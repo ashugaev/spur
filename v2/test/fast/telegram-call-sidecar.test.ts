@@ -163,6 +163,7 @@ it("finishes owned tmux teardown when pane HUP follows TERM", async () => {
   const tools = join(path, "tools");
   const capture = join(path, "capture");
   const marker = join(path, "cleaning");
+  const termed = join(path, "termed");
   const socket = `spur-voice-test-${process.pid}`;
   mkdirSync(bin);
   mkdirSync(tools);
@@ -178,7 +179,7 @@ SPUR_ISOLATED_DAEMON_PID="$$"
 SPUR_ISOLATED_TMUX_SOCKET_NAME="$VOICE_SOCKET"
 RUNTIME
 printf 'READY\\n'
-exec "$VOICE_NODE" -e 'process.stdin.resume();setInterval(()=>{},1000)'
+exec "$VOICE_NODE" -e 'process.on("SIGTERM",()=>{require("node:fs").writeFileSync(process.env.VOICE_TERMED,"1");process.exit(0)});process.stdin.resume();setInterval(()=>{},1000)'
 `,
   );
   writeFileSync(
@@ -202,6 +203,7 @@ exec "$VOICE_TMUX" "$@"
       TELEGRAM_CALL_STATE_DIR: join(path, "state"),
       VOICE_CAPTURE: capture,
       VOICE_MARKER: marker,
+      VOICE_TERMED: termed,
       VOICE_NODE: process.execPath,
       VOICE_TMUX: tmux,
       VOICE_SOCKET: socket,
@@ -209,6 +211,10 @@ exec "$VOICE_TMUX" "$@"
     stdio: ["pipe", "pipe", "pipe"],
   });
   const exited = once(child, "exit");
+  let stderr = "";
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
   try {
     await new Promise<void>((ready, reject) => {
       child.stdout.on("data", (chunk: Buffer) => {
@@ -217,7 +223,6 @@ exec "$VOICE_TMUX" "$@"
       child.on("error", reject);
     });
     const input = readFileSync(capture, "utf8").trim();
-    const started = Date.now();
     child.kill("SIGTERM");
     for (let index = 0; index < 100 && !existsSync(marker); index += 1)
       await new Promise((done) => setTimeout(done, 5));
@@ -225,7 +230,9 @@ exec "$VOICE_TMUX" "$@"
     child.kill("SIGHUP");
     const [code] = await exited;
     expect(code).toBe(143);
-    expect(Date.now() - started).toBeLessThan(1400);
+    // Daemon stopped on TERM, not on the KILL escalation; teardown ran to completion.
+    expect(existsSync(termed)).toBe(true);
+    expect(stderr).not.toContain("sandbox retained");
     expect(() => execFileSync(tmux, ["-L", socket, "has-session"], { stdio: "pipe" })).toThrow();
     expect(existsSync(join(tools, "voice-daemon/isolated-env.sh"))).toBe(false);
     expect(existsSync(dirname(input))).toBe(false);
