@@ -2,6 +2,10 @@
 set -euo pipefail
 umask 077
 
+if [[ ! "${SPUR_RESERVED_PORT_DAEMON:-}" =~ ^[0-9]+$ ]]; then
+  echo "voice-daemon: SPUR_RESERVED_PORT_DAEMON unset or not numeric; start via the voice-daemon sidecar" >&2
+  exit 1
+fi
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(realpath "$SCRIPT_DIR/../..")
 source "$SCRIPT_DIR/inputs.sh"
@@ -77,9 +81,7 @@ check_socket() {
   exit 1
 }
 check_socket "$receipt_socket"
-if [[ "${SPUR_RESERVED_PORT_DAEMON:-}" =~ ^[0-9]+$ ]]; then
-  check_socket "spur-$SPUR_RESERVED_PORT_DAEMON"
-fi
+check_socket "spur-$SPUR_RESERVED_PORT_DAEMON"
 if [[ -f "$TOOL_DIR/isolated-env.sh" ]]; then
   [[ -z "$stale_launcher" ]] || rm -rf "$stale_launcher"
   rm -f "$TOOL_DIR/isolated-env.sh" "$TOOL_DIR/spur-isolated"

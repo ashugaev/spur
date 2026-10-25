@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -91,6 +92,7 @@ it("launches an unknown-selection fixture containing only a disposable project",
       PATH: `${bin}:/usr/bin:/bin`,
       SPUR_SESSION_TOOL_DIR: tools,
       TELEGRAM_CALL_PYTHON: inputChecker(path),
+      SPUR_RESERVED_PORT_DAEMON: "1",
       TELEGRAM_CALL_STATE_DIR: join(path, "state"),
       VOICE_CAPTURE: capture,
       VOICE_NODE: process.execPath,
@@ -203,6 +205,7 @@ exec "$VOICE_TMUX" "$@"
       PATH: `${bin}:/usr/bin:/bin`,
       SPUR_SESSION_TOOL_DIR: tools,
       TELEGRAM_CALL_PYTHON: inputChecker(path),
+      SPUR_RESERVED_PORT_DAEMON: "1",
       TELEGRAM_CALL_STATE_DIR: join(path, "state"),
       VOICE_CAPTURE: capture,
       VOICE_MARKER: marker,
@@ -283,6 +286,7 @@ function runWithReceipt(
       PATH: `${bin}:/usr/bin:/bin`,
       SPUR_SESSION_TOOL_DIR: tools,
       TELEGRAM_CALL_PYTHON: inputChecker(path),
+      SPUR_RESERVED_PORT_DAEMON: "1",
       TELEGRAM_CALL_STATE_DIR: join(path, "state"),
       VOICE_STARTED: started,
       ...extraEnv,
@@ -631,6 +635,7 @@ it("sweeps an orphan fixture pointer when no receipt exists", () => {
       PATH: `${bin}:/usr/bin:/bin`,
       SPUR_SESSION_TOOL_DIR: tools,
       TELEGRAM_CALL_PYTHON: inputChecker(path),
+      SPUR_RESERVED_PORT_DAEMON: "1",
       TELEGRAM_CALL_STATE_DIR: join(path, "state"),
       TMPDIR: path,
     },
@@ -639,4 +644,28 @@ it("sweeps an orphan fixture pointer when no receipt exists", () => {
   expect(result.status).toBe(0);
   expect(existsSync(dirs.fixtureDir)).toBe(false);
   expect(existsSync(dirs.launcher)).toBe(true);
+});
+
+it("fails fast without creating or deleting anything when the reserved port is unset or invalid", () => {
+  for (const port of [undefined, "", "abc"]) {
+    const path = fixture();
+    const tools = join(path, "tools");
+    mkdirSync(tools);
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      PATH: "/usr/bin:/bin",
+      SPUR_SESSION_TOOL_DIR: tools,
+      TMPDIR: path,
+    };
+    if (port === undefined) delete env["SPUR_RESERVED_PORT_DAEMON"];
+    else env["SPUR_RESERVED_PORT_DAEMON"] = port;
+    const result = spawnSync("/bin/bash", [resolve("../scripts/telegram-call/run-daemon.sh")], {
+      env,
+      encoding: "utf8",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("SPUR_RESERVED_PORT_DAEMON");
+    expect(readdirSync(tools)).toEqual([]);
+    expect(readdirSync(path).sort()).toEqual(["tools"]);
+  }
 });

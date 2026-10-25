@@ -60,6 +60,7 @@ Stop listener before daemon:
 
 Daemon stop terminates sandbox agent processes before deleting owned fixture and launcher config dir.
 Start refuses while the recorded daemon is alive.
+Start requires `SPUR_RESERVED_PORT_DAEMON` (numeric); the sidecar sets it. Unset: exit 1 before any change.
 Start also refuses while a tmux server is live on the receipt socket or on `spur-<reserved daemon port>`; nothing is deleted or killed.
 Server whose panes all started under the previous run's launcher or fixture dir: receipt and dirs kept; clear with `tmux -L <socket> kill-server`.
 Any other live server (foreign, mixed, no panes, unreadable): not owned by this voice run; no kill advice, leave it.
