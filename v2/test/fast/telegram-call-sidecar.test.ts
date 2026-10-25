@@ -400,6 +400,23 @@ it("refuses when the daemon is dead but its owned tmux server still runs", () =>
   expect(serverAlive(socket)).toBe(true);
 });
 
+it("refuses when receipt paths carry a double slash but panes start at the normalized path", () => {
+  const socket = `spur-voice-slash-${process.pid}`;
+  const pid = deadPid();
+  const result = runWithReceipt(
+    (path) => {
+      const dirs = staleDirs(path);
+      startServer(socket, join(dirs.launcher, "worktrees"));
+      return `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_CONFIG="${path}//spur-isolated-daemon.OLD/config.yaml"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="${socket}"\n`;
+    },
+    () => undefined,
+  );
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain(socket);
+  expect(result.started).toBe(false);
+  expect(serverAlive(socket)).toBe(true);
+});
+
 it("treats a live tmux server outside this run's dirs as foreign and starts", () => {
   const socket = `spur-voice-foreign-${process.pid}`;
   const pid = deadPid();

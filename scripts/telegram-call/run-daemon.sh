@@ -31,12 +31,15 @@ if [[ -f "$TOOL_DIR/isolated-env.sh" ]]; then
     exit 1
   fi
   stale_config=$(source "$TOOL_DIR/isolated-env.sh" && printf '%s' "${SPUR_ISOLATED_CONFIG:-}")
+  # Lexical normalization (no symlink resolution) matches Spur's path.resolve.
+  [[ -z "$stale_config" ]] || stale_config=$(realpath -m -s -- "$stale_config")
   stale_launcher=$(dirname "${stale_config:-/}")
   [[ "$(basename "$stale_launcher")" == spur-isolated-daemon.* &&
      "$stale_config" == "$stale_launcher/config.yaml" ]] || stale_launcher=""
   stale_fixture=""
   if [[ -f "$TOOL_DIR/fixture-dir" ]]; then
     IFS= read -r stale_fixture < "$TOOL_DIR/fixture-dir" || true
+    [[ -z "$stale_fixture" ]] || stale_fixture=$(realpath -m -s -- "$stale_fixture")
     [[ "$(basename "${stale_fixture:-/}")" == spur-voice-sandbox.* &&
        -f "$stale_fixture/project.yaml" && -d "$stale_fixture/repository" ]] || stale_fixture=""
   fi
@@ -49,6 +52,7 @@ if [[ -f "$TOOL_DIR/isolated-env.sh" ]]; then
      tmux -L "$receipt_socket" has-session 2>/dev/null; then
     owned=0
     while IFS= read -r pane_path; do
+      [[ -z "$pane_path" ]] || pane_path=$(realpath -m -s -- "$pane_path")
       if [[ -n "$stale_launcher" && ( "$pane_path" == "$stale_launcher" || "$pane_path" == "$stale_launcher/"* ) ]] || \
          [[ -n "$stale_fixture" && ( "$pane_path" == "$stale_fixture" || "$pane_path" == "$stale_fixture/"* ) ]]; then
         owned=1
