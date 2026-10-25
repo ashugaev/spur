@@ -73,7 +73,7 @@ Verified: a planted Claude launched this way runs `command -v node` and gets NO-
 
 Run twice per cycle, once per agent, with a full reset (step 2) between the two runs — a box dirtied by one agent's run is not a clean box for the other's.
 
-The prompt is the Install block of the repo README verbatim — that block is the artifact under test, not a prompt the runner writes. It tells the agent to fetch `raw.githubusercontent.com/<owner>/spur/<ref>/docs/install-from-npm.md`, never a `github.com/.../blob/...` URL — that form returns an empty document under cursor's webFetch. `<ref>` is `main` by default; point it at the PR branch to test an unmerged doc fix. No docs are staged on the VM — the agent fetches this one file over HTTPS; do not tar the repo docs onto the box, the prompt never reads them.
+The prompt is the Install block of the repo README verbatim — that block is the artifact under test, not a prompt the runner writes. It tells the agent to fetch `raw.githubusercontent.com/<owner>/spur/<ref>/docs/install-from-npm.md`, never a `github.com/.../blob/...` URL — that form returns an empty document under cursor's webFetch. `<ref>` is `main` by default; point it at the PR head commit SHA to test an unmerged doc fix — a branch ref serves `cache-control: max-age=300`, so a re-run right after a push can fetch the previous doc. No docs are staged on the VM — the agent fetches this one file over HTTPS; do not tar the repo docs onto the box, the prompt never reads them.
 
 Write the prompt to a file on the box AFTER each reset, one ssh call, no nested quoting to get wrong — the same file backs both agents' launches. `reset-vm.sh` deletes `/tmp/prompt.txt` as a run artifact, and `$(cat)` on the missing file launches the agent with an empty prompt:
 
@@ -102,9 +102,12 @@ Walk each tool_call with its result, each error, and the final result message. L
 
 6 VERIFY SERVICES (INFRA LEVEL, NOT UI)
 
-Confirm the agent's install works. Expected topology after `spur init`: two user units only.
+Verify daemon/web/MCP user units; include configured tunnel.
 
-  systemctl --user is-active spur-daemon.service spur-web.service          # both active
+  systemctl --user is-active spur-daemon.service spur-web.service spur-mcp.service
+  systemctl --user is-enabled spur-daemon.service spur-web.service spur-mcp.service
+  loginctl show-user "$USER" -p Linger
+  node tests/itest/mcp-probe.mjs --package-root <installed-package> --url <installed-mcp-url> --expected-build <candidate-digest>
   curl -sf -o /dev/null -w 'daemon %{http_code}\n' http://127.0.0.1:4310/sessions   # 200
   curl -sf -o /dev/null -w 'web %{http_code}\n'    http://127.0.0.1:5555/           # 200
   curl -s -o /dev/null -w 'ws %{http_code}\n' --max-time 5 \
@@ -113,7 +116,20 @@ Confirm the agent's install works. Expected topology after `spur init`: two user
     'http://127.0.0.1:5555/ws?session=none'                                 # 101
   ss -ltn
 
-Pass = both units active, daemon 200, web 200, `/ws` upgrade 101, `ss -ltn` shows only 22, 127.0.0.1:4310, 127.0.0.1:5555, plus systemd-resolved — nothing else, and nothing answers on the app ports from the VM's public IP.
+Require units active/enabled, linger yes, daemon/web 200, MCP SDK initialize/list_projects with matching build identities, `/ws` 101, private app listeners and loopback MCP.
+
+EXACT CANDIDATE / MCP RECOVERY
+
+  - Claim exclusive VM ownership outside reset-owned paths; recheck idle before reset.
+  - Export clean reviewed package through `scripts/test-deploy.sh`'s `SPUR_TEST_DEPLOY_EXPORT_DIR`; prepare candidates with `tests/itest/npm-fixture.mjs`. Preserve its public-membership guard and version-metadata-only repacking.
+  - Name older accepted candidate V_A, newer V_B.
+  - Serve fixture on VM loopback using private harness Node and verified branch release discovery; retain service/state across reboot outside `spur-*` units/reset paths.
+  - Configure only `@shugaev:registry` after each reset; preserve other registries and verify scoped setting survives pin/reinit. Keep step 4 prompt literal except raw docs SHA.
+  - Install V_A in both reset-separated agent runs; capture served tarball/checksum, installed version, source/runtime digest and both transcripts.
+  - After each install: reinit V_A, installed CLI update V_B, actual deploy-switch V_A then V_B, failed-candidate rollback. Require prior artifact/version, recorded rollback state and healthy MCP; use harness-only faults, no publication or membership bypass.
+  - Run `tests/itest/mcp-recovery.sh` user/system checkpoints: dead-MCP health, daemon restart, MCP SIGKILL and reboot with changed boot identity; require SDK round trip after each. Use installed config ports and private session evidence.
+  - Invoke reboot through SSH; `reboot-before` records only checkpoint. Reconnect before `reboot-after`.
+  - Test source updates through actual redeploy; retain npm-switch refusal. Report OpenAI account/tunnel/product access unproven without real credentials and product calls.
 
 7 EVOLVE THE DOCS
 
@@ -138,13 +154,13 @@ Second use of the same box: run `scripts/main-deploy.sh` end to end against real
      git clone ~/spur-mirror ~/spur
      cd ~/spur && pnpm main:deploy
 
-  4  Positive case: script exits 0, `spur-daemon.service` and `spur-web.service` both active, web answers 200 on 127.0.0.1:3012 (source-install port, not the npm path's 5555), and the run prints no `missing chunk` or `serving stale chunks` line.
-  5  Negative case: re-run and SIGTERM the script mid-build, then assert `spur-web.service` is still active — the exit trap restarts it. Two traps that read as a failure and are not:
+  4  Require exit 0, daemon/web/MCP and configured tunnel active/enabled, MCP SDK round trip with candidate build identity, web 200 on source port from docs/install-from-source.md, no `missing chunk` or `serving stale chunks` line.
+  5  SIGTERM forced build; require restored web/MCP/configured tunnel and MCP SDK round trip. Preserve both timing checks:
      - The stamp file matches after step 4, so a bare re-run takes the "Already deployed" fast path and never builds. Delete `~/.spur/main-deploy/repo/.git/main-deploy-last-successful` first, or there is no build to interrupt.
      - `kill -TERM` on the `main-deploy.sh` bash pid does NOT fire the exit trap while `pnpm build` is the foreground child — bash runs the trap only after that child returns. Budget the remaining build (measured 630-690 s for a full one), never a 60 s poll. Confirm with `rc=143` plus the log's `main:deploy exiting rc=143 with spur-web inactive — starting`.
      Then, and only then, check HTTP: `next start` needs 5-20 s after the trap starts the unit, so an immediate curl returns `000` on a healthy box. Assert the unit active first, poll `127.0.0.1:3012` for 200 second.
 
-  6  A guard keyed on the npm user units (`$HOME/.config/systemd/user/spur-daemon.service`) cannot fire on this box after step 2 — `tests/itest/reset-vm.sh:15` removes those units. Exercise it by planting the file by hand, then assert exit 1 and that both units' MainPIDs are unchanged.
+  6  Plant daemon user-unit guard fixture after reset; require exit 1 and unchanged daemon/web/MCP/configured-tunnel MainPIDs.
 
 AUTONOMOUS MODE
 

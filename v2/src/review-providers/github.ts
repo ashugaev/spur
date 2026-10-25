@@ -7,6 +7,8 @@ import {
   withGhPollBudget,
 } from "../gh.js";
 import {
+  readIgnoredGitHubFeedback,
+  recordIgnoredGitHubFeedback,
   readCommentSeenRegistry,
   readGitHubReviewPagination,
   writeGitHubReviewPagination,
@@ -14,12 +16,13 @@ import {
 import {
   claimPollPrLookup,
   gqlErrorsByAlias,
+  parseRepoSlugFromRemoteUrl,
   resolvePrLookupRepo,
   type PollPrLookupClaim,
   type PrLookupOutcome,
 } from "../pr-lookup.js";
 import { PR_LOOKUP_LIVE_CAP_MS, type PrRepoSlug } from "../pr-lookup-cache.js";
-import { readCurrentBranch } from "../workspace.js";
+import { readBranchPushUrl, readCurrentBranch } from "../workspace.js";
 import type {
   GitHubCheck,
   GitHubPrSummary,
@@ -73,7 +76,7 @@ const GITHUB_BOUND_PR_NODE_BUDGET =
   1 +
   GITHUB_CONNECTION_PAGE_SIZE +
   GITHUB_REVIEW_THREAD_COUNT * (1 + GITHUB_CONNECTION_PAGE_SIZE) +
-  GITHUB_CONNECTION_PAGE_SIZE * 2 +
+  GITHUB_CONNECTION_PAGE_SIZE * 3 +
   GITHUB_REVIEW_REQUEST_COUNT;
 const GITHUB_UNBOUND_PR_CANDIDATES = 5;
 const GITHUB_UNBOUND_TARGET_NODE_BUDGET =
@@ -379,8 +382,71 @@ function readPrStatusSummary(value: unknown): GitHubPrStatusSummary | null {
   };
 }
 
-export function summarizeFailingCi(checks: GitHubCheck[]): string | null {
-  const failing = checks.filter((check) => {
+// A re-run (e.g. draft->ready) leaves the superseded run on the same head commit.
+// Runs are superseded per check suite, never per run: within one (kind, app,
+// workflow, trigger event, name) key a run is dropped only when a suite of that
+// key was created strictly later; siblings of one suite share a createdAt, so
+// they are kept. Fail closed: a check whose producer identity is not fully
+// proven (no `producer`), or without a parseable timestamp, is kept and never
+// takes part in supersession. A later run that did not re-execute the check
+// (SKIPPED, NEUTRAL, STALE) supersedes nothing. StatusContext: keyed by context
+// and creator; the latest createdAt wins.
+export type GitHubRunProducer =
+  | {
+      kind: "check_run";
+      appId: number;
+      // null: non-Actions check (workflowRun absent). Present: both ids proven.
+      workflow: { id: number; event: string } | null;
+      suiteId: number;
+    }
+  | { kind: "status_context"; creator: string };
+
+export interface GitHubRunCheck extends GitHubCheck {
+  producer?: GitHubRunProducer;
+  // CheckRun: check suite createdAt. StatusContext: context createdAt.
+  createdAt?: string;
+}
+
+function checkRunKey(check: GitHubRunCheck, producer: GitHubRunProducer): string {
+  return producer.kind === "status_context"
+    ? JSON.stringify([producer.kind, producer.creator, check.name])
+    : JSON.stringify([
+        producer.kind,
+        producer.appId,
+        producer.workflow?.id ?? null,
+        producer.workflow?.event ?? null,
+        check.name,
+      ]);
+}
+
+function latestChecksByName(checks: GitHubRunCheck[]): GitHubRunCheck[] {
+  const entries = checks.map((check) => ({
+    check,
+    key: check.producer ? checkRunKey(check, check.producer) : null,
+    at: check.createdAt ? Date.parse(check.createdAt) : Number.NaN,
+  }));
+  const decisive = new Map<string, { at: number; suiteId: number | undefined }[]>();
+  for (const { check, key, at } of entries) {
+    if (key === null || Number.isNaN(at)) continue;
+    if (IGNORED_GITHUB_CI_STATES.has(normalizeReviewState(check.conclusion ?? check.state))) {
+      continue;
+    }
+    const suiteId = check.producer?.kind === "check_run" ? check.producer.suiteId : undefined;
+    decisive.set(key, [...(decisive.get(key) ?? []), { at, suiteId }]);
+  }
+  return entries
+    .filter(({ check, key, at }) => {
+      if (key === null || Number.isNaN(at)) return true;
+      const suiteId = check.producer?.kind === "check_run" ? check.producer.suiteId : undefined;
+      return !decisive
+        .get(key)
+        ?.some((later) => later.at > at && (suiteId === undefined || later.suiteId !== suiteId));
+    })
+    .map(({ check }) => check);
+}
+
+export function summarizeFailingCi(checks: GitHubRunCheck[]): string | null {
+  const failing = latestChecksByName(checks).filter((check) => {
     const state = normalizeReviewState(check.conclusion ?? check.state);
     return FAILING_GITHUB_CI_STATES.has(state);
   });
@@ -438,13 +504,14 @@ function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | 
 }
 
 const GITHUB_REVIEW_THREAD_FIELDS = `id isResolved comments(last:100){nodes{databaseId body path line author{login}} pageInfo{hasPreviousPage startCursor}}`;
-const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url reviewDecision mergeable mergeStateStatus isDraft state
+const GITHUB_CHECK_CONTEXT_FIELDS = `... on CheckRun{name conclusion status checkSuite{databaseId createdAt app{databaseId} workflowRun{event workflow{databaseId}}}} ... on StatusContext{context state createdAt creator{login}}`;
+const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName headRepository{nameWithOwner} author{login} reviewDecision mergeable mergeStateStatus isDraft state
   commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{
-    ... on CheckRun{name conclusion status}
-    ... on StatusContext{context state}
+    ${GITHUB_CHECK_CONTEXT_FIELDS}
   } pageInfo{hasPreviousPage startCursor}}}}}}
   reviewThreads(last:100){nodes{${GITHUB_REVIEW_THREAD_FIELDS}} pageInfo{hasPreviousPage startCursor}}
   reviews(last:100){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}
+  latestOpinionatedReviews(last:100){nodes{state author{login}} pageInfo{hasPreviousPage}}
   comments(last:100){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}
   reviewRequests(last:${GITHUB_REVIEW_REQUEST_COUNT}){nodes{requestedReviewer{... on User{login}}}}`;
 
@@ -482,17 +549,54 @@ function buildGitHubReviewBatchQuery(targets: GitHubBatchTarget[]): {
   };
 }
 
-function checksFromPrNode(value: Record<string, unknown>): GitHubCheck[] {
+export function checksFromPrNode(value: Record<string, unknown>): GitHubRunCheck[] {
   const commit = connectionNodes(value.commits).at(-1);
   if (!isRecord(commit) || !isRecord(commit.commit) || !isRecord(commit.commit.statusCheckRollup)) {
     return [];
   }
-  return connectionNodes(commit.commit.statusCheckRollup.contexts).flatMap((raw): GitHubCheck[] => {
-    if (!isRecord(raw)) return [];
-    const name = readString(raw.name) ?? readString(raw.context);
-    const state = readString(raw.conclusion) ?? readString(raw.state) ?? readString(raw.status);
-    return name && state ? [{ name, state }] : [];
-  });
+  return connectionNodes(commit.commit.statusCheckRollup.contexts).flatMap(
+    (raw): GitHubRunCheck[] => {
+      if (!isRecord(raw)) return [];
+      const checkName = readString(raw.name);
+      const name = checkName ?? readString(raw.context);
+      const state = readString(raw.conclusion) ?? readString(raw.state) ?? readString(raw.status);
+      if (!name || !state) return [];
+      const suite = isRecord(raw.checkSuite) ? raw.checkSuite : null;
+      const createdAt = readString(suite ? suite.createdAt : raw.createdAt);
+      const creator = isRecord(raw.creator) ? readString(raw.creator.login) : null;
+      const producer = checkName
+        ? checkRunProducer(suite)
+        : creator !== null
+          ? ({ kind: "status_context", creator } as const)
+          : null;
+      return [
+        {
+          name,
+          state,
+          ...(producer ? { producer } : {}),
+          ...(createdAt ? { createdAt } : {}),
+        },
+      ];
+    },
+  );
+}
+
+// Proven only with suite id, app id, and either workflowRun null (non-Actions)
+// or workflowRun with both workflow id and event. Anything else is unproven.
+function checkRunProducer(suite: Record<string, unknown> | null): GitHubRunProducer | null {
+  if (!suite) return null;
+  const suiteId = readNumber(suite.databaseId);
+  const appId = isRecord(suite.app) ? readNumber(suite.app.databaseId) : null;
+  if (suiteId === null || appId === null) return null;
+  if (suite.workflowRun === null) return { kind: "check_run", appId, workflow: null, suiteId };
+  if (!isRecord(suite.workflowRun)) return null;
+  const id = isRecord(suite.workflowRun.workflow)
+    ? readNumber(suite.workflowRun.workflow.databaseId)
+    : null;
+  const event = readString(suite.workflowRun.event);
+  return id !== null && event !== null
+    ? { kind: "check_run", appId, workflow: { id, event }, suiteId }
+    : null;
 }
 
 function reviewCommentsFromPrNode(value: Record<string, unknown>): PullRequestReviewComment[] {
@@ -684,10 +788,13 @@ function reviewSignalsFromComments(
   dataDir: string,
   projectId: string,
   sourceId: string,
+  isOwnFeedback: (key: string, body: string, login: string | null | undefined) => boolean,
 ): ReviewSignal[] {
   const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
   const signals: ReviewSignal[] = [];
   for (const comment of comments) {
+    if (isOwnFeedback(reviewCommentSeenKey(comment.id), comment.body, comment.user?.login))
+      continue;
     if (seen.has(reviewCommentSeenKey(comment.id))) continue;
     const author = comment.user?.login ?? "unknown";
     const location = comment.path
@@ -711,11 +818,22 @@ function reviewSignalsFromComments(
   return signals;
 }
 
-function reviewSummarySignalsFromReviews(reviews: ReviewEntry[]): ReviewSignal[] {
+function isViewerAuthor(
+  authorLogin: string | null | undefined,
+  viewerLogin: string | null,
+): boolean {
+  return !!authorLogin && !!viewerLogin && authorLogin.toLowerCase() === viewerLogin.toLowerCase();
+}
+
+function reviewSummarySignalsFromReviews(
+  reviews: ReviewEntry[],
+  isOwnFeedback: (key: string, body: string, login: string | null | undefined) => boolean,
+): ReviewSignal[] {
   const approvedIdentities = new Set<string>();
   const signals: ReviewSignal[] = [];
   for (const review of reviews) {
     const login = review.user?.login ?? null;
+    if (isOwnFeedback(`review:${String(review.id ?? "")}`, review.body ?? "", login)) continue;
     // A review submitted as COMMENTED/CHANGES_REQUESTED with substance only in the
     // body (no inline comments) is otherwise invisible: it is not an issue comment,
     // not an inline review comment, and COMMENTED does not move reviewDecision. Surface
@@ -750,19 +868,27 @@ function reviewSummarySignalsFromReviews(reviews: ReviewEntry[]): ReviewSignal[]
   return signals;
 }
 
-function issueCommentSignalsFromComments(comments: IssueComment[]): ReviewSignal[] {
+function issueCommentSignalsFromComments(
+  comments: IssueComment[],
+  isOwnFeedback: (key: string, body: string, login: string | null | undefined) => boolean,
+): ReviewSignal[] {
   // Dedup is handled by the persisted snapshot diff, not by marking comments seen
   // here. Recording seen at generation time dropped the comment from the next poll's
   // snapshot, so the trigger's retry prune() discarded it whenever the worker was busy
   // at first delivery — silently losing the comment. Mirror the inline-comment path.
-  return comments.map((comment) => {
-    const author = comment.user?.login ?? "unknown";
-    return {
-      key: `comment:${String(comment.id)}`,
-      kind: "comment",
-      text: `New PR comment from ${author}: "${shortText(comment.body)}"`,
-    };
-  });
+  return comments
+    .filter(
+      (comment) =>
+        !isOwnFeedback(`comment:${String(comment.id)}`, comment.body, comment.user?.login),
+    )
+    .map((comment) => {
+      const author = comment.user?.login ?? "unknown";
+      return {
+        key: `comment:${String(comment.id)}`,
+        kind: "comment",
+        text: `New PR comment from ${author}: "${shortText(comment.body)}"`,
+      };
+    });
 }
 
 function parseSignalId(signal: ReviewSignal, prefix: string): string | null {
@@ -915,31 +1041,119 @@ async function refreshSignals(
   );
 }
 
+/** Renders a source `selfMarker` template for one session; `{session}` is the only placeholder. */
+export function renderSelfMarker(template: string, sessionId: string): string {
+  return template.replaceAll("{session}", sessionId);
+}
+
+function hasUnquotedMarker(body: string, marker: string): boolean {
+  let spanStart = 0;
+  let lineStart = 0;
+  while (lineStart < body.length) {
+    let lineEnd = lineStart;
+    while (lineEnd < body.length && body[lineEnd] !== "\r" && body[lineEnd] !== "\n") {
+      lineEnd += 1;
+    }
+    const nextLine =
+      body[lineEnd] === "\r" && body[lineEnd + 1] === "\n"
+        ? lineEnd + 2
+        : lineEnd < body.length
+          ? lineEnd + 1
+          : lineEnd;
+    if (/^\s*>/.test(body.slice(lineStart, lineEnd))) {
+      if (body.slice(spanStart, lineStart).includes(marker)) return true;
+      spanStart = nextLine;
+    }
+    lineStart = nextLine;
+  }
+  return body.slice(spanStart).includes(marker);
+}
+
 function collectSignalsFromNode(
   session: SessionRecord,
   pr: GitHubPrStatusSummary,
   node: Record<string, unknown>,
+  expectedHead: PrRepoSlug | null,
+  prHost: string,
   dataDir: string,
   projectId: string,
   sourceId: string,
   viewerLogin: string | null,
+  selfMarker?: string,
 ): GitHubCollectedSignals {
+  const ignored = readIgnoredGitHubFeedback(dataDir, projectId, sourceId, session.id, pr.number);
+  const newlyIgnored: string[] = [];
+  const renderedMarker =
+    selfMarker !== undefined ? renderSelfMarker(selfMarker, session.id) : undefined;
+  const isOwnFeedback = (key: string, body: string, login: string | null | undefined): boolean => {
+    if (ignored.has(key)) return true;
+    const own =
+      renderedMarker !== undefined
+        ? hasUnquotedMarker(body, renderedMarker)
+        : isViewerAuthor(login, viewerLogin);
+    if (own) {
+      ignored.add(key);
+      newlyIgnored.push(key);
+    }
+    return own;
+  };
   const checks = checksFromPrNode(node);
+  const reviews = reviewsFromPrNode(node);
+  const currentReviewConnection = isRecord(node.latestOpinionatedReviews)
+    ? node.latestOpinionatedReviews
+    : null;
+  const currentReviews = currentReviewConnection
+    ? reviewsFromPrNode({ reviews: currentReviewConnection })
+    : [];
+  const currentReviewsComplete =
+    currentReviewConnection &&
+    isRecord(currentReviewConnection.pageInfo) &&
+    currentReviewConnection.pageInfo.hasPreviousPage === false;
   const reviewSignals = reviewSignalsFromComments(
     reviewCommentsFromPrNode(node),
     dataDir,
     projectId,
     sourceId,
+    isOwnFeedback,
   );
-  const commentSignals = issueCommentSignalsFromComments(issueCommentsFromPrNode(node));
+  const commentSignals = issueCommentSignalsFromComments(
+    issueCommentsFromPrNode(node),
+    isOwnFeedback,
+  );
   const approvalSignals =
     pr.state === "MERGED" || pr.state === "CLOSED"
       ? []
-      : reviewSummarySignalsFromReviews(reviewsFromPrNode(node));
+      : reviewSummarySignalsFromReviews(reviews, isOwnFeedback);
+  recordIgnoredGitHubFeedback(dataDir, projectId, sourceId, session.id, pr.number, newlyIgnored);
   const ciText =
     normalizeReviewState(pr.statusCheckRollupState) === "SUCCESS"
       ? null
       : summarizeFailingCi(checks);
+  const headRepository = isRecord(node.headRepository)
+    ? readString(node.headRepository.nameWithOwner)
+    : null;
+  const headParts = headRepository?.split("/");
+  const matchingHead =
+    readString(node.headRefName) === session.branch &&
+    expectedHead !== null &&
+    expectedHead.host.toLowerCase() === prHost.toLowerCase() &&
+    headParts?.length === 2 &&
+    headParts[0]?.toLowerCase() === expectedHead.owner.toLowerCase() &&
+    headParts[1]?.toLowerCase() === expectedHead.name.toLowerCase();
+  const ownsPr =
+    !session.pr ||
+    matchingHead ||
+    isViewerAuthor(isRecord(node.author) ? readString(node.author.login) : null, viewerLogin);
+  const viewerRequestedChanges = currentReviews.some(
+    (review) =>
+      normalizeReviewState(review.state) === "CHANGES_REQUESTED" &&
+      isViewerAuthor(review.user?.login, viewerLogin),
+  );
+  const anotherReviewerRequestedChanges = currentReviews.some(
+    (review) =>
+      normalizeReviewState(review.state) === "CHANGES_REQUESTED" &&
+      !isViewerAuthor(review.user?.login, viewerLogin),
+  );
   const snapshot = new Map<string, ReviewSignal>();
   // Terminal PRs are excluded for the same reason approvals are: closing a PR
   // does not clear its pending review requests, and a review on a dead PR is
@@ -956,21 +1170,25 @@ function collectSignalsFromNode(
       text: `Review requested from ${viewerLogin} on this PR.`,
     });
   }
-  if (pr.reviewDecision === "changes_requested") {
+  if (
+    ownsPr &&
+    pr.reviewDecision === "changes_requested" &&
+    (!currentReviewsComplete || !viewerRequestedChanges || anotherReviewerRequestedChanges)
+  ) {
     snapshot.set("changes_requested", {
       key: "changes_requested",
       kind: "changes_requested",
       text: "Changes requested in review.",
     });
   }
-  if (ciText) {
+  if (ownsPr && ciText) {
     snapshot.set("ci_failed", {
       key: "ci_failed",
       kind: "ci_failed",
       text: ciText,
     });
   }
-  if (hasMergeConflict(pr)) {
+  if (ownsPr && hasMergeConflict(pr)) {
     snapshot.set("merge_conflict", {
       key: "merge_conflict",
       kind: "merge_conflict",
@@ -1455,7 +1673,7 @@ function signalPageToFetch(
 function signalPageField(index: number, page: PullRequestSignalPage): string {
   const connection =
     page.kind === "checks"
-      ? `commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100,before:$before${index}){nodes{... on CheckRun{name conclusion status} ... on StatusContext{context state}} pageInfo{hasPreviousPage startCursor}}}}}}`
+      ? `commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100,before:$before${index}){nodes{${GITHUB_CHECK_CONTEXT_FIELDS}} pageInfo{hasPreviousPage startCursor}}}}}}`
       : page.kind === "reviews"
         ? `reviews(last:100,before:$before${index}){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}`
         : `comments(last:100,before:$before${index}){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}`;
@@ -1555,6 +1773,8 @@ async function runReviewRepoBatch(
   projectId: string,
   sourceId: string,
   maxTargets: number,
+  expectedHeads: Map<string, Promise<PrRepoSlug | null>>,
+  selfMarker?: string,
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
   const slug = targets[0]?.slug;
@@ -1780,18 +2000,38 @@ async function runReviewRepoBatch(
       continue;
     }
     for (const matching of matchingTargets) {
-      results.set(matching.session.id, {
-        status: "ok",
-        collected: collectSignalsFromNode(
-          matching.session,
-          selected.summary,
-          selected.node,
-          dataDir,
-          projectId,
-          sourceId,
-          viewerLogin,
-        ),
-      });
+      const session = matching.session;
+      let expectedHead: PrRepoSlug | null = null;
+      if (session.pr && session.branch && session.worktreePath) {
+        const key = JSON.stringify([session.worktreePath, session.branch]);
+        let pending = expectedHeads.get(key);
+        if (!pending) {
+          pending = readBranchPushUrl(session.worktreePath, session.branch).then((url) =>
+            url ? parseRepoSlugFromRemoteUrl(url) : null,
+          );
+          expectedHeads.set(key, pending);
+        }
+        expectedHead = await pending;
+      }
+      try {
+        results.set(matching.session.id, {
+          status: "ok",
+          collected: collectSignalsFromNode(
+            session,
+            selected.summary,
+            selected.node,
+            expectedHead,
+            matching.slug.host,
+            dataDir,
+            projectId,
+            sourceId,
+            viewerLogin,
+            selfMarker,
+          ),
+        });
+      } catch (error) {
+        results.set(matching.session.id, { status: "error", error });
+      }
     }
   }
   return results;
@@ -1803,8 +2043,10 @@ export async function collectGitHubSignalsBatch(
   projectId: string,
   sourceId: string,
   maxTargets?: number,
+  selfMarker?: string,
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
+  const expectedHeads = new Map<string, Promise<PrRepoSlug | null>>();
   const byRepo = new Map<string, GitHubBatchTarget[]>();
   for (const session of sessions) {
     const target = await targetForSession(session);
@@ -1893,7 +2135,15 @@ export async function collectGitHubSignalsBatch(
       if (selected.length === 0) continue;
       try {
         const admission = await withGhPollBudget(() =>
-          runReviewRepoBatch(selected, dataDir, projectId, sourceId, limit),
+          runReviewRepoBatch(
+            selected,
+            dataDir,
+            projectId,
+            sourceId,
+            limit,
+            expectedHeads,
+            selfMarker,
+          ),
         );
         if (admission.status === "blocked") {
           for (const target of selected) {

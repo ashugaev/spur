@@ -69,6 +69,8 @@ export interface SourceWorkbench {
   }): Promise<SourceLaunchOptions>;
   listSessions(): Promise<SourceWorkSessionItem[]>;
   getSession(sessionId: string): Promise<SourceWorkSessionItem>;
+  completeSession(sessionId: string): Promise<void>;
+  killSession(sessionId: string): Promise<void>;
   restoreSession(request: {
     sessionId: string;
     expectedProject: string;

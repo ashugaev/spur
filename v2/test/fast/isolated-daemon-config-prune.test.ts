@@ -283,6 +283,28 @@ describe("spur-isolated-daemon.sh prune_stale_config_dirs", () => {
     expect(existsSync(dead)).toBe(false);
   });
 
+  it("keeps a stale dir matched early in a ps listing larger than the pipe buffer (GATE A, #1012)", async () => {
+    const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
+    cleanupPaths.push(tmpRoot);
+    const configDir = join(tmpRoot, "spur-isolated-daemon.self");
+    mkdirSync(configDir, { recursive: true });
+    const stale = await makeStaleDir(tmpRoot, "spur-isolated-daemon.live-big-ps", 120);
+    // ~90 KB, past the 64 KB pipe buffer, under the 128 KB per-env-string cap.
+    const filler = Array.from({ length: 2_500 }, (_, i) => `/usr/bin/unrelated-process --id ${i}`);
+
+    await runPrune({
+      tmpRoot,
+      configDir,
+      psArgsOutput: [
+        `node /some/cli.js --config ${stale}/config.yaml daemon start`,
+        ...filler,
+      ].join("\n"),
+      fakeBinDir: join(tmpRoot, "bin"),
+    });
+
+    expect(existsSync(stale)).toBe(true);
+  });
+
   it("keeps a stale dir a live own-uid pid has as its cwd, including a cwd under <dir>/worktrees (GATE B)", async () => {
     const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
     cleanupPaths.push(tmpRoot);

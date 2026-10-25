@@ -49,6 +49,7 @@ vi.mock("../../src/glab.js", () => ({
 }));
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
+  hasTrailingClaudeAuthenticationFailure: vi.fn(() => false),
 }));
 vi.mock("../../src/claude-session-status.js", () => ({
   readClaudeSessionStatus: readClaudeSessionStatusMock,
@@ -243,6 +244,7 @@ function baseConfig(): AppConfig {
     defaultAgent: "claude",
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
+    mcp: { port: 4311 },
     models: { codexHome: "/tmp/codex" },
     voice: {
       provider: "whisper_cpp",
