@@ -57,7 +57,7 @@ fi
 # panes and every pane started under that run's unique launcher or fixture dir;
 # anything else is not ours: refuse, touch nothing, no kill advice.
 check_socket() {
-  local socket="$1" panes pane_path foreign=0
+  local socket="$1" panes pane_path foreign=0 owned=0
   [[ "$socket" =~ ^[A-Za-z0-9._-]+$ ]] || return 0
   tmux -L "$socket" has-session 2>/dev/null || return 0
   if ! panes=$(tmux -L "$socket" list-panes -a -F '#{pane_start_path}' 2>/dev/null); then
@@ -67,11 +67,16 @@ check_socket() {
       [[ -z "$pane_path" ]] || pane_path=$(realpath -m -s -- "$pane_path")
       if [[ -n "$stale_launcher" && ( "$pane_path" == "$stale_launcher" || "$pane_path" == "$stale_launcher/"* ) ]] || \
          [[ -n "$stale_fixture" && ( "$pane_path" == "$stale_fixture" || "$pane_path" == "$stale_fixture/"* ) ]]; then
-        :
+        owned=1
       else
         foreign=1
       fi
     done <<< "$panes"
+  fi
+  if [[ "$foreign" == 1 && "$owned" == 0 && "$socket" != "spur-$SPUR_RESERVED_PORT_DAEMON" ]]; then
+    # This run never joins or kills that socket; only our stale receipt and dirs go.
+    echo "voice-daemon: tmux socket '$socket' is live and not owned by this voice run; left untouched, continuing" >&2
+    return 0
   fi
   if [[ "$foreign" == 1 ]]; then
     echo "voice-daemon: tmux socket '$socket' is live and not owned by this voice run; nothing touched" >&2

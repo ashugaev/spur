@@ -454,12 +454,17 @@ function expectUntouched(
   expect(serverAlive(socket)).toBe(true);
 }
 
-it("refuses without kill advice when a foreign server holds the receipt socket", () => {
+it("continues and leaves a foreign server alone when it holds a receipt socket other than the reserved one", () => {
   const socket = `spur-voice-foreign-${process.pid}`;
   const { result, dirs } = foreignRun(socket);
-  expectUntouched(result, dirs, socket);
-  expect(result.stderr).toContain("not owned by this voice run");
+  expect(result.status).toBe(0);
+  expect(result.started).toBe(true);
+  expect(result.stderr).toContain("left untouched");
   expect(result.stderr).not.toContain("kill-server");
+  expect(serverAlive(socket)).toBe(true);
+  expect(existsSync(result.receiptPath)).toBe(false);
+  expect(existsSync(dirs.launcher)).toBe(false);
+  expect(existsSync(dirs.fixtureDir)).toBe(false);
 });
 
 it("refuses without kill advice when a foreign server holds the reserved port socket and no receipt names it", () => {
@@ -511,7 +516,8 @@ it.each(["foreign-first", "owned-first"])(
 );
 
 it("refuses without deleting when list-panes fails after has-session succeeds", () => {
-  const socket = `spur-voice-listfail-${process.pid}`;
+  const port = `${40000 + (process.pid % 20000)}`;
+  const socket = `spur-${port}`;
   const pid = deadPid();
   let dirs: StaleDirs = { fixtureDir: "", launcher: "" };
   const result = runWithReceipt(
@@ -527,6 +533,7 @@ it("refuses without deleting when list-panes fails after has-session succeeds", 
       return `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_CONFIG="${dirs.launcher}/config.yaml"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="${socket}"\n`;
     },
     (_path, voiceDir) => writeFileSync(join(voiceDir, "fixture-dir"), `${dirs.fixtureDir}\n`),
+    { SPUR_RESERVED_PORT_DAEMON: port },
   );
   expectUntouched(result, dirs, socket);
   expect(result.stderr).not.toContain("kill-server");
@@ -535,7 +542,8 @@ it("refuses without deleting when list-panes fails after has-session succeeds", 
 it.each(["launcher", "fixtureDir"] as const)(
   "treats a pane under a sibling-prefixed %s as foreign",
   (which) => {
-    const socket = `spur-voice-sibling-${process.pid}`;
+    const port = `${40000 + (process.pid % 20000)}`;
+    const socket = `spur-${port}`;
     const pid = deadPid();
     let dirs: StaleDirs = { fixtureDir: "", launcher: "" };
     const result = runWithReceipt(
@@ -547,6 +555,7 @@ it.each(["launcher", "fixtureDir"] as const)(
         return `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_CONFIG="${dirs.launcher}/config.yaml"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="${socket}"\n`;
       },
       (_path, voiceDir) => writeFileSync(join(voiceDir, "fixture-dir"), `${dirs.fixtureDir}\n`),
+      { SPUR_RESERVED_PORT_DAEMON: port },
     );
     expectUntouched(result, dirs, socket);
     expect(result.stderr).not.toContain("kill-server");
@@ -647,7 +656,7 @@ it("sweeps an orphan fixture pointer when no receipt exists", () => {
 });
 
 it("fails fast without creating or deleting anything when the reserved port is unset or invalid", () => {
-  for (const port of [undefined, "", "abc"]) {
+  for (const port of [undefined, "", "abc", "12a"]) {
     const path = fixture();
     const tools = join(path, "tools");
     mkdirSync(tools);
