@@ -143,10 +143,12 @@ import {
 } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
+  ACTIVITY_WINDOW_MS,
   CONVERSATION_PAGE_ENTRIES,
   readClaudeConversationTail,
   readClaudeJsonlState,
   hasClaudeRecoveryAfter,
+  hasTrailingClaudeAuthenticationFailure,
   type ClaudeConversationReaderState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
@@ -3622,6 +3624,11 @@ export class SessionService {
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
   private readonly spawnsPreparing = new Set<string>();
+  // Session ids this process is launching in place: dead-agent recovery
+  // (relaunchSessionInPlace) and restore()/reopen(). Each writes `running`
+  // before the agent reaches its prompt and settles the record itself, so a
+  // not-yet-started agent must not be reconciled to errored meanwhile.
+  private readonly launchesInFlight = new Set<string>();
   private readonly triggerBirthsInFlight = new Map<
     string,
     { request: SpawnSessionRequest; result: Promise<SessionView> }
@@ -19107,6 +19114,7 @@ export class SessionService {
     // state right after this returns and must not have that forced to
     // "working" the way a genuine post-restore warmup intentionally does.
     this.restoreWarmupUntil.set(session.id, Date.now() + RESTORE_WARMUP_MS);
+    this.launchesInFlight.add(session.id);
     let recovered: ReadySessionForSend;
     try {
       recovered = await this.relaunchSessionInPlace(session, project, {
@@ -19129,6 +19137,7 @@ export class SessionService {
       throw error;
     } finally {
       this.restoreWarmupUntil.delete(session.id);
+      this.launchesInFlight.delete(session.id);
     }
     operation?.assertActive();
     recovered.session = this.writeRecoverySession(recovered.session, options?.wakeClaim, options);
@@ -19744,7 +19753,12 @@ export class SessionService {
           },
           operation,
         );
-        return this.restoreLocked(sessionId, request, claim, operation);
+        try {
+          this.launchesInFlight.add(sessionId);
+          return await this.restoreLocked(sessionId, request, claim, operation);
+        } finally {
+          this.launchesInFlight.delete(sessionId);
+        }
       },
       operation,
     );
@@ -19976,6 +19990,10 @@ export class SessionService {
     // warmup window (see reapDeadSessionSidecars) for exactly this gap.
     const warmupUntil = Date.now() + RESTORE_WARMUP_MS;
     this.restoreWarmupUntil.set(sessionId, warmupUntil);
+    // Released by restoreWithPaneLock once this frame settles, after the final
+    // status write on every exit: the provisional `running` write precedes a
+    // ready wait longer than the warmup.
+    this.launchesInFlight.add(sessionId);
     let restoredLaunchCommand = current.launchCommand;
     let mcpSidecarUpdate: SessionRecord = current;
     let restoreGeneration: PaneGeneration | null = null;
@@ -22410,6 +22428,7 @@ export class SessionService {
     rolloutState: CodexRolloutStateRecord | null;
     rateLimit: RateLimitDetection | null;
     activityMs: number;
+    threadId?: string;
     model?: string;
     tokenUsage?: ProviderTokenUsageSample;
     tokenUsages?: ProviderTokenUsageSample[];
@@ -22470,6 +22489,7 @@ export class SessionService {
       rolloutState,
       rateLimit: rolloutRead.rateLimit,
       activityMs,
+      ...(rolloutRead.threadId ? { threadId: rolloutRead.threadId } : {}),
       ...(rolloutRead.model ? { model: rolloutRead.model } : {}),
       ...(rolloutRead.tokenUsage ? { tokenUsage: rolloutRead.tokenUsage } : {}),
       ...(rolloutRead.tokenUsages ? { tokenUsages: rolloutRead.tokenUsages } : {}),
@@ -23138,6 +23158,7 @@ export class SessionService {
     }
     const protectedRuntime = (ownedPane?: Promise<void>) =>
       this.spawnsInFlight.has(session.id) ||
+      this.launchesInFlight.has(session.id) ||
       this.lifecycle.snapshot(session.id).revision !== probeRevision ||
       (this.paneWriteLocks.has(session.tmuxSession) &&
         this.paneWriteLocks.get(session.tmuxSession) !== ownedPane) ||
@@ -23829,6 +23850,7 @@ export class SessionService {
     let liveModel: string | undefined;
     let tokenUsage: ProviderTokenUsageSample | undefined;
     let tokenUsages: ProviderTokenUsageSample[] | undefined;
+    let codexProbeRecovery: Awaited<ReturnType<typeof this.classifyCodexState>> | undefined;
     if (
       options?.reconcileRuntime !== false &&
       (effectiveSession.status === "running" || effectiveSession.status === "spawning")
@@ -23860,6 +23882,7 @@ export class SessionService {
 
     let rateLimit: RateLimitDetection | null = null;
     let hasServerErrorRecord = false;
+    let hasAuthenticationFailure = false;
     let serverErrorEvidence: "error" | "recovered" | undefined;
     let serverErrorJsonlPath: string | null = null;
     // Set from whichever structured artifact the branches below already read.
@@ -23893,12 +23916,86 @@ export class SessionService {
       }
     }
     if (
-      runtime.probeUnresponsive ||
+      runtime.probeUnresponsive &&
+      !workspace.diagnostic &&
+      workspace.exists &&
+      session.agent === "codex" &&
+      session.status === "running" &&
+      !session.serverErrorAt &&
+      effectiveSession.errorSource === "runtime_probe" &&
+      effectiveSession.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX)
+    ) {
+      const native = await this.classifyCodexState(session).catch(() => null);
+      const observedAt = Date.now();
+      const current = readSession(this.config.dataDir, session.id);
+      const lifecycle = this.lifecycle.snapshot(session.id);
+      const rolloutState = native?.rolloutState;
+      const nativeStateIsAuthoritative =
+        (native?.state === "waiting" && rolloutState?.reason === "task_complete") ||
+        (native?.state === "needs_input" &&
+          (rolloutState?.reason === "input_required" ||
+            rolloutState?.reason === "request_user_input")) ||
+        (native?.state === "working" &&
+          (rolloutState?.reason === "function_call" ||
+            rolloutState?.reason === "custom_tool_call") &&
+          typeof rolloutState.turnId === "string" &&
+          native.hookState?.hookEvent === "PreToolUse" &&
+          native.hookState.turnId === rolloutState.turnId &&
+          Date.parse(native.hookState.updatedAt) <= observedAt &&
+          observedAt - Date.parse(native.hookState.updatedAt) <= ACTIVITY_WINDOW_MS);
+      const hookMatchesRollout =
+        !native?.hookState ||
+        (typeof rolloutState?.turnId === "string" &&
+          native.hookState.turnId === rolloutState.turnId);
+      if (
+        native !== null &&
+        rolloutState !== null &&
+        rolloutState !== undefined &&
+        session.agentSessionId !== undefined &&
+        native.threadId === session.agentSessionId &&
+        native.rateLimit === null &&
+        nativeStateIsAuthoritative &&
+        native.state === rolloutState.state &&
+        hookMatchesRollout &&
+        rolloutState.timestampMs > 0 &&
+        rolloutState.timestampMs <= observedAt &&
+        observedAt - rolloutState.timestampMs <= ACTIVITY_WINDOW_MS &&
+        current &&
+        current.status === "running" &&
+        current.error === effectiveSession.error &&
+        current.errorSource === "runtime_probe" &&
+        !current.serverErrorAt &&
+        current.agentSessionId === session.agentSessionId &&
+        current.agentLaunchId === session.agentLaunchId &&
+        sameSessionRuntimeOwner(current, session) &&
+        this.lifecycleStateMatches(current, this.lifecycleStamp(session)) &&
+        lifecycle.revision === probeRevision &&
+        lifecycle.operation?.phase !== "pending"
+      ) {
+        const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recovered } = current;
+        effectiveSession = { ...recovered, updatedAt: nowIso() };
+        writeSession(this.config.dataDir, effectiveSession);
+        this.stateCache.delete(session.id);
+        codexProbeRecovery = native;
+      }
+    }
+    if (
+      (runtime.probeUnresponsive && codexProbeRecovery === undefined) ||
       workspace.diagnostic ||
-      hasRetainedSessionError(effectiveSession)
+      (hasRetainedSessionError(effectiveSession) && codexProbeRecovery === undefined)
     ) {
       state = "error";
       classifiedDetail = effectiveSession.error ?? "State: error";
+    } else if (codexProbeRecovery) {
+      state = codexProbeRecovery.state;
+      stateSource = codexProbeRecovery.source;
+      rateLimit = codexProbeRecovery.rateLimit;
+      agentActivityAt = activityAtFromMs(codexProbeRecovery.activityMs);
+      liveModel = codexProbeRecovery.model;
+      tokenUsage = codexProbeRecovery.tokenUsage;
+      tokenUsages = codexProbeRecovery.tokenUsages;
+      historySourcePath = codexProbeRecovery.rolloutState?.filePath ?? null;
+      classifiedDetail = `State: ${state} (codex ${stateSource}, recovered from runtime probe error)`;
     } else {
       if (effectiveSession.status !== "running") {
         state = statusFallbackState(effectiveSession);
@@ -23930,6 +24027,9 @@ export class SessionService {
           this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
           rateLimit = jsonlResult.rateLimit;
           hasServerErrorRecord = jsonlResult.serverError;
+          hasAuthenticationFailure = hasTrailingClaudeAuthenticationFailure(
+            jsonlResult.reader.tailRecords,
+          );
           if (jsonlResult.serverError) serverErrorEvidence = "error";
           else if (
             session.agentSessionId &&
@@ -23956,6 +24056,39 @@ export class SessionService {
           stateSource = "claude_status";
           historySourcePath = statusResult.filePath;
           classifiedDetail = `State: ${state} (claude status=${statusResult.status})`;
+          // A native retry/dialog can precede the next transcript append.
+          // Supersede only an older error, with a fresh observation from this
+          // UUID's process in the pane. Keep the error episode until the
+          // transcript supplies its existing positive recovery evidence.
+          const errorAt = jsonlResult?.reader.tailRecords
+            .slice()
+            .reverse()
+            .find((record) => record.serverError)?.ownTimestampMs;
+          const statusAt = statusResult.statusUpdatedMs;
+          const current = readSession(this.config.dataDir, session.id);
+          if (
+            hasServerErrorRecord &&
+            errorAt !== undefined &&
+            statusAt !== undefined &&
+            (state === "working" || state === "needs_input") &&
+            statusResult.paneOwned &&
+            session.agentSessionId !== undefined &&
+            statusResult.sessionId === session.agentSessionId &&
+            session.agentLaunchId !== undefined &&
+            statusAt > errorAt &&
+            statusAt <= nowMs &&
+            nowMs - statusAt <= ACTIVITY_WINDOW_MS &&
+            current &&
+            !hasRetainedSessionError(current) &&
+            current.serverErrorAt === session.serverErrorAt &&
+            sameSessionRuntimeOwner(current, session) &&
+            current.agentLaunchId === session.agentLaunchId &&
+            this.lifecycleStateMatches(current, this.lifecycleStamp(session)) &&
+            this.lifecycle.snapshot(session.id).revision === probeRevision &&
+            this.lifecycle.snapshot(session.id).operation?.phase !== "pending"
+          ) {
+            hasServerErrorRecord = false;
+          }
         } else if (jsonlResult) {
           state = jsonlResult.state;
           stateSource = "jsonl";
@@ -24315,6 +24448,12 @@ export class SessionService {
         historySourcePath = serverErrorJsonlPath;
         classifiedDetail = "State: error (claude server error)";
       }
+      if (hasAuthenticationFailure) {
+        state = "needs_input";
+        stateSource = "jsonl";
+        historySourcePath = serverErrorJsonlPath;
+        classifiedDetail = "State: needs_input (claude authentication failed)";
+      }
     }
 
     if (!readSession(this.config.dataDir, session.id) || classifiedDetail === undefined) {
@@ -24381,10 +24520,8 @@ export class SessionService {
     session = persisted.session;
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
-    const displaySlots = this.projectSidecarSlots(
-      session,
-      deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session)),
-    );
+    const workspaceState = resolveWorkspaceState(this.config.dataDir, session);
+    const displaySlots = this.projectSidecarSlots(session, deriveSessionSlots(workspaceState));
     const sidecars = await this.sidecarViews(session, this.resolveProjectForSession(session));
     const runningSidecarNames = sidecars.filter((view) => view.alive).map((view) => view.name);
 
@@ -24412,6 +24549,7 @@ export class SessionService {
       branchSource: _branchSource,
       error: _error,
       errorSource: _errorSource,
+      pr: _recordPr,
       ...dashboardSession
     } = session;
     const state = this.stabilizeState(
@@ -24439,6 +24577,7 @@ export class SessionService {
         deskId: workspaceIdOf(dashboardSession),
         planMode: resolvePlanMode(dashboardSession),
         restrictWrites: resolveRestrictWrites(dashboardSession),
+        ...(workspaceState.pr ? { pr: workspaceState.pr } : {}),
         ...(displaySlots ? { slots: displaySlots } : {}),
         runtimeAlive: classified.runtime.runtimeAlive,
         workspaceExists: workspacePresent,
@@ -24747,10 +24886,8 @@ export class SessionService {
     );
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
-    const displaySlots = this.projectSidecarSlots(
-      session,
-      deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, anchorRecord)),
-    );
+    const workspaceState = resolveWorkspaceState(this.config.dataDir, anchorRecord);
+    const displaySlots = this.projectSidecarSlots(session, deriveSessionSlots(workspaceState));
     const deskGroupMembers = await this.buildDeskGroupMembers(
       session,
       {
@@ -24776,6 +24913,7 @@ export class SessionService {
       // The record's queue state is internal; the view carries queuedMessagesView.
       queuedMessages: _queuedMessages,
       errorSource: _errorSource,
+      pr: _recordPr,
       ...sessionWithoutDetailFields
     } = session;
 
@@ -24787,6 +24925,7 @@ export class SessionService {
       deskId: workspaceIdOf(session),
       planMode: resolvePlanMode(session),
       restrictWrites: resolveRestrictWrites(session),
+      ...(workspaceState.pr ? { pr: workspaceState.pr } : {}),
       ...(displaySlots ? { slots: displaySlots } : {}),
       runtimeAlive: classified.runtime.runtimeAlive,
       workspaceExists: workspacePresent,
