@@ -51,6 +51,7 @@ vi.mock("../../src/glab.js", () => ({
 vi.mock("../../src/claude-jsonl-state.js", async (importOriginal) => ({
   ...(await importOriginal<typeof claudeJsonlStateModule>()),
   readClaudeJsonlState: readClaudeJsonlStateMock,
+  hasTrailingClaudeAuthenticationFailure: vi.fn(() => false),
 }));
 vi.mock("../../src/claude-session-status.js", () => ({
   readClaudeSessionStatus: readClaudeSessionStatusMock,
