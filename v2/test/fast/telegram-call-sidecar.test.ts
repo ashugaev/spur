@@ -366,7 +366,9 @@ it("refuses when the daemon is dead but its tmux server still runs", () => {
   expect(result.stderr).toContain(socket);
   expect(result.started).toBe(false);
   expect(existsSync(result.receiptPath)).toBe(true);
-  expect(() => execFileSync("tmux", ["-L", socket, "has-session"], { stdio: "pipe" })).not.toThrow();
+  expect(() =>
+    execFileSync("tmux", ["-L", socket, "has-session"], { stdio: "pipe" }),
+  ).not.toThrow();
 });
 
 function staleDirs(path: string): { fixtureDir: string; launcher: string } {
