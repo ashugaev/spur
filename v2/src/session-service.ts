@@ -6318,14 +6318,21 @@ export class SessionService {
     rows: {
       view: T;
       source: SessionRecord | null;
-      revision: number;
+      receipt: SessionLifecycleSnapshot;
       identity?: boolean;
     }[],
     rebuild: (
       record: SessionRecord,
       listing: SessionRecord[] | undefined,
     ) => Promise<{ view: T; source: SessionRecord | null } | undefined>,
-    options: { includePending: boolean; signal?: AbortSignal | undefined },
+    // "refuse" throws 503 once the rebuild budget is spent; "lastBuild" returns
+    // each still-moving row as last built with the receipt captured at that
+    // build, and omits a pending session first seen on the final pass.
+    options: {
+      includePending: boolean;
+      onExhausted: "refuse" | "lastBuild";
+      signal?: AbortSignal | undefined;
+    },
   ): Promise<(T & { lifecycle: SessionLifecycleSnapshot })[]> {
     const rebuildExisting = async (record: SessionRecord, listing: SessionRecord[] | undefined) => {
       try {
@@ -6348,9 +6355,9 @@ export class SessionService {
       record: SessionRecord,
       receipt: SessionLifecycleSnapshot,
     ) => {
-      if (receipt.revision === 0 && row.revision === 0) return false;
+      if (receipt.revision === 0 && row.receipt.revision === 0) return false;
       return (
-        receipt.revision !== row.revision ||
+        receipt.revision !== row.receipt.revision ||
         (record !== row.source &&
           (row.identity === true || !isDeepStrictEqual(record, row.source))) ||
         !isDeepStrictEqual(
@@ -6410,6 +6417,9 @@ export class SessionService {
         pass === LIFECYCLE_REBUILD_PASSES ||
         (pass > 0 && Date.now() - startedAt >= LIFECYCLE_ASSEMBLY_BUDGET_MS)
       ) {
+        if (options.onExhausted === "lastBuild") {
+          return live.map((row) => ({ ...row.view, lifecycle: row.receipt }));
+        }
         const refused = pickup[0]?.id ?? (stale[0] as (typeof stale)[number]).view.id;
         throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(refused));
       }
@@ -6426,7 +6436,7 @@ export class SessionService {
             }
             row.view = rebuilt.view;
             row.source = rebuilt.source;
-            row.revision = (receipts.get(id) as SessionLifecycleSnapshot).revision;
+            row.receipt = receipts.get(id) as SessionLifecycleSnapshot;
             row.identity = false;
           }),
         ),
@@ -6436,7 +6446,7 @@ export class SessionService {
             return rebuilt
               ? {
                   ...rebuilt,
-                  revision: (receipts.get(record.id) as SessionLifecycleSnapshot).revision,
+                  receipt: receipts.get(record.id) as SessionLifecycleSnapshot,
                   identity: false,
                 }
               : undefined;
@@ -10889,18 +10899,18 @@ export class SessionService {
         .map((view) => ({
           view,
           source: this.dashboardEnrichedRecords.get(view.id) ?? null,
-          revision: this.lifecycle.snapshot(view.id).revision,
+          receipt: this.lifecycle.snapshot(view.id),
           identity: true,
         }));
       for (const { id } of allSessions) {
-        // One synchronous span: capture the revision, then read the record.
-        const revision = this.lifecycle.snapshot(id).revision;
-        if (this.dashboardCache.has(id) || revision === 0) continue;
+        // One synchronous span: capture the receipt, then read the record.
+        const receipt = this.lifecycle.snapshot(id);
+        if (this.dashboardCache.has(id) || receipt.revision === 0) continue;
         const record = readSession(this.config.dataDir, id);
         if (!record) continue;
         try {
           const assembled = await this.assembleDashboard(record);
-          if (assembled) rows.push({ ...assembled, revision, identity: false });
+          if (assembled) rows.push({ ...assembled, receipt, identity: false });
           else if (readSession(this.config.dataDir, record.id))
             throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(record.id));
         } catch (error) {
@@ -10915,7 +10925,7 @@ export class SessionService {
       const views = await this.finalizeLifecycleRows(
         rows,
         (record) => this.assembleDashboard(record),
-        { includePending: true, signal: options.signal },
+        { includePending: true, onExhausted: "lastBuild", signal: options.signal },
       );
       for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
       return views.filter(included);
@@ -10926,14 +10936,14 @@ export class SessionService {
     const claudeAccounts = this.computeClaudeAccountsView();
     const rows = await Promise.all(
       sessions.map(async (session) => {
-        const revision = this.lifecycle.snapshot(session.id).revision;
+        const receipt = this.lifecycle.snapshot(session.id);
         try {
           const { view, source } = await this.enrichWithClassified(
             session,
             claudeAccounts,
             allSessions,
           );
-          return { view, source, revision };
+          return { view, source, receipt };
         } catch (error) {
           if (
             error instanceof SessionResourceNotFoundError &&
@@ -10947,7 +10957,7 @@ export class SessionService {
     const views = await this.finalizeLifecycleRows(
       rows.filter((row) => row !== undefined),
       (record, listing) => this.enrichWithClassified(record, undefined, listing),
-      { includePending: true, signal: options?.signal },
+      { includePending: true, onExhausted: "lastBuild", signal: options?.signal },
     );
     for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
     return views.filter(included);
@@ -24750,14 +24760,14 @@ export class SessionService {
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],
   ): Promise<SessionView> {
-    const revision = this.lifecycle.snapshot(session.id).revision;
+    const receipt = this.lifecycle.snapshot(session.id);
     const { view, classified, source } = await this.enrichWithClassified(
       session,
       claudeAccounts,
       sessionBatch,
     );
     const rows = await this.finalizeLifecycleRows(
-      [{ view: this.withSessionDetail(view, classified.session), source, revision }],
+      [{ view: this.withSessionDetail(view, classified.session), source, receipt }],
       async (record) => {
         const rebuilt = await this.enrichWithClassified(record);
         return {
@@ -24765,7 +24775,7 @@ export class SessionService {
           source: rebuilt.source,
         };
       },
-      { includePending: false },
+      { includePending: false, onExhausted: "refuse" },
     );
     const result = rows[0];
     if (!result) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
