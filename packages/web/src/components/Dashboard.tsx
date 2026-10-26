@@ -56,6 +56,7 @@ import {
   writeSpawnDraft,
   type SpawnDraft,
 } from "@/lib/spawn-draft";
+import { readSpawnBatchConflict } from "@/lib/spawn-batch-conflict";
 import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
 import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
 import { reconcileSessionMode, sessionModeOptions } from "@/lib/session-modes";
@@ -1693,6 +1694,14 @@ export function Dashboard() {
     setSpawnPreflightStatus("idle");
   };
 
+  // A claimed batch belongs to the session it created; rotate it unless that
+  // session is still being created.
+  const handleSpawnBatchConflict = (project: string, status: number, failure: unknown) => {
+    const conflict = status === 409 ? readSpawnBatchConflict(failure) : null;
+    if (conflict && conflict.code !== "spawn_in_progress") resetSpawnPreflightBatch(project);
+    return conflict !== null;
+  };
+
   const persistSpawnPreflightBatch = (project: string, id: string) => {
     spawnPreflightBatchIdRef.current = id;
     setSpawnPreflightBatchId(id);
@@ -1921,6 +1930,7 @@ export function Dashboard() {
           })
             .then(async (response) => ({
               ok: response.ok,
+              status: response.status,
               result: (await response.json().catch(() => null)) as {
                 branch?: string | null;
                 error?: string;
@@ -1928,10 +1938,15 @@ export function Dashboard() {
                 preflightTokenUsageView?: SpurPreflightTokenUsageView;
               } | null,
             }))
-            .then(({ ok, result }) => {
+            .then(({ ok, status, result }) => {
               if (owner !== spawnPreflightOwnerRef.current) return;
               if (!result) {
                 if (!cancelled) setSpawnPreflightStatus("error");
+                return;
+              }
+              if (handleSpawnBatchConflict(project, status, result)) {
+                setSpawnError(responseErrorMessage(result, "Failed to run preflight"));
+                if (!cancelled) setSpawnPreflightStatus("idle");
                 return;
               }
               const batchChanged =
@@ -2043,15 +2058,7 @@ export function Dashboard() {
       });
       if (!response.ok) {
         const failure = await readResponsePayload(response);
-        if (
-          response.status === 409 &&
-          typeof failure === "object" &&
-          failure !== null &&
-          "code" in failure &&
-          (failure.code === "spawn_committed" || failure.code === "spawn_failed")
-        ) {
-          resetSpawnPreflightBatch(nextProjectId);
-        }
+        handleSpawnBatchConflict(nextProjectId, response.status, failure);
         throw new Error(responseErrorMessage(failure, "Failed to spawn Spur session"));
       }
       spawnHistory.saveEntry(nextPrompt);

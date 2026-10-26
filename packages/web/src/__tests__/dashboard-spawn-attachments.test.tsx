@@ -328,6 +328,12 @@ describe("Dashboard spawn photo preparation", () => {
   }
 
   async function openBeforeProjectsLoad(batchProjectId: string) {
+    await openDraftBeforeProjectsLoad(batchProjectId);
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(1));
+  }
+
+  async function openDraftBeforeProjectsLoad(batchProjectId: string) {
     saveBatchDraft(batchProjectId);
     let releaseSessions!: () => void;
     sessionsGate = new Promise<void>((accept) => {
@@ -344,8 +350,6 @@ describe("Dashboard spawn photo preparation", () => {
     expect(screen.getByLabelText("Prompt...")).toHaveValue("Retry after reload");
     await act(async () => releaseSessions());
     await waitFor(() => expect(submit()).not.toBeDisabled());
-    fireEvent.click(submit());
-    await waitFor(() => expect(requests).toHaveLength(1));
   }
 
   it("reuses the saved batch when the modal opens before projects load", async () => {
@@ -386,6 +390,33 @@ describe("Dashboard spawn photo preparation", () => {
     await waitFor(() => expect(requests).toHaveLength(1));
     expect(sentBatchId(0)).toBe("saved-batch");
     expect(batchRequests).toBe(0);
+  });
+
+  it("shows the created session and rotates the batch when preview hits a claimed batch", async () => {
+    previewResponse = Promise.resolve(
+      Response.json(
+        {
+          error: "Session demo-7 was already created from this submission",
+          code: "spawn_committed",
+          sessionId: "demo-7",
+        },
+        { status: 409 },
+      ),
+    );
+    await openDraftBeforeProjectsLoad("demo");
+    const dialog = screen.getByRole("dialog");
+    await waitFor(() =>
+      expect(within(dialog).getByRole("alert")).toHaveTextContent("demo-7 was already created"),
+    );
+    expect(within(dialog).queryByText(/Branch preview failed/)).toBeNull();
+    await waitFor(() =>
+      expect(
+        JSON.parse(String(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY))),
+      ).toMatchObject({ preflightBatchId: null }),
+    );
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(sentBatchId(0)).toBe("batch-1");
   });
 
   it("rotates the saved batch when its project is gone once projects load", async () => {
