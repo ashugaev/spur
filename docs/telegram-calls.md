@@ -61,10 +61,10 @@ Stop listener before daemon:
 Daemon stop terminates sandbox agent processes before deleting owned fixture and launcher config dir.
 Start refuses while the recorded daemon is alive.
 Start requires `SPUR_RESERVED_PORT_DAEMON` (numeric); the sidecar sets it. Unset: exit 1 before any change.
-Start also refuses while a tmux server is live on the receipt socket or on `spur-<reserved daemon port>`; nothing is deleted or killed.
+Start also refuses, deleting and killing nothing, on any live tmux server on `spur-<reserved daemon port>`, and on the receipt socket when its server is owned, mixed or unreadable.
 Server whose panes all started under the previous run's launcher or fixture dir: receipt and dirs kept; clear with `tmux -L <socket> kill-server`.
 Mixed server (any pane outside those dirs) on either socket: refuse, no kill advice.
-Unreadable server (pane list fails) on either socket: refuse, no kill advice, nothing deleted.
+Unreadable server (pane list fails) on either socket: refuse, no kill advice.
 Foreign or no-pane server on `spur-<reserved daemon port>`: refuse, no kill advice, leave it.
 Foreign or no-pane server on a different receipt socket: left untouched, start continues; stale receipt and dirs are discarded.
 No live server: stale receipt, fixture and launcher dirs are discarded; an orphan fixture pointer is swept without a receipt.

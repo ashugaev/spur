@@ -52,10 +52,11 @@ if [[ -f "$TOOL_DIR/isolated-env.sh" ]]; then
   receipt_socket=$(source "$TOOL_DIR/isolated-env.sh" && printf '%s' "${SPUR_ISOLATED_TMUX_SOCKET_NAME:-}")
 fi
 # Socket name spur-<port> is reused: the new run joins a live server there and its
-# teardown kills the whole server. Never start over a live server on the receipt
-# socket or the socket this run will use. A server is a dead run's only when it has
-# panes and every pane started under that run's unique launcher or fixture dir;
-# anything else is not ours: refuse, touch nothing, no kill advice.
+# teardown kills the whole server. Never start over a live server on the socket this
+# run will use. A server is a dead run's only when it has panes and every pane started
+# under that run's unique launcher or fixture dir. On a different receipt socket, a
+# readable server with no owned pane is left untouched and start continues; owned,
+# mixed or unreadable refuse, no kill advice for non-owned.
 check_socket() {
   local socket="$1" panes pane_path foreign=0 owned=0 unreadable=0
   [[ "$socket" =~ ^[A-Za-z0-9._-]+$ ]] || return 0
