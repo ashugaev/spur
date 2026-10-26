@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
 import { fileAttachmentsFromFiles, type FileAttachment } from "@/lib/file-attachments";
 import type * as FileAttachmentsModule from "@/lib/file-attachments";
-import { SPAWN_DRAFT_STORAGE_KEY } from "@/lib/spawn-draft";
+import { SPAWN_DRAFT_STORAGE_KEY, writeSpawnDraft } from "@/lib/spawn-draft";
 import type { SpurSessionView } from "@/lib/types";
 
 vi.mock("@/lib/file-attachments", async (importOriginal) => ({
@@ -60,6 +60,7 @@ describe("Dashboard spawn photo preparation", () => {
   let previewResponse: Promise<Response> | undefined;
   let spawnConflict: "spawn_in_progress" | "spawn_committed" | "spawn_failed" | undefined;
   let batchRequests: number;
+  let sessionsGate: Promise<void> | undefined;
   beforeEach(() => {
     vi.clearAllMocks();
     window.localStorage.clear();
@@ -70,9 +71,11 @@ describe("Dashboard spawn photo preparation", () => {
     previewResponse = undefined;
     spawnConflict = undefined;
     batchRequests = 0;
+    sessionsGate = undefined;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/sessions")
+      if (url === "/api/sessions") {
+        await sessionsGate;
         return Response.json({
           lifecycleInstanceId: "test-instance",
           projects: [
@@ -80,6 +83,7 @@ describe("Dashboard spawn photo preparation", () => {
           ],
           sessions: [],
         });
+      }
       if (url.startsWith("/api/models"))
         return Response.json({ models: [{ id: "sonnet", label: "Sonnet" }] });
       if (url.includes("spawn-defaults")) return Response.json({ model: null, worktree: false });
@@ -294,6 +298,56 @@ describe("Dashboard spawn photo preparation", () => {
       preflightBatchProjectId: "demo",
     });
     await act(async () => resolve(Response.json(spawnedSession, { status: 201 })));
+  });
+
+  async function openBeforeProjectsLoad(batchProjectId: string) {
+    writeSpawnDraft({
+      prompt: "Retry after reload",
+      agent: "claude",
+      model: null,
+      branch: "",
+      branchIsExplicit: false,
+      workspaceMode: "shared",
+      workspaceModeConfirmedFor: null,
+      defaultBranch: "",
+      planMode: false,
+      selfDestruct: false,
+      selfDestructConditions: "",
+      steps: [],
+      trackerUrl: null,
+      sessionMode: null,
+      preflightBatchId: "saved-batch",
+      preflightBatchProjectId: batchProjectId,
+    });
+    let releaseSessions!: () => void;
+    sessionsGate = new Promise<void>((accept) => {
+      releaseSessions = accept;
+    });
+    render(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <Dashboard />
+      </QueryClientProvider>,
+    );
+    fireEvent.click((await screen.findAllByRole("button", { name: "Spawn Session" }))[0]);
+    expect(screen.getByLabelText("Prompt...")).toHaveValue("Retry after reload");
+    await act(async () => releaseSessions());
+    await waitFor(() => expect(submit()).not.toBeDisabled());
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(1));
+  }
+
+  it("reuses the saved batch when the modal opens before projects load", async () => {
+    await openBeforeProjectsLoad("demo");
+    expect(sentBatchId(0)).toBe("saved-batch");
+    expect(batchRequests).toBe(0);
+  });
+
+  it("rotates the saved batch when its project is gone once projects load", async () => {
+    await openBeforeProjectsLoad("removed");
+    expect(sentBatchId(0)).toBe("batch-1");
+    expect(JSON.parse(String(requests[0].body))).toMatchObject({ projectId: "demo" });
   });
 
   it("closes and resets after an in-flight spawn succeeds", async () => {
