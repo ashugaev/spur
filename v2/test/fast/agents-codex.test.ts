@@ -4,6 +4,7 @@ import type * as Os from "node:os";
 import type * as Readline from "node:readline";
 import type * as CodexModule from "../../src/agents/codex.js";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("node:fs", () => ({
@@ -49,6 +50,7 @@ import {
 } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { resolveWorktreePathCandidates } from "../../src/agents/worktree-path.js";
+import { buildAgentResumePlan } from "../../src/agents/index.js";
 import {
   codexCommand,
   buildCodexPlan,
@@ -242,8 +244,29 @@ describe("buildCodexPlan", () => {
 });
 
 describe("buildCodexResumePlan model", () => {
-  it("does not add --model", () => {
-    const plan = buildCodexResumePlan("thread-123");
+  it.each(["gpt-6.1-sol", "selected-model"])(
+    "preserves the selected model through generic Codex resume: %s",
+    (model) => {
+      const plan = buildAgentResumePlan("codex", "thread-123", "/custom/codex", {
+        model,
+        codexHomePath: "/home/codex-dir",
+        codexArgs: ["--enable", "fast_mode"],
+        reasoningEffort: "high",
+        restrictWrites: true,
+      });
+      expect(plan.launchCommand).toContain(`--model '${model}'`);
+      expect(plan.launchCommand).toContain("'/custom/codex' resume");
+      expect(plan.launchCommand).toContain("'thread-123'");
+      expect(plan.launchCommand).toContain("CODEX_HOME='/home/codex-dir'");
+      expect(plan.launchCommand).toContain("'--enable' 'fast_mode'");
+      expect(plan.launchCommand).toContain('model_reasoning_effort="high"');
+      expect(plan.launchCommand).toContain("--sandbox read-only");
+      expect(plan.launchCommand).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    },
+  );
+
+  it("does not add --model when generic resume has no selected model", () => {
+    const plan = buildAgentResumePlan("codex", "thread-123");
     expect(plan.launchCommand).not.toContain("--model");
   });
 });
@@ -331,7 +354,7 @@ describe("buildCodexRestorePlan", () => {
     const mockLines = [
       JSON.stringify({ type: "session_meta", cwd: "/worktree/path", threadId: "my-thread-id" }),
     ];
-    mockCreateReadStream.mockReturnValue({});
+    mockCreateReadStream.mockReturnValue({ on: vi.fn(), destroy: vi.fn() });
     mockCreateInterface.mockReturnValue(makeAsyncIterable(mockLines));
 
     // This test relies on the real agent-restore-plans integration tests
@@ -1088,6 +1111,7 @@ function makeAsyncIterable(lines: string[]) {
     close: () => {
       /* no-op for mock */
     },
+    on: vi.fn(),
   };
 }
 
@@ -1101,12 +1125,12 @@ function mockFlatJsonlDir(dir: string, files: string[]) {
 }
 
 function mockStreamForFile(_filePath: string, lines: string[]) {
-  mockCreateReadStream.mockReturnValue({});
+  mockCreateReadStream.mockReturnValue({ on: vi.fn(), destroy: vi.fn() });
   mockCreateInterface.mockReturnValue(makeAsyncIterable(lines));
 }
 
 function mockStreamsForFiles(mapping: Record<string, string[]>) {
-  mockCreateReadStream.mockReturnValue({});
+  mockCreateReadStream.mockReturnValue({ on: vi.fn(), destroy: vi.fn() });
   mockCreateInterface.mockImplementation(() => {
     const callCount = mockCreateInterface.mock.calls.length;
     const keys = Object.keys(mapping);
@@ -1134,6 +1158,33 @@ describe("captureCodexRolloutBaseline", () => {
 });
 
 describe("scanCodexRolloutForMessage", () => {
+  it.each(["input", "readline"] as const)(
+    "contains legacy %s errors, including delayed teardown errors",
+    async (source) => {
+      const realReadline = await vi.importActual<typeof Readline>("node:readline");
+      const input = new PassThrough();
+      mockFlatJsonlDir("/sessions", ["original.jsonl"]);
+      mockCreateReadStream.mockReturnValue(input);
+      mockCreateInterface.mockImplementation((options) => {
+        const reader = realReadline.createInterface(options);
+        setImmediate(() => {
+          (source === "input" ? input : reader).emit("error", new Error("EBADF"));
+        });
+        return reader;
+      });
+      const result = await scanCodexRolloutForMessage("/sessions", "held", new Map());
+      expect(result.found).toBe(false);
+      expect(result.qualifiedNoMatch).not.toBe(true);
+      expect(input.destroyed).toBe(true);
+      await new Promise<void>((resolve) =>
+        setImmediate(() => {
+          input.emit("error", new Error("Delayed EBADF"));
+          resolve();
+        }),
+      );
+    },
+  );
+
   it.each(
     [
       {
@@ -1259,6 +1310,7 @@ describe("scanCodexRolloutForMessage", () => {
     "replacement",
     "truncation",
     "append-during-scan",
+    "chunk-boundary",
   ] as const)("qualifies only original strict historical ACK evidence: %s", async (guard) => {
     const realFs = await vi.importActual<typeof Fs>("node:fs");
     const realOs = await vi.importActual<typeof Os>("node:os");
@@ -1269,8 +1321,16 @@ describe("scanCodexRolloutForMessage", () => {
     const previousReadline = { ...(await import("node:readline")) };
     const root = await realPromises.mkdtemp(join(realOs.tmpdir(), "spur-codex-ack-"));
     const file = join(root, "original.jsonl");
-    const message = "  held text\n";
+    const chunkBytes = 1 << 20;
+    const messageHeader = '{"type":"event_msg","payload":{"type":"user_message","message":"';
+    const message =
+      guard === "chunk-boundary"
+        ? "x".repeat(chunkBytes - Buffer.byteLength(messageHeader) - 1) + "€\n"
+        : "  held text\n";
     const meta = JSON.stringify({
+      ...(guard === "chunk-boundary"
+        ? { padding: "x".repeat(chunkBytes - Buffer.byteLength('{"padding":"') - 1) + "€" }
+        : {}),
       type: "session_meta",
       ...(guard === "conflicting-single-uuid" ? { threadId: "native" } : {}),
       ...(guard === "conflicting-single-cwd" ? { cwd: "/worktree" } : {}),
@@ -1392,30 +1452,28 @@ describe("scanCodexRolloutForMessage", () => {
       baseline.set(join(scanRoot, "original.jsonl"), offset);
     }
     let changed = false;
-    vi.doMock("node:fs", () => ({
-      ...realFs,
-      createReadStream: (...args: Parameters<typeof realFs.createReadStream>) => {
-        const [path, options] = args;
-        if (!changed && path === file && typeof options === "object" && options.start === offset) {
-          changed = true;
-          if (guard === "replacement") {
-            realFs.renameSync(file, join(root, "replaced.jsonl"));
-            realFs.writeFileSync(file, prefix + user + "\n");
-          }
-          if (guard === "truncation") realFs.truncateSync(file, offset);
-          if (guard === "append-during-scan") realFs.appendFileSync(file, "{}\n");
-        }
-        return realFs.createReadStream(...args);
-      },
-    }));
+    vi.doMock("node:fs", () => realFs);
     vi.doMock("node:fs/promises", () => ({
       ...realPromises,
-      open:
-        guard === "unreadable"
-          ? async () => {
-              throw new Error("unreadable original");
+      open: async (...args: Parameters<typeof realPromises.open>) => {
+        if (guard === "unreadable") throw new Error("unreadable original");
+        const handle = await realPromises.open(...args);
+        const read = handle.read;
+        let reads = 0;
+        vi.spyOn(handle, "read").mockImplementation(async (...readArgs) => {
+          if (++reads === 4 && !changed && args[0] === file) {
+            changed = true;
+            if (guard === "replacement") {
+              realFs.renameSync(file, join(root, "replaced.jsonl"));
+              realFs.writeFileSync(file, prefix + user + "\n");
             }
-          : realPromises.open,
+            if (guard === "truncation") realFs.truncateSync(file, offset);
+            if (guard === "append-during-scan") realFs.appendFileSync(file, "{}\n");
+          }
+          return Reflect.apply(read, handle, readArgs);
+        });
+        return handle;
+      },
     }));
     vi.doMock("node:readline", () => realReadline);
     vi.resetModules();
@@ -1431,6 +1489,7 @@ describe("scanCodexRolloutForMessage", () => {
         guard === "exact" ||
           guard === "response-item" ||
           guard === "coherent-duplicate" ||
+          guard === "chunk-boundary" ||
           guard === "image-and-text",
       );
       if (["image-only", "empty-content", "valid-nonmatch", "qualified-empty"].includes(guard))
@@ -1612,7 +1671,7 @@ describe("scanCodexRolloutForMessage", () => {
     mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
     // When createReadStream is called with start=oldBytes, the readline interface
     // should only yield the new line (old line is before the offset).
-    mockCreateReadStream.mockReturnValue({});
+    mockCreateReadStream.mockReturnValue({ on: vi.fn(), destroy: vi.fn() });
     mockCreateInterface.mockImplementation(() => {
       // The implementation passes start offset to createReadStream, so readline
       // only sees data after the baseline. Simulate by returning only newLine.
@@ -1628,7 +1687,7 @@ describe("scanCodexRolloutForMessage", () => {
 
     // Reset mocks for second call (same baseline logic applies).
     mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
-    mockCreateReadStream.mockReturnValue({});
+    mockCreateReadStream.mockReturnValue({ on: vi.fn(), destroy: vi.fn() });
     mockCreateInterface.mockImplementation(() => makeAsyncIterable([newLine]));
 
     // Searching for "new message" should match because it's after baseline.

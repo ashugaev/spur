@@ -754,24 +754,39 @@ test("four CI, two Security, one onboarding fixed allocations total at most 600 
   for (const entry of Object.values(controller.STAGES))
     totals.set(entry.workflow, (totals.get(entry.workflow) ?? 0) + entry.seconds);
   expect([...totals.values()]).toEqual([600, 600, 600]);
-  const run = { created_at: iso(-19 * 60_000), run_attempt: 3 };
-  const jobs = [
-    {
-      name: "Quality",
-      status: "completed",
-      conclusion: "success",
-      run_attempt: 3,
-      completed_at: iso(),
-    },
-  ];
-  expect(controller.stageDeadline("playwright", run, jobs, wall, 0, 150_000)).toBe(150_000);
-  expect(controller.stageDeadline("playwright", run, jobs, wall + 90_000, 90_000, 150_000)).toBe(
-    150_000,
-  );
-  expect(() =>
-    controller.stageDeadline("playwright", run, [{ ...jobs[0], run_attempt: 2 }], wall, 0, 150_000),
-  ).toThrow();
 });
+test.each(["playwright", "runtime-integration", "real-agent-smoke"] as const)(
+  "%s admission deadline anchors to successful Quality in the current attempt",
+  (stage) => {
+    expect(controller.STAGES[stage].predecessor).toBe("Quality");
+    const run = { created_at: iso(-19 * 60_000), run_attempt: 3 };
+    const jobs = [
+      {
+        name: "Quality",
+        status: "completed",
+        conclusion: "success",
+        run_attempt: 3,
+        completed_at: iso(),
+      },
+    ];
+    expect(controller.stageDeadline(stage, run, jobs, wall, 0, 150_000)).toBe(150_000);
+    expect(controller.stageDeadline(stage, run, jobs, wall + 90_000, 90_000, 150_000)).toBe(
+      150_000,
+    );
+    expect(controller.stageDeadline(stage, run, jobs, wall + 160_000, 160_000, 150_000)).toBe(
+      150_000,
+    );
+    expect(() =>
+      controller.stageDeadline(stage, run, [{ ...jobs[0], run_attempt: 2 }], wall, 0, 150_000),
+    ).toThrow();
+    expect(() => controller.stageDeadline(stage, run, [], wall, 0, 150_000)).toThrow();
+    for (const conclusion of ["failure", "cancelled", "skipped"]) {
+      expect(() =>
+        controller.stageDeadline(stage, run, [{ ...jobs[0], conclusion }], wall, 0, 150_000),
+      ).toThrow();
+    }
+  },
+);
 
 type Workflow = {
   on: {
@@ -780,6 +795,7 @@ type Workflow = {
     pull_request?: { branches: string[] };
   };
   permissions?: Record<string, string>;
+  concurrency: { group: string; "cancel-in-progress": string };
   jobs: Record<
     string,
     {
@@ -840,7 +856,7 @@ test.each([
   const definition = await workflow("ci.yml");
   expect(present(definition.on.pull_request).branches.includes(base)).toBe(admitted);
 });
-test("required jobs depend on hosted admission, preserve serial stages and readonly caller permissions", async () => {
+test("required jobs retain admission, fan out after Quality and preserve readonly permissions", async () => {
   const expected = {
     "ci.yml": ["quality", "playwright", "runtime-integration", "real-agent-smoke"],
     "security.yml": ["gitleaks", "npm-audit"],
@@ -870,18 +886,56 @@ test("required jobs depend on hosted admission, preserve serial stages and reado
       expect(job.if).toContain("!cancelled()");
       expect(job.if).toContain("github.event_name != 'pull_request'");
       expect(job.if).not.toContain("always()");
-      const predecessor = controller.STAGES[id as Stage].predecessor;
-      if (predecessor) {
-        const previousId = present(ids[ids.indexOf(id) - 1]);
-        expect(gate.needs).toBe(previousId);
-        expect([job.needs].flat()).toContain(previousId);
-        expect(job.if).toContain(`needs.${previousId}.result == 'success'`);
+      if (file === "ci.yml" && id !== "quality") {
+        expect(gate.needs).toBe("quality");
+        expect(job.needs).toEqual(["quality", `${id}-admission`]);
+        expect(job.if).toContain("needs.quality.result == 'success'");
+      } else {
+        expect(gate.needs).toBeUndefined();
+        expect(job.needs).toBe(`${id}-admission`);
       }
     }
   }
+  const ci = await workflow("ci.yml");
+  expect(
+    ["quality", "playwright", "runtime-integration", "real-agent-smoke"].map(
+      (id) => present(ci.jobs[id]).name,
+    ),
+  ).toEqual(["Quality", "Playwright E2E", "Runtime Integration", "Real-Agent Smoke"]);
   for (const name of ["release.yml", "review-approval.yml"])
     expect(JSON.stringify(await workflow(name))).not.toContain("ci-ready-admission");
 });
+
+test.each(["ci.yml", "security.yml", "onboarding-test.yml"])(
+  "%s cancels superseded PRs and isolates non-PR runs",
+  async (file) => {
+    const definition = await workflow(file);
+    const evaluate = (expression: string, event: string, ref: string, runId: number) =>
+      new Script(expression.slice(3, -2)).runInNewContext({
+        github: { workflow: file, event_name: event, ref, run_id: runId },
+      }) as string | boolean;
+    const group = (event: string, ref: string, runId: number) =>
+      definition.concurrency.group.replace(/\$\{\{.*?\}\}/g, (expression) =>
+        String(evaluate(expression, event, ref, runId)),
+      );
+    const cancel = (event: string) =>
+      evaluate(definition.concurrency["cancel-in-progress"], event, "refs/heads/main", 1);
+    expect(group("pull_request", "refs/pull/1/merge", 1)).toBe(
+      group("pull_request", "refs/pull/1/merge", 2),
+    );
+    expect(group("pull_request", "refs/pull/1/merge", 1)).not.toBe(
+      group("pull_request", "refs/pull/2/merge", 1),
+    );
+    expect(cancel("pull_request")).toBe(true);
+    for (const event of ["push", "workflow_dispatch", "schedule"]) {
+      expect(group(event, "refs/heads/main", 1)).not.toBe(group(event, "refs/heads/main", 2));
+      expect(group(event, "refs/heads/main", 1)).not.toBe(
+        group("pull_request", "refs/pull/1/merge", 1),
+      );
+      expect(cancel(event)).toBe(false);
+    }
+  },
+);
 
 test("PR install artifact follows Quality admission and binds the canonical export to exact head", async () => {
   const definition = await workflow("ci.yml");
@@ -1002,17 +1056,35 @@ async function realChild(
   event: string,
   cancelled: boolean,
   predecessor = "success",
+  jobId = "playwright",
 ) {
   const definition = await workflow("ci.yml");
-  const condition = present(present(definition.jobs.playwright).if)
+  const condition = present(present(definition.jobs[jobId]).if)
     .slice(3, -2)
     .replace(/needs\.([\w-]+)\.result/g, 'needs["$1"].result');
   return new Script(condition).runInNewContext({
     cancelled: () => cancelled,
     github: { event_name: event },
-    needs: { quality: { result: predecessor }, "playwright-admission": { result: gate } },
+    needs: { quality: { result: predecessor }, [`${jobId}-admission`]: { result: gate } },
   }) as boolean;
 }
+test.each(["playwright", "runtime-integration", "real-agent-smoke"])(
+  "%s requires Quality and its own PR admission without sibling dependencies",
+  async (jobId) => {
+    expect(await realChild("success", "pull_request", false, "success", jobId)).toBe(true);
+    for (const state of ["failure", "cancelled", "skipped"] as const) {
+      expect(await realChild(state, "pull_request", false, "success", jobId)).toBe(false);
+      expect(await realChild("success", "pull_request", false, state, jobId)).toBe(false);
+    }
+    for (const event of ["push", "workflow_dispatch"]) {
+      expect(await realChild("skipped", event, false, "success", jobId)).toBe(true);
+      for (const state of ["failure", "cancelled", "skipped"] as const) {
+        expect(await realChild("skipped", event, false, state, jobId)).toBe(false);
+      }
+    }
+    expect(await realChild("success", "pull_request", true, "success", jobId)).toBe(false);
+  },
+);
 test.each(["controller404", "invalid-import", "stall"] as const)(
   "actual wrapper %s finishes degraded admission and permits real child execution",
   async (mode) => {
