@@ -1060,6 +1060,13 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     });
   };
 
+  // pollCycle hands back the in-flight cycle when one is running: attach the
+  // catch only to a cycle this call started, so a failure is reported once.
+  const firePollCycle = (emitInitial: boolean): void => {
+    if (activePoll) return;
+    pollCycle(emitInitial).catch(reportPollCycleFailure);
+  };
+
   const timer = startInterval(() => {
     try {
       if (!shouldPollThisTick()) return;
@@ -1067,12 +1074,12 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       reportPollCycleFailure(error);
       return;
     }
-    pollCycle(false).catch(reportPollCycleFailure);
+    firePollCycle(false);
   }, deps.config.intervalMs);
 
   if (!deps.config.runOnStart) {
     if (deps.deferInitialSync) {
-      pollCycle(false).catch(reportPollCycleFailure);
+      firePollCycle(false);
     } else {
       await pollCycle(false);
     }
@@ -1087,7 +1094,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     ...(deps.config.runOnStart
       ? {
           runOnStart(): void {
-            pollCycle(true).catch(reportPollCycleFailure);
+            firePollCycle(true);
           },
         }
       : {}),

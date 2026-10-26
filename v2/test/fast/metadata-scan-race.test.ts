@@ -11,7 +11,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 type FaultFn = "readdirSync" | "statSync" | "readFileSync";
-type FaultKind = "vanish" | "eacces";
+// "enoent" raises ENOENT but leaves the target on disk, so a later call sees it again.
+type FaultKind = "vanish" | "eacces" | "enoent";
 
 const faults = new Map<string, FaultKind>();
 
@@ -34,6 +35,14 @@ vi.mock("node:fs", async (importOriginal) => {
           throw Object.assign(new Error(`EACCES: permission denied, ${fn} '${String(path)}'`), {
             code: "EACCES",
           });
+        }
+        if (kind === "enoent") {
+          throw Object.assign(
+            new Error(`ENOENT: no such file or directory, ${fn} '${String(path)}'`),
+            {
+              code: "ENOENT",
+            },
+          );
         }
         actual.rmSync(path as string, { recursive: true, force: true });
       }
@@ -63,7 +72,7 @@ const {
   writeServiceSourceState,
   writeSession,
 } = await import("../../src/metadata.js");
-const { existsSync, mkdirSync } = await import("node:fs");
+const { existsSync, mkdirSync, rmSync, utimesSync } = await import("node:fs");
 
 const tempDirs: string[] = [];
 
@@ -302,6 +311,28 @@ describe("metadata scanner mid-scan races", () => {
 });
 
 describe("listSessions dir listing cache", () => {
+  it("evicts a cached dir listing when the dir vanishes at readdir", async () => {
+    const dataDir = await newDataDir();
+    seedSession(dataDir, "alpha", "alpha-1");
+    seedSession(dataDir, "beta", "beta-1");
+    const alphaDir = join(dataDir, "sessions", "alpha");
+    // Old enough to be cacheable (DIR_LISTING_MIN_AGE_MS).
+    const backdated = new Date(Date.now() - 60_000);
+    utimesSync(alphaDir, backdated, backdated);
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["alpha-1", "beta-1"]);
+
+    // Swap alpha-1 for a same-length name: the dir changes, then the readdir fails.
+    seedSession(dataDir, "alpha", "alpha-2");
+    rmSync(join(alphaDir, "alpha-1.json"));
+    faults.set(faultKey("readdirSync", alphaDir), "enoent");
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["beta-1"]);
+
+    // Same inode, mtime and size as the cached entry: a surviving entry would
+    // serve the stale alpha-1 listing.
+    utimesSync(alphaDir, backdated, backdated);
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["alpha-2", "beta-1"]);
+  });
+
   it("lists a dir again once it is recreated after vanishing mid-scan", async () => {
     const dataDir = await newDataDir();
     seedSession(dataDir, "alpha", "alpha-1");

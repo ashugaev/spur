@@ -295,13 +295,13 @@ function isSessionRecord(value: unknown): value is SessionRecord {
 // Distinguishes "file vanished between readdir and read" (a benign race with
 // a concurrent GC archive) from every other read failure, which must still
 // surface — a corrupt record on disk is a real problem, not a race.
-// readSessionFile wraps every failure from its inner try (including a
-// readFileSync ENOENT) in a fresh Error with `cause: error`, so the original
-// error code only survives on `cause`, never on the thrown error itself.
 function isEnoent(error: unknown): boolean {
   return isRecord(error) && error["code"] === "ENOENT";
 }
 
+// readSessionFile wraps every failure from its inner try (including a
+// readFileSync ENOENT) in a fresh Error with `cause: error`, so the original
+// error code only survives on `cause`, never on the thrown error itself.
 function isEnoentCause(error: unknown): boolean {
   return isEnoent(error instanceof Error ? error.cause : undefined);
 }

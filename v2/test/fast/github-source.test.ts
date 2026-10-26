@@ -4049,6 +4049,45 @@ describe("github source", () => {
       expect(uncaught).not.toHaveBeenCalled();
     });
 
+    it("logs one failed cycle once while later ticks overlap it in flight", async () => {
+      // 1: startup scan, 2: awaited initial cycle (empty), then one session whose
+      // gh call is held open across several ticks before the cycle throws.
+      let scans = 0;
+      listSessionsMock.mockImplementation(() => {
+        scans += 1;
+        return scans <= 2 ? [] : [makeSession()];
+      });
+      let armed = false;
+      let transportCalls = 0;
+      ghTransportMock.mockImplementation(async () => {
+        transportCalls += 1;
+        await new Promise((resolve) => setTimeout(resolve, REAL_INTERVAL_MS * 8));
+        armed = true;
+        return "[]";
+      });
+      readGitHubPollDisabledMock.mockImplementation(() => {
+        if (armed) {
+          armed = false;
+          throw new Error("EACCES: permission denied, read poll-disabled registry");
+        }
+        return new Map();
+      });
+      const handle = await startSource({ intervalMs: REAL_INTERVAL_MS });
+      for (let waited = 0; cycleWarns() < 1; waited += 10) {
+        if (waited >= 4000) throw new Error("timed out waiting for the failed cycle");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      // Ticks fired while the cycle was in flight (transport held ~8 intervals).
+      expect(transportCalls).toBe(1);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      handle.stop();
+
+      expect(cycleWarns()).toBe(1);
+      expect(cycleEvents()).toBe(1);
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(uncaught).not.toHaveBeenCalled();
+    });
+
     it("logs once when the adaptive gate throws on a tick", async () => {
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(new Date("2026-07-30T00:00:00.000Z"));
