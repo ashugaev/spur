@@ -16,6 +16,10 @@ ensure_node_ready
 
 TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}"
 : "${SPUR_PROJECT:?SPUR_PROJECT not set}"
+case "${SPUR_ISOLATED_WITHOUT_TELEGRAM:-0}" in
+  0|1) ;;
+  *) echo "SPUR_ISOLATED_WITHOUT_TELEGRAM must be 0 or 1" >&2; exit 1 ;;
+esac
 
 PORT_START=${SPUR_SIDECAR_DAEMON_PORT_START:-4320}
 PORT_END=${SPUR_SIDECAR_DAEMON_PORT_END:-4399}
@@ -268,6 +272,9 @@ fi
   --output "$CONFIG_DIR/config.yaml"
 
 # Hold the bot lock across both execs for the daemon's lifetime.
+if [[ "${SPUR_ISOLATED_WITHOUT_TELEGRAM:-0}" == 1 ]]; then
+  WRITE_CONFIG_ARGS+=(--without-telegram)
+fi
 "$NODE_BIN" "$WRITE_CONFIG_PATH" "${WRITE_CONFIG_ARGS[@]}" \
   --telegram-lock-output "$CONFIG_DIR/telegram-lock"
 TELEGRAM_LOCK_PATH="$(<"$CONFIG_DIR/telegram-lock")"

@@ -91,7 +91,9 @@ const TODO_PROMPT = `Spur ToDo:
 - The ledger starts empty. You own every item; nothing is added for you.
 - One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.
 - Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.
-- Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.`;
+- Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.
+
+Read associated chat and bot with \`"$SPUR_SESSION_TOOL_DIR/spur" source info --json\`.`;
 const TELEGRAM_PROMPT = [
   "Telegram: the user reads this session in Telegram. Your terminal output is invisible to them.",
   '- Send them a message: `"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"`.',
@@ -6287,6 +6289,74 @@ describe("SessionService", () => {
     return config;
   }
 
+  it.each(["stored", "configured", "unavailable", "absent", "invalid", "unknown"])(
+    "sourceInfo reads %s association without runtime or send effects",
+    async (kind) => {
+      loadConfigMock.mockReturnValue(
+        configWithTelegram({
+          type: "telegram",
+          runOnStart: false,
+          token: "secret-token",
+          allowedUsers: [123],
+          chatId: 4242,
+        }),
+      );
+      const sessions = createSessionStore();
+      if (kind !== "unknown") sessions.set("api-1", sessionRecord({ id: "api-1" }));
+      if (kind === "stored" || kind === "invalid")
+        readTelegramReplyTargetMock.mockReturnValue({
+          sessionId: "api-1",
+          projectId: "api",
+          sourceId: kind === "invalid" ? "removed" : "chat",
+          chatId: -1001,
+          messageThreadId: 22,
+          updatedAt: "2026-03-18T10:00:00.000Z",
+        });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const project = service.config.projects.api;
+      if (kind === "absent" && project) project.sources = {};
+      const identity = vi.fn(() =>
+        kind === "unavailable" ? null : { id: 44, username: "testbot" },
+      );
+      service.setTelegramBotIdentityReader(identity);
+      tmuxSessionExistsMock.mockClear().mockRejectedValue(new Error("runtime unavailable"));
+      writeSessionMock.mockClear();
+      writeTelegramReplyTargetMock.mockClear();
+      writeTelegramBindingsMock.mockClear();
+      sendTelegramReplyMock.mockClear();
+      if (kind === "invalid" || kind === "unknown") {
+        expect(() => service.sourceInfo("api-1")).toThrow(
+          kind === "invalid" ? "not configured" : "Session not found",
+        );
+      } else {
+        const result = service.sourceInfo("api-1");
+        expect(result).toEqual(
+          kind === "absent"
+            ? { sessionId: "api-1", source: null }
+            : {
+                sessionId: "api-1",
+                source: "telegram",
+                projectId: "api",
+                sourceId: "chat",
+                chatId: kind === "stored" ? -1001 : 4242,
+                ...(kind === "stored" ? { messageThreadId: 22 } : {}),
+                bot: kind === "unavailable" ? null : { id: 44, username: "testbot" },
+              },
+        );
+        expect(JSON.stringify(result)).not.toContain("secret-token");
+      }
+      expect(tmuxSessionExistsMock).not.toHaveBeenCalled();
+      expect(writeSessionMock).not.toHaveBeenCalled();
+      expect(writeTelegramReplyTargetMock).not.toHaveBeenCalled();
+      expect(writeTelegramBindingsMock).not.toHaveBeenCalled();
+      expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+      if (!["absent", "invalid", "unknown"].includes(kind)) {
+        expect(identity).toHaveBeenCalledWith("api", "chat");
+      }
+    },
+  );
+
   function configWithGitHub(sources: Record<string, unknown>) {
     const config = baseConfig();
     config.projects.api.sources = sources as typeof config.projects.api.sources;
@@ -6313,6 +6383,7 @@ describe("SessionService", () => {
     );
 
     const prompt = buildAgentLaunchPlanMock.mock.calls[0]?.[1];
+    expect(prompt?.match(/source info --json/g)).toHaveLength(1);
     if (hasInbound) {
       expect(prompt).toBe(`slot-instructions\nhello\n\n${TODO_PROMPT}\n\n${TELEGRAM_PROMPT}`);
     } else {
@@ -6342,6 +6413,7 @@ describe("SessionService", () => {
     const prompt = buildAgentLaunchPlanMock.mock.calls[0]?.[1];
     expect(prompt).toContain("Telegram: send when the user requests a Telegram message.");
     expect(prompt).not.toContain("Your terminal output is invisible");
+    expect(prompt?.match(/source info --json/g)).toHaveLength(1);
   });
 
   it.each([false, true])(
@@ -6394,6 +6466,7 @@ describe("SessionService", () => {
       const service = await createDisposedSessionService();
       await service.restore("api-1");
       const prompt = sendMessageToTmuxMock.mock.calls.at(-1)?.[1];
+      expect(prompt?.match(/source info --json/g)).toHaveLength(1);
       expect(prompt).toContain(
         hasInbound
           ? "Telegram: the user reads this session in Telegram."
@@ -6433,6 +6506,7 @@ describe("SessionService", () => {
     await service.respawn("api-1");
     const prompt = buildAgentLaunchPlanMock.mock.calls[0]?.[1];
     expect(prompt).toContain(carriedPrompt);
+    expect(prompt?.match(/source info --json/g)).toHaveLength(1);
     expect(prompt).toContain("Telegram: send when the user requests a Telegram message.");
     expect(prompt).not.toContain("Your terminal output is invisible");
     expect(writeTelegramReplyTargetMock).not.toHaveBeenCalled();
@@ -49188,6 +49262,7 @@ describe("SessionService", () => {
       expect(shepherdHeaderMatches.length).toBeLessThanOrEqual(1);
       expect(operatorRequestMatches.length).toBeLessThanOrEqual(1);
       expect(withSessionSlotInstructionsMock).not.toHaveBeenCalled();
+      expect(launchPrompt).not.toContain("source info --json");
     });
 
     it("attaches a disposable terminal screenshot when tmux pane capture succeeds", async () => {

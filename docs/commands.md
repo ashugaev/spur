@@ -91,6 +91,7 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 ## source
 
 `spur source poll-enable --session <id>` re-enables GitHub signal polling after a not-found PR permanently disabled a session (see [source.poll.disabled](configuration.md#events)). `--session` defaults to `SPUR_SESSION`. `--json` prints raw JSON. Clears the disable in every `github`-type source of the session's project, and in registry entries of removed or renamed sources; `cleared: []` when nothing was disabled. Route: [daemon-api.md#session-routes](daemon-api.md#session-routes).
+`spur source info [--session <id>] [--json]`: read associated chat/topic and cached bot identity from existing daemon; session defaults to `SPUR_SESSION`; advertised in standard startup prompts; `v2/src/cli.ts`.
 
 ## source reply
 
@@ -109,13 +110,13 @@ Telegram `/complete`, `/kill`: close current bound forum-topic session; no argum
 `spur service run <id> --port <n> -- <command>` / `status <id>` — session-bound tmux sidecar wrapper. `spur service logs [sessionId] [name] [--sidecar] [--limit <n>] [--json]` — retained pane and archived rows, default runtime scope and global 200-row limit; route 404/502 errors exit nonzero; `v2/src/cli.ts`. `spur memory set|get|list|rm [key] [body] --scope task|project|global [--session <id>] [--file <path>] [--json]` — one `.md` file per key. `spur session-memory <sessionId> list|get|set|resolve [key] [body] [--json]` — [daemon-api.md#session-routes](daemon-api.md#session-routes).
 `spur agent-issue log <text...>` / `list [--project <id>] [--session <id>] [--limit <n>] [--json]` — friction operating Spur itself, never a repo code defect.
 `spur comment-seen record <id...>` — marks GitHub review-comment ids seen, needs `SPUR_PROJECT`.
-
 `spur subscribe <targetSessionId> --state <state>... [--message <text>] [--session <id>] | --list | --remove <subscriptionId>`. States: `working|waiting|needs_input|rate_limited|stale|stopped|error|killed`.
 
 ## Sidecars
 
 Start `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name> [--clear-port <port>]`, stop `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>`. Incomplete launch with live tmux: start/restore fails; stop sidecar, retry; confirmed absent tmux permits start (`v2/src/session-service.ts`). Ports: `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports [--name <name>] [--json]` — `<sidecar> <portId> <env> <port> alive|dead` per line. Sweep: `spur sidecar sweep [--reap]`. Idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping). Outcomes: [daemon-api.md#session-routes](daemon-api.md#session-routes).
 Open: configured reserved TCP listener + live recorded launcher; `v2/src/session-service.ts`. Dev stand: start `isolated-ui` (daemon dependency); `isolated-daemon` alone is backend-only. Seed dedicated TEST JSON once through stdin: `node v2/bin/write-isolated-project-config.mjs --input spur.yaml --output <private-project.yaml> --worktree <checkout> --project <id> --telegram-env-stdin`; unknown project rejects seed; `scripts/spur-isolated-daemon.sh` reuses it, source-free outcomes: `Telegram NOT_CONNECTED/missing-fixture`, `Telegram NOT_CONNECTED/unknown-project`, `Telegram NOT_CONNECTED/owner-busy`.
+Native Telegram: [prototype workflow](telegram-calls.md); offline input gate `scripts/telegram-call/bridge.py --check-inputs`; `SPUR_ISOLATED_WITHOUT_TELEGRAM=1` bypasses TEST attachment, default `0`; `scripts/spur-isolated-daemon.sh`.
 Commands run through `sh -lc` (`dash` on Debian/Ubuntu, no `nvm`); use `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. A long-lived server must `exec` its process, or pid-based reaping misses it.
 Slot links: omit exact normalized matches of sidecar name and configured reserved URL, including manual duplicates; retain other targets; `v2/src/session-service.ts`.
 Stop/restart reap the sidecar's whole tmux pane process tree, not just the direct child. Only that tree — anything the command detached from it survives, including docker containers and a compose project. A sidecar that starts detached resources owns tearing them down. `spur sidecar sweep` reports unclaimed process trees (pid, rss, age, worktree), each with its descendant tree's pid list and, when reaped, any survivor pids left after the confirmation window; a trailing line totals the would-free RSS across every reported tree. Nothing dies without `--reap`.
