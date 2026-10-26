@@ -14,7 +14,7 @@ Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|
 
 ## doctor
 
-Read-only host/config/daemon health check. `--scaffold` writes a minimal local `spur.yaml`. Checks: `sidecar-orphans`, `config-registry`, `session-headroom`, `home-disk-headroom`, `reclaimable-caches`, `claude-onboarding`, `opencode-executable`, `skills-symlinks`, `agent-process-ownership`, `github-poll-disabled` (reports only non-archived session records on configured `github` sources).
+Read-only host/config/daemon health check; `--scaffold` writes local `spur.yaml`; `spur-*-persistence` requires persistent enablement of installed required services; `v2/src/host-install.ts`.
 
 ## gc
 
@@ -98,6 +98,7 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 `spur source reply <message...> [--button <label[=value]>]... [--session <id>] [--json]`: bound-chat send; up to 8 buttons; `--request-interface-approval <manifest-file>` requests designated-human semantic consent. Outside forum topics: bold session label (`<id> — <title>`, or `<id>`), one empty line before body; `v2/src/session-service.ts`. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes); routing/formatting: [configuration.md#telegram-binding](configuration.md#telegram-binding).
 Telegram `/new <task>`: displayed project defaults, optional engine/mode Settings, runtime-only recent project; requester-owned cards expire after 10 min — `v2/src/event-sources/telegram.ts`, `v2/src/event-sources/telegram-workbench.ts`.
 Telegram `/work`: daemon-wide Attention/Working/Recent; inspection leaves routing unchanged, explicit Continue binds, eligible Restore keeps session id and core recovery/budget rules — `v2/src/event-sources/telegram.ts`, `v2/src/server.ts`.
+Telegram `/complete`, `/kill`: close current bound forum-topic session; no arguments; preserve PR; kill requires saved and pushed work — `v2/src/event-sources/telegram.ts`.
 
 ## spur-slots
 
@@ -115,6 +116,7 @@ Telegram `/work`: daemon-wide Attention/Working/Recent; inspection leaves routin
 
 Start `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name> [--clear-port <port>]`, stop `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>`. Incomplete launch with live tmux: start/restore fails; stop sidecar, retry; confirmed absent tmux permits start (`v2/src/session-service.ts`). Ports: `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports [--name <name>] [--json]` — `<sidecar> <portId> <env> <port> alive|dead` per line. Sweep: `spur sidecar sweep [--reap]`. Idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping). Outcomes: [daemon-api.md#session-routes](daemon-api.md#session-routes).
 Open: configured reserved TCP listener + live recorded launcher; `v2/src/session-service.ts`. Dev stand: start `isolated-ui` (daemon dependency); `isolated-daemon` alone is backend-only. Seed dedicated TEST JSON once through stdin: `node v2/bin/write-isolated-project-config.mjs --input spur.yaml --output <private-project.yaml> --worktree <checkout> --project <id> --telegram-env-stdin`; unknown project rejects seed; `scripts/spur-isolated-daemon.sh` reuses it, source-free outcomes: `Telegram NOT_CONNECTED/missing-fixture`, `Telegram NOT_CONNECTED/unknown-project`, `Telegram NOT_CONNECTED/owner-busy`.
+Native Telegram: [prototype workflow](telegram-calls.md); offline input gate `scripts/telegram-call/bridge.py --check-inputs`; `SPUR_ISOLATED_WITHOUT_TELEGRAM=1` bypasses TEST attachment, default `0`; `scripts/spur-isolated-daemon.sh`.
 Commands run through `sh -lc` (`dash` on Debian/Ubuntu, no `nvm`); use `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. A long-lived server must `exec` its process, or pid-based reaping misses it.
 Slot links: omit exact normalized matches of sidecar name and configured reserved URL, including manual duplicates; retain other targets; `v2/src/session-service.ts`.
 Stop/restart reap the sidecar's whole tmux pane process tree, not just the direct child. Only that tree — anything the command detached from it survives, including docker containers and a compose project. A sidecar that starts detached resources owns tearing them down. `spur sidecar sweep` reports unclaimed process trees (pid, rss, age, worktree), each with its descendant tree's pid list and, when reaped, any survivor pids left after the confirmation window; a trailing line totals the would-free RSS across every reported tree. Nothing dies without `--reap`.

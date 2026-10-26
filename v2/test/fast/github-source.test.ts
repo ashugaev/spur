@@ -32,7 +32,11 @@ const logSpurEventMock = vi.fn();
 const isGitWorktreeMock = vi.fn();
 const readBranchPushUrlMock = vi.fn().mockResolvedValue("git@github.com:acme/api.git");
 const hasRecentSessionUserActionMock = vi.fn();
+const resolveWorkspaceStateMock = vi.fn();
 
+vi.mock("../../src/workspace-store.js", () => ({
+  resolveWorkspaceState: resolveWorkspaceStateMock,
+}));
 vi.mock("../../src/gh.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ghModule>()),
   gh: ghTransportMock,
@@ -289,6 +293,10 @@ describe("github source", () => {
     // dead-worktree tests override this per case.
     isGitWorktreeMock.mockResolvedValue(true);
     hasRecentSessionUserActionMock.mockReturnValue(false);
+    // Default: the workspace binding is the record's own pr (no stale copy).
+    resolveWorkspaceStateMock.mockImplementation((_dataDir: string, record: SessionRecord) =>
+      record.pr ? { pr: record.pr } : {},
+    );
     viewerLogin = "review-bot";
   });
 
@@ -2683,6 +2691,79 @@ describe("github source", () => {
     handle.stop();
   });
 
+  const STALE_CLOSED_3960 = (): Map<string, ReviewSnapshot> =>
+    new Map([
+      [
+        "api-a1b2",
+        storedSnapshot(
+          [
+            {
+              key: "closed:3960",
+              kind: "closed" as const,
+              text: "PR #3960 was closed without merging.",
+            },
+          ],
+          3960,
+        ),
+      ],
+    ]);
+  const staleRecordPr = {
+    number: 3960,
+    repo: "acme/api",
+    url: "https://github.com/acme/api/pull/3960",
+  };
+  const workspacePr = {
+    number: 3963,
+    repo: "acme/api",
+    url: "https://github.com/acme/api/pull/3963",
+  };
+
+  it("polls the workspace PR binding, not a stale member record pr, and baselines it silently", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(STALE_CLOSED_3960());
+    listSessionsMock.mockReturnValue([makeSession({ pr: staleRecordPr })]);
+    resolveWorkspaceStateMock.mockReturnValue({ pr: workspacePr });
+    mockLifecyclePoll(
+      prView({
+        number: 3963,
+        url: workspacePr.url,
+        reviewDecision: "CHANGES_REQUESTED",
+      }),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    try {
+      const graphqlArgs = ghTransportMock.mock.calls.map((call) => call.slice(1).join(" "));
+      expect(graphqlArgs.some((args) => args.includes("n0=3963"))).toBe(true);
+      expect(graphqlArgs.some((args) => args.includes("=3960"))).toBe(false);
+      const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+      expect(snapshot.prNumber).toBe(3963);
+      expect(snapshot.signals.has("changes_requested")).toBe(true);
+      expect(emit).not.toHaveBeenCalled();
+    } finally {
+      handle.stop();
+    }
+  });
+
+  it("polls a member as unbound when the workspace has no pr, ignoring a stale record pr", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(STALE_CLOSED_3960());
+    listSessionsMock.mockReturnValue([makeSession({ pr: staleRecordPr })]);
+    resolveWorkspaceStateMock.mockReturnValue({});
+    ghMock.mockResolvedValueOnce("[]");
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    try {
+      const graphqlArgs = ghTransportMock.mock.calls.map((call) => call.slice(1).join(" "));
+      expect(graphqlArgs.some((args) => args.includes("b0=feature/native-pr-binding"))).toBe(true);
+      expect(graphqlArgs.some((args) => args.includes("=3960"))).toBe(false);
+    } finally {
+      handle.stop();
+    }
+  });
+
   it("suppresses already-true lifecycle state on the first poll, then emits transitions after baseline", async () => {
     // First poll: pre-existing session whose persisted snapshot predates
     // lifecycle keys (only a non-lifecycle ci_failed signal) and is NOT baselined.
@@ -3367,6 +3448,93 @@ describe("github source", () => {
       await assertGhCallCountStable(10);
 
       handle.stop();
+    });
+
+    it("keeps polling a member whose record pr is a stale closed PR once the workspace rebinds", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(
+        new Map([
+          [
+            "api-a1b2",
+            storedSnapshot(
+              [
+                {
+                  key: "closed:3960",
+                  kind: "closed" as const,
+                  text: "PR #3960 was closed without merging.",
+                },
+              ],
+              3960,
+            ),
+          ],
+        ]),
+      );
+      listSessionsMock.mockReturnValue([
+        makeSession({
+          pr: { number: 3960, repo: "acme/api", url: "https://github.com/acme/api/pull/3960" },
+        }),
+      ]);
+      resolveWorkspaceStateMock.mockReturnValue({
+        pr: { number: 3963, repo: "acme/api", url: "https://github.com/acme/api/pull/3963" },
+      });
+      const queueWorkspacePr = (issueComments: unknown[]): void => {
+        ghMock.mockResolvedValueOnce(
+          prView({
+            number: 3963,
+            url: "https://github.com/acme/api/pull/3963",
+            statusCheckRollup: [{ name: "check", state: "SUCCESS" }],
+          }),
+        );
+        ghMock.mockResolvedValueOnce("[]");
+        ghMock.mockResolvedValueOnce("[]");
+        ghMock.mockResolvedValueOnce(JSON.stringify(issueComments));
+        ghMock.mockResolvedValueOnce("[]");
+      };
+      const emit = vi.fn();
+      queueWorkspacePr([]);
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit,
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      try {
+        // Startup poll is ungated: silent baseline of #3963.
+        const c0 = ghMock.mock.calls.length;
+        expect(c0).toBeGreaterThan(0);
+        expect(emit).not.toHaveBeenCalled();
+
+        // Tick 2 stays inside the slow window; only the terminal gate could skip it.
+        hasRecentSessionUserActionMock.mockReturnValue(true);
+        queueWorkspacePr([{ id: 9300, body: "please look", user: { login: "grace" } }]);
+        await waitForGhCallCount(c0 + 5);
+        expect(emit).toHaveBeenCalledTimes(1);
+        expect(emit).toHaveBeenCalledWith(
+          "github:comment",
+          expect.objectContaining({ signals: [expect.objectContaining({ key: "comment:9300" })] }),
+        );
+
+        // Tick 3: identical data, nothing new.
+        queueWorkspacePr([{ id: 9300, body: "please look", user: { login: "grace" } }]);
+        await waitForGhCallCount(c0 + 10);
+        expect(emit).toHaveBeenCalledTimes(1);
+
+        hasRecentSessionUserActionMock.mockReturnValue(false);
+        await assertGhCallCountStable(c0 + 10);
+      } finally {
+        handle.stop();
+      }
     });
 
     it("forces a poll for a brand-new session mid-window even when the tracked session is quiet", async () => {

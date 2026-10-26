@@ -636,17 +636,21 @@ export function buildCodexResumePlan(
     codexHomePath?: string;
     codexArgs?: string[];
     reasoningEffort?: ProviderReasoningEffort;
+    model?: string;
     restrictWrites?: boolean;
   },
 ): AgentResumePlan {
   return {
     launchCommand: withCodexHome(
-      appendCodexReasoningEffort(
-        appendCodexArgs(
-          `${shellEscape(binary)} resume ${codexLaunchFlags(options?.restrictWrites)} ${shellEscape(threadId)}`,
-          options?.codexArgs,
+      appendCodexModel(
+        appendCodexReasoningEffort(
+          appendCodexArgs(
+            `${shellEscape(binary)} resume ${codexLaunchFlags(options?.restrictWrites)} ${shellEscape(threadId)}`,
+            options?.codexArgs,
+          ),
+          options?.reasoningEffort,
         ),
-        options?.reasoningEffort,
+        options?.model,
       ),
       options?.codexHomePath,
     ),

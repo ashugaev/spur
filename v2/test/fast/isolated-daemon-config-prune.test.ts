@@ -179,6 +179,8 @@ async function runPrune(options: {
     cleanupPaths.push(resolvedGitHome.home);
   }
   mkdirSync(fakeBinDir, { recursive: true });
+  const psArgsFile = join(fakeBinDir, "ps-args-output");
+  writeFileSync(psArgsFile, psArgsOutput, "utf8");
   const fakePs = join(fakeBinDir, "ps");
   makeExecutable(
     fakePs,
@@ -194,7 +196,7 @@ if [[ "$#" -eq 2 && "$1" == "-eo" && "$2" == "args=" ]]; then
   if [[ "${psArgsFail ? "1" : "0"}" == "1" ]]; then
     exit 1
   fi
-  printf '%s\\n' "$PRUNE_TEST_PS_ARGS_OUTPUT"
+  cat "$PRUNE_TEST_PS_ARGS_FILE"
   exit 0
 fi
 if [[ "$#" -eq 4 && "$1" == "-o" && "$2" == "pid=" && "$3" == "-u" && "$4" =~ ^[0-9]+$ ]]; then
@@ -216,7 +218,7 @@ exit 97
       PATH: `${fakeBinDir}:${process.env["PATH"] ?? ""}`,
       TMPDIR: tmpRoot,
       CONFIG_DIR: configDir,
-      PRUNE_TEST_PS_ARGS_OUTPUT: psArgsOutput,
+      PRUNE_TEST_PS_ARGS_FILE: psArgsFile,
       PRUNE_TEST_PS_PID_OUTPUT: psPidOutput,
       HOME: resolvedGitHome.home,
       GIT_CONFIG_GLOBAL: join(resolvedGitHome.home, ".gitconfig"),
@@ -252,6 +254,51 @@ describe("spur-isolated-daemon.sh prune_stale_config_dirs", () => {
       tmpRoot,
       configDir,
       psArgsOutput: `node /some/cli.js --config ${stale}/config.yaml daemon start`,
+      fakeBinDir: join(tmpRoot, "bin"),
+    });
+
+    expect(existsSync(stale)).toBe(true);
+  });
+
+  it("keeps live configs when ps output exceeds a pipe buffer and still prunes dead owners", async () => {
+    const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
+    cleanupPaths.push(tmpRoot);
+    const configDir = join(tmpRoot, "spur-isolated-daemon.self");
+    mkdirSync(configDir);
+    const live = await makeStaleDir(tmpRoot, "spur-isolated-daemon.live-long-argv", 120);
+    const dead = await makeStaleDir(tmpRoot, "spur-isolated-daemon.dead-long-argv", 120);
+    writeFileSync(join(live, "config.yaml"), "owned config\n");
+    writeFileSync(join(live, "project.yaml"), "owned projects\n");
+    writeFileSync(join(dead, "config.yaml"), "dead config\n");
+    await makeStaleDir(tmpRoot, "spur-isolated-daemon.live-long-argv", 120);
+    await makeStaleDir(tmpRoot, "spur-isolated-daemon.dead-long-argv", 120);
+    const psArgsOutput = `node fixture-cli --config ${live}/config.yaml daemon start\n${"unrelated-process --fixture\n".repeat(8192)}`;
+    expect(Buffer.byteLength(psArgsOutput)).toBeGreaterThan(200_000);
+
+    await runPrune({ tmpRoot, configDir, psArgsOutput, fakeBinDir: join(tmpRoot, "bin") });
+
+    expect(existsSync(live)).toBe(true);
+    expect(readFileSync(join(live, "config.yaml"), "utf8")).toBe("owned config\n");
+    expect(readFileSync(join(live, "project.yaml"), "utf8")).toBe("owned projects\n");
+    expect(existsSync(dead)).toBe(false);
+  });
+
+  it("keeps a stale dir matched early in a ps listing larger than the pipe buffer (GATE A, #1012)", async () => {
+    const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
+    cleanupPaths.push(tmpRoot);
+    const configDir = join(tmpRoot, "spur-isolated-daemon.self");
+    mkdirSync(configDir, { recursive: true });
+    const stale = await makeStaleDir(tmpRoot, "spur-isolated-daemon.live-big-ps", 120);
+    // ~90 KB, past the 64 KB pipe buffer, under the 128 KB per-env-string cap.
+    const filler = Array.from({ length: 2_500 }, (_, i) => `/usr/bin/unrelated-process --id ${i}`);
+
+    await runPrune({
+      tmpRoot,
+      configDir,
+      psArgsOutput: [
+        `node /some/cli.js --config ${stale}/config.yaml daemon start`,
+        ...filler,
+      ].join("\n"),
       fakeBinDir: join(tmpRoot, "bin"),
     });
 

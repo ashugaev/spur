@@ -10,14 +10,26 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type * as ChildProcess from "node:child_process";
+import type * as CacheRetention from "../../src/cache-retention.js";
 import type * as InstalledInstance from "../../src/installed-instance.js";
 import type * as PortProbe from "../../src/port-probe.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const execFileSyncMock = vi.hoisted(() => vi.fn());
+const { execFileSyncMock, execFileMock, planCachePruneMock } = vi.hoisted(() => ({
+  execFileSyncMock: vi.fn(),
+  execFileMock: vi.fn(() => {
+    throw new Error("Unexpected process execution in installed-instance fixture");
+  }),
+  planCachePruneMock: vi.fn(),
+}));
 vi.mock("node:child_process", async (original) => ({
   ...(await original<typeof ChildProcess>()),
   execFileSync: execFileSyncMock,
+  execFile: execFileMock,
+}));
+vi.mock("../../src/cache-retention.js", async (original) => ({
+  ...(await original<typeof CacheRetention>()),
+  planCachePrune: planCachePruneMock,
 }));
 vi.mock("../../src/port-probe.js", async (original) => ({
   ...(await original<typeof PortProbe>()),
@@ -30,6 +42,16 @@ beforeEach(async () => {
   vi.stubEnv("HOME", directory);
   vi.stubEnv("SPUR_CONFIG", "");
   execFileSyncMock.mockReset();
+  execFileMock.mockClear();
+  planCachePruneMock.mockReset();
+  planCachePruneMock.mockResolvedValue({
+    generatedAt: new Date(0).toISOString(),
+    roots: [],
+    candidates: [],
+    reclaimableKb: 0,
+    processTreeReadable: true,
+    pinSourceCount: 0,
+  } satisfies CacheRetention.CachePlan);
   vi.resetModules();
   api = await import("../../src/installed-instance.js");
 });
@@ -101,6 +123,79 @@ describe("installed instance selection", () => {
     },
   );
 
+  it.each(["user", "system"] as const)(
+    "retries %s probe without --expand-environment on systemd < 254",
+    (scope) => {
+      const selected = config();
+      writeFileSync(options().daemonEnvFile, "SPUR_CONFIG=relative.yaml\n");
+      execFileSyncMock
+        .mockImplementationOnce(() => {
+          throw Object.assign(new Error("Command failed"), {
+            stderr: "systemd-run: unrecognized option '--expand-environment=no'\n",
+          });
+        })
+        .mockReturnValueOnce(JSON.stringify(selected));
+      expect(api.resolveInstallationConfig({ ...options(), scope })).toBe(selected);
+      expect(execFileSyncMock).toHaveBeenCalledTimes(2);
+      const [first, second] = execFileSyncMock.mock.calls.map((call) => call[1] as string[]);
+      expect(first).toContain("--expand-environment=no");
+      expect(second).not.toContain("--expand-environment=no");
+      expect(second).toEqual(first?.filter((arg) => arg !== "--expand-environment=no"));
+    },
+  );
+
+  it("escapes $ in the retry command so pre-254 expansion yields the same command", () => {
+    const selected = config();
+    writeFileSync(options().daemonEnvFile, "SPUR_CONFIG=relative.yaml\n");
+    execFileSyncMock
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error("Command failed"), {
+          stderr: "systemd-run: unrecognized option '--expand-environment=no'\n",
+        });
+      })
+      .mockReturnValueOnce(JSON.stringify(selected));
+    api.resolveInstallationConfig({
+      ...options(),
+      configModulePath: join(directory, "a$b", "config.js"),
+    });
+    const [first, second] = execFileSyncMock.mock.calls.map((call) => call[1] as string[]);
+    expect(first?.at(-1)).toContain("/a$b/config.js");
+    expect(first?.at(-1)).not.toContain("$$");
+    expect(second?.at(-1)).toContain("/a$$b/config.js");
+    expect(second).toContain(`Environment=HOME=${directory}`);
+  });
+
+  it("surfaces retry stderr when the retry also fails", () => {
+    writeFileSync(options().daemonEnvFile, "SPUR_CONFIG=relative.yaml\n");
+    execFileSyncMock
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error("Command failed"), {
+          stderr: "systemd-run: unrecognized option '--expand-environment=no'\n",
+        });
+      })
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error("Command failed"), { stderr: "Failed to connect to bus\n" });
+      });
+    expect(() => api.resolveInstallationConfig(options())).toThrow(
+      /existing installation was preserved: Failed to connect to bus$/,
+    );
+    expect(execFileSyncMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["user", "system"] as const)(
+    "does not retry other %s probe failures and surfaces stderr",
+    (scope) => {
+      writeFileSync(options().daemonEnvFile, "SPUR_CONFIG=relative.yaml\n");
+      execFileSyncMock.mockImplementation(() => {
+        throw Object.assign(new Error("Command failed"), { stderr: "Failed to connect to bus\n" });
+      });
+      expect(() => api.resolveInstallationConfig({ ...options(), scope })).toThrow(
+        /existing installation was preserved: Failed to connect to bus$/,
+      );
+      expect(execFileSyncMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("refuses missing receipt for existing argv pin, invalid JSON and failed probe before writes", () => {
     writeFileSync(
       options().daemonUnitPath,
@@ -129,6 +224,14 @@ describe("installed instance selection", () => {
     const { collectHostInstallChecks } = await import("../../src/host-install.js");
     const checks = await collectHostInstallChecks(directory);
     expect(checks.find((check) => check.id === "systemd-units")).toMatchObject({ ok: false });
+    expect(planCachePruneMock).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ home: directory, signal: expect.any(AbortSignal) }),
+    );
+    expect(checks.find((check) => check.id === "reclaimable-caches")).toMatchObject({
+      ok: true,
+      detail: expect.stringContaining("no reclaimable caches found"),
+    });
+    expect(execFileMock).not.toHaveBeenCalled();
     expect(existsSync(path)).toBe(false);
     expect(api.prepareInstallationConfig(path, 4311).mcp.port).toBe(4312);
     expect(readFileSync(path, "utf8")).toContain("mcp:");
