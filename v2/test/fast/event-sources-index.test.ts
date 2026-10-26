@@ -354,6 +354,8 @@ describe("startConfiguredSources", () => {
       listSessions: vi.fn(),
       getSession: vi.fn(),
       restoreSession: vi.fn(),
+      completeSession: vi.fn(),
+      killSession: vi.fn(),
     };
     const controller = await startConfiguredSources({
       config: buildConfig(tmpDir, {

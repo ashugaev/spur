@@ -1659,7 +1659,7 @@ export interface CompleteSessionRequest {
 
 export type TodoActor =
   | { kind: "agent"; agent: AgentName; sessionId: string }
-  | { kind: "human"; origin: "cli" | "ui" | "mcp" }
+  | { kind: "human"; origin: "cli" | "ui" | "mcp" | "telegram" }
   | { kind: "system"; source: "spawn" | "legacy_migration" | "handoff" };
 
 export type TodoBlocker = { kind: "external" } | { kind: "human"; requiredAction: string };
