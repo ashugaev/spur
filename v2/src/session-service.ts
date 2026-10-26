@@ -3676,6 +3676,7 @@ export class SessionService {
   private readonly claudeRotationEpisode = new Map<string, { episode: string; count: number }>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
   private readonly sidecarEndpoints = new Map<string, SidecarEndpointEntry>();
+  private readonly reportedMissingSidecarOwners = new Set<string>();
   private readonly sidecarViewClaims = new WeakMap<
     SessionSidecarView,
     { ownerId: string; generation: number; signature: string }
@@ -10357,7 +10358,8 @@ export class SessionService {
     const name = normalizeSlotLabel(link.label);
     const sidecar = this.resolveProjectForSession(session)?.sidecars[name];
     if (!sidecar) return false;
-    const owner = this.resolveSidecarOwnerRecord(session, sidecar);
+    const owner = this.readSidecarOwnerRecord(session, sidecar);
+    if (!owner) return false;
     const current = this.resolveSidecarUrlLink(owner, name, sidecar);
     return (
       current !== undefined && normalizeSlotUrl(link.url) === normalizeSlotUrl(current.linkUrl)
@@ -10504,19 +10506,20 @@ export class SessionService {
     if (names.length === 0) return [];
     const hasIdentity = names.some((name) => {
       const sidecar = project?.sidecars[name];
-      const owner = sidecar ? this.resolveSidecarOwnerRecord(session, sidecar) : session;
-      return owner.sidecarProcs?.[name] !== undefined;
+      const owner = sidecar ? this.readSidecarOwnerRecord(session, sidecar) : session;
+      return owner?.sidecarProcs?.[name] !== undefined;
     });
     const claims = new Map(
       await Promise.all(
         names.map(async (name) => {
           const sidecar = project?.sidecars[name];
-          const owner = sidecar ? this.resolveSidecarOwnerRecord(session, sidecar) : session;
-          const identity = owner.sidecarProcs?.[name];
+          const owner = sidecar ? this.readSidecarOwnerRecord(session, sidecar) : session;
+          const identity = owner?.sidecarProcs?.[name];
           return [
             name,
             {
-              signature: sidecar ? this.sidecarEndpointSignature(owner, name, sidecar) : undefined,
+              signature:
+                sidecar && owner ? this.sidecarEndpointSignature(owner, name, sidecar) : undefined,
               starttime: identity ? await readProcessStarttime(identity.pid) : null,
             },
           ] as const;
@@ -10535,7 +10538,8 @@ export class SessionService {
     for (const name of names) {
       const sidecar = project?.sidecars[name];
       const current = readSession(this.config.dataDir, session.id) ?? session;
-      const owner = sidecar ? this.resolveSidecarOwnerRecord(current, sidecar) : current;
+      const owner = sidecar ? this.readSidecarOwnerRecord(current, sidecar) : current;
+      if (!owner) continue;
       const identity = owner.sidecarProcs?.[name];
       const ageSeconds = identity
         ? observation.processes.byPid.get(identity.pid)?.etimes
@@ -10624,8 +10628,7 @@ export class SessionService {
       if (!view.url) continue;
       const claim = this.sidecarViewClaims.get(view);
       const sidecar = project?.sidecars[view.name];
-      const owner =
-        session && sidecar ? this.resolveSidecarOwnerRecord(session, sidecar) : undefined;
+      const owner = session && sidecar ? this.readSidecarOwnerRecord(session, sidecar) : undefined;
       const entry = claim
         ? this.sidecarEndpoints.get(this.sidecarEndpointKey(claim.ownerId, view.name))
         : undefined;
@@ -10650,24 +10653,45 @@ export class SessionService {
   // Resolves the record that owns a sidecar's tmux pane and reserved ports:
   // the in-hand record itself for a per-session (mcp) sidecar or a non-desk
   // session (zero extra IO — sidecarOwnerId returns session.id unchanged),
-  // else a fresh read of the desk anchor's own record. Session records are
-  // never deleted from the store, so a missing anchor is an invariant break,
-  // not a fallback case.
-  private resolveSidecarOwnerRecord(
+  // else a fresh read of the desk anchor's own record. The anchor can be
+  // absent (archived before the GC anchor-retention fix, or moved by hand):
+  // read paths get undefined and render no desk-shared view, one warn per
+  // (session, anchor) per process; sidecar start throws via the wrapper below.
+  private readSidecarOwnerRecord(
     session: SessionRecord,
     sidecar: Pick<SidecarConfig, "mcp">,
-  ): SessionRecord {
+  ): SessionRecord | undefined {
     const ownerId = sidecarOwnerId(session, sidecar);
     if (ownerId === session.id) {
       return session;
     }
     const anchor = readSession(this.config.dataDir, ownerId);
     if (!anchor) {
+      const key = `${session.id}\0${ownerId}`;
+      if (!this.reportedMissingSidecarOwners.has(key)) {
+        this.reportedMissingSidecarOwners.add(key);
+        this.logEvent("session.sidecar.owner_missing", {
+          level: "warn",
+          sessionId: session.id,
+          message: `Desk anchor session ${ownerId} not found (owner of sidecar for ${session.id})`,
+          details: { ownerId },
+        });
+      }
+    }
+    return anchor ?? undefined;
+  }
+
+  private resolveSidecarOwnerRecord(
+    session: SessionRecord,
+    sidecar: Pick<SidecarConfig, "mcp">,
+  ): SessionRecord {
+    const owner = this.readSidecarOwnerRecord(session, sidecar);
+    if (!owner) {
       throw new Error(
-        `Desk anchor session ${ownerId} not found (owner of sidecar for ${session.id})`,
+        `Desk anchor session ${sidecarOwnerId(session, sidecar)} not found (owner of sidecar for ${session.id})`,
       );
     }
-    return anchor;
+    return owner;
   }
 
   // Owner id for a sidecar known only by name. A name with no config entry

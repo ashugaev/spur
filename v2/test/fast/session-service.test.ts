@@ -33496,6 +33496,116 @@ describe("SessionService", () => {
         expect(view).toMatchObject({ runningSidecarNames: ["daemon"] });
       }
     });
+
+    describe("missing desk anchor record", () => {
+      const daemonLink = { label: "daemon", url: "http://localhost:4100" };
+
+      function seedAnchorlessSibling(slotLinks?: Array<{ label: string; url: string }>) {
+        loadConfigMock.mockReturnValue(daemonAndPlaywrightProjectConfig());
+        const sessions = createSessionStore();
+        const base = {
+          project: "api",
+          agent: "claude" as const,
+          prompt: "hello",
+          branch: "api-1",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          launchCommand: "claude --dangerously-skip-permissions",
+          status: "running" as const,
+          createdAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T10:01:00.000Z",
+        };
+        sessions.set("api-2", {
+          ...base,
+          id: "api-2",
+          tmuxSession: "api-2",
+          deskId: "api-1",
+          sidecarNames: ["daemon", "playwright"],
+          ...(slotLinks ? { slots: { links: slotLinks } } : {}),
+        });
+        sessions.set("api-3", {
+          ...base,
+          id: "api-3",
+          tmuxSession: "api-3",
+          branch: "api-3",
+          worktreePath: "/tmp/spur-worktrees/api/api-3",
+        });
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+        workspaceExistsMock.mockReturnValue(true);
+      }
+
+      async function newService() {
+        const { SessionService } = await loadSessionServiceModule();
+        return new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      }
+
+      function ownerMissingEvents() {
+        return logSpurEventMock.mock.calls
+          .map(([, entry]) => entry)
+          .filter(
+            (entry) =>
+              entry.event === "session.sidecar.owner_missing" && entry.sessionId === "api-2",
+          );
+      }
+
+      it("desk anchor missing: full list still returns every record and drops only the desk-shared view", async () => {
+        seedAnchorlessSibling();
+        const service = await newService();
+
+        const listed = await service.list({ includeCompleted: true });
+
+        expect(listed.map((s) => s.id).sort()).toEqual(["api-2", "api-3"]);
+        const sibling = listed.find((s) => s.id === "api-2");
+        expect(sibling?.sidecars.find((sc) => sc.name === "daemon")).toBeUndefined();
+        expect(sibling?.sidecars.some((sc) => sc.tmuxSession === "api-2--daemon")).toBe(false);
+        expect(sibling?.sidecars).toEqual([
+          expect.objectContaining({ name: "playwright", tmuxSession: "api-2--playwright" }),
+        ]);
+      });
+
+      it("desk anchor missing: dashboard list still returns the sibling with only its mcp sidecar running", async () => {
+        seedAnchorlessSibling();
+        const service = await newService();
+
+        const listed = await service.list({ includeCompleted: true, view: "dashboard" });
+
+        expect(listed.map((s) => s.id).sort()).toEqual(["api-2", "api-3"]);
+        expect(listed.find((s) => s.id === "api-2")?.runningSidecarNames).toEqual(["playwright"]);
+      });
+
+      it("desk anchor missing: a sidecar-labelled slot link on the sibling is kept", async () => {
+        seedAnchorlessSibling([daemonLink]);
+        const service = await newService();
+
+        const listed = await service.list({ includeCompleted: true });
+
+        expect(listed.find((s) => s.id === "api-2")?.slots?.links).toEqual([daemonLink]);
+      });
+
+      it("desk anchor missing: warns once per sibling and anchor across repeated lists", async () => {
+        seedAnchorlessSibling();
+        const service = await newService();
+
+        await service.list({ includeCompleted: true });
+        await service.list({ includeCompleted: true });
+        await service.list({ includeCompleted: true });
+        await service.list({ includeCompleted: true, view: "dashboard" });
+
+        const events = ownerMissingEvents();
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({ level: "warn", details: { ownerId: "api-1" } });
+      });
+
+      it("desk anchor missing: starting the desk-shared sidecar still fails fast and spawns nothing", async () => {
+        seedAnchorlessSibling();
+        const service = await newService();
+
+        await expect(service.startSidecar("api-2", "daemon")).rejects.toThrow(
+          /Desk anchor session api-1 not found/,
+        );
+        expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+      });
+    });
   });
 
   it("completes a renamed-project session by resolving the repo from its worktree", async () => {
