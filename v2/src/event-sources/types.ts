@@ -10,6 +10,7 @@ import {
   type SourceConfig,
   type SourceType,
   type TelegramSpawnOrigin,
+  type TelegramBotIdentity,
 } from "../types.js";
 
 export interface SpurEvent<T = unknown> {
@@ -119,6 +120,7 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
 }
 
 export interface SourceHandle {
+  telegramBotIdentity?: TelegramBotIdentity;
   stop(): void | Promise<void>;
   runOnStart?(): void;
   /**
@@ -139,6 +141,7 @@ export interface SourceModule<TConfig extends SourceConfig = SourceConfig> {
 }
 
 export interface SourceGroupController {
+  telegramBotIdentity(projectId: string, sourceId: string): TelegramBotIdentity | null;
   stop(): void | Promise<void>;
   /**
    * Reaches a single running source handle by projectId/sourceId and, if it

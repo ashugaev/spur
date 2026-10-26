@@ -850,6 +850,9 @@ export async function startServer(
   const bus = new EventBus();
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
+  service.setTelegramBotIdentityReader(
+    (projectId, sourceId) => sources?.telegramBotIdentity(projectId, sourceId) ?? null,
+  );
   // Closure over the reassignable `sources` above, so this stays correct
   // across reloadAutomation recreating sources — registered once, not
   // re-registered per (re)start.
@@ -2021,6 +2024,12 @@ export async function startServer(
             submitFailedMatch[2] === "retry" ? "retry" : "dismiss",
           ),
         );
+        return;
+      }
+
+      const sourceInfoSessionId = path.match(/^\/sessions\/([^/]+)\/source-info$/)?.[1];
+      if (method === "GET" && sourceInfoSessionId) {
+        sendJson(response, 200, service.sourceInfo(sourceInfoSessionId));
         return;
       }
 

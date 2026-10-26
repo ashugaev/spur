@@ -962,6 +962,13 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     },
   ),
   operation(
+    "get_source_info",
+    "GET",
+    "/sessions/{sessionId}/source-info",
+    "Read session Telegram chat association and cached bot identity.",
+    { response: "SourceInfoResponse" },
+  ),
+  operation(
     "enable_source_poll",
     "POST",
     "/sessions/{sessionId}/source-poll-enable",

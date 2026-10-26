@@ -20,9 +20,9 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "86b20eb14f559769713321f072062cff8251912f3221cd0b9425b2baf6b03257",
-  "types.ts": "e9976ee534e4b065b9b1aa96863aa6e369ae56e414b8140fc071b982cac5377f",
-  "session-service.ts": "d7f3e898c1eb9a346cb15cce0f12876fd3bfa870702d0d39b83fd00f63a51e94",
+  "server.ts": "d186b2ca245a241033fa532b7bb82abda48daad25cc542c374442583e7bb3d1c",
+  "types.ts": "0909450ffb8c26acae20587957389ba5029d5dedb7b0c6f69663e7dc4b508520",
+  "session-service.ts": "a08519e47dac8f55374a0f8a0762ff7078e7bbcc89dd5fbf65fe94bd17a6c43e",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "837a7052b62b977b59f117e344b83b0f507298ce0d716c1ab637ead711060c42",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -43,9 +43,9 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(79);
+    expect(routes).toHaveLength(80);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(79);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(80);
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("spawn_background_session")?.path).toBe("/sessions/background");
     expect(getDaemonOperation("missing")).toBeUndefined();
@@ -187,7 +187,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(79);
+      expect(page.total).toBe(80);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",

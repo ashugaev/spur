@@ -10,6 +10,15 @@ async function readRepoFile(path: string): Promise<string> {
 }
 
 describe("published interface contracts", () => {
+  it("links native Telegram call workflow and source-free launcher opt-out", async () => {
+    expect(await readRepoFile("README.md")).toContain("docs/telegram-calls.md");
+    expect(await readRepoFile("docs/commands.md")).toContain("SPUR_ISOLATED_WITHOUT_TELEGRAM");
+    expect(await readRepoFile("docs/configuration.md")).toContain("voice-call");
+    expect(await readRepoFile(".agents/skills/spur/SKILL.md")).toContain("docs/telegram-calls.md");
+    expect(await readRepoFile(".claude/skills/spur/SKILL.md")).toBe(
+      await readRepoFile(".agents/skills/spur/SKILL.md"),
+    );
+  });
   it("documents launcher-owned isolated UI discovery environment", async () => {
     const commands = await readRepoFile("docs/commands.md");
     expect(commands).toContain("SPUR_ISOLATED_CONFIG");
