@@ -1944,6 +1944,12 @@ export function Dashboard() {
                 if (!cancelled) setSpawnPreflightStatus("error");
                 return;
               }
+              // An in-flight submit owns the batch: its own 409 rotates it and
+              // shows the error, so rotating here would spawn a duplicate.
+              if (spawningRef.current && status === 409 && readSpawnBatchConflict(result)) {
+                if (!cancelled) setSpawnPreflightStatus("idle");
+                return;
+              }
               if (handleSpawnBatchConflict(project, status, result)) {
                 setSpawnError(responseErrorMessage(result, "Failed to run preflight"));
                 if (!cancelled) setSpawnPreflightStatus("idle");

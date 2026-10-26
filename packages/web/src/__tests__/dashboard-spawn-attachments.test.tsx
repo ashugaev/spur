@@ -392,6 +392,13 @@ describe("Dashboard spawn photo preparation", () => {
     expect(batchRequests).toBe(0);
   });
 
+  function previewConflict(code: "spawn_in_progress" | "spawn_committed" | "spawn_failed") {
+    return Response.json(
+      { error: `Session demo-7 conflict ${code}`, code, sessionId: "demo-7" },
+      { status: 409 },
+    );
+  }
+
   it("shows the created session and rotates the batch when preview hits a claimed batch", async () => {
     previewResponse = Promise.resolve(
       Response.json(
@@ -417,6 +424,46 @@ describe("Dashboard spawn photo preparation", () => {
     fireEvent.click(submit());
     await waitFor(() => expect(requests).toHaveLength(1));
     expect(sentBatchId(0)).toBe("batch-1");
+  });
+
+  it("rotates the batch when preview hits a failed batch", async () => {
+    previewResponse = Promise.resolve(previewConflict("spawn_failed"));
+    await openDraftBeforeProjectsLoad("demo");
+    await waitFor(() =>
+      expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent("demo-7"),
+    );
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(sentBatchId(0)).toBe("batch-1");
+    expect(batchRequests).toBe(1);
+  });
+
+  it("keeps the batch when preview hits a batch still spawning", async () => {
+    previewResponse = Promise.resolve(previewConflict("spawn_in_progress"));
+    await openDraftBeforeProjectsLoad("demo");
+    await waitFor(() =>
+      expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent("demo-7"),
+    );
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(sentBatchId(0)).toBe("saved-batch");
+    expect(batchRequests).toBe(0);
+  });
+
+  it("keeps the batch when a preview conflict lands during submit", async () => {
+    let resolvePreview!: (response: Response) => void;
+    previewResponse = new Promise<Response>((accept) => {
+      resolvePreview = accept;
+    });
+    await openDraftBeforeProjectsLoad("demo");
+    await waitFor(() =>
+      expect(vi.mocked(fetch).mock.calls.some(([input]) => input === "/api/preflight")).toBe(true),
+    );
+    fireEvent.click(submit());
+    await act(async () => resolvePreview(previewConflict("spawn_committed")));
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(sentBatchId(0)).toBe("saved-batch");
+    expect(batchRequests).toBe(0);
   });
 
   it("rotates the saved batch when its project is gone once projects load", async () => {
