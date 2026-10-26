@@ -123,6 +123,15 @@ class PrivateSessionTests(unittest.TestCase):
                 with self.assertRaisesRegex(bridge.BridgeError, "credentials_in_artifacts"):
                     bridge.read_inputs()
 
+    def test_suffixed_symlink_into_artifacts_is_rejected(self):
+        artifacts = self.root / "artifacts"
+        artifacts.mkdir()
+        (artifacts / "real.session").write_bytes(self.source.read_bytes())
+        (self.root / "acct.session").symlink_to(artifacts / "real.session")
+        with patch.dict(os.environ, {"SPUR_SESSION_ARTIFACTS_DIR": str(artifacts)}):
+            with self.assertRaisesRegex(bridge.BridgeError, "telegram_session_in_artifacts"):
+                bridge.private_session({"TG_SESSION": str(self.root / "acct")})
+
     def test_session_name_appends_extension_like_telethon(self):
         for name, stored in (("acct.v2", "acct.v2.session"), ("plain", "plain.session"),
                              ("acct.session", "acct.session")):
