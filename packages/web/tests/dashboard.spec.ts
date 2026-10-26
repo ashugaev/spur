@@ -4207,6 +4207,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
           enabled: true,
           conditions: "After the summary is posted",
         },
+        preflightBatchId: "10000000-0000-4000-8000-000000000001",
       },
     ]);
 
@@ -4271,6 +4272,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
         model: "opus",
         overrides: { worktree: true },
         selfDestruct: { enabled: true },
+        preflightBatchId: "10000000-0000-4000-8000-000000000001",
       },
     ]);
   });
@@ -4479,6 +4481,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await fillSpawnForm(page, { prompt: placeholder.prompt });
     await page.getByRole("button", { name: /^spawn$/i }).click();
 
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(1);
     sessions.splice(0, sessions.length, errored);
     await page.waitForTimeout(DASHBOARD_POLL_WAIT_MS);
 
