@@ -30,7 +30,10 @@ function fixture(): string {
 
 function inputChecker(path: string, status = 0): string {
   const python = join(path, "input-checker");
-  writeFileSync(python, `#!/bin/bash\n[[ "$2" == --check-inputs ]] || exit 91\nexit ${status}\n`);
+  writeFileSync(
+    python,
+    `#!/bin/bash\n[[ "$2" == --check-inputs ]] || exit 91\necho input-check-ran >&2\nexit ${status}\n`,
+  );
   chmodSync(python, 0o700);
   return python;
 }
@@ -48,9 +51,12 @@ it.each(["run-daemon.sh", "run-call.sh"])(
         TELEGRAM_CALL_STATE_DIR: state,
         TELEGRAM_CALL_ENV_FILE: join(path, "missing.env"),
         SPUR_SESSION_TOOL_DIR: tools,
+        SPUR_RESERVED_PORT_DAEMON: "49001",
       },
+      encoding: "utf8",
     });
     expect(result.status).toBe(1);
+    expect(result.stderr).toContain("input-check-ran");
     expect(existsSync(state)).toBe(false);
     expect(existsSync(tools)).toBe(false);
   },

@@ -733,8 +733,8 @@ def private_session(values):
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     state.chmod(0o700)
     source = Path(values["TG_SESSION"]).expanduser().resolve()
-    if source.suffix != ".session":
-        source = source.with_suffix(".session")
+    if not source.name.endswith(".session"):
+        source = source.with_name(source.name + ".session")
     if artifacts and source.is_relative_to(Path(artifacts).resolve()):
         raise BridgeError("telegram_session_in_artifacts")
     lock_dir = Path.home() / ".cache/spur/telegram-call-locks"

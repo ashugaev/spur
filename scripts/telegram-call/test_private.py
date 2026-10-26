@@ -123,6 +123,19 @@ class PrivateSessionTests(unittest.TestCase):
                 with self.assertRaisesRegex(bridge.BridgeError, "credentials_in_artifacts"):
                     bridge.read_inputs()
 
+    def test_session_name_appends_extension_like_telethon(self):
+        for name, stored in (("acct.v2", "acct.v2.session"), ("plain", "plain.session"),
+                             ("acct.session", "acct.session")):
+            with self.subTest(name=name):
+                path = self.root / stored
+                with sqlite3.connect(path) as db:
+                    db.execute("CREATE TABLE secret (value TEXT)")
+                    db.execute("INSERT INTO secret VALUES (?)", (stored,))
+                lock, target = bridge.private_session({"TG_SESSION": str(self.root / name)})
+                lock.close()
+                with sqlite3.connect(target) as db:
+                    self.assertEqual(db.execute("SELECT value FROM secret").fetchone(), (stored,))
+
 
 class StartupTests(unittest.IsolatedAsyncioTestCase):
     async def test_failure_stages_close_owned_clients_handlers_and_lock(self):
