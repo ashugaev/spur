@@ -27,7 +27,7 @@ import {
 } from "./session-lifecycle.js";
 import { userInfo } from "node:os";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
+import { setImmediate as yieldToEventLoop, setTimeout as sleep } from "node:timers/promises";
 import {
   agentBusyQueuedSendAwaitsPrompt,
   agentHasLaunchSubmitAck,
@@ -7755,10 +7755,14 @@ export class SessionService {
       let liveUnderTerminal = 0;
       // One fleet fork for the whole pass: absent records read the shared
       // snapshot instead of each forcing their own list-windows. Holds while
-      // the fork finishes within RUNTIME_PROBE_CACHE_TTL_MS; a slower call
-      // degrades to a re-fork per expired read, as before.
+      // the fork finishes within RUNTIME_PROBE_CACHE_TTL_MS; the per-record
+      // yield below can outlast it, which re-forks once per expired window.
       await refreshTmuxFleetSnapshot();
       for (const session of sessions) {
+        // A warm snapshot settles every await below as a microtask, so a pass
+        // over a large store would otherwise run to completion without
+        // returning to the event loop. Top of the body: six branches continue.
+        await yieldToEventLoop();
         let agentAlive = false;
         let presence = await getTmuxSessionPresence(session.tmuxSession);
         if (presence.present) {
@@ -7813,30 +7817,47 @@ export class SessionService {
         // Snapshot "absent" can be 2s stale: a mid-pass reopen makes this owner restorable.
         const latest = readSession(this.config.dataDir, session.id);
         if (!latest || !isTerminalSessionStatus(latest.status)) continue;
-        // A desk-shared sidecar's pane is named after the desk anchor, so on a
-        // terminal anchor this loop would otherwise reap the pane a restorable
-        // sibling is still using. Same active-workspace semantics as the
-        // policy pass (collectSidecarReapCandidates): any non-terminal member
-        // holds the shared pane.
-        const deskSiblingsAlive = this.hasActiveWorkspaceMembers(session);
-        // Resolved unconditionally (not only when deskSiblingsAlive): every
-        // sidecar's owner id below needs it, since a desk-shared sidecar's
-        // pane is named after the desk anchor/owner, never this session's
-        // own id.
+        // Resolved unconditionally: every sidecar's owner id below needs it,
+        // since a desk-shared sidecar's pane is named after the desk
+        // anchor/owner, never this session's own id.
         let reapProject: ProjectConfig | undefined;
         try {
           reapProject = this.resolveProjectForSession(session);
         } catch {
           reapProject = undefined;
         }
+        // A desk-shared sidecar's pane is named after the desk anchor, so on a
+        // terminal anchor this loop would otherwise reap the pane a restorable
+        // sibling is still using. Same active-workspace semantics as the
+        // policy pass (collectSidecarReapCandidates): any non-terminal member
+        // holds the shared pane. Computed at the first configured non-MCP sidecar
+        // that is still a teardown candidate, at most once per record.
+        let deskSiblingsAlive: boolean | undefined;
         for (const sidecarName of session.sidecarNames ?? []) {
           const reapSidecar = reapProject?.sidecars[sidecarName];
-          if (deskSiblingsAlive && reapSidecar !== undefined && !reapSidecar.mcp) {
-            continue;
-          }
           const ownerId = this.sidecarOwnerIdForName(session, reapProject, sidecarName);
           const owner = readSession(this.config.dataDir, ownerId);
-          const paneAlive = await sidecarTmuxAlive(ownerId, sidecarName);
+          const sidecarPresence = await getSidecarTmuxPresence(ownerId, sidecarName);
+          const identity = owner?.sidecarProcs?.[sidecarName];
+          // Pane confirmed absent and no recorded identity: neither teardown
+          // branch below can fire, so skip the vetoes' workspace scans. A probe
+          // diagnostic is not confirmed absence and stays a candidate.
+          if (!sidecarPresence.present && sidecarPresence.diagnostic === undefined && !identity) {
+            continue;
+          }
+          if (
+            reapSidecar !== undefined &&
+            !reapSidecar.mcp &&
+            (deskSiblingsAlive ??= this.hasActiveWorkspaceMembers(session))
+          ) {
+            continue;
+          }
+          // After the sibling veto: a vetoed sidecar's unreadable probe never
+          // aborts the pass.
+          if (sidecarPresence.diagnostic !== undefined) {
+            throw new TmuxProbeUnknownError(sidecarPresence.diagnostic);
+          }
+          const paneAlive = sidecarPresence.present;
           // The established-connection veto, applied here too — this loop
           // reaches a desk-shared sidecar by owner id the same as the
           // reaper-tick candidate pass, and is not exempt from the same hard
@@ -7872,7 +7893,6 @@ export class SessionService {
           // sibling's own probe id could never see under the old
           // session.id-only probe); fall through to the recorded identity,
           // mirroring killSidecar.
-          const identity = owner?.sidecarProcs?.[sidecarName];
           if (owner && identity) {
             this.invalidateSidecarEndpoint(ownerId, sidecarName);
             const outcome = await reapRecordedIdentity(identity, owner.worktreePath);
