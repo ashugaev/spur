@@ -33556,8 +33556,8 @@ describe("SessionService", () => {
 
         expect(listed.map((s) => s.id).sort()).toEqual(["api-2", "api-3"]);
         const sibling = listed.find((s) => s.id === "api-2");
-        expect(sibling?.sidecars.find((sc) => sc.name === "daemon")).toBeUndefined();
-        expect(sibling?.sidecars.some((sc) => sc.tmuxSession === "api-2--daemon")).toBe(false);
+        expect(sibling?.sidecars?.find((sc) => sc.name === "daemon")).toBeUndefined();
+        expect(sibling?.sidecars?.some((sc) => sc.tmuxSession === "api-2--daemon")).toBe(false);
         expect(sibling?.sidecars).toEqual([
           expect.objectContaining({ name: "playwright", tmuxSession: "api-2--playwright" }),
         ]);
@@ -33570,7 +33570,9 @@ describe("SessionService", () => {
         const listed = await service.list({ includeCompleted: true, view: "dashboard" });
 
         expect(listed.map((s) => s.id).sort()).toEqual(["api-2", "api-3"]);
-        expect(listed.find((s) => s.id === "api-2")?.runningSidecarNames).toEqual(["playwright"]);
+        expect(listed.find((s) => s.id === "api-2")).toMatchObject({
+          runningSidecarNames: ["playwright"],
+        });
       });
 
       it("desk anchor missing: a sidecar-labelled slot link on the sibling is kept", async () => {
