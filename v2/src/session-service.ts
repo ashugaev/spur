@@ -7830,8 +7830,8 @@ export class SessionService {
         // terminal anchor this loop would otherwise reap the pane a restorable
         // sibling is still using. Same active-workspace semantics as the
         // policy pass (collectSidecarReapCandidates): any non-terminal member
-        // holds the shared pane. Computed at the first sidecar that is still a
-        // teardown candidate, at most once per record.
+        // holds the shared pane. Computed at the first configured non-MCP sidecar
+        // that is still a teardown candidate, at most once per record.
         let deskSiblingsAlive: boolean | undefined;
         for (const sidecarName of session.sidecarNames ?? []) {
           const reapSidecar = reapProject?.sidecars[sidecarName];
