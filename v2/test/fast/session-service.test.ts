@@ -477,12 +477,14 @@ const activeSessionServices: Array<{
   dispose(): void;
 }> = [];
 const timerPromisesSleepMock = vi.fn<(ms: number) => Promise<void>>();
+const timerPromisesImmediateMock = vi.fn<() => Promise<void>>();
 
 vi.mock("node:timers/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof timersPromisesModule>();
   return {
     ...actual,
     setTimeout: timerPromisesSleepMock,
+    setImmediate: timerPromisesImmediateMock,
   };
 });
 
@@ -2145,6 +2147,7 @@ describe("SessionService", () => {
     const timersPromises =
       await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
     timerPromisesSleepMock.mockReset().mockImplementation((ms) => timersPromises.setTimeout(ms));
+    timerPromisesImmediateMock.mockReset().mockResolvedValue(undefined);
     rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
     resetAccountStoreMocks();
 
@@ -53258,6 +53261,200 @@ describe("SessionService", () => {
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--proxy");
       service.dispose();
+    });
+
+    describe("per-record cost and ordering", () => {
+      const daemonSidecar = {
+        command: "pnpm daemon",
+        autoStart: false,
+        ports: { http: { env: "SPUR_RESERVED_PORT_DAEMON", start: 4100, end: 4100 } },
+      };
+
+      function mockSidecarConfig(sidecars: Record<string, unknown>) {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: { api: { ...baseConfig().projects.api, sidecars } },
+        });
+      }
+
+      function addReaperSession(
+        sessions: Map<string, SessionRecord>,
+        id: string,
+        overrides: Partial<SessionRecord> = {},
+      ) {
+        sessions.set(id, {
+          ...(sessions.get("api-1") as SessionRecord),
+          id,
+          tmuxSession: id,
+          branch: id,
+          worktreePath: `/tmp/spur-worktrees/api/${id}`,
+          status: "completed",
+          ...overrides,
+        });
+      }
+
+      async function createReaper() {
+        const service = (await createDisposedSessionService()) as unknown as {
+          reapOrphanedTmux(): Promise<void>;
+          dispose(): void;
+        };
+        return service;
+      }
+
+      function reaperFailedMessages(): string[] {
+        return logSpurEventMock.mock.calls
+          .map(([, entry]) => entry)
+          .filter((entry) => entry.event === "session.reaper.failed")
+          .map((entry) => entry.message as string);
+      }
+
+      it("T1: lists sessions once for a pass where no sidecar is a teardown candidate", async () => {
+        const sessions = seedReaperSession({ status: "completed", sidecarNames: ["proxy"] });
+        for (let index = 2; index <= 20; index += 1) {
+          addReaperSession(sessions, `api-${index}`, { sidecarNames: ["proxy"] });
+        }
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        sidecarTmuxAliveMock.mockResolvedValue(false);
+        const service = await createReaper();
+        listSessionsMock.mockClear();
+        hasEstablishedConnectionsMock.mockClear();
+        killTmuxSessionMock.mockClear();
+        writeSessionMock.mockClear();
+
+        await service.reapOrphanedTmux();
+
+        expect(listSessionsMock).toHaveBeenCalledTimes(1);
+        expect(hasEstablishedConnectionsMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(writeSessionMock).not.toHaveBeenCalled();
+        service.dispose();
+      });
+
+      it("T1b: skips an absent configured sidecar before the desk-sibling scan", async () => {
+        mockSidecarConfig({ daemon: daemonSidecar });
+        const sessions = seedReaperSession({
+          status: "completed",
+          sidecarNames: ["daemon"],
+          sidecarPorts: { daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 } },
+        });
+        addReaperSession(sessions, "api-2", { deskId: "api-1", status: "running" });
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        sidecarTmuxAliveMock.mockResolvedValue(false);
+        const service = await createReaper();
+        listSessionsMock.mockClear();
+        hasEstablishedConnectionsMock.mockClear();
+
+        await service.reapOrphanedTmux();
+
+        expect(listSessionsMock).toHaveBeenCalledTimes(1);
+        expect(hasEstablishedConnectionsMock).not.toHaveBeenCalledWith(4100);
+        service.dispose();
+      });
+
+      it("T2: yields one event-loop turn before each record's first tmux read", async () => {
+        const sessions = seedReaperSession({ status: "completed" });
+        for (let index = 2; index <= 5; index += 1) addReaperSession(sessions, `api-${index}`);
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        const service = await createReaper();
+        const marks: number[] = [];
+        getTmuxSessionPresenceMock.mockClear();
+        timerPromisesImmediateMock.mockImplementation(async () => {
+          marks.push(getTmuxSessionPresenceMock.mock.calls.length);
+        });
+
+        await service.reapOrphanedTmux();
+
+        expect(marks).toEqual([0, 1, 2, 3, 4]);
+        service.dispose();
+      });
+
+      describe("probe failure on a sidecar", () => {
+        const probeDiagnostic = "tmux list-windows failed: boom";
+
+        function seedProbeFailureDesk(options: { siblingRunning: boolean }): void {
+          mockSidecarConfig({ daemon: daemonSidecar });
+          const sessions = seedReaperSession({ status: "completed", sidecarNames: ["daemon"] });
+          if (options.siblingRunning) {
+            addReaperSession(sessions, "api-2", { deskId: "api-1", status: "running" });
+          }
+          addReaperSession(sessions, "api-3", { sidecarNames: ["proxy"] });
+          tmuxSessionExistsMock.mockResolvedValue(false);
+          getSidecarTmuxPresenceMock.mockImplementation(async (id, name) => {
+            if (id === "api-1" && name === "daemon") {
+              return { present: false, unresponsive: false, diagnostic: probeDiagnostic };
+            }
+            return { present: id === "api-3" && name === "proxy", unresponsive: false };
+          });
+        }
+
+        it("T3: a sibling-vetoed sidecar's probe failure does not abort the pass", async () => {
+          seedProbeFailureDesk({ siblingRunning: true });
+          const service = await createReaper();
+
+          await service.reapOrphanedTmux();
+
+          expect(killTmuxSessionMock).toHaveBeenCalledWith("api-3--proxy");
+          expect(reaperFailedMessages()).toEqual([]);
+          service.dispose();
+        });
+
+        it("T4: an unvetoed sidecar's probe failure aborts the pass with the diagnostic", async () => {
+          seedProbeFailureDesk({ siblingRunning: false });
+          const service = await createReaper();
+
+          await service.reapOrphanedTmux();
+
+          expect(reaperFailedMessages()).toEqual([expect.stringContaining("boom")]);
+          expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-3--proxy");
+          service.dispose();
+        });
+      });
+
+      it("T5: an MCP sidecar bypasses the sibling veto, a configured non-MCP sidecar does not", async () => {
+        mockSidecarConfig({
+          daemon: daemonSidecar,
+          mcpsvc: {
+            command: "node mcp.js --port $MCP_PORT",
+            autoStart: false,
+            ports: { http: { env: "MCP_PORT", start: 4200, end: 4200 } },
+            mcp: { server: "mcpsvc", portId: "http", path: "/mcp" },
+          },
+        });
+        const sessions = seedReaperSession({
+          status: "completed",
+          sidecarNames: ["daemon", "mcpsvc"],
+          sidecarPorts: { daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 }, mcpsvc: { MCP_PORT: 4200 } },
+        });
+        addReaperSession(sessions, "api-2", { deskId: "api-1", status: "running" });
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+        const service = await createReaper();
+        hasEstablishedConnectionsMock.mockClear();
+
+        await service.reapOrphanedTmux();
+
+        expect(hasEstablishedConnectionsMock).toHaveBeenCalledWith(4200);
+        expect(hasEstablishedConnectionsMock).not.toHaveBeenCalledWith(4100);
+        expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--daemon");
+        service.dispose();
+      });
+
+      it("T6: a desk member with a retained error blocks a live sidecar teardown", async () => {
+        const sessions = seedReaperSession({ status: "completed", sidecarNames: ["proxy"] });
+        addReaperSession(sessions, "api-2", {
+          deskId: "api-1",
+          status: "stopped",
+          error: "provider failed",
+        });
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+        const service = await createReaper();
+
+        await service.reapOrphanedTmux();
+
+        expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--proxy");
+        service.dispose();
+      });
     });
   });
 
