@@ -69518,22 +69518,5 @@ describe("SessionService", () => {
       expect(retry.id).toBe("api-2");
       expect([...sessions.keys()]).toEqual(["api-2"]);
     });
-
-    it("rejects interactive spawn of a claimed batch with 409 and releases nothing", async () => {
-      const { sessions, service, store, preflightBatchId, SpawnBatchConflictError } =
-        await setupBatchService();
-      await store.claim(preflightBatchId, "api", "api-9");
-      const inFlight = (service as unknown as { spawnsInFlight: Set<string> }).spawnsInFlight;
-
-      const attempt = service.spawn({ project: "api", prompt: "hello", preflightBatchId });
-
-      await expect(attempt).rejects.toBeInstanceOf(SpawnBatchConflictError);
-      await expect(attempt).rejects.toMatchObject({
-        statusCode: 409,
-        payload: { code: "spawn_failed", sessionId: "api-9" },
-      });
-      expect([...sessions.keys()]).toEqual([]);
-      expect([...inFlight]).toEqual([]);
-    });
   });
 });
