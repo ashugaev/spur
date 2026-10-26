@@ -1326,6 +1326,7 @@ export function Dashboard() {
     });
   }, [tagCatalog]);
   const loading = isPending;
+  const projectsKnown = data !== undefined;
   const sessionsErrorToastRef = useRef<{ id: number; message: string } | null>(null);
   const { phase: versionSwitchPhase } = useVersionSwitch();
   const { phase: backendPhase } = useBackendConnection();
@@ -1673,7 +1674,7 @@ export function Dashboard() {
       return;
     }
 
-    if (loading || (spawnProjectId && isValidSpawnProject(spawnProjectId))) {
+    if (!projectsKnown || (spawnProjectId && isValidSpawnProject(spawnProjectId))) {
       return;
     }
 
@@ -1682,7 +1683,7 @@ export function Dashboard() {
       setSpawnProjectId(nextProjectId);
       resetSpawnPreflightBatch(nextProjectId);
     }
-  }, [loading, projectId, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
+  }, [projectsKnown, projectId, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
 
   const resetSpawnPreflightBatch = (projectId: string) => {
     spawnPreflightOwnerRef.current = { project: projectId, queue: Promise.resolve() };
@@ -2536,7 +2537,7 @@ export function Dashboard() {
     // Before the project catalog loads, keep the draft's batch project so a
     // retry of an already-submitted spawn reuses its batch.
     applySpawnDraft(
-      loading ? (draft?.preflightBatchProjectId ?? "") : resolvePreferredSpawnProjectId(),
+      !projectsKnown ? (draft?.preflightBatchProjectId ?? "") : resolvePreferredSpawnProjectId(),
       draft,
     );
     setSpawnOpen(true);

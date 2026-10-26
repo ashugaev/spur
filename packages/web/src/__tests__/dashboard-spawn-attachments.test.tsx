@@ -61,6 +61,7 @@ describe("Dashboard spawn photo preparation", () => {
   let spawnConflict: "spawn_in_progress" | "spawn_committed" | "spawn_failed" | undefined;
   let batchRequests: number;
   let sessionsGate: Promise<void> | undefined;
+  let sessionsFailures: number;
   beforeEach(() => {
     vi.clearAllMocks();
     window.localStorage.clear();
@@ -72,10 +73,15 @@ describe("Dashboard spawn photo preparation", () => {
     spawnConflict = undefined;
     batchRequests = 0;
     sessionsGate = undefined;
+    sessionsFailures = 0;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/sessions") {
         await sessionsGate;
+        if (sessionsFailures > 0) {
+          sessionsFailures -= 1;
+          return Response.json({ error: "unavailable" }, { status: 503 });
+        }
         return Response.json({
           lifecycleInstanceId: "test-instance",
           projects: [
@@ -300,7 +306,7 @@ describe("Dashboard spawn photo preparation", () => {
     await act(async () => resolve(Response.json(spawnedSession, { status: 201 })));
   });
 
-  async function openBeforeProjectsLoad(batchProjectId: string) {
+  function saveBatchDraft(batchProjectId: string) {
     writeSpawnDraft({
       prompt: "Retry after reload",
       agent: "claude",
@@ -319,6 +325,10 @@ describe("Dashboard spawn photo preparation", () => {
       preflightBatchId: "saved-batch",
       preflightBatchProjectId: batchProjectId,
     });
+  }
+
+  async function openBeforeProjectsLoad(batchProjectId: string) {
+    saveBatchDraft(batchProjectId);
     let releaseSessions!: () => void;
     sessionsGate = new Promise<void>((accept) => {
       releaseSessions = accept;
@@ -340,6 +350,40 @@ describe("Dashboard spawn photo preparation", () => {
 
   it("reuses the saved batch when the modal opens before projects load", async () => {
     await openBeforeProjectsLoad("demo");
+    expect(sentBatchId(0)).toBe("saved-batch");
+    expect(batchRequests).toBe(0);
+  });
+
+  it("keeps the draft project over the URL project when opened before projects load", async () => {
+    window.history.replaceState(null, "", "/?project=other");
+    await openBeforeProjectsLoad("demo");
+    expect(JSON.parse(String(requests[0].body))).toMatchObject({ projectId: "demo" });
+  });
+
+  it("keeps the saved batch when the first sessions read fails", async () => {
+    saveBatchDraft("demo");
+    sessionsFailures = 1;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <Dashboard />
+      </QueryClientProvider>,
+    );
+    fireEvent.click((await screen.findAllByRole("button", { name: "Spawn Session" }))[0]);
+    expect(screen.getByLabelText("Prompt...")).toHaveValue("Retry after reload");
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 700));
+    });
+    expect(JSON.parse(String(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)))).toMatchObject({
+      preflightBatchId: "saved-batch",
+      preflightBatchProjectId: "demo",
+    });
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["sessions"] });
+    });
+    await waitFor(() => expect(submit()).not.toBeDisabled());
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(1));
     expect(sentBatchId(0)).toBe("saved-batch");
     expect(batchRequests).toBe(0);
   });
