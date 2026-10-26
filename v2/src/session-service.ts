@@ -12002,6 +12002,8 @@ export class SessionService {
         ),
       };
     } catch (error) {
+      if (error instanceof PreflightBatchClaimedError)
+        throw this.spawnBatchConflict(error.claimedBy);
       throw new PreflightPreviewError(
         error,
         preflightBatchId,
@@ -13601,15 +13603,18 @@ export class SessionService {
       return await this.preflightUsageStore.claim(batchId, projectId, sessionId);
     } catch (error) {
       if (!(error instanceof PreflightBatchClaimedError)) throw error;
-      const owner = error.claimedBy;
-      if (this.spawnsPreparing.has(owner))
-        throw new SpawnBatchConflictError("spawn_in_progress", owner);
-      const ownerRecord = readSession(this.config.dataDir, owner);
-      throw new SpawnBatchConflictError(
-        ownerRecord && ownerRecord.status !== "errored" ? "spawn_committed" : "spawn_failed",
-        owner,
-      );
+      throw this.spawnBatchConflict(error.claimedBy);
     }
+  }
+
+  private spawnBatchConflict(owner: string): SpawnBatchConflictError {
+    if (this.spawnsPreparing.has(owner))
+      return new SpawnBatchConflictError("spawn_in_progress", owner);
+    const ownerRecord = readSession(this.config.dataDir, owner);
+    return new SpawnBatchConflictError(
+      ownerRecord && ownerRecord.status !== "errored" ? "spawn_committed" : "spawn_failed",
+      owner,
+    );
   }
 
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {

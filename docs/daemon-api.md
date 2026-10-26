@@ -29,7 +29,7 @@
 - `GET /projects/:id/spawn-defaults?agent=<name>` — `{model, reasoningEffort, worktree}`; unset effort is `null`.
 - `GET /projects/:id/branches/exists?name=<branch>`
 - `POST /projects/:id/preflight-batches`
-- `POST /projects/:id/preflight`
+- `POST /projects/:id/preflight` — same `409` as `POST /sessions/background` when `preflightBatchId` is already claimed.
 
 ## Session routes
 

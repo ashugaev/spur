@@ -387,7 +387,7 @@ export class PreflightUsageStore {
       const batch = await this.read(id);
       if (batch.project !== project) throw new Error("preflight batch project mismatch");
       if (batch.claimedBy && batch.claimedBy !== claimedBy) {
-        throw new Error("preflight batch is already claimed");
+        throw new PreflightBatchClaimedError(batch.claimedBy);
       }
       const now = new Date().toISOString();
       const attempt: AttemptRecord = {

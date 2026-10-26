@@ -69512,6 +69512,33 @@ describe("SessionService", () => {
       expect([...sessions.keys()]).toEqual(["api-1"]);
     });
 
+    it("rejects a branch preview on a committed batch with spawn_committed", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            preflight: { prompt: "Suggest a branch name from the task context." },
+          },
+        },
+      });
+      runSpawnPreflightMock.mockResolvedValue({ branch: "feature/suggested" });
+      const { service, preflightBatchId, SpawnBatchConflictError } = await setupBatchService();
+      const first = await service.spawnInBackground({
+        project: "api",
+        prompt: "hello",
+        preflightBatchId,
+      });
+
+      const preview = service.preflight({ project: "api", prompt: "hello", preflightBatchId });
+
+      await expect(preview).rejects.toBeInstanceOf(SpawnBatchConflictError);
+      await expect(preview).rejects.toMatchObject({
+        statusCode: 409,
+        payload: { code: "spawn_committed", sessionId: first.id },
+      });
+    });
+
     it("releases the claim of a replaced batch under the resolved id", async () => {
       const { sessions, service } = await setupBatchService();
       const requested = "00000000-0000-4000-8000-0000000000aa";

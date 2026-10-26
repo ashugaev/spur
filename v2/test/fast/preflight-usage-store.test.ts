@@ -248,6 +248,9 @@ describe("PreflightUsageStore", () => {
     await expect(ledger.claim(batch, "api", "api-2")).rejects.toBeInstanceOf(
       PreflightBatchClaimedError,
     );
+    const attempt = ledger.runAttempt(batch, "api", "claude", async () => ({}));
+    await expect(attempt).rejects.toBeInstanceOf(PreflightBatchClaimedError);
+    await expect(attempt).rejects.toMatchObject({ claimedBy: "api-1" });
   });
 
   it("release clears only the matching claim", async () => {
