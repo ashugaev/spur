@@ -1045,14 +1045,34 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     return activePoll;
   };
 
+  // Fire-and-forget cycles (tick, deferred start, runOnStart) end here: a throw is
+  // logged once for that cycle and the next tick polls again. The awaited startup
+  // cycle is not routed through it, so start() still rejects there.
+  const reportPollCycleFailure = (error: unknown): void => {
+    const message = extractGithubErrorText(error);
+    deps.logger.warn?.(`[source:${deps.projectId}/${deps.sourceId}] poll cycle failed: ${message}`);
+    logSpurEvent(deps.dataDir, {
+      event: "source.poll_cycle.error",
+      level: "error",
+      projectId: deps.projectId,
+      sourceId: deps.sourceId,
+      message: `Poll cycle failed for ${deps.projectId}/${deps.sourceId}: ${message}`,
+    });
+  };
+
   const timer = startInterval(() => {
-    if (!shouldPollThisTick()) return;
-    void pollCycle(false);
+    try {
+      if (!shouldPollThisTick()) return;
+    } catch (error) {
+      reportPollCycleFailure(error);
+      return;
+    }
+    pollCycle(false).catch(reportPollCycleFailure);
   }, deps.config.intervalMs);
 
   if (!deps.config.runOnStart) {
     if (deps.deferInitialSync) {
-      void pollCycle(false);
+      pollCycle(false).catch(reportPollCycleFailure);
     } else {
       await pollCycle(false);
     }
@@ -1067,7 +1087,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     ...(deps.config.runOnStart
       ? {
           runOnStart(): void {
-            void pollCycle(true);
+            pollCycle(true).catch(reportPollCycleFailure);
           },
         }
       : {}),

@@ -3946,6 +3946,165 @@ describe("github source", () => {
     });
   });
 
+  describe("poll cycle failure", () => {
+    const REAL_INTERVAL_MS = 20;
+    const SLOW_INTERVAL_MS = 60_000;
+
+    // Start-up scans listSessions once synchronously (pruneIgnoredFeedback); the
+    // permanentPrNotFound scan is skipped because the disabled registry is empty.
+    // `healthyCalls` counts the scans that return [] before the throws begin.
+    function scripted(healthyCalls: number, failures: number): () => number {
+      let calls = 0;
+      listSessionsMock.mockImplementation(() => {
+        calls += 1;
+        if (calls > healthyCalls && calls <= healthyCalls + failures) {
+          throw new Error("EACCES: permission denied, scandir");
+        }
+        return [];
+      });
+      return () => calls;
+    }
+
+    async function waitForCalls(calls: () => number, target: number): Promise<void> {
+      for (let waited = 0; calls() < target; waited += 10) {
+        if (waited >= 4000) throw new Error(`timed out at ${calls()} of ${target} calls`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+
+    async function startSource(
+      config: Record<string, unknown>,
+      deferInitialSync?: boolean,
+    ): ReturnType<typeof githubSourceModule.start> {
+      return githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: SLOW_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          ...config,
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger,
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+        ...(deferInitialSync === undefined ? {} : { deferInitialSync }),
+      });
+    }
+
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const unhandled = vi.fn();
+    const uncaught = vi.fn();
+
+    function cycleWarns(): number {
+      return logger.warn.mock.calls.filter(([line]) => String(line).includes("poll cycle failed"))
+        .length;
+    }
+
+    function cycleEvents(): number {
+      return logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "source.poll_cycle.error",
+      ).length;
+    }
+
+    beforeEach(() => {
+      logger.warn.mockClear();
+      unhandled.mockClear();
+      uncaught.mockClear();
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      readGitHubPollDisabledMock.mockReturnValue(new Map());
+      process.on("unhandledRejection", unhandled);
+      process.on("uncaughtException", uncaught);
+    });
+
+    afterEach(() => {
+      listSessionsMock.mockReset();
+      process.removeListener("unhandledRejection", unhandled);
+      process.removeListener("uncaughtException", uncaught);
+    });
+
+    it("logs once per failed interval tick and polls again after recovery", async () => {
+      // 1: startup scan, 2: awaited initial cycle, 3-4: failing ticks, 5+: recovered.
+      const calls = scripted(2, 2);
+      const handle = await startSource({ intervalMs: REAL_INTERVAL_MS });
+      await waitForCalls(calls, 5);
+      handle.stop();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      expect(cycleWarns()).toBe(2);
+      expect(cycleEvents()).toBe(2);
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        expect.objectContaining({
+          event: "source.poll_cycle.error",
+          level: "error",
+          projectId: "api",
+          sourceId: "pr-watch",
+        }),
+      );
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(uncaught).not.toHaveBeenCalled();
+    });
+
+    it("logs once when the adaptive gate throws on a tick", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-07-30T00:00:00.000Z"));
+      // 1: startup scan, 2: awaited initial cycle, 3: shouldPollThisTick throws.
+      const calls = scripted(2, 1);
+      const handle = await startSource({
+        intervalMs: REAL_INTERVAL_MS,
+        adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+      });
+      await waitForCalls(calls, 4);
+      handle.stop();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      expect(cycleWarns()).toBe(1);
+      expect(cycleEvents()).toBe(1);
+      expect(ghMock).not.toHaveBeenCalled();
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(uncaught).not.toHaveBeenCalled();
+    });
+
+    it("logs once when a deferred initial cycle fails and start still resolves", async () => {
+      scripted(1, 1);
+      const handle = await startSource({}, true);
+      await flushPollCycle();
+      await flushPollCycle();
+      handle.stop();
+
+      expect(cycleWarns()).toBe(1);
+      expect(cycleEvents()).toBe(1);
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(uncaught).not.toHaveBeenCalled();
+    });
+
+    it("logs once when a runOnStart cycle fails", async () => {
+      scripted(1, 1);
+      const handle = await startSource({ runOnStart: true });
+      expect(cycleWarns()).toBe(0);
+      handle.runOnStart?.();
+      await flushPollCycle();
+      await flushPollCycle();
+      handle.stop();
+
+      expect(cycleWarns()).toBe(1);
+      expect(cycleEvents()).toBe(1);
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(uncaught).not.toHaveBeenCalled();
+    });
+
+    it("still rejects start when the awaited initial cycle fails", async () => {
+      scripted(1, 1);
+      await expect(startSource({}, false)).rejects.toThrow(/EACCES/);
+      expect(cycleWarns()).toBe(0);
+      expect(cycleEvents()).toBe(0);
+    });
+  });
+
   describe("permanent PR not found", () => {
     // SHARED FIXTURE: one in-memory fake store backing all four poll-disabled
     // metadata mocks, keyed `${projectId}/${sourceId}`, so a mutation made through
