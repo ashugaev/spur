@@ -12560,7 +12560,7 @@ export class SessionService {
         project.sessionPrefix,
       );
       preflightTokenUsage = preflightBatchId
-        ? await this.preflightUsageStore.claim(preflightBatchId, request.project, sessionId)
+        ? await this.claimSpawnPreflightBatch(preflightBatchId, request.project, sessionId)
         : aggregatePreflightAttempts([]);
       this.spawnsInFlight.add(sessionId);
       if (!reuseCtx && preflightOutcome) {
