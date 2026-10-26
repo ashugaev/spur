@@ -1586,6 +1586,23 @@ export interface SendMessageRequest {
   interrupt?: boolean;
 }
 
+export interface TelegramBotIdentity {
+  id: number;
+  username?: string;
+}
+
+export type SourceInfoResponse =
+  | { sessionId: string; source: null }
+  | {
+      sessionId: string;
+      source: "telegram";
+      projectId: string;
+      sourceId: string;
+      chatId: number;
+      messageThreadId?: number;
+      bot: TelegramBotIdentity | null;
+    };
+
 export interface SourceReplyButton {
   text: string;
   value: string;
