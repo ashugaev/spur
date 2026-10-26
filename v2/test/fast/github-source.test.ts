@@ -4066,7 +4066,10 @@ describe("github source", () => {
         return "[]";
       });
       readGitHubPollDisabledMock.mockImplementation(() => {
-        if (armed) {
+        // Only the cycle's own prune read fails; refreshPollDisabled reads (tick gate,
+        // pollSignals entry) swallow errors and must not consume the one-shot fault.
+        const fromRefresh = new Error().stack?.includes("refreshPollDisabled") ?? false;
+        if (armed && !fromRefresh) {
           armed = false;
           throw new Error("EACCES: permission denied, read poll-disabled registry");
         }
