@@ -51391,28 +51391,41 @@ describe("SessionService", () => {
         }
       });
 
-      it.each(["list", "get"] as const)(
-        "returns retryable 503 after bounded rebuilds when %s sees churn on every build",
-        async (route) => {
-          const records = plainSeed();
-          const { service, internals } = await setup();
-          try {
-            settleOp(internals, "api-1");
-            let changes = 0;
-            const watch = watchBuilds(internals, (id) => {
-              if (id === "api-1") rewrite(records, id, { branch: `changed ${++changes}` });
-            });
-            listSessionsMock.mockClear();
-            const call =
-              route === "list" ? service.list({ includeCompleted: true }) : service.get("api-1");
-            await expect(call).rejects.toMatchObject(snapshotChanged);
-            expect(watch.builds("api-1")).toBe(4);
-            if (route === "list") expect(listSessionsMock).toHaveBeenCalledTimes(5);
-          } finally {
-            service.dispose();
-          }
-        },
-      );
+      it("list returns every row, the churning one as its last build, after bounded rebuilds", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          let changes = 0;
+          const watch = watchBuilds(internals, (id) => {
+            if (id === "api-1") rewrite(records, id, { branch: `changed ${++changes}` });
+          });
+          listSessionsMock.mockClear();
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-1", "api-2"]);
+          expect(rows.find((row) => row.id === "api-1")?.branch).toBe("changed 3");
+          expect(watch.builds("api-1")).toBe(4);
+          expect(listSessionsMock).toHaveBeenCalledTimes(5);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("get returns retryable 503 after bounded rebuilds under churn on every build", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          let changes = 0;
+          const watch = watchBuilds(internals, (id) => {
+            if (id === "api-1") rewrite(records, id, { branch: `changed ${++changes}` });
+          });
+          await expect(service.get("api-1")).rejects.toMatchObject(snapshotChanged);
+          expect(watch.builds("api-1")).toBe(4);
+        } finally {
+          service.dispose();
+        }
+      });
 
       it.each([
         { churnBuilds: 3, builds: 4 },
@@ -51457,17 +51470,22 @@ describe("SessionService", () => {
         }
       });
 
-      it("returns 503 after bounded rebuilds when the lifecycle revision moves every pass", async () => {
+      it("list carries the build-time receipt when the lifecycle revision moves every pass", async () => {
         plainSeed();
         const { service, internals } = await setup();
         try {
           settleOp(internals, "api-1");
+          const buildRevisions: number[] = [];
           const watch = watchBuilds(internals, (id) => {
-            if (id === "api-1") settleOp(internals, id);
+            if (id !== "api-1") return;
+            buildRevisions.push(internals.lifecycle.snapshot(id).revision);
+            settleOp(internals, id);
           });
-          await expect(service.list({ includeCompleted: true })).rejects.toMatchObject(
-            snapshotChanged,
-          );
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-1", "api-2"]);
+          const lifecycle = rows.find((row) => row.id === "api-1")?.lifecycle;
+          expect(lifecycle?.revision).toBeLessThan(internals.lifecycle.snapshot("api-1").revision);
+          expect(buildRevisions).toContain(lifecycle?.revision);
           expect(watch.builds("api-1")).toBe(4);
         } finally {
           service.dispose();
@@ -51558,7 +51576,7 @@ describe("SessionService", () => {
         }
       });
 
-      it("refuses naming the picked-up session when a pickup and a stale row remain at the last pass", async () => {
+      it("omits a pending session first seen at the last pass and returns the moving row", async () => {
         const records = plainSeed();
         const { service, internals } = await setup();
         try {
@@ -51579,13 +51597,8 @@ describe("SessionService", () => {
             });
             internals.lifecycle.begin("reopen", ["api-3"], "pending-reopen");
           });
-          await expect(service.list({ includeCompleted: true })).rejects.toMatchObject({
-            ...snapshotChanged,
-            payload: {
-              code: "session_lifecycle_snapshot_changed",
-              lifecycle: { operation: { operationId: "pending-reopen", phase: "pending" } },
-            },
-          });
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-1", "api-2"]);
         } finally {
           service.dispose();
         }
@@ -51852,8 +51865,31 @@ describe("SessionService", () => {
         }
       });
 
+      it("dashboard list returns every row when one churns on every build", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          settleOp(internals, "api-2");
+          await internals.runDashboardCacheTick();
+          let changes = 0;
+          const watch = watchDashboardBuilds(internals, (id) => {
+            if (id === "api-1") rewrite(records, id, { branch: `changed ${++changes}` });
+          });
+          rewrite(records, "api-1", { branch: "changed 0" });
+          listSessionsMock.mockClear();
+          const rows = await service.list({ view: "dashboard", includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-1", "api-2"]);
+          expect(rows.find((row) => row.id === "api-1")?.branch).toBe("changed 2");
+          expect(watch.builds("api-1")).toBe(3);
+          expect(listSessionsMock).toHaveBeenCalledTimes(6);
+        } finally {
+          service.dispose();
+        }
+      });
+
       describe("deadline and abort", () => {
-        it("refuses after the budget once a rebuild pass ran, never before the first", async () => {
+        it("stops rebuilding after the budget once a rebuild pass ran, never before the first", async () => {
           vi.useFakeTimers({ toFake: ["Date"] });
           try {
             for (const churnAlways of [true, false]) {
@@ -51868,8 +51904,7 @@ describe("SessionService", () => {
                   if (build === 2) vi.setSystemTime(Date.now() + 60_000);
                 });
                 const listed = service.list({ includeCompleted: true });
-                if (churnAlways) await expect(listed).rejects.toMatchObject(snapshotChanged);
-                else await expect(listed).resolves.toHaveLength(2);
+                await expect(listed).resolves.toHaveLength(2);
                 expect(watch.builds("api-1")).toBe(2);
               } finally {
                 service.dispose();

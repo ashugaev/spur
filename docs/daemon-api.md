@@ -33,7 +33,7 @@
 
 ## Session routes
 
-- `GET /sessions` — array body, `sidecars[].url` ready endpoint; `v2/src/types.ts`; producing `x-spur-lifecycle-instance-id` header, per-row `lifecycle`; `v2/src/session-lifecycle.ts`.
+- `GET /sessions` — array body, `sidecars[].url` ready endpoint; `v2/src/types.ts`; producing `x-spur-lifecycle-instance-id` header, per-row `lifecycle`; `v2/src/session-lifecycle.ts`; never `503` on lifecycle churn, a still-moving row carries its last build and that build's receipt.
 - `POST /sessions` — optional `reasoningEffort` overrides project default; provider/model validation in `v2/src/session-service.ts`.
 - `POST /sessions/background`
 - `POST /shepherd/spawn`
