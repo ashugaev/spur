@@ -768,10 +768,9 @@ export function withSessionArtifactInstructions(prompt: string): string {
   return `${prompt}
 
 Session artifacts:
-- \`$SPUR_SESSION_ARTIFACTS_DIR\` is for the human: put only final files meant for user review there — test evidence (screenshots, videos), final reports, design exports for approval.
-- Write every other file you or other agents need — plans, drafts, specs, task memory, scratch logs, raw command output, intermediate data — to \`$SPUR_SESSION_WORK_DIR\`. Spur UI never shows it.
-- Both directories are tied to this Spur session and are not committed from the repo workspace. Never leave either kind of file in the repo worktree.
-- Images, videos, and text files (including .txt, .md, .json) in \`$SPUR_SESSION_ARTIFACTS_DIR\` appear inline in Spur UI. Other files appear as download links.
-- HTML files render as a live preview in Spur UI, with a button that opens the page standalone at its artifact URL.
-- A file in a subfolder of \`$SPUR_SESSION_ARTIFACTS_DIR\` is listed under its path relative to that directory (for example \`design/design-spec.md\`).`;
+- \`$SPUR_SESSION_ARTIFACTS_DIR\`: put only final files meant for user review there — screenshots, videos, final reports, design exports for approval.
+- \`$SPUR_SESSION_WORK_DIR\`: every other file — plans, drafts, specs, task memory, scratch logs, raw command output, intermediate data. Hidden in Spur UI.
+- Both dirs belong to this Spur session, outside git. Never leave either kind in the repo worktree.
+- Spur UI shows images, videos, text (.txt, .md, .json) inline; HTML as live preview with a standalone-open button; other files as download links.
+- Subfolder files list by relative path, e.g. \`design/design-spec.md\`.`;
 }
