@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadInstanceConfigReadOnly, loadProjectConfig } from "../../src/config.js";
@@ -210,7 +210,7 @@ describe("cron jobs view", () => {
     expect(project?.sources[0]?.triggers).toEqual([]);
     const triggers = project?.sources[1]?.triggers ?? [];
     expect(triggers.map((trigger) => trigger.triggerId)).toEqual(["poke", "pair"]);
-    expect(triggers[0]?.action).toEqual({ kind: "send" });
+    expect(triggers[0]?.action).toEqual({ kind: "send", prompt: "hello" });
     expect(triggers[1]?.action).toEqual({
       kind: "spawn",
       blocks: [
@@ -330,14 +330,33 @@ describe("cron jobs drift", () => {
     expect(project?.sources[0]?.triggers[0]?.disk).toBe("unknown");
   });
 
-  it("marks the owner unresolved when the YAML does not parse", async () => {
+  it("reports a YAML parse error with the parser message and no file excerpt", async () => {
     const f = await fixture();
     await writeFile(f.bootstrapPath, instanceYaml(f, demoProject(f)));
     const running = loadRunning(f.bootstrapPath);
-    await writeFile(f.bootstrapPath, "projects: [unterminated\n");
+    await writeFile(f.bootstrapPath, "projects: [unterminated-secret-x\n");
+    const bytes = await readFile(f.bootstrapPath);
     const project = (await view(f, running)).projects[0];
-    expect(project?.owner).toEqual({ state: "unresolved" });
+    expect(project?.owner).toEqual({
+      state: "parse_error",
+      path: f.bootstrapPath,
+      revision: createHash("sha256").update(bytes).digest("hex"),
+      error: expect.stringMatching(/ at line \d+, column \d+$/) as unknown as string,
+    });
+    expect(JSON.stringify(project)).not.toContain("unterminated-secret-x");
     expect(project?.sources[0]?.disk).toBe("unknown");
+    expect(project?.sources[0]?.triggers[0]?.disk).toBe("unknown");
+  });
+
+  it("marks every loaded row removed when the owner file no longer declares the project", async () => {
+    const f = await fixture();
+    await writeFile(f.bootstrapPath, instanceYaml(f, demoProject(f)));
+    const running = loadRunning(f.bootstrapPath);
+    await writeFile(f.bootstrapPath, instanceYaml(f, `  plain:\n    path: ${f.repo}`));
+    const project = (await view(f, running)).projects[0];
+    expect(project?.owner).toEqual({ state: "project_removed" });
+    expect(project?.sources[0]).toMatchObject({ sourceId: "nightly", disk: "removed" });
+    expect(project?.sources[0]?.triggers[0]?.disk).toBe("removed");
   });
 });
 
@@ -404,20 +423,23 @@ describe("cron jobs owner resolution", () => {
     const side = response.projects.find((project) => project.projectId === "side");
     expect(side?.owner).toMatchObject({ state: "loaded", path: registryPath, changed: false });
     expect(side?.sources[0]?.disk).toBe("same");
-    expect(response.projects.find((project) => project.projectId === "demo")?.owner).toEqual({
-      state: "unresolved",
+    expect(response.projects.find((project) => project.projectId === "demo")?.owner).toMatchObject({
+      state: "parse_error",
+      path: f.bootstrapPath,
     });
   });
 
-  it("absent bootstrap maps to unreadable and leaves its projects unresolved", async () => {
+  it("absent bootstrap maps to missing with unknown rows", async () => {
     const f = await fixture();
     await writeFile(f.bootstrapPath, instanceYaml(f, demoProject(f)));
     const running = loadRunning(f.bootstrapPath);
     await rm(f.bootstrapPath);
     expect(resolveCronOwnerFiles(f.bootstrapPath, [], running)).toEqual([
-      { state: "unreadable", path: f.bootstrapPath, error: "Config file not found" },
+      { state: "missing", path: f.bootstrapPath },
     ]);
-    expect((await view(f, running)).projects[0]?.owner).toEqual({ state: "unresolved" });
+    const project = (await view(f, running)).projects[0];
+    expect(project?.owner).toEqual({ state: "missing", path: f.bootstrapPath });
+    expect(project?.sources[0]?.disk).toBe("unknown");
   });
 });
 
@@ -506,6 +528,28 @@ describe("cron jobs event tail", () => {
     const full = await readCronEventTail(f.dataDir, 1024 * 1024);
     expect(full.eventsSince).toBe("2026-10-01T00:00:00.000Z");
     expect(full.events).toHaveLength(3);
+  });
+
+  it("reuses the last scan while the log size and mtime are unchanged", async () => {
+    const f = await fixture();
+    const path = await writeLog(f, [tickLine("2026-10-01T00:00:00.000Z", "demo", "nightly")]);
+    // Whole-second mtime so restoring it below is exact.
+    const mtime = new Date("2026-10-01T00:00:00.000Z");
+    await utimes(path, mtime, mtime);
+    const first = await readCronEventTail(f.dataDir, 1024 * 1024);
+    // Same length, other content, original mtime: only a rescan would notice.
+    await writeLog(f, [tickLine("2026-10-02T00:00:00.000Z", "demo", "nightly")]);
+    await utimes(path, mtime, mtime);
+    expect(await readCronEventTail(f.dataDir, 1024 * 1024)).toBe(first);
+    await writeLog(f, [
+      tickLine("2026-10-02T00:00:00.000Z", "demo", "nightly"),
+      tickLine("2026-10-03T00:00:00.000Z", "demo", "nightly"),
+    ]);
+    const changed = await readCronEventTail(f.dataDir, 1024 * 1024);
+    expect(changed.events.map((entry) => entry.timestamp)).toEqual([
+      "2026-10-02T00:00:00.000Z",
+      "2026-10-03T00:00:00.000Z",
+    ]);
   });
 
   it("returns no events and no eventsSince for a missing log", async () => {

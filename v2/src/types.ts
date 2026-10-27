@@ -1865,7 +1865,10 @@ export type CronDiskState = "same" | "changed" | "added" | "removed" | "unknown"
 export type CronOwnerState =
   | { state: "loaded"; path: string; revision: string; changed: boolean }
   | { state: "invalid"; path: string; revision: string; error: string }
-  | { state: "unresolved" };
+  | { state: "parse_error"; path: string; revision: string; error: string }
+  | { state: "missing"; path: string }
+  | { state: "unreadable"; path: string; error: string }
+  | { state: "project_removed" };
 
 export type CronActionEventName =
   | "trigger.spawn.completed"
@@ -1892,7 +1895,7 @@ export interface CronTriggerView {
   triggerId: string;
   event: string;
   disk: CronDiskState;
-  action: { kind: "spawn"; blocks: CronSpawnBlockView[] } | { kind: "send" };
+  action: { kind: "spawn"; blocks: CronSpawnBlockView[] } | { kind: "send"; prompt: string | null };
   recentActions: CronActionEvent[];
 }
 

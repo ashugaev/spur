@@ -43,7 +43,9 @@ export type CronOwnerFile =
       error: string;
       declaredProjectIds: readonly string[];
     }
+  | { state: "parse_error"; path: string; revision: string; error: string }
   | { state: "rejected"; path: string; revision: string; error: string }
+  | { state: "missing"; path: string }
   | { state: "unreadable"; path: string; error: string };
 
 export interface CronEventTail {
@@ -55,15 +57,15 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function declaredProjectIds(bytes: Buffer): string[] {
-  try {
-    const root: unknown = parseYaml(bytes.toString("utf8"));
-    if (typeof root !== "object" || root === null) return [];
-    const projects: unknown = (root as Record<string, unknown>)["projects"];
-    return typeof projects === "object" && projects !== null ? Object.keys(projects) : [];
-  } catch {
-    return [];
-  }
+function declaredProjectIds(root: unknown): string[] {
+  if (typeof root !== "object" || root === null) return [];
+  const projects: unknown = (root as Record<string, unknown>)["projects"];
+  return typeof projects === "object" && projects !== null ? Object.keys(projects) : [];
+}
+
+// The YAML parser's first message line: reason and position, never the file excerpt below it.
+function yamlErrorMessage(error: unknown): string {
+  return (errorMessage(error).split("\n")[0] ?? "").replace(/:$/, "");
 }
 
 // Mirrors ConfigRegistryScanner.scan: the bootstrap file first, registry files
@@ -80,20 +82,26 @@ export function resolveCronOwnerFiles(
     try {
       bytes = readFileSync(path);
     } catch (error) {
-      const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
-      files.push({
-        state: "unreadable",
-        path,
-        error: missing ? "Config file not found" : errorMessage(error),
-      });
+      files.push(
+        (error as NodeJS.ErrnoException).code === "ENOENT"
+          ? { state: "missing", path }
+          : { state: "unreadable", path, error: errorMessage(error) },
+      );
       continue;
     }
     const revision = createHash("sha256").update(bytes).digest("hex");
+    let root: unknown;
+    try {
+      root = parseYaml(bytes.toString("utf8"));
+    } catch (error) {
+      files.push({ state: "parse_error", path, revision, error: yamlErrorMessage(error) });
+      continue;
+    }
     let config: AppConfig;
     if (path === bootstrapPath) {
       const result = loadInstanceConfigReadOnly(path);
       if (result.status === "absent") {
-        files.push({ state: "unreadable", path, error: "Config file not found" });
+        files.push({ state: "missing", path });
         continue;
       }
       if (result.status === "invalid") {
@@ -102,7 +110,7 @@ export function resolveCronOwnerFiles(
           path,
           revision,
           error: result.error,
-          declaredProjectIds: declaredProjectIds(bytes),
+          declaredProjectIds: declaredProjectIds(root),
         });
         continue;
       }
@@ -116,7 +124,7 @@ export function resolveCronOwnerFiles(
           path,
           revision,
           error: errorMessage(error),
-          declaredProjectIds: declaredProjectIds(bytes),
+          declaredProjectIds: declaredProjectIds(root),
         });
         continue;
       }
@@ -133,15 +141,32 @@ export function resolveCronOwnerFiles(
   return files;
 }
 
+// Last scan only: a repeat open with an unchanged live log skips the rescan.
+let tailCache: { key: string; tail: CronEventTail } | null = null;
+
 // Scans the live event log from `maxBytes` before its end. Archives are never read.
 export async function readCronEventTail(dataDir: string, maxBytes: number): Promise<CronEventTail> {
   const path = eventLogPath(dataDir);
   let size: number;
+  let key: string;
   try {
-    size = (await stat(path)).size;
+    const stats = await stat(path);
+    size = stats.size;
+    key = `${path}\0${size}\0${stats.mtimeMs}\0${maxBytes}`;
   } catch {
     return { events: [], eventsSince: null };
   }
+  if (tailCache?.key === key) return tailCache.tail;
+  const tail = await scanCronEventTail(path, size, maxBytes);
+  tailCache = { key, tail };
+  return tail;
+}
+
+async function scanCronEventTail(
+  path: string,
+  size: number,
+  maxBytes: number,
+): Promise<CronEventTail> {
   const offset = Math.max(0, size - maxBytes);
   const events: SpurLogEntry[] = [];
   let eventsSince: string | null = null;
@@ -214,7 +239,7 @@ function diskState(
 }
 
 function triggerAction(trigger: TriggerConfig): CronTriggerView["action"] {
-  if (!("spawn" in trigger)) return { kind: "send" };
+  if (!("spawn" in trigger)) return { kind: "send", prompt: trigger.send.prompt ?? null };
   return {
     kind: "spawn",
     blocks: trigger.spawn.blocks.map((block) => ({
@@ -237,16 +262,52 @@ function actionEvent(entry: SpurLogEntry): CronActionEvent {
   };
 }
 
-function ownerFor(projectId: string, files: readonly CronOwnerFile[]): CronOwnerFile | undefined {
-  const loaded = files.find(
-    (file) =>
-      file.state === "loaded" &&
-      Object.prototype.hasOwnProperty.call(file.config.projects, projectId),
+// The first file declaring the project; else the first file that cannot be read
+// or parsed, since it may hold the project; else the project left every file.
+function ownerFor(
+  projectId: string,
+  files: readonly CronOwnerFile[],
+): CronOwnerFile | { state: "project_removed" } {
+  return (
+    files.find(
+      (file) =>
+        file.state === "loaded" &&
+        Object.prototype.hasOwnProperty.call(file.config.projects, projectId),
+    ) ??
+    files.find((file) => file.state === "invalid" && file.declaredProjectIds.includes(projectId)) ??
+    files.find(
+      (file) =>
+        file.state === "parse_error" || file.state === "missing" || file.state === "unreadable",
+    ) ?? { state: "project_removed" }
   );
-  if (loaded) return loaded;
-  return files.find(
-    (file) => file.state === "invalid" && file.declaredProjectIds.includes(projectId),
-  );
+}
+
+function ownerState(
+  owner: ReturnType<typeof ownerFor>,
+  sources: readonly CronSourceView[],
+): CronOwnerState {
+  switch (owner.state) {
+    case "loaded":
+      return {
+        state: "loaded",
+        path: owner.path,
+        revision: owner.revision,
+        changed: sources.some(
+          (source) =>
+            source.disk !== "same" || source.triggers.some((trigger) => trigger.disk !== "same"),
+        ),
+      };
+    case "invalid":
+    case "parse_error":
+      return { state: owner.state, path: owner.path, revision: owner.revision, error: owner.error };
+    case "missing":
+      return { state: "missing", path: owner.path };
+    case "unreadable":
+      return { state: "unreadable", path: owner.path, error: owner.error };
+    case "rejected":
+    case "project_removed":
+      return { state: "project_removed" };
+  }
 }
 
 export function buildCronJobsView(input: {
@@ -279,9 +340,10 @@ export function buildCronJobsView(input: {
     const running = input.running.projects[projectId];
     const ownerFile = ownerFor(projectId, input.ownerFiles);
     const diskProject =
-      ownerFile?.state === "loaded" ? ownerFile.config.projects[projectId] : undefined;
+      ownerFile.state === "loaded" ? ownerFile.config.projects[projectId] : undefined;
     if (!running && !diskProject) continue;
-    const compare = ownerFile?.state === "loaded";
+    // A removed project compares against nothing, so every loaded row reads "removed".
+    const compare = ownerFile.state === "loaded" || ownerFile.state === "project_removed";
 
     const loadedSources = cronSources(running);
     const diskSources = compare ? cronSources(diskProject) : new Map<string, CronSourceConfig>();
@@ -333,31 +395,10 @@ export function buildCronJobsView(input: {
     const sources = [...sourceViews.values()];
     if (sources.length === 0) continue;
 
-    const owner: CronOwnerState =
-      ownerFile?.state === "loaded"
-        ? {
-            state: "loaded",
-            path: ownerFile.path,
-            revision: ownerFile.revision,
-            changed: sources.some(
-              (source) =>
-                source.disk !== "same" ||
-                source.triggers.some((trigger) => trigger.disk !== "same"),
-            ),
-          }
-        : ownerFile?.state === "invalid"
-          ? {
-              state: "invalid",
-              path: ownerFile.path,
-              revision: ownerFile.revision,
-              error: ownerFile.error,
-            }
-          : { state: "unresolved" };
-
     projects.push({
       projectId,
       projectName: (running ?? diskProject)?.name ?? projectId,
-      owner,
+      owner: ownerState(ownerFile, sources),
       sources,
     });
   }
