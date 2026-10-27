@@ -20,8 +20,8 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "681bded9db89826ca8cf0d8b4f90f3018db9683834b9d37f053f6642d9428daa",
-  "types.ts": "40cd7f936153851d070d7bd898db842fa6292c6720b3e70ee2185be878b281e4",
+  "server.ts": "9e54afedeea20722039b87835d5bf7185be3255ada3ab91c7fdf3bb82a02f8aa",
+  "types.ts": "c84ffe4cace33ff76fb902cd303c5fee1526967e8f396ae1d963750de5e161e5",
   "session-service.ts": "61fe3399efc71bc35b8d4c6e654566bd2905e93e16e63676b1f14c83a2c598da",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "837a7052b62b977b59f117e344b83b0f507298ce0d716c1ab637ead711060c42",
@@ -43,9 +43,9 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(80);
+    expect(routes).toHaveLength(81);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(80);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(81);
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("spawn_background_session")?.path).toBe("/sessions/background");
     expect(getDaemonOperation("missing")).toBeUndefined();
@@ -187,7 +187,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(80);
+      expect(page.total).toBe(81);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",
