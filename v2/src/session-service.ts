@@ -8660,10 +8660,12 @@ export class SessionService {
       updateTopicName?: boolean;
       /** Raw pane tail, shown verbatim in a code block after the text. */
       preformatted?: string;
+      /** Destination already checked by the forgotten-reply nudge. */
+      resolved?: ResolvedTelegramNotice;
     } = {},
   ): Promise<void> {
     try {
-      const resolved = this.resolveTelegramNotice(sessionId);
+      const resolved = options.resolved ?? this.resolveTelegramNotice(sessionId);
       if (!resolved) return;
       const { target, source } = resolved;
       this.claimTelegramPlaceholder(sessionId, target);
