@@ -87,8 +87,27 @@ describe("SessionRow actions menu", () => {
   }
 
   it.each([
-    [{ status: "running", runtimeAlive: true }, ["Pause", "Complete", "Kill"]],
-    [{ status: "stopped", state: "stopped", runtimeAlive: false }, ["Restore", "Complete", "Kill"]],
+    [
+      { status: "running", runtimeAlive: true },
+      ["Desk agent", "Handoff", "Pause", "Complete", "Kill"],
+    ],
+    [
+      {
+        status: "running",
+        runtimeAlive: true,
+        agent: "claude",
+        claudeAccounts: [{ id: "work", authenticated: true }],
+      },
+      ["Desk agent", "Handoff", "Switch auth", "Pause", "Complete", "Kill"],
+    ],
+    [
+      { status: "running", runtimeAlive: true, workspaceExists: false },
+      ["Pause", "Recover", "Complete", "Kill"],
+    ],
+    [
+      { status: "stopped", state: "stopped", runtimeAlive: false },
+      ["Desk agent", "Handoff", "Restore", "Complete", "Kill"],
+    ],
     [
       {
         status: "budget_limited",
@@ -104,9 +123,12 @@ describe("SessionRow actions menu", () => {
           exhausted: true,
         },
       },
-      ["Continue anyway", "Complete", "Kill"],
+      ["Desk agent", "Continue anyway", "Complete", "Kill"],
     ],
-    [{ status: "completed", state: "stopped", runtimeAlive: false }, ["Reopen"]],
+    [
+      { status: "completed", state: "stopped", runtimeAlive: false },
+      ["Desk agent", "Reopen", "Edit & Respawn"],
+    ],
   ] as const)("shows detail-page predicates for %o", (overrides, labels) => {
     expect(openMenu(makeSession(overrides))).toEqual(labels);
   });
@@ -129,7 +151,12 @@ describe("SessionRow actions menu", () => {
   it("reserves the slot without a trigger when no action applies", () => {
     const { container } = render(
       <SessionRow
-        session={makeSession({ status: "killed", state: "killed", runtimeAlive: false })}
+        session={makeSession({
+          status: "killed",
+          state: "killed",
+          runtimeAlive: true,
+          workspaceExists: false,
+        })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
         onSessionAction={onSessionAction}

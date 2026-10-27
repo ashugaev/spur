@@ -1020,6 +1020,17 @@ export function canRespawn(session: DashboardSession): boolean {
   );
 }
 
+export function canSwitchAuth(session: DashboardSession): boolean {
+  return (
+    session.agent === "claude" &&
+    (session.claudeAccounts?.some((account) => account.authenticated) ?? false)
+  );
+}
+
+export function canUseDeskCheckout(session: DashboardSession): boolean {
+  return Boolean(session.workspaceExists && session.worktreePath.trim());
+}
+
 export function canReopen(session: DashboardSession): boolean {
   return session.status === "completed" && !session.runtimeAlive;
 }

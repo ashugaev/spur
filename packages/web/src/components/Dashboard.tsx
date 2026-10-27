@@ -12,6 +12,7 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
 import type { SessionRowAction } from "@/components/SessionRow";
+import { useSessionActionDialogs } from "@/components/SessionActionDialogs";
 import { BusyContent } from "@/components/BusyContent";
 import { CenteredLoader } from "@/components/CenteredLoader";
 import { BrandGlyph } from "@/components/BrandGlyph";
@@ -73,6 +74,7 @@ import {
   collapseDeskRows,
   isGithubPrCheckUnavailablePayload,
   isOpenPrActionRequiredPayload,
+  isSessionNotRestorablePayload,
   isTerminalSession,
   toDashboardSession,
   type AttentionLevel,
@@ -2390,6 +2392,12 @@ export function Dashboard() {
           await reconcileAttempt(owner);
           return false;
         }
+        if (action === "restore" && isSessionNotRestorablePayload(payload)) {
+          await reconcileAttempt(owner);
+          if (!lifecycleRef.current.isCurrent(owner)) return false;
+          actionDialogs.openRecover(session, payload);
+          return false;
+        }
         if (action === "kill" && isOpenPrActionRequiredPayload(payload)) {
           await reconcileAttempt(owner);
           if (!lifecycleRef.current.isCurrent(owner)) return false;
@@ -2450,8 +2458,41 @@ export function Dashboard() {
   const handleKillSession = (session: DashboardSession, body: Record<string, unknown> = {}) =>
     handleSessionTransition(session, "kill", { ...body, force: true });
 
+  const actionDialogs = useSessionActionDialogs({
+    resolve: (id) => allSessions.find((candidate) => candidate.id === id) ?? null,
+    showErrorToast,
+    onCreated: () => void queryClient.invalidateQueries({ queryKey: sessionsQueryKey }),
+    onUpdated: (row) => {
+      const accepted = lifecycleRef.current.acceptUpdate(row);
+      if (!accepted) return;
+      queryClient.setQueryData<SpurSessionsResponse>(
+        sessionsQueryKey,
+        (current) =>
+          current && {
+            ...current,
+            sessions: current.sessions.map((candidate) =>
+              candidate.id === accepted.id ? accepted : candidate,
+            ),
+          },
+      );
+      publishTransitions();
+    },
+    onForceKill: (session) => handleKillSession(session),
+    pageBusy: false,
+  });
+
   const handleRowAction = async (session: DashboardSession, action: SessionRowAction) => {
     switch (action) {
+      case "desk":
+        return actionDialogs.openDeskSpawn(session);
+      case "handoff":
+        return actionDialogs.openHandoff(session);
+      case "switchAuth":
+        return actionDialogs.openSwitchAuth(session);
+      case "recover":
+        return actionDialogs.openRecover(session);
+      case "respawn":
+        return actionDialogs.openRespawn(session);
       case "complete":
         return handleCompleteSession(session);
       case "continue":
@@ -3258,6 +3299,7 @@ export function Dashboard() {
           {terminalSession ? (
             <TerminalModal onClose={() => syncTerminalFilter(null)} session={terminalSession} />
           ) : null}
+          {actionDialogs.dialogs}
           {openPrAction ? (
             <OpenPrActionDialog
               busy={openPrActionBusy === openPrAction}

@@ -17,8 +17,13 @@ import {
 import { buildSessionPath } from "@/lib/project-routes";
 import {
   canComplete,
+  canHandoff,
   canPause,
+  canRecover,
   canReopen,
+  canRespawn,
+  canSwitchAuth,
+  canUseDeskCheckout,
   getAttentionLevel,
   isRestorable,
   isTerminalSession,
@@ -208,7 +213,18 @@ function RunningSidecarIndicator({
   );
 }
 
-export type SessionRowAction = "pause" | "restore" | "continue" | "reopen" | "complete" | "kill";
+export type SessionRowAction =
+  | "desk"
+  | "handoff"
+  | "switchAuth"
+  | "pause"
+  | "restore"
+  | "continue"
+  | "reopen"
+  | "recover"
+  | "complete"
+  | "respawn"
+  | "kill";
 
 function RowActionsMenu({
   session,
@@ -230,12 +246,18 @@ function RowActionsMenu({
   });
   const budgetBlocked = isTokenBudgetBlocked(session);
   const restorable = isRestorable(session);
+  // Same order as the detail page action bar; Kill renders last.
   const items: { label: string; action: SessionRowAction }[] = [];
+  if (canUseDeskCheckout(session)) items.push({ label: "Desk agent", action: "desk" });
+  if (canHandoff(session)) items.push({ label: "Handoff", action: "handoff" });
+  if (canSwitchAuth(session)) items.push({ label: "Switch auth", action: "switchAuth" });
   if (canPause(session)) items.push({ label: "Pause", action: "pause" });
   if (restorable && !budgetBlocked) items.push({ label: "Restore", action: "restore" });
   if (restorable && budgetBlocked) items.push({ label: "Continue anyway", action: "continue" });
   if (canReopen(session)) items.push({ label: "Reopen", action: "reopen" });
+  if (canRecover(session)) items.push({ label: "Recover", action: "recover" });
   if (canComplete(session)) items.push({ label: "Complete", action: "complete" });
+  if (canRespawn(session)) items.push({ label: "Edit & Respawn", action: "respawn" });
   const showKill = !isTerminalSession(session);
   if (items.length === 0 && !showKill)
     return <span aria-hidden="true" className="hidden h-6 w-6 shrink-0 lg:inline-flex" />;

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
@@ -26,6 +26,7 @@ const running: SpurSessionView = {
   lastActivityAt: "2026-01-01",
   runtimeAlive: true,
   workspaceExists: true,
+  worktreePath: "/tmp/row-one",
   services: [],
   slots: { title: "Row session", links: [] },
   lifecycle: { instanceId: "epoch-one", revision: 0, operation: null },
@@ -142,5 +143,67 @@ describe("Dashboard row actions", () => {
       expect(screen.queryByRole("dialog", { name: "Open Pull Request" })).not.toBeInTheDocument(),
     );
     expect(kills).toEqual([{ force: true }, { prAction: "leave_open", force: true }]);
+  });
+
+  function editorFetch(url: string) {
+    if (url.startsWith("/api/models")) return json({ models: [{ id: "auto", label: "Auto" }] });
+    if (url.startsWith("/api/projects/api/spawn-defaults"))
+      return json({ model: "auto", worktree: false });
+    if (url.includes("/slash-commands")) return json({ commands: [] });
+    return null;
+  }
+
+  it.each([
+    ["Handoff", running, "Handoff"],
+    ["Desk agent", running, "Desk agent"],
+    [
+      "Edit & Respawn",
+      { ...running, status: "errored", state: "error", runtimeAlive: false },
+      "Edit & Respawn",
+    ],
+  ] as const)("opens the detail-page %s editor from the row menu", async (label, row, title) => {
+    mount(async (url) => {
+      if (url === "/api/sessions") return list([row as SpurSessionView]);
+      const editor = editorFetch(url);
+      if (editor) return editor;
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    await choose(label);
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(title);
+  });
+
+  it("opens Recover for a not-restorable restore and force-kills from it", async () => {
+    let rows: SpurSessionView[] = [
+      { ...running, status: "stopped", state: "stopped", runtimeAlive: false },
+    ];
+    const calls: string[] = [];
+    mount(async (url) => {
+      if (url === "/api/sessions") return list(rows);
+      if (url.endsWith("/restore")) {
+        calls.push("restore");
+        return json(
+          {
+            code: "session_not_restorable",
+            sessionId: running.id,
+            reason: "Workspace is gone",
+            availableActions: ["force_kill", "respawn"],
+          },
+          409,
+        );
+      }
+      if (url.endsWith("/kill")) {
+        calls.push("kill");
+        rows = [{ ...running, status: "killed", state: "killed", runtimeAlive: false }];
+        return json({ ok: true });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    await choose("Restore");
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Workspace is gone");
+    fireEvent.click(within(dialog).getByRole("button", { name: /force kill/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(calls).toEqual(["restore", "kill"]);
   });
 });
