@@ -23,7 +23,9 @@ acceptance criteria (visual, testable); approval status (pending |
 approved by user @ <ISO>).
 
 APPROVAL: design-author exports, returns PENDING_APPROVAL, never waits.
-Manager hard-stops, pings user with canvas URL + summary, resumes when
-approval status is approved. Downstream (architect, developer, designer)
+Manager hard-stops, sends PNG render to session Telegram chat plus
+approval question with --button choices, duplicates both in chat,
+resumes when approval status is approved. Approval always by image,
+never by text spec. Downstream (architect, developer, designer)
 read design-spec.md and honor it; Tier 2/3 curator optionally notes
 "Accepted design" in task-memory.md.
