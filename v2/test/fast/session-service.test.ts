@@ -9631,6 +9631,50 @@ describe("SessionService", () => {
       expect(result).toMatchObject({ ok: true, chatId: -1001, messageThreadId: 22 });
     });
 
+    it("keeps an explicit unwatch during first-topic body send without recreating routing", async () => {
+      let stored: Record<string, unknown> | null = null;
+      readTelegramReplyTargetMock.mockImplementation(() => stored);
+      writeTelegramReplyTargetMock.mockImplementation((_dir: string, target: object) => {
+        stored = { ...target, updatedAt: "2026-03-18T10:06:00.000Z" };
+      });
+      let publish: (() => void) | undefined;
+      const published = new Promise<void>((resolve) => {
+        publish = resolve;
+      });
+      let finish: (() => void) | undefined;
+      const body = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      sendTelegramReplyMock.mockImplementationOnce(
+        async (
+          _source,
+          _target,
+          _text,
+          options: { onTopicCreated: (id: number) => Promise<void> },
+        ) => {
+          await options.onTopicCreated(55);
+          publish?.();
+          await body;
+          return { messageThreadId: 55, messageIds: [91] };
+        },
+      );
+      const { service } = await serviceWithTelegramSession(undefined, -1009);
+      const reply = service.replyToSource("api-1", { message: "first" });
+      await published;
+      expect(stored).toMatchObject({ messageThreadId: 55 });
+      expect(writeTelegramBindingsMock).toHaveBeenCalledTimes(1);
+      // /unwatch removes the published target and binding while the body is pending.
+      stored = null;
+      writeTelegramBindingsMock.mockClear();
+      writeTelegramReplyTargetMock.mockClear();
+      finish?.();
+      await reply;
+      expect(stored).toBeNull();
+      expect(writeTelegramBindingsMock).not.toHaveBeenCalled();
+      expect(writeTelegramReplyTargetMock).not.toHaveBeenCalled();
+      expect(deleteTelegramTopicMock).not.toHaveBeenCalled();
+    });
+
     it("opens a new topic for a session with no target and records it", async () => {
       let stored: Record<string, unknown> | null = null;
       readTelegramReplyTargetMock.mockImplementation(() => stored);

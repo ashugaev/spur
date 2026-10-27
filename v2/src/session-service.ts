@@ -15305,6 +15305,7 @@ export class SessionService {
       });
     }
     this.claimTelegramPlaceholder(sessionId, target);
+    let createdTopicPublished = false;
     const result = await sendTelegramReply(
       source,
       target,
@@ -15334,6 +15335,7 @@ export class SessionService {
               }
               this.bindTelegramChatIfFree(created, sessionId);
               writeTelegramReplyTarget(this.config.dataDir, { ...created, sessionId });
+              createdTopicPublished = true;
             } catch (error) {
               const bindings = readTelegramBindings(
                 this.config.dataDir,
@@ -15400,12 +15402,10 @@ export class SessionService {
         choices: [],
       });
     }
-    // A target that existed when the send began is never re-created: it was
-    // removed mid-send (a spawn took the thread over), and writing it back
-    // would keep this session posting into a thread it no longer owns.
+    // Never recreate published routing removed mid-send by unwatch or takeover.
     const sent = { lastReplyAt: nowIso(), topicName: telegramTopicName(view) };
     const settledTarget =
-      storedTarget === null
+      storedTarget === null && !createdTopicPublished
         ? this.recordTelegramSend(sessionId, target, result, { ...sent, createIfMissing: true })
         : this.recordTelegramSend(sessionId, target, result, { ...sent, createIfMissing: false });
     const replyTarget = settledTarget ?? target;
