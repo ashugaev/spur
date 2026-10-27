@@ -7838,6 +7838,54 @@ describe("startConfiguredTriggers", () => {
       }
     });
 
+    it.each(["known", "tagged"] as const)(
+      "holds the RAW %s owner on typed lifecycle503 without birthing a replacement",
+      async (kind) => {
+        const previous = workItemMember({
+          state: kind === "known" ? "running" : "spawning",
+          sessionId: kind === "known" ? "api-9" : undefined,
+          claimedAt: new Date(Date.now() - 46 * MINUTE).toISOString(),
+        });
+        const records = useWorkItemLifecycleStore([workItemLifecycle([previous])]);
+        const accepted = acceptedSession("api-9");
+        listSessionsMock.mockReturnValue([accepted]);
+        const spawn = vi.fn();
+        const discardFailedSpawn = vi.fn();
+        const get = vi.fn();
+        const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
+          spawn,
+          get,
+          discardFailedSpawn,
+        });
+        const { SessionLifecycleError } = await import("../../src/session-lifecycle.js");
+        get.mockRejectedValue(
+          new SessionLifecycleError("Snapshot changed", 503, {
+            code: "session_lifecycle_snapshot_changed",
+            lifecycle: { instanceId: "test-instance", revision: 1, operation: null },
+          }),
+        );
+        try {
+          bus.emit(workItemEvent());
+          await vi.waitFor(() =>
+            expect(
+              eventsOf(kind === "known" ? "trigger.spawn.suppressed" : "trigger.spawn.failed"),
+            ).toHaveLength(1),
+          );
+          expect(get).toHaveBeenCalledWith("api-9");
+          expect(memberOf(records)).toEqual(previous);
+          expect(listSessionsMock()).toEqual([accepted]);
+          if (kind === "known")
+            expect(eventsOf("trigger.spawn.suppressed")[0]?.details?.reason).toBe(
+              "owner_load_failed",
+            );
+          expect(spawn).not.toHaveBeenCalled();
+          expect(discardFailedSpawn).not.toHaveBeenCalled();
+        } finally {
+          await controller.stop();
+        }
+      },
+    );
+
     it("releases the claim when a tagged-session lookup fails", async () => {
       const stale = workItemMember({
         state: "spawning",

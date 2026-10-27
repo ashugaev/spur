@@ -70,6 +70,7 @@ import {
   type ServiceInstanceRecord,
   type SessionMemoryRecord,
   type SessionRecord,
+  type SessionLifecycleSnapshot,
   type SessionSidecarView,
   type SessionState,
   type SessionStateTransition,
@@ -8429,11 +8430,19 @@ describe("SessionService", () => {
       });
       const request = { project: "api", prompt: "hello", agent: "codex" as const };
       if (background) {
-        await service.spawnInBackground(request);
-        await vi.waitFor(() => expect(sessions.get("api-1")?.status).toBe("running"));
-        if (failReady)
-          await vi.waitFor(() => expect(sessions.get("api-1")?.error).toBe("ready failure"));
-        else
+        const accepted = await service.spawnInBackground(request);
+        expect(accepted.id).toBe("api-1");
+        if (failReady) {
+          await vi.waitFor(() =>
+            expect(sessions.get(accepted.id)).toMatchObject({
+              id: accepted.id,
+              status: "spawning",
+              error: "ready failure",
+              spawnIntent: { phase: "launching", submission: { state: "pending" } },
+            }),
+          );
+        } else {
+          await vi.waitFor(() => expect(sessions.get("api-1")?.status).toBe("running"));
           await vi.waitFor(() =>
             expect(
               logSpurEventMock.mock.calls.filter(
@@ -8441,6 +8450,7 @@ describe("SessionService", () => {
               ),
             ).toHaveLength(1),
           );
+        }
       } else if (failReady) {
         await expect(service.spawn(request)).rejects.toThrow("ready failure");
       } else {
@@ -8589,6 +8599,12 @@ describe("SessionService", () => {
       attempts.push({ ...record });
       if (attempts.length === 1) {
         vi.setSystemTime(Date.now() + 1_000);
+        lookupTmuxPanePidMock.mockResolvedValueOnce({ status: "ok", panePid: null });
+        captureAgentProcessesForLaunchMock.mockResolvedValueOnce({
+          status: "ok",
+          processes: [],
+          complete: true,
+        });
         throw new Error("first create failed");
       }
       tmuxSessionExistsMock.mockResolvedValue(true);
@@ -19331,13 +19347,32 @@ describe("SessionService", () => {
       const ledgerPath = join(TEST_DATA_DIR, "sessions", session.id, "todo.jsonl");
       const ledgerBefore = readFileSync(ledgerPath, "utf8");
       const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const recovered = mode === "credited" || mode === "no telemetry";
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: !recovered,
+      });
+      let releaseBlockedDelivery: (() => void) | undefined;
       try {
         await service.settleBackgroundSpawns();
         expect((await service.get(session.id)).state).toBe("rate_limited");
         const episode = sessions.get(session.id)?.rateLimitedAt;
         expect(episode).toBeDefined();
+        let deliveryBlocked: Promise<void> | undefined;
+        if (!recovered) {
+          let entered!: () => void;
+          deliveryBlocked = new Promise<void>((resolve) => {
+            entered = resolve;
+          });
+          const held = new Promise<void>((resolve) => {
+            releaseBlockedDelivery = resolve;
+          });
+          timerPromisesSleepMock.mockImplementationOnce(async () => {
+            entered();
+            await held;
+          });
+        }
         await service.send(session.id, { message: "original credit recovery intent", queue: true });
+        if (deliveryBlocked) await deliveryBlocked;
         expect(sessions.get(session.id)?.queuedMessages?.messages).toEqual([
           "original credit recovery intent",
         ]);
@@ -19376,7 +19411,15 @@ describe("SessionService", () => {
           captureTmuxPaneMock.mockResolvedValue("› Ready for the next task");
         }
         await advanceSeconds(6);
-        const recovered = mode === "credited" || mode === "no telemetry";
+        if (recovered)
+          await waitForRealTime(() => {
+            expect(
+              sendMessageToTmuxMock.mock.calls.filter(
+                ([, text]) => text === "original credit recovery intent",
+              ),
+            ).toHaveLength(1);
+            expect(sessions.get(session.id)?.queuedMessages?.messages ?? []).toEqual([]);
+          });
         const current = sessions.get(session.id);
         if (!current) throw new Error("Missing FIFO fixture record");
         expect(current.rateLimitedAt ?? episode).toBe(episode);
@@ -19430,6 +19473,10 @@ describe("SessionService", () => {
         expect(createTmuxSessionMock).not.toHaveBeenCalled();
       } finally {
         service.dispose();
+        if (releaseBlockedDelivery) {
+          releaseBlockedDelivery();
+          await Promise.all(sessionServiceInternals(service).deliveryRuns.values());
+        }
       }
     },
   );
@@ -19441,8 +19488,10 @@ describe("SessionService", () => {
     ...[
       "no completion",
       "unknown telemetry",
+      "unknown completion",
       "null pane",
       "blank pane",
+      "whitespace pane",
       "old completion",
       "legacy owner",
       "mismatched owner",
@@ -19461,9 +19510,11 @@ describe("SessionService", () => {
           ? null
           : mode === "blank pane"
             ? ""
-            : mode === "static hard banner"
-              ? "■ Your workspace is out of credits"
-              : "› Ready",
+            : mode === "whitespace pane"
+              ? "  \n "
+              : mode === "static hard banner"
+                ? "■ Your workspace is out of credits"
+                : "› Ready",
     })),
   ])(
     "Codex hard-limit episode recovery holds the original FIFO through $mode / $pane",
@@ -19501,7 +19552,10 @@ describe("SessionService", () => {
           payload: {
             type: "token_count",
             info: null,
-            rate_limits: mode === "unknown telemetry" ? {} : { primary: { used_percent: 0 } },
+            rate_limits:
+              mode === "unknown telemetry" || mode === "unknown completion"
+                ? {}
+                : { primary: { used_percent: 0 } },
           },
         }),
       ];
@@ -19584,7 +19638,12 @@ describe("SessionService", () => {
       }
       for (const elapsed of [6, 16]) {
         await advanceSeconds(elapsed);
-        expect((await service.get(session.id)).state).toBe("rate_limited");
+        if (mode === "boundary changed during clear" && elapsed === 6)
+          await expect(service.get(session.id)).rejects.toMatchObject({
+            statusCode: 503,
+            payload: { code: "session_lifecycle_snapshot_changed" },
+          });
+        else expect((await service.get(session.id)).state).toBe("rate_limited");
         expect(await sessionServiceInternals(service).tryDeliverQueuedMessage(session.id)).toBe(
           false,
         );
@@ -19596,6 +19655,328 @@ describe("SessionService", () => {
       }
       expect(createTmuxSessionMock).not.toHaveBeenCalled();
       service.dispose();
+    },
+  );
+
+  it.each([
+    { label: "hard", pane: "■ Your workspace is out of credits", state: "rate_limited" },
+    { label: "MCP", pane: CODEX_MCP_PANE, state: "needs_input" },
+  ])("Phase B completed credited foreground observes $label evidence", async ({ pane, state }) => {
+    const session = runningSession({ agent: "codex", agentSessionId: "completed-thread" });
+    createSessionStore(session);
+    const path = await useActualCodexLimits(
+      { primary: { used_percent: 0 }, credits: { has_credits: true, unlimited: false } },
+      session,
+    );
+    appendFileSync(
+      path,
+      JSON.stringify({
+        timestamp: new Date(Date.now()).toISOString(),
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "completed-turn" },
+      }) + "\n",
+    );
+    captureTmuxPaneMock.mockResolvedValue(pane);
+    const service = await createDisposedSessionService();
+    try {
+      expect((await service.get(session.id)).state).toBe(state);
+      expect(captureTmuxPaneMock).toHaveBeenCalled();
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it.each(["foreground", "background"] as const)(
+    "Phase B stale %s evidence cannot overwrite a newer MCP observation",
+    async (mode) => {
+      const session = runningSession({
+        agent: "codex",
+        agentSessionId: "overlap-thread",
+        agentLaunchId: "overlap-launch",
+        codexRestoreLaunchId: "overlap-launch",
+        codexRestoreStartedAt: new Date(Date.now() - 1000).toISOString(),
+      });
+      const sessions = createSessionStore(session);
+      const path = await useActualCodexLimits({ primary: { used_percent: 0 } }, session);
+      appendFileSync(
+        path,
+        JSON.stringify({
+          timestamp: new Date(Date.now()).toISOString(),
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "overlap-turn" },
+        }) + "\n",
+      );
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      let releaseQueue!: () => void;
+      const queueBarrier = new Promise<void>((resolve) => {
+        releaseQueue = resolve;
+      });
+      let queueEntered!: () => void;
+      const blockedQueue = new Promise<void>((resolve) => {
+        queueEntered = resolve;
+      });
+      try {
+        expect((await service.get(session.id)).state).toBe("working");
+        timerPromisesSleepMock.mockImplementationOnce(async () => {
+          queueEntered();
+          await queueBarrier;
+        });
+        await service.send(session.id, { message: "original overlap intent", queue: true });
+        await blockedQueue;
+        const before = sessions.get(session.id);
+        if (!before) throw new Error("Missing overlap record");
+        appendFileSync(
+          path,
+          JSON.stringify({
+            timestamp: new Date(Date.now() + 1).toISOString(),
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: null,
+              rate_limits: { primary: { used_percent: 100 } },
+            },
+          }) + "\n",
+        );
+        appendFileSync(
+          path,
+          JSON.stringify({
+            timestamp: new Date(Date.now() + 1).toISOString(),
+            type: "event_msg",
+            payload: { type: "task_complete", turn_id: "overlap-turn" },
+          }) + "\n",
+        );
+        let enter!: () => void;
+        const entered = new Promise<void>((resolve) => {
+          enter = resolve;
+        });
+        let release!: () => void;
+        const barrier = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        if (mode === "foreground")
+          captureTmuxPaneMock.mockImplementationOnce(async () => {
+            enter();
+            await barrier;
+            return "■ Your workspace is out of credits";
+          });
+        else {
+          const reporting = service as unknown as {
+            sidecarViews: (...args: unknown[]) => Promise<SessionSidecarView[]>;
+          };
+          const original = reporting.sidecarViews.bind(service);
+          vi.spyOn(reporting, "sidecarViews").mockImplementationOnce(async (...args) => {
+            const value = await original(...args);
+            enter();
+            await barrier;
+            return value;
+          });
+        }
+        const pending =
+          mode === "foreground"
+            ? internals.classifySessionRecord(before)
+            : internals.enrichDashboard(before);
+        const outcome = pending.then(
+          () => "published",
+          () => "invalidated",
+        );
+        await entered;
+        captureTmuxPaneMock.mockResolvedValue(CODEX_MCP_PANE);
+        expect((await internals.classifySessionRecord(before)).state).toBe("needs_input");
+        const peer = structuredClone(internals.codexMcpDialogOverrides.get(session.id));
+        expect(peer?.kind).toBe("mcp");
+        const history = structuredClone(
+          (
+            service as unknown as { stateHistory: Map<string, SessionStateTransition[]> }
+          ).stateHistory.get(session.id),
+        );
+        release();
+        const settled = await outcome;
+        expect(internals.codexMcpDialogOverrides.get(session.id)).toEqual(peer);
+        expect(
+          (
+            service as unknown as { stateHistory: Map<string, SessionStateTransition[]> }
+          ).stateHistory.get(session.id),
+        ).toEqual(history);
+        expect(settled).toBe("invalidated");
+        expect(sessions.get(session.id)?.rateLimitedAt).toBe(before.rateLimitedAt);
+        expect(sessions.get(session.id)?.queuedMessages?.messages).toEqual([
+          "original overlap intent",
+        ]);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+        releaseQueue();
+      }
+    },
+  );
+
+  it.each(["stopped", "errored", "running"] as const)(
+    "Phase B owns %s prefix normalization without stamping legacy restore metadata",
+    async (status) => {
+      const session = runningSession({
+        agent: "codex",
+        agentSessionId: "normalization-thread",
+        status,
+        ...(status !== "stopped"
+          ? {
+              error: "Agent runtime exited unexpectedly.",
+              errorSource: "inferred_runtime_exit" as const,
+            }
+          : {}),
+      });
+      const sessions = createSessionStore(session);
+      const path = await useActualCodexLimits({ primary: { used_percent: 0 } }, session);
+      appendFileSync(
+        path,
+        JSON.stringify({
+          timestamp: new Date(Date.now()).toISOString(),
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "normalization-turn" },
+        }) + "\n",
+      );
+      const service = await createDisposedSessionService();
+      try {
+        expect(await service.get(session.id)).toMatchObject({
+          status: "running",
+          state: "working",
+        });
+        expect(sessions.get(session.id)).not.toHaveProperty("error");
+        expect(sessions.get(session.id)).not.toHaveProperty("codexRestoreLaunchId");
+        expect(sessions.get(session.id)).not.toHaveProperty("codexRestoreStartedAt");
+      } finally {
+        service.dispose();
+      }
+    },
+  );
+
+  it.each(["legacy paused", "stopped error", "running"] as const)(
+    "Phase B manual %s response begins after its owned refresh",
+    async (mode) => {
+      const session = runningSession({
+        agent: "codex",
+        agentSessionId: "manual-thread",
+        status:
+          mode === "legacy paused" ? "paused" : mode === "stopped error" ? "stopped" : "running",
+        ...(mode === "stopped error"
+          ? { error: "retained error", errorSource: "other" as const }
+          : {}),
+      });
+      const sessions = createSessionStore(session);
+      const service = await createDisposedSessionService();
+      try {
+        expect(await service.pause(session.id)).toMatchObject({
+          id: session.id,
+          status: "stopped",
+          state: "stopped",
+          stopReason: "manual_pause",
+        });
+        expect(sessions.get(session.id)).not.toHaveProperty("error");
+        expect(sessions.get(session.id)?.agentSessionId).toBe(session.agentSessionId);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    },
+  );
+
+  it.each(["full", "dashboard", "detail"] as const)(
+    "Phase B invalidated %s publication preserves unaffected rows and refuses stale evidence",
+    async (mode) => {
+      mockClaudeJsonlState("waiting");
+      const session = runningSession({ agent: "codex", agentSessionId: "publication-thread" });
+      const other = runningSession({ id: "api-other" });
+      const sessions = createSessionStore(session, other);
+      const path = await useActualCodexLimits({ primary: { used_percent: 0 } }, session);
+      const service = await createDisposedSessionService();
+      const internals = service as unknown as {
+        runDashboardCacheTick(): Promise<void>;
+        sidecarViews: (...args: unknown[]) => Promise<SessionSidecarView[]>;
+        lifecycle: {
+          begin(action: "restore", ids: string[]): SessionLifecycleSnapshot;
+          settle(
+            owner: SessionLifecycleSnapshot,
+            success: boolean,
+            result: () => "failed",
+            exists: () => boolean,
+          ): unknown;
+        };
+      };
+      try {
+        if (mode === "dashboard") {
+          await internals.runDashboardCacheTick();
+          const owner = internals.lifecycle.begin("restore", [session.id]);
+          internals.lifecycle.settle(
+            owner,
+            false,
+            () => "failed",
+            () => true,
+          );
+          sessions.set(session.id, { ...session, prompt: "current publication fixture" });
+        }
+        appendFileSync(
+          path,
+          JSON.stringify({
+            timestamp: new Date(Date.now() + 1).toISOString(),
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: null,
+              rate_limits: { primary: { used_percent: 100 } },
+            },
+          }) + "\n",
+        );
+        let enter!: () => void;
+        const entered = new Promise<void>((resolve) => {
+          enter = resolve;
+        });
+        let release!: () => void;
+        const barrier = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const original = internals.sidecarViews.bind(service);
+        let blocked = false;
+        vi.spyOn(internals, "sidecarViews").mockImplementation(async (...args) => {
+          const value = await original(...args);
+          if ((args[0] as SessionRecord).id === session.id && !blocked) {
+            blocked = true;
+            enter();
+            await barrier;
+          }
+          return value;
+        });
+        const pending = mode === "detail" ? service.get(session.id) : service.list({ view: mode });
+        const outcome = pending.then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        );
+        await entered;
+        captureTmuxPaneMock.mockResolvedValue(CODEX_MCP_PANE);
+        const current = sessions.get(session.id);
+        if (!current) throw new Error("Missing publication record");
+        expect((await sessionServiceInternals(service).classifySessionRecord(current)).state).toBe(
+          "needs_input",
+        );
+        release();
+        const result = await outcome;
+        if (mode === "detail")
+          expect(result).toMatchObject({
+            error: { statusCode: 503, payload: { code: "session_lifecycle_snapshot_changed" } },
+          });
+        else {
+          expect(result).toMatchObject({ value: [expect.objectContaining({ id: other.id })] });
+          expect(
+            logSpurEventMock.mock.calls.some(
+              ([, event]) =>
+                event.event === "session.list.enrich_failed" && event.sessionId === session.id,
+            ),
+          ).toBe(true);
+        }
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
     },
   );
 
@@ -21877,8 +22258,10 @@ describe("SessionService", () => {
       });
 
       try {
-        const result = await pending;
-        expect(result.state).toBe("error");
+        await expect(pending).rejects.toMatchObject({
+          statusCode: 503,
+          payload: { code: "session_lifecycle_snapshot_changed" },
+        });
         expect(sessions.get(record.id)).toEqual(replacement);
         expect(writeSessionMock).not.toHaveBeenCalled();
       } finally {
@@ -24091,6 +24474,92 @@ describe("SessionService", () => {
     await service.restoreRebootedSessions([{ id: "api-1", project: "api" }]);
 
     expect(timerPromisesSleepMock).not.toHaveBeenCalled();
+  });
+
+  describe("background acceptance response ordering", () => {
+    it.each(["success", "view failure", "cancel", "dispose"] as const)(
+      "preserves same-ID scheduling and completion cleanup on %s",
+      async (mode) => {
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        const service = await createDisposedSessionService();
+        const internals = service as unknown as {
+          enrich(record: SessionRecord): Promise<SessionView>;
+          recoverDurableSpawns(): Promise<void>;
+          durableSpawnRuns: Set<string>;
+          backgroundSpawnRuns: Set<Promise<void>>;
+          spawnCompletions: Map<string, unknown>;
+        };
+        vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+          found: true,
+          lastScannedFile: null,
+        });
+        const original = internals.enrich.bind(service);
+        let enter!: (id: string) => void;
+        const entered = new Promise<string>((resolve) => {
+          enter = resolve;
+        });
+        let release!: () => void;
+        const viewGate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const viewError = new Error("Accepted view unavailable");
+        vi.spyOn(internals, "enrich").mockImplementationOnce(async (record) => {
+          expect(internals.durableSpawnRuns.has(record.id)).toBe(true);
+          await internals.recoverDurableSpawns();
+          enter(record.id);
+          await viewGate;
+          if (mode === "view failure") throw viewError;
+          return original(record);
+        });
+        const outcome = service
+          .spawnInBackground({ project: "api", prompt: "ordered accepted launch" })
+          .then(
+            (view) => ({ view }),
+            (error: unknown) => ({ error }),
+          );
+        try {
+          const id = await entered;
+          const accepted = sessions.get(id);
+          expect(accepted).toMatchObject({
+            status: "spawning",
+            spawnReceipt: { version: 1 },
+            spawnIntent: { phase: "queued" },
+          });
+          await internals.recoverDurableSpawns();
+          expect(sessions.size).toBe(1);
+          expect(internals.durableSpawnRuns.size).toBe(1);
+          expect(createWorktreeMock).not.toHaveBeenCalled();
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          if (mode === "cancel" || mode === "dispose") {
+            if (mode === "cancel") await service.pause(id);
+            else service.dispose();
+            // Deliberately NEVER release viewGate: completion cancellation must drain the runner.
+            await service.settleBackgroundSpawns();
+            expect(await outcome).toHaveProperty("error");
+            expect(internals.durableSpawnRuns.size).toBe(0);
+            expect(internals.backgroundSpawnRuns.size).toBe(0);
+            expect(internals.spawnCompletions.size).toBe(0);
+            expect(createWorktreeMock).not.toHaveBeenCalled();
+            expect(createTmuxSessionMock).not.toHaveBeenCalled();
+            expect(sessions.get(id)?.id).toBe(id);
+            if (mode === "dispose") expect(sessions.get(id)?.spawnIntent?.phase).toBe("queued");
+            else expect(sessions.get(id)).not.toHaveProperty("spawnIntent");
+          } else {
+            release();
+            const result = await outcome;
+            if (mode === "view failure") expect(result).toEqual({ error: viewError });
+            else expect(result).toMatchObject({ view: { id } });
+            await service.settleBackgroundSpawns();
+            expect(sessions.get(id)?.status).toBe("running");
+            expect(sessions.size).toBe(1);
+            expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+          }
+        } finally {
+          service.dispose();
+        }
+      },
+    );
   });
 
   describe("durable spawn recovery", () => {
@@ -37280,7 +37749,7 @@ describe("SessionService", () => {
   });
 
   it("re-discovers codex session ids from the session-scoped codex home during send recovery", async () => {
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "codex",
