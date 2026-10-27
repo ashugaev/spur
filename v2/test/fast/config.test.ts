@@ -2747,6 +2747,39 @@ projects:
     }
   });
 
+  it("loads github source ignoreChecks", async () => {
+    const configured = loadConfig(
+      await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        ignoreChecks: [approvals, "Spur Approval Gate"]
+`),
+    );
+    expect(configured.projects.backend?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      ignoreChecks: ["approvals", "Spur Approval Gate"],
+    });
+  });
+
+  it("rejects invalid ignoreChecks", async () => {
+    for (const value of ["approvals", '[""]']) {
+      const path = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        ignoreChecks: ${value}
+`);
+      expect(() => loadConfig(path)).toThrow(/\.ignoreChecks/);
+    }
+  });
+
   describe("signPosts", () => {
     const marker = "[AI-generated, session: {session}]";
     const otherMarker = "[bot {session}]";

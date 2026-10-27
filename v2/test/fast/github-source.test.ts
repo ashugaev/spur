@@ -1371,7 +1371,11 @@ describe("github source", () => {
     });
   }
 
-  async function startLifecycle(emit: (name: string, data?: unknown) => void, selfMarker?: string) {
+  async function startLifecycle(
+    emit: (name: string, data?: unknown) => void,
+    selfMarker?: string,
+    ignoreChecks?: string[],
+  ) {
     return githubSourceModule.start({
       sourceId: "pr-watch",
       projectId: "api",
@@ -1382,6 +1386,7 @@ describe("github source", () => {
         runOnStart: false,
         emitExisting: false,
         ...(selfMarker ? { selfMarker } : {}),
+        ...(ignoreChecks ? { ignoreChecks } : {}),
       },
       emit,
       signal: new AbortController().signal,
@@ -1390,7 +1395,10 @@ describe("github source", () => {
     });
   }
 
-  async function pollCiSignal(rollup: unknown[]): Promise<ReviewSignal | undefined> {
+  async function pollCiSignal(
+    rollup: unknown[],
+    ignoreChecks?: string[],
+  ): Promise<{ signal: ReviewSignal | undefined; emit: ReturnType<typeof vi.fn> }> {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
     ghMock
@@ -1399,10 +1407,11 @@ describe("github source", () => {
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]");
-    const handle = await startLifecycle(vi.fn());
+    const emit = vi.fn();
+    const handle = await startLifecycle(emit, undefined, ignoreChecks);
     const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
     handle.stop();
-    return snapshot.signals.get("ci_failed");
+    return { signal: snapshot.signals.get("ci_failed"), emit };
   }
   const rolledRun = (
     conclusion: string,
@@ -1423,7 +1432,7 @@ describe("github source", () => {
   });
 
   it("emits no ci_failed for a cancelled run superseded by a later suite of the same workflow", async () => {
-    const signal = await pollCiSignal([
+    const { signal } = await pollCiSignal([
       rolledRun("CANCELLED", { id: 1, createdAt: "2026-01-01T00:00:00Z", app: 5, workflow: 7 }),
       rolledRun("SUCCESS", { id: 2, createdAt: "2026-01-01T00:05:00Z", app: 5, workflow: 7 }),
     ]);
@@ -1431,10 +1440,33 @@ describe("github source", () => {
   });
 
   it("emits ci_failed when another app publishes a later success under the same name", async () => {
-    const signal = await pollCiSignal([
+    const { signal } = await pollCiSignal([
       rolledRun("FAILURE", { id: 1, createdAt: "2026-01-01T00:00:00Z", app: 5, workflow: null }),
       rolledRun("SUCCESS", { id: 2, createdAt: "2026-01-01T00:05:00Z", app: 6, workflow: null }),
     ]);
+    expect(signal?.text).toBe("CI is failing: Labeler.");
+  });
+
+  it("ignoreChecks drops ci_failed when only ignored checks fail", async () => {
+    const { signal, emit } = await pollCiSignal(
+      [
+        { name: "approvals", conclusion: "FAILURE", status: "COMPLETED" },
+        { name: "Spur Approval Gate", conclusion: "FAILURE", status: "COMPLETED" },
+      ],
+      ["approvals", "Spur Approval Gate"],
+    );
+    expect(signal).toBeUndefined();
+    expect(emit).not.toHaveBeenCalledWith("github:ci_failed", expect.anything());
+  });
+
+  it("ignoreChecks keeps non-ignored failing checks in ci_failed", async () => {
+    const { signal } = await pollCiSignal(
+      [
+        { name: "approvals", conclusion: "FAILURE", status: "COMPLETED" },
+        { name: "Labeler", conclusion: "FAILURE", status: "COMPLETED" },
+      ],
+      ["approvals"],
+    );
     expect(signal?.text).toBe("CI is failing: Labeler.");
   });
 
