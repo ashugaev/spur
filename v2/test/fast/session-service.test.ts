@@ -33308,7 +33308,6 @@ describe("SessionService", () => {
           tmuxSession: "api-1",
           branch: "api-1",
           worktreePath: "/tmp/spur-worktrees/api/api-1",
-          deskId: undefined,
         });
         await service.get("api-2");
         expect(ownerMissingEvents()).toHaveLength(1);
