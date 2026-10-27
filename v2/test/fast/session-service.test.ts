@@ -51835,6 +51835,135 @@ describe("SessionService", () => {
         },
       );
 
+      const enrichFailedEvents = () =>
+        logSpurEventMock.mock.calls
+          .map(([, entry]) => entry)
+          .filter((entry) => entry.event === "session.list.enrich_failed");
+
+      it("full list drops only the row whose enrich throws and logs enrich_failed", async () => {
+        plainSeed();
+        const { service, internals } = await setup();
+        try {
+          const original = internals.enrichWithClassified.bind(internals);
+          vi.spyOn(internals, "enrichWithClassified").mockImplementation(
+            async (record, ...rest) => {
+              if (record.id === "api-1") throw new Error("enrich boom");
+              return original(record, ...rest);
+            },
+          );
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-2"]);
+          expect(enrichFailedEvents()).toMatchObject([{ level: "warn", sessionId: "api-1" }]);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("dashboard list drops only the uncached row whose assemble throws", async () => {
+        plainSeed();
+        const { service, internals } = await setup();
+        try {
+          await internals.runDashboardCacheTick();
+          settleOp(internals, "api-1");
+          (service as unknown as { dashboardCache: Map<string, unknown> }).dashboardCache.delete(
+            "api-1",
+          );
+          const original = internals.assembleDashboard.bind(internals);
+          vi.spyOn(internals, "assembleDashboard").mockImplementation(async (record) => {
+            if (record.id === "api-1") throw new Error("assemble boom");
+            return original(record);
+          });
+          const rows = await service.list({ view: "dashboard", includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-2"]);
+          expect(enrichFailedEvents()).toMatchObject([{ level: "warn", sessionId: "api-1" }]);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("dashboard list still refuses with 503 when assemble yields nothing for an existing row", async () => {
+        plainSeed();
+        const { service, internals } = await setup();
+        try {
+          await internals.runDashboardCacheTick();
+          settleOp(internals, "api-1");
+          (service as unknown as { dashboardCache: Map<string, unknown> }).dashboardCache.delete(
+            "api-1",
+          );
+          vi.spyOn(internals, "assembleDashboard").mockResolvedValue(undefined as never);
+          await expect(
+            service.list({ view: "dashboard", includeCompleted: true }),
+          ).rejects.toMatchObject(snapshotChanged);
+          expect(enrichFailedEvents()).toHaveLength(0);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("list drops a stale row whose rebuild throws; get still rejects with the rebuild error", async () => {
+        plainSeed();
+        const { service, internals } = await setup();
+        try {
+          const original = internals.enrichWithClassified.bind(internals);
+          let apiOneBuilds = 0;
+          vi.spyOn(internals, "enrichWithClassified").mockImplementation(
+            async (record, ...rest) => {
+              if (record.id !== "api-1") return original(record, ...rest);
+              apiOneBuilds += 1;
+              if (apiOneBuilds > 1) throw new Error("rebuild boom");
+              const row = await original(record, ...rest);
+              settleOp(internals, "api-1");
+              return row;
+            },
+          );
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-2"]);
+          expect(enrichFailedEvents()).toMatchObject([{ level: "warn", sessionId: "api-1" }]);
+
+          apiOneBuilds = 0;
+          await expect(service.get("api-1")).rejects.toThrow("rebuild boom");
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("list drops a pending pickup row whose rebuild throws", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          const original = internals.enrichWithClassified.bind(internals);
+          vi.spyOn(internals, "enrichWithClassified").mockImplementation(
+            async (record, ...rest) => {
+              if (record.id === "api-3") throw new Error("pickup boom");
+              const row = await original(record, ...rest);
+              if (record.id === "api-1") {
+                const base = records.get("api-1");
+                if (!base) throw new Error("Missing fixture");
+                if (!records.has("api-3")) {
+                  rewrite(records, "api-1", { branch: "rewritten" });
+                  records.set("api-3", {
+                    ...base,
+                    id: "api-3",
+                    workspaceId: "api-3",
+                    branch: "api-3",
+                    tmuxSession: "api-3",
+                    status: "completed",
+                  });
+                  internals.lifecycle.begin("reopen", ["api-3"], "pending-reopen");
+                }
+              }
+              return row;
+            },
+          );
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-1", "api-2"]);
+          expect(enrichFailedEvents().map((entry) => entry.sessionId)).toContain("api-3");
+        } finally {
+          service.dispose();
+        }
+      });
+
       it("does not rebuild revision-0 rows that churn", async () => {
         const records = plainSeed();
         const { service, internals } = await setup();
@@ -52544,6 +52673,12 @@ describe("SessionService", () => {
   });
 
   describe("dashboard cache", () => {
+    function dashboardEvents(event: string) {
+      return logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === event);
+    }
+
     function seedDashboardSessions(count: number, idleCount = 0): Map<string, SessionRecord> {
       const sessions = createSessionStore();
       for (let index = 1; index <= count; index += 1) {
@@ -52775,6 +52910,10 @@ describe("SessionService", () => {
 
       await vi.advanceTimersByTimeAsync(2_000);
       expect(enrichSpy).toHaveBeenCalledTimes(1);
+      expect(dashboardEvents("session.dashboard_cache.refresh_failed")).toMatchObject([
+        { sessionId: "api-1" },
+      ]);
+      expect(dashboardEvents("session.dashboard_cache.failed")).toHaveLength(0);
 
       const afterFailure = await service.list({ view: "dashboard" });
       expect(afterFailure.map((view) => view.id)).toEqual(["api-1"]);
@@ -52789,7 +52928,40 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("retries the same idle slice after enrichment fails", async () => {
+    it("one failing record does not block the others and keeps its prior view", async () => {
+      seedDashboardSessions(2);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as SessionServiceInternals & {
+        runDashboardCacheTick(): Promise<void>;
+      };
+      await service.list({ view: "dashboard" });
+      const enrichSpy = vi.spyOn(internals, "enrichDashboard");
+      enrichSpy.mockImplementation(async (session: SessionRecord) => ({
+        id: session.id,
+        model: "old",
+      }));
+      await internals.runDashboardCacheTick();
+
+      enrichSpy.mockImplementation(async (session: SessionRecord) => {
+        if (session.id === "api-1") throw new Error("boom");
+        return { id: session.id, model: "fresh" };
+      });
+      await internals.runDashboardCacheTick();
+
+      const listed = await service.list({ view: "dashboard" });
+      expect(Object.fromEntries(listed.map((view) => [view.id, view.model]))).toEqual({
+        "api-1": "old",
+        "api-2": "fresh",
+      });
+      expect(dashboardEvents("session.dashboard_cache.refresh_failed")).toMatchObject([
+        { sessionId: "api-1" },
+      ]);
+      expect(dashboardEvents("session.dashboard_cache.failed")).toHaveLength(0);
+      service.dispose();
+    });
+
+    it("does not pin the idle cursor to a failing record", async () => {
       seedDashboardSessions(0, 10);
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -52797,11 +52969,10 @@ describe("SessionService", () => {
       await service.list({ view: "dashboard", includeCompleted: true });
 
       const selected: string[] = [];
-      let failSelectedSlice = true;
       vi.spyOn(sessionServiceInternals(service), "enrichDashboard").mockImplementation(
         async (session: SessionRecord) => {
           selected.push(session.id);
-          if (failSelectedSlice && session.id === "done-2") {
+          if (session.id === "done-2") {
             throw new Error("idle enrichment failed");
           }
           return { id: session.id };
@@ -52812,13 +52983,11 @@ describe("SessionService", () => {
       expect(selected).toEqual(["done-1", "done-2", "done-3", "done-4"]);
 
       selected.length = 0;
-      failSelectedSlice = false;
-      await vi.advanceTimersByTimeAsync(2_000);
-      expect(selected).toEqual(["done-1", "done-2", "done-3", "done-4"]);
-
-      selected.length = 0;
       await vi.advanceTimersByTimeAsync(2_000);
       expect(selected).toEqual(["done-5", "done-6", "done-7", "done-8"]);
+      expect(
+        (await service.list({ view: "dashboard", includeCompleted: true })).map((v) => v.id),
+      ).toContain("done-2");
       service.dispose();
     });
 
