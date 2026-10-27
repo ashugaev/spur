@@ -52961,6 +52961,39 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("survives a synchronous enrich throw on one record and refreshes the others", async () => {
+      seedDashboardSessions(2);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as SessionServiceInternals & {
+        runDashboardCacheTick(): Promise<void>;
+      };
+      await service.list({ view: "dashboard" });
+      const enrichSpy = vi.spyOn(internals, "enrichDashboard");
+      enrichSpy.mockImplementation(async (session: SessionRecord) => ({
+        id: session.id,
+        model: "old",
+      }));
+      await internals.runDashboardCacheTick();
+
+      enrichSpy.mockImplementation(((session: SessionRecord) => {
+        if (session.id === "api-1") throw new Error("sync boom");
+        return Promise.resolve({ id: session.id, model: "fresh" });
+      }) as never);
+      await internals.runDashboardCacheTick();
+
+      const listed = await service.list({ view: "dashboard" });
+      expect(Object.fromEntries(listed.map((view) => [view.id, view.model]))).toEqual({
+        "api-1": "old",
+        "api-2": "fresh",
+      });
+      expect(dashboardEvents("session.dashboard_cache.refresh_failed")).toMatchObject([
+        { sessionId: "api-1" },
+      ]);
+      expect(dashboardEvents("session.dashboard_cache.failed")).toHaveLength(0);
+      service.dispose();
+    });
+
     it("does not pin the idle cursor to a failing record", async () => {
       seedDashboardSessions(0, 10);
       const { SessionService } = await loadSessionServiceModule();
