@@ -213,20 +213,20 @@ function JobRow({
   const tickText = row.lastTick ? formatRelativeTime(row.lastTick) : "—";
   return (
     <div className="border-b border-[var(--color-border-subtle)]">
+      {/* Mouse convenience only: the keyboard toggle is the native button below. */}
       <div
-        aria-expanded={open}
         className={`${GRID_CLASS} w-full cursor-pointer items-baseline px-[13px] py-2.5 text-left transition hover:bg-[var(--color-row-hover)]`}
         onClick={onToggle}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            onToggle();
-          }
-        }}
-        role="button"
-        tabIndex={0}
       >
-        <span className="flex min-w-0 flex-col">
+        <button
+          aria-expanded={open}
+          className="flex min-w-0 flex-col text-left outline-none focus-visible:underline"
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggle();
+          }}
+          type="button"
+        >
           <span className="flex min-w-0 items-baseline gap-2">
             <span className={`truncate font-semibold ${PRIMARY_TEXT}`}>{row.name}</span>
             {marker ? (
@@ -238,7 +238,7 @@ function JobRow({
           {row.subtitle ? (
             <span className={`truncate ${SECONDARY_TEXT}`}>{row.subtitle}</span>
           ) : null}
-        </span>
+        </button>
         <span className={`hidden truncate sm:inline ${SECONDARY_TEXT}`}>{row.source.schedule}</span>
         <span className={`hidden tabular-nums sm:inline ${SECONDARY_TEXT}`} title={tickTitle}>
           {tickText}

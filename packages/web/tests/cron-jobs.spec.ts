@@ -94,6 +94,19 @@ test.describe("Cron jobs modal", () => {
     await expect(dialog).toBeHidden();
   });
 
+  test("toggles a row with Enter and Space on its button", async ({ page }) => {
+    await mockSessions(page, [], PROJECTS);
+    await mockCron(page);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Cron jobs" }).click();
+    const toggle = page.getByRole("button", { name: /audit/ });
+    await toggle.focus();
+    await page.keyboard.press("Enter");
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await page.keyboard.press("Space");
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  });
+
   test("inherits the dashboard project filter", async ({ page }) => {
     await mockSessions(page, [], PROJECTS);
     const urls = await mockCron(page);

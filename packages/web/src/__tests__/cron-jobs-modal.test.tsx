@@ -195,6 +195,32 @@ describe("CronJobsModal", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/cron", expect.anything());
   });
 
+  it("toggles a row from a native, focusable button", async () => {
+    stubFetch(() => jsonResponse(READY));
+    renderModal();
+    const toggle = (await screen.findByText("audit")).closest("button") as HTMLButtonElement;
+    expect(toggle).toHaveAttribute("type", "button");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    toggle.focus();
+    expect(toggle).toHaveFocus();
+    // Browsers dispatch click on Enter and Space for a native button.
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("keeps the session link outside the toggle so Enter and click never toggle the row", async () => {
+    stubFetch(() => jsonResponse(READY));
+    renderModal();
+    const toggle = (await screen.findByText("audit")).closest("button") as HTMLButtonElement;
+    const link = screen.getByRole("link", { name: "api-412" });
+    expect(toggle.contains(link)).toBe(false);
+    expect(fireEvent.keyDown(link, { key: "Enter" })).toBe(true);
+    fireEvent.click(link);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("closes on Escape", async () => {
     stubFetch(() => jsonResponse({ projects: [], eventsSince: null }));
     const onClose = renderModal();
