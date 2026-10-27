@@ -14,7 +14,6 @@ import {
   takeTelegramChoice,
   telegramBindingKey,
   writeTelegramBindings,
-  writeTelegramOffer,
   writeTelegramReplyTarget,
 } from "../metadata.js";
 import {

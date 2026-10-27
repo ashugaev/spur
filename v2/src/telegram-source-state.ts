@@ -226,7 +226,7 @@ export async function createTelegramTopic(
   name: string,
 ): Promise<number> {
   return lifecycleTransport(async (transport) => {
-    const topic = await callTelegram<TelegramForumTopic>(
+    const topic = await callTelegram<TelegramForumTopic | null>(
       config,
       "createForumTopic",
       {
