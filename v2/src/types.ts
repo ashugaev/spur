@@ -144,6 +144,7 @@ export interface TagDefinition {
 export type ReviewProviderId = "github" | "gitlab";
 export type SourceType =
   | "cron"
+  | "script"
   | ReviewProviderId
   | "sentry"
   | "service"
@@ -185,12 +186,14 @@ export const WEBHOOK_RECEIVED_EVENT = "webhook:received" as const;
 export const TELEGRAM_CHOICE_CALLBACK_PREFIX = "spur_choice:" as const;
 export const GITHUB_CI_RUN_COMPLETED_EVENT = "github-ci:run.completed" as const;
 export const JIRA_WORK_ITEM_NEW_EVENT = "jira:work_item.new" as const;
+export const SCRIPT_ITEM_NEW_EVENT = "script:item.new" as const;
 
 export const WORK_ITEM_NEW_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
   GITHUB_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
   GITHUB_CI_RUN_COMPLETED_EVENT,
   JIRA_WORK_ITEM_NEW_EVENT,
+  SCRIPT_ITEM_NEW_EVENT,
 ]);
 
 export interface WorkItemEventData {
@@ -279,6 +282,16 @@ interface BaseSourceConfig {
 export interface CronSourceConfig extends BaseSourceConfig {
   type: "cron";
   schedule: string;
+}
+
+export interface ScriptSourceConfig extends BaseSourceConfig {
+  type: "script";
+  command: string[];
+  schedule: string;
+  timeoutMs: number;
+  env: Record<string, string>;
+  cwd: string;
+  emitExisting: boolean;
 }
 
 interface ReviewSourceConfigBase<TType extends ReviewProviderId> extends BaseSourceConfig {
@@ -433,6 +446,7 @@ export interface TelegramReplyTarget extends TelegramBinding {
 
 export type SourceConfig =
   | CronSourceConfig
+  | ScriptSourceConfig
   | ReviewSourceConfig
   | SentrySourceConfig
   | ServiceSourceConfig
@@ -1553,6 +1567,23 @@ export interface SendMessageRequest {
   interrupt?: boolean;
 }
 
+export interface TelegramBotIdentity {
+  id: number;
+  username?: string;
+}
+
+export type SourceInfoResponse =
+  | { sessionId: string; source: null }
+  | {
+      sessionId: string;
+      source: "telegram";
+      projectId: string;
+      sourceId: string;
+      chatId: number;
+      messageThreadId?: number;
+      bot: TelegramBotIdentity | null;
+    };
+
 export interface SourceReplyButton {
   text: string;
   value: string;
@@ -1646,7 +1677,7 @@ export interface CompleteSessionRequest {
 
 export type TodoActor =
   | { kind: "agent"; agent: AgentName; sessionId: string }
-  | { kind: "human"; origin: "cli" | "ui" | "mcp" }
+  | { kind: "human"; origin: "cli" | "ui" | "mcp" | "telegram" }
   | { kind: "system"; source: "spawn" | "legacy_migration" | "handoff" };
 
 export type TodoBlocker = { kind: "external" } | { kind: "human"; requiredAction: string };

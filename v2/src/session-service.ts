@@ -27,7 +27,7 @@ import {
 } from "./session-lifecycle.js";
 import { userInfo } from "node:os";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
+import { setImmediate as yieldToEventLoop, setTimeout as sleep } from "node:timers/promises";
 import {
   agentBusyQueuedSendAwaitsPrompt,
   agentHasLaunchSubmitAck,
@@ -143,10 +143,12 @@ import {
 } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
+  ACTIVITY_WINDOW_MS,
   CONVERSATION_PAGE_ENTRIES,
   readClaudeConversationTail,
   readClaudeJsonlState,
   hasClaudeRecoveryAfter,
+  hasTrailingClaudeAuthenticationFailure,
   type ClaudeConversationReaderState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
@@ -493,6 +495,8 @@ import {
   type SidecarPortConflictPayload,
   type SidecarProcessIdentity,
   type SourcePollEnableResponse,
+  type SourceInfoResponse,
+  type TelegramBotIdentity,
   type SourceReplyButton,
   type SourceReplyRequest,
   type SourceReplyResponse,
@@ -2248,6 +2252,7 @@ function buildInitialMessage(
   }
   const todoInstructions = `Spur ToDo:\n- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.\n- The ledger starts empty. You own every item; nothing is added for you.\n- One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.\n- Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.\n- Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.`;
   base = base ? `${base}\n\n${todoInstructions}` : todoInstructions;
+  base = `${base}\n\nRead associated chat and bot with \`"$SPUR_SESSION_TOOL_DIR/spur" source info --json\`.`;
   if (telegramInstructions) {
     base = `${base}\n\n${telegramInstructions}`;
   }
@@ -3746,6 +3751,9 @@ export class SessionService {
   private pollDisabledOverrideClearer:
     | ((projectId: string, sourceId: string, sessionId: string) => number | null)
     | undefined;
+  private telegramBotIdentityReader:
+    | ((projectId: string, sourceId: string) => TelegramBotIdentity | null)
+    | undefined;
 
   constructor(
     configPath?: string,
@@ -3820,6 +3828,12 @@ export class SessionService {
     clearer: (projectId: string, sourceId: string, sessionId: string) => number | null,
   ): void {
     this.pollDisabledOverrideClearer = clearer;
+  }
+
+  setTelegramBotIdentityReader(
+    reader: (projectId: string, sourceId: string) => TelegramBotIdentity | null,
+  ): void {
+    this.telegramBotIdentityReader = reader;
   }
 
   startBackgroundLoops(): void {
@@ -7741,10 +7755,14 @@ export class SessionService {
       let liveUnderTerminal = 0;
       // One fleet fork for the whole pass: absent records read the shared
       // snapshot instead of each forcing their own list-windows. Holds while
-      // the fork finishes within RUNTIME_PROBE_CACHE_TTL_MS; a slower call
-      // degrades to a re-fork per expired read, as before.
+      // the fork finishes within RUNTIME_PROBE_CACHE_TTL_MS; the per-record
+      // yield below can outlast it, which re-forks once per expired window.
       await refreshTmuxFleetSnapshot();
       for (const session of sessions) {
+        // A warm snapshot settles every await below as a microtask, so a pass
+        // over a large store would otherwise run to completion without
+        // returning to the event loop. Top of the body: six branches continue.
+        await yieldToEventLoop();
         let agentAlive = false;
         let presence = await getTmuxSessionPresence(session.tmuxSession);
         if (presence.present) {
@@ -7799,30 +7817,47 @@ export class SessionService {
         // Snapshot "absent" can be 2s stale: a mid-pass reopen makes this owner restorable.
         const latest = readSession(this.config.dataDir, session.id);
         if (!latest || !isTerminalSessionStatus(latest.status)) continue;
-        // A desk-shared sidecar's pane is named after the desk anchor, so on a
-        // terminal anchor this loop would otherwise reap the pane a restorable
-        // sibling is still using. Same active-workspace semantics as the
-        // policy pass (collectSidecarReapCandidates): any non-terminal member
-        // holds the shared pane.
-        const deskSiblingsAlive = this.hasActiveWorkspaceMembers(session);
-        // Resolved unconditionally (not only when deskSiblingsAlive): every
-        // sidecar's owner id below needs it, since a desk-shared sidecar's
-        // pane is named after the desk anchor/owner, never this session's
-        // own id.
+        // Resolved unconditionally: every sidecar's owner id below needs it,
+        // since a desk-shared sidecar's pane is named after the desk
+        // anchor/owner, never this session's own id.
         let reapProject: ProjectConfig | undefined;
         try {
           reapProject = this.resolveProjectForSession(session);
         } catch {
           reapProject = undefined;
         }
+        // A desk-shared sidecar's pane is named after the desk anchor, so on a
+        // terminal anchor this loop would otherwise reap the pane a restorable
+        // sibling is still using. Same active-workspace semantics as the
+        // policy pass (collectSidecarReapCandidates): any non-terminal member
+        // holds the shared pane. Computed at the first configured non-MCP sidecar
+        // that is still a teardown candidate, at most once per record.
+        let deskSiblingsAlive: boolean | undefined;
         for (const sidecarName of session.sidecarNames ?? []) {
           const reapSidecar = reapProject?.sidecars[sidecarName];
-          if (deskSiblingsAlive && reapSidecar !== undefined && !reapSidecar.mcp) {
-            continue;
-          }
           const ownerId = this.sidecarOwnerIdForName(session, reapProject, sidecarName);
           const owner = readSession(this.config.dataDir, ownerId);
-          const paneAlive = await sidecarTmuxAlive(ownerId, sidecarName);
+          const sidecarPresence = await getSidecarTmuxPresence(ownerId, sidecarName);
+          const identity = owner?.sidecarProcs?.[sidecarName];
+          // Pane confirmed absent and no recorded identity: neither teardown
+          // branch below can fire, so skip the vetoes' workspace scans. A probe
+          // diagnostic is not confirmed absence and stays a candidate.
+          if (!sidecarPresence.present && sidecarPresence.diagnostic === undefined && !identity) {
+            continue;
+          }
+          if (
+            reapSidecar !== undefined &&
+            !reapSidecar.mcp &&
+            (deskSiblingsAlive ??= this.hasActiveWorkspaceMembers(session))
+          ) {
+            continue;
+          }
+          // After the sibling veto: a vetoed sidecar's unreadable probe never
+          // aborts the pass.
+          if (sidecarPresence.diagnostic !== undefined) {
+            throw new TmuxProbeUnknownError(sidecarPresence.diagnostic);
+          }
+          const paneAlive = sidecarPresence.present;
           // The established-connection veto, applied here too — this loop
           // reaches a desk-shared sidecar by owner id the same as the
           // reaper-tick candidate pass, and is not exempt from the same hard
@@ -7858,7 +7893,6 @@ export class SessionService {
           // sibling's own probe id could never see under the old
           // session.id-only probe); fall through to the recorded identity,
           // mirroring killSidecar.
-          const identity = owner?.sidecarProcs?.[sidecarName];
           if (owner && identity) {
             this.invalidateSidecarEndpoint(ownerId, sidecarName);
             const outcome = await reapRecordedIdentity(identity, owner.worktreePath);
@@ -14919,6 +14953,35 @@ export class SessionService {
     return this.enrich(updated);
   }
 
+  sourceInfo(sessionId: string): SourceInfoResponse {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    const target = this.telegramReplyTarget(session);
+    if (!target) return { sessionId, source: null };
+    const source = this.config.projects[target.projectId]?.sources[target.sourceId];
+    if (!source || source.type !== "telegram") {
+      throw new InvalidSourceReplyInputError(
+        `Telegram source is not configured for ${target.projectId}/${target.sourceId}`,
+      );
+    }
+    return {
+      sessionId,
+      source: "telegram",
+      projectId: target.projectId,
+      sourceId: target.sourceId,
+      chatId: target.chatId,
+      ...(target.messageThreadId !== undefined ? { messageThreadId: target.messageThreadId } : {}),
+      bot: this.telegramBotIdentityReader?.(target.projectId, target.sourceId) ?? null,
+    };
+  }
+
+  private telegramReplyTarget(
+    session: SessionRecord,
+    storedTarget = readTelegramReplyTarget(this.config.dataDir, session.id),
+  ): TelegramReplyTarget | null {
+    return storedTarget ?? this.configuredTelegramReplyTarget(session);
+  }
+
   async replyToSource(
     sessionId: string,
     request: SourceReplyRequest,
@@ -14942,7 +15005,7 @@ export class SessionService {
     });
 
     const storedTarget = readTelegramReplyTarget(this.config.dataDir, sessionId);
-    const target = storedTarget ?? this.configuredTelegramReplyTarget(session);
+    const target = this.telegramReplyTarget(session, storedTarget);
     if (!target) {
       throw new InvalidSourceReplyInputError(`No Telegram reply target for ${sessionId}`);
     }
@@ -22376,6 +22439,7 @@ export class SessionService {
     rolloutState: CodexRolloutStateRecord | null;
     rateLimit: RateLimitDetection | null;
     activityMs: number;
+    threadId?: string;
     model?: string;
     tokenUsage?: ProviderTokenUsageSample;
     tokenUsages?: ProviderTokenUsageSample[];
@@ -22436,6 +22500,7 @@ export class SessionService {
       rolloutState,
       rateLimit: rolloutRead.rateLimit,
       activityMs,
+      ...(rolloutRead.threadId ? { threadId: rolloutRead.threadId } : {}),
       ...(rolloutRead.model ? { model: rolloutRead.model } : {}),
       ...(rolloutRead.tokenUsage ? { tokenUsage: rolloutRead.tokenUsage } : {}),
       ...(rolloutRead.tokenUsages ? { tokenUsages: rolloutRead.tokenUsages } : {}),
@@ -23796,6 +23861,7 @@ export class SessionService {
     let liveModel: string | undefined;
     let tokenUsage: ProviderTokenUsageSample | undefined;
     let tokenUsages: ProviderTokenUsageSample[] | undefined;
+    let codexProbeRecovery: Awaited<ReturnType<typeof this.classifyCodexState>> | undefined;
     if (
       options?.reconcileRuntime !== false &&
       (effectiveSession.status === "running" || effectiveSession.status === "spawning")
@@ -23827,6 +23893,7 @@ export class SessionService {
 
     let rateLimit: RateLimitDetection | null = null;
     let hasServerErrorRecord = false;
+    let hasAuthenticationFailure = false;
     let serverErrorEvidence: "error" | "recovered" | undefined;
     let serverErrorJsonlPath: string | null = null;
     // Set from whichever structured artifact the branches below already read.
@@ -23860,12 +23927,86 @@ export class SessionService {
       }
     }
     if (
-      runtime.probeUnresponsive ||
+      runtime.probeUnresponsive &&
+      !workspace.diagnostic &&
+      workspace.exists &&
+      session.agent === "codex" &&
+      session.status === "running" &&
+      !session.serverErrorAt &&
+      effectiveSession.errorSource === "runtime_probe" &&
+      effectiveSession.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX)
+    ) {
+      const native = await this.classifyCodexState(session).catch(() => null);
+      const observedAt = Date.now();
+      const current = readSession(this.config.dataDir, session.id);
+      const lifecycle = this.lifecycle.snapshot(session.id);
+      const rolloutState = native?.rolloutState;
+      const nativeStateIsAuthoritative =
+        (native?.state === "waiting" && rolloutState?.reason === "task_complete") ||
+        (native?.state === "needs_input" &&
+          (rolloutState?.reason === "input_required" ||
+            rolloutState?.reason === "request_user_input")) ||
+        (native?.state === "working" &&
+          (rolloutState?.reason === "function_call" ||
+            rolloutState?.reason === "custom_tool_call") &&
+          typeof rolloutState.turnId === "string" &&
+          native.hookState?.hookEvent === "PreToolUse" &&
+          native.hookState.turnId === rolloutState.turnId &&
+          Date.parse(native.hookState.updatedAt) <= observedAt &&
+          observedAt - Date.parse(native.hookState.updatedAt) <= ACTIVITY_WINDOW_MS);
+      const hookMatchesRollout =
+        !native?.hookState ||
+        (typeof rolloutState?.turnId === "string" &&
+          native.hookState.turnId === rolloutState.turnId);
+      if (
+        native !== null &&
+        rolloutState !== null &&
+        rolloutState !== undefined &&
+        session.agentSessionId !== undefined &&
+        native.threadId === session.agentSessionId &&
+        native.rateLimit === null &&
+        nativeStateIsAuthoritative &&
+        native.state === rolloutState.state &&
+        hookMatchesRollout &&
+        rolloutState.timestampMs > 0 &&
+        rolloutState.timestampMs <= observedAt &&
+        observedAt - rolloutState.timestampMs <= ACTIVITY_WINDOW_MS &&
+        current &&
+        current.status === "running" &&
+        current.error === effectiveSession.error &&
+        current.errorSource === "runtime_probe" &&
+        !current.serverErrorAt &&
+        current.agentSessionId === session.agentSessionId &&
+        current.agentLaunchId === session.agentLaunchId &&
+        sameSessionRuntimeOwner(current, session) &&
+        this.lifecycleStateMatches(current, this.lifecycleStamp(session)) &&
+        lifecycle.revision === probeRevision &&
+        lifecycle.operation?.phase !== "pending"
+      ) {
+        const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recovered } = current;
+        effectiveSession = { ...recovered, updatedAt: nowIso() };
+        writeSession(this.config.dataDir, effectiveSession);
+        this.stateCache.delete(session.id);
+        codexProbeRecovery = native;
+      }
+    }
+    if (
+      (runtime.probeUnresponsive && codexProbeRecovery === undefined) ||
       workspace.diagnostic ||
-      hasRetainedSessionError(effectiveSession)
+      (hasRetainedSessionError(effectiveSession) && codexProbeRecovery === undefined)
     ) {
       state = "error";
       classifiedDetail = effectiveSession.error ?? "State: error";
+    } else if (codexProbeRecovery) {
+      state = codexProbeRecovery.state;
+      stateSource = codexProbeRecovery.source;
+      rateLimit = codexProbeRecovery.rateLimit;
+      agentActivityAt = activityAtFromMs(codexProbeRecovery.activityMs);
+      liveModel = codexProbeRecovery.model;
+      tokenUsage = codexProbeRecovery.tokenUsage;
+      tokenUsages = codexProbeRecovery.tokenUsages;
+      historySourcePath = codexProbeRecovery.rolloutState?.filePath ?? null;
+      classifiedDetail = `State: ${state} (codex ${stateSource}, recovered from runtime probe error)`;
     } else {
       if (effectiveSession.status !== "running") {
         state = statusFallbackState(effectiveSession);
@@ -23897,6 +24038,9 @@ export class SessionService {
           this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
           rateLimit = jsonlResult.rateLimit;
           hasServerErrorRecord = jsonlResult.serverError;
+          hasAuthenticationFailure = hasTrailingClaudeAuthenticationFailure(
+            jsonlResult.reader.tailRecords,
+          );
           if (jsonlResult.serverError) serverErrorEvidence = "error";
           else if (
             session.agentSessionId &&
@@ -23923,6 +24067,39 @@ export class SessionService {
           stateSource = "claude_status";
           historySourcePath = statusResult.filePath;
           classifiedDetail = `State: ${state} (claude status=${statusResult.status})`;
+          // A native retry/dialog can precede the next transcript append.
+          // Supersede only an older error, with a fresh observation from this
+          // UUID's process in the pane. Keep the error episode until the
+          // transcript supplies its existing positive recovery evidence.
+          const errorAt = jsonlResult?.reader.tailRecords
+            .slice()
+            .reverse()
+            .find((record) => record.serverError)?.ownTimestampMs;
+          const statusAt = statusResult.statusUpdatedMs;
+          const current = readSession(this.config.dataDir, session.id);
+          if (
+            hasServerErrorRecord &&
+            errorAt !== undefined &&
+            statusAt !== undefined &&
+            (state === "working" || state === "needs_input") &&
+            statusResult.paneOwned &&
+            session.agentSessionId !== undefined &&
+            statusResult.sessionId === session.agentSessionId &&
+            session.agentLaunchId !== undefined &&
+            statusAt > errorAt &&
+            statusAt <= nowMs &&
+            nowMs - statusAt <= ACTIVITY_WINDOW_MS &&
+            current &&
+            !hasRetainedSessionError(current) &&
+            current.serverErrorAt === session.serverErrorAt &&
+            sameSessionRuntimeOwner(current, session) &&
+            current.agentLaunchId === session.agentLaunchId &&
+            this.lifecycleStateMatches(current, this.lifecycleStamp(session)) &&
+            this.lifecycle.snapshot(session.id).revision === probeRevision &&
+            this.lifecycle.snapshot(session.id).operation?.phase !== "pending"
+          ) {
+            hasServerErrorRecord = false;
+          }
         } else if (jsonlResult) {
           state = jsonlResult.state;
           stateSource = "jsonl";
@@ -24282,6 +24459,12 @@ export class SessionService {
         historySourcePath = serverErrorJsonlPath;
         classifiedDetail = "State: error (claude server error)";
       }
+      if (hasAuthenticationFailure) {
+        state = "needs_input";
+        stateSource = "jsonl";
+        historySourcePath = serverErrorJsonlPath;
+        classifiedDetail = "State: needs_input (claude authentication failed)";
+      }
     }
 
     if (!readSession(this.config.dataDir, session.id) || classifiedDetail === undefined) {
@@ -24348,10 +24531,8 @@ export class SessionService {
     session = persisted.session;
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
-    const displaySlots = this.projectSidecarSlots(
-      session,
-      deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session)),
-    );
+    const workspaceState = resolveWorkspaceState(this.config.dataDir, session);
+    const displaySlots = this.projectSidecarSlots(session, deriveSessionSlots(workspaceState));
     const sidecars = await this.sidecarViews(session, this.resolveProjectForSession(session));
     const runningSidecarNames = sidecars.filter((view) => view.alive).map((view) => view.name);
 
@@ -24379,6 +24560,7 @@ export class SessionService {
       branchSource: _branchSource,
       error: _error,
       errorSource: _errorSource,
+      pr: _recordPr,
       ...dashboardSession
     } = session;
     const state = this.stabilizeState(
@@ -24406,6 +24588,7 @@ export class SessionService {
         deskId: workspaceIdOf(dashboardSession),
         planMode: resolvePlanMode(dashboardSession),
         restrictWrites: resolveRestrictWrites(dashboardSession),
+        ...(workspaceState.pr ? { pr: workspaceState.pr } : {}),
         ...(displaySlots ? { slots: displaySlots } : {}),
         runtimeAlive: classified.runtime.runtimeAlive,
         workspaceExists: workspacePresent,
@@ -24714,10 +24897,8 @@ export class SessionService {
     );
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
-    const displaySlots = this.projectSidecarSlots(
-      session,
-      deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, anchorRecord)),
-    );
+    const workspaceState = resolveWorkspaceState(this.config.dataDir, anchorRecord);
+    const displaySlots = this.projectSidecarSlots(session, deriveSessionSlots(workspaceState));
     const deskGroupMembers = await this.buildDeskGroupMembers(
       session,
       {
@@ -24743,6 +24924,7 @@ export class SessionService {
       // The record's queue state is internal; the view carries queuedMessagesView.
       queuedMessages: _queuedMessages,
       errorSource: _errorSource,
+      pr: _recordPr,
       ...sessionWithoutDetailFields
     } = session;
 
@@ -24754,6 +24936,7 @@ export class SessionService {
       deskId: workspaceIdOf(session),
       planMode: resolvePlanMode(session),
       restrictWrites: resolveRestrictWrites(session),
+      ...(workspaceState.pr ? { pr: workspaceState.pr } : {}),
       ...(displaySlots ? { slots: displaySlots } : {}),
       runtimeAlive: classified.runtime.runtimeAlive,
       workspaceExists: workspacePresent,

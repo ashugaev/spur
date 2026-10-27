@@ -2,6 +2,7 @@ import { spawn, execFileSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -19,6 +20,11 @@ import { readLiveProcessStarttime } from "../../src/sidecars/reap.js";
 import { SPUR_DAEMON_API_VERSION } from "../../src/types.js";
 
 const paths: string[] = [];
+const telegramEnv = {
+  ...process.env,
+  SPUR_ISOLATED_TELEGRAM: "test",
+  SPUR_ISOLATED_WITHOUT_TELEGRAM: "0",
+};
 afterEach(() => {
   for (const path of paths.splice(0)) rmSync(path, { recursive: true, force: true });
 });
@@ -57,6 +63,7 @@ it("holds the launcher bot lock through exec, disables a contender, releases on 
   const config = join(path, "config");
   execFileSync("mkdir", [config]);
   const owner = spawn("bash", ["-c", script, "fixture", process.execPath, writer, config], {
+    env: telegramEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
   const started = new Promise<void>((resolveStarted, reject) => {
@@ -70,7 +77,7 @@ it("holds the launcher bot lock through exec, disables a contender, releases on 
     const contender = execFileSync(
       "bash",
       ["-c", `${script}\n`, "fixture", process.execPath, writer, config],
-      { input: "", encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+      { env: telegramEnv, input: "", encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
     );
     expect(contender).toContain("SOURCE_FREE");
     owner.stdin.end();
@@ -78,7 +85,7 @@ it("holds the launcher bot lock through exec, disables a contender, releases on 
     const restarted = execFileSync(
       "bash",
       ["-c", script, "fixture", process.execPath, writer, config],
-      { input: "", encoding: "utf8" },
+      { env: telegramEnv, input: "", encoding: "utf8" },
     );
     expect(restarted).toContain("STARTED");
     expect(restarted).not.toContain("SOURCE_FREE");
@@ -93,6 +100,8 @@ it("selects off before the first writer and rejects empty or invalid selectors w
   const source = readFileSync(resolve("../scripts/spur-isolated-daemon.sh"), "utf8");
   const selectorStart = source.indexOf('ISOLATED_TELEGRAM="');
   const selector = source.slice(selectorStart, source.indexOf("\nTOOL_DIR=", selectorStart));
+  const aliasStart = source.indexOf('case "${SPUR_ISOLATED_WITHOUT_TELEGRAM:-0}"');
+  const alias = source.slice(aliasStart, source.indexOf("\nesac", aliasStart) + 5);
   const argumentStart = source.indexOf('if [[ "$ISOLATED_TELEGRAM" == off ]]');
   const argument = source.slice(argumentStart, source.indexOf("\nfi", argumentStart) + 3);
   const lockStart = source.indexOf("# Hold the bot lock");
@@ -108,28 +117,50 @@ it("selects off before the first writer and rejects empty or invalid selectors w
     writer,
     `const fs=require('node:fs');const a=process.argv.slice(2);fs.writeFileSync(${JSON.stringify(calls)},JSON.stringify(a));const off=a.includes('--without-telegram');if(!off)fs.writeFileSync(${JSON.stringify(loader)},'fixture');const i=a.indexOf('--telegram-lock-output');if(i>=0)fs.writeFileSync(a[i+1],off?'':${JSON.stringify(lock)});`,
   );
-  const script = `set -euo pipefail\n${selector}\nNODE_BIN="$1"\nWRITE_CONFIG_PATH="$2"\nCONFIG_DIR="$3"\nWRITE_CONFIG_ARGS=()\n${argument}\n${boundary}\n`;
-  const run = (value: string | undefined): string =>
+  expect(aliasStart).toBeGreaterThan(0);
+  const script = `set -euo pipefail\n${selector}\n${alias}\nNODE_BIN="$1"\nWRITE_CONFIG_PATH="$2"\nCONFIG_DIR="$3"\nWRITE_CONFIG_ARGS=()\n${argument}\n${boundary}\n`;
+  const run = (value: string | undefined, without: string | undefined): string =>
     execFileSync("bash", ["-c", script, "fixture", process.execPath, writer, path], {
-      env: { ...process.env, SPUR_ISOLATED_TELEGRAM: value },
+      env: {
+        ...telegramEnv,
+        SPUR_ISOLATED_TELEGRAM: value,
+        SPUR_ISOLATED_WITHOUT_TELEGRAM: without,
+      },
       encoding: "utf8",
       stdio: "pipe",
     });
-  for (const invalid of ["", "other"]) {
-    expect(() => run(invalid)).toThrow();
+  for (const [value, without] of [
+    ["", "0"],
+    ["other", "1"],
+    ["test", "other"],
+    ["off", "2"],
+  ]) {
+    expect(() => run(value, without)).toThrow();
     expect(() => readFileSync(calls)).toThrow();
     expect(() => readFileSync(loader)).toThrow();
     expect(() => readFileSync(lock)).toThrow();
   }
-  run("off");
-  expect(JSON.parse(readFileSync(calls, "utf8"))).toContain("--without-telegram");
-  expect(readFileSync(join(path, "telegram-lock"), "utf8")).toBe("");
-  expect(() => readFileSync(loader)).toThrow();
-  expect(() => readFileSync(lock)).toThrow();
-  run(undefined);
-  expect(JSON.parse(readFileSync(calls, "utf8"))).not.toContain("--without-telegram");
-  expect(readFileSync(loader, "utf8")).toBe("fixture");
-  expect(readFileSync(lock, "utf8")).toBe("");
+  for (const [value, without] of [
+    ["test", "1"],
+    ["off", "0"],
+    ["off", "1"],
+  ]) {
+    run(value, without);
+    expect(JSON.parse(readFileSync(calls, "utf8"))).toContain("--without-telegram");
+    expect(readFileSync(join(path, "telegram-lock"), "utf8")).toBe("");
+    expect(() => readFileSync(loader)).toThrow();
+    expect(() => readFileSync(lock)).toThrow();
+  }
+  for (const [value, without] of [
+    [undefined, undefined],
+    ["test", "0"],
+    ["test", ""],
+  ]) {
+    run(value, without);
+    expect(JSON.parse(readFileSync(calls, "utf8"))).not.toContain("--without-telegram");
+    expect(readFileSync(loader, "utf8")).toBe("fixture");
+    expect(readFileSync(lock, "utf8")).toBe("");
+  }
 });
 
 it.for(["restart", "blocked"] as const)(
@@ -169,7 +200,7 @@ it.for(["restart", "blocked"] as const)(
     const owner = spawn(
       "bash",
       ["-c", script, "fixture", process.execPath, writer, path, ownerPath],
-      { stdio: ["pipe", "pipe", "pipe"] },
+      { env: telegramEnv, stdio: ["pipe", "pipe", "pipe"] },
     );
     let stderr = "";
     let spawnError: Error | undefined;
@@ -340,3 +371,61 @@ it.for(["restart", "blocked"] as const)(
     }
   },
 );
+
+it("opts out before loading a persisted Telegram TEST fixture", () => {
+  const path = mkdtempSync(join(tmpdir(), "spur-test-telegram-optout-"));
+  paths.push(path);
+  execFileSync("git", ["init", "-q"], { cwd: path });
+  mkdirSync(join(path, ".git/spur-telegram-test"), { mode: 0o700 });
+  writeFileSync(join(path, ".git/spur-telegram-test/credentials.json"), "malformed", {
+    mode: 0o600,
+  });
+  const input = join(path, "project.yaml");
+  writeFileSync(input, `projects:\n  fixture:\n    path: ${path}\n`);
+  const launcher = readFileSync(resolve("../scripts/spur-isolated-daemon.sh"), "utf8");
+  const selectorStart = launcher.indexOf('ISOLATED_TELEGRAM="');
+  const selector = launcher.slice(selectorStart, launcher.indexOf("\nTOOL_DIR=", selectorStart));
+  const aliasStart = launcher.indexOf('case "${SPUR_ISOLATED_WITHOUT_TELEGRAM:-0}"');
+  const alias = launcher.slice(aliasStart, launcher.indexOf("\nesac", aliasStart) + 5);
+  const argumentStart = launcher.indexOf('if [[ "$ISOLATED_TELEGRAM" == off ]]');
+  const argument = launcher.slice(argumentStart, launcher.indexOf("\nfi", argumentStart) + 3);
+  const start = launcher.indexOf("# Hold the bot lock");
+  const end = launcher.indexOf("\n# Advertise only final configs", start);
+  const boundary = launcher.slice(start, end);
+  expect(selectorStart).toBeGreaterThan(0);
+  expect(aliasStart).toBeGreaterThan(0);
+  expect(argumentStart).toBeGreaterThan(0);
+  const script = `set -euo pipefail\n${selector}\n${alias}\nNODE_BIN="$1"\nWRITE_CONFIG_PATH="$2"\nCONFIG_DIR="$3"\nWRITE_CONFIG_ARGS=(--input "$4" --output "$3/output.yaml" --worktree "$3" --project fixture)\n${argument}\n${boundary}\n`;
+  const args = [
+    "-c",
+    script,
+    "fixture",
+    process.execPath,
+    resolve("bin/write-isolated-project-config.mjs"),
+    path,
+    input,
+  ];
+  expect(() =>
+    execFileSync("bash", args, {
+      env: telegramEnv,
+      stdio: "pipe",
+    }),
+  ).toThrow();
+  for (const [value, without] of [
+    ["test", "1"],
+    ["off", "0"],
+    ["off", "1"],
+  ]) {
+    const output = execFileSync("bash", args, {
+      env: {
+        ...telegramEnv,
+        SPUR_ISOLATED_TELEGRAM: value,
+        SPUR_ISOLATED_WITHOUT_TELEGRAM: without,
+      },
+      encoding: "utf8",
+    });
+    expect(output).toContain("Telegram TEST disabled");
+    expect(readFileSync(join(path, "telegram-lock"), "utf8")).toBe("");
+    expect(loadProjectConfig(join(path, "output.yaml")).projects["fixture"]?.sources).toEqual({});
+  }
+});
