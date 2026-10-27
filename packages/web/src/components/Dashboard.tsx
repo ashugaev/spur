@@ -95,7 +95,8 @@ import { useTagCatalog } from "@/hooks/useTagCatalog";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
-const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
+type CollapsibleBlock = AttentionLevel | "backlog";
+const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: CollapsibleBlock[] = ["stopped", "backlog"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const TAG_FILTERS_STORAGE_KEY = "spur:tag-filters";
 const LEGACY_TAG_FILTER_STORAGE_KEY = "spur:tag-filter";
@@ -106,14 +107,18 @@ const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
 const SPAWN_DRAFT_SAVE_DELAY_MS = 500;
 const SHEPHERD_PROJECT_ID = "spur-shepherd";
 
-function readCollapsedCategories(): Set<AttentionLevel> {
+function readCollapsedCategories(): Set<CollapsibleBlock> {
   if (typeof window === "undefined") return new Set();
   const raw = window.localStorage.getItem(COLLAPSED_CATEGORIES_STORAGE_KEY);
   if (!raw) return new Set(DEFAULT_COLLAPSED_MOBILE_CATEGORIES);
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return new Set();
-    return new Set(parsed.filter((v): v is AttentionLevel => LANE_ORDER_SET.has(v as string)));
+    return new Set(
+      parsed.filter(
+        (v): v is CollapsibleBlock => v === "backlog" || LANE_ORDER_SET.has(v as string),
+      ),
+    );
   } catch {
     return new Set();
   }
@@ -246,14 +251,24 @@ function BacklogZone({
   items,
   projectNameMap,
   onTake,
+  collapsed,
+  onToggle,
 }: {
   items: readonly AvailableBacklogItem[];
   projectNameMap: Map<string, string>;
   onTake: (item: AvailableBacklogItem) => void;
+  collapsed: boolean;
+  onToggle: () => void;
 }) {
   if (items.length === 0) return null;
   return (
-    <Zone label="Backlog" color="var(--color-status-attention)" count={items.length}>
+    <Zone
+      label="Backlog"
+      color="var(--color-status-attention)"
+      count={items.length}
+      collapsed={collapsed}
+      onToggle={onToggle}
+    >
       {items.map((item) => {
         const itemKey = `${item.projectId}:${item.backlogId}:${item.externalId}`;
         return (
@@ -1144,7 +1159,7 @@ export function Dashboard() {
     onTranscribed: setSearchQuery,
   });
   const [collapsedLevels, setCollapsedLevels] = useState(readCollapsedCategories);
-  const toggleCollapsed = useCallback((level: AttentionLevel) => {
+  const toggleCollapsed = useCallback((level: CollapsibleBlock) => {
     setCollapsedLevels((current) => {
       const next = new Set(current);
       if (next.has(level)) next.delete(level);
@@ -1566,7 +1581,8 @@ export function Dashboard() {
     syncProjectFilter("");
   };
   const hasVisibleSessions = visibleLevels.length > 0;
-  const hasVisibleBacklog = activeStatFilter === null && visibleBacklog.length > 0;
+  const hasVisibleBacklog =
+    activeStatFilter === null && projectId !== "" && visibleBacklog.length > 0;
   const activeProjectName = projectId
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All Projects";
@@ -3142,6 +3158,8 @@ export function Dashboard() {
                   items={visibleBacklog}
                   projectNameMap={projectNameMap}
                   onTake={openBacklogSpawnModal}
+                  collapsed={collapsedLevels.has("backlog")}
+                  onToggle={() => toggleCollapsed("backlog")}
                 />
               ) : null}
               {visibleLevels.map((level) => (

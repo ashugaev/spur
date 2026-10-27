@@ -189,6 +189,10 @@ function getAttentionZoneToggle(label: string): HTMLElement {
   return toggle;
 }
 
+async function expandBacklog(): Promise<void> {
+  fireEvent.click(await screen.findByRole("button", { name: /Backlog/ }));
+}
+
 describe("Dashboard", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -255,12 +259,10 @@ describe("Dashboard", () => {
       return new Response(JSON.stringify({ ...sessionsPayload(), backlog: [backlogItem] }));
     });
 
+    window.history.replaceState(null, "", "/?project=api");
     render(<Dashboard />);
 
-    await waitFor(() => {
-      expect(screen.getByText("Backlog")).toBeInTheDocument();
-      expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
-    });
+    await expandBacklog();
     const backlogLink = screen.getByRole("link", { name: /WEB-17/ });
     expect(backlogLink).toHaveAttribute("href", "https://jira.example.com/browse/WEB-17");
     expect(backlogLink).toHaveAttribute("target", "_blank");
@@ -323,11 +325,10 @@ describe("Dashboard", () => {
       return new Response(JSON.stringify({ ...sessionsPayload(), backlog: [backlogItem] }));
     });
 
+    window.history.replaceState(null, "", "/?project=api");
     render(<Dashboard />);
 
-    await waitFor(() => {
-      expect(screen.getByText("Backlog")).toBeInTheDocument();
-    });
+    await expandBacklog();
 
     fireEvent.click(screen.getByRole("button", { name: "Take task" }));
 
@@ -393,8 +394,9 @@ describe("Dashboard", () => {
       return new Response(JSON.stringify({ ...sessionsPayload(), backlog }));
     });
 
+    window.history.replaceState(null, "", "/?project=api");
     render(<Dashboard />);
-    await screen.findByRole("link", { name: /WEB-17/ });
+    await expandBacklog();
 
     fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[0]);
     fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
@@ -469,6 +471,7 @@ describe("Dashboard", () => {
       );
     });
 
+    window.history.replaceState(null, "", "/?project=api");
     render(<Dashboard />);
 
     await waitFor(() => {
@@ -476,6 +479,59 @@ describe("Dashboard", () => {
     });
     expect(screen.queryByText("Backlog")).not.toBeInTheDocument();
     expect(screen.queryByText("Fix checkout")).not.toBeInTheDocument();
+  });
+
+  describe("jira backlog block", () => {
+    const backlogFor = (projectId: string, key: string) => ({
+      provider: "jira" as const,
+      projectId,
+      backlogId: "features",
+      externalId: key,
+      key,
+      title: `Task ${key}`,
+      url: `https://jira.example.com/browse/${key}`,
+      fetchedAt: "2026-06-16T12:00:00.000Z",
+      position: 0,
+    });
+
+    function mockBacklog() {
+      const backlog = [backlogFor("api", "API-1"), backlogFor("web", "WEB-1")];
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/runtime/resources")
+          return new Response(JSON.stringify({ available: false }));
+        if (url === "/api/runtime/voice")
+          return new Response(JSON.stringify({ available: false, language: "" }));
+        return new Response(JSON.stringify({ ...sessionsPayload(), backlog }));
+      });
+    }
+
+    it("does not render the block when the project filter is All", async () => {
+      mockBacklog();
+      render(<Dashboard />);
+      await screen.findByRole("link", { name: "Fix auth" });
+      expect(screen.queryByText("Backlog")).not.toBeInTheDocument();
+      expect(screen.queryByText("Task API-1")).not.toBeInTheDocument();
+    });
+
+    it("shows only the selected project's backlog, collapsed by default and expandable", async () => {
+      mockBacklog();
+      window.history.replaceState(null, "", "/?project=api");
+      render(<Dashboard />);
+
+      const toggle = await screen.findByRole("button", { name: /Backlog/ });
+      expect(screen.queryByRole("link", { name: /API-1/ })).not.toBeInTheDocument();
+
+      fireEvent.click(toggle);
+      expect(screen.getByRole("link", { name: /API-1/ })).toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: /WEB-1/ })).not.toBeInTheDocument();
+      expect(window.localStorage.getItem(MOBILE_COLLAPSED_CATEGORIES_STORAGE_KEY)).not.toContain(
+        "backlog",
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: /Backlog/ }));
+      expect(screen.queryByRole("link", { name: /API-1/ })).not.toBeInTheDocument();
+    });
   });
 
   it("dismisses the sessions load error toast after refetch recovers", async () => {
