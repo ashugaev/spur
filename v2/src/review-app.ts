@@ -233,7 +233,7 @@ function legacyArchive(canonical: string, sha256: string): string {
 }
 
 async function readLegacyArchive(path: string): Promise<Buffer> {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const metadata = await file.stat();
     if (!metadata.isFile() || (metadata.mode & 0o077) !== 0)

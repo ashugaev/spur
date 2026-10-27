@@ -14,6 +14,7 @@ import {
   recoverReview,
 } from "../../src/review-app.js";
 import { publishLaneState } from "../../src/review-state.js";
+import { execFileAsync } from "../helpers/common.js";
 
 const dirs: string[] = [];
 const faults = vi.hoisted(() => ({ approvedWrite: false, recovery: "", writes: 0 }));
@@ -566,6 +567,62 @@ test.each(["network", "http-403", "http-404"])(
       "APPROVED",
     );
     expect(f.posts()).toBe(1);
+  },
+);
+
+test.skipIf(process.platform === "win32").each(["legacy", "pending"])(
+  "legacy recovery rejects FIFO archive during %s without hanging the canonical lock",
+  async (mode) => {
+    const f = await legacyRecoveryFixture();
+    if (mode === "pending") {
+      await f.recover();
+      await rm(f.archive);
+    }
+    await execFileAsync("mkfifo", ["-m", "600", f.archive], { timeout: 2_000 });
+    const child = `
+      import { readFile, lstat, access } from "node:fs/promises";
+      const [moduleUrl, configuration, attempt, sha256, archive] = process.argv.slice(1);
+      let network = 0;
+      globalThis.fetch = async () => { network++; throw new Error("unexpected fixture network"); };
+      const { recoverReview } = await import(moduleUrl);
+      const request = JSON.parse(attempt);
+      const before = await readFile(request.receipt);
+      const original = await lstat(archive);
+      let rejected = false;
+      try { await recoverReview(JSON.parse(configuration), request, request.session, sha256); }
+      catch (error) { rejected = error?.category === "legacy-archive-invalid"; }
+      const after = await lstat(archive);
+      let locked = true;
+      try { await access(request.receipt + ".lock"); } catch { locked = false; }
+      console.log(JSON.stringify({ rejected, network, locked,
+        unchanged: before.equals(await readFile(request.receipt)),
+        fifo: after.isFIFO(), sameArchive: original.ino === after.ino && original.dev === after.dev }));
+    `;
+    const result = await execFileAsync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        child,
+        new URL("../../dist/review-app.js", import.meta.url).href,
+        JSON.stringify(f.config),
+        JSON.stringify(f.request),
+        f.sha256,
+        f.archive,
+      ],
+      { timeout: 2_000, killSignal: "SIGKILL" },
+    );
+    expect(result.stdout.trim()).toBe(
+      JSON.stringify({
+        rejected: true,
+        network: 0,
+        locked: false,
+        unchanged: true,
+        fifo: true,
+        sameArchive: true,
+      }),
+    );
+    expect(f.posts()).toBe(0);
   },
 );
 
