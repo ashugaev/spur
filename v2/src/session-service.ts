@@ -122,7 +122,9 @@ import { extractGithubErrorText, isGitHubRateLimitError, runGhPollCycle } from "
 import {
   codexHookHomePath,
   findLatestCodexSessionFile,
+  readCodexConversationTail,
   readCodexRolloutState,
+  type CodexConversationReaderState,
   type CodexRolloutReaderState,
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
@@ -1636,6 +1638,38 @@ function clampPageStart(
   )
     return candidate;
   return Math.max(totalEntries - CONVERSATION_PAGE_ENTRIES, 0);
+}
+
+async function pageConversationTail(
+  tail: { entries: TranscriptEntry[]; totalEntries: number; startIndex: number },
+  options: { from?: number; preserveEnd?: boolean } | undefined,
+  state: SessionState,
+  durationMs: number,
+  readFullEntries: () => Promise<TranscriptEntry[]>,
+): Promise<ConversationResponse> {
+  const { entries: tailEntries, totalEntries, startIndex: tailStartIndex } = tail;
+  const from = options?.from;
+
+  if (from === undefined || from >= tailStartIndex) {
+    // Within the retained window: slice the cached tail, no full read.
+    const sliceStart =
+      from === undefined
+        ? Math.max(tailStartIndex, totalEntries - CONVERSATION_PAGE_ENTRIES, 0)
+        : clampPageStart(from, tailStartIndex, totalEntries, options?.preserveEnd);
+    const entries = tailEntries.slice(sliceStart - tailStartIndex);
+    return buildConversationResponse(entries, totalEntries, sliceStart, state, durationMs);
+  }
+
+  // Deep scroll-back below the retained window: fall back to a full read.
+  const fullEntries = await readFullEntries();
+  const startIndex = clampPageStart(from, 0, fullEntries.length, options?.preserveEnd);
+  return buildConversationResponse(
+    fullEntries.slice(startIndex),
+    fullEntries.length,
+    startIndex,
+    state,
+    durationMs,
+  );
 }
 
 type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
@@ -3656,10 +3690,15 @@ export class SessionService {
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly conversationReaders = new Map<string, ClaudeConversationReaderState>();
+  // Kept for the life of the session, not pruned with live ids: a viewed
+  // terminal session would otherwise re-read its rollout every sweep.
+  private readonly codexConversationReaders = new Map<string, CodexConversationReaderState>();
   // Serializes conversation tail reads per session. getConversation is polled
   // every 4s and a slow read can overlap the next poll; chaining keeps the one
-  // shared reader's offset monotonic instead of racing read-modify-write.
-  private readonly conversationReadChain = new Map<string, Promise<void>>();
+  // shared reader's offset monotonic instead of racing read-modify-write. The
+  // slot object outlives every read queued on it and is dropped on eviction,
+  // so a read still in flight can tell it must not store its reader.
+  private readonly conversationReadChain = new Map<string, { tail: Promise<void> }>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly codexRolloutReaders = new Map<string, CodexRolloutReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
@@ -6318,14 +6357,21 @@ export class SessionService {
     rows: {
       view: T;
       source: SessionRecord | null;
-      revision: number;
+      receipt: SessionLifecycleSnapshot;
       identity?: boolean;
     }[],
     rebuild: (
       record: SessionRecord,
       listing: SessionRecord[] | undefined,
     ) => Promise<{ view: T; source: SessionRecord | null } | undefined>,
-    options: { includePending: boolean; signal?: AbortSignal | undefined },
+    // "refuse" throws 503 once the rebuild budget is spent; "lastBuild" returns
+    // each still-moving row as last built with the receipt captured at that
+    // build, and omits a pending session first seen on the final pass.
+    options: {
+      includePending: boolean;
+      onExhausted: "refuse" | "lastBuild";
+      signal?: AbortSignal | undefined;
+    },
   ): Promise<(T & { lifecycle: SessionLifecycleSnapshot })[]> {
     const rebuildExisting = async (record: SessionRecord, listing: SessionRecord[] | undefined) => {
       try {
@@ -6348,9 +6394,9 @@ export class SessionService {
       record: SessionRecord,
       receipt: SessionLifecycleSnapshot,
     ) => {
-      if (receipt.revision === 0 && row.revision === 0) return false;
+      if (receipt.revision === 0 && row.receipt.revision === 0) return false;
       return (
-        receipt.revision !== row.revision ||
+        receipt.revision !== row.receipt.revision ||
         (record !== row.source &&
           (row.identity === true || !isDeepStrictEqual(record, row.source))) ||
         !isDeepStrictEqual(
@@ -6410,6 +6456,9 @@ export class SessionService {
         pass === LIFECYCLE_REBUILD_PASSES ||
         (pass > 0 && Date.now() - startedAt >= LIFECYCLE_ASSEMBLY_BUDGET_MS)
       ) {
+        if (options.onExhausted === "lastBuild") {
+          return live.map((row) => ({ ...row.view, lifecycle: row.receipt }));
+        }
         const refused = pickup[0]?.id ?? (stale[0] as (typeof stale)[number]).view.id;
         throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(refused));
       }
@@ -6426,7 +6475,7 @@ export class SessionService {
             }
             row.view = rebuilt.view;
             row.source = rebuilt.source;
-            row.revision = (receipts.get(id) as SessionLifecycleSnapshot).revision;
+            row.receipt = receipts.get(id) as SessionLifecycleSnapshot;
             row.identity = false;
           }),
         ),
@@ -6436,7 +6485,7 @@ export class SessionService {
             return rebuilt
               ? {
                   ...rebuilt,
-                  revision: (receipts.get(record.id) as SessionLifecycleSnapshot).revision,
+                  receipt: receipts.get(record.id) as SessionLifecycleSnapshot,
                   identity: false,
                 }
               : undefined;
@@ -7987,12 +8036,18 @@ export class SessionService {
           sizes: true,
         },
       );
+      const archivedIds = report.groups
+        .filter((g) => g.archived)
+        .flatMap((g) => g.archiveSessionIds);
+      for (const id of archivedIds) {
+        this.evictConversationReaders(id);
+      }
       this.logEvent("session.gc.completed", {
         level: "info",
         message: `Session GC sweep: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived, ${report.totals.freedBytes ?? 0} byte(s) freed.`,
         details: {
           totals: report.totals,
-          sessionIds: report.groups.filter((g) => g.archived).flatMap((g) => g.archiveSessionIds),
+          sessionIds: archivedIds,
         },
       });
     } catch (error) {
@@ -10909,18 +10964,18 @@ export class SessionService {
         .map((view) => ({
           view,
           source: this.dashboardEnrichedRecords.get(view.id) ?? null,
-          revision: this.lifecycle.snapshot(view.id).revision,
+          receipt: this.lifecycle.snapshot(view.id),
           identity: true,
         }));
       for (const { id } of allSessions) {
-        // One synchronous span: capture the revision, then read the record.
-        const revision = this.lifecycle.snapshot(id).revision;
-        if (this.dashboardCache.has(id) || revision === 0) continue;
+        // One synchronous span: capture the receipt, then read the record.
+        const receipt = this.lifecycle.snapshot(id);
+        if (this.dashboardCache.has(id) || receipt.revision === 0) continue;
         const record = readSession(this.config.dataDir, id);
         if (!record) continue;
         try {
           const assembled = await this.assembleDashboard(record);
-          if (assembled) rows.push({ ...assembled, revision, identity: false });
+          if (assembled) rows.push({ ...assembled, receipt, identity: false });
           else if (readSession(this.config.dataDir, record.id))
             throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(record.id));
         } catch (error) {
@@ -10935,7 +10990,7 @@ export class SessionService {
       const views = await this.finalizeLifecycleRows(
         rows,
         (record) => this.assembleDashboard(record),
-        { includePending: true, signal: options.signal },
+        { includePending: true, onExhausted: "lastBuild", signal: options.signal },
       );
       for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
       return views.filter(included);
@@ -10946,14 +11001,14 @@ export class SessionService {
     const claudeAccounts = this.computeClaudeAccountsView();
     const rows = await Promise.all(
       sessions.map(async (session) => {
-        const revision = this.lifecycle.snapshot(session.id).revision;
+        const receipt = this.lifecycle.snapshot(session.id);
         try {
           const { view, source } = await this.enrichWithClassified(
             session,
             claudeAccounts,
             allSessions,
           );
-          return { view, source, revision };
+          return { view, source, receipt };
         } catch (error) {
           if (
             error instanceof SessionResourceNotFoundError &&
@@ -10967,7 +11022,7 @@ export class SessionService {
     const views = await this.finalizeLifecycleRows(
       rows.filter((row) => row !== undefined),
       (record, listing) => this.enrichWithClassified(record, undefined, listing),
-      { includePending: true, signal: options?.signal },
+      { includePending: true, onExhausted: "lastBuild", signal: options?.signal },
     );
     for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
     return views.filter(included);
@@ -11306,28 +11361,14 @@ export class SessionService {
         );
       }
 
-      const { entries: tailEntries, state, totalEntries, startIndex: tailStartIndex } = tail;
+      return pageConversationTail(tail, options, tail.state, durationMs, readFullEntries);
+    }
 
-      if (from === undefined || from >= tailStartIndex) {
-        // Within the retained window: slice the cached tail, no full read.
-        const sliceStart =
-          from === undefined
-            ? Math.max(tailStartIndex, totalEntries - CONVERSATION_PAGE_ENTRIES, 0)
-            : clampPageStart(from, tailStartIndex, totalEntries, options?.preserveEnd);
-        const entries = tailEntries.slice(sliceStart - tailStartIndex);
-        return buildConversationResponse(entries, totalEntries, sliceStart, state, durationMs);
-      }
-
-      // Deep scroll-back below the retained window: fall back to a full read.
-      const fullEntries = await readFullEntries();
-      const startIndex = clampPageStart(from, 0, fullEntries.length, options?.preserveEnd);
-      return buildConversationResponse(
-        fullEntries.slice(startIndex),
-        fullEntries.length,
-        startIndex,
-        state,
-        durationMs,
-      );
+    if (session.agent === "codex") {
+      const tail = await this.readCodexConversationSerialized(session);
+      const state = statusFallbackState(session);
+      if (!tail) return buildConversationResponse([], 0, 0, state, durationMs);
+      return pageConversationTail(tail, options, state, durationMs, readFullEntries);
     }
 
     const entries = await readFullEntries();
@@ -11349,16 +11390,32 @@ export class SessionService {
    * would otherwise both snapshot the same cached reader and the later write
    * would clobber the earlier, regressing the offset and double-counting.
    * Chaining on the prior read serializes them so the offset advances
-   * monotonically.
+   * monotonically. `read` gets `isLive`: false once the session was evicted
+   * mid-read, so it must not write its reader back.
    */
+  private serializeConversationRead<T>(
+    sessionId: string,
+    read: (isLive: () => boolean) => Promise<T>,
+  ): Promise<T> {
+    const slot = this.conversationReadChain.get(sessionId) ?? { tail: Promise.resolve() };
+    const run = slot.tail.then(() =>
+      read(() => this.conversationReadChain.get(sessionId) === slot),
+    );
+    slot.tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.conversationReadChain.set(sessionId, slot);
+    return run;
+  }
+
   private readConversationSerialized(session: SessionRecord): Promise<{
     entries: TranscriptEntry[];
     state: SessionState;
     totalEntries: number;
     startIndex: number;
   } | null> {
-    const prior = this.conversationReadChain.get(session.id) ?? Promise.resolve();
-    const run = prior.then(async () => {
+    return this.serializeConversationRead(session.id, async (isLive) => {
       const result = await readClaudeConversationTail(
         session.worktreePath,
         this.conversationReaders.get(session.id),
@@ -11366,17 +11423,26 @@ export class SessionService {
       );
       if (!result) return null;
       const { reader, hasMore: _hasMore, ...conversation } = result;
-      this.conversationReaders.set(session.id, reader);
+      if (isLive()) this.conversationReaders.set(session.id, reader);
       return conversation;
     });
-    this.conversationReadChain.set(
-      session.id,
-      run.then(
-        () => undefined,
-        () => undefined,
-      ),
-    );
-    return run;
+  }
+
+  private readCodexConversationSerialized(session: SessionRecord): Promise<{
+    entries: TranscriptEntry[];
+    totalEntries: number;
+    startIndex: number;
+  } | null> {
+    return this.serializeConversationRead(session.id, async (isLive) => {
+      const result = await readCodexConversationTail(
+        this.codexSessionsDir(session.id),
+        this.codexConversationReaders.get(session.id),
+      );
+      if (!result) return null;
+      const { reader, ...conversation } = result;
+      if (isLive()) this.codexConversationReaders.set(session.id, reader);
+      return conversation;
+    });
   }
 
   async getProjectSuggestions(
@@ -18105,6 +18171,14 @@ export class SessionService {
     });
   }
 
+  // Session GC archives records without removeSessionArtifacts, so the
+  // sweep evicts through this too.
+  private evictConversationReaders(sessionId: string): void {
+    this.conversationReaders.delete(sessionId);
+    this.codexConversationReaders.delete(sessionId);
+    this.conversationReadChain.delete(sessionId);
+  }
+
   private removeSessionArtifacts(
     session: Pick<
       SessionRecord,
@@ -18119,8 +18193,7 @@ export class SessionService {
     deleteSessionUserActions(this.config.dataDir, sessionId);
     // Evict per-session in-memory reader caches so they do not grow unbounded
     // for the life of the daemon as sessions are created and discarded.
-    this.conversationReaders.delete(sessionId);
-    this.conversationReadChain.delete(sessionId);
+    this.evictConversationReaders(sessionId);
     this.claudeJsonlReaders.delete(sessionId);
     this.cursorJsonlReaders.delete(sessionId);
     this.cursorPaneReadyOverrides.delete(sessionId);
@@ -24777,14 +24850,14 @@ export class SessionService {
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],
   ): Promise<SessionView> {
-    const revision = this.lifecycle.snapshot(session.id).revision;
+    const receipt = this.lifecycle.snapshot(session.id);
     const { view, classified, source } = await this.enrichWithClassified(
       session,
       claudeAccounts,
       sessionBatch,
     );
     const rows = await this.finalizeLifecycleRows(
-      [{ view: this.withSessionDetail(view, classified.session), source, revision }],
+      [{ view: this.withSessionDetail(view, classified.session), source, receipt }],
       async (record) => {
         const rebuilt = await this.enrichWithClassified(record);
         return {
@@ -24792,7 +24865,7 @@ export class SessionService {
           source: rebuilt.source,
         };
       },
-      { includePending: false },
+      { includePending: false, onExhausted: "refuse" },
     );
     const result = rows[0];
     if (!result) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);

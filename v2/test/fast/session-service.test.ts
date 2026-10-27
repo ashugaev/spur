@@ -447,6 +447,7 @@ const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDi
 const captureCodexRolloutBaselineMock = vi.fn();
 const findLatestCodexSessionFileMock = vi.fn();
 const readCodexRolloutStateMock = vi.fn();
+const readCodexConversationTailMock = vi.fn();
 const scanCodexRolloutForMessageMock = vi.fn();
 const ghMock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
@@ -773,6 +774,7 @@ vi.mock("../../src/agents/codex.js", () => ({
   codexHookHomePath: codexHookHomePathMock,
   captureCodexRolloutBaseline: captureCodexRolloutBaselineMock,
   findLatestCodexSessionFile: findLatestCodexSessionFileMock,
+  readCodexConversationTail: readCodexConversationTailMock,
   readCodexRolloutState: readCodexRolloutStateMock,
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
 }));
@@ -2497,6 +2499,7 @@ describe("SessionService", () => {
     tryRotateMock.mockReset();
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
     findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
+    readCodexConversationTailMock.mockReset().mockResolvedValue(null);
     readCodexRolloutStateMock.mockReset().mockResolvedValue({ rollout: null, rateLimit: null });
     // Default: a well-formed batched-lookup response that says "no PR for this
     // branch". An unparseable answer is no longer read as "no PR" — it is a
@@ -50666,29 +50669,316 @@ describe("SessionService", () => {
 
     it("derives messages and entries from the codex transcript reader", async () => {
       readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
-      readAgentConversationMock.mockResolvedValue([
-        { kind: "message", role: "user", text: "hi", timestampMs: 1 },
-        { kind: "tool", name: "exec_command", callId: "call_1" },
-        { kind: "message", role: "assistant", text: "hello back", timestampMs: 2 },
-      ]);
+      readCodexConversationTailMock.mockResolvedValue({
+        entries: [
+          { kind: "message", role: "user", text: "hi", timestampMs: 1 },
+          { kind: "tool", name: "exec_command", callId: "call_1" },
+          { kind: "message", role: "assistant", text: "hello back", timestampMs: 2 },
+        ],
+        totalEntries: 3,
+        startIndex: 0,
+        reader: { filePath: "/rollout.jsonl" },
+      });
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       const result = await service.getConversation("api-1");
 
-      expect(readAgentConversationMock).toHaveBeenCalledWith(
-        "codex",
-        expect.objectContaining({
-          worktreePath: "/tmp/spur-worktrees/api/api-1",
-          codexSessionsDir: expect.stringContaining("api-1"),
-        }),
+      expect(readCodexConversationTailMock).toHaveBeenCalledWith(
+        expect.stringContaining("api-1"),
+        undefined,
       );
+      expect(readAgentConversationMock).not.toHaveBeenCalled();
       expect(result.messages).toEqual([
         { role: "user", text: "hi", timestampMs: 1 },
         { role: "assistant", text: "hello back", timestampMs: 2 },
       ]);
       expect(result.entries.map((entry) => entry.kind)).toEqual(["message", "tool", "message"]);
+      expect(result.totalEntries).toBe(3);
+      expect(result.startIndex).toBe(0);
+    });
+
+    describe("codex window paging", () => {
+      // Window of 300 entries ending at total 450: absolute indexes 150..449.
+      const total = 450;
+      const windowSize = 300;
+
+      function messageEntries(
+        startIndex: number,
+        count: number,
+      ): { kind: "message"; role: "user"; text: string }[] {
+        return Array.from({ length: count }, (_, offset) => ({
+          kind: "message" as const,
+          role: "user" as const,
+          text: `m${startIndex + offset}`,
+        }));
+      }
+
+      function tailResult(): object {
+        return {
+          entries: messageEntries(total - windowSize, windowSize),
+          totalEntries: total,
+          startIndex: total - windowSize,
+          reader: { filePath: "/rollout.jsonl" },
+        };
+      }
+
+      async function codexService(): Promise<
+        InstanceType<Awaited<ReturnType<typeof loadSessionServiceModule>>["SessionService"]>
+      > {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+        readCodexConversationTailMock.mockResolvedValue(tailResult());
+        const { SessionService } = await loadSessionServiceModule();
+        return new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      }
+
+      it("returns the last page of the window without a full read", async () => {
+        const service = await codexService();
+
+        const result = await service.getConversation("api-1");
+
+        expect(result.startIndex).toBe(350);
+        expect(result.totalEntries).toBe(total);
+        expect(result.entries).toEqual(messageEntries(350, 100));
+        expect(readAgentConversationMock).not.toHaveBeenCalled();
+      });
+
+      it("slices from inside the window without a full read", async () => {
+        const service = await codexService();
+
+        const result = await service.getConversation("api-1", { from: 200 });
+
+        expect(result.startIndex).toBe(200);
+        expect(result.entries).toEqual(messageEntries(200, 250));
+        expect(readAgentConversationMock).not.toHaveBeenCalled();
+      });
+
+      it("reads the full transcript when from is below the window", async () => {
+        const service = await codexService();
+        readAgentConversationMock.mockResolvedValue(messageEntries(0, total));
+
+        const result = await service.getConversation("api-1", { from: 10 });
+
+        expect(readAgentConversationMock).toHaveBeenCalledWith(
+          "codex",
+          expect.objectContaining({ codexSessionsDir: expect.stringContaining("api-1") }),
+        );
+        expect(result.startIndex).toBe(10);
+        expect(result.totalEntries).toBe(total);
+        expect(result.entries).toEqual(messageEntries(10, total - 10));
+      });
+
+      it("keeps the end of the transcript for preserveEnd at from == totalEntries", async () => {
+        const service = await codexService();
+
+        const result = await service.getConversation("api-1", {
+          from: total,
+          preserveEnd: true,
+        });
+
+        expect(result.startIndex).toBe(total);
+        expect(result.entries).toEqual([]);
+        expect(readAgentConversationMock).not.toHaveBeenCalled();
+      });
+
+      it("returns an empty response with the status fallback state when no rollout exists", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "killed" }));
+        readCodexConversationTailMock.mockResolvedValue(null);
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const result = await service.getConversation("api-1", { from: 5 });
+
+        expect(result.state).toBe("killed");
+        expect(result.entries).toEqual([]);
+        expect(result.totalEntries).toBe(0);
+        expect(result.startIndex).toBe(0);
+        expect(readAgentConversationMock).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("codex conversation reader lifetime", () => {
+      const readerResult = (reader: object): object => ({
+        entries: [],
+        totalEntries: 0,
+        startIndex: 0,
+        reader,
+      });
+
+      it("reuses the cached codex reader across calls", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+        const first = { filePath: "/rollout-a.jsonl" };
+        readCodexConversationTailMock.mockResolvedValueOnce(readerResult(first));
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await service.getConversation("api-1");
+        await service.getConversation("api-1");
+
+        expect(readCodexConversationTailMock).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining("api-1"),
+          first,
+        );
+      });
+
+      it("serializes overlapping codex reads so the shared reader is not clobbered", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+        // Each read builds on the reader it was handed: two overlapping polls
+        // that both saw the same stale reader would double-count.
+        readCodexConversationTailMock.mockImplementation(
+          async (_dir: string, reader?: { totalEntries?: number }) => {
+            const totalEntries = (reader?.totalEntries ?? 0) + 5;
+            await Promise.resolve();
+            return {
+              entries: [],
+              totalEntries,
+              startIndex: totalEntries,
+              reader: { filePath: "/x.jsonl", totalEntries },
+            };
+          },
+        );
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const [a, b] = await Promise.all([
+          service.getConversation("api-1"),
+          service.getConversation("api-1"),
+        ]);
+
+        const totals = [a.totalEntries, b.totalEntries].sort((x, y) => (x ?? 0) - (y ?? 0));
+        expect(totals).toEqual([5, 10]);
+        expect(readCodexConversationTailMock).toHaveBeenLastCalledWith(
+          expect.stringContaining("api-1"),
+          expect.objectContaining({ totalEntries: 5 }),
+        );
+      });
+
+      it("evicts the codex reader when the session artifacts are removed", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+        readCodexConversationTailMock.mockResolvedValue(
+          readerResult({ filePath: "/rollout-a.jsonl" }),
+        );
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await service.getConversation("api-1");
+
+        // @ts-expect-error test-only access to a private method
+        service.removeSessionArtifacts({
+          id: "api-1",
+          project: "api",
+          startupAttachmentIds: [],
+        });
+        await service.getConversation("api-1");
+
+        expect(readCodexConversationTailMock).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining("api-1"),
+          undefined,
+        );
+      });
+
+      it("evicts the codex reader when session gc archives the record", async () => {
+        createSessionStore(
+          baseSession({
+            agent: "codex",
+            status: "completed",
+            worktree: false,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          }),
+        );
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          sessionGc: { ...baseConfig().sessionGc, enabled: true, olderThanDays: 0 },
+        });
+        archiveSessionsMock.mockReturnValueOnce({
+          archivedIds: ["api-1"] as never[],
+          archiveDir: "/tmp/sessions-archive",
+        });
+        readCodexConversationTailMock.mockResolvedValue(
+          readerResult({ filePath: "/rollout-a.jsonl" }),
+        );
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService(
+          "/tmp/spur.yaml",
+          "2026-03-18T10:00:00.000Z",
+        ) as unknown as {
+          runSessionGcSweep(): Promise<void>;
+          lastSessionGcSweepAt: number;
+          getConversation(id: string): Promise<unknown>;
+          dispose(): void;
+        };
+        await service.getConversation("api-1");
+        service.lastSessionGcSweepAt = 0;
+
+        await service.runSessionGcSweep();
+        await service.getConversation("api-1");
+
+        expect(archiveSessionsMock).toHaveBeenCalledTimes(1);
+        expect(readCodexConversationTailMock).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining("api-1"),
+          undefined,
+        );
+        service.dispose();
+      });
+
+      it("does not restore the codex reader from a read that straddles eviction", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+        let release: (value: object) => void = () => undefined;
+        readCodexConversationTailMock.mockReturnValueOnce(
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+        );
+        readCodexConversationTailMock.mockResolvedValue(
+          readerResult({ filePath: "/rollout-fresh.jsonl" }),
+        );
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const pending = service.getConversation("api-1");
+        await vi.waitFor(() => expect(readCodexConversationTailMock).toHaveBeenCalledTimes(1));
+
+        // @ts-expect-error test-only access to a private method
+        service.removeSessionArtifacts({
+          id: "api-1",
+          project: "api",
+          startupAttachmentIds: [],
+        });
+        release(readerResult({ filePath: "/rollout-stale.jsonl" }));
+        await pending;
+        // @ts-expect-error test-only access to a private field
+        expect(service.codexConversationReaders.has("api-1")).toBe(false);
+        // @ts-expect-error test-only access to a private field
+        expect(service.conversationReadChain.has("api-1")).toBe(false);
+        await service.getConversation("api-1");
+
+        expect(readCodexConversationTailMock).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining("api-1"),
+          undefined,
+        );
+      });
+
+      it("keeps the codex reader across pruneSessionScopedState for a terminal session", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "completed" }));
+        const first = { filePath: "/rollout-a.jsonl" };
+        readCodexConversationTailMock.mockResolvedValueOnce(readerResult(first));
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await service.getConversation("api-1");
+
+        // @ts-expect-error test-only access to a private method
+        service.pruneSessionScopedState(new Set());
+        await service.getConversation("api-1");
+
+        expect(readCodexConversationTailMock).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining("api-1"),
+          first,
+        );
+      });
     });
 
     it("derives messages and entries from the cursor transcript reader", async () => {
@@ -51553,28 +51843,41 @@ describe("SessionService", () => {
         }
       });
 
-      it.each(["list", "get"] as const)(
-        "returns retryable 503 after bounded rebuilds when %s sees churn on every build",
-        async (route) => {
-          const records = plainSeed();
-          const { service, internals } = await setup();
-          try {
-            settleOp(internals, "api-1");
-            let changes = 0;
-            const watch = watchBuilds(internals, (id) => {
-              if (id === "api-1") rewrite(records, id, { branch: `changed ${++changes}` });
-            });
-            listSessionsMock.mockClear();
-            const call =
-              route === "list" ? service.list({ includeCompleted: true }) : service.get("api-1");
-            await expect(call).rejects.toMatchObject(snapshotChanged);
-            expect(watch.builds("api-1")).toBe(4);
-            if (route === "list") expect(listSessionsMock).toHaveBeenCalledTimes(5);
-          } finally {
-            service.dispose();
-          }
-        },
-      );
+      it("list returns every row, the churning one as its last build, after bounded rebuilds", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          let changes = 0;
+          const watch = watchBuilds(internals, (id) => {
+            if (id === "api-1") rewrite(records, id, { branch: `changed ${++changes}` });
+          });
+          listSessionsMock.mockClear();
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-1", "api-2"]);
+          expect(rows.find((row) => row.id === "api-1")?.branch).toBe("changed 3");
+          expect(watch.builds("api-1")).toBe(4);
+          expect(listSessionsMock).toHaveBeenCalledTimes(5);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("get returns retryable 503 after bounded rebuilds under churn on every build", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          let changes = 0;
+          const watch = watchBuilds(internals, (id) => {
+            if (id === "api-1") rewrite(records, id, { branch: `changed ${++changes}` });
+          });
+          await expect(service.get("api-1")).rejects.toMatchObject(snapshotChanged);
+          expect(watch.builds("api-1")).toBe(4);
+        } finally {
+          service.dispose();
+        }
+      });
 
       it.each([
         { churnBuilds: 3, builds: 4 },
@@ -51619,17 +51922,22 @@ describe("SessionService", () => {
         }
       });
 
-      it("returns 503 after bounded rebuilds when the lifecycle revision moves every pass", async () => {
+      it("list carries the build-time receipt when the lifecycle revision moves every pass", async () => {
         plainSeed();
         const { service, internals } = await setup();
         try {
           settleOp(internals, "api-1");
+          const buildRevisions: number[] = [];
           const watch = watchBuilds(internals, (id) => {
-            if (id === "api-1") settleOp(internals, id);
+            if (id !== "api-1") return;
+            buildRevisions.push(internals.lifecycle.snapshot(id).revision);
+            settleOp(internals, id);
           });
-          await expect(service.list({ includeCompleted: true })).rejects.toMatchObject(
-            snapshotChanged,
-          );
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-1", "api-2"]);
+          const lifecycle = rows.find((row) => row.id === "api-1")?.lifecycle;
+          expect(lifecycle?.revision).toBeLessThan(internals.lifecycle.snapshot("api-1").revision);
+          expect(buildRevisions).toContain(lifecycle?.revision);
           expect(watch.builds("api-1")).toBe(4);
         } finally {
           service.dispose();
@@ -51720,7 +52028,7 @@ describe("SessionService", () => {
         }
       });
 
-      it("refuses naming the picked-up session when a pickup and a stale row remain at the last pass", async () => {
+      it("omits a pending session first seen at the last pass and returns the moving row", async () => {
         const records = plainSeed();
         const { service, internals } = await setup();
         try {
@@ -51741,13 +52049,8 @@ describe("SessionService", () => {
             });
             internals.lifecycle.begin("reopen", ["api-3"], "pending-reopen");
           });
-          await expect(service.list({ includeCompleted: true })).rejects.toMatchObject({
-            ...snapshotChanged,
-            payload: {
-              code: "session_lifecycle_snapshot_changed",
-              lifecycle: { operation: { operationId: "pending-reopen", phase: "pending" } },
-            },
-          });
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-1", "api-2"]);
         } finally {
           service.dispose();
         }
@@ -52014,8 +52317,31 @@ describe("SessionService", () => {
         }
       });
 
+      it("dashboard list returns every row when one churns on every build", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          settleOp(internals, "api-2");
+          await internals.runDashboardCacheTick();
+          let changes = 0;
+          const watch = watchDashboardBuilds(internals, (id) => {
+            if (id === "api-1") rewrite(records, id, { branch: `changed ${++changes}` });
+          });
+          rewrite(records, "api-1", { branch: "changed 0" });
+          listSessionsMock.mockClear();
+          const rows = await service.list({ view: "dashboard", includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-1", "api-2"]);
+          expect(rows.find((row) => row.id === "api-1")?.branch).toBe("changed 2");
+          expect(watch.builds("api-1")).toBe(3);
+          expect(listSessionsMock).toHaveBeenCalledTimes(6);
+        } finally {
+          service.dispose();
+        }
+      });
+
       describe("deadline and abort", () => {
-        it("refuses after the budget once a rebuild pass ran, never before the first", async () => {
+        it("stops rebuilding after the budget once a rebuild pass ran, never before the first", async () => {
           vi.useFakeTimers({ toFake: ["Date"] });
           try {
             for (const churnAlways of [true, false]) {
@@ -52030,8 +52356,7 @@ describe("SessionService", () => {
                   if (build === 2) vi.setSystemTime(Date.now() + 60_000);
                 });
                 const listed = service.list({ includeCompleted: true });
-                if (churnAlways) await expect(listed).rejects.toMatchObject(snapshotChanged);
-                else await expect(listed).resolves.toHaveLength(2);
+                await expect(listed).resolves.toHaveLength(2);
                 expect(watch.builds("api-1")).toBe(2);
               } finally {
                 service.dispose();
