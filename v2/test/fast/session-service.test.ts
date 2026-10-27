@@ -33316,6 +33316,25 @@ describe("SessionService", () => {
         expect(ownerMissingEvents()).toHaveLength(2);
       });
 
+      it("prunes the dedupe key once the session leaves the store", async () => {
+        const { service, sessions } = await strandedService();
+        const stranded = sessions.get("api-2");
+        if (!stranded) {
+          throw new Error("fixture session api-2 missing");
+        }
+
+        await service.get("api-2");
+        expect(ownerMissingEvents()).toHaveLength(1);
+
+        sessions.delete("api-2");
+        await (
+          service as unknown as { runDashboardCacheTick: () => Promise<void> }
+        ).runDashboardCacheTick();
+        sessions.set("api-2", stranded);
+        await service.get("api-2");
+        expect(ownerMissingEvents()).toHaveLength(2);
+      });
+
       it("full and dashboard list resolve and include the session", async () => {
         const { service } = await strandedService();
 
