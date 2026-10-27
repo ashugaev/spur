@@ -98,7 +98,7 @@ describe("SessionRow actions menu", () => {
         agent: "claude",
         claudeAccounts: [{ id: "work", authenticated: true }],
       },
-      ["Desk agent", "Handoff", "Switch auth", "Pause", "Complete", "Kill"],
+      ["Desk agent", "Handoff", "Pause", "Complete", "Kill"],
     ],
     [
       { status: "running", runtimeAlive: true, workspaceExists: false },

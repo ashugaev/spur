@@ -2488,8 +2488,6 @@ export function Dashboard() {
         return actionDialogs.openDeskSpawn(session);
       case "handoff":
         return actionDialogs.openHandoff(session);
-      case "switchAuth":
-        return actionDialogs.openSwitchAuth(session);
       case "recover":
         return actionDialogs.openRecover(session);
       case "respawn":

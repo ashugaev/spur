@@ -174,45 +174,15 @@ describe("Dashboard row actions", () => {
     expect(dialog).toHaveTextContent(title);
   });
 
-  // The list endpoint omits claudeAccounts and artifacts; these rows match it.
-  const claudeRow: SpurSessionView = { ...running, agent: "claude" };
-
-  it("loads the full session before opening Switch auth", async () => {
-    const reads: string[] = [];
-    mount(async (url) => {
-      if (url === "/api/sessions") return list([claudeRow]);
-      if (url === `/api/sessions/${running.id}`) {
-        reads.push(url);
-        return json({ ...claudeRow, claudeAccounts: [{ id: "work", authenticated: true }] });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-    await choose("Switch auth");
-    expect(await screen.findByRole("dialog", { name: "Switch Claude account" })).toBeVisible();
-    expect(reads).toHaveLength(1);
-  });
-
-  it("toasts instead of opening Switch auth without authenticated accounts", async () => {
-    mount(async (url) => {
-      if (url === "/api/sessions") return list([claudeRow]);
-      if (url === `/api/sessions/${running.id}`)
-        return json({ ...claudeRow, claudeAccounts: [{ id: "work", authenticated: false }] });
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-    await choose("Switch auth");
-    expect(
-      await screen.findByText("No authenticated Claude accounts to switch to"),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-  });
+  // The list endpoint omits artifacts; this row matches it.
+  const errored: SpurSessionView = {
+    ...running,
+    status: "errored",
+    state: "error",
+    runtimeAlive: false,
+  };
 
   it("shows startup images from the full session in Edit & Respawn", async () => {
-    const errored: SpurSessionView = {
-      ...running,
-      status: "errored",
-      state: "error",
-      runtimeAlive: false,
-    };
     mount(async (url) => {
       if (url === "/api/sessions") return list([errored]);
       if (url === `/api/sessions/${running.id}`)
@@ -244,11 +214,11 @@ describe("Dashboard row actions", () => {
 
   it("toasts when the full session read fails and opens nothing", async () => {
     mount(async (url) => {
-      if (url === "/api/sessions") return list([claudeRow]);
+      if (url === "/api/sessions") return list([errored]);
       if (url === `/api/sessions/${running.id}`) return json({ error: "read exploded" }, 502);
       throw new Error(`Unexpected fetch: ${url}`);
     });
-    await choose("Switch auth");
+    await choose("Edit & Respawn");
     expect(await screen.findByText("read exploded")).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
@@ -257,26 +227,27 @@ describe("Dashboard row actions", () => {
     const other: SpurSessionView = { ...running, id: "row-two", tmuxSession: "row-two" };
     let release!: (response: Response) => void;
     mount(async (url) => {
-      if (url === "/api/sessions") return list([claudeRow, other]);
+      if (url === "/api/sessions") return list([errored, other]);
       if (url === `/api/sessions/${running.id}`)
         return new Promise<Response>((resolve) => (release = resolve));
       const editor = editorFetch(url);
       if (editor) return editor;
       throw new Error(`Unexpected fetch: ${url}`);
     });
-    await choose("Switch auth");
+    await choose("Edit & Respawn");
     fireEvent.click(await screen.findByRole("button", { name: "Actions for row-two" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Handoff" }));
     expect(await screen.findByRole("dialog")).toHaveTextContent("Handoff");
     await act(async () => {
-      release(json({ ...claudeRow, claudeAccounts: [{ id: "work", authenticated: true }] }));
+      release(json(errored));
     });
-    expect(screen.queryByRole("dialog", { name: "Switch Claude account" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(screen.getByRole("dialog")).not.toHaveTextContent("Edit & Respawn");
   });
 
   it("puts an icon before every row menu item", async () => {
     mount(async (url) => {
-      if (url === "/api/sessions") return list([claudeRow]);
+      if (url === "/api/sessions") return list([running]);
       throw new Error(`Unexpected fetch: ${url}`);
     });
     fireEvent.click(await trigger());

@@ -31,7 +31,6 @@ import {
   PRIMARY_SUBMIT_HINT,
 } from "@/lib/submit-hotkeys";
 import {
-  canSwitchAuth,
   isTerminalSession,
   toDashboardSession,
   type DashboardSession,
@@ -228,8 +227,8 @@ export function useSessionActionDialogs({
   };
 
   /**
-   * List rows omit artifacts and Claude accounts. With `loadFull`, Respawn and
-   * Switch auth read the full session first and pin that snapshot.
+   * List rows omit artifacts. With `loadFull`, Respawn reads the full session
+   * first and pins that snapshot.
    */
   const loadTarget = async (target: DashboardSession): Promise<DashboardSession | null> => {
     try {
@@ -304,16 +303,11 @@ export function useSessionActionDialogs({
     setDeskSpawnOpen(true);
   };
 
-  const openSwitchAuth = (listed: DashboardSession) =>
-    withFullTarget(listed, (target) => {
-      if (!canSwitchAuth(target)) {
-        showErrorToast("No authenticated Claude accounts to switch to");
-        return;
-      }
-      setTarget(target, loadFull);
-      setSwitchAuthError(null);
-      setSwitchAuthOpen(true);
-    });
+  const openSwitchAuth = (target: DashboardSession) => {
+    setTarget(target);
+    setSwitchAuthError(null);
+    setSwitchAuthOpen(true);
+  };
 
   const openRecover = (target: DashboardSession, payload = buildLocalRecoverPayload(target)) => {
     setTarget(target);

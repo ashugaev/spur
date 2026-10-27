@@ -52,15 +52,6 @@ export function CheckIcon({ className = "h-3.5 w-3.5" }: { className?: string })
   );
 }
 
-export function KeyIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
-  return (
-    <StrokeIcon className={className}>
-      <circle cx="5" cy="11" r="2.5" />
-      <path d="m6.8 9.2 6.2-6.2M11 5l1.5 1.5M9.5 6.5 11 8" />
-    </StrokeIcon>
-  );
-}
-
 export function EditIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
   return (
     <StrokeIcon className={className}>

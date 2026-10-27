@@ -9,7 +9,6 @@ import { SendIcon } from "@/components/icons/SendIcon";
 import {
   CheckIcon,
   EditIcon,
-  KeyIcon,
   PauseIcon,
   PlayIcon,
   RestoreIcon,
@@ -230,7 +229,6 @@ const ICON = "h-3.5 w-3.5 shrink-0";
 export type SessionRowAction =
   | "desk"
   | "handoff"
-  | "switchAuth"
   | "pause"
   | "restore"
   | "continue"
@@ -266,8 +264,6 @@ function RowActionsMenu({
     items.push({ label, action, icon });
   if (canUseDeskCheckout(session)) add("Desk agent", "desk", <AccountsIcon className={ICON} />);
   if (canHandoff(session)) add("Handoff", "handoff", <SendIcon className={ICON} />);
-  // List rows omit Claude accounts; the dialog checks them after a full read.
-  if (session.agent === "claude") add("Switch auth", "switchAuth", <KeyIcon className={ICON} />);
   if (canPause(session)) add("Pause", "pause", <PauseIcon className={ICON} />);
   if (restorable && !budgetBlocked) add("Restore", "restore", <RestoreIcon className={ICON} />);
   if (restorable && budgetBlocked)
