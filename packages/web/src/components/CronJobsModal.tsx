@@ -221,7 +221,7 @@ function JobRow({
     <div className="border-b border-[var(--color-border-subtle)]">
       {/* Mouse convenience only: the keyboard toggle is the native button below. */}
       <div
-        className={`${GRID_CLASS} w-full cursor-pointer items-baseline px-[13px] py-2.5 text-left transition hover:bg-[var(--color-row-hover)] ${open ? "bg-[var(--color-row-hover)]" : ""}`}
+        className={`${GRID_CLASS} w-full cursor-pointer items-baseline px-[13px] py-2.5 text-left transition focus-within:bg-[var(--color-row-hover)] hover:bg-[var(--color-row-hover)] ${open ? "bg-[var(--color-row-hover)]" : ""}`}
         onClick={onToggle}
       >
         <button
@@ -235,7 +235,7 @@ function JobRow({
         >
           <span className="flex min-w-0 items-baseline gap-2">
             <span
-              className={`truncate font-semibold ${PRIMARY_TEXT} group-focus-visible:text-[var(--color-accent)]`}
+              className={`truncate font-semibold ${PRIMARY_TEXT} underline-offset-2 group-focus-visible:text-[var(--color-accent)] group-focus-visible:underline`}
             >
               {row.name}
             </span>
@@ -379,7 +379,7 @@ export function CronJobsModal({
           <span className="flex-1" />
           <button
             aria-label="Close cron"
-            className={`uppercase ${SECONDARY_TEXT} outline-none transition hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-accent)]`}
+            className={`uppercase ${SECONDARY_TEXT} outline-none transition underline-offset-2 hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-accent)] focus-visible:underline`}
             onClick={onClose}
             type="button"
           >
