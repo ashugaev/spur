@@ -1100,7 +1100,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "switch_session_auth",
     "POST",
     "/sessions/{sessionId}/switch-auth",
-    "Switch Claude account for session.",
+    "Switch Claude account for session. Returns 404 unless authRotation.switchAuth is true.",
     {
       body: body("SwitchAuthRequest", [
         field("accountId", "string", "Nonblank account ID.", true),
