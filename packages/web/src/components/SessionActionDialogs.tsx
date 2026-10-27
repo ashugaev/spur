@@ -98,7 +98,9 @@ export function useSessionActionDialogs({
   // unless the snapshot is a pinned full read.
   const [target, setTargetState] = useState<DashboardSession | null>(null);
   const [pinned, setPinned] = useState(false);
+  const loadRequestRef = useRef(0);
   const setTarget = (next: DashboardSession, full = false) => {
+    loadRequestRef.current += 1;
     setTargetState(next);
     setPinned(full);
   };
@@ -252,9 +254,11 @@ export function useSessionActionDialogs({
     listed: DashboardSession,
     apply: (target: DashboardSession) => void,
   ) => {
+    const request = ++loadRequestRef.current;
     if (!loadFull) return apply(listed);
     const target = await loadTarget(listed);
-    if (target) apply(target);
+    // A newer open superseded this read; never open late or twice.
+    if (target && request === loadRequestRef.current) apply(target);
   };
 
   const openRespawn = (listed: DashboardSession) => withFullTarget(listed, applyRespawn);

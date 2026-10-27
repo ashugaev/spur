@@ -253,6 +253,37 @@ describe("Dashboard row actions", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  it("drops a slow full read once another dialog opened", async () => {
+    const other: SpurSessionView = { ...running, id: "row-two", tmuxSession: "row-two" };
+    let release!: (response: Response) => void;
+    mount(async (url) => {
+      if (url === "/api/sessions") return list([claudeRow, other]);
+      if (url === `/api/sessions/${running.id}`)
+        return new Promise<Response>((resolve) => (release = resolve));
+      const editor = editorFetch(url);
+      if (editor) return editor;
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    await choose("Switch auth");
+    fireEvent.click(await screen.findByRole("button", { name: "Actions for row-two" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Handoff" }));
+    expect(await screen.findByRole("dialog")).toHaveTextContent("Handoff");
+    await act(async () => {
+      release(json({ ...claudeRow, claudeAccounts: [{ id: "work", authenticated: true }] }));
+    });
+    expect(screen.queryByRole("dialog", { name: "Switch Claude account" })).not.toBeInTheDocument();
+  });
+
+  it("puts an icon before every row menu item", async () => {
+    mount(async (url) => {
+      if (url === "/api/sessions") return list([claudeRow]);
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    fireEvent.click(await trigger());
+    for (const item of screen.getAllByRole("menuitem"))
+      expect(item.firstElementChild?.tagName.toLowerCase()).toBe("svg");
+  });
+
   it("opens Recover from the row menu for a session without a workspace", async () => {
     mount(async (url) => {
       if (url === "/api/sessions") return list([{ ...running, workspaceExists: false }]);

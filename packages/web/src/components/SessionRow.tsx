@@ -1,8 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
+import { AccountsIcon } from "@/components/icons/AccountsIcon";
+import { AlertIcon } from "@/components/icons/AlertIcon";
+import { SendIcon } from "@/components/icons/SendIcon";
+import {
+  CheckIcon,
+  EditIcon,
+  KeyIcon,
+  PauseIcon,
+  PlayIcon,
+  RestoreIcon,
+} from "@/components/icons/SessionActionIcons";
+import { StopSquareIcon } from "@/components/VoiceInput";
 import { DataRow, RowIconButton } from "@/components/DataRow";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
 import { TagEditor } from "@/components/TagEditor";
@@ -212,6 +224,9 @@ function RunningSidecarIndicator({
   );
 }
 
+/** 14px menu glyph; inherits the item's text color. */
+const ICON = "h-3.5 w-3.5 shrink-0";
+
 export type SessionRowAction =
   | "desk"
   | "handoff"
@@ -246,23 +261,26 @@ function RowActionsMenu({
   const budgetBlocked = isTokenBudgetBlocked(session);
   const restorable = isRestorable(session);
   // Same order as the detail page action bar; Kill renders last.
-  const items: { label: string; action: SessionRowAction }[] = [];
-  if (canUseDeskCheckout(session)) items.push({ label: "Desk agent", action: "desk" });
-  if (canHandoff(session)) items.push({ label: "Handoff", action: "handoff" });
+  const items: { label: string; action: SessionRowAction; icon: ReactNode }[] = [];
+  const add = (label: string, action: SessionRowAction, icon: ReactNode) =>
+    items.push({ label, action, icon });
+  if (canUseDeskCheckout(session)) add("Desk agent", "desk", <AccountsIcon className={ICON} />);
+  if (canHandoff(session)) add("Handoff", "handoff", <SendIcon className={ICON} />);
   // List rows omit Claude accounts; the dialog checks them after a full read.
-  if (session.agent === "claude") items.push({ label: "Switch auth", action: "switchAuth" });
-  if (canPause(session)) items.push({ label: "Pause", action: "pause" });
-  if (restorable && !budgetBlocked) items.push({ label: "Restore", action: "restore" });
-  if (restorable && budgetBlocked) items.push({ label: "Continue anyway", action: "continue" });
-  if (canReopen(session)) items.push({ label: "Reopen", action: "reopen" });
-  if (canRecover(session)) items.push({ label: "Recover", action: "recover" });
-  if (canComplete(session)) items.push({ label: "Complete", action: "complete" });
-  if (canRespawn(session)) items.push({ label: "Edit & Respawn", action: "respawn" });
+  if (session.agent === "claude") add("Switch auth", "switchAuth", <KeyIcon className={ICON} />);
+  if (canPause(session)) add("Pause", "pause", <PauseIcon className={ICON} />);
+  if (restorable && !budgetBlocked) add("Restore", "restore", <RestoreIcon className={ICON} />);
+  if (restorable && budgetBlocked)
+    add("Continue anyway", "continue", <PlayIcon className={ICON} />);
+  if (canReopen(session)) add("Reopen", "reopen", <RestoreIcon className={ICON} />);
+  if (canRecover(session)) add("Recover", "recover", <AlertIcon className={ICON} />);
+  if (canComplete(session)) add("Complete", "complete", <CheckIcon className={ICON} />);
+  if (canRespawn(session)) add("Edit & Respawn", "respawn", <EditIcon className={ICON} />);
   const showKill = !isTerminalSession(session);
   if (items.length === 0 && !showKill)
     return <span aria-hidden="true" className="hidden h-6 w-6 shrink-0 lg:inline-flex" />;
   const itemClass =
-    "block w-full px-2 py-1.5 text-left outline-none transition hover:bg-[var(--color-hover-overlay)] focus-visible:bg-[var(--color-hover-overlay)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--color-accent)]";
+    "flex w-full items-center gap-2 px-2 py-1.5 text-left outline-none transition hover:bg-[var(--color-hover-overlay)] focus-visible:bg-[var(--color-hover-overlay)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--color-accent)]";
   const select = async (action: SessionRowAction) => {
     setOpen(false);
     if (busy) return;
@@ -311,6 +329,7 @@ function RowActionsMenu({
               role="menuitem"
               type="button"
             >
+              {item.icon}
               {item.label}
             </button>
           ))}
@@ -328,6 +347,7 @@ function RowActionsMenu({
                 role="menuitem"
                 type="button"
               >
+                <StopSquareIcon className={ICON} />
                 Kill
               </button>
             </>
