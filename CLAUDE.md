@@ -24,7 +24,7 @@ Autonomous workers invoked via the `Task` tool. Source: .claude/agents/
   architect             .claude/agents/architect.md             Produce an executable spec: recon findings, change map, invariants, acceptance criteria bound to verification
   spec-critic           .claude/agents/spec-critic.md           Falsify the architect's spec before the developer builds — check cited facts, change map, bound acceptance criteria
   developer             .claude/agents/developer.md             Implement, fix-after-review, fix-after-test
-  reviewer              .claude/agents/reviewer.md              Static diff analysis plus build/lint/test gate
+  reviewer              .claude/agents/reviewer.md              Changed-code/direct-caller review and named targeted checks
   designer              .claude/agents/designer.md              UI review for visible web changes
   design-author         .claude/agents/design-author.md         Prepare proposed UI screenshot and design-spec for approval; any runtime
   tester                .claude/agents/tester.md                Validation gate at the cheapest crossing tier
@@ -102,8 +102,8 @@ ALWAYS-ON RULES
   Do not ask the same question twice in one task. Ask the smallest precise question that changes implementation.
   Absolute local filesystem paths in docs and comments are an antipattern. Use relative paths or `~/`-style placeholders.
   Never publish operator environment detail to GitHub — issue and PR titles, bodies, comments, commit messages, CI logs. Banned: IP addresses, hostnames, VM and machine names, OS usernames, internal URLs and ports, tokens, absolute home paths, names of the operator's personal skills, agents, or unrelated projects and repos. Say `the host`, `a dev box`, `a local daemon` instead. Real names stay in session artifacts and local notes. Redact before posting, never after.
-  Run full test suites in GitHub CI; consume automatic result notifications. Locally run only targeted quick checks when needed.
-  Before marking implementation complete, run the relevant package `build` command(s) and fix failures.
+  Run only named test files for changed modules/direct callers locally; GitHub CI owns full suites, package/repo build, typecheck, lint and e2e. Enforce for workers, reviewers and testers; consume automatic CI notifications.
+  Start reviewers immediately on available diff; never inspect, query or wait for CI in review lanes. Owner alone checks required green CI at authorized merge gate. Require live/browser proof only for actual runtime/UI-flow changes.
   For every code change, write or update tests at the cheapest tier that crosses the changed boundary.
   Branch names: `feature/<short-description>` (1-4 lowercase hyphen-separated words).
   Commit messages: conventional commits for semantic-release on `main`. Format: `type(scope): subject`. `fix:` patch (`0.1.1` → `0.1.2`), `feat:` minor (`0.1.1` → `0.2.0`), `feat!:` or footer `BREAKING CHANGE:` major. `chore:`, `docs:`, `refactor:`, `test:`, `ci:` do not publish a new npm version. Squash-merge PR titles use the same prefix. No `wip` on merged commits.

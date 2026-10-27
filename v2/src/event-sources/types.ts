@@ -10,6 +10,7 @@ import {
   type SourceConfig,
   type SourceType,
   type TelegramSpawnOrigin,
+  type TelegramBotIdentity,
 } from "../types.js";
 
 export interface SpurEvent<T = unknown> {
@@ -69,6 +70,8 @@ export interface SourceWorkbench {
   }): Promise<SourceLaunchOptions>;
   listSessions(): Promise<SourceWorkSessionItem[]>;
   getSession(sessionId: string): Promise<SourceWorkSessionItem>;
+  completeSession(sessionId: string): Promise<void>;
+  killSession(sessionId: string): Promise<void>;
   restoreSession(request: {
     sessionId: string;
     expectedProject: string;
@@ -87,6 +90,8 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   config: TConfig;
   deferInitialSync?: boolean;
   listSessions?(): Promise<SourceSessionListItem[]>;
+  /** One session by id, same inclusion as listSessions. */
+  getSession?(sessionId: string): Promise<SourceSessionListItem | null>;
   workbench?: SourceWorkbench;
   emit<TEvent = unknown>(name: string, data?: TEvent): void;
   signal: AbortSignal;
@@ -115,6 +120,7 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
 }
 
 export interface SourceHandle {
+  telegramBotIdentity?: TelegramBotIdentity;
   stop(): void | Promise<void>;
   runOnStart?(): void;
   /**
@@ -135,6 +141,7 @@ export interface SourceModule<TConfig extends SourceConfig = SourceConfig> {
 }
 
 export interface SourceGroupController {
+  telegramBotIdentity(projectId: string, sourceId: string): TelegramBotIdentity | null;
   stop(): void | Promise<void>;
   /**
    * Reaches a single running source handle by projectId/sourceId and, if it

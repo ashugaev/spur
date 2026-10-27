@@ -189,6 +189,10 @@ function getAttentionZoneToggle(label: string): HTMLElement {
   return toggle;
 }
 
+async function expandBacklog(): Promise<void> {
+  fireEvent.click(await screen.findByRole("button", { name: /Backlog/ }));
+}
+
 describe("Dashboard", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -255,12 +259,10 @@ describe("Dashboard", () => {
       return new Response(JSON.stringify({ ...sessionsPayload(), backlog: [backlogItem] }));
     });
 
+    window.history.replaceState(null, "", "/?project=api");
     render(<Dashboard />);
 
-    await waitFor(() => {
-      expect(screen.getByText("Backlog")).toBeInTheDocument();
-      expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
-    });
+    await expandBacklog();
     const backlogLink = screen.getByRole("link", { name: /WEB-17/ });
     expect(backlogLink).toHaveAttribute("href", "https://jira.example.com/browse/WEB-17");
     expect(backlogLink).toHaveAttribute("target", "_blank");
@@ -323,11 +325,10 @@ describe("Dashboard", () => {
       return new Response(JSON.stringify({ ...sessionsPayload(), backlog: [backlogItem] }));
     });
 
+    window.history.replaceState(null, "", "/?project=api");
     render(<Dashboard />);
 
-    await waitFor(() => {
-      expect(screen.getByText("Backlog")).toBeInTheDocument();
-    });
+    await expandBacklog();
 
     fireEvent.click(screen.getByRole("button", { name: "Take task" }));
 
@@ -393,8 +394,9 @@ describe("Dashboard", () => {
       return new Response(JSON.stringify({ ...sessionsPayload(), backlog }));
     });
 
+    window.history.replaceState(null, "", "/?project=api");
     render(<Dashboard />);
-    await screen.findByRole("link", { name: /WEB-17/ });
+    await expandBacklog();
 
     fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[0]);
     fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
@@ -469,6 +471,7 @@ describe("Dashboard", () => {
       );
     });
 
+    window.history.replaceState(null, "", "/?project=api");
     render(<Dashboard />);
 
     await waitFor(() => {
@@ -476,6 +479,78 @@ describe("Dashboard", () => {
     });
     expect(screen.queryByText("Backlog")).not.toBeInTheDocument();
     expect(screen.queryByText("Fix checkout")).not.toBeInTheDocument();
+  });
+
+  describe("jira backlog block", () => {
+    const backlogFor = (projectId: string, key: string) => ({
+      provider: "jira" as const,
+      projectId,
+      backlogId: "features",
+      externalId: key,
+      key,
+      title: `Task ${key}`,
+      url: `https://jira.example.com/browse/${key}`,
+      fetchedAt: "2026-06-16T12:00:00.000Z",
+      position: 0,
+    });
+
+    function mockBacklog() {
+      const backlog = [backlogFor("api", "API-1"), backlogFor("web", "WEB-1")];
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/runtime/resources")
+          return new Response(JSON.stringify({ available: false }));
+        if (url === "/api/runtime/voice")
+          return new Response(JSON.stringify({ available: false, language: "" }));
+        return new Response(JSON.stringify({ ...sessionsPayload(), backlog }));
+      });
+    }
+
+    it("does not render the block when the project filter is All", async () => {
+      mockBacklog();
+      render(<Dashboard />);
+      await screen.findByRole("link", { name: "Fix auth" });
+      expect(screen.queryByText("Backlog")).not.toBeInTheDocument();
+      expect(screen.queryByText("Task API-1")).not.toBeInTheDocument();
+    });
+
+    it("starts collapsed for users with a stored collapsed-categories entry lacking backlog", async () => {
+      mockBacklog();
+      window.localStorage.setItem(MOBILE_COLLAPSED_CATEGORIES_STORAGE_KEY, JSON.stringify([]));
+      window.history.replaceState(null, "", "/?project=api");
+      render(<Dashboard />);
+
+      await screen.findByRole("button", { name: /Backlog/ });
+      expect(screen.queryByRole("link", { name: /API-1/ })).not.toBeInTheDocument();
+    });
+
+    it("restores the persisted expanded flag and writes it back on toggle", async () => {
+      mockBacklog();
+      window.localStorage.setItem("spur:backlog-expanded", "1");
+      window.history.replaceState(null, "", "/?project=api");
+      render(<Dashboard />);
+
+      expect(await screen.findByRole("link", { name: /API-1/ })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /Backlog/ }));
+      expect(window.localStorage.getItem("spur:backlog-expanded")).toBe("0");
+      expect(screen.queryByRole("link", { name: /API-1/ })).not.toBeInTheDocument();
+    });
+
+    it("shows only the selected project's backlog, collapsed by default and expandable", async () => {
+      mockBacklog();
+      window.history.replaceState(null, "", "/?project=api");
+      render(<Dashboard />);
+
+      const toggle = await screen.findByRole("button", { name: /Backlog/ });
+      expect(screen.queryByRole("link", { name: /API-1/ })).not.toBeInTheDocument();
+
+      fireEvent.click(toggle);
+      expect(screen.getByRole("link", { name: /API-1/ })).toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: /WEB-1/ })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: /Backlog/ }));
+      expect(screen.queryByRole("link", { name: /API-1/ })).not.toBeInTheDocument();
+    });
   });
 
   it("dismisses the sessions load error toast after refetch recovers", async () => {
@@ -3604,6 +3679,10 @@ describe("StatusBar", () => {
     vi.restoreAllMocks();
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   function mockStatusBarFetch({
     resources,
     github,
@@ -3636,14 +3715,23 @@ describe("StatusBar", () => {
     });
   }
 
-  function renderStatusBar() {
+  function renderStatusBar(onOpenCron: () => void = () => undefined) {
     const client = createTestQueryClient();
     client.setQueryData(["sessions"], { sessions: [], projects: [], daemonAlive: true });
     const Wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
-    return rtlRender(<StatusBar />, { wrapper: Wrapper });
+    return rtlRender(<StatusBar onOpenCron={onOpenCron} />, { wrapper: Wrapper });
   }
+
+  it("opens cron jobs from the first button of the right cluster", () => {
+    const onOpenCron = vi.fn();
+    renderStatusBar(onOpenCron);
+    const button = screen.getByRole("button", { name: "Cron jobs" });
+    expect(screen.getByTestId("status-bar-right-cluster").firstElementChild).toBe(button);
+    fireEvent.click(button);
+    expect(onOpenCron).toHaveBeenCalledTimes(1);
+  });
 
   function expectAggregatedStatusButtonHasIcon(): void {
     expect(
@@ -3655,7 +3743,7 @@ describe("StatusBar", () => {
     const client = createTestQueryClient();
     const html = renderToString(
       <QueryClientProvider client={client}>
-        <StatusBar />
+        <StatusBar onOpenCron={() => undefined} />
       </QueryClientProvider>,
     );
     expect(html).toContain("Show Spur version information");
@@ -3782,6 +3870,49 @@ describe("StatusBar", () => {
     fireEvent.click(tooltipHeader!);
 
     expect(screen.queryByText("System")).not.toBeInTheDocument();
+  });
+
+  describe.each([
+    ["clicking the tooltip content", "click"],
+    ["focus leaving the trigger", "focusout"],
+  ] as const)("hover then pin then close by %s", (_label, closer) => {
+    it("stays closed, and a later mouseenter waits for the hover delay", async () => {
+      mockStatusBarFetch({
+        resources: { available: true, cpuPercent: 86, memoryPercent: 48, diskPercent: 41 },
+      });
+      renderStatusBar();
+      const trigger = await screen.findByRole("button", {
+        name: "Show aggregated system status",
+      });
+      await waitFor(() => expect(trigger).toHaveAttribute("data-status", "attention"));
+      const container = trigger.parentElement!;
+
+      vi.useFakeTimers();
+      fireEvent.mouseEnter(container);
+      act(() => {
+        vi.advanceTimersByTime(100);
+      });
+      fireEvent.click(trigger);
+      expect(screen.getByText("System")).toBeInTheDocument();
+
+      if (closer === "click") {
+        fireEvent.click(screen.getByText("System").closest("div")!);
+      } else {
+        fireEvent.blur(trigger, { relatedTarget: null });
+      }
+      expect(screen.queryByText("System")).not.toBeInTheDocument();
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(screen.queryByText("System")).not.toBeInTheDocument();
+
+      fireEvent.mouseEnter(container);
+      expect(screen.queryByText("System")).not.toBeInTheDocument();
+      act(() => {
+        vi.advanceTimersByTime(100);
+      });
+      expect(screen.getByText("System")).toBeInTheDocument();
+    });
   });
 
   it("shows a healthy GitHub footer tooltip with the last request timestamp", async () => {
@@ -3963,8 +4094,8 @@ describe("StatusBar", () => {
 
     rtlRender(
       <>
-        <StatusBar />
-        <StatusBar />
+        <StatusBar onOpenCron={() => undefined} />
+        <StatusBar onOpenCron={() => undefined} />
       </>,
       { wrapper: Wrapper },
     );
@@ -3992,7 +4123,7 @@ describe("StatusBar", () => {
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
 
-    rtlRender(<StatusBar />, { wrapper: Wrapper });
+    rtlRender(<StatusBar onOpenCron={() => undefined} />, { wrapper: Wrapper });
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
@@ -4015,7 +4146,7 @@ describe("StatusBar", () => {
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
 
-    rtlRender(<StatusBar />, { wrapper: Wrapper });
+    rtlRender(<StatusBar onOpenCron={() => undefined} />, { wrapper: Wrapper });
 
     expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
       "data-status",
@@ -4036,7 +4167,7 @@ describe("StatusBar", () => {
     const Wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
-    return rtlRender(<StatusBar />, { wrapper: Wrapper });
+    return rtlRender(<StatusBar onOpenCron={() => undefined} />, { wrapper: Wrapper });
   }
 
   it("hides both provider badges when neither configured nor referenced by sessions", async () => {
@@ -4146,7 +4277,7 @@ describe("StatusBar", () => {
     const Wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
-    rtlRender(<StatusBar />, { wrapper: Wrapper });
+    rtlRender(<StatusBar onOpenCron={() => undefined} />, { wrapper: Wrapper });
 
     expect(screen.getByLabelText("GitHub connection checking")).toBeInTheDocument();
     expect(screen.getByLabelText("GitLab connection checking")).toBeInTheDocument();

@@ -143,6 +143,7 @@ export interface TagDefinition {
 export type ReviewProviderId = "github" | "gitlab";
 export type SourceType =
   | "cron"
+  | "script"
   | ReviewProviderId
   | "sentry"
   | "service"
@@ -184,12 +185,14 @@ export const WEBHOOK_RECEIVED_EVENT = "webhook:received" as const;
 export const TELEGRAM_CHOICE_CALLBACK_PREFIX = "spur_choice:" as const;
 export const GITHUB_CI_RUN_COMPLETED_EVENT = "github-ci:run.completed" as const;
 export const JIRA_WORK_ITEM_NEW_EVENT = "jira:work_item.new" as const;
+export const SCRIPT_ITEM_NEW_EVENT = "script:item.new" as const;
 
 export const WORK_ITEM_NEW_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
   GITHUB_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
   GITHUB_CI_RUN_COMPLETED_EVENT,
   JIRA_WORK_ITEM_NEW_EVENT,
+  SCRIPT_ITEM_NEW_EVENT,
 ]);
 
 export interface WorkItemEventData {
@@ -229,6 +232,7 @@ export type WorkItemLifecycleRecord = WorkItemLifecycleBase &
   (
     | {
         state: "pending";
+        spawnWorkId?: string;
       }
     | {
         state: "running";
@@ -245,6 +249,31 @@ export type WorkItemLifecycleRecord = WorkItemLifecycleBase &
       }
   );
 
+export type PersistedSpawnBlock =
+  | { birthKey: string; state: "pending" }
+  | { birthKey: string; state: "succeeded"; sessionId: string }
+  | { birthKey: string; state: "failed"; error: string; sessionId?: string };
+
+export interface PersistedSpawnWork {
+  workId: string;
+  revision: number;
+  projectId: string;
+  triggerId: string;
+  sourceId: string;
+  eventName: string;
+  occurrenceId: string;
+  routeFingerprint: string;
+  eventData: unknown;
+  createdAt: string;
+  nextBlockIndex: number;
+  blocks: PersistedSpawnBlock[];
+  anchorSessionId?: string;
+  lastSessionId?: string;
+  failures: string[];
+  admissionDenials: number;
+  notBeforeAt: number;
+}
+
 interface BaseSourceConfig {
   runOnStart: boolean;
 }
@@ -252,6 +281,16 @@ interface BaseSourceConfig {
 export interface CronSourceConfig extends BaseSourceConfig {
   type: "cron";
   schedule: string;
+}
+
+export interface ScriptSourceConfig extends BaseSourceConfig {
+  type: "script";
+  command: string[];
+  schedule: string;
+  timeoutMs: number;
+  env: Record<string, string>;
+  cwd: string;
+  emitExisting: boolean;
 }
 
 interface ReviewSourceConfigBase<TType extends ReviewProviderId> extends BaseSourceConfig {
@@ -268,17 +307,22 @@ export interface GitHubAdaptivePollConfig {
   activeGraceMs: number;
 }
 
-export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & {
-  adaptivePoll?: GitHubAdaptivePollConfig;
-  // Caps how many sessions one review poll batches into a single GraphQL call.
-  // Clamped by the query's node budget (48 bound / 9 unbound targets per call, see
-  // review-providers/github.ts reviewBatchTargetLimit), so it can only lower it.
-  maxReviewBatchTargets?: number;
-  // How often a durably poll-disabled session (bound PR permanently not found) gets
-  // one bounded recheck request. Default 86400000 (24h, see
-  // event-sources/github.ts POLL_DISABLED_RECHECK_INTERVAL_MS).
-  pollDisabledRecheckMs?: number;
-};
+export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> &
+  (
+    | { selfMarker?: string; signPosts?: never }
+    // signPosts: the launch prompt tells the agent to sign its posts with selfMarker.
+    | { selfMarker: string; signPosts: true }
+  ) & {
+    adaptivePoll?: GitHubAdaptivePollConfig;
+    // Caps how many sessions one review poll batches into a single GraphQL call.
+    // Clamped by the query's node budget (48 bound / 9 unbound targets per call, see
+    // review-providers/github.ts reviewBatchTargetLimit), so it can only lower it.
+    maxReviewBatchTargets?: number;
+    // How often a durably poll-disabled session (bound PR permanently not found) gets
+    // one bounded recheck request. Default 86400000 (24h, see
+    // event-sources/github.ts POLL_DISABLED_RECHECK_INTERVAL_MS).
+    pollDisabledRecheckMs?: number;
+  };
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
 
@@ -401,6 +445,7 @@ export interface TelegramReplyTarget extends TelegramBinding {
 
 export type SourceConfig =
   | CronSourceConfig
+  | ScriptSourceConfig
   | ReviewSourceConfig
   | SentrySourceConfig
   | ServiceSourceConfig
@@ -924,6 +969,9 @@ export interface AppConfig {
   ui: {
     port: number;
   };
+  mcp: {
+    port: number;
+  };
   models: {
     codexHome: string;
   };
@@ -1111,6 +1159,9 @@ export interface CursorRestoreBoundary {
 export interface SessionRecord {
   id: string;
   project: string;
+  /** Internal durable trigger birth identity and original request. */
+  triggerBirthKey?: string;
+  triggerBirthRequest?: SpawnSessionRequest;
   // The id of the workspace (shared git worktree) this session lives in.
   // Equals the session's own id for a session that does not share a
   // workspace; otherwise the id of the session whose workspace it joined
@@ -1150,9 +1201,11 @@ export interface SessionRecord {
   worktreePath: string;
   tmuxSession: string;
   launchCommand: string;
+  /** Opaque identity shared only by one agent launch and its process tree. */
+  agentLaunchId?: string;
   status: SessionStatus;
   /** "memory_shed" is written only by the critical memory shed's session stop. */
-  stopReason?: "manual_pause" | "stale_timeout" | "memory_shed" | "token_budget";
+  stopReason?: "manual_pause" | "stale_timeout" | "memory_shed" | "token_budget" | "runtime_lost";
   tokenBudgetOverride?: boolean;
   tokenUsage?: SessionTokenUsageRecord;
   preflightTokenUsage?: PreflightTokenUsageRecord;
@@ -1173,6 +1226,8 @@ export interface SessionRecord {
    * desk-shared sidecar, the session itself for an mcp sidecar).
    */
   sidecarProcs?: Record<string, SidecarProcessIdentity>;
+  /** Restore-owned sidecar launches not yet acknowledged as configured commands. */
+  sidecarLaunches?: Record<string, string>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
   /**
@@ -1211,6 +1266,8 @@ export interface SessionRecord {
   todoNudge?: { fingerprint: string; attempts: number };
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
+  /** Internal provenance for a retained session error; absent on legacy records. */
+  errorSource?: "inferred_runtime_exit" | "runtime_probe" | "other";
   /** Presence distinguishes initialized ledgers from pre-ToDo records. */
   todoLedgerVersion?: 1;
 }
@@ -1315,10 +1372,15 @@ export interface SessionSidecarView {
 export interface SessionView extends Omit<
   SessionRecord,
   | "queuedMessages"
+  | "agentLaunchId"
+  | "triggerBirthKey"
+  | "triggerBirthRequest"
+  | "sidecarLaunches"
   | "tokenUsage"
   | "preflightTokenUsage"
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
+  | "errorSource"
 > {
   lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
@@ -1365,9 +1427,14 @@ export type DashboardOmittedField =
   | "stateSubscriptions"
   | "allowedTriggers"
   | "agentSessionId"
+  | "agentLaunchId"
+  | "triggerBirthKey"
+  | "triggerBirthRequest"
+  | "sidecarLaunches"
   | "branchSource"
   | "tokenUsage"
-  | "preflightTokenUsage";
+  | "preflightTokenUsage"
+  | "errorSource";
 
 export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
   lifecycle: SessionLifecycleSnapshot;
@@ -1499,6 +1566,23 @@ export interface SendMessageRequest {
   interrupt?: boolean;
 }
 
+export interface TelegramBotIdentity {
+  id: number;
+  username?: string;
+}
+
+export type SourceInfoResponse =
+  | { sessionId: string; source: null }
+  | {
+      sessionId: string;
+      source: "telegram";
+      projectId: string;
+      sourceId: string;
+      chatId: number;
+      messageThreadId?: number;
+      bot: TelegramBotIdentity | null;
+    };
+
 export interface SourceReplyButton {
   text: string;
   value: string;
@@ -1592,7 +1676,7 @@ export interface CompleteSessionRequest {
 
 export type TodoActor =
   | { kind: "agent"; agent: AgentName; sessionId: string }
-  | { kind: "human"; origin: "cli" | "ui" }
+  | { kind: "human"; origin: "cli" | "ui" | "mcp" | "telegram" }
   | { kind: "system"; source: "spawn" | "legacy_migration" | "handoff" };
 
 export type TodoBlocker = { kind: "external" } | { kind: "human"; requiredAction: string };
@@ -1774,6 +1858,73 @@ export interface SpawnDefaultsResponse {
   worktree: boolean;
 }
 
+// GET /projects/cron. Values come from the running config; "added" rows carry
+// owner-file values. Built field by field, never spread from config.
+export type CronDiskState = "same" | "changed" | "added" | "removed" | "unknown";
+
+export type CronOwnerState =
+  | { state: "loaded"; path: string; revision: string; changed: boolean }
+  | { state: "invalid"; path: string; revision: string; error: string }
+  | { state: "ambiguous"; failedFiles: CronFailedConfigFile[] }
+  | { state: "project_removed" };
+
+// A config file that failed to load; never claimed as a project's owner.
+export interface CronFailedConfigFile {
+  file: string;
+  reason: "parse_error" | "unreadable";
+  message: string;
+}
+
+export type CronActionEventName =
+  | "trigger.spawn.completed"
+  | "trigger.spawn.failed"
+  | "trigger.spawn.suppressed"
+  | "trigger.send.ignored";
+
+export interface CronActionEvent {
+  at: string;
+  event: CronActionEventName;
+  sessionId: string | null;
+  message: string | null;
+}
+
+export interface CronSpawnBlockView {
+  prompt: string;
+  agent: AgentName | null;
+  model: string | null;
+  reasoningEffort: ProviderReasoningEffort | null;
+  mode: string | null;
+}
+
+export interface CronTriggerView {
+  triggerId: string;
+  event: string;
+  disk: CronDiskState;
+  action: { kind: "spawn"; blocks: CronSpawnBlockView[] } | { kind: "send"; prompt: string | null };
+  recentActions: CronActionEvent[];
+}
+
+export interface CronSourceView {
+  sourceId: string;
+  schedule: string;
+  runOnStart: boolean;
+  disk: CronDiskState;
+  recentTicks: string[];
+  triggers: CronTriggerView[];
+}
+
+export interface CronProjectView {
+  projectId: string;
+  projectName: string;
+  owner: CronOwnerState;
+  sources: CronSourceView[];
+}
+
+export interface CronJobsResponse {
+  projects: CronProjectView[];
+  eventsSince: string | null;
+}
+
 export interface SessionLaunchOptions {
   project: string;
   agent: AgentName;
@@ -1846,6 +1997,7 @@ export interface ProjectConfigMutationResponse {
 }
 
 export interface RuntimeInfo {
+  buildId: string;
   lifecycleInstanceId: string;
   ok: true;
   apiVersion: number;
@@ -1924,6 +2076,23 @@ export type TranscriptEntry =
       multiSelect?: boolean;
       timestampMs?: number;
     };
+
+export interface ConversationPage {
+  sessionId: string;
+  state: SessionState;
+  messages: {
+    index: number;
+    role: "user" | "assistant";
+    text: string;
+    timestampMs?: number;
+    textTruncated?: boolean;
+  }[];
+  startIndex: number;
+  totalEntries: number;
+  nextFrom: number;
+  hasMoreBefore: boolean;
+  hasMoreAfter: boolean;
+}
 
 export interface ConversationResponse {
   messages: ConversationMessage[];

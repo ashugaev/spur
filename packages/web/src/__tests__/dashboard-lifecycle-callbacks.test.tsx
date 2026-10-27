@@ -33,6 +33,7 @@ const source: SpurSessionView = {
   lastActivityAt: "2026-01-01",
   runtimeAlive: true,
   workspaceExists: true,
+  worktreePath: "/tmp/callback-one",
   services: [],
   slots: {
     title: "Callback session",

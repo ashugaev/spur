@@ -19,10 +19,21 @@ export interface UpdateInProgress {
   phase: UpdatePhase;
 }
 
+export interface UpdateFailure {
+  fromVersion: string;
+  toVersion: string;
+  startedAt: string;
+  finishedAt: string;
+  stage: "install" | "reinit";
+  installedVersion: string | null;
+  exitCode: number | null;
+}
+
 export interface RollbackState {
   version: 1;
   lastKnownGood: LastKnownGood | null;
   inProgress: UpdateInProgress | null;
+  lastFailure?: UpdateFailure;
 }
 
 export function defaultRollbackStatePath(home = homedir()): string {
@@ -67,12 +78,25 @@ function isUpdateInProgress(value: unknown): value is UpdateInProgress {
   );
 }
 
-function isRollbackState(value: unknown): value is RollbackState {
+function isRollbackState(value: unknown): value is Omit<RollbackState, "lastFailure"> {
   return (
     isRecord(value) &&
     value["version"] === 1 &&
     (value["lastKnownGood"] === null || isLastKnownGood(value["lastKnownGood"])) &&
     (value["inProgress"] === null || isUpdateInProgress(value["inProgress"]))
+  );
+}
+
+function isUpdateFailure(value: unknown): value is UpdateFailure {
+  return (
+    isRecord(value) &&
+    typeof value["fromVersion"] === "string" &&
+    typeof value["toVersion"] === "string" &&
+    typeof value["startedAt"] === "string" &&
+    typeof value["finishedAt"] === "string" &&
+    (value["stage"] === "install" || value["stage"] === "reinit") &&
+    (value["installedVersion"] === null || typeof value["installedVersion"] === "string") &&
+    (value["exitCode"] === null || Number.isInteger(value["exitCode"]))
   );
 }
 
@@ -88,10 +112,16 @@ export function readState(path: string): RollbackState {
   } catch {
     return defaultState();
   }
+  const lastFailure = isRecord(parsed) ? parsed["lastFailure"] : undefined;
   if (!isRollbackState(parsed)) {
     return defaultState();
   }
-  return parsed;
+  return {
+    version: parsed.version,
+    lastKnownGood: parsed.lastKnownGood,
+    inProgress: parsed.inProgress,
+    ...(isUpdateFailure(lastFailure) ? { lastFailure } : {}),
+  };
 }
 
 export function writeState(path: string, state: RollbackState): void {
