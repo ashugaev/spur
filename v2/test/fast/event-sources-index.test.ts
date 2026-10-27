@@ -101,6 +101,28 @@ describe("startConfiguredSources", () => {
     expect(await deps.resolveWebBaseUrl()).toBe("http://127.0.0.1:5643");
     await controller.stop();
   });
+  it("looks up cached bot identity by source and controller generation", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const identity = { id: 44, username: "testbot" };
+    cronStartMock.mockResolvedValueOnce({ stop: vi.fn(), telegramBotIdentity: identity });
+    const deps = {
+      config: buildConfig(tmpDir, {
+        api: { path: tmpDir, sources: { test: { type: "cron" } } },
+      }) as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+      getSession: vi.fn().mockResolvedValue(null),
+    };
+    const controller = await startConfiguredSources(deps);
+    expect(controller.telegramBotIdentity("api", "test")).toEqual(identity);
+    expect(controller.telegramBotIdentity("other", "test")).toBeNull();
+    expect(controller.telegramBotIdentity("api", "missing")).toBeNull();
+    await controller.stop();
+    const replacement = await startConfiguredSources(deps);
+    expect(replacement.telegramBotIdentity("api", "test")).toBeNull();
+    await replacement.stop();
+  });
+
   it("preserves cached successful production endpoint", async () => {
     const { startConfiguredSources } = await loadStartConfiguredSources();
     vi.stubEnv("SPUR_SESSION_TOOL_DIR", undefined);
@@ -354,6 +376,8 @@ describe("startConfiguredSources", () => {
       listSessions: vi.fn(),
       getSession: vi.fn(),
       restoreSession: vi.fn(),
+      completeSession: vi.fn(),
+      killSession: vi.fn(),
     };
     const controller = await startConfiguredSources({
       config: buildConfig(tmpDir, {

@@ -7,6 +7,7 @@ export type WorkItemRecordBase = WorkItemEventData & {
   autoComplete: boolean;
   createdAt: string;
   lastRetryEmitAt?: string;
+  spawnWorkId?: string | null;
 };
 
 // A claim older than the interval is stale: the controller that wrote it
@@ -86,6 +87,7 @@ export function buildWorkItemRecord(
     autoComplete: base.autoComplete,
     createdAt: base.createdAt,
     ...(base.lastRetryEmitAt !== undefined ? { lastRetryEmitAt: base.lastRetryEmitAt } : {}),
+    ...(typeof base.spawnWorkId === "string" ? { spawnWorkId: base.spawnWorkId } : {}),
     members: sorted,
   };
   const running = sorted.find((member) => member.state === "running" && member.sessionId);

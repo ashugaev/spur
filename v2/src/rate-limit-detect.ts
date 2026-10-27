@@ -135,12 +135,17 @@ export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | 
     (credits["unlimited"] === undefined || typeof credits["unlimited"] === "boolean") &&
     (credits["has_credits"] === true || credits["unlimited"] === true);
   const windows = [rateLimits["primary"], rateLimits["secondary"]];
-  const knownWindows = windows.every((window) =>
-    window === undefined || window === null ||
-    (isRecord(window) && typeof window["used_percent"] === "number" &&
-      Number.isFinite(window["used_percent"]) && window["used_percent"] >= 0),
+  const knownWindows = windows.every(
+    (window) =>
+      window === undefined ||
+      window === null ||
+      (isRecord(window) &&
+        typeof window["used_percent"] === "number" &&
+        Number.isFinite(window["used_percent"]) &&
+        window["used_percent"] >= 0),
   );
-  const knownCredits = credits === undefined ||
+  const knownCredits =
+    credits === undefined ||
     (isRecord(credits) &&
       (credits["has_credits"] === undefined || typeof credits["has_credits"] === "boolean") &&
       (credits["unlimited"] === undefined || typeof credits["unlimited"] === "boolean") &&
@@ -148,9 +153,13 @@ export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | 
   const codexAuthority =
     (reachedType === undefined || reachedType === null) &&
     (rateLimits["individual_limit"] === undefined || rateLimits["individual_limit"] === null) &&
-    (rateLimits["spend_control_reached"] === undefined || rateLimits["spend_control_reached"] === null) &&
-    knownWindows && knownCredits && (windows.some(usageWindowPresent) || creditedMeters)
-      ? "soft" : "unknown";
+    (rateLimits["spend_control_reached"] === undefined ||
+      rateLimits["spend_control_reached"] === null) &&
+    knownWindows &&
+    knownCredits &&
+    (windows.some(usageWindowPresent) || creditedMeters)
+      ? "soft"
+      : "unknown";
   // Preserve legacy false-credit denial without a live window. HARD authority
   // requires complete known flags and explicit null windows/cap companions.
   if (
@@ -166,8 +175,11 @@ export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | 
       codexAuthority:
         credits["unlimited"] === false &&
         windows.every((window) => window === null) &&
-        reachedType === null && rateLimits["individual_limit"] === null &&
-        rateLimits["spend_control_reached"] === null ? "hard" : "unknown",
+        reachedType === null &&
+        rateLimits["individual_limit"] === null &&
+        rateLimits["spend_control_reached"] === null
+          ? "hard"
+          : "unknown",
     };
   }
   if (!creditedMeters && usedPercentExhausted(rateLimits["primary"])) {

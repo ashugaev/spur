@@ -10,6 +10,7 @@ import { githubSourceModule } from "./github.js";
 import { gitlabSourceModule } from "./gitlab.js";
 import { jiraSourceModule } from "./jira.js";
 import { sentrySourceModule } from "./sentry.js";
+import { scriptSourceModule } from "./script.js";
 import { serviceSourceModule } from "./service.js";
 import { telegramSourceModule } from "./telegram.js";
 import { webhookSourceModule } from "./webhook.js";
@@ -56,6 +57,7 @@ interface StartedSource {
 
 const SOURCE_MODULES = {
   cron: cronSourceModule,
+  script: scriptSourceModule,
   github: githubSourceModule,
   "github-ci": githubCiSourceModule,
   gitlab: gitlabSourceModule,
@@ -201,6 +203,12 @@ export async function startConfiguredSources(
   }
 
   return {
+    telegramBotIdentity(projectId, sourceId) {
+      return (
+        startedSources.find((entry) => entry.projectId === projectId && entry.sourceId === sourceId)
+          ?.handle.telegramBotIdentity ?? null
+      );
+    },
     async stop(): Promise<void> {
       await stopAll(startedSources);
     },

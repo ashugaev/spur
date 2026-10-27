@@ -344,7 +344,7 @@ describe("spur-isolated-ui.sh", () => {
     expect(child.stderr).toContain("Timed out waiting for current isolated daemon runtime");
     expect(await exists(fixture.marker)).toBe(false);
     expect(script).toContain("RUNTIME_DEADLINE=$((SECONDS + 30))");
-  });
+  }, 45_000);
   it("rejects retained valid old generation until delayed current publication", async (context) => {
     const fixture = await launcherFixture(context);
     await writeFile(fixture.runtimeFile, fixture.runtime(fixture.oldDir, "fixture-old"), {

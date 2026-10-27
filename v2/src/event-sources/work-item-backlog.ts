@@ -92,7 +92,9 @@ function emitDueRetries<TData>(
 // seen registry, reentrancy/abort guards, interval, error logging, and the
 // runOnStart vs immediate-first-poll handling. The source supplies its poll
 // function and the labels used in the two failure log lines.
-export async function startWorkItemPoller<TConfig extends WorkItemSourceConfig>(
+export async function startWorkItemPoller<
+  TConfig extends WorkItemSourceConfig & { intervalMs: number },
+>(
   deps: SourceStartDeps<TConfig>,
   labels: { warn: string; event: string },
   poll: (deps: SourceStartDeps<TConfig>, seen: Set<string>) => Promise<void>,
