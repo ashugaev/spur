@@ -63,6 +63,7 @@ import {
   isRespawnableStatus,
   type AgentName,
   type AppConfig,
+  type ProjectConfig,
   type DashboardSessionView,
   type SessionListItemView,
   type ScheduleSessionWakeRequest,
@@ -6473,7 +6474,9 @@ describe("SessionService", () => {
     "canonical Telegram exhausted budget after deferred worktree preserves %s",
     async (action) => {
       const { config } = telegramProjectConfig();
-      config.projects.api.preflight = { prompt: "Choose branch" };
+      const project: typeof config.projects.api & Pick<ProjectConfig, "preflight" | "tokenBudget"> =
+        config.projects.api;
+      project.preflight = { prompt: "Choose branch" };
       loadConfigMock.mockReturnValue(config);
       runSpawnPreflightMock.mockResolvedValueOnce({
         branch: "feature/preview",
@@ -6484,7 +6487,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const preview = await service.preflight({ project: "api", prompt: "task" });
-      config.projects.api.tokenBudget = 50;
+      project.tokenBudget = 50;
       let finish: ((path: string) => void) | undefined;
       createWorktreeMock.mockReturnValueOnce(
         new Promise<string>((resolve) => {
@@ -6526,14 +6529,16 @@ describe("SessionService", () => {
     "canonical Telegram disabled origin %s never advertises another source",
     async (kind) => {
       const config = configWithTelegram({ type: "telegram", token: "forum-token", chatId: -1001 });
+      const sources: ProjectConfig["sources"] = config.projects.api.sources;
+      const projects: Record<string, typeof config.projects.api> = config.projects;
       config.projects.api.worktree = false;
       if (kind === "same-project") {
-        config.projects.api.sources["disabled"] = { type: "telegram", token: "control-token" };
+        sources["disabled"] = { type: "telegram", token: "control-token", runOnStart: false };
       } else {
-        config.projects["origin"] = {
+        projects["origin"] = {
           ...config.projects.api,
           sessionPrefix: "origin",
-          sources: { disabled: { type: "telegram", token: "control-token" } },
+          sources: { disabled: { type: "telegram", token: "control-token", runOnStart: false } },
         };
       }
       loadConfigMock.mockReturnValue(config);
@@ -9616,7 +9621,9 @@ describe("SessionService", () => {
       const { service } = await serviceWithTelegramSession();
       service.config.projects["origin"] = {
         ...service.config.projects.api!,
-        sources: { bot: { type: "telegram", token: "origin-token", chatId: -2001 } },
+        sources: {
+          bot: { type: "telegram", token: "origin-token", chatId: -2001, runOnStart: false },
+        },
       };
       readTelegramReplyTargetMock.mockReturnValue({
         ...replyTargetFor(),

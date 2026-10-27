@@ -213,8 +213,9 @@ async function startSource(
   const task = overrides.task ?? vi.fn().mockReturnValue(Promise.resolve());
   const logger = { info: vi.fn(), warn: vi.fn() };
   let nextTopic = 22;
+  type EnsureTopic = NonNullable<SourceStartDeps["telegramConversations"]>["ensureTopic"];
   const telegramConversations: NonNullable<SourceStartDeps["telegramConversations"]> = {
-    ensureTopic: vi.fn(async (sessionId, origin) => {
+    ensureTopic: vi.fn<EnsureTopic>(async (sessionId, origin) => {
       const canonicalChatId =
         overrides.config && "chatId" in overrides.config ? overrides.config["chatId"] : -1001;
       if (typeof canonicalChatId !== "number" || canonicalChatId >= 0) {
@@ -271,7 +272,11 @@ async function startSource(
       bindings.delete(key);
       metadataModule.writeTelegramBindings(dataDir, "api", "telegram", bindings.values());
       const target = readTelegramReplyTarget(dataDir, sessionId);
-      if (target?.chatId === origin.chatId && target.messageThreadId === origin.messageThreadId) {
+      if (
+        target &&
+        target.chatId === origin.chatId &&
+        target.messageThreadId === origin.messageThreadId
+      ) {
         writeTelegramReplyTarget(dataDir, {
           sessionId,
           projectId: origin.projectId,
