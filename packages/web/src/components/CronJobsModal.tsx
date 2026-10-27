@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { CenteredLoader } from "@/components/CenteredLoader";
 import { buildCronRows, fetchCronJobs, type CronRow, type CronRun } from "@/lib/cron-jobs";
-import { formatAbsoluteTime, formatRelativeTime } from "@/lib/format";
+import { formatAbsoluteTime, formatRelativeTime, formatShortTimestamp } from "@/lib/format";
 import { buildSessionPath } from "@/lib/project-routes";
 import type {
   CronActionEvent,
@@ -20,6 +20,9 @@ type LoadState =
   | { status: "ready"; data: CronJobsResponse };
 
 const LABEL_CLASS = "text-[10px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]";
+const SECTION_HEADING_CLASS =
+  "text-[11px] uppercase tracking-[0.1em] text-[var(--color-text-secondary)]";
+const SECTION_CLASS = "flex flex-col gap-2 border-t border-[var(--color-border-subtle)] pt-3";
 const GRID_CLASS =
   "grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 sm:grid-cols-[minmax(0,1fr)_9.5rem_5.5rem_minmax(0,1fr)]";
 const PRIMARY_TEXT = "text-[var(--color-text-primary)]";
@@ -135,9 +138,9 @@ function actionSummary(row: CronRow): string {
 function JobDetail({ row, eventsSince }: { row: CronRow; eventsSince: string | null }) {
   const blocks = row.trigger?.action.kind === "spawn" ? row.trigger.action.blocks : [];
   return (
-    <div className="flex flex-col gap-3 px-[13px] pb-3">
-      <section className="flex flex-col gap-1.5">
-        <h3 className={LABEL_CLASS}>Settings</h3>
+    <div className="flex flex-col gap-4 border-l-2 border-[var(--color-accent)] pb-3 pl-[11px] pr-[13px] pt-3">
+      <section className={SECTION_CLASS}>
+        <h3 className={SECTION_HEADING_CLASS}>Settings</h3>
         <dl className="grid grid-cols-[6rem_minmax(0,1fr)] gap-x-3 gap-y-1">
           <Setting label="Cron">{row.source.schedule}</Setting>
           <Setting label="Run on start">{row.source.runOnStart ? "yes" : "no"}</Setting>
@@ -151,16 +154,19 @@ function JobDetail({ row, eventsSince }: { row: CronRow; eventsSince: string | n
           ))}
         </dl>
       </section>
-      <section className="flex flex-col gap-1.5">
-        <h3 className={LABEL_CLASS}>Recent runs</h3>
+      <section className={SECTION_CLASS}>
+        <h3 className={SECTION_HEADING_CLASS}>Recent runs</h3>
         {row.runs.length === 0 ? (
           <span className={SECONDARY_TEXT}>{noTickText(eventsSince)}</span>
         ) : (
-          <ul className="flex flex-col gap-1">
+          <ul className="flex flex-col gap-2 sm:gap-1">
             {row.runs.map((run, index) => (
-              <li className="flex gap-3" key={index}>
-                <span className={`shrink-0 tabular-nums ${SECONDARY_TEXT}`}>
-                  {formatAbsoluteTime(run.at)}
+              <li className="flex flex-col sm:flex-row sm:gap-3" key={index}>
+                <span
+                  className={`shrink-0 tabular-nums ${SECONDARY_TEXT}`}
+                  title={formatAbsoluteTime(run.at)}
+                >
+                  {formatShortTimestamp(run.at)}
                 </span>
                 <RunEntry projectId={row.projectId} run={run} />
               </li>
@@ -180,7 +186,7 @@ function RunEntry({ run, projectId }: { run: CronRun; projectId: string }) {
 function BlockSettings({ block, label }: { block: CronSpawnBlockView; label: string | null }) {
   return (
     <>
-      {label ? <dt className={`col-span-2 pt-1 ${LABEL_CLASS}`}>{label}</dt> : null}
+      {label ? <dt className={`col-span-2 pt-1 ${SECTION_HEADING_CLASS}`}>{label}</dt> : null}
       <Setting label="Agent">{block.agent ?? "default"}</Setting>
       <Setting label="Model">{block.model ?? "default"}</Setting>
       <Setting label="Effort">{block.reasoningEffort ?? "default"}</Setting>
@@ -215,12 +221,12 @@ function JobRow({
     <div className="border-b border-[var(--color-border-subtle)]">
       {/* Mouse convenience only: the keyboard toggle is the native button below. */}
       <div
-        className={`${GRID_CLASS} w-full cursor-pointer items-baseline px-[13px] py-2.5 text-left transition hover:bg-[var(--color-row-hover)]`}
+        className={`${GRID_CLASS} w-full cursor-pointer items-baseline px-[13px] py-2.5 text-left transition hover:bg-[var(--color-row-hover)] ${open ? "bg-[var(--color-row-hover)]" : ""}`}
         onClick={onToggle}
       >
         <button
           aria-expanded={open}
-          className="flex min-w-0 flex-col text-left outline-none focus-visible:underline"
+          className="group flex min-w-0 flex-col text-left outline-none"
           onClick={(event) => {
             event.stopPropagation();
             onToggle();
@@ -228,7 +234,11 @@ function JobRow({
           type="button"
         >
           <span className="flex min-w-0 items-baseline gap-2">
-            <span className={`truncate font-semibold ${PRIMARY_TEXT}`}>{row.name}</span>
+            <span
+              className={`truncate font-semibold ${PRIMARY_TEXT} group-focus-visible:text-[var(--color-accent)]`}
+            >
+              {row.name}
+            </span>
             {marker ? (
               <span className={`shrink-0 ${ATTENTION_TEXT}`} title={marker}>
                 •
@@ -344,7 +354,7 @@ export function CronJobsModal({
       }}
       role="dialog"
     >
-      <div className="flex max-h-[80vh] w-[min(640px,100%)] flex-col border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)]">
+      <div className="flex max-h-[80vh] w-[min(640px,100%)] flex-col border border-[var(--color-border-strong)] bg-[var(--color-bg-base)]">
         <div className="flex shrink-0 items-center gap-3 border-b border-[var(--color-border-default)] px-[13px] py-2">
           <h2
             className={`font-bold uppercase tracking-[0.1em] ${PRIMARY_TEXT}`}
@@ -354,7 +364,7 @@ export function CronJobsModal({
           </h2>
           <select
             aria-label="Cron project"
-            className="h-7 min-w-0 border border-[var(--color-input-border)] bg-[var(--color-input-bg)] px-2 text-[var(--color-input-text)] outline-none transition focus:border-[var(--color-accent)]"
+            className="h-7 min-w-0 border border-[var(--color-input-border)] bg-[var(--color-input-bg)] px-2 text-[var(--color-input-text)] outline-none transition focus:border-[var(--color-accent)] focus-visible:border-[var(--color-accent)]"
             onChange={(event) => setProjectId(event.target.value)}
             ref={selectRef}
             value={projectId}
@@ -369,7 +379,7 @@ export function CronJobsModal({
           <span className="flex-1" />
           <button
             aria-label="Close cron"
-            className={`uppercase ${SECONDARY_TEXT} transition hover:text-[var(--color-text-primary)]`}
+            className={`uppercase ${SECONDARY_TEXT} outline-none transition hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-accent)]`}
             onClick={onClose}
             type="button"
           >

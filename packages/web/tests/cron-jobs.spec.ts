@@ -60,6 +60,15 @@ async function mockCron(
   response: { status: number; body: unknown } = { status: 200, body: CRON },
 ): Promise<string[]> {
   const urls: string[] = [];
+  // The content-width version label can shift the footer cluster under the
+  // pointer left on the clock, hover-opening the Claude accounts popover.
+  await page.route("**/api/claude-accounts", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ accounts: [] }),
+    });
+  });
   await page.route("**/api/cron**", async (route) => {
     urls.push(route.request().url());
     await route.fulfill({

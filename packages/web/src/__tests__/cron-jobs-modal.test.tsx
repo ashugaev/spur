@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CronJobsModal } from "@/components/CronJobsModal";
-import { formatAbsoluteTime } from "@/lib/format";
+import { formatAbsoluteTime, formatShortTimestamp } from "@/lib/format";
 import type { CronJobsResponse, ProjectInfo } from "@/lib/types";
 
 const PROJECTS: ProjectInfo[] = [
@@ -149,6 +149,15 @@ describe("CronJobsModal", () => {
     }
     const runs = screen.getByText("Recent runs").closest("section") as HTMLElement;
     expect(within(runs).getByText("Cron tick")).toBeInTheDocument();
+    const tickTime = formatShortTimestamp("2026-10-27T03:00:00.000Z");
+    expect(tickTime).toMatch(/^Oct 2[67] \d{2}:\d{2}:00$/);
+    expect(within(runs).getByText(tickTime)).toHaveAttribute(
+      "title",
+      formatAbsoluteTime("2026-10-27T03:00:00.000Z"),
+    );
+    expect(screen.getByText("Settings").className).toContain("text-[var(--color-text-secondary)]");
+    expect(settings.className).toContain("border-t");
+    expect(runs.className).toContain("border-t");
     expect(within(runs).getByText("Session")).toBeInTheDocument();
     expect(within(runs).getByRole("link", { name: "api-412" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /edit/i })).toBeNull();
