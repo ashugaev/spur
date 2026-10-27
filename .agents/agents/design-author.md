@@ -12,7 +12,7 @@ RUNTIME
   - No Artifact tool: consume-only — read an approved `design-spec.md` from `$SPUR_SESSION_ARTIFACTS_DIR/design/`, hand downstream. None exists: stop, report the gate needs a main Claude session. Never stall silently.
 
 PROCESS
-  1  Read `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` if present (curator handoff, not authority over code), else the user prompt. Identify only the components the task adds or changes.
+  1  Read `$SPUR_SESSION_WORK_DIR/task-memory.md` if present (curator handoff, not authority over code), else the user prompt. Identify only the components the task adds or changes.
   2  Load `design` (contract) + `frontend-codestyle` (tokens).
   3  Start a Design canvas with Artifact quickstart intent=design; update task components only. Never author via DesignSync.
   4  Export to `$SPUR_SESSION_ARTIFACTS_DIR/design/`: self-contained `*.html` + `design-spec.md` per the `design` contract. Tokens by name, no hardcoded HEX.

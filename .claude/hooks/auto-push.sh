@@ -97,7 +97,7 @@ if [ -n "$problems" ]; then
   fi
   if [ "$mode" = "codex" ]; then
     cat <<EOF
-{"decision":"block","reason":"\$github\n\nUse the github close-out gate before stopping.\n\nProblems:$problems\n\nInspect the worktree. Commit and push every change that belongs in the PR. For files that should not be committed, move session artifacts to \$SPUR_SESSION_ARTIFACTS_DIR or remove scratch files, then report what was excluded. If no PR exists for this branch, create one."}
+{"decision":"block","reason":"\$github\n\nUse the github close-out gate before stopping.\n\nProblems:$problems\n\nInspect the worktree. Commit and push every change that belongs in the PR. For files that should not be committed, move agent working files to \$SPUR_SESSION_WORK_DIR and human-review files to \$SPUR_SESSION_ARTIFACTS_DIR, or remove scratch files, then report what was excluded. If no PR exists for this branch, create one."}
 EOF
   else
     cat <<EOF
@@ -107,7 +107,7 @@ Use the github close-out gate before stopping.
 
 Problems:$problems
 
-Inspect the worktree. Commit and push every change that belongs in the PR. For files that should not be committed, move session artifacts to \$SPUR_SESSION_ARTIFACTS_DIR or remove scratch files, then report what was excluded. If no PR exists for this branch, create one.
+Inspect the worktree. Commit and push every change that belongs in the PR. For files that should not be committed, move agent working files to \$SPUR_SESSION_WORK_DIR and human-review files to \$SPUR_SESSION_ARTIFACTS_DIR, or remove scratch files, then report what was excluded. If no PR exists for this branch, create one.
 EOF
   fi
 else

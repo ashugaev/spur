@@ -78,7 +78,7 @@ RESPONSE STYLE
 
 TASK MEMORY
 
-  Read `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` first if present — curator's handoff: task model, facts, decisions, assumptions, open questions. Re-read the repo when it falls short. Handoff, not authority — code wins.
+  Read `$SPUR_SESSION_WORK_DIR/task-memory.md` first if present — curator's handoff: task model, facts, decisions, assumptions, open questions. Re-read the repo when it falls short. Handoff, not authority — code wins.
 
 
 ALWAYS-ON RULES

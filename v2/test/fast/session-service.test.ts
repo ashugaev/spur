@@ -928,6 +928,11 @@ vi.mock("../../src/session-artifacts.js", () => ({
     mkdirSync(dir, { recursive: true });
     return dir;
   }),
+  ensureSessionWorkDir: vi.fn((_dataDir: string, sessionId: string) => {
+    const dir = join(artifactDirForSession(sessionId), ".spur-work");
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }),
   deleteSessionArtifactById: deleteSessionArtifactByIdMock,
   deleteSessionArtifactsExcept: deleteSessionArtifactsExceptMock,
   deleteSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
@@ -3450,6 +3455,7 @@ describe("SessionService", () => {
         SPUR_CLOSEOUT_OWNER: "1",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
+        SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
@@ -5242,6 +5248,7 @@ describe("SessionService", () => {
           SPUR_SESSION: "api-2",
           SPUR_CLOSEOUT_OWNER: "0",
           SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
+          SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         }),
       }),
     );
@@ -8800,6 +8807,7 @@ describe("SessionService", () => {
         SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
+        SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
@@ -33836,6 +33844,7 @@ describe("SessionService", () => {
         SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
+        SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
@@ -40135,6 +40144,7 @@ describe("SessionService", () => {
         SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
+        SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
@@ -40608,6 +40618,7 @@ describe("SessionService", () => {
         SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
+        SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
@@ -42030,6 +42041,7 @@ describe("SessionService", () => {
         SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
+        SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",

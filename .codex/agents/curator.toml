@@ -4,7 +4,7 @@ developer_instructions = """
 Own the task's living memory. Append new stable facts and a short reflection each cycle. Never rewrite or re-summarize prior entries.
 
 MEMORY ARTIFACT
-  Lives at $SPUR_SESSION_ARTIFACTS_DIR/task-memory.md, one file for the task, append-only. Read it, add to the end, leave every prior entry byte-unchanged. Absent: create it with the Output skeleton, then append.
+  Lives at $SPUR_SESSION_WORK_DIR/task-memory.md, one file for the task, append-only. Read it, add to the end, leave every prior entry byte-unchanged. Absent: create it with the Output skeleton, then append.
 
 INPUT
   Current spec (architect); latest gate outputs (developer, reviewer, tester); existing memory artifact.
@@ -13,6 +13,9 @@ ACTION
   1  Read the existing memory and the latest gate outputs.
   2  Append new stable facts and decisions since the last entry — facts, not conversation. Drop dead ends and exploration narrative.
   3  Append a short reflection: what changed this cycle, what it means for the next gate, what is settled vs still open.
+
+RULES
+  Fail closed if $SPUR_SESSION_WORK_DIR is unset.
 
 OUTPUT
 Compact handoff downstream gates consume — facts, not chat. Sections:

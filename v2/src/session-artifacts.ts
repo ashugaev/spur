@@ -19,6 +19,7 @@ import type { SessionArtifact, SessionArtifactKind, SessionArtifactOrigin } from
 
 const ARTIFACTS_DIR = "session-artifacts";
 const ARTIFACT_METADATA_FILE = ".spur-artifacts.json";
+const SESSION_WORK_DIR = ".spur-work";
 
 // Every entry pulled from a below-root directory costs one tick, and opening that
 // directory costs one tick too, whether the directory turns out empty, its entries become
@@ -205,6 +206,12 @@ export function sessionArtifactsDir(dataDir: string, sessionId: string): string 
 
 export function ensureSessionArtifactsDir(dataDir: string, sessionId: string): string {
   const dir = sessionArtifactsDir(dataDir, sessionId);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function ensureSessionWorkDir(dataDir: string, sessionId: string): string {
+  const dir = join(sessionArtifactsDir(dataDir, sessionId), SESSION_WORK_DIR);
   mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -412,7 +419,8 @@ function classifyUnknownDirent(
  * ancestor chain of resolved paths from the root down to its parent; a match means the link
  * re-enters a directory already on its own path and is skipped (not an error — an alias of
  * an ancestor, not lost work). Two distinct paths reaching the same physical directory
- * (neither on the other's chain) are both listed.
+ * (neither on the other's chain) are both listed. The root `.spur-work` entry (agent
+ * work dir) is never listed or walked.
  */
 export function listSessionArtifacts(dataDir: string, sessionId: string): ArtifactWalkResult {
   const dir = sessionArtifactsDir(dataDir, sessionId);
@@ -441,7 +449,7 @@ export function listSessionArtifacts(dataDir: string, sessionId: string): Artifa
   let nextLevel: { dir: string; relPath: string; chain: DirChain }[] = [];
 
   for (const entry of rootEntries) {
-    if (entry.name === ARTIFACT_METADATA_FILE) {
+    if (entry.name === ARTIFACT_METADATA_FILE || entry.name === SESSION_WORK_DIR) {
       continue;
     }
     if (entry.isFile()) {
@@ -760,11 +768,10 @@ export function withSessionArtifactInstructions(prompt: string): string {
   return `${prompt}
 
 Session artifacts:
-- Use \`$SPUR_SESSION_ARTIFACTS_DIR\` for temporary session-owned files you want Spur to track.
-- For screenshots, videos, traces, logs, and other test outputs, write the file to \`$SPUR_SESSION_ARTIFACTS_DIR\` instead of leaving it in the repo worktree.
-- If you generate an artifact you want the user to inspect in Spur UI, always put it in \`$SPUR_SESSION_ARTIFACTS_DIR\`.
-- Files written there are not committed from the repo workspace and are tied to this Spur session.
-- Images, videos, and text files (including .txt, .md, .json) written there appear inline in Spur UI. Other files appear as download links.
+- \`$SPUR_SESSION_ARTIFACTS_DIR\` is for the human: put only final files meant for user review there — test evidence (screenshots, videos), final reports, design exports for approval.
+- Write every other file you or other agents need — plans, drafts, specs, task memory, scratch logs, raw command output, intermediate data — to \`$SPUR_SESSION_WORK_DIR\`. Spur UI never shows it.
+- Both directories are tied to this Spur session and are not committed from the repo workspace. Never leave either kind of file in the repo worktree.
+- Images, videos, and text files (including .txt, .md, .json) in \`$SPUR_SESSION_ARTIFACTS_DIR\` appear inline in Spur UI. Other files appear as download links.
 - HTML files render as a live preview in Spur UI, with a button that opens the page standalone at its artifact URL.
-- A file written in a subfolder of \`$SPUR_SESSION_ARTIFACTS_DIR\` is listed under its path relative to that directory (for example \`design/design-spec.md\`).`;
+- A file in a subfolder of \`$SPUR_SESSION_ARTIFACTS_DIR\` is listed under its path relative to that directory (for example \`design/design-spec.md\`).`;
 }

@@ -7,7 +7,7 @@ RUNTIME
   Artifact Design authoring runs in a main Claude session — Codex has no Artifact tool. Consume-only here: read an approved design-spec.md from $SPUR_SESSION_ARTIFACTS_DIR/design/, hand it downstream. None exists and the task needs one: stop, report the gate needs a main Claude session. Never stall silently.
 
 PROCESS
-  1  Read $SPUR_SESSION_ARTIFACTS_DIR/task-memory.md if present (curator handoff, not authority over code), else the user prompt.
+  1  Read $SPUR_SESSION_WORK_DIR/task-memory.md if present (curator handoff, not authority over code), else the user prompt.
   2  Read the approved design-spec.md and its exported html; hand components, states, tokens, acceptance criteria downstream.
 
 RULES
