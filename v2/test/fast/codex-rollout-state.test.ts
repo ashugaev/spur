@@ -1136,6 +1136,8 @@ describe("readCodexRolloutState", () => {
 });
 
 const FIXTURE_DIR = join(__dirname, "../fixtures/agent-history/codex");
+// Kept out of the top-level .jsonl set the rollout-state tests count.
+const EDGE_TRANSCRIPT_FIXTURE = "edge/tool-output-edge-cases.jsonl";
 
 function rolloutPath(sessionsDir: string, filename: string): string {
   return join(sessionsDir, "2026", "04", "19", filename);
@@ -1979,7 +1981,10 @@ describe("readCodexTranscriptEntries", () => {
     const golden = JSON.parse(
       await readFile(join(FIXTURE_DIR, "transcript-golden.json"), "utf8"),
     ) as Record<string, { totalEntries: number; sha256: string }>;
-    const names = (await readdir(FIXTURE_DIR)).filter((name) => name.endsWith(".jsonl")).sort();
+    const names = [
+      ...(await readdir(FIXTURE_DIR)).filter((name) => name.endsWith(".jsonl")),
+      EDGE_TRANSCRIPT_FIXTURE,
+    ].sort();
     expect(Object.keys(golden).sort()).toEqual(names);
 
     for (const name of names) {
@@ -2131,7 +2136,10 @@ describe("readCodexConversationTail", () => {
   );
 
   it("matches a full read at every split of every fixture", async () => {
-    const names = (await readdir(FIXTURE_DIR)).filter((name) => name.endsWith(".jsonl")).sort();
+    const names = [
+      ...(await readdir(FIXTURE_DIR)).filter((name) => name.endsWith(".jsonl")),
+      EDGE_TRANSCRIPT_FIXTURE,
+    ].sort();
     for (const name of names) {
       const content = await readFile(join(FIXTURE_DIR, name));
       const sessionsDir = await makeSessionsDir("");
