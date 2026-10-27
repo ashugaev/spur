@@ -581,6 +581,7 @@ test.skipIf(process.platform === "win32").each(["legacy", "pending"])(
     await execFileAsync("mkfifo", ["-m", "600", f.archive], { timeout: 2_000 });
     const child = `
       import { readFile, lstat, access } from "node:fs/promises";
+      try {
       const [moduleUrl, configuration, attempt, sha256, archive] = process.argv.slice(1);
       let network = 0;
       globalThis.fetch = async () => { network++; throw new Error("unexpected fixture network"); };
@@ -597,6 +598,10 @@ test.skipIf(process.platform === "win32").each(["legacy", "pending"])(
       console.log(JSON.stringify({ rejected, network, locked,
         unchanged: before.equals(await readFile(request.receipt)),
         fifo: after.isFIFO(), sameArchive: original.ino === after.ino && original.dev === after.dev }));
+      } catch (error) {
+        console.error(error);
+        process.exitCode = 1;
+      }
     `;
     const result = await execFileAsync(
       process.execPath,
