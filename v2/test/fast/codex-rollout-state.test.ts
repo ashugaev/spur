@@ -7,6 +7,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   utimes,
@@ -18,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CODEX_ROLLOUT_READ_MAX_CONCURRENCY,
+  readCodexConversationTail,
   readCodexRolloutState,
   readCodexTranscriptEntries,
   type CodexRolloutReaderState,
@@ -1806,6 +1808,10 @@ describe("readCodexRolloutState incremental chunked reads", () => {
 });
 
 describe("readCodexTranscriptEntries", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("parses an assistant message and a tool entry whose output is paired via call_id", async () => {
     const content = await readFile(WORKING_CURRENT_SESSION_FIXTURE, "utf8");
     const sessionsDir = await makeSessionsDir(content, "rollout-transcript-working.jsonl");
@@ -1940,5 +1946,356 @@ describe("readCodexTranscriptEntries", () => {
         timestampMs: Date.parse("2026-05-10T09:00:00.000Z"),
       },
     ]);
+  });
+
+  it("drops non-record assistant content items", async () => {
+    const line = JSON.stringify({
+      timestamp: "2026-05-10T09:00:00.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [null, 7, { type: "output_text", text: "ok" }],
+      },
+    });
+    const sessionsDir = await makeSessionsDir(`${line}\n`, "rollout-transcript-malformed.jsonl");
+    const expected = [
+      {
+        kind: "message",
+        role: "assistant",
+        text: "ok",
+        timestampMs: Date.parse("2026-05-10T09:00:00.000Z"),
+      },
+    ];
+
+    expect(await readCodexTranscriptEntries(sessionsDir)).toEqual(expected);
+    const first = await readCodexConversationTail(sessionsDir, undefined);
+    const second = await readCodexConversationTail(sessionsDir, first?.reader);
+    expect(first?.entries).toEqual(expected);
+    expect(second?.entries).toEqual(expected);
+  });
+
+  it("matches the pre-change transcript golden for every fixture", async () => {
+    const golden = JSON.parse(
+      await readFile(join(FIXTURE_DIR, "transcript-golden.json"), "utf8"),
+    ) as Record<string, { totalEntries: number; sha256: string }>;
+    const names = (await readdir(FIXTURE_DIR)).filter((name) => name.endsWith(".jsonl")).sort();
+    expect(Object.keys(golden).sort()).toEqual(names);
+
+    for (const name of names) {
+      const sessionsDir = await makeSessionsDir(await readFile(join(FIXTURE_DIR, name), "utf8"));
+      const entries = await readCodexTranscriptEntries(sessionsDir);
+      expect(entries?.length, name).toBe(golden[name]?.totalEntries);
+      expect(createHash("sha256").update(JSON.stringify(entries)).digest("hex"), name).toBe(
+        golden[name]?.sha256,
+      );
+    }
+  });
+
+  it("parses each rollout line once", async () => {
+    const content = await readFile(WORKING_CURRENT_SESSION_FIXTURE, "utf8");
+    const lines = content.split("\n").filter((line) => line.trim());
+    const sessionsDir = await makeSessionsDir(content);
+    const parse = vi.spyOn(JSON, "parse");
+
+    await readCodexTranscriptEntries(sessionsDir);
+
+    const lineSet = new Set(lines);
+    const counts = new Map<string, number>();
+    for (const [arg] of parse.mock.calls) {
+      if (typeof arg === "string" && lineSet.has(arg)) counts.set(arg, (counts.get(arg) ?? 0) + 1);
+    }
+    for (const line of lineSet) {
+      const occurrences = lines.filter((other) => other === line).length;
+      expect(counts.get(line), line.slice(0, 80)).toBe(occurrences);
+    }
+  });
+});
+
+const TAIL_WINDOW = 300;
+let lineClock = 0;
+
+function transcriptLine(type: string, payload: Record<string, unknown>): string {
+  lineClock += 1;
+  return JSON.stringify({
+    timestamp: new Date(Date.UTC(2026, 4, 10, 9, 0, 0, lineClock)).toISOString(),
+    type,
+    payload,
+  });
+}
+
+function userLine(text: string): string {
+  return transcriptLine("response_item", {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text }],
+  });
+}
+
+function toolCall(callId: string, args = "{}"): string {
+  return transcriptLine("response_item", {
+    type: "function_call",
+    name: "exec_command",
+    call_id: callId,
+    arguments: args,
+  });
+}
+
+function toolOutput(callId: string, output: string): string {
+  return transcriptLine("response_item", {
+    type: "function_call_output",
+    call_id: callId,
+    output,
+  });
+}
+
+function rollout(lines: string[]): string {
+  return `${lines.join("\n")}\n`;
+}
+
+async function expectTailEqualsFullRead(
+  sessionsDir: string,
+  tail: { entries: unknown[]; totalEntries: number; startIndex: number } | null,
+  label: string,
+): Promise<void> {
+  const full = await readCodexTranscriptEntries(sessionsDir);
+  if (!full || !tail) throw new Error(`expected entries for ${label}`);
+  expect(JSON.stringify(tail.entries), label).toBe(JSON.stringify(full.slice(-TAIL_WINDOW)));
+  expect(tail.totalEntries, label).toBe(full.length);
+  expect(tail.startIndex, label).toBe(Math.max(full.length - TAIL_WINDOW, 0));
+}
+
+function parseCount(parse: { mock: { calls: unknown[][] } }, line: string): number {
+  return parse.mock.calls.filter(([arg]) => arg === line).length;
+}
+
+describe("readCodexConversationTail", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("returns the cached window without reading or parsing an unchanged rollout", async () => {
+    const lines = [userLine("one"), toolCall("call-a"), toolOutput("call-a", "out")];
+    const sessionsDir = await makeSessionsDir(rollout(lines));
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const first = await readCodexConversationTail(sessionsDir, undefined);
+    probe.reads.length = 0;
+    probe.readFileCalls.length = 0;
+    const parse = vi.spyOn(JSON, "parse");
+
+    const second = await readCodexConversationTail(sessionsDir, first?.reader);
+
+    expect(probe.reads.filter((read) => read.path === filePath)).toEqual([]);
+    expect(probe.readFileCalls).toEqual([]);
+    expect(lines.filter((line) => parseCount(parse, line) > 0)).toEqual([]);
+    expect(second?.entries).toBe(first?.entries);
+    expect(second?.reader.cursor).toBe(first?.reader.cursor);
+  });
+
+  it.each(["line boundary", "mid-line", "mid multibyte char"] as const)(
+    "parses only appended bytes at a %s split",
+    async (split) => {
+      const base = [userLine("one"), toolCall("call-a"), toolOutput("call-a", "out")];
+      const added = [userLine("price €5 today"), userLine("two"), userLine("three")];
+      const baseText = rollout(base);
+      const full = Buffer.from(baseText + rollout(added));
+      const cut = {
+        "line boundary": Buffer.byteLength(baseText + rollout(added.slice(0, 1))),
+        "mid-line": Buffer.byteLength(baseText) + 20,
+        "mid multibyte char": full.indexOf(Buffer.from("€")) + 1,
+      }[split];
+      const sessionsDir = await makeSessionsDir("");
+      const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+      await writeFile(filePath, full.subarray(0, cut));
+      const first = await readCodexConversationTail(sessionsDir, undefined);
+      const offset = first?.reader.cursor.offset;
+      await appendFile(filePath, full.subarray(cut));
+      probe.reads.length = 0;
+      const parse = vi.spyOn(JSON, "parse");
+
+      const second = await readCodexConversationTail(sessionsDir, first?.reader);
+
+      let end = Buffer.byteLength(baseText);
+      const consumed = [...base];
+      const fresh: string[] = [];
+      for (const line of added) {
+        end += Buffer.byteLength(`${line}\n`);
+        (end <= cut ? consumed : fresh).push(line);
+      }
+      expect(consumed.filter((line) => parseCount(parse, line) > 0)).toEqual([]);
+      for (const line of fresh) expect(parseCount(parse, line), line).toBe(1);
+      const reads = probe.reads.filter((read) => read.path === filePath);
+      expect(reads.at(-1)?.position).toBe(offset);
+      await expectTailEqualsFullRead(sessionsDir, second, split);
+    },
+  );
+
+  it("matches a full read at every split of every fixture", async () => {
+    const names = (await readdir(FIXTURE_DIR)).filter((name) => name.endsWith(".jsonl")).sort();
+    for (const name of names) {
+      const content = await readFile(join(FIXTURE_DIR, name));
+      const sessionsDir = await makeSessionsDir("");
+      const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+      await writeFile(filePath, content);
+      const cold = await readCodexTranscriptEntries(sessionsDir);
+      const cuts: number[] = [];
+      for (let start = content.indexOf(10) + 1; start > 0; start = content.indexOf(10, start) + 1) {
+        const next = content.indexOf(10, start);
+        cuts.push(start, start + Math.floor(((next < 0 ? content.length : next) - start) / 2));
+      }
+      for (const cut of cuts) {
+        await writeFile(filePath, content.subarray(0, cut));
+        const first = await readCodexConversationTail(sessionsDir, undefined);
+        await appendFile(filePath, content.subarray(cut));
+        const second = await readCodexConversationTail(sessionsDir, first?.reader);
+        expect(JSON.stringify(second?.entries), `${name} cut ${cut}`).toBe(
+          JSON.stringify(cold?.slice(-TAIL_WINDOW)),
+        );
+        expect(second?.totalEntries, `${name} cut ${cut}`).toBe(cold?.length);
+      }
+    }
+  }, 60_000);
+
+  it("matches a full read at splits of a rollout larger than the window", async () => {
+    const lines: string[] = [];
+    for (let index = 0; index < 700; index += 1) {
+      if (index % 3 === 0) lines.push(userLine(`message ${index}`));
+      else if (index % 3 === 1) lines.push(toolCall(`call-${index}`, `{"n":${index}}`));
+      else lines.push(toolOutput(`call-${index - 1}`, `output ${index}`));
+    }
+    for (const cut of [100, 350, 650, 699]) {
+      const sessionsDir = await makeSessionsDir(rollout(lines.slice(0, cut)));
+      const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+      const first = await readCodexConversationTail(sessionsDir, undefined);
+      await appendFile(filePath, rollout(lines.slice(cut)));
+      const second = await readCodexConversationTail(sessionsDir, first?.reader);
+      expect(second?.entries.length).toBe(TAIL_WINDOW);
+      await expectTailEqualsFullRead(sessionsDir, second, `cut ${cut}`);
+    }
+  });
+
+  it.each([
+    {
+      name: "output after call",
+      before: [toolCall("call-a", "A")],
+      added: [toolOutput("call-a", "late")],
+      refold: false,
+      last: { name: "exec_command", callId: "call-a", inputSummary: "A", output: "late" },
+    },
+    {
+      name: "output before call (cross-read -> full refold)",
+      before: [toolOutput("call-a", "early")],
+      added: [toolCall("call-a", "A")],
+      refold: true,
+      last: { name: "exec_command", callId: "call-a", inputSummary: "A", output: "early" },
+    },
+    {
+      name: "call_id reuse across reads",
+      before: [toolCall("call-a", "A"), toolOutput("call-a", "first")],
+      added: [toolCall("call-a", "B")],
+      refold: false,
+      last: { name: "exec_command", callId: "call-a", inputSummary: "B", output: "first" },
+    },
+    {
+      name: "empty output after non-empty",
+      before: [toolCall("call-a", "A"), toolOutput("call-a", "keep")],
+      added: [toolOutput("call-a", "")],
+      refold: false,
+      last: { name: "exec_command", callId: "call-a", inputSummary: "A", output: "keep" },
+    },
+    {
+      name: "reuse of id evicted from window",
+      before: [
+        toolCall("call-a", "A"),
+        toolOutput("call-a", "old"),
+        ...Array.from({ length: TAIL_WINDOW + 10 }, (_, index) => userLine(`filler ${index}`)),
+      ],
+      added: [toolCall("call-a", "B")],
+      refold: true,
+      last: { name: "exec_command", callId: "call-a", inputSummary: "B", output: "old" },
+    },
+  ])("pairs tool outputs across reads: $name", async ({ before, added, refold, last }) => {
+    const sessionsDir = await makeSessionsDir(rollout(before));
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const first = await readCodexConversationTail(sessionsDir, undefined);
+    await appendFile(filePath, rollout(added));
+    const parse = vi.spyOn(JSON, "parse");
+
+    const second = await readCodexConversationTail(sessionsDir, first?.reader);
+
+    const reparsed = before.filter((line) => parseCount(parse, line) > 0);
+    if (refold) expect(reparsed.length).toBeGreaterThan(0);
+    else expect(reparsed).toEqual([]);
+    const entry = second?.entries.at(-1);
+    expect(entry).toMatchObject({ kind: "tool", ...last });
+    expect(Object.keys(entry ?? {}).slice(0, 4)).toEqual([
+      "kind",
+      "name",
+      "callId",
+      "inputSummary",
+    ]);
+    await expectTailEqualsFullRead(sessionsDir, second, "pairs");
+  });
+
+  it("keeps a published window intact when an output patches the next read", async () => {
+    const sessionsDir = await makeSessionsDir(rollout([toolCall("call-a")]));
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const first = await readCodexConversationTail(sessionsDir, undefined);
+    const published = JSON.stringify(first?.entries);
+    await appendFile(filePath, rollout([toolOutput("call-a", "done")]));
+
+    const second = await readCodexConversationTail(sessionsDir, first?.reader);
+
+    expect(JSON.stringify(first?.entries)).toBe(published);
+    expect(second?.entries[0]).toMatchObject({ output: "done" });
+  });
+
+  describe("rewrites", () => {
+    const original = rollout([userLine("one"), toolCall("call-a"), toolOutput("call-a", "out")]);
+
+    async function rewriteAndRead(
+      rewrite: (filePath: string, sessionsDir: string) => Promise<void>,
+    ): Promise<void> {
+      const sessionsDir = await makeSessionsDir(original);
+      const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+      const first = await readCodexConversationTail(sessionsDir, undefined);
+      const before = await stat(filePath);
+      await rewrite(filePath, sessionsDir);
+      const after = await stat(filePath);
+      await utimes(filePath, new Date(after.atimeMs), new Date(before.mtimeMs + 2000));
+      const warm = await readCodexConversationTail(sessionsDir, first?.reader);
+      await expectTailEqualsFullRead(sessionsDir, warm, "rewrite");
+    }
+
+    it("refolds after truncation", async () => {
+      await rewriteAndRead((filePath) => writeFile(filePath, rollout([userLine("short")])));
+    });
+
+    it("refolds after a same-size rewrite with a new mtime", async () => {
+      await rewriteAndRead((filePath) => writeFile(filePath, original.replace("one", "two")));
+    });
+
+    it("refolds after a prefix rewrite with growth", async () => {
+      await rewriteAndRead((filePath) =>
+        writeFile(filePath, original.replace("one", "two") + rollout([userLine("more")])),
+      );
+    });
+
+    it("refolds after a new inode via rename", async () => {
+      await rewriteAndRead(async (filePath) => {
+        const replacement = `${filePath}.tmp`;
+        await writeFile(replacement, original + rollout([userLine("after rename")]));
+        await rename(replacement, filePath);
+      });
+    });
+
+    it("refolds when a newer rollout file takes over", async () => {
+      await rewriteAndRead(async (filePath) => {
+        const newer = join(dirname(filePath), "rollout-newer.jsonl");
+        await writeFile(newer, rollout([userLine("other file")]));
+        const future = new Date(Date.now() + 60_000);
+        await utimes(newer, future, future);
+      });
+    });
   });
 });
