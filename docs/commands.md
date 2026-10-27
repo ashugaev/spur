@@ -91,13 +91,13 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 ## source
 
 `spur source poll-enable --session <id>` re-enables GitHub signal polling after a not-found PR permanently disabled a session (see [source.poll.disabled](configuration.md#events)). `--session` defaults to `SPUR_SESSION`. `--json` prints raw JSON. Clears the disable in every `github`-type source of the session's project, and in registry entries of removed or renamed sources; `cleared: []` when nothing was disabled. Route: [daemon-api.md#session-routes](daemon-api.md#session-routes).
-`spur source info [--session <id>] [--json]`: read associated chat/topic and cached bot identity from existing daemon; session defaults to `SPUR_SESSION`; advertised in standard startup prompts; `v2/src/cli.ts`.
+`spur source info [--session <id>] [--json]`: read published canonical topic/cached bot identity without allocation; null when absent/disabled/terminal; session defaults to `SPUR_SESSION` — `v2/src/cli.ts`, `v2/src/session-service.ts`.
 
 ## source reply
 
-`spur source reply <message...> [--button <label[=value]>]... [--session <id>] [--json]`: bound-chat send; up to 8 buttons; `--request-interface-approval <manifest-file>` requests designated-human semantic consent. Outside forum topics: bold session label (`<id> — <title>`, or `<id>`), one empty line before body; `v2/src/session-service.ts`. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes); routing/formatting: [configuration.md#telegram-binding](configuration.md#telegram-binding).
+`spur source reply <message...> [--button <label[=value]>]... [--session <id>] [--json]`: canonical-topic send; up to 8 buttons; `--request-interface-approval <manifest-file>` requests designated-human semantic consent; unavailable without forum `chatId<0` — `v2/src/session-service.ts`. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes); routing: [configuration.md#telegram-binding](configuration.md#telegram-binding).
 Telegram `/new <task>`: displayed project defaults, optional engine/mode Settings, runtime-only recent project; requester-owned cards expire after 10 min — `v2/src/event-sources/telegram.ts`, `v2/src/event-sources/telegram-workbench.ts`.
-Telegram `/work`: daemon-wide Attention/Working/Recent; inspection leaves routing unchanged, explicit Continue binds, eligible Restore keeps session id and core recovery/budget rules — `v2/src/event-sources/telegram.ts`, `v2/src/server.ts`.
+Telegram `/work`: daemon-wide Attention/Working/Recent; inspection leaves routing unchanged, Continue assigns topic, eligible Restore keeps session id and core recovery/budget rules — `v2/src/event-sources/telegram.ts`, `v2/src/server.ts`.
 Telegram `/complete`, `/kill`: finish bound forum-topic session, delete owned topics, report in General; no arguments; preserve PR; kill requires saved and pushed work — `v2/src/event-sources/telegram.ts`, `v2/src/session-service.ts`.
 
 ## spur-slots

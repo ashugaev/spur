@@ -908,6 +908,10 @@ export async function startServer(
           (await service.list({ view: "dashboard" })).map(projectSourceSession),
         getSession: (sessionId) => sourceSessionById(service, sessionId),
         workbench: createSourceWorkbench(service),
+        telegramConversations: {
+          ensureTopic: (sessionId, origin) => service.ensureTelegramTopic(sessionId, origin),
+          unwatch: (sessionId, origin) => service.unwatchTelegramTopic(sessionId, origin),
+        },
         spawnSession: async (request) => {
           const { telegramOrigin, ...spawnRequest } = request;
           const session = await service.spawn(

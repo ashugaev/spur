@@ -11,6 +11,7 @@ import {
   type SourceType,
   type TelegramSpawnOrigin,
   type TelegramBotIdentity,
+  type TelegramConversation,
 } from "../types.js";
 
 export interface SpurEvent<T = unknown> {
@@ -43,7 +44,7 @@ export interface SourceSpawnSessionRequest {
   model?: string;
   mode?: string;
   selfDestruct?: SelfDestructConfig;
-  /** Chat the spawn came from; becomes the session's reply target before the agent can speak. */
+  /** Origin source selects the canonical forum; ingress chat remains manual. */
   telegramOrigin?: TelegramSpawnOrigin;
 }
 
@@ -93,6 +94,10 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   /** One session by id, same inclusion as listSessions. */
   getSession?(sessionId: string): Promise<SourceSessionListItem | null>;
   workbench?: SourceWorkbench;
+  telegramConversations?: {
+    ensureTopic(sessionId: string, origin: TelegramSpawnOrigin): Promise<TelegramConversation>;
+    unwatch(sessionId: string, origin: TelegramSpawnOrigin): Promise<boolean>;
+  };
   emit<TEvent = unknown>(name: string, data?: TEvent): void;
   signal: AbortSignal;
   logger: SourceLogger;

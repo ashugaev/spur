@@ -2683,6 +2683,36 @@ export function deleteTelegramReplyTarget(dataDir: string, sessionId: string): v
   rmSync(telegramReplyTargetFilePath(dataDir, sessionId), { force: true });
 }
 
+export function retireTelegramLegacyState(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  assigned?: Pick<TelegramBinding, "chatId" | "messageThreadId">,
+): void {
+  const bindings = readTelegramBindings(dataDir, projectId, sourceId);
+  const originalSize = bindings.size;
+  for (const [key, binding] of bindings) {
+    if (
+      binding.sessionId === sessionId &&
+      (binding.chatId > 0 || (binding.messageThreadId ?? 1) <= 1)
+    )
+      bindings.delete(key);
+  }
+  if (bindings.size !== originalSize) {
+    writeTelegramBindings(dataDir, projectId, sourceId, bindings.values());
+  }
+  const choices = readTelegramChoices(dataDir, projectId, sourceId);
+  const kept = choices.filter(
+    (choice) =>
+      choice.sessionId !== sessionId ||
+      (assigned !== undefined &&
+        choice.chatId === assigned.chatId &&
+        choice.messageThreadId === assigned.messageThreadId),
+  );
+  if (kept.length !== choices.length) writeTelegramChoices(dataDir, projectId, sourceId, kept);
+}
+
 export function deleteTelegramSourceStateForSession(
   dataDir: string,
   projectId: string,

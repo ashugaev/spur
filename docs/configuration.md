@@ -52,20 +52,20 @@ A mode is a prompt suffix naming a skill, set via `projects.<id>.modes.<name>.{s
 
 ## Telegram binding
 
-`/watch [sessionId]` binds chat/topic; successful forum binding confirmations omit session identity; `/unwatch` drops binding; source `allowedUsers`/`allowedChats` gates access; `/spawn [agent] [task]`, `autoSpawn.*` handles unbound messages — `v2/src/event-sources/telegram.ts`.
+`chatId<0` selects canonical agent forum; missing/positive `chatId` disables agent communication; `allowedUsers`/`allowedChats` gates manual access — `v2/src/session-service.ts`, `v2/src/event-sources/telegram.ts`.
 Task launch, attention cards, topic lifecycle: [`/new`, `/work`, `/complete`, `/kill`](commands.md#source-reply); complete/kill topic deletion requires bot administrator `can_delete_messages`.
-[`source reply`](commands.md#source-reply) targets latest inbound chat, else `chatId`; sends claim chat and enroll attention pushes — `v2/src/session-service.ts`.
-Bot-message replies in private chats and group main reach recorded sender ahead of binding; confirmed forum topics (`is_topic_message`) and plain messages follow binding; gone or stopped/error/killed targets answer `not delivered` without delivery — `v2/src/event-sources/telegram.ts`.
+[`source reply`](commands.md#source-reply), questions, attention and typing use assigned topic; Telegram spawn assigns before launch; legacy destinations migrate on input/output — `v2/src/session-service.ts`.
+DMs support commands/spawn tasks; existing-agent text, buttons and voice outside assigned topic redirect without delivery — `v2/src/event-sources/telegram.ts`.
 Failed inbound update from an allowed user answers `Message not delivered. Send it again.` once in the same chat/topic; taps on buttons older than 48h answer in the group main — `v2/src/event-sources/telegram.ts`.
-`/spawn` changes plain-message recipient; group-main replies retain sender routing; forum takeover detaches old session — `v2/src/event-sources/telegram.ts`.
+`/spawn` creates its own canonical topic; `/watch` and `/work` Continue return topic links; `/unwatch` removes selected binding and retains topic — `v2/src/event-sources/telegram.ts`, `v2/src/session-service.ts`.
 Recorded bot-message owners: 1000 per source, oldest evicted first — `v2/src/metadata.ts`.
 Pending button choices: 200 per source, oldest offers evicted first; session cleanup retires its choices — `v2/src/metadata.ts`.
-Private/forum placeholders: `Received. <label> is thinking...`, `is busy; your message is queued.`, `needs input in its terminal; your message is queued.`; next agent send edits placeholder — `v2/src/event-sources/telegram.ts`, `v2/src/session-service.ts`.
+Assigned-topic placeholders: `Received. <label> is thinking...`, `is busy; your message is queued.`, `needs input in its terminal; your message is queued.`; next agent send edits placeholder — `v2/src/event-sources/telegram.ts`, `v2/src/session-service.ts`.
 Queued Telegram sends suppress `is waiting.` notices and ToDo nudges — `v2/src/session-service.ts`.
-Private/forum typing: delivered, unanswered messages while session works; 10 min cap — `v2/src/session-service.ts`.
+Assigned-topic typing: delivered, unanswered messages while session works; 10 min cap — `v2/src/session-service.ts`.
 Agent Markdown: bold, strike, inline/fenced code, HTTP(S) links and headings render as HTML; Telegram parse rejection retries plain text — `v2/src/telegram-markdown.ts`, `v2/src/telegram-source-state.ts`.
 Forum topic names: status emoji, title, session id, agent; titled names capped at 128 UTF-16 units, title truncation preserves identity when it fits — `v2/src/session-service.ts`.
-Generated Telegram launch instructions require source `chatId` and matching `telegram:message` send trigger; inbound origin/provenance selects Telegram readership and decisions, capability-only launches select user-requested sends — `v2/src/session-service.ts`.
+Generated Telegram launch instructions require source `chatId<0` and matching `telegram:message` send trigger — `v2/src/session-service.ts`.
 
 ## Event log retention
 

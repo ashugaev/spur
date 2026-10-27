@@ -138,7 +138,7 @@ async function callTelegram<T>(
   config: Pick<TelegramSourceConfig, "token">,
   method: string,
   body: Record<string, unknown>,
-  options: { retry?: false; transport?: TelegramTransport | undefined } = {},
+  options: { retry?: false; transport?: TelegramTransport | undefined; create?: true } = {},
 ): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
     const controller = options.transport ? new AbortController() : undefined;
@@ -176,7 +176,9 @@ async function callTelegram<T>(
     } catch (error) {
       options.transport?.signal.throwIfAborted();
       const delayMs =
-        options.retry === false || (options.transport && attempt >= 2)
+        options.retry === false ||
+        (options.transport && attempt >= 2) ||
+        (options.create && !(error instanceof TelegramApiError && error.status === 429))
           ? null
           : retryDelay(error, attempt);
       if (options.transport && delayMs !== null && delayMs > 5_000) throw error;
@@ -218,13 +220,12 @@ export async function sendTelegramChatAction(
   }
 }
 
-async function createTelegramTopic(
+export async function createTelegramTopic(
   config: Pick<TelegramSourceConfig, "token">,
   chatId: number,
   name: string,
-  transport?: TelegramTransport,
-): Promise<number | null> {
-  try {
+): Promise<number> {
+  return lifecycleTransport(async (transport) => {
     const topic = await callTelegram<TelegramForumTopic>(
       config,
       "createForumTopic",
@@ -232,12 +233,13 @@ async function createTelegramTopic(
         chat_id: chatId,
         name,
       },
-      { transport },
+      { transport, create: true },
     );
-    return Number.isInteger(topic.message_thread_id) ? topic.message_thread_id : null;
-  } catch {
-    return null;
-  }
+    if (!topic || !Number.isInteger(topic.message_thread_id) || topic.message_thread_id <= 1) {
+      throw new Error("Telegram topic creation returned no valid topic id");
+    }
+    return topic.message_thread_id;
+  });
 }
 
 export async function editTelegramTopic(
@@ -431,12 +433,10 @@ async function editTelegramMessage(
 }
 
 interface TelegramReplyOptions {
-  topicName?: string;
   buttons?: TelegramInlineButton[];
   preformatted?: string;
   sessionLabel?: string;
   lifecycle?: boolean;
-  onTopicCreated?: (topicId: number) => Promise<void>;
 }
 
 export async function sendTelegramReply(
@@ -459,15 +459,7 @@ async function sendTelegramReplyWithTransport(
   options: TelegramReplyOptions,
   transport?: TelegramTransport,
 ): Promise<TelegramReplySendResult> {
-  const createdThreadId =
-    target.statusMessageId === undefined &&
-    target.messageThreadId === undefined &&
-    target.chatId < 0 &&
-    options.topicName
-      ? await createTelegramTopic(config, target.chatId, options.topicName, transport)
-      : null;
-  if (createdThreadId !== null) await options.onTopicCreated?.(createdThreadId);
-  const messageThreadId = target.messageThreadId ?? createdThreadId ?? undefined;
+  const messageThreadId = target.messageThreadId;
   const label =
     target.chatId < 0 && messageThreadId !== undefined ? "" : (options.sessionLabel ?? "");
   const prefix = label ? `${label}\n\n` : "";
