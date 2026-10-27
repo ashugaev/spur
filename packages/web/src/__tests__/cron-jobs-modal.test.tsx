@@ -251,15 +251,6 @@ describe("CronJobsModal owner states", () => {
   it.each([
     [
       {
-        state: "parse_error",
-        path: "/repo/api/spur.yaml",
-        revision: "r",
-        error: "Bad indent at line 2, column 1",
-      },
-      "• spur.yaml invalid: Bad indent at line 2, column 1",
-    ],
-    [
-      {
         state: "invalid",
         path: "/repo/api/spur.yaml",
         revision: "r",
@@ -267,10 +258,13 @@ describe("CronJobsModal owner states", () => {
       },
       "• spur.yaml invalid: schedule must be a string",
     ],
-    [{ state: "missing", path: "/repo/api/spur.yaml" }, "• spur.yaml: config file not found"],
     [
-      { state: "unreadable", path: "/repo/api/spur.yaml", error: "EACCES" },
-      "• spur.yaml unreadable: EACCES",
+      { state: "ambiguous", failedFiles: 1 },
+      "• config for API not found; 1 config file failed to load",
+    ],
+    [
+      { state: "ambiguous", failedFiles: 2 },
+      "• config for API not found; 2 config files failed to load",
     ],
     [{ state: "project_removed" }, "• API removed from its config file, not loaded"],
   ] as const)("renders the %o drift line", async (owner, text) => {

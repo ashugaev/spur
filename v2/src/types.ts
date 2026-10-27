@@ -1865,9 +1865,7 @@ export type CronDiskState = "same" | "changed" | "added" | "removed" | "unknown"
 export type CronOwnerState =
   | { state: "loaded"; path: string; revision: string; changed: boolean }
   | { state: "invalid"; path: string; revision: string; error: string }
-  | { state: "parse_error"; path: string; revision: string; error: string }
-  | { state: "missing"; path: string }
-  | { state: "unreadable"; path: string; error: string }
+  | { state: "ambiguous"; failedFiles: number }
   | { state: "project_removed" };
 
 export type CronActionEventName =

@@ -57,20 +57,17 @@ function driftLine(project: CronProjectView, allProjects: boolean): ReactNode {
         </span>
       );
     case "invalid":
-    case "parse_error":
-    case "unreadable":
       return (
         <span className={ERROR_TEXT}>
           • {prefix}
-          {fileName(owner.path)} {owner.state === "unreadable" ? "unreadable" : "invalid"}:{" "}
-          {owner.error}
+          {fileName(owner.path)} invalid: {owner.error}
         </span>
       );
-    case "missing":
+    case "ambiguous":
       return (
         <span className={ATTENTION_TEXT}>
-          • {prefix}
-          {fileName(owner.path)}: config file not found
+          • config for {project.projectName} not found; {owner.failedFiles} config file
+          {owner.failedFiles === 1 ? "" : "s"} failed to load
         </span>
       );
     case "project_removed":

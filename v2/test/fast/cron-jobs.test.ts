@@ -330,19 +330,22 @@ describe("cron jobs drift", () => {
     expect(project?.sources[0]?.triggers[0]?.disk).toBe("unknown");
   });
 
-  it("reports a YAML parse error with the parser message and no file excerpt", async () => {
+  it("reports an unparseable file as ambiguous, keeping only the parser message line", async () => {
     const f = await fixture();
     await writeFile(f.bootstrapPath, instanceYaml(f, demoProject(f)));
     const running = loadRunning(f.bootstrapPath);
     await writeFile(f.bootstrapPath, "projects: [unterminated-secret-x\n");
     const bytes = await readFile(f.bootstrapPath);
+    expect(resolveCronOwnerFiles(f.bootstrapPath, [], running)).toEqual([
+      {
+        state: "parse_error",
+        path: f.bootstrapPath,
+        revision: createHash("sha256").update(bytes).digest("hex"),
+        error: expect.stringMatching(/ at line \d+, column \d+$/) as unknown as string,
+      },
+    ]);
     const project = (await view(f, running)).projects[0];
-    expect(project?.owner).toEqual({
-      state: "parse_error",
-      path: f.bootstrapPath,
-      revision: createHash("sha256").update(bytes).digest("hex"),
-      error: expect.stringMatching(/ at line \d+, column \d+$/) as unknown as string,
-    });
+    expect(project?.owner).toEqual({ state: "ambiguous", failedFiles: 1 });
     expect(JSON.stringify(project)).not.toContain("unterminated-secret-x");
     expect(project?.sources[0]?.disk).toBe("unknown");
     expect(project?.sources[0]?.triggers[0]?.disk).toBe("unknown");
@@ -423,10 +426,29 @@ describe("cron jobs owner resolution", () => {
     const side = response.projects.find((project) => project.projectId === "side");
     expect(side?.owner).toMatchObject({ state: "loaded", path: registryPath, changed: false });
     expect(side?.sources[0]?.disk).toBe("same");
-    expect(response.projects.find((project) => project.projectId === "demo")?.owner).toMatchObject({
-      state: "parse_error",
-      path: f.bootstrapPath,
+    expect(response.projects.find((project) => project.projectId === "demo")?.owner).toEqual({
+      state: "ambiguous",
+      failedFiles: 1,
     });
+  });
+
+  it("never attributes a project removed from a valid file to an unrelated broken file", async () => {
+    const f = await fixture();
+    await writeFile(f.bootstrapPath, instanceYaml(f, demoProject(f)));
+    const registryPath = join(f.root, "side.yaml");
+    await writeFile(
+      registryPath,
+      `projects:\n  side:\n    path: ${f.repo}\n    sources: {hourly: {type: cron, schedule: '0 * * * *'}}\n`,
+    );
+    const base = loadRunning(f.bootstrapPath);
+    const running = mergeProjects(base, [base, loadProjectConfig(registryPath, base)]);
+    await writeFile(f.bootstrapPath, instanceYaml(f, `  plain:\n    path: ${f.repo}`));
+    await writeFile(registryPath, "projects: [\n");
+    const response = await view(f, running, [registryPath]);
+    const demo = response.projects.find((project) => project.projectId === "demo");
+    expect(demo?.owner).toEqual({ state: "ambiguous", failedFiles: 1 });
+    expect(JSON.stringify(demo)).not.toContain("side.yaml");
+    expect(demo?.sources[0]?.disk).toBe("unknown");
   });
 
   it("absent bootstrap maps to missing with unknown rows", async () => {
@@ -438,7 +460,7 @@ describe("cron jobs owner resolution", () => {
       { state: "missing", path: f.bootstrapPath },
     ]);
     const project = (await view(f, running)).projects[0];
-    expect(project?.owner).toEqual({ state: "missing", path: f.bootstrapPath });
+    expect(project?.owner).toEqual({ state: "ambiguous", failedFiles: 1 });
     expect(project?.sources[0]?.disk).toBe("unknown");
   });
 });

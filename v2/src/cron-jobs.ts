@@ -262,30 +262,33 @@ function actionEvent(entry: SpurLogEntry): CronActionEvent {
   };
 }
 
-// The first file declaring the project; else the first file that cannot be read
-// or parsed, since it may hold the project; else the project left every file.
-function ownerFor(
-  projectId: string,
-  files: readonly CronOwnerFile[],
-): CronOwnerFile | { state: "project_removed" } {
-  return (
-    files.find(
-      (file) =>
-        file.state === "loaded" &&
-        Object.prototype.hasOwnProperty.call(file.config.projects, projectId),
-    ) ??
-    files.find((file) => file.state === "invalid" && file.declaredProjectIds.includes(projectId)) ??
-    files.find(
-      (file) =>
-        file.state === "parse_error" || file.state === "missing" || file.state === "unreadable",
-    ) ?? { state: "project_removed" }
-  );
+type OwnerMatch =
+  | Extract<CronOwnerFile, { state: "loaded" | "invalid" }>
+  | { state: "ambiguous"; failedFiles: number }
+  | { state: "project_removed" };
+
+// The daemon keeps no load-time project -> file record, so ownership comes only
+// from a file that declares the project. With no declaring file, a file that
+// fails to read or parse may or may not hold it: never attribute across files.
+function ownerFor(projectId: string, files: readonly CronOwnerFile[]): OwnerMatch {
+  for (const file of files) {
+    if (
+      file.state === "loaded" &&
+      Object.prototype.hasOwnProperty.call(file.config.projects, projectId)
+    )
+      return file;
+  }
+  for (const file of files) {
+    if (file.state === "invalid" && file.declaredProjectIds.includes(projectId)) return file;
+  }
+  const failedFiles = files.filter(
+    (file) =>
+      file.state === "parse_error" || file.state === "missing" || file.state === "unreadable",
+  ).length;
+  return failedFiles > 0 ? { state: "ambiguous", failedFiles } : { state: "project_removed" };
 }
 
-function ownerState(
-  owner: ReturnType<typeof ownerFor>,
-  sources: readonly CronSourceView[],
-): CronOwnerState {
+function ownerState(owner: OwnerMatch, sources: readonly CronSourceView[]): CronOwnerState {
   switch (owner.state) {
     case "loaded":
       return {
@@ -298,15 +301,10 @@ function ownerState(
         ),
       };
     case "invalid":
-    case "parse_error":
-      return { state: owner.state, path: owner.path, revision: owner.revision, error: owner.error };
-    case "missing":
-      return { state: "missing", path: owner.path };
-    case "unreadable":
-      return { state: "unreadable", path: owner.path, error: owner.error };
-    case "rejected":
+      return { state: "invalid", path: owner.path, revision: owner.revision, error: owner.error };
+    case "ambiguous":
     case "project_removed":
-      return { state: "project_removed" };
+      return owner;
   }
 }
 
