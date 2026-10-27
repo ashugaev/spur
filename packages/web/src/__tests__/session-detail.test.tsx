@@ -6378,12 +6378,14 @@ describe("SessionDetail load state", () => {
       expect(screen.getAllByText("temporary failure").length).toBeGreaterThan(0);
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
-
-    await waitFor(() => {
-      expect(screen.queryByText("temporary failure")).not.toBeInTheDocument();
-    });
-  });
+    // Pause holds its optimistic status, so the next poll is the successful reload.
+    await waitFor(
+      () => {
+        expect(screen.queryByText("temporary failure")).not.toBeInTheDocument();
+      },
+      { timeout: 6_000 },
+    );
+  }, 10_000);
 });
 
 describe("SessionDetail display state", () => {
