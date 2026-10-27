@@ -1862,6 +1862,73 @@ export interface SpawnDefaultsResponse {
   worktree: boolean;
 }
 
+// GET /projects/cron. Values come from the running config; "added" rows carry
+// owner-file values. Built field by field, never spread from config.
+export type CronDiskState = "same" | "changed" | "added" | "removed" | "unknown";
+
+export type CronOwnerState =
+  | { state: "loaded"; path: string; revision: string; changed: boolean }
+  | { state: "invalid"; path: string; revision: string; error: string }
+  | { state: "ambiguous"; failedFiles: CronFailedConfigFile[] }
+  | { state: "project_removed" };
+
+// A config file that failed to load; never claimed as a project's owner.
+export interface CronFailedConfigFile {
+  file: string;
+  reason: "parse_error" | "unreadable";
+  message: string;
+}
+
+export type CronActionEventName =
+  | "trigger.spawn.completed"
+  | "trigger.spawn.failed"
+  | "trigger.spawn.suppressed"
+  | "trigger.send.ignored";
+
+export interface CronActionEvent {
+  at: string;
+  event: CronActionEventName;
+  sessionId: string | null;
+  message: string | null;
+}
+
+export interface CronSpawnBlockView {
+  prompt: string;
+  agent: AgentName | null;
+  model: string | null;
+  reasoningEffort: ProviderReasoningEffort | null;
+  mode: string | null;
+}
+
+export interface CronTriggerView {
+  triggerId: string;
+  event: string;
+  disk: CronDiskState;
+  action: { kind: "spawn"; blocks: CronSpawnBlockView[] } | { kind: "send"; prompt: string | null };
+  recentActions: CronActionEvent[];
+}
+
+export interface CronSourceView {
+  sourceId: string;
+  schedule: string;
+  runOnStart: boolean;
+  disk: CronDiskState;
+  recentTicks: string[];
+  triggers: CronTriggerView[];
+}
+
+export interface CronProjectView {
+  projectId: string;
+  projectName: string;
+  owner: CronOwnerState;
+  sources: CronSourceView[];
+}
+
+export interface CronJobsResponse {
+  projects: CronProjectView[];
+  eventsSince: string | null;
+}
+
 export interface SessionLaunchOptions {
   project: string;
   agent: AgentName;
