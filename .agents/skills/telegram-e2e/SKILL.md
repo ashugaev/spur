@@ -59,6 +59,7 @@ SCENARIOS
   8. Inactive: `pause` an agent, reply-to its message: "<label> is not active. Message not delivered." Nothing delivered.
   9. Gone (DM/group-main): `kill --pr-action leave_open`, reply-to message: "Spur session <id> is gone. Message not delivered." Binding unchanged.
   10. Command menu: after final-build source start/restart, compare dedicated TEST `getMyCommands` with TELEGRAM_COMMANDS; verify `getChatMenuButton` commands type. Record build/start identity; report overrides without deleting scopes.
+  11. Images: forum agent runs `spur source reply` with 2 `--image` PNGs and 2 buttons. MTProto read: album in the session topic, never General; album ids below text id; keyboard on text. Repeat with 1 image and `--request-interface-approval`: photo, then approval text with Before/After. Reply-to in the topic, agent answers with 1 image: placeholder deleted, photo then text in that topic. Record message ids.
 
 
 CLEANUP

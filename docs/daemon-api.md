@@ -50,7 +50,7 @@
 - `POST /sessions/:id/launch/submit` — presses submit over a pending `submitUnconfirmedAt` prompt
 - `POST /sessions/:id/submit-failed/retry` — re-queues `submitFailedMessage` at the head
 - `POST /sessions/:id/submit-failed/dismiss` — drops `submitFailedMessage`
-- `POST /sessions/:id/source-reply`: `requestInterfaceApproval` semantic proposal; `v2/src/session-service.ts`.
+- `POST /sessions/:id/source-reply`: `requestInterfaceApproval` semantic proposal; `images` `{name,data}[]` base64, invalid -> 400 before any send; body cap 15 MB; response `images` count; `v2/src/session-service.ts`.
 - `GET /sessions/:id/source-info` — read-only association and cached bot identity; `v2/src/server.ts`, `v2/src/session-service.ts`.
 - `POST /sessions/:id/opened`
 - `POST /sessions/:id/pause`
