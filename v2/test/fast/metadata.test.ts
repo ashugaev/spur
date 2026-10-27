@@ -2171,6 +2171,13 @@ describe("session metadata PR migration", () => {
     const baselines: SubmitAckBaseline[] = [
       { agent: "claude", file: "/c.jsonl", size: 7 },
       { agent: "cursor", file: "/k.jsonl", size: 9 },
+      { agent: "cursor", file: null, size: 0, deliveryId: "a1111111-1111-4111-8111-111111111111" },
+      {
+        agent: "cursor",
+        file: "/k.jsonl",
+        size: 9,
+        deliveryId: "a1111111-1111-4111-8111-111111111111",
+      },
       { agent: "cursor", file: "/k.jsonl", size: 9, rotated: { file: "/r.jsonl", size: 40 } },
       { agent: "opencode", sessionId: "ses_1", after: { createdMs: 200, id: "msg_2" } },
       { agent: "opencode", sessionId: "ses_1", after: null },
@@ -2196,6 +2203,21 @@ describe("session metadata PR migration", () => {
       queuedMessageTyped: { message: "m", typedAt, ackBaseline: malformed },
     });
     expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual({ message: "m", typedAt });
+    for (const invalid of [
+      { agent: "cursor", file: "/k.jsonl", size: 9, deliveryId: "invalid" },
+      { agent: "cursor", file: null, size: 0 },
+      { agent: "cursor", file: null, size: 1, deliveryId: "a1111111-1111-4111-8111-111111111111" },
+    ]) {
+      writeSession(dataDir, {
+        ...base,
+        queuedMessageTyped: {
+          message: "m",
+          typedAt,
+          ackBaseline: invalid as unknown as SubmitAckBaseline,
+        },
+      });
+      expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual({ message: "m", typedAt });
+    }
     // A malformed rotation entry drops alone; the pinned offset survives.
     const badRotation = {
       agent: "cursor",
