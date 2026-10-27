@@ -17,6 +17,7 @@ import {
 } from "../../src/session-slots.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "../../src/self-destruct.js";
 import { createTempDir, findFreePort } from "../helpers/common.js";
+import { readAgentHookState } from "../../src/agent-hook-state.js";
 
 const tempDirs: string[] = [];
 const PARAM_EXPANSION_OPEN = "$" + "{";
@@ -26,6 +27,32 @@ afterEach(async () => {
 });
 
 describe("session slots", () => {
+  it.each([undefined, "", " ", "current-launch", "foreign-launch"])(
+    "writes launch-stamped hook evidence only from inherited env %s",
+    async (stamp) => {
+      const dataDir = await createTempDir("spur-hook-launch-");
+      tempDirs.push(dataDir);
+      const toolDir = ensureSessionSlotTool({
+        dataDir,
+        sessionId: "stamp-test",
+        configPath: "/tmp/spur.yaml",
+      });
+      const env = { ...process.env };
+      delete env["SPUR_AGENT_LAUNCH_ID"];
+      if (stamp !== undefined) env["SPUR_AGENT_LAUNCH_ID"] = stamp;
+      execFileSync(join(toolDir, AGENT_STATE_TOOL_NAME), {
+        env,
+        input: JSON.stringify({
+          hook_event_name: "UserPromptSubmit",
+          turn_id: "turn-current",
+          agentLaunchId: "payload-forgery",
+        }),
+      });
+      const state = readAgentHookState(dataDir, "stamp-test");
+      expect(state).toMatchObject({ state: "working", turnId: "turn-current" });
+      expect(state?.agentLaunchId).toBe(stamp?.trim() ? stamp : undefined);
+    },
+  );
   it("normalizes and merges title and named links", () => {
     const updated = applySlotsUpdate(
       {

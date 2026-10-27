@@ -4,7 +4,7 @@ import type * as fsPromisesModule from "node:fs/promises";
 import type * as fsModule from "node:fs";
 import { randomUUID } from "node:crypto";
 import type * as timersPromisesModule from "node:timers/promises";
-import { spawn as spawnChildProcess } from "node:child_process";
+import { execFileSync, spawn as spawnChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   appendFileSync,
@@ -45,6 +45,7 @@ import type * as jsonlLogIoModule from "../../src/jsonl-log-io.js";
 import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
 import type * as claudeModule from "../../src/agents/claude.js";
 import type * as codexModule from "../../src/agents/codex.js";
+import type * as agentHookStateModule from "../../src/agent-hook-state.js";
 import type * as agentIndexModule from "../../src/agents/index.js";
 import type * as openCodeModule from "../../src/agents/opencode.js";
 import type * as ghModule from "../../src/gh.js";
@@ -25087,6 +25088,621 @@ describe("SessionService", () => {
         expect(createTmuxSessionMock).not.toHaveBeenCalled();
         expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
         expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+      },
+    );
+  });
+
+  describe("launch-owned primary Codex retirement", () => {
+    type BoundService = {
+      runMemoryShedTick(): Promise<void>;
+      recoverDurableRuntime(record: SessionRecord): Promise<void>;
+      proveTaggedDurableLaunch(record: SessionRecord): Promise<SessionRecord | null>;
+      startAutoStartSidecars(record: SessionRecord, project: unknown): Promise<SessionRecord>;
+      codexMcpDialogOverrides: SessionServiceInternals["codexMcpDialogOverrides"];
+      stateHistory: Map<string, SessionStateTransition[]>;
+      recoverDurableSpawns(): Promise<void>;
+      startMemoryShedLoop(): void;
+      durableSpawnIds: Set<string>;
+    };
+    async function fixture(launch = true) {
+      vi.useRealTimers();
+      const config = baseConfig();
+      config.admission.memoryGuard.shedEnabled = false;
+      config.projects.api.path = process.cwd();
+      config.projects.api.worktree = false;
+      loadConfigMock.mockReturnValue(config);
+      readHostMemoryMock.mockReturnValue({
+        totalBytes: 65_000_000 * 1024,
+        availableBytes: 7_000_000_000,
+        swapTotalBytes: 0,
+        swapFreeBytes: 0,
+      });
+      const sessions = createSessionStore();
+      const nativeId = "4b8a0091-3931-4f1f-8c48-0162ff0fa940";
+      findAgentSessionIdMock.mockResolvedValue(nativeId);
+      const codex = await vi.importActual<typeof codexModule>("../../src/agents/codex.js");
+      const hooks = await vi.importActual<typeof agentHookStateModule>(
+        "../../src/agent-hook-state.js",
+      );
+      const slots = await vi.importActual<typeof sessionSlotsModule>("../../src/session-slots.js");
+      readCodexRolloutStateMock.mockImplementation(codex.readCodexRolloutState);
+      readAgentHookStateMock.mockImplementation(hooks.readAgentHookState);
+      const { readProcessStarttime } = await import("../../src/sidecars/reap.js");
+      const starttime = await readProcessStarttime(process.pid);
+      if (starttime === null) throw new Error("Missing owned unit process starttime");
+      const processRef = { pid: process.pid, identity: String(starttime) };
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      captureAgentProcessesForLaunchMock.mockResolvedValue({
+        status: "ok",
+        processes: [processRef],
+        complete: true,
+      });
+      capturePaneAgentProcessesMock.mockResolvedValue({ status: "ok", processes: [processRef] });
+      let manual: SessionRecord | undefined;
+      if (!launch) {
+        const now = new Date().toISOString();
+        const agentLaunchId = randomUUID();
+        manual = runningSession({
+          id: "api-1",
+          agent: "codex",
+          agentSessionId: nativeId,
+          agentLaunchId,
+          codexRestoreLaunchId: agentLaunchId,
+          codexRestoreStartedAt: now,
+          worktreePath: process.cwd(),
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+          triggerOrigin: {
+            triggerId: "review",
+            sourceId: "pull-requests",
+            externalId: "fixture/repo#1",
+            blockIndex: 0,
+          },
+          spawnReceipt: { version: 1, acceptedAt: now },
+          spawnIntent: {
+            version: 1,
+            phase: "submitted",
+            request: { project: "api", prompt: "original Codex review", agent: "codex" },
+            defaultBranch: "main",
+            preflightBatchId: "unit-batch",
+            startupAttachments: [],
+            launchSelection: {},
+            submission: { state: "confirmed" },
+            pane: { pid: process.pid, starttime },
+          },
+        });
+      }
+      const { SessionService } = await loadSessionServiceModule({ realPaneGeneration: true });
+      const service = new SessionService("/tmp/spur.yaml", new Date().toISOString(), {
+        deferBackgroundLoops: true,
+      });
+      if (launch) {
+        await service.spawn(
+          { project: "api", prompt: "original Codex review", agent: "codex" },
+          {
+            acceptQueued: true,
+            triggerOrigin: {
+              triggerId: "review",
+              sourceId: "pull-requests",
+              externalId: "fixture/repo#1",
+              blockIndex: 0,
+            },
+          },
+        );
+        readHostMemoryMock.mockReturnValue({
+          totalBytes: 65_000_000 * 1024,
+          availableBytes: 20_000_000_000,
+          swapTotalBytes: 0,
+          swapFreeBytes: 0,
+        });
+        await (service as unknown as BoundService).runMemoryShedTick();
+      }
+      await service.settleBackgroundSpawns();
+      if (manual) sessions.set(manual.id, manual);
+      const record = sessions.get("api-1");
+      if (!record?.spawnIntent || !record.agentLaunchId)
+        throw new Error("Missing retained Codex launch");
+      expect(record.spawnIntent.submission.state).toBe("confirmed");
+      const root = join(TEST_DATA_DIR, "session-tools", record.id, "codex-home", "sessions");
+      mkdirSync(root, { recursive: true });
+      const path = join(root, "primary.jsonl");
+      const writeRollout = (
+        options: { child?: boolean; turnId?: string; timestamp?: string } = {},
+      ) => {
+        writeFileSync(
+          path,
+          [
+            JSON.stringify({
+              type: "session_meta",
+              timestamp: new Date(Date.now() - 86_400_000).toISOString(),
+              payload: {
+                id: nativeId,
+                source: "cli",
+                thread_source: options.child ? "subagent" : "user",
+                cwd: process.cwd(),
+              },
+            }),
+            JSON.stringify({
+              type: "event_msg",
+              timestamp: options.timestamp ?? new Date().toISOString(),
+              payload: { type: "task_complete", turn_id: options.turnId ?? "current-launch-turn" },
+            }),
+          ].join("\n") + "\n",
+        );
+      };
+      const writeHook = (
+        stamp: string | undefined = record.agentLaunchId,
+        turnId = "current-launch-turn",
+      ) => {
+        const dir = slots.ensureSessionSlotTool({
+          dataDir: TEST_DATA_DIR,
+          sessionId: record.id,
+          configPath: "/tmp/spur.yaml",
+          agent: "codex",
+        });
+        const env = { ...process.env };
+        delete env["SPUR_AGENT_LAUNCH_ID"];
+        if (stamp !== undefined) env["SPUR_AGENT_LAUNCH_ID"] = stamp;
+        execFileSync(join(dir, "spur-agent-state"), {
+          env,
+          input: JSON.stringify({ hook_event_name: "Stop", turn_id: turnId }),
+        });
+      };
+      const internals = service as unknown as BoundService;
+      return {
+        service,
+        sessions,
+        record,
+        root,
+        path,
+        writeRollout,
+        writeHook,
+        internals,
+        nativeId,
+        SessionService,
+      };
+    }
+
+    it("joins generated hook, actual reader and owned runtime to retire the same accepted ID once", async () => {
+      const f = await fixture();
+      f.writeRollout();
+      f.writeHook();
+      await f.internals.recoverDurableRuntime(f.sessions.get(f.record.id) ?? f.record);
+      expect(f.sessions.get(f.record.id)).toMatchObject({
+        id: f.record.id,
+        status: "running",
+        agentSessionId: f.nativeId,
+        spawnReceipt: f.record.spawnReceipt,
+      });
+      expect(f.sessions.get(f.record.id)?.spawnIntent).toBeUndefined();
+      expect(f.sessions.get(f.record.id)?.error).toBeUndefined();
+      expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      await f.internals.recoverDurableSpawns();
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      "missing stamp",
+      "foreign stamp",
+      "wrong hook turn",
+      "wrong native",
+      "wrong pair",
+      "no turn",
+      "future turn",
+      "prelaunch turn",
+      "child",
+      "second primary",
+      "unknown runtime",
+      "partial runtime",
+      "absent runtime",
+    ])("retains the same accepted intent for %s without new input", async (mode) => {
+      const f = await fixture(false);
+      f.writeRollout({
+        child: mode === "child",
+        turnId: mode === "no turn" ? "" : "current-launch-turn",
+        ...(mode === "future turn"
+          ? { timestamp: new Date(Date.now() + 60_000).toISOString() }
+          : {}),
+        ...(mode === "prelaunch turn"
+          ? {
+              timestamp: new Date(
+                Date.parse(f.record.codexRestoreStartedAt ?? "") - 1,
+              ).toISOString(),
+            }
+          : {}),
+      });
+      f.writeHook(
+        mode === "missing stamp"
+          ? ""
+          : mode === "foreign stamp"
+            ? "foreign-launch"
+            : f.record.agentLaunchId,
+        mode === "wrong hook turn" ? "other-turn" : "current-launch-turn",
+      );
+      if (mode === "wrong native")
+        f.sessions.set(f.record.id, { ...f.record, agentSessionId: "other-native" });
+      if (mode === "wrong pair")
+        f.sessions.set(f.record.id, { ...f.record, codexRestoreLaunchId: "foreign-launch" });
+      if (mode === "second primary")
+        writeFileSync(
+          join(f.root, "second.jsonl"),
+          JSON.stringify({
+            type: "session_meta",
+            timestamp: new Date().toISOString(),
+            payload: { id: "second-native", source: "cli", thread_source: "user" },
+          }) + "\n",
+        );
+      if (mode === "unknown runtime")
+        captureAgentProcessesForLaunchMock.mockResolvedValue({ status: "unavailable" });
+      if (mode === "partial runtime")
+        captureAgentProcessesForLaunchMock.mockResolvedValue({
+          status: "ok",
+          processes: [{ pid: process.pid, identity: "unit-partial" }],
+          complete: false,
+        });
+      if (mode === "absent runtime") {
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+        captureAgentProcessesForLaunchMock.mockResolvedValue({
+          status: "ok",
+          processes: [],
+          complete: true,
+        });
+      }
+      const current = f.sessions.get(f.record.id);
+      if (!current) throw new Error("Missing pending unit launch");
+      const before = clone(current);
+      expect(await f.internals.proveTaggedDurableLaunch(current)).toBeNull();
+      expect(f.sessions.get(f.record.id)).toEqual(before);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    const changes = [
+      "owner",
+      "native",
+      "intent",
+      "error",
+      "errorSource",
+      "raw start",
+      "raw launch",
+      "episode",
+      "hard detection",
+      "hard observedAt",
+      "mcp expiry",
+      "pause",
+      "revision",
+    ] as const;
+    const barriers = [
+      "reader",
+      "process roster",
+      "birth",
+      "pane",
+      "cwd",
+      "reread",
+      "sidecar",
+    ] as const;
+    it.each(barriers.flatMap((barrier) => changes.map((change) => ({ barrier, change }))))(
+      "preserves peer $change across $barrier await",
+      async ({ barrier, change }) => {
+        const f = await fixture(false);
+        f.writeRollout();
+        f.writeHook();
+        const cacheBase = {
+          nativeId: f.record.agentSessionId,
+          launchId: f.record.agentLaunchId,
+          startedAt: Date.parse(f.record.codexRestoreStartedAt ?? ""),
+        };
+        f.internals.codexMcpDialogOverrides.set(
+          f.record.id,
+          change === "mcp expiry"
+            ? { ...cacheBase, kind: "mcp", expiresAt: Date.now() + 15_000 }
+            : {
+                ...cacheBase,
+                kind: "hard",
+                observedAt: Date.now(),
+                detection: { limited: true, reason: "original hard" },
+              },
+        );
+        const history = clone(f.internals.stateHistory.get(f.record.id));
+        let peer: SessionRecord | undefined;
+        let writes = -1;
+        const mutate = () => {
+          const current = f.sessions.get(f.record.id);
+          if (!current?.spawnIntent) throw new Error("Missing peer-bound unit launch");
+          peer = clone(current);
+          if (change === "owner") peer.agentLaunchId = "peer-launch";
+          if (change === "native") peer.agentSessionId = "peer-native";
+          if (change === "intent")
+            peer.spawnIntent = {
+              ...current.spawnIntent,
+              request: { ...current.spawnIntent.request, prompt: "peer intent" },
+            };
+          if (change === "error") peer.error = "peer diagnostic";
+          if (change === "errorSource") peer.errorSource = "runtime_probe";
+          if (change === "raw start")
+            peer.codexRestoreStartedAt = new Date(Date.now() + 1).toISOString();
+          if (change === "raw launch") peer.codexRestoreLaunchId = "peer-launch";
+          if (change === "episode") peer.rateLimitedAt = new Date().toISOString();
+          if (change === "pause") {
+            peer.status = "stopped";
+            peer.stopReason = "manual_pause";
+          }
+          if (change === "revision")
+            sessionServiceInternals(f.service).lifecycle.begin("restore", [f.record.id]);
+          const cached = f.internals.codexMcpDialogOverrides.get(f.record.id);
+          if (cached?.kind === "hard" && change === "hard detection")
+            f.internals.codexMcpDialogOverrides.set(f.record.id, {
+              ...cached,
+              detection: { limited: true, reason: "peer hard" },
+            });
+          if (cached?.kind === "hard" && change === "hard observedAt")
+            f.internals.codexMcpDialogOverrides.set(f.record.id, {
+              ...cached,
+              observedAt: cached.observedAt + 1,
+            });
+          if (cached?.kind === "mcp" && change === "mcp expiry")
+            f.internals.codexMcpDialogOverrides.set(f.record.id, {
+              ...cached,
+              expiresAt: cached.expiresAt + 1,
+            });
+          f.sessions.set(f.record.id, peer);
+          writes = writeSessionMock.mock.calls.length;
+        };
+        const codex = await vi.importActual<typeof codexModule>("../../src/agents/codex.js");
+        if (barrier === "reader" || barrier === "reread") {
+          let calls = 0;
+          readCodexRolloutStateMock.mockImplementation(
+            async (...args: Parameters<typeof codex.readCodexRolloutState>) => {
+              const result = await codex.readCodexRolloutState(...args);
+              if (++calls === (barrier === "reader" ? 1 : 2)) mutate();
+              return result;
+            },
+          );
+        }
+        if (barrier === "process roster") {
+          const pane = f.record.spawnIntent?.pane;
+          if (!pane) throw new Error("Missing unit launch process generation");
+          const result = {
+            status: "ok" as const,
+            processes: [{ pid: pane.pid, identity: String(pane.starttime) }],
+            complete: true,
+          };
+          captureAgentProcessesForLaunchMock.mockImplementationOnce(async () => {
+            mutate();
+            return result;
+          });
+        }
+        if (barrier === "pane") {
+          const pane = f.record.spawnIntent?.pane;
+          if (!pane) throw new Error("Missing unit launch pane generation");
+          const result = {
+            status: "ok" as const,
+            processes: [{ pid: pane.pid, identity: String(pane.starttime) }],
+            complete: true,
+          };
+          capturePaneAgentProcessesMock.mockImplementationOnce(async () => {
+            mutate();
+            return result;
+          });
+        }
+        if (barrier === "birth" || barrier === "cwd") {
+          const reap = await import("../../src/sidecars/reap.js");
+          if (barrier === "birth") {
+            const original = reap.readProcessStarttime;
+            vi.spyOn(reap, "readProcessStarttime").mockImplementationOnce(async (pid) => {
+              const value = await original(pid);
+              mutate();
+              return value;
+            });
+          } else {
+            const tree = await import("../../src/process-tree.js");
+            const original = tree.readProcessCwd;
+            vi.spyOn(tree, "readProcessCwd").mockImplementationOnce(async (pid) => {
+              const value = await original(pid);
+              mutate();
+              return value;
+            });
+          }
+        }
+        if (barrier === "sidecar")
+          vi.spyOn(f.internals, "startAutoStartSidecars").mockImplementationOnce(async (record) => {
+            mutate();
+            return record;
+          });
+        const current = f.sessions.get(f.record.id);
+        if (!current) throw new Error("Missing current unit launch");
+        await expect(
+          barrier === "sidecar"
+            ? f.internals.recoverDurableRuntime(current)
+            : f.internals.proveTaggedDurableLaunch(current),
+        ).rejects.toThrow("observation changed");
+        expect(peer).toBeDefined();
+        expect(f.sessions.get(f.record.id)).toEqual(peer);
+        expect(writeSessionMock.mock.calls.length).toBe(writes);
+        expect(f.internals.stateHistory.get(f.record.id)).toEqual(history);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["before recovery", "during sidecar"])(
+      "preserves unrelated diagnostic %s",
+      async (mode) => {
+        const f = await fixture(false);
+        f.writeRollout();
+        f.writeHook();
+        const peer = {
+          ...f.record,
+          error: "unrelated probe failure",
+          errorSource: "runtime_probe" as const,
+        };
+        if (mode === "before recovery") f.sessions.set(f.record.id, peer);
+        else
+          vi.spyOn(f.internals, "startAutoStartSidecars").mockImplementationOnce(async (record) => {
+            f.sessions.set(f.record.id, {
+              ...(f.sessions.get(f.record.id) ?? record),
+              error: peer.error,
+              errorSource: peer.errorSource,
+            });
+            return record;
+          });
+        const recovery = f.internals.recoverDurableRuntime(f.sessions.get(f.record.id) ?? f.record);
+        if (mode === "during sidecar")
+          await expect(recovery).rejects.toThrow("observation changed");
+        else await recovery;
+        expect(f.sessions.get(f.record.id)).toMatchObject({
+          error: peer.error,
+          errorSource: peer.errorSource,
+        });
+        expect(f.sessions.get(f.record.id)?.spawnIntent === undefined).toBe(
+          mode === "before recovery",
+        );
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["ended background run", "daemon recreation"])(
+      "converges late primary proof after %s with the same accepted identity and one input",
+      async (mode) => {
+        const f = await fixture();
+        const receipt = clone(f.record.spawnReceipt);
+        let active = f.service;
+        if (mode === "daemon recreation") {
+          f.service.dispose();
+          await f.service.settleBackgroundSpawns();
+          active = new f.SessionService("/tmp/spur.yaml", new Date().toISOString(), {
+            deferBackgroundLoops: true,
+          });
+        }
+        f.writeRollout();
+        f.writeHook();
+        (active as unknown as BoundService).startMemoryShedLoop();
+        await vi.waitFor(() => expect(f.sessions.get(f.record.id)?.spawnIntent).toBeUndefined(), {
+          timeout: 4_000,
+        });
+        expect(f.sessions.get(f.record.id)).toMatchObject({
+          id: f.record.id,
+          agentSessionId: f.nativeId,
+          agentLaunchId: f.record.agentLaunchId,
+          spawnReceipt: receipt,
+        });
+        expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(["prelaunch", "future"])("holds %s hook timestamps", async (mode) => {
+      const f = await fixture(false);
+      f.writeRollout();
+      f.writeHook();
+      const hooks = await vi.importActual<typeof agentHookStateModule>(
+        "../../src/agent-hook-state.js",
+      );
+      const current = hooks.readAgentHookState(TEST_DATA_DIR, f.record.id);
+      if (!current) throw new Error("Missing generated hook frame");
+      writeFileSync(
+        join(TEST_DATA_DIR, "session-agent-state", `${f.record.id}.json`),
+        JSON.stringify({
+          ...current,
+          updatedAt: new Date(
+            mode === "future"
+              ? Date.now() + 60_000
+              : Date.parse(f.record.codexRestoreStartedAt ?? "") - 1,
+          ).toISOString(),
+        }),
+      );
+      expect(await f.internals.proveTaggedDurableLaunch(f.record)).toBeNull();
+      expect(f.sessions.get(f.record.id)?.spawnIntent).toEqual(f.record.spawnIntent);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["process probe", "final synchronous read"])(
+      "holds hook replacement at %s",
+      async (mode) => {
+        const f = await fixture(false);
+        f.writeRollout();
+        f.writeHook();
+        if (mode === "process probe") {
+          const pane = f.record.spawnIntent?.pane;
+          if (!pane) throw new Error("Missing unit process generation");
+          captureAgentProcessesForLaunchMock.mockImplementationOnce(async () => {
+            f.writeHook(f.record.agentLaunchId, "replaced-turn");
+            return {
+              status: "ok",
+              processes: [{ pid: pane.pid, identity: String(pane.starttime) }],
+              complete: true,
+            };
+          });
+        } else {
+          const hooks = await vi.importActual<typeof agentHookStateModule>(
+            "../../src/agent-hook-state.js",
+          );
+          let calls = 0;
+          readAgentHookStateMock.mockImplementation(
+            (...args: Parameters<typeof hooks.readAgentHookState>) => {
+              if (++calls === 3) f.writeHook(f.record.agentLaunchId, "replaced-turn");
+              return hooks.readAgentHookState(...args);
+            },
+          );
+        }
+        expect(await f.internals.proveTaggedDurableLaunch(f.record)).toBeNull();
+        expect(f.sessions.get(f.record.id)?.spawnIntent).toEqual(f.record.spawnIntent);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["peer error", "peer hard", "absent", "paused"])(
+      "keeps the actual retained-intent reconciler from replacing %s",
+      async (mode) => {
+        const f = await fixture(false);
+        f.writeRollout();
+        f.writeHook();
+        const current: SessionRecord = {
+          ...f.record,
+          error: "peer diagnostic",
+          errorSource: "runtime_probe",
+          ...(mode === "paused" ? { status: "stopped", stopReason: "manual_pause" } : {}),
+        };
+        f.sessions.set(current.id, current);
+        f.internals.durableSpawnIds.add(current.id);
+        let peer = clone(current);
+        if (mode === "peer error" || mode === "peer hard") {
+          const pane = current.spawnIntent?.pane;
+          if (!pane) throw new Error("Missing retained unit generation");
+          captureAgentProcessesForLaunchMock.mockImplementationOnce(async () => {
+            if (mode === "peer error") {
+              peer = { ...current, error: "deferred peer diagnostic" };
+              f.sessions.set(current.id, peer);
+            } else
+              f.internals.codexMcpDialogOverrides.set(current.id, {
+                nativeId: current.agentSessionId,
+                launchId: current.agentLaunchId,
+                startedAt: Date.parse(current.codexRestoreStartedAt ?? ""),
+                kind: "hard",
+                observedAt: Date.now(),
+                detection: { limited: true, reason: "deferred hard" },
+              });
+            return {
+              status: "ok",
+              processes: [{ pid: pane.pid, identity: String(pane.starttime) }],
+              complete: true,
+            };
+          });
+        }
+        if (mode === "absent") {
+          lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+          captureAgentProcessesForLaunchMock.mockResolvedValue({
+            status: "ok",
+            processes: [],
+            complete: true,
+          });
+        }
+        await f.internals.recoverDurableSpawns();
+        expect(f.sessions.get(current.id)).toEqual(peer);
+        expect(f.sessions.get(current.id)?.spawnIntent).toEqual(current.spawnIntent);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
       },
     );
   });

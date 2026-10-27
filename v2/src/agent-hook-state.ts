@@ -10,6 +10,7 @@ export interface AgentHookStateRecord {
   updatedAt: string;
   hookEvent?: string;
   turnId?: string;
+  agentLaunchId?: string;
   fileMtimeMs?: number;
 }
 
@@ -40,6 +41,9 @@ export function readAgentHookState(
         updatedAt: parsed.updatedAt,
         ...(typeof parsed.hookEvent === "string" ? { hookEvent: parsed.hookEvent } : {}),
         ...(typeof parsed.turnId === "string" ? { turnId: parsed.turnId } : {}),
+        ...(typeof parsed.agentLaunchId === "string" && parsed.agentLaunchId.trim()
+          ? { agentLaunchId: parsed.agentLaunchId }
+          : {}),
         ...(Number.isFinite(fileMtimeMs) ? { fileMtimeMs } : {}),
       };
     }

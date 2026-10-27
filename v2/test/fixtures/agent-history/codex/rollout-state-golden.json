@@ -36,7 +36,8 @@
     },
     "rateLimit": {
       "limited": false,
-      "reason": ""
+      "reason": "",
+      "codexAuthority": "unknown"
     },
     "model": "gpt-5.5"
   },
@@ -71,7 +72,8 @@
     },
     "rateLimit": {
       "limited": false,
-      "reason": ""
+      "reason": "",
+      "codexAuthority": "unknown"
     }
   },
   "token-components.jsonl": {
@@ -141,7 +143,8 @@
     },
     "rateLimit": {
       "limited": false,
-      "reason": ""
+      "reason": "",
+      "codexAuthority": "unknown"
     },
     "model": "gpt-5.5"
   },
@@ -156,7 +159,8 @@
     },
     "rateLimit": {
       "limited": false,
-      "reason": ""
+      "reason": "",
+      "codexAuthority": "unknown"
     }
   },
   "working-spur-67c0-rollout-tail.jsonl": {
@@ -170,7 +174,8 @@
     },
     "rateLimit": {
       "limited": false,
-      "reason": ""
+      "reason": "",
+      "codexAuthority": "unknown"
     },
     "model": "gpt-5.5"
   },

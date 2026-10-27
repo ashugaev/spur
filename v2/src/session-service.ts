@@ -129,6 +129,8 @@ import {
   type CodexConversationReaderState,
   type CodexRolloutReaderState,
   type CodexRolloutStateRecord,
+  type CodexLaunchProofContext,
+  type CodexLaunchProof,
 } from "./agents/codex.js";
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
 import {
@@ -690,6 +692,7 @@ const PANE_WRITE_FENCE_MS = 30_000;
 // any realistic single inference. 300s makes a false flip on a live inference highly unlikely while
 // still clearing an indefinite-"working" hang.
 const CODEX_HUNG_AFTER_TOOLS_MS = 300_000;
+const TAGGED_NATIVE_LAUNCH_UNCERTAIN = "Tagged native launch remains uncertain";
 const RESTORE_WARMUP_MS = 30_000;
 const RESTORE_SETTLE_MS = 2_000;
 const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
@@ -14846,10 +14849,10 @@ export class SessionService {
           const settled = await this.withWorkspaceLifecycleLocks(updatedRecord.id, async () => {
             const proven = await this.proveTaggedDurableLaunch(updatedRecord);
             if (!proven) {
-              this.holdDurableSpawn(updatedRecord.id, "Tagged native launch remains uncertain");
+              this.holdDurableSpawn(updatedRecord.id, TAGGED_NATIVE_LAUNCH_UNCERTAIN);
               return null;
             }
-            return this.retireDurableSpawn(proven);
+            return proven.spawnIntent ? this.retireDurableSpawn(proven) : proven;
           });
           if (!settled) return "completed";
           updatedRecord = settled;
@@ -14877,6 +14880,12 @@ export class SessionService {
       return "completed";
     } catch (error) {
       const interrupted = readSession(this.config.dataDir, sessionId);
+      if (
+        error instanceof CodexEvidenceInvalidatedError &&
+        interrupted?.agent === "codex" &&
+        interrupted.triggerOrigin
+      )
+        return "completed";
       if (
         (this.admissionStopped && interrupted?.spawnIntent) ||
         error instanceof SpawnAdmissionCancelledError ||
@@ -15155,6 +15164,14 @@ export class SessionService {
     const current = readSession(this.config.dataDir, sessionId);
     if (!current?.spawnIntent || isTerminalSessionStatus(current.status)) return;
     this.registerDurableSpawn(current);
+    if (current.agent === "codex" && current.triggerOrigin) {
+      if (
+        current.error &&
+        !(current.errorSource === "other" && current.error === TAGGED_NATIVE_LAUNCH_UNCERTAIN)
+      )
+        return;
+      reason = TAGGED_NATIVE_LAUNCH_UNCERTAIN;
+    }
     if (current.error === reason) return;
     writeSession(this.config.dataDir, { ...current, error: reason, errorSource: "other" });
     this.logEvent("session.spawn.recovery_held", {
@@ -15283,7 +15300,26 @@ export class SessionService {
     );
   }
 
-  private async proveTaggedDurableLaunch(record: SessionRecord): Promise<SessionRecord | null> {
+  private assertTaggedCodexObservation(observation?: PreparedSessionObservation): void {
+    if (!observation) return;
+    const current = readSession(this.config.dataDir, observation.session.id);
+    if (
+      !current ||
+      !this.preparedSessionObservationCurrent(observation, current) ||
+      !isDeepStrictEqual(current.triggerOrigin, observation.session.triggerOrigin) ||
+      !isDeepStrictEqual(current.spawnReceipt, observation.session.spawnReceipt) ||
+      !isDeepStrictEqual(current.spawnIntent, observation.session.spawnIntent)
+    )
+      throw new CodexEvidenceInvalidatedError("Tagged Codex observation changed");
+  }
+
+  private async proveTaggedDurableLaunch(
+    record: SessionRecord,
+    prepared?: PreparedSessionObservation,
+  ): Promise<SessionRecord | null> {
+    const observation =
+      record.agent === "codex" ? (prepared ?? this.prepareSessionObservation(record)) : undefined;
+    this.assertTaggedCodexObservation(observation);
     const owns = (current: SessionRecord): boolean =>
       !this.admissionStopped &&
       !isTerminalSessionStatus(current.status) &&
@@ -15295,6 +15331,60 @@ export class SessionService {
       isDeepStrictEqual(current.spawnIntent, record.spawnIntent);
     const before = readSession(this.config.dataDir, record.id);
     if (!before || !owns(before)) throw new SpawnAdmissionCancelledError("killed");
+    if (before.agent === "codex") {
+      if (before.status === "stopped") return null;
+      try {
+        const sinceMs = codexLaunchStartedAt(before);
+        if (
+          !before.triggerOrigin ||
+          !before.agentSessionId ||
+          !before.agentLaunchId ||
+          !before.spawnReceipt ||
+          before.spawnIntent?.submission.state !== "confirmed" ||
+          sinceMs === null
+        )
+          return null;
+        const native = await this.classifyCodexState(before, { sinceMs, nowMs: Date.now() });
+        this.assertTaggedCodexObservation(observation);
+        const hook = native.hookState;
+        const proof = native.launchProof;
+        if (
+          proof?.kind !== "primary" ||
+          proof.threadId !== before.agentSessionId ||
+          !hook ||
+          hook.agentLaunchId !== before.agentLaunchId ||
+          hook.turnId !== proof.turnId ||
+          Date.parse(hook.updatedAt) < sinceMs ||
+          Date.parse(hook.updatedAt) > Date.now()
+        )
+          return null;
+        const evidence = await this.observeDurableRuntime(before, observation);
+        this.assertTaggedCodexObservation(observation);
+        if (evidence.state !== "matching") return null;
+        const verified = await this.classifyCodexState(before, { sinceMs, nowMs: Date.now() });
+        this.assertTaggedCodexObservation(observation);
+        if (
+          !isDeepStrictEqual(verified.launchProof, proof) ||
+          !isDeepStrictEqual(verified.hookState, hook)
+        )
+          return null;
+        const finalHook = readAgentHookState(this.config.dataDir, record.id);
+        const current = readSession(this.config.dataDir, record.id);
+        this.assertTaggedCodexObservation(observation);
+        if (!current || !owns(current) || !isDeepStrictEqual(finalHook, hook)) return null;
+        const settled: SessionRecord = { ...current, status: "running" };
+        if (settled.errorSource === "other" && settled.error === TAGGED_NATIVE_LAUNCH_UNCERTAIN) {
+          delete settled.error;
+          delete settled.errorSource;
+        }
+        const retired = this.retireDurableSpawn(settled);
+        if (observation) this.advancePreparedObservation(observation, retired);
+        return retired;
+      } catch (error) {
+        this.assertTaggedCodexObservation(observation);
+        throw error;
+      }
+    }
     if (!this.hasTrustedTaggedNativeBinding(before)) return null;
     const evidence = await this.observeDurableRuntime(before);
     const current = readSession(this.config.dataDir, record.id);
@@ -15304,6 +15394,7 @@ export class SessionService {
 
   private async observeDurableRuntime(
     record: SessionRecord,
+    observation?: PreparedSessionObservation,
   ): Promise<
     | { state: "absent" }
     | { state: "matching"; generation: PaneGeneration }
@@ -15322,7 +15413,12 @@ export class SessionService {
         recovery: true,
       }),
     ]);
-    if (pane.status !== "ok" || capture.status !== "ok") {
+    this.assertTaggedCodexObservation(observation);
+    if (
+      pane.status !== "ok" ||
+      capture.status !== "ok" ||
+      (observation && capture.complete !== true)
+    ) {
       return { state: "unknown", reason: `Launch ownership probe unavailable for ${record.id}` };
     }
     if (pane.panePid === null && capture.complete === true && capture.processes.length === 0) {
@@ -15336,6 +15432,7 @@ export class SessionService {
       return { state: "unknown", reason: `Launch ownership remains uncertain for ${record.id}` };
     }
     const starttime = await readProcessStarttime(pane.panePid);
+    this.assertTaggedCodexObservation(observation);
     const paneCapture = await capturePaneAgentProcesses({
       sessionId: record.id,
       agentLaunchId: record.agentLaunchId,
@@ -15343,6 +15440,7 @@ export class SessionService {
       paneDead: pane.paneDead,
       processMatchers: agentProcessMatchers(record.agent, record.launchCommand),
     });
+    this.assertTaggedCodexObservation(observation);
     if (
       starttime === null ||
       paneCapture.status !== "ok" ||
@@ -15357,6 +15455,7 @@ export class SessionService {
     }
     for (const process of capture.processes) {
       const cwd = await readProcessCwd(process.pid);
+      this.assertTaggedCodexObservation(observation);
       if (!cwd || tryRealpath(cwd) !== tryRealpath(record.worktreePath)) {
         return {
           state: "unknown",
@@ -15377,173 +15476,215 @@ export class SessionService {
   private async recoverDurableRuntime(record: SessionRecord): Promise<void> {
     const intent = record.spawnIntent;
     if (!intent) return;
-    if (record.agent === "opencode" && !record.agentSessionId) {
-      throw new Error(`OpenCode native launch identity remains uncertain for ${record.id}`);
-    }
-    const evidence = await this.observeDurableRuntime(record);
-    if (evidence.state === "unknown") throw new Error(evidence.reason);
-    const openCodeLaunchConfirmed =
-      record.agent === "opencode" &&
-      record.agentSessionId !== undefined &&
-      (await waitForOpenCodeLaunchMessage(record.agentSessionId, 0));
-    if (evidence.state === "absent") {
+    const observation =
+      record.agent === "codex" && record.triggerOrigin
+        ? this.prepareSessionObservation(record)
+        : undefined;
+    this.assertTaggedCodexObservation(observation);
+    try {
+      if (observation && record.status === "stopped") return;
+      if (record.agent === "opencode" && !record.agentSessionId) {
+        throw new Error(`OpenCode native launch identity remains uncertain for ${record.id}`);
+      }
+      const evidence = await this.observeDurableRuntime(record, observation);
+      this.assertTaggedCodexObservation(observation);
+      if (evidence.state === "unknown") throw new Error(evidence.reason);
+      const openCodeLaunchConfirmed =
+        record.agent === "opencode" &&
+        record.agentSessionId !== undefined &&
+        (await waitForOpenCodeLaunchMessage(record.agentSessionId, 0));
+      if (evidence.state === "absent") {
+        if (observation && intent.submission.state !== "pending")
+          throw new Error(TAGGED_NATIVE_LAUNCH_UNCERTAIN);
+        await this.withWorkspaceLifecycleLocks(record.id, async () => {
+          this.assertTaggedCodexObservation(observation);
+          const current = readSession(this.config.dataDir, record.id);
+          if (
+            !current?.spawnIntent ||
+            isTerminalSessionStatus(current.status) ||
+            current.agentLaunchId !== record.agentLaunchId
+          )
+            return;
+          const submission = current.spawnIntent.submission;
+          if (submission.state !== "pending") {
+            const binding = submission.ackBaseline
+              ? await resumeAgentSubmitAckBinding(
+                  current.agent,
+                  this.submitAckContext(current),
+                  submission.ackBaseline,
+                )
+              : null;
+            this.assertTaggedCodexObservation(observation);
+            if (
+              submission.state === "confirmed" ||
+              openCodeLaunchConfirmed ||
+              (binding && submission.message && (await binding.scan(submission.message)).found)
+            ) {
+              const stopped: SessionRecord = { ...current, status: "stopped", updatedAt: nowIso() };
+              delete stopped.error;
+              delete stopped.errorSource;
+              const settled = this.retireDurableSpawn(stopped, true);
+              const completion = this.spawnCompletions.get(record.id);
+              if (completion) completion.resolve(await this.enrich(settled));
+              this.spawnCompletions.delete(record.id);
+              return;
+            }
+            throw new Error(`Startup submission remains uncertain for ${record.id}`);
+          }
+          const { agentLaunchId: _launch, agentSessionId: _provider, ...unlaunched } = current;
+          const { pane: _pane, ...baseIntent } = current.spawnIntent;
+          const resumed: SessionRecord = {
+            ...unlaunched,
+            launchCommand: "",
+            status: "spawning",
+            spawnIntent: {
+              ...baseIntent,
+              phase: "workspace_ready",
+              submission: { state: "pending" },
+            },
+          };
+          if (!observation) {
+            delete resumed.error;
+            delete resumed.errorSource;
+          }
+          writeSession(this.config.dataDir, resumed);
+          if (observation) this.advancePreparedObservation(observation, resumed);
+          this.registerDurableSpawn(resumed);
+          void this.startBackgroundSpawn(await this.prepareRecoveredSpawn(resumed));
+        });
+        return;
+      }
+      const { panePid, processStarttime: starttime } = evidence.generation;
+      if (intent.submission.state !== "confirmed" && !openCodeLaunchConfirmed) {
+        const binding = intent.submission.ackBaseline
+          ? await resumeAgentSubmitAckBinding(
+              record.agent,
+              this.submitAckContext(record),
+              intent.submission.ackBaseline,
+            )
+          : null;
+        this.assertTaggedCodexObservation(observation);
+        const message = intent.submission.message;
+        if (intent.submission.state === "pending" && message?.trim()) {
+          const freshBinding = await createAgentSubmitAckBinding(record.agent, {
+            ...this.submitAckContext(record),
+            freshLaunch: true,
+          });
+          this.assertTaggedCodexObservation(observation);
+          if (!freshBinding)
+            throw new Error(`Startup provider identity unavailable for ${record.id}`);
+          const generation = {
+            tmuxSession: record.tmuxSession,
+            panePid,
+            processStarttime: starttime,
+          };
+          const uncertain = await this.withWorkspaceLifecycleLocks(record.id, async () => {
+            this.assertTaggedCodexObservation(observation);
+            const current = readSession(this.config.dataDir, record.id);
+            if (
+              !current?.spawnIntent ||
+              isTerminalSessionStatus(current.status) ||
+              current.agentLaunchId !== record.agentLaunchId ||
+              !(await this.paneGenerationMatches(current, generation))
+            ) {
+              throw new SpawnAdmissionCancelledError("killed");
+            }
+            this.assertTaggedCodexObservation(observation);
+            const checkpoint = this.checkpointSpawn(current, "launching", {
+              state: "uncertain",
+              uncertainAt: nowIso(),
+              message,
+              ackBaseline: freshBinding.baseline,
+            });
+            if (observation) this.advancePreparedObservation(observation, checkpoint);
+            return checkpoint;
+          });
+          const sent = await this.sendAgentMessageWithGeneration(
+            uncertain,
+            message,
+            { freshLaunch: true },
+            (actual) => {
+              this.assertTaggedCodexObservation(observation);
+              const latest = readSession(this.config.dataDir, record.id);
+              if (
+                this.admissionStopped ||
+                !latest?.spawnIntent ||
+                isTerminalSessionStatus(latest.status) ||
+                latest.agentLaunchId !== record.agentLaunchId ||
+                actual.panePid !== generation.panePid ||
+                actual.processStarttime !== generation.processStarttime
+              )
+                throw new SpawnAdmissionCancelledError("killed");
+            },
+          );
+          this.assertTaggedCodexObservation(observation);
+          if (sent.outcome !== "submitted")
+            throw new Error(`Startup submission remains uncertain for ${record.id}`);
+        } else if (!binding || !message || !(await binding.scan(message)).found) {
+          throw new Error(`Startup submission remains uncertain for ${record.id}`);
+        }
+      }
+      this.assertTaggedCodexObservation(observation);
       await this.withWorkspaceLifecycleLocks(record.id, async () => {
+        this.assertTaggedCodexObservation(observation);
         const current = readSession(this.config.dataDir, record.id);
         if (
+          this.admissionStopped ||
           !current?.spawnIntent ||
           isTerminalSessionStatus(current.status) ||
           current.agentLaunchId !== record.agentLaunchId
         )
           return;
-        const submission = current.spawnIntent.submission;
-        if (submission.state !== "pending") {
-          const binding = submission.ackBaseline
-            ? await resumeAgentSubmitAckBinding(
-                current.agent,
-                this.submitAckContext(current),
-                submission.ackBaseline,
-              )
-            : null;
-          if (
-            submission.state === "confirmed" ||
-            openCodeLaunchConfirmed ||
-            (binding && submission.message && (await binding.scan(submission.message)).found)
-          ) {
-            const stopped: SessionRecord = { ...current, status: "stopped", updatedAt: nowIso() };
-            delete stopped.error;
-            delete stopped.errorSource;
-            const settled = this.retireDurableSpawn(stopped, true);
-            const completion = this.spawnCompletions.get(record.id);
-            if (completion) completion.resolve(await this.enrich(settled));
-            this.spawnCompletions.delete(record.id);
+        if (
+          !(await this.paneGenerationMatches(current, {
+            tmuxSession: current.tmuxSession,
+            panePid,
+            processStarttime: starttime,
+          }))
+        )
+          throw new Error(`Launch generation changed for ${record.id}`);
+        this.assertTaggedCodexObservation(observation);
+        const project = this.getProject(current.project);
+        let launched: SessionRecord = { ...current, status: "running", updatedAt: nowIso() };
+        delete launched.submitUnconfirmedAt;
+        if (!observation) {
+          delete launched.error;
+          delete launched.errorSource;
+        } else {
+          launched = this.checkpointSpawn(launched, "submitted", {
+            ...launched.spawnIntent?.submission,
+            state: "confirmed",
+          });
+          this.advancePreparedObservation(observation, launched);
+        }
+        launched = await this.startAutoStartSidecars(launched, project);
+        this.assertTaggedCodexObservation(observation);
+        if (observation) launched = readSession(this.config.dataDir, record.id) ?? launched;
+        launched = this.applyRequestedStateSubscriptions(launched, intent.request.subscriptions);
+        this.assertTaggedCodexObservation(observation);
+        if (launched.triggerOrigin) {
+          if (!observation)
+            launched = this.checkpointSpawn(launched, "submitted", {
+              ...launched.spawnIntent?.submission,
+              state: "confirmed",
+            });
+          const proven = await this.proveTaggedDurableLaunch(launched, observation);
+          if (!proven) {
+            this.holdDurableSpawn(record.id, TAGGED_NATIVE_LAUNCH_UNCERTAIN);
             return;
           }
-          throw new Error(`Startup submission remains uncertain for ${record.id}`);
+          launched = proven;
         }
-        const { agentLaunchId: _launch, agentSessionId: _provider, ...unlaunched } = current;
-        const { pane: _pane, ...baseIntent } = current.spawnIntent;
-        const resumed: SessionRecord = {
-          ...unlaunched,
-          launchCommand: "",
-          status: "spawning",
-          spawnIntent: {
-            ...baseIntent,
-            phase: "workspace_ready",
-            submission: { state: "pending" },
-          },
-        };
-        delete resumed.error;
-        delete resumed.errorSource;
-        writeSession(this.config.dataDir, resumed);
-        this.registerDurableSpawn(resumed);
-        void this.startBackgroundSpawn(await this.prepareRecoveredSpawn(resumed));
+        if (launched.spawnIntent) launched = this.retireDurableSpawn(launched);
+        const completion = this.spawnCompletions.get(record.id);
+        if (completion) completion.resolve(await this.enrich(launched));
+        this.spawnCompletions.delete(record.id);
+        if (this.shouldRunDelivery(launched)) this.scheduleDeliveryRunner(launched.id);
       });
-      return;
+    } catch (error) {
+      this.assertTaggedCodexObservation(observation);
+      throw error;
     }
-    const { panePid, processStarttime: starttime } = evidence.generation;
-    if (intent.submission.state !== "confirmed" && !openCodeLaunchConfirmed) {
-      const binding = intent.submission.ackBaseline
-        ? await resumeAgentSubmitAckBinding(
-            record.agent,
-            this.submitAckContext(record),
-            intent.submission.ackBaseline,
-          )
-        : null;
-      const message = intent.submission.message;
-      if (intent.submission.state === "pending" && message?.trim()) {
-        const freshBinding = await createAgentSubmitAckBinding(record.agent, {
-          ...this.submitAckContext(record),
-          freshLaunch: true,
-        });
-        if (!freshBinding)
-          throw new Error(`Startup provider identity unavailable for ${record.id}`);
-        const generation = {
-          tmuxSession: record.tmuxSession,
-          panePid,
-          processStarttime: starttime,
-        };
-        const uncertain = await this.withWorkspaceLifecycleLocks(record.id, async () => {
-          const current = readSession(this.config.dataDir, record.id);
-          if (
-            !current?.spawnIntent ||
-            isTerminalSessionStatus(current.status) ||
-            current.agentLaunchId !== record.agentLaunchId ||
-            !(await this.paneGenerationMatches(current, generation))
-          ) {
-            throw new SpawnAdmissionCancelledError("killed");
-          }
-          return this.checkpointSpawn(current, "launching", {
-            state: "uncertain",
-            uncertainAt: nowIso(),
-            message,
-            ackBaseline: freshBinding.baseline,
-          });
-        });
-        const sent = await this.sendAgentMessageWithGeneration(
-          uncertain,
-          message,
-          { freshLaunch: true },
-          (actual) => {
-            const latest = readSession(this.config.dataDir, record.id);
-            if (
-              this.admissionStopped ||
-              !latest?.spawnIntent ||
-              isTerminalSessionStatus(latest.status) ||
-              latest.agentLaunchId !== record.agentLaunchId ||
-              actual.panePid !== generation.panePid ||
-              actual.processStarttime !== generation.processStarttime
-            )
-              throw new SpawnAdmissionCancelledError("killed");
-          },
-        );
-        if (sent.outcome !== "submitted")
-          throw new Error(`Startup submission remains uncertain for ${record.id}`);
-      } else if (!binding || !message || !(await binding.scan(message)).found) {
-        throw new Error(`Startup submission remains uncertain for ${record.id}`);
-      }
-    }
-    await this.withWorkspaceLifecycleLocks(record.id, async () => {
-      const current = readSession(this.config.dataDir, record.id);
-      if (
-        this.admissionStopped ||
-        !current?.spawnIntent ||
-        isTerminalSessionStatus(current.status) ||
-        current.agentLaunchId !== record.agentLaunchId
-      )
-        return;
-      if (
-        !(await this.paneGenerationMatches(current, {
-          tmuxSession: current.tmuxSession,
-          panePid,
-          processStarttime: starttime,
-        }))
-      )
-        throw new Error(`Launch generation changed for ${record.id}`);
-      const project = this.getProject(current.project);
-      let launched: SessionRecord = { ...current, status: "running", updatedAt: nowIso() };
-      delete launched.submitUnconfirmedAt;
-      delete launched.error;
-      delete launched.errorSource;
-      launched = await this.startAutoStartSidecars(launched, project);
-      launched = this.applyRequestedStateSubscriptions(launched, intent.request.subscriptions);
-      if (launched.triggerOrigin) {
-        launched = this.checkpointSpawn(launched, "submitted", {
-          ...launched.spawnIntent?.submission,
-          state: "confirmed",
-        });
-        const proven = await this.proveTaggedDurableLaunch(launched);
-        if (!proven) {
-          this.holdDurableSpawn(record.id, "Tagged native launch remains uncertain");
-          return;
-        }
-        launched = proven;
-      }
-      launched = this.retireDurableSpawn(launched);
-      const completion = this.spawnCompletions.get(record.id);
-      if (completion) completion.resolve(await this.enrich(launched));
-      this.spawnCompletions.delete(record.id);
-      if (this.shouldRunDelivery(launched)) this.scheduleDeliveryRunner(launched.id);
-    });
   }
 
   private async recoverDurableSpawns(): Promise<void> {
@@ -15567,7 +15708,14 @@ export class SessionService {
         await this.recoverDurableRuntime(record);
       }
     } catch (error) {
-      this.holdDurableSpawn(sessionId, error instanceof Error ? error.message : String(error));
+      if (
+        !(
+          error instanceof CodexEvidenceInvalidatedError &&
+          record.agent === "codex" &&
+          record.triggerOrigin
+        )
+      )
+        this.holdDurableSpawn(sessionId, error instanceof Error ? error.message : String(error));
     } finally {
       this.durableRecoveryBusy = false;
     }
@@ -23804,6 +23952,7 @@ export class SessionService {
       SessionRecord,
       "id" | "agentSessionId" | "agentLaunchId" | "codexRestoreLaunchId" | "codexRestoreStartedAt"
     >,
+    proofContext?: CodexLaunchProofContext,
   ): Promise<{
     state: SessionState;
     source: StateSource;
@@ -23815,6 +23964,7 @@ export class SessionService {
     model?: string;
     tokenUsage?: ProviderTokenUsageSample;
     tokenUsages?: ProviderTokenUsageSample[];
+    launchProof?: CodexLaunchProof;
   }> {
     const hookState = readAgentHookState(this.config.dataDir, session.id);
     const rolloutReader = this.codexRolloutReaders.get(session.id) ?? { files: new Map() };
@@ -23823,6 +23973,7 @@ export class SessionService {
       this.codexSessionsDir(session.id),
       rolloutReader,
       session.agentSessionId,
+      ...(proofContext ? ([proofContext] as const) : ([] as const)),
     );
     const rolloutState = rolloutRead.rollout;
     let state: SessionState = hookState?.state ?? "waiting";
@@ -23875,6 +24026,7 @@ export class SessionService {
       rateLimit: rolloutRead.rateLimit,
       activityMs,
       ...(rolloutRead.threadId ? { threadId: rolloutRead.threadId } : {}),
+      ...(rolloutRead.launchProof ? { launchProof: rolloutRead.launchProof } : {}),
       ...(rolloutRead.model ? { model: rolloutRead.model } : {}),
       ...(rolloutRead.tokenUsage ? { tokenUsage: rolloutRead.tokenUsage } : {}),
       ...(rolloutRead.tokenUsages ? { tokenUsages: rolloutRead.tokenUsages } : {}),

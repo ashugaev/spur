@@ -10,6 +10,7 @@ import {
   rename,
   rm,
   stat,
+  symlink,
   utimes,
   writeFile,
 } from "node:fs/promises";
@@ -29,6 +30,188 @@ import { hashHistoryTail, PREFIX_VERIFY_BYTES } from "../../src/agent-history-de
 import { SCAN_CHUNK_BYTES } from "../../src/jsonl-scan.js";
 import { reconcileTokenUsage } from "../../src/token-usage.js";
 
+describe("launch-owned primary Codex roster", () => {
+  const sinceMs = Date.parse("2026-06-28T08:10:00.000Z");
+  const nowMs = sinceMs + 60_000;
+  const meta = (id = "primary-thread", timestamp = "2026-06-28T08:00:00.000Z") => ({
+    type: "session_meta",
+    timestamp,
+    payload: { id, source: "cli", thread_source: "user", cwd: "/fixture-worktree" },
+  });
+  const turn = {
+    type: "event_msg",
+    timestamp: "2026-06-28T08:10:01.000Z",
+    payload: { type: "task_complete", turn_id: "launch-turn" },
+  };
+  const jsonl = (rows: unknown[]) => rows.map((row) => JSON.stringify(row)).join("\n") + "\n";
+  const read = (dir: string, reader?: CodexRolloutReaderState) =>
+    readCodexRolloutState(dir, reader, "primary-thread", { sinceMs, nowMs });
+
+  it.each(["old header", "fresh header", "consistent repeated header"])(
+    "proves explicit primary with current launch turn and %s",
+    async (mode) => {
+      const header = meta(
+        "primary-thread",
+        mode === "fresh header" ? "2026-06-28T08:10:00.000Z" : undefined,
+      );
+      const dir = await makeSessionsDir(
+        jsonl([header, ...(mode === "consistent repeated header" ? [header] : []), turn]),
+      );
+      expect((await read(dir)).launchProof).toMatchObject({
+        kind: "primary",
+        complete: true,
+        threadId: "primary-thread",
+        turnId: "launch-turn",
+      });
+    },
+  );
+
+  it.each([
+    "missing source",
+    "unknown source",
+    "unknown thread source",
+    "parent",
+    "nested child",
+    "builtin child",
+    "conflicting repeat",
+    "mixed source",
+    "conflicting ID",
+    "no turn",
+    "whitespace turn",
+    "prelaunch turn",
+    "future turn",
+  ])("holds pinned %s provenance", async (mode) => {
+    const header: {
+      type: string;
+      timestamp: string;
+      source?: string;
+      id?: string;
+      payload: {
+        id: string;
+        source?: unknown;
+        thread_source: string;
+        cwd: string;
+        parent_thread_id?: string;
+      };
+    } = meta();
+    if (mode === "missing source") delete header.payload.source;
+    if (mode === "unknown source") header.payload.source = "unknown";
+    if (mode === "unknown thread source") header.payload.thread_source = "unknown";
+    if (mode === "parent") header.payload.parent_thread_id = "parent-thread";
+    if (mode === "nested child")
+      header.payload.source = { subagent: { thread_spawn: { parent_thread_id: "parent-thread" } } };
+    if (mode === "builtin child") header.payload.thread_source = "subagent";
+    if (mode === "mixed source") header.source = "subagent";
+    if (mode === "conflicting ID") header.id = "other-thread";
+    const state = {
+      ...turn,
+      timestamp:
+        mode === "prelaunch turn"
+          ? "2026-06-28T08:09:59.000Z"
+          : mode === "future turn"
+            ? "2026-06-28T08:12:00.000Z"
+            : turn.timestamp,
+      payload: {
+        ...turn.payload,
+        turn_id: mode === "whitespace turn" ? " " : turn.payload.turn_id,
+      },
+    };
+    const dir = await makeSessionsDir(
+      jsonl([
+        header,
+        ...(mode === "conflicting repeat" ? [meta("other-thread")] : []),
+        ...(mode === "no turn" ? [] : [state]),
+      ]),
+    );
+    expect((await read(dir)).launchProof).toEqual({ kind: "unknown" });
+  });
+
+  it.each([
+    "metadata-only primary",
+    "current evidence old header",
+    "duplicate native ID",
+    "unknown old context",
+    "clearly prior primary",
+    "clearly child",
+  ])("inventories every %s context before uniqueness", async (mode) => {
+    const dir = await makeSessionsDir(jsonl([meta(), turn]));
+    const sibling = meta(
+      mode === "duplicate native ID" ? "primary-thread" : "other-thread",
+      mode === "clearly prior primary" ||
+        mode === "current evidence old header" ||
+        mode === "unknown old context"
+        ? "2026-06-28T08:00:00.000Z"
+        : "2026-06-28T08:10:00.000Z",
+    );
+    if (mode === "unknown old context") sibling.payload.source = "unknown";
+    if (mode === "clearly child") sibling.payload.thread_source = "subagent";
+    await writeFile(
+      join(dir, "other.jsonl"),
+      jsonl([sibling, ...(mode === "current evidence old header" ? [turn] : [])]),
+    );
+    expect((await read(dir)).launchProof?.kind).toBe(
+      mode === "clearly prior primary" || mode === "clearly child" ? "primary" : "unknown",
+    );
+  });
+
+  it.each([
+    "malformed terminated",
+    "truncated tail",
+    "nonrecord",
+    "unknown record",
+    "malformed payload",
+    "invalid encoding",
+    "unreadable",
+    "stat failure",
+    "collection failure",
+    "close failure",
+    "short read",
+    "symlink",
+    "file changes",
+    "roster changes",
+  ])("does not upgrade best-effort cache across %s snapshot", async (mode) => {
+    const dir = await makeSessionsDir(jsonl([meta(), turn]));
+    const path = join(dir, "2026", "04", "19", "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    await readCodexRolloutState(dir, reader, "primary-thread");
+    if (mode === "malformed terminated") await appendFile(path, "{bad}\n");
+    if (mode === "truncated tail") await appendFile(path, JSON.stringify(turn));
+    if (mode === "nonrecord") await appendFile(path, "3\n");
+    if (mode === "unknown record")
+      await appendFile(path, jsonl([{ type: "unknown", timestamp: turn.timestamp }]));
+    if (mode === "malformed payload")
+      await appendFile(
+        path,
+        jsonl([{ type: "event_msg", timestamp: turn.timestamp, payload: null }]),
+      );
+    if (mode === "invalid encoding")
+      await appendFile(
+        path,
+        Buffer.concat([
+          Buffer.from(
+            `{"type":"event_msg","timestamp":"${turn.timestamp}","payload":{"type":"note","message":"`,
+          ),
+          Buffer.from([0xff]),
+          Buffer.from('"}}\n'),
+        ]),
+      );
+    if (mode === "unreadable") probe.readFail.add(path);
+    if (mode === "stat failure") probe.lstatFail.add(path);
+    if (mode === "collection failure") probe.collectFail.add(dir);
+    if (mode === "close failure") probe.closeFail.add(path);
+    if (mode === "short read") probe.eofOnce.add(path);
+    if (mode === "symlink") await symlink(path, join(dir, "escape.jsonl"));
+    if (mode === "file changes" || mode === "roster changes") {
+      probe.beforeRead = async () => {
+        probe.beforeRead = undefined;
+        if (mode === "file changes") await appendFile(path, jsonl([turn]));
+        else await writeFile(join(dir, "new.jsonl"), jsonl([meta("other-thread", turn.timestamp)]));
+      };
+    }
+    expect((await read(dir, reader)).launchProof).toEqual({ kind: "unknown" });
+  });
+});
+
 // Passthrough fs mock that records how rollout files are opened and read.
 const probe = vi.hoisted(() => ({
   readFileCalls: [] as string[],
@@ -37,6 +220,8 @@ const probe = vi.hoisted(() => ({
   peak: 0,
   delayReads: false,
   statFail: new Set<string>(),
+  lstatFail: new Set<string>(),
+  collectFail: new Set<string>(),
   readFail: new Set<string>(),
   openFailOnce: new Set<string>(),
   readFailOnce: new Set<string>(),
@@ -57,6 +242,15 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     stat: (...args: Parameters<typeof actual.stat>) => {
       if (probe.statFail.has(String(args[0]))) return Promise.reject(new Error("stat failed"));
       return actual.stat(...args);
+    },
+    lstat: (...args: Parameters<typeof actual.lstat>) => {
+      if (probe.lstatFail.has(String(args[0]))) return Promise.reject(new Error("lstat failed"));
+      return actual.lstat(...args);
+    },
+    readdir: (...args: Parameters<typeof actual.readdir>) => {
+      if (probe.collectFail.has(String(args[0])))
+        return Promise.reject(new Error("collection failed"));
+      return actual.readdir(...args);
     },
     open: async (...args: Parameters<typeof actual.open>) => {
       if (probe.openFailOnce.delete(String(args[0]))) throw new Error("open failed");
@@ -95,6 +289,8 @@ beforeEach(() => {
   probe.peak = 0;
   probe.delayReads = false;
   probe.statFail.clear();
+  probe.lstatFail.clear();
+  probe.collectFail.clear();
   probe.readFail.clear();
   probe.openFailOnce.clear();
   probe.readFailOnce.clear();
@@ -188,41 +384,51 @@ describe("readCodexRolloutState", () => {
   it.each([
     ["usable credits", { credits: { has_credits: true } }, false],
     ["unlimited credits", { credits: { has_credits: false, unlimited: true } }, false],
-    ["hard reached type", { credits: { has_credits: true }, rate_limit_reached_type: "hard_cap" }, true],
+    [
+      "hard reached type",
+      { credits: { has_credits: true }, rate_limit_reached_type: "hard_cap" },
+      true,
+    ],
     ["unknown cap", { credits: { has_credits: true }, individual_limit: {} }, true],
-  ] as const)("selects the newest %s snapshot over an older hard limit", async (_name, latest, limited) => {
-    const lines = [
-      sessionMeta("credit-thread"),
-      JSON.stringify({
-        timestamp: "2026-06-28T08:00:01.000Z",
-        type: "event_msg",
-        payload: { type: "token_count", rate_limits: { rate_limit_reached_type: "old_hard_cap" } },
-      }),
-      JSON.stringify({
-        timestamp: "2026-06-28T08:00:02.000Z",
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: null,
-          rate_limits: {
-            limit_id: "codex",
-            primary: { used_percent: 100, window_minutes: 300 },
-            secondary: { used_percent: 100, window_minutes: 10080 },
-            ...latest,
+  ] as const)(
+    "selects the newest %s snapshot over an older hard limit",
+    async (_name, latest, limited) => {
+      const lines = [
+        sessionMeta("credit-thread"),
+        JSON.stringify({
+          timestamp: "2026-06-28T08:00:01.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            rate_limits: { rate_limit_reached_type: "old_hard_cap" },
           },
-        },
-      }),
-      JSON.stringify({
-        timestamp: "2026-06-28T08:00:03.000Z",
-        type: "event_msg",
-        payload: { type: "task_complete", turn_id: "credit-turn" },
-      }),
-    ];
-    const dir = await makeSessionsDir(lines.join("\n") + "\n");
-    const result = await readCodexRolloutState(dir, undefined, "credit-thread");
-    expect(result.rollout).toMatchObject({ state: "waiting", reason: "task_complete" });
-    expect(result.rateLimit?.limited).toBe(limited);
-  });
+        }),
+        JSON.stringify({
+          timestamp: "2026-06-28T08:00:02.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: null,
+            rate_limits: {
+              limit_id: "codex",
+              primary: { used_percent: 100, window_minutes: 300 },
+              secondary: { used_percent: 100, window_minutes: 10080 },
+              ...latest,
+            },
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-06-28T08:00:03.000Z",
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "credit-turn" },
+        }),
+      ];
+      const dir = await makeSessionsDir(lines.join("\n") + "\n");
+      const result = await readCodexRolloutState(dir, undefined, "credit-thread");
+      expect(result.rollout).toMatchObject({ state: "waiting", reason: "task_complete" });
+      expect(result.rateLimit?.limited).toBe(limited);
+    },
+  );
 
   it("reuses parsed unchanged rollout files and refreshes a changed file", async () => {
     const firstRecord = JSON.stringify({
@@ -877,24 +1083,39 @@ describe("readCodexRolloutState", () => {
 
   it("retains Codex authority through pinned cached and incremental rate-limit reads", async () => {
     const native = "authority-thread";
-    const token = (limits: unknown, timestamp: string) => JSON.stringify({ timestamp, type: "event_msg",
-      payload: { type: "token_count", info: null, rate_limits: limits } });
-    const sessionsDir = await makeSessionsDir([
-      sessionMeta(native), token({ primary: { used_percent: 100 } }, "2026-06-28T09:00:00.000Z"),
-    ].join("\n") + "\n");
+    const token = (limits: unknown, timestamp: string) =>
+      JSON.stringify({
+        timestamp,
+        type: "event_msg",
+        payload: { type: "token_count", info: null, rate_limits: limits },
+      });
+    const sessionsDir = await makeSessionsDir(
+      [
+        sessionMeta(native),
+        token({ primary: { used_percent: 100 } }, "2026-06-28T09:00:00.000Z"),
+      ].join("\n") + "\n",
+    );
     const reader: CodexRolloutReaderState = { files: new Map() };
     for (let i = 0; i < 2; i += 1) {
       expect((await readCodexRolloutState(sessionsDir, reader, native)).rateLimit).toEqual({
-        limited: true, reason: "codex 5h window exhausted", codexAuthority: "soft",
+        limited: true,
+        reason: "codex 5h window exhausted",
+        codexAuthority: "soft",
       });
     }
-    await writeFile(join(sessionsDir, "2026", "04", "19", "rollout-test.jsonl"),
+    await writeFile(
+      join(sessionsDir, "2026", "04", "19", "rollout-test.jsonl"),
       token({ rate_limit_reached_type: "5h window exhausted" }, "2026-06-28T09:00:01.000Z") + "\n",
-      { encoding: "utf8", flag: "a" });
+      { encoding: "utf8", flag: "a" },
+    );
     expect((await readCodexRolloutState(sessionsDir, reader, native)).rateLimit).toEqual({
-      limited: true, reason: "codex 5h window exhausted", codexAuthority: "hard",
+      limited: true,
+      reason: "codex 5h window exhausted",
+      codexAuthority: "hard",
     });
-    expect((await readCodexRolloutState(sessionsDir, reader, "foreign-thread")).rateLimit).toBeNull();
+    expect(
+      (await readCodexRolloutState(sessionsDir, reader, "foreign-thread")).rateLimit,
+    ).toBeNull();
   });
 
   it("keeps a sibling's rate limit when the newest file carries only a turn_context model", async () => {
@@ -924,7 +1145,11 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary", codexAuthority: "hard" });
+    expect(result.rateLimit).toEqual({
+      limited: true,
+      reason: "codex primary",
+      codexAuthority: "hard",
+    });
     expect(result.model).toBe("gpt-5.5-codex");
   });
 
@@ -1088,7 +1313,11 @@ describe("readCodexRolloutState", () => {
     expect(result.rollout).toMatchObject({
       turnId: "019e0000-0000-7000-9000-0000000curnt",
     });
-    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary", codexAuthority: "hard" });
+    expect(result.rateLimit).toEqual({
+      limited: true,
+      reason: "codex primary",
+      codexAuthority: "hard",
+    });
   });
 
   it("returns the selected file's null rate-limit rather than a stale sibling's", async () => {
@@ -1158,7 +1387,11 @@ describe("readCodexRolloutState", () => {
     const result = await readCodexRolloutState(sessionsDir);
 
     expect(result.rollout).toBeNull();
-    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary", codexAuthority: "hard" });
+    expect(result.rateLimit).toEqual({
+      limited: true,
+      reason: "codex primary",
+      codexAuthority: "hard",
+    });
   });
 
   it("breaks equal in-content timestamps by picking the newer-mtime file", async () => {
