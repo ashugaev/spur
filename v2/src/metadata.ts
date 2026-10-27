@@ -1420,13 +1420,29 @@ export function readSession(dataDir: string, sessionId: string): SessionRecord |
 // indexed-but-missing entry on its next lookup). Un-archiving is `mv` back
 // into sessions/<project>/<id>.json; the next findSessionFilePath scan or
 // writeSession repairs the index.
+//
+// A member that is workspaceIdOf() of any record staying in sessions/ (any
+// project) is not moved: archiving a desk anchor strands its dependents.
+// Those ids come back in retainedAnchorIds. Throws before any move when a
+// record file is corrupt.
 export function archiveSessions(
   dataDir: string,
   members: readonly Pick<SessionRecord, "id" | "project">[],
-): { archivedIds: string[]; archiveDir: string } {
+): { archivedIds: string[]; retainedAnchorIds: string[]; archiveDir: string } {
   const archiveDir = join(dataDir, "sessions-archive");
   const archivedIds: string[] = [];
+  const retainedAnchorIds: string[] = [];
+  const memberIds = new Set(members.map((member) => member.id));
+  const heldAnchorIds = new Set(
+    listSessions(dataDir)
+      .filter((record) => !memberIds.has(record.id))
+      .map(workspaceIdOf),
+  );
   for (const member of members) {
+    if (heldAnchorIds.has(member.id)) {
+      retainedAnchorIds.push(member.id);
+      continue;
+    }
     const sourcePath = sessionFilePath(dataDir, member.project, member.id);
     if (!existsSync(sourcePath)) {
       continue;
@@ -1453,7 +1469,7 @@ export function archiveSessions(
     writeSessionIndexFile(dataDir, nextIndex);
   }
 
-  return { archivedIds, archiveDir };
+  return { archivedIds, retainedAnchorIds, archiveDir };
 }
 
 export function writeServiceInstance(dataDir: string, service: ServiceInstanceRecord): void {

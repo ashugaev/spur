@@ -3634,6 +3634,9 @@ export class SessionService {
   // (never-reaped) sidecar would otherwise warn every SIDECAR_REAPER_INTERVAL_MS
   // tick forever. Keyed on `${ownerId}::${sidecarName}`.
   private readonly sidecarAgeWarnLastLoggedAt = new Map<string, number>();
+  // `${session.id}\0${ownerId}` keys already warned by
+  // session.sidecar.owner_missing: one warn per (session, anchor) per process.
+  private readonly sidecarOwnerMissingWarned = new Set<string>();
   // Session ids this process is actively spawning. A spawning session tracked
   // here still has its spawn pipeline running (worktree/tools/tmux setup), so
   // its dead runtime is expected and must not be reconciled to stopped.
@@ -6353,6 +6356,15 @@ export class SessionService {
     );
   }
 
+  private logListEnrichFailed(sessionId: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.logEvent("session.list.enrich_failed", {
+      level: "warn",
+      sessionId,
+      message: `Session list dropped ${sessionId}: ${message}`,
+    });
+  }
+
   private async finalizeLifecycleRows<T extends { id: string; slots?: SessionSlots }>(
     rows: {
       view: T;
@@ -6385,6 +6397,12 @@ export class SessionService {
           !readSession(this.config.dataDir, record.id)
         )
           return undefined;
+        // List callers (lastBuild) drop the one row that cannot be rebuilt
+        // instead of failing the whole listing; refuse callers keep the throw.
+        if (options.onExhausted === "lastBuild" && !(error instanceof SessionLifecycleError)) {
+          this.logListEnrichFailed(record.id, error);
+          return undefined;
+        }
         throw error;
       }
     };
@@ -7580,6 +7598,11 @@ export class SessionService {
           this.historyCaptureStamps.delete(stampKey);
         }
       }
+      for (const key of this.sidecarOwnerMissingWarned) {
+        if (!includedIds.has(key.slice(0, key.indexOf("\0")))) {
+          this.sidecarOwnerMissingWarned.delete(key);
+        }
+      }
 
       // A session is due for enrichment when it can still change on its own
       // (isLiveSessionRecord), when its on-disk record object changed since
@@ -7627,22 +7650,33 @@ export class SessionService {
       }
 
       const enriched = await Promise.all(
-        due.map((session) =>
-          this.enrichDashboard(session).catch((error: unknown) => {
+        due.map(async (session) => {
+          try {
+            return await this.enrichDashboard(session);
+          } catch (error) {
             if (
               error instanceof SessionResourceNotFoundError &&
               !readSession(this.config.dataDir, session.id)
             ) {
               return undefined;
             }
-            throw error;
-          }),
-        ),
+            // One failing record keeps its prior cache entry and stays due;
+            // it must not abort the tick for every other record.
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.dashboard_cache.refresh_failed", {
+              level: "warn",
+              sessionId: session.id,
+              message: `Dashboard cache refresh failed for ${session.id}: ${message}`,
+            });
+            return "failed" as const;
+          }
+        }),
       );
       if (this.isDeliveryStopped()) return;
       for (const [index, session] of due.entries()) {
         if (refreshedDuringTick(session.id)) continue;
         const view = enriched[index];
+        if (view === "failed") continue;
         if (!view) {
           this.dashboardCache.delete(session.id);
           this.dashboardEnrichedRecords.delete(session.id);
@@ -10444,7 +10478,8 @@ export class SessionService {
     const name = normalizeSlotLabel(link.label);
     const sidecar = this.resolveProjectForSession(session)?.sidecars[name];
     if (!sidecar) return false;
-    const owner = this.resolveSidecarOwnerRecord(session, sidecar);
+    const owner = this.findSidecarOwnerRecord(session, sidecar);
+    if (!owner) return false;
     const current = this.resolveSidecarUrlLink(owner, name, sidecar);
     return (
       current !== undefined && normalizeSlotUrl(link.url) === normalizeSlotUrl(current.linkUrl)
@@ -10591,14 +10626,15 @@ export class SessionService {
     if (names.length === 0) return [];
     const hasIdentity = names.some((name) => {
       const sidecar = project?.sidecars[name];
-      const owner = sidecar ? this.resolveSidecarOwnerRecord(session, sidecar) : session;
-      return owner.sidecarProcs?.[name] !== undefined;
+      const owner = sidecar ? this.findSidecarOwnerRecord(session, sidecar) : session;
+      return owner?.sidecarProcs?.[name] !== undefined;
     });
     const claims = new Map(
       await Promise.all(
         names.map(async (name) => {
           const sidecar = project?.sidecars[name];
-          const owner = sidecar ? this.resolveSidecarOwnerRecord(session, sidecar) : session;
+          const owner = sidecar ? this.findSidecarOwnerRecord(session, sidecar) : session;
+          if (!owner) return [name, { signature: undefined, starttime: null }] as const;
           const identity = owner.sidecarProcs?.[name];
           return [
             name,
@@ -10622,7 +10658,8 @@ export class SessionService {
     for (const name of names) {
       const sidecar = project?.sidecars[name];
       const current = readSession(this.config.dataDir, session.id) ?? session;
-      const owner = sidecar ? this.resolveSidecarOwnerRecord(current, sidecar) : current;
+      const owner = sidecar ? this.findSidecarOwnerRecord(current, sidecar) : current;
+      if (!owner) continue;
       const identity = owner.sidecarProcs?.[name];
       const ageSeconds = identity
         ? observation.processes.byPid.get(identity.pid)?.etimes
@@ -10711,8 +10748,7 @@ export class SessionService {
       if (!view.url) continue;
       const claim = this.sidecarViewClaims.get(view);
       const sidecar = project?.sidecars[view.name];
-      const owner =
-        session && sidecar ? this.resolveSidecarOwnerRecord(session, sidecar) : undefined;
+      const owner = session && sidecar ? this.findSidecarOwnerRecord(session, sidecar) : undefined;
       const entry = claim
         ? this.sidecarEndpoints.get(this.sidecarEndpointKey(claim.ownerId, view.name))
         : undefined;
@@ -10737,24 +10773,33 @@ export class SessionService {
   // Resolves the record that owns a sidecar's tmux pane and reserved ports:
   // the in-hand record itself for a per-session (mcp) sidecar or a non-desk
   // session (zero extra IO — sidecarOwnerId returns session.id unchanged),
-  // else a fresh read of the desk anchor's own record. Session records are
-  // never deleted from the store, so a missing anchor is an invariant break,
-  // not a fallback case.
-  private resolveSidecarOwnerRecord(
+  // else a fresh read of the desk anchor's own record. archiveSessions can
+  // remove an anchor record, so readers must tolerate absence: undefined,
+  // warned once per (session, anchor) per process.
+  private findSidecarOwnerRecord(
     session: SessionRecord,
     sidecar: Pick<SidecarConfig, "mcp">,
-  ): SessionRecord {
+  ): SessionRecord | undefined {
     const ownerId = sidecarOwnerId(session, sidecar);
     if (ownerId === session.id) {
       return session;
     }
+    const key = `${session.id}\0${ownerId}`;
     const anchor = readSession(this.config.dataDir, ownerId);
-    if (!anchor) {
-      throw new Error(
-        `Desk anchor session ${ownerId} not found (owner of sidecar for ${session.id})`,
-      );
+    if (anchor) {
+      this.sidecarOwnerMissingWarned.delete(key);
+      return anchor;
     }
-    return anchor;
+    if (!this.sidecarOwnerMissingWarned.has(key)) {
+      this.sidecarOwnerMissingWarned.add(key);
+      this.logEvent("session.sidecar.owner_missing", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Desk anchor session ${ownerId} not found (owner of sidecar for ${session.id}); desk-shared sidecar views omitted.`,
+        details: { ownerId },
+      });
+    }
+    return undefined;
   }
 
   // Owner id for a sidecar known only by name. A name with no config entry
@@ -10832,7 +10877,12 @@ export class SessionService {
       // this function returns, persisted onto the caller's own record by
       // every call site) get updated — a sibling starting an anchor-owned
       // sidecar must get its own record back unchanged, never the anchor's.
-      const owner = this.resolveSidecarOwnerRecord(currentSession, sidecar);
+      const owner = this.findSidecarOwnerRecord(currentSession, sidecar);
+      if (!owner) {
+        throw new Error(
+          `Desk anchor session ${sidecarOwnerId(currentSession, sidecar)} not found (owner of sidecar for ${currentSession.id})`,
+        );
+      }
       const updated = await this.startSidecarInternal({
         session: owner,
         project: args.project,
@@ -10973,19 +11023,22 @@ export class SessionService {
         if (this.dashboardCache.has(id) || receipt.revision === 0) continue;
         const record = readSession(this.config.dataDir, id);
         if (!record) continue;
+        let assembled: Awaited<ReturnType<typeof this.assembleDashboard>>;
         try {
-          const assembled = await this.assembleDashboard(record);
-          if (assembled) rows.push({ ...assembled, receipt, identity: false });
-          else if (readSession(this.config.dataDir, record.id))
-            throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(record.id));
+          assembled = await this.assembleDashboard(record);
         } catch (error) {
           if (
             error instanceof SessionResourceNotFoundError &&
             !readSession(this.config.dataDir, record.id)
           )
             continue;
-          throw error;
+          if (error instanceof SessionLifecycleError) throw error;
+          this.logListEnrichFailed(record.id, error);
+          continue;
         }
+        if (assembled) rows.push({ ...assembled, receipt, identity: false });
+        else if (readSession(this.config.dataDir, record.id))
+          throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(record.id));
       }
       const views = await this.finalizeLifecycleRows(
         rows,
@@ -11015,7 +11068,9 @@ export class SessionService {
             !readSession(this.config.dataDir, session.id)
           )
             return undefined;
-          throw error;
+          if (error instanceof SessionLifecycleError) throw error;
+          this.logListEnrichFailed(session.id, error);
+          return undefined;
         }
       }),
     );
