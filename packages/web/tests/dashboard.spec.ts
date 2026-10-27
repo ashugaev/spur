@@ -2453,9 +2453,10 @@ test.describe("D6a: Backlog zone", () => {
       },
     ]);
 
-    await page.goto("/");
+    await page.goto("/?project=my-project");
 
     await expect(page.getByText("Backlog")).toBeVisible();
+    await page.getByRole("button", { name: /Backlog/ }).click();
     const backlogLink = page.getByRole("link", { name: /WEB-17/ });
     await expect(backlogLink).toBeVisible();
     await expect(backlogLink).toHaveAttribute("href", "https://jira.example.com/browse/WEB-17");
@@ -2495,8 +2496,9 @@ test.describe("D6a: Backlog zone", () => {
       },
     ]);
 
-    await page.goto("/");
+    await page.goto("/?project=my-project");
 
+    await page.getByRole("button", { name: /Backlog/ }).click();
     await page.getByRole("button", { name: "Take task" }).click();
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();

@@ -102,6 +102,7 @@ const LEGACY_TAG_FILTER_STORAGE_KEY = "spur:tag-filter";
 const DASHBOARD_SEARCH_TOOL_BUTTON_CLASS =
   "inline-flex h-7 w-7 shrink-0 items-center justify-center bg-transparent text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
+const BACKLOG_EXPANDED_STORAGE_KEY = "spur:backlog-expanded";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
 const SPAWN_DRAFT_SAVE_DELAY_MS = 500;
 const SHEPHERD_PROJECT_ID = "spur-shepherd";
@@ -246,14 +247,24 @@ function BacklogZone({
   items,
   projectNameMap,
   onTake,
+  collapsed,
+  onToggle,
 }: {
   items: readonly AvailableBacklogItem[];
   projectNameMap: Map<string, string>;
   onTake: (item: AvailableBacklogItem) => void;
+  collapsed: boolean;
+  onToggle: () => void;
 }) {
   if (items.length === 0) return null;
   return (
-    <Zone label="Backlog" color="var(--color-status-attention)" count={items.length}>
+    <Zone
+      label="Backlog"
+      color="var(--color-status-attention)"
+      count={items.length}
+      collapsed={collapsed}
+      onToggle={onToggle}
+    >
       {items.map((item) => {
         const itemKey = `${item.projectId}:${item.backlogId}:${item.externalId}`;
         return (
@@ -1153,6 +1164,17 @@ export function Dashboard() {
       return next;
     });
   }, []);
+  // Absence of a stored flag means collapsed, so every user starts collapsed.
+  const [backlogExpanded, setBacklogExpanded] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      window.localStorage.getItem(BACKLOG_EXPANDED_STORAGE_KEY) === "1",
+  );
+  const toggleBacklog = useCallback(() => {
+    const next = !backlogExpanded;
+    window.localStorage.setItem(BACKLOG_EXPANDED_STORAGE_KEY, next ? "1" : "0");
+    setBacklogExpanded(next);
+  }, [backlogExpanded]);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
   const [agentFilter, setAgentFilter] = useState<AgentName[]>([]);
   // Not persisted: PR readiness is remote state that flips without user
@@ -1566,7 +1588,8 @@ export function Dashboard() {
     syncProjectFilter("");
   };
   const hasVisibleSessions = visibleLevels.length > 0;
-  const hasVisibleBacklog = activeStatFilter === null && visibleBacklog.length > 0;
+  const hasVisibleBacklog =
+    activeStatFilter === null && projectId !== "" && visibleBacklog.length > 0;
   const activeProjectName = projectId
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All Projects";
@@ -3142,6 +3165,8 @@ export function Dashboard() {
                   items={visibleBacklog}
                   projectNameMap={projectNameMap}
                   onTake={openBacklogSpawnModal}
+                  collapsed={!backlogExpanded}
+                  onToggle={toggleBacklog}
                 />
               ) : null}
               {visibleLevels.map((level) => (
