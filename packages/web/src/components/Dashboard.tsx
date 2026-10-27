@@ -92,6 +92,7 @@ import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { useBackendConnection } from "@/lib/backend-connection-context";
 import { useVersionSwitch } from "@/lib/version-switch-context";
 import { useTagCatalog } from "@/hooks/useTagCatalog";
+import { CronJobsModal } from "@/components/CronJobsModal";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
@@ -1183,6 +1184,7 @@ export function Dashboard() {
   // un-persisted `activeStatFilter` above.
   const [prReadyOnly, setPrReadyOnly] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [cronOpen, setCronOpen] = useState(false);
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
     const stored = window.localStorage.getItem(TAG_FILTERS_STORAGE_KEY);
@@ -2791,6 +2793,13 @@ export function Dashboard() {
           </button>
         ) : null}
 
+        {cronOpen ? (
+          <CronJobsModal
+            initialProjectId={projectId}
+            onClose={() => setCronOpen(false)}
+            projects={filterProjectOptions}
+          />
+        ) : null}
         {filtersOpen ? (
           <FiltersModal
             activeFilterCount={activeFilterCount}
@@ -3207,7 +3216,7 @@ export function Dashboard() {
           ) : null}
         </main>
         <ToastViewport toasts={toasts} onDismiss={dismissToast} />
-        <StatusBar />
+        <StatusBar onOpenCron={() => setCronOpen(true)} />
       </div>
     </TagsContext.Provider>
   );

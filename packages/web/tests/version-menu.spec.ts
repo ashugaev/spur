@@ -55,9 +55,7 @@ async function mockVersionMenu(
 }
 
 test.describe("Version menu Auto checkbox", () => {
-  test("live version chip keeps its width and acknowledges only changed heartbeats", async ({
-    page,
-  }) => {
+  test("live version chip takes content width up to 24ch", async ({ page }) => {
     const versions: VersionsFixture = {
       current: "1.4.0",
       autoUpdate: false,
@@ -81,7 +79,6 @@ test.describe("Version menu Auto checkbox", () => {
     const trigger = page.getByRole("button", { name: /Show Spur version information/ });
     await expect(trigger).toContainText("1.4.0");
     const label = trigger.locator("span").first();
-    const rightCluster = page.getByTestId("status-bar-right-cluster");
     await trigger.evaluate((element) => {
       element.dataset.versionAnimationStarts = "0";
       element.addEventListener("animationstart", (event) => {
@@ -92,13 +89,8 @@ test.describe("Version menu Auto checkbox", () => {
       });
     });
 
-    const [initialLabelBox, initialClusterBox] = await Promise.all([
-      label.boundingBox(),
-      rightCluster.boundingBox(),
-    ]);
-    expect(initialLabelBox).not.toBeNull();
-    expect(initialClusterBox).not.toBeNull();
-    if (!initialLabelBox || !initialClusterBox) throw new Error("unreachable");
+    const initialLabelBox = await label.boundingBox();
+    if (!initialLabelBox) throw new Error("version label has no box");
 
     const unchangedFetches = infoFetches;
     await page.clock.fastForward(5_100);
@@ -114,17 +106,9 @@ test.describe("Version menu Auto checkbox", () => {
     await expect(label).toHaveCSS("animation-duration", "0.8s");
     await expect(label).toHaveCSS("animation-iteration-count", "1");
 
-    const [changedLabelBox, changedClusterBox] = await Promise.all([
-      label.boundingBox(),
-      rightCluster.boundingBox(),
-    ]);
-    expect(changedLabelBox).not.toBeNull();
-    expect(changedClusterBox).not.toBeNull();
-    if (!changedLabelBox || !changedClusterBox) throw new Error("unreachable");
-    expect(Math.abs(changedLabelBox.width - initialLabelBox.width)).toBeLessThanOrEqual(1);
-    expect(Math.abs(changedLabelBox.x - initialLabelBox.x)).toBeLessThanOrEqual(1);
-    expect(Math.abs(changedClusterBox.width - initialClusterBox.width)).toBeLessThanOrEqual(1);
-    expect(Math.abs(changedClusterBox.x - initialClusterBox.x)).toBeLessThanOrEqual(1);
+    const changedLabelBox = await label.boundingBox();
+    if (!changedLabelBox) throw new Error("version label has no box");
+    expect(initialLabelBox.width).toBeLessThan(changedLabelBox.width);
     expect(await label.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(
       changedLabelBox.width + 1,
     );
@@ -136,15 +120,20 @@ test.describe("Version menu Auto checkbox", () => {
     await expect(trigger).toContainText("10.10.10-beta.1-build-20260917");
     await expect(label).toHaveAttribute("title", "10.10.10-beta.1-build-20260917");
     await expect(trigger).toHaveAttribute("data-version-animation-starts", "2");
-    const [overflowLabelBox, overflowClusterBox] = await Promise.all([
-      label.boundingBox(),
-      rightCluster.boundingBox(),
-    ]);
-    expect(overflowLabelBox).not.toBeNull();
-    expect(overflowClusterBox).not.toBeNull();
-    if (!overflowLabelBox || !overflowClusterBox) throw new Error("unreachable");
-    expect(Math.abs(overflowLabelBox.width - initialLabelBox.width)).toBeLessThanOrEqual(1);
-    expect(Math.abs(overflowClusterBox.width - initialClusterBox.width)).toBeLessThanOrEqual(1);
+    const overflowLabelBox = await label.boundingBox();
+    if (!overflowLabelBox) throw new Error("version label has no box");
+    const probeWidth = await label.evaluate((element) => {
+      const probe = document.createElement("span");
+      probe.style.display = "inline-block";
+      probe.style.whiteSpace = "nowrap";
+      probe.textContent = "0".repeat(24);
+      element.parentElement?.appendChild(probe);
+      const width = probe.getBoundingClientRect().width;
+      probe.remove();
+      return width;
+    });
+    expect(overflowLabelBox.width).toBeLessThanOrEqual(probeWidth + 1);
+    expect(overflowLabelBox.width).toBeGreaterThanOrEqual(probeWidth - 1);
     expect(await label.evaluate((element) => element.scrollWidth)).toBeGreaterThan(
       overflowLabelBox.width,
     );
