@@ -22,7 +22,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { readJson } from "./github-app.js";
-import { join, relative, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -128,7 +128,11 @@ import {
 } from "./disk-gc.js";
 import { findBuildCacheDirs } from "./build-cache-scan.js";
 import { snapshotProcesses } from "./process-tree.js";
-import { readdir as readdirAsync, lstat as lstatAsync } from "node:fs/promises";
+import {
+  readdir as readdirAsync,
+  lstat as lstatAsync,
+  readFile as readFileAsync,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { startServer } from "./server.js";
 import {
@@ -465,8 +469,12 @@ function renderSourceInfo(response: SourceInfoResponse): string {
 }
 
 function renderSourceReplyResponse(response: SourceReplyResponse): string {
-  const buttons = response.buttons ? ` with ${response.buttons} button(s)` : "";
-  return `Sent ${response.source} reply for ${response.sessionId}${buttons}.`;
+  const parts = [
+    ...(response.buttons ? [`${response.buttons} button(s)`] : []),
+    ...(response.images ? [`${response.images} image(s)`] : []),
+  ];
+  const extras = parts.length > 0 ? ` with ${parts.join(" and ")}` : "";
+  return `Sent ${response.source} reply for ${response.sessionId}${extras}.`;
 }
 
 /** `<label>` or `<label>=<value>`; the value defaults to the label. */
@@ -4743,6 +4751,11 @@ export function createProgram(cliEntrypoint: string): Command {
       "Inline choice button; repeatable. A click arrives as a user message carrying the value.",
       parseButtonOption,
     )
+    .option(
+      "--image <path>",
+      "PNG/JPEG/WebP posted as a photo before the text; repeatable, up to 4, 10 MB total",
+      collectOptionValue,
+    )
     .option("--json", "Print raw JSON")
     .action(
       async (
@@ -4751,6 +4764,7 @@ export function createProgram(cliEntrypoint: string): Command {
           session?: string;
           json?: boolean;
           button?: SourceReplyButton[];
+          image?: string[];
           requestInterfaceApproval?: string;
         },
         command: Command,
@@ -4763,12 +4777,19 @@ export function createProgram(cliEntrypoint: string): Command {
           throw new Error("source reply requires --session or SPUR_SESSION");
         }
         const buttons = options.button ?? [];
+        const images = await Promise.all(
+          (options.image ?? []).map(async (path) => ({
+            name: basename(path),
+            data: (await readFileAsync(path)).toString("base64"),
+          })),
+        );
         const payload: SourceReplyRequest = {
           message: messageParts.join(" "),
           ...(buttons.length > 0 ? { buttons } : {}),
           ...(options.requestInterfaceApproval
             ? { requestInterfaceApproval: await readJson(options.requestInterfaceApproval) }
             : {}),
+          ...(images.length > 0 ? { images } : {}),
         };
         await outputResult({
           json: Boolean(options.json),
