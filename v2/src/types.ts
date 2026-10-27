@@ -1179,6 +1179,8 @@ export interface SessionRecord {
   prompt: string;
   originalTaskPrompt?: string;
   startupAttachmentIds?: string[];
+  spawnIntent?: DurableSpawnIntent;
+  spawnReceipt?: DurableSpawnReceipt;
   branch: string;
   branchSource?: BranchSource;
   pr?: SessionPrBinding;
@@ -1363,6 +1365,8 @@ export interface SessionView extends Omit<
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
   | "codexRestoreLaunchId"
+  | "spawnIntent"
+  | "spawnReceipt"
   | "errorSource"
 > {
   lifecycle: SessionLifecycleSnapshot;
@@ -1404,6 +1408,8 @@ export type DashboardOmittedField =
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
   | "codexRestoreLaunchId"
+  | "spawnIntent"
+  | "spawnReceipt"
   | "pipeline"
   | "sidecarNames"
   | "sidecarPorts"
@@ -1524,6 +1530,34 @@ export interface SpawnSessionRequest {
   // falling back to the (still-rate-limited) default.
   claudeAccountId?: string;
   subscriptions?: SubscribeSessionStatesRequest[];
+}
+
+export interface DurableSpawnReceipt {
+  version: 1;
+  acceptedAt: string;
+}
+
+export interface DurableSpawnIntent {
+  version: 1;
+  phase: "queued" | "workspace_ready" | "launching" | "submitted";
+  request: Omit<SpawnSessionRequest, "attachments" | "configPath">;
+  mode?: { name: string; skill: string };
+  defaultBranch: string;
+  preflightBatchId: string;
+  startupAttachments: { id: string; name: string }[];
+  launchSelection: {
+    model?: string;
+    reasoningEffort?: ProviderReasoningEffort;
+    reasoningVariantNames?: string[];
+  };
+  submission: {
+    state: "pending" | "uncertain" | "confirmed";
+    uncertainAt?: string;
+    message?: string;
+    ackBaseline?: SubmitAckBaseline;
+  };
+  pane?: { pid: number; starttime: number };
+  telegramOrigin?: TelegramSpawnOrigin;
 }
 
 /**

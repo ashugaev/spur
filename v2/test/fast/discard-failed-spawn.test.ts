@@ -111,6 +111,30 @@ async function branches(fixture: Fixture, name: string): Promise<string> {
 }
 
 describe("discardFailedSpawn", () => {
+  it("retains a recoverable accepted intent without deleting its branch or record", async () => {
+    const f = await createFixture();
+    await git(f.repoPath, "branch", "api-held");
+    const record = erroredRecord("api-held", {
+      spawnReceipt: { version: 1, acceptedAt: "2026-06-01T10:00:00.000Z" },
+      spawnIntent: {
+        version: 1,
+        phase: "queued",
+        request: { project: "api", prompt: "review" },
+        defaultBranch: "main",
+        preflightBatchId: "batch",
+        startupAttachments: [],
+        launchSelection: {},
+        submission: { state: "pending" },
+      },
+    });
+    writeSession(f.dataDir, record);
+    await f.discard(record.id);
+    expect(readSession(f.dataDir, record.id)).toMatchObject(record);
+    expect(existsSync(archivedPath(f, record.id))).toBe(false);
+    expect(await branches(f, record.id)).toContain(record.id);
+    expect(f.logEvent).not.toHaveBeenCalled();
+  });
+
   it("cleans an intermediate retained namespace without touching an unrelated or launched owner", async () => {
     const f = await createFixture();
     const item = {

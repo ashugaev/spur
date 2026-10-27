@@ -109,7 +109,7 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - Webhook `.host` (IP literal, `127.0.0.1`; no hostname or zone id), `.port` (required integer `1..65535`; same-port bind cannot overlap another webhook, server, or UI bind; a server hostname overlaps every webhook host), `.path` (required exact path, 1..2048 visible ASCII bytes; one leading `/`; no query, fragment, whitespace, or control byte), `.secret` (required 16..512 visible ASCII bytes; `${VAR}`-resolvable).
 - `projects.<id>.triggers.<triggerId>.{source,event,spawn|send}`.
 - `spawn[].{prompt,steps,agent,model,reasoningEffort,mode,selfDestruct,branch,overrides.worktree,overrides.defaultBranch,restrictWrites,autoComplete}`, `spawnDeskGroup`: effort overrides project default; `v2/src/config.ts`; see [Desk groups](#desk-groups), [selfDestruct](#selfdestruct-steps).
-- Work-item spawn retries: `v2/src/work-item-retry.ts`; tagged never-launched cleanup: `v2/src/session-service.ts` (`discardFailedSpawn`); unused own-branch guards: `v2/src/workspace.ts` (`deleteLocalBranch`).
+- Work-item retries: `v2/src/work-item-retry.ts`; accepted pending members: `v2/src/triggers.ts`; tagged cleanup: `v2/src/session-service.ts`; branch guards: `v2/src/workspace.ts`.
 - Work-item trigger renames: unresolved tagged-session adoption and guarded cleanup; v2/src/triggers.ts.
 - `send.{interrupt false, prompt}`. `false` opens a send window (default 30s, `SPUR_IDLE_WAIT_BEFORE_FLUSH_MS`; `telegram:message` batches use 2s, never above the env value), counted from the agent's last activity.
 - `projects.<id>.backlog.<backlogId>.{source,query,intervalMs 60000,runOnStart false}` (`.spawn` parsed, ignored — wire a `jira:work_item.new` trigger instead).
@@ -117,11 +117,17 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 
 ## Admission control
 
-Cap limits concurrent live sessions at spawn, restore, and the wake of a stale-parked or memory-shed session. Over cap: `429` naming stop candidates. Reporting route: [`GET /headroom`](daemon-api.md). CLI: [`spur doctor`](commands.md#doctor). Schema `v2/src/config.ts`, enforcement `v2/src/session-service.ts`.
+Spawn waits automatically for memory-guard or live-session-cap recovery; `v2/src/session-service.ts`.
+Accepted background and resource-queued HTTP spawns retain session id, launch intent, messages, attachments, and selected account across daemon restart; `v2/src/session-service.ts`, `v2/src/metadata.ts`.
+Recovery adopts confirmed existing runtime; uncertain runtime or startup delivery holds and rechecks automatically; `v2/src/session-service.ts`.
+OpenCode recovery without a persisted native session id stays `session.spawn.recovery_held`; history and prompt acknowledgment cannot supply ownership; `v2/src/session-service.ts`.
+
+Restore and wake reject memory-guard or cap denial (`429`); `v2/src/session-service.ts`.
+Limits: `v2/src/config.ts`; reports: [`GET /headroom`](daemon-api.md), [`spur doctor`](commands.md#doctor).
 
 The shed's session stop writes `status: "stopped"`, `stopReason: "memory_shed"`. Queued trigger batches for such a session are held, not dropped, and its wake passes the admission gate.
 
-Events: `daemon.memory.shed`(`.failed`), `session.admission.denied`, `session.admission.memory_guard`, `daemon.memory.unbounded`, `daemon.memory.hold.engaged`(`.cleared`/`.failed`), `trigger.send.suppressed_memory_guard`.
+Events: `daemon.memory.shed`(`.failed`), `session.admission.denied`, `session.admission.memory_guard`, `session.spawn.recovery_held`, `daemon.memory.unbounded`, `daemon.memory.hold.engaged`(`.cleared`/`.failed`), `trigger.send.suppressed_memory_guard`.
 
 ## Artifact retention
 

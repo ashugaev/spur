@@ -39,6 +39,7 @@ const readReviewSourceSnapshotMock = vi.fn();
 const readWorkItemLifecyclesMock = vi.fn();
 const updateWorkItemMembersMock = vi.fn();
 const listSessionsMock = vi.fn();
+const readSessionMock = vi.fn();
 const deleteWorkItemLifecycleMock = vi.fn();
 const readPendingSendBatchesMock = vi.fn();
 const recordPendingSendBatchMock = vi.fn();
@@ -82,6 +83,7 @@ vi.mock("../../src/metadata.js", () => ({
   readWorkItemLifecycles: readWorkItemLifecyclesMock,
   updateWorkItemMembers: updateWorkItemMembersMock,
   listSessions: listSessionsMock,
+  readSession: readSessionMock,
   readPendingSendBatches: readPendingSendBatchesMock,
   recordPendingSendBatch: recordPendingSendBatchMock,
   deletePendingSendBatch: deletePendingSendBatchMock,
@@ -876,6 +878,12 @@ describe("startConfiguredTriggers", () => {
     readReviewSourceSnapshotMock.mockReset().mockReturnValue(null);
     useWorkItemLifecycleStore();
     listSessionsMock.mockReset().mockReturnValue([]);
+    readSessionMock
+      .mockReset()
+      .mockImplementation(
+        (_dataDir: string, id: string) =>
+          listSessionsMock().find((session: { id: string }) => session.id === id) ?? null,
+      );
     readPendingSendBatchesMock.mockReset().mockReturnValue(new Map());
     recordPendingSendBatchMock
       .mockReset()
@@ -5655,6 +5663,24 @@ describe("startConfiguredTriggers", () => {
       };
     }
 
+    function acceptedSession(sessionId: string, blockIndex = 0) {
+      return {
+        ...taggedSession(sessionId, blockIndex),
+        status: "spawning",
+        spawnReceipt: { version: 1, acceptedAt: new Date().toISOString() },
+        spawnIntent: {
+          version: 1,
+          phase: "queued",
+          request: { project: "api", prompt: "review" },
+          defaultBranch: "main",
+          preflightBatchId: "batch",
+          startupAttachments: [],
+          launchSelection: { agent: "claude" },
+          submission: { state: "pending" },
+        },
+      };
+    }
+
     function failedMember(overrides?: Partial<WorkItemMember>): WorkItemMember {
       return workItemMember({
         state: "failed",
@@ -5672,6 +5698,161 @@ describe("startConfiguredTriggers", () => {
     function eventsOf(event: string) {
       return loggedEvents(event);
     }
+
+    it("retains a returned durable accepted anchor as pending without starting a sibling", async () => {
+      const records = useWorkItemLifecycleStore();
+      const accepted = acceptedSession("api-accepted");
+      listSessionsMock.mockReturnValue([accepted]);
+      const spawn = vi.fn().mockResolvedValue({ ...accepted, state: "stopped" });
+      const { bus, controller } = await startTriggers(deskConfig(), { spawn });
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => expect(memberOf(records)?.sessionId).toBe(accepted.id));
+        expect(memberOf(records)).toMatchObject({ state: "spawning", attempts: 1, deferrals: 0 });
+        expect(memberOf(records)?.startedAt).toBeUndefined();
+        expect(memberOf(records, 1)).toBeUndefined();
+        expect(records.get("acme/api#42")?.state).toBe("pending");
+        expect(spawn).toHaveBeenCalledTimes(1);
+        expect(eventsOf("trigger.spawn.completed")).toHaveLength(0);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("reconciles a lost accepted return through repeated due claims without consuming attempts", async () => {
+      const stale = workItemMember({
+        state: "spawning",
+        sessionId: undefined,
+        claimedAt: new Date(Date.now() - WORK_ITEM_RETRY_INTERVAL_MS).toISOString(),
+        previousTriggerIds: ["retired-A"],
+        attempts: 3,
+      });
+      const records = useWorkItemLifecycleStore([workItemLifecycle([stale])]);
+      const accepted = acceptedSession("api-accepted");
+      const origin = { ...accepted.triggerOrigin, triggerId: "retired-A" };
+      const held = { ...accepted, triggerOrigin: origin, status: "running", error: "held" };
+      listSessionsMock.mockReturnValue([held]);
+      const spawn = vi.fn();
+      const get = vi.fn().mockResolvedValue({ ...held, state: "error" });
+      const { bus, controller } = await startTriggers(deskConfig(), { spawn, get });
+      try {
+        for (let retry = 0; retry < 2; retry += 1) {
+          bus.emit(workItemEvent());
+          await vi.waitFor(() =>
+            expect(
+              eventsOf("trigger.spawn.adopted").length +
+                eventsOf("trigger.spawn.suppressed").length,
+            ).toBeGreaterThan(retry),
+          );
+          expect(memberOf(records)).toMatchObject({
+            state: "spawning",
+            sessionId: held.id,
+            attempts: 3,
+            previousTriggerIds: ["retired-A"],
+          });
+          expect(memberOf(records, 1)).toBeUndefined();
+          expect(spawn).not.toHaveBeenCalled();
+          vi.setSystemTime(Date.now() + WORK_ITEM_RETRY_INTERVAL_MS);
+        }
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("holds an ambiguous lost return without selecting or discarding a tagged record", async () => {
+      const records = useWorkItemLifecycleStore([workItemLifecycle([failedMember()])]);
+      const accepted = [acceptedSession("api-a"), acceptedSession("api-b")];
+      listSessionsMock.mockReturnValue(accepted);
+      const spawn = vi.fn();
+      const discardFailedSpawn = vi.fn();
+      const get = vi.fn().mockImplementation(async (id: string) => ({
+        ...accepted.find((record) => record.id === id),
+        state: "stopped",
+      }));
+      const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
+        spawn,
+        get,
+        discardFailedSpawn,
+      });
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => expect(eventsOf("trigger.spawn.failed")).toHaveLength(1));
+        expect(memberOf(records)?.state).toBe("failed");
+        expect(memberOf(records)?.sessionId).toBeUndefined();
+        expect(spawn).not.toHaveBeenCalled();
+        expect(discardFailedSpawn).not.toHaveBeenCalled();
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("retains an unplanned anchor's recovered intent and refunds its sibling claim", async () => {
+      const records = useWorkItemLifecycleStore([
+        workItemLifecycle([
+          workItemMember({ state: "running", sessionId: "api-accepted", attempts: 2 }),
+          failedMember({ blockIndex: 1 }),
+        ]),
+      ]);
+      const accepted = { ...acceptedSession("api-accepted"), status: "running" };
+      listSessionsMock.mockReturnValue([accepted]);
+      const spawn = vi.fn();
+      const get = vi.fn().mockResolvedValue({ ...accepted, state: "error" });
+      const { bus, controller } = await startTriggers(deskConfig(), { spawn, get });
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => expect(memberOf(records)?.state).toBe("spawning"));
+        expect(memberOf(records)).toMatchObject({ sessionId: accepted.id, attempts: 2 });
+        expect(memberOf(records, 1)).toMatchObject({ state: "failed", attempts: 1 });
+        expect(memberOf(records, 1)?.endedReason).toBeUndefined();
+        expect(spawn).not.toHaveBeenCalled();
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it.each(["known", "lost"] as const)(
+      "resumes only the missing desk member after a %s accepted return qualifies",
+      async (binding) => {
+        const records = useWorkItemLifecycleStore([
+          workItemLifecycle([
+            workItemMember({
+              state: "spawning",
+              sessionId: binding === "known" ? "api-accepted" : undefined,
+              claimedAt: new Date(Date.now() - WORK_ITEM_RETRY_INTERVAL_MS).toISOString(),
+              attempts: 2,
+            }),
+          ]),
+        ]);
+        const { spawnIntent: _intent, ...accepted } = acceptedSession("api-accepted");
+        const launched = {
+          ...accepted,
+          status: "running",
+          agentSessionId: "native-anchor",
+          agentLaunchId: "launch-anchor",
+        };
+        listSessionsMock.mockReturnValue([launched]);
+        const spawn = vi
+          .fn()
+          .mockResolvedValue({ id: "api-sibling", status: "running", state: "waiting" });
+        const get = vi.fn().mockResolvedValue({ ...launched, state: "waiting" });
+        const { bus, controller } = await startTriggers(deskConfig(), { spawn, get });
+        try {
+          bus.emit(workItemEvent());
+          await vi.waitFor(() => expect(memberOf(records, 1)?.state).toBe("running"));
+          expect(memberOf(records)).toMatchObject({
+            state: "running",
+            sessionId: "api-accepted",
+            attempts: 2,
+          });
+          expect(spawn).toHaveBeenCalledTimes(1);
+          expect(spawn.mock.calls[0]?.[0]).toMatchObject({
+            reuseWorkspaceSessionId: "api-accepted",
+          });
+        } finally {
+          await controller.stop();
+        }
+      },
+    );
 
     it.each(["memory_guard", "cap"] as const)(
       "admission denial defers without spending an attempt (%s)",
