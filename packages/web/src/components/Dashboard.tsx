@@ -11,6 +11,7 @@ import {
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
+import type { SessionRowAction } from "@/components/SessionRow";
 import { BusyContent } from "@/components/BusyContent";
 import { CenteredLoader } from "@/components/CenteredLoader";
 import { BrandGlyph } from "@/components/BrandGlyph";
@@ -61,7 +62,11 @@ import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
 import { reconcileSessionMode, sessionModeOptions } from "@/lib/session-modes";
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
-import { SessionLifecycleConsumer, type LifecycleIntent } from "@/lib/session-lifecycle";
+import {
+  killConfirmText,
+  SessionLifecycleConsumer,
+  type LifecycleIntent,
+} from "@/lib/session-lifecycle";
 import {
   ATTENTION_LANE_META,
   ATTENTION_ZONE_ORDER,
@@ -81,6 +86,7 @@ import {
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
   type ProjectInfo,
+  type SessionTransition,
   type SpurSessionView,
   type SpurPreflightTokenUsageView,
   type SpurSessionsResponse,
@@ -1066,11 +1072,13 @@ export function Dashboard() {
   const [projectId, setProjectId] = useState("");
   const { toasts, showErrorToast, dismissToast } = useToasts();
   const [openPrAction, setOpenPrAction] = useState<{
+    action: "complete" | "kill";
     session: DashboardSession;
     payload: OpenPrActionRequiredPayload;
   } | null>(null);
   const [openPrActionBusy, setOpenPrActionBusy] = useState<typeof openPrAction>(null);
   const [prCheckUnavailable, setPrCheckUnavailable] = useState<{
+    action: "complete" | "kill";
     session: DashboardSession;
     payload: GithubPrCheckUnavailablePayload;
   } | null>(null);
@@ -2312,10 +2320,7 @@ export function Dashboard() {
     [tagCatalog, handleApplyTags],
   );
 
-  const reserveTransitions = (
-    sessions: readonly SpurSessionView[],
-    action: "complete" | "restore",
-  ) => {
+  const reserveTransitions = (sessions: readonly SpurSessionView[], action: SessionTransition) => {
     const owner = lifecycleRef.current.reserve(sessions, action);
     publishTransitions();
     return owner;
@@ -2349,21 +2354,27 @@ export function Dashboard() {
     publishTransitions();
   };
 
-  const handleRestoreSession = async (session: DashboardSession) => {
+  /** Single-row pause/kill/restore/reopen; complete keeps its desk-scoped handler. */
+  const handleSessionTransition = async (
+    session: DashboardSession,
+    action: Exclude<SessionTransition, "complete">,
+    body: Record<string, unknown> = {},
+  ): Promise<boolean> => {
     const source = rawSessions.find((candidate) => candidate.id === session.id);
-    if (!source) return;
-    const owner = reserveTransitions([source], "restore");
-    if (!owner) return;
+    if (!source) return false;
+    const owner = reserveTransitions([source], action);
+    if (!owner) return false;
     await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
 
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
+      const daemonOperation = action === "restore" || action === "reopen";
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/${action}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ operationId: owner.operationId }),
+        body: JSON.stringify(daemonOperation ? { ...body, operationId: owner.operationId } : body),
       });
       const payload = await readResponsePayload(response);
-      if (!lifecycleRef.current.isCurrent(owner)) return;
+      if (!lifecycleRef.current.isCurrent(owner)) return false;
       if (!response.ok) {
         if (
           response.status === 503 &&
@@ -2373,13 +2384,36 @@ export function Dashboard() {
           payload.code === "session_lifecycle_snapshot_changed"
         ) {
           await reconcileAttempt(owner);
-          return;
+          return false;
         }
-        throw new Error(responseErrorMessage(payload, "Failed to restore Spur session"));
+        if (action === "kill" && isOpenPrActionRequiredPayload(payload)) {
+          await reconcileAttempt(owner);
+          if (!lifecycleRef.current.isCurrent(owner)) return false;
+          setPrCheckUnavailable(null);
+          setOpenPrAction({ action, session, payload });
+          return false;
+        }
+        if (action === "kill" && isGithubPrCheckUnavailablePayload(payload)) {
+          await reconcileAttempt(owner);
+          if (!lifecycleRef.current.isCurrent(owner)) return false;
+          setOpenPrAction(null);
+          setPrCheckUnavailable({ action, session, payload });
+          return false;
+        }
+        throw new Error(responseErrorMessage(payload, `Failed to ${action} Spur session`));
       }
-      const restored = payload as SpurSessionView;
+      if (
+        !daemonOperation ||
+        typeof payload !== "object" ||
+        payload === null ||
+        !("id" in payload) ||
+        payload.id !== session.id
+      ) {
+        await reconcileAttempt(owner);
+        return lifecycleRef.current.isCurrent(owner);
+      }
       await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
-      const accepted = lifecycleRef.current.acceptMutation(restored, owner);
+      const accepted = lifecycleRef.current.acceptMutation(payload as SpurSessionView, owner);
       if (accepted) {
         queryClient.setQueryData<SpurSessionsResponse>(
           sessionsQueryKey,
@@ -2391,15 +2425,37 @@ export function Dashboard() {
         );
         publishTransitions();
       }
-    } catch (restoreError) {
+      return accepted !== null;
+    } catch (transitionError) {
       await reconcileAttempt(owner);
-      if (!lifecycleRef.current.isCurrent(owner)) return;
-      showErrorToast(errorMessage(restoreError, "Failed to restore Spur session"));
-      throw restoreError;
+      if (!lifecycleRef.current.isCurrent(owner)) return false;
+      showErrorToast(errorMessage(transitionError, `Failed to ${action} Spur session`));
+      throw transitionError;
     } finally {
       if (lifecycleRef.current.isCurrent(owner)) {
         await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
       }
+    }
+  };
+
+  const handleRestoreSession = async (session: DashboardSession) => {
+    await handleSessionTransition(session, "restore");
+  };
+
+  const handleKillSession = (session: DashboardSession, body: Record<string, unknown> = {}) =>
+    handleSessionTransition(session, "kill", { ...body, force: true });
+
+  const handleRowAction = async (session: DashboardSession, action: SessionRowAction) => {
+    switch (action) {
+      case "complete":
+        return handleCompleteSession(session);
+      case "continue":
+        return handleSessionTransition(session, "restore", { overrideTokenBudget: true });
+      case "kill":
+        if (!window.confirm(killConfirmText(session.id))) return false;
+        return handleKillSession(session);
+      default:
+        return handleSessionTransition(session, action);
     }
   };
 
@@ -2471,7 +2527,7 @@ export function Dashboard() {
           if (!lifecycleRef.current.isCurrent(owner)) return false;
           // Only one dashboard dialog is ever mounted.
           setPrCheckUnavailable(null);
-          setOpenPrAction({ session, payload });
+          setOpenPrAction({ action: "complete", session, payload });
           return false;
         }
         if (isGithubPrCheckUnavailablePayload(payload)) {
@@ -2481,7 +2537,7 @@ export function Dashboard() {
           // the sibling mounted stacks both, and the stale one survives a later
           // success and re-fires /complete on a terminal session.
           setOpenPrAction(null);
-          setPrCheckUnavailable({ session, payload });
+          setPrCheckUnavailable({ action: "complete", session, payload });
           return false;
         }
         throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
@@ -2507,7 +2563,11 @@ export function Dashboard() {
     try {
       // Clear only on a real completion: a second failure re-opens a dialog,
       // and dismissing it here would drop the user back to a bare row.
-      if (await handleCompleteSession(dialog.session, { prAction, retry: true })) {
+      const done =
+        dialog.action === "kill"
+          ? await handleKillSession(dialog.session, { prAction })
+          : await handleCompleteSession(dialog.session, { prAction, retry: true });
+      if (done) {
         setOpenPrAction((current) => (current === dialog ? null : current));
       }
     } catch {
@@ -2522,7 +2582,11 @@ export function Dashboard() {
     const dialog = prCheckUnavailable;
     setPrCheckUnavailableBusy(dialog);
     try {
-      if (await handleCompleteSession(dialog.session, { ...options, retry: true })) {
+      const done =
+        dialog.action === "kill"
+          ? await handleKillSession(dialog.session, options)
+          : await handleCompleteSession(dialog.session, { ...options, retry: true });
+      if (done) {
         setPrCheckUnavailable((current) => (current === dialog ? null : current));
       }
     } catch {
@@ -3177,6 +3241,7 @@ export function Dashboard() {
                   onCompleteSession={handleCompleteSession}
                   onOpenTerminal={openTerminal}
                   onRestoreSession={handleRestoreSession}
+                  onSessionAction={handleRowAction}
                   projectFilterId={projectId || undefined}
                   onToggle={isMobile ? toggleCollapsed : undefined}
                   rows={grouped[level]}

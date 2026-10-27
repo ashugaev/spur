@@ -64,6 +64,70 @@ function makeSession(overrides?: Partial<DashboardSession>): DashboardSession {
 
 const onRestoreSession = vi.fn().mockResolvedValue(undefined);
 const onCompleteSession = vi.fn().mockResolvedValue(undefined);
+const onSessionAction = vi.fn().mockResolvedValue(undefined);
+
+describe("SessionRow actions menu", () => {
+  beforeEach(() => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "none" });
+    onSessionAction.mockReset();
+    onSessionAction.mockResolvedValue(undefined);
+  });
+
+  function openMenu(session: DashboardSession) {
+    render(
+      <SessionRow
+        session={session}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: `Actions for ${session.id}` }));
+    return screen.getAllByRole("menuitem").map((item) => item.textContent);
+  }
+
+  it.each([
+    [{ status: "running", runtimeAlive: true }, ["Pause", "Complete", "Kill"]],
+    [{ status: "paused", state: "stopped", runtimeAlive: false }, ["Restore", "Complete", "Kill"]],
+    [
+      {
+        status: "budget_limited",
+        state: "budget_limited",
+        runtimeAlive: false,
+        tokenUsageView: {
+          status: "available",
+          inputTokens: 10,
+          outputTokens: 0,
+          totalTokens: 10,
+          provider: "codex",
+          budget: 10,
+          exhausted: true,
+        },
+      },
+      ["Continue anyway", "Complete", "Kill"],
+    ],
+    [{ status: "completed", state: "stopped", runtimeAlive: false }, ["Reopen"]],
+  ] as const)("shows detail-page predicates for %o", (overrides, labels) => {
+    expect(openMenu(makeSession(overrides))).toEqual(labels);
+  });
+
+  it("dispatches the selected action and disables items while it runs", async () => {
+    let finish!: () => void;
+    onSessionAction.mockReturnValue(new Promise<void>((resolve) => (finish = resolve)));
+    openMenu(makeSession({ status: "running", runtimeAlive: true }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Kill" }));
+    expect(onSessionAction).toHaveBeenCalledWith(expect.objectContaining({ id: "api-a1" }), "kill");
+    fireEvent.click(screen.getByRole("button", { name: "Actions for api-a1" }));
+    for (const item of screen.getAllByRole("menuitem")) expect(item).toBeDisabled();
+    finish();
+    await waitFor(() => expect(screen.getByRole("menuitem", { name: "Pause" })).not.toBeDisabled());
+  });
+
+  it("disables items while a lifecycle transition is pending", () => {
+    openMenu(makeSession({ status: "paused", state: "stopped", lifecyclePending: "pause" }));
+    for (const item of screen.getAllByRole("menuitem")) expect(item).toBeDisabled();
+  });
+});
 
 describe("SessionRow", () => {
   it.each(["errored", "running"] as const)(
@@ -75,6 +139,7 @@ describe("SessionRow", () => {
           session={makeSession({ status, state: "error", runtimeAlive: true })}
           onCompleteSession={onCompleteSession}
           onRestoreSession={onRestoreSession}
+          onSessionAction={onSessionAction}
         />,
       );
 
@@ -101,6 +166,7 @@ describe("SessionRow", () => {
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
     expect(screen.getByRole("link", { name: "Budget limited" })).toHaveAttribute(
@@ -133,6 +199,7 @@ describe("SessionRow", () => {
         session={makeSession()}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -172,6 +239,7 @@ describe("SessionRow", () => {
         session={makeSession()}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -204,6 +272,7 @@ describe("SessionRow", () => {
         session={makeSession()}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -234,6 +303,7 @@ describe("SessionRow", () => {
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -267,6 +337,7 @@ describe("SessionRow", () => {
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -301,6 +372,7 @@ describe("SessionRow", () => {
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -333,6 +405,7 @@ describe("SessionRow", () => {
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -357,7 +430,7 @@ describe("SessionRow", () => {
 
   it("removes a ready sidecar link on refresh while retaining a running URL-less sidecar", () => {
     useSessionLinkPrInfoMock.mockReturnValue({ state: "none" });
-    const props = { onCompleteSession, onRestoreSession };
+    const props = { onCompleteSession, onRestoreSession, onSessionAction };
     const { rerender } = render(
       <SessionRow
         {...props}
@@ -412,6 +485,7 @@ describe("SessionRow", () => {
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -448,6 +522,7 @@ describe("SessionRow", () => {
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -484,6 +559,7 @@ describe("SessionRow", () => {
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -528,6 +604,7 @@ describe("SessionRow", () => {
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -558,6 +635,7 @@ describe("SessionRow", () => {
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -590,6 +668,7 @@ describe("SessionRow", () => {
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -612,6 +691,7 @@ describe("SessionRow", () => {
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -637,6 +717,7 @@ describe("SessionRow", () => {
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -667,6 +748,7 @@ describe("SessionRow", () => {
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -692,6 +774,7 @@ describe("SessionRow", () => {
         session={makeSession({ hasUnseenAttention: true })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -704,6 +787,7 @@ describe("SessionRow", () => {
         session={makeSession({ hasUnseenAttention: false })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -728,6 +812,7 @@ describe("SessionRow", () => {
           session={makeSession({ state, hasUnseenAttention: false })}
           onCompleteSession={onCompleteSession}
           onRestoreSession={onRestoreSession}
+          onSessionAction={onSessionAction}
         />,
       );
 
@@ -755,6 +840,7 @@ describe("SessionRow", () => {
         session={makeSession()}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 
@@ -781,6 +867,7 @@ describe("SessionRow", () => {
         session={makeSession()}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
       />,
     );
 

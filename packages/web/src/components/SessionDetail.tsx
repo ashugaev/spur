@@ -101,7 +101,11 @@ import {
 import { insertTextAtCursor } from "@/lib/textarea";
 import { useToasts } from "@/hooks/useToasts";
 import { usePoll } from "@/hooks/usePoll";
-import { SessionLifecycleConsumer, type LifecycleIntent } from "@/lib/session-lifecycle";
+import {
+  killConfirmText,
+  SessionLifecycleConsumer,
+  type LifecycleIntent,
+} from "@/lib/session-lifecycle";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -2064,10 +2068,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     body?: Record<string, unknown>,
     options: { skipKillConfirm?: boolean } = {},
   ) => {
-    const lifecycleAction = action === "complete" || action === "restore" || action === "reopen";
+    const daemonOperation = action === "complete" || action === "restore" || action === "reopen";
     const consumer = lifecycleRef.current;
     let owner: LifecycleIntent | null = null;
-    if (lifecycleAction) {
+    if (action !== "send") {
+      if (
+        action === "kill" &&
+        !options.skipKillConfirm &&
+        !window.confirm(killConfirmText(sessionId))
+      )
+        return false;
       if (consumer.pending(sessionId)) return false;
       if (!consumer.instanceId) {
         const read = consumer.beginRead();
@@ -2110,17 +2120,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         (consumer === lifecycleRef.current &&
           consumer.isCurrent(owner) &&
           lifecycleActionRef.current === owner));
-    if (
-      action === "kill" &&
-      !options.skipKillConfirm &&
-      !window.confirm(`Kill session ${sessionId}? This forces cleanup even with local changes.`)
-    ) {
-      return false;
-    }
 
     setBusyAction(action);
     try {
-      const requestBody = owner ? { ...body, operationId: owner.operationId } : body;
+      const requestBody =
+        owner && daemonOperation ? { ...body, operationId: owner.operationId } : body;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/${action}`, {
         method: "POST",
         headers: requestBody ? { "content-type": "application/json" } : undefined,

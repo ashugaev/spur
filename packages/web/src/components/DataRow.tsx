@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 
 export const DATA_ROW_CLASS =
   "data-row group flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-2 py-2 transition-colors sm:gap-3 sm:px-2.5";
@@ -18,12 +18,14 @@ export function RowIconButton({
   disabled,
   activeClass,
   onClick,
+  buttonRef,
   children,
 }: {
   label: string;
   disabled: boolean;
   activeClass: string;
   onClick: () => void;
+  buttonRef?: Ref<HTMLButtonElement>;
   children: ReactNode;
 }) {
   return (
@@ -33,6 +35,7 @@ export function RowIconButton({
       className={`${BASE_BTN} ${disabled ? DISABLED_BTN : activeClass}`}
       disabled={disabled}
       onClick={onClick}
+      ref={buttonRef}
       type="button"
     >
       {children}

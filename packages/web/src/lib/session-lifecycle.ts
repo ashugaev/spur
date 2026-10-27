@@ -1,4 +1,14 @@
-import type { LifecycleAction, SessionLifecycleSnapshot, SpurSessionView } from "./types";
+import type { SessionLifecycleSnapshot, SessionTransition, SpurSessionView } from "./types";
+
+export function killConfirmText(sessionId: string): string {
+  return `Kill session ${sessionId}? This forces cleanup even with local changes.`;
+}
+
+/** Client-only transitions: no daemon receipt, a read showing this status settles them. */
+const CONFIRMED_STATUS: Partial<Record<SessionTransition, string>> = {
+  pause: "paused",
+  kill: "killed",
+};
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -58,7 +68,7 @@ export interface LifecycleIntent {
   operationId: string;
   generation: number;
   instanceId: string;
-  action: LifecycleAction;
+  action: SessionTransition;
   revisions: ReadonlyMap<string, number>;
 }
 
@@ -124,9 +134,10 @@ export class SessionLifecycleConsumer {
     const intent = this.intents.get(row.id);
     if (
       intent &&
-      snapshot.operation &&
-      (snapshot.operation.operationId === intent.owner.operationId ||
-        snapshot.revision > (intent.source.lifecycle?.revision ?? 0))
+      ((snapshot.operation &&
+        (snapshot.operation.operationId === intent.owner.operationId ||
+          snapshot.revision > (intent.source.lifecycle?.revision ?? 0))) ||
+        row.status === CONFIRMED_STATUS[intent.owner.action])
     )
       this.intents.delete(row.id);
     return row;
@@ -151,7 +162,7 @@ export class SessionLifecycleConsumer {
     return this.acceptRow(row);
   }
 
-  reserve(rows: readonly SpurSessionView[], action: LifecycleAction): LifecycleIntent | null {
+  reserve(rows: readonly SpurSessionView[], action: SessionTransition): LifecycleIntent | null {
     if (
       !this.instanceId ||
       rows.length === 0 ||
@@ -195,7 +206,7 @@ export class SessionLifecycleConsumer {
       if (intent.owner === owner && !this.rejectedRows.has(id)) this.intents.delete(id);
   }
 
-  pending(id: string): LifecycleAction | null {
+  pending(id: string): SessionTransition | null {
     const intent = this.intents.get(id);
     if (intent) return intent.owner.action;
     const operation = this.rows.get(id)?.lifecycle?.operation;
@@ -212,10 +223,19 @@ export class SessionLifecycleConsumer {
 
 export function projectLifecycleSession<T extends { status: string; state: string }>(
   row: T,
-  action: LifecycleAction | null = null,
+  action: SessionTransition | null = null,
 ): T {
-  if (!action) return row;
-  return action === "complete"
-    ? { ...row, status: "completed", state: "stopped", lifecyclePending: action }
-    : { ...row, status: "running", state: "working", lifecyclePending: action };
+  switch (action) {
+    case null:
+      return row;
+    case "complete":
+      return { ...row, status: "completed", state: "stopped", lifecyclePending: action };
+    case "kill":
+      return { ...row, status: "killed", state: "killed", lifecyclePending: action };
+    case "pause":
+      return { ...row, status: "paused", state: "stopped", lifecyclePending: action };
+    case "restore":
+    case "reopen":
+      return { ...row, status: "running", state: "working", lifecyclePending: action };
+  }
 }

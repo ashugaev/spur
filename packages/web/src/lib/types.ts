@@ -404,6 +404,8 @@ export type SpurSidecarStopReport =
   | { outcome: "nothing-to-stop" };
 
 export type LifecycleAction = "complete" | "restore" | "reopen";
+/** Daemon lifecycle operation, or a client-only transition held until a read confirms it. */
+export type SessionTransition = LifecycleAction | "pause" | "kill";
 export type LifecyclePhase = "pending" | "succeeded" | "failed";
 export interface LifecycleOperation {
   operationId: string;
@@ -420,7 +422,7 @@ export interface SessionLifecycleSnapshot {
 
 export interface SpurSessionView {
   lifecycle: SessionLifecycleSnapshot;
-  lifecyclePending?: LifecycleAction;
+  lifecyclePending?: SessionTransition;
   id: string;
   project: string;
   agent: AgentName;
@@ -799,7 +801,7 @@ export interface DashboardRunningSidecar {
 
 export interface DashboardSession {
   lifecycle?: SessionLifecycleSnapshot;
-  lifecyclePending?: LifecycleAction;
+  lifecyclePending?: SessionTransition;
   id: string;
   projectId: string;
   projectName: string;
@@ -1079,7 +1081,9 @@ export interface ConversationResponse {
 }
 
 export function getAttentionLevel(session: DashboardSession): AttentionLevel {
-  if (session.lifecyclePending) return session.lifecyclePending === "complete" ? "done" : "working";
+  if (session.lifecyclePending === "complete" || session.lifecyclePending === "kill") return "done";
+  if (session.lifecyclePending === "restore" || session.lifecyclePending === "reopen")
+    return "working";
   if (session.status === "budget_limited") return "respond";
   if (isTerminalSession(session)) {
     return "done";

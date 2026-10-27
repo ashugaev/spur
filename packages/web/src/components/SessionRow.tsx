@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
 import { DataRow, RowIconButton } from "@/components/DataRow";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
 import { TagEditor } from "@/components/TagEditor";
@@ -16,6 +17,8 @@ import {
 import { buildSessionPath } from "@/lib/project-routes";
 import {
   canComplete,
+  canPause,
+  canReopen,
   getAttentionLevel,
   isRestorable,
   isTerminalSession,
@@ -205,6 +208,113 @@ function RunningSidecarIndicator({
   );
 }
 
+export type SessionRowAction = "pause" | "restore" | "continue" | "reopen" | "complete" | "kill";
+
+function RowActionsMenu({
+  session,
+  onAction,
+}: {
+  session: DashboardSession;
+  onAction: (session: DashboardSession, action: SessionRowAction) => Promise<unknown>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [running, setRunning] = useState(false);
+  const busy = running || Boolean(session.lifecyclePending);
+  const { containerRef, buttonRef, menuRef, menuStyle } = useAnchoredMenu({
+    open,
+    onClose: () => setOpen(false),
+    contentDeps: [session.status],
+    preferredSide: "below",
+    align: "end",
+  });
+  const budgetBlocked = isTokenBudgetBlocked(session);
+  const restorable = isRestorable(session);
+  const items: { label: string; action: SessionRowAction }[] = [];
+  if (canPause(session)) items.push({ label: "Pause", action: "pause" });
+  if (restorable && !budgetBlocked) items.push({ label: "Restore", action: "restore" });
+  if (restorable && budgetBlocked) items.push({ label: "Continue anyway", action: "continue" });
+  if (canReopen(session)) items.push({ label: "Reopen", action: "reopen" });
+  if (canComplete(session)) items.push({ label: "Complete", action: "complete" });
+  const showKill = !isTerminalSession(session);
+  if (items.length === 0 && !showKill) return null;
+  const itemClass =
+    "block w-full px-2 py-1.5 text-left transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50";
+  const select = async (action: SessionRowAction) => {
+    setOpen(false);
+    if (busy) return;
+    setRunning(true);
+    try {
+      await onAction(session, action);
+    } catch (err) {
+      console.error(`${action} failed`, err);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <span
+      className={`relative hidden shrink-0 lg:inline-flex ${open ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+      ref={containerRef}
+    >
+      <RowIconButton
+        activeClass="border-transparent text-[var(--color-text-tertiary)] hover:border-[var(--color-border-default)] hover:text-[var(--color-text-secondary)]"
+        buttonRef={buttonRef}
+        disabled={false}
+        label={`Actions for ${session.id}`}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 24 24">
+          <circle cx="12" cy="5" r="1.6" />
+          <circle cx="12" cy="12" r="1.6" />
+          <circle cx="12" cy="19" r="1.6" />
+        </svg>
+      </RowIconButton>
+      {open ? (
+        <div
+          aria-label="Session actions"
+          className="fixed z-30 w-44 border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+          ref={menuRef}
+          role="menu"
+          style={menuStyle}
+        >
+          {items.map((item) => (
+            <button
+              className={`${itemClass} text-[var(--color-text-secondary)]`}
+              disabled={busy}
+              key={item.action}
+              onClick={() => void select(item.action)}
+              role="menuitem"
+              type="button"
+            >
+              {item.label}
+            </button>
+          ))}
+          {showKill ? (
+            <>
+              {items.length > 0 ? (
+                <div
+                  className="my-1 border-t border-[var(--color-border-subtle)]"
+                  role="separator"
+                />
+              ) : null}
+              <button
+                className={`${itemClass} text-[var(--color-status-error)]`}
+                disabled={busy}
+                onClick={() => void select("kill")}
+                role="menuitem"
+                type="button"
+              >
+                Kill
+              </button>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+    </span>
+  );
+}
+
 interface SessionRowProps {
   projectFilterId?: string;
   deskMemberCount?: number;
@@ -212,6 +322,7 @@ interface SessionRowProps {
   onOpenTerminal?: (session: DashboardSession) => void;
   onCompleteSession: (session: DashboardSession) => Promise<unknown>;
   onRestoreSession: (session: DashboardSession) => Promise<void>;
+  onSessionAction: (session: DashboardSession, action: SessionRowAction) => Promise<unknown>;
 }
 
 export function SessionRow({
@@ -221,6 +332,7 @@ export function SessionRow({
   onOpenTerminal,
   onCompleteSession,
   onRestoreSession,
+  onSessionAction,
 }: SessionRowProps) {
   const title = getSessionTitle(session);
   const canAttach =
@@ -482,6 +594,8 @@ export function SessionRow({
           </svg>
         </RowIconButton>
       )}
+
+      <RowActionsMenu onAction={onSessionAction} session={session} />
     </DataRow>
   );
 }
