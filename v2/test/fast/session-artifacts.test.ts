@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import type * as fs from "node:fs";
+import { type Mode, type PathLike, existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -6,10 +7,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // Simulates a dir owned by another uid: chmod fails with EPERM, so it stays locked.
 const chmodState = vi.hoisted(() => ({ lockedPath: null as string | null }));
 vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
+  const actual = await importOriginal<typeof fs>();
   return {
     ...actual,
-    chmodSync: (path: import("node:fs").PathLike, mode: import("node:fs").Mode) => {
+    chmodSync: (path: PathLike, mode: Mode) => {
       if (chmodState.lockedPath !== null && String(path) === chmodState.lockedPath) {
         throw Object.assign(new Error(`EPERM: operation not permitted, chmod '${path}'`), {
           code: "EPERM",
