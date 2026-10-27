@@ -339,6 +339,7 @@ function operation(
       "spawn_shepherd",
       "send_message",
       "respawn_session",
+      "reply_to_source",
     ].includes(operationId)
       ? 15_000_000
       : 1_000_000,
@@ -935,9 +936,25 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
           '{version:1,repository:string,baseBranch:string,surfaces:{kind:"UI"|"CLI"|"config"|"API"|"prompt"|"workflow",id:string,before:string[],after:string[],constraints:string[]}[]}',
           "InterfaceManifest; excludes buttons. Nonblank clauses, unique kind/id surfaces; repository/base/source must match native approval policy. Requesting approval never grants it.",
         ),
+        field(
+          "images",
+          "{name:string,data:string}[]",
+          "At most 4 base64 PNG/JPEG/WebP files named .png/.jpg/.jpeg/.webp, 10000000 decoded bytes total; each width+height at most 10000, side ratio at most 20. Sent as photos before the text.",
+        ),
       ]),
       examples: [
         { body: { message: "Choose", buttons: [{ text: "Continue", value: "continue" }] } },
+        {
+          body: {
+            message: "Screenshot",
+            images: [
+              {
+                name: "shot.png",
+                data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+              },
+            ],
+          },
+        },
         {
           body: {
             message: "Approve interface",

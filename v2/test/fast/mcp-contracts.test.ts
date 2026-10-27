@@ -20,9 +20,9 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "681bded9db89826ca8cf0d8b4f90f3018db9683834b9d37f053f6642d9428daa",
-  "types.ts": "40cd7f936153851d070d7bd898db842fa6292c6720b3e70ee2185be878b281e4",
-  "session-service.ts": "61fe3399efc71bc35b8d4c6e654566bd2905e93e16e63676b1f14c83a2c598da",
+  "server.ts": "4fa2d26febd56c14fcc431ce7671e5e905291fd030032ba21748bcf93e25f8fc",
+  "types.ts": "f72eb61f7ddf810e9f952592ecf646ba460e82f29497a9e5c8c78c2919f8365d",
+  "session-service.ts": "eddab406bdb8a2411063e7b3703f73c77f4238cd910348c931aa0823ce83d399",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "837a7052b62b977b59f117e344b83b0f507298ce0d716c1ab637ead711060c42",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -151,6 +151,11 @@ describe("daemon MCP operation contracts", () => {
         getDaemonOperation(id)?.body?.fields.find((entry) => entry.name === "attachments")?.type,
       ).toContain("name:string,data:string");
     }
+    const reply = getDaemonOperation("reply_to_source");
+    expect(reply?.maxBodyBytes).toBe(15_000_000);
+    expect(reply?.body?.fields.find((entry) => entry.name === "images")?.type).toBe(
+      "{name:string,data:string}[]",
+    );
   });
 
   it("provides examples, path/query/body metadata, errors and source references for every operation", () => {
@@ -373,6 +378,14 @@ describe("catalog examples at the real daemon router", () => {
           await request("reply_to_source", {
             message: "Reply",
             buttons: [{ text: "", value: "x" }],
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await request("reply_to_source", {
+            message: "Reply",
+            images: [{ name: "shot.gif", data: "AAAA" }],
           })
         ).status,
       ).toBe(400);
