@@ -916,13 +916,13 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "reply_to_source",
     "POST",
     "/sessions/{sessionId}/source-reply",
-    "Send reply and optional choices to session source.",
+    "Send reply and optional choices in assigned Telegram forum topic.",
     {
       body: body("SourceReplyRequest", [
         field(
           "message",
           "string",
-          "Nonblank reply text; configured Telegram reply target required.",
+          "Nonblank text; nonterminal session and configured Telegram forum required.",
           true,
         ),
         field(
@@ -965,8 +965,8 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "get_source_info",
     "GET",
     "/sessions/{sessionId}/source-info",
-    "Read session Telegram chat association and cached bot identity.",
-    { response: "SourceInfoResponse" },
+    "Read existing canonical Telegram topic and cached bot identity without allocating.",
+    { response: "SourceInfoResponse; source:null without an eligible assigned topic." },
   ),
   operation(
     "enable_source_poll",
@@ -1046,7 +1046,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "complete_session",
     "POST",
     "/sessions/{sessionId}/complete",
-    "Complete session or desk with explicit PR disposition.",
+    "Complete session or desk with explicit PR disposition and owned Telegram topic cleanup.",
     {
       body: requestBodies.complete,
       examples: [
@@ -1061,10 +1061,16 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "/sessions/{sessionId}/self-destruct",
     "Perform session self-destruction.",
   ),
-  operation("kill_session", "POST", "/sessions/{sessionId}/kill", "Terminate session runtime.", {
-    body: requestBodies.kill,
-    examples: [{ body: { force: true, prAction: "leave_open" } }],
-  }),
+  operation(
+    "kill_session",
+    "POST",
+    "/sessions/{sessionId}/kill",
+    "Terminate session runtime and attempt owned Telegram topic deletion.",
+    {
+      body: requestBodies.kill,
+      examples: [{ body: { force: true, prAction: "leave_open" } }],
+    },
+  ),
   operation(
     "restore_session",
     "POST",
