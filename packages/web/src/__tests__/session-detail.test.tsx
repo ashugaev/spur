@@ -6443,6 +6443,7 @@ describe("SessionDetail artifacts", () => {
       });
       expect(screen.getByText("b2-notes.txt")).toBeInTheDocument();
       expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      expect(headerCount()).toBe("2");
     });
   });
 });

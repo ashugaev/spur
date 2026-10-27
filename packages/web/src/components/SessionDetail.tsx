@@ -2045,6 +2045,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   useEffect(() => {
     setArtifactCategory("agent");
+    setArtifactFormat(null);
     setShowAllDeskMembers(false);
   }, [sessionId]);
 
