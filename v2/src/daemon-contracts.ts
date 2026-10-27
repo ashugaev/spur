@@ -512,6 +512,17 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "List every configured, unconfigured and shepherd project.",
     { response: "ProjectListEntry[]" },
   ),
+  operation(
+    "list_cron_jobs",
+    "GET",
+    "/projects/cron",
+    "List loaded cron sources, bound triggers, owner-file drift and last observed events.",
+    {
+      query: [field("project", "string", "Project id; omit for all projects.", false)],
+      examples: [{}, { query: { project: "example-project" } }],
+      response: "CronJobsResponse",
+    },
+  ),
   operation("list_backlog", "GET", "/backlog/available", "List available backlog work."),
   operation("list_models", "GET", "/models", "Discover provider model catalog.", {
     query: [{ ...agent, required: true }],
