@@ -987,6 +987,271 @@ describe("startConfiguredTriggers", () => {
     vi.restoreAllMocks();
   });
 
+  describe("snapshot invalidation", () => {
+    async function fixture() {
+      const dataDir = mkdtempSync(join(tmpdir(), "spur-snapshot-notice-"));
+      const actual = await vi.importActual<typeof metadataModule>("../../src/metadata.js");
+      readPendingSendBatchesMock.mockImplementation(actual.readPendingSendBatches);
+      recordPendingSendBatchMock.mockImplementation(actual.recordPendingSendBatch);
+      readPendingSendBatchMock.mockImplementation(actual.readPendingSendBatch);
+      updatePendingSendBatchConditionalMock.mockImplementation(
+        actual.updatePendingSendBatchConditional,
+      );
+      deletePendingSendBatchConditionalMock.mockImplementation(
+        actual.deletePendingSendBatchConditional,
+      );
+      deletePendingSendBatchMock.mockImplementation(actual.deletePendingSendBatch);
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const { SessionLifecycleError } = await import("../../src/session-lifecycle.js");
+      const changed = (
+        status = 503,
+        code:
+          | "session_lifecycle_conflict"
+          | "session_lifecycle_snapshot_changed" = "session_lifecycle_snapshot_changed",
+      ) =>
+        new SessionLifecycleError("Snapshot changed", status, {
+          code,
+          lifecycle: { instanceId: "test-instance", revision: 1, operation: null },
+        });
+      const healthy = {
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        workspaceExists: true,
+        lastActivityAt: staleActivity(),
+      };
+      const get = vi.fn().mockRejectedValue(changed());
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      const bus = new EventBus();
+      const autoPing = new AutoPingService(dataDir);
+      const settings = { ...config({ event: "github:merge_conflict" }), dataDir };
+      const start = () =>
+        startConfiguredTriggers({
+          config: settings as never,
+          bus,
+          autoPing,
+          sessionService: { get, deliver } as never,
+          logger: { warn: vi.fn() },
+        });
+      readGitHubSourceSnapshotMock.mockReturnValue(mergeConflictSnapshot());
+      const pending = () => [...actual.readPendingSendBatches(dataDir).values()][0];
+      return {
+        dataDir,
+        actual,
+        changed,
+        healthy,
+        get,
+        deliver,
+        bus,
+        settings,
+        start,
+        pending,
+        cleanup: () => {
+          autoPing.dispose();
+          rmSync(dataDir, { recursive: true, force: true });
+        },
+      };
+    }
+
+    it("retains the identical disk batch before input and delivers once after controller reconstruction", async () => {
+      const f = await fixture();
+      let controller = f.start();
+      try {
+        f.bus.emit(mergeConflictEvent());
+        await vi.advanceTimersByTimeAsync(1);
+        const saved = f.pending();
+        expect(saved).toBeDefined();
+        expect(saved?.retryAccounting?.every((row) => row.deliveryAttempts === 0)).toBe(true);
+        expect(f.deliver).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(f.pending()).toEqual(saved);
+        expect(f.get).toHaveBeenCalledTimes(4);
+        expect(loggedEvents("trigger.send.dropped")).toHaveLength(0);
+        await controller.stop();
+        controller = f.start();
+        expect(f.pending()).toEqual(saved);
+        f.get.mockResolvedValue(f.healthy);
+        await advanceSendWindow();
+        expect(f.deliver).toHaveBeenCalledTimes(1);
+        expect(f.deliver.mock.calls[0]?.[1]).toContain("Merge conflicts are blocking this PR.");
+        expect(f.pending()).toBeUndefined();
+        await advanceSendWindow();
+        expect(f.deliver).toHaveBeenCalledTimes(1);
+      } finally {
+        await controller.stop();
+        f.cleanup();
+      }
+    });
+
+    it.each(["ordinary", "plain", "other code", "other status"])(
+      "keeps the prior drop policy for %s errors",
+      async (kind) => {
+        const f = await fixture();
+        f.get.mockRejectedValue(
+          kind === "ordinary"
+            ? new Error("Snapshot changed")
+            : kind === "plain"
+              ? { statusCode: 503, payload: { code: "session_lifecycle_snapshot_changed" } }
+              : kind === "other code"
+                ? f.changed(503, "session_lifecycle_conflict")
+                : f.changed(409),
+        );
+        const controller = f.start();
+        try {
+          f.bus.emit(mergeConflictEvent());
+          await vi.advanceTimersByTimeAsync(1);
+          expect(f.pending()).toBeUndefined();
+          expect(loggedEvents("trigger.send.dropped")).toHaveLength(1);
+          expect(f.deliver).not.toHaveBeenCalled();
+        } finally {
+          await controller.stop();
+          f.cleanup();
+        }
+      },
+    );
+
+    it("serializes invalidated reads and merges real incoming edits without spending delivery attempts", async () => {
+      const f = await fixture();
+      const controller = f.start();
+      try {
+        f.bus.emit(mergeConflictEvent());
+        await vi.advanceTimersByTimeAsync(1);
+        const saved = f.pending();
+        let reject!: (error: Error) => void;
+        f.get.mockImplementationOnce(
+          () =>
+            new Promise((_resolve, fail) => {
+              reject = fail;
+            }),
+        );
+        const timers = vi.getTimerCount();
+        await vi.advanceTimersByTimeAsync(5_000);
+        const next = mergeConflictEvent();
+        f.bus.emit({
+          ...next,
+          occurrenceId: "new-conflict-edit",
+          data: {
+            ...next.data,
+            signals: [{ ...mergeConflictSignal(), text: "Updated conflict notice" }],
+          },
+        });
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(f.get).toHaveBeenCalledTimes(2);
+        expect(f.pending()).toEqual(saved);
+        expect(vi.getTimerCount()).toBe(timers);
+        reject(f.changed());
+        await vi.advanceTimersByTimeAsync(1);
+        const merged = f.pending();
+        expect(merged?.workId).toBe(saved?.workId);
+        expect(merged?.revision).toBe((saved?.revision ?? 0) + 1);
+        expect(merged?.retryAccounting?.every((row) => row.deliveryAttempts === 0)).toBe(true);
+        expect(f.get).toHaveBeenCalledTimes(3);
+        expect(f.deliver).not.toHaveBeenCalled();
+        expect(loggedEvents("trigger.send.dropped")).toHaveLength(0);
+      } finally {
+        await controller.stop();
+        f.cleanup();
+      }
+    });
+
+    it("preserves existing admission accounting and its deadline through invalidated reads", async () => {
+      const f = await fixture();
+      const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
+      f.get.mockResolvedValue(f.healthy);
+      f.deliver.mockRejectedValue(new SessionAdmissionDeniedError("cap", "cap"));
+      const controller = f.start();
+      try {
+        f.bus.emit(mergeConflictEvent());
+        await advanceSendWindow();
+        const denied = f.pending();
+        expect(denied?.admissionCapDenials).toBeGreaterThan(0);
+        expect(denied?.admissionCapRetryAt).toBeGreaterThan(Date.now());
+        const calls = f.deliver.mock.calls.length;
+        f.get.mockRejectedValue(f.changed());
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(f.pending()).toEqual(denied);
+        expect(f.deliver).toHaveBeenCalledTimes(calls);
+      } finally {
+        await controller.stop();
+        f.cleanup();
+      }
+    });
+
+    it.each(["manual_pause", "missing"])(
+      "drops a retained notice when the recipient becomes %s",
+      async (state) => {
+        const f = await fixture();
+        const controller = f.start();
+        try {
+          f.bus.emit(mergeConflictEvent());
+          await vi.advanceTimersByTimeAsync(1);
+          expect(f.pending()).toBeDefined();
+          if (state === "missing") {
+            const { SessionResourceNotFoundError } = await import("../../src/session-service.js");
+            f.get.mockRejectedValue(new SessionResourceNotFoundError("Session not found"));
+          } else
+            f.get.mockResolvedValue({
+              ...f.healthy,
+              status: "stopped",
+              state: "stopped",
+              stopReason: "manual_pause",
+            });
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect(f.pending()).toBeUndefined();
+          expect(f.deliver).not.toHaveBeenCalled();
+        } finally {
+          await controller.stop();
+          f.cleanup();
+        }
+      },
+    );
+
+    it("keeps route cancellation authoritative after an invalidated lookup", async () => {
+      const f = await fixture();
+      let controller = f.start();
+      try {
+        f.bus.emit(mergeConflictEvent());
+        await vi.advanceTimersByTimeAsync(1);
+        expect(f.pending()).toBeDefined();
+        await controller.stop();
+        f.settings.projects.api.triggers = {} as typeof f.settings.projects.api.triggers;
+        controller = f.start();
+        expect(f.pending()).toBeUndefined();
+        f.get.mockResolvedValue(f.healthy);
+        await advanceSendWindow();
+        expect(f.deliver).not.toHaveBeenCalled();
+      } finally {
+        await controller.stop();
+        f.cleanup();
+      }
+    });
+
+    it("does not replay an uncertain native write when the post-failure lookup invalidates", async () => {
+      const f = await fixture();
+      f.get.mockResolvedValue(f.healthy);
+      f.deliver.mockImplementation(async () => {
+        f.get.mockRejectedValue(f.changed());
+        throw new Error("Input may already have been written");
+      });
+      let controller = f.start();
+      try {
+        f.bus.emit(mergeConflictEvent());
+        await advanceSendWindow();
+        expect(f.deliver).toHaveBeenCalledTimes(1);
+        expect(f.pending()).toBeUndefined();
+        expect(loggedEvents("trigger.send.failed")).toHaveLength(1);
+        await controller.stop();
+        controller = f.start();
+        f.get.mockResolvedValue(f.healthy);
+        await advanceSendWindow();
+        expect(f.deliver).toHaveBeenCalledTimes(1);
+      } finally {
+        await controller.stop();
+        f.cleanup();
+      }
+    });
+  });
+
   describe("persisted live feedback", () => {
     const pending = (): PersistedPendingBatch | undefined =>
       readPendingSendBatchesMock().get("api:send:api-1");
