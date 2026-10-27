@@ -138,7 +138,7 @@ async function callTelegram<T>(
   config: Pick<TelegramSourceConfig, "token">,
   method: string,
   body: Record<string, unknown>,
-  options: { retry?: false; transport?: TelegramTransport } = {},
+  options: { retry?: false; transport?: TelegramTransport | undefined } = {},
 ): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
     const controller = options.transport ? new AbortController() : undefined;
