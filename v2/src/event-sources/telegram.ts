@@ -35,7 +35,7 @@ import type {
   SourceSessionListItem,
   SourceStartDeps,
 } from "./types.js";
-import { formatTelegramSessionLabel } from "../telegram-source-state.js";
+import { formatTelegramSessionLabel, telegramTopicIsDeleting } from "../telegram-source-state.js";
 import { telegramStatusEmoji } from "../telegram-status-emoji.js";
 import {
   consentPolicy,
@@ -160,7 +160,11 @@ interface TelegramRuntime {
   pendingSpawns: Map<string, TelegramPendingSpawn>;
   autoSpawnInFlight: Set<string>;
   workbench: TelegramWorkbench;
-  persistBindings(options?: { removeKeys?: string[]; reconcileKey?: string }): Promise<void>;
+  persistBindings(options?: {
+    removeKeys?: string[];
+    reconcileKey?: string;
+    bindKey?: string;
+  }): Promise<void>;
   drainWrites(): Promise<void>;
 }
 
@@ -865,6 +869,9 @@ async function bindTelegramThread(
 ): Promise<void> {
   const deps = runtime.deps;
   const key = telegramBindingKey(chatId, messageThreadId);
+  if (telegramTopicIsDeleting(deps.dataDir, chatId, messageThreadId)) {
+    throw new Error("Topic is being deleted with its agent");
+  }
   const previous = runtime.bindings.get(key);
   runtime.bindings.set(telegramBindingKey(chatId, messageThreadId), {
     chatId,
@@ -872,7 +879,7 @@ async function bindTelegramThread(
     sessionId,
   });
   try {
-    await runtime.persistBindings();
+    await runtime.persistBindings({ bindKey: key });
   } catch (error) {
     if (previous) {
       runtime.bindings.set(key, previous);
@@ -884,6 +891,14 @@ async function bindTelegramThread(
   }
   // A bind is not an inbound message: it must not move lastInboundAt past an
   // agent reply that already landed.
+  const current = readSession(deps.dataDir, sessionId);
+  if (
+    current?.status === "completed" ||
+    current?.status === "killed" ||
+    telegramTopicIsDeleting(deps.dataDir, chatId, messageThreadId)
+  ) {
+    throw new Error("Topic or agent is no longer available");
+  }
   recordTelegramReplyTarget(deps, {
     sessionId,
     chatId,
@@ -2330,15 +2345,34 @@ async function startTelegramSource(
     pendingSpawns: new Map(),
     autoSpawnInFlight: new Set(),
     workbench: new TelegramWorkbench(),
-    persistBindings(options: { removeKeys?: string[]; reconcileKey?: string } = {}): Promise<void> {
+    persistBindings(
+      options: { removeKeys?: string[]; reconcileKey?: string; bindKey?: string } = {},
+    ): Promise<void> {
       const removedKeys = new Set(options.removeKeys ?? []);
+      const requestedBinding =
+        options.bindKey === undefined ? undefined : bindings.get(options.bindKey);
       const next = writeQueue.then(() => {
-        if (options.reconcileKey !== undefined) {
-          const current = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId).get(
-            options.reconcileKey,
-          );
-          if (current) bindings.set(options.reconcileKey, current);
-          else bindings.delete(options.reconcileKey);
+        const persisted = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId);
+        for (const key of bindings.keys()) {
+          if (key !== options.bindKey && !persisted.has(key)) bindings.delete(key);
+        }
+        for (const [key, binding] of persisted) {
+          if (key !== options.bindKey) bindings.set(key, binding);
+        }
+        if (options.bindKey !== undefined && requestedBinding)
+          bindings.set(options.bindKey, requestedBinding);
+        for (const [key, binding] of bindings) {
+          const record = readSession(deps.dataDir, binding.sessionId);
+          if (
+            removedKeys.has(key) ||
+            record?.status === "completed" ||
+            record?.status === "killed" ||
+            telegramTopicIsDeleting(deps.dataDir, binding.chatId, binding.messageThreadId)
+          ) {
+            bindings.delete(key);
+            removedKeys.add(key);
+            if (key === options.bindKey) throw new Error("Topic or agent is no longer available");
+          }
         }
         return writeTelegramBindings(
           deps.dataDir,
@@ -2347,8 +2381,6 @@ async function startTelegramSource(
           bindings.values(),
           {
             ...(runtime.lastUpdateId !== undefined ? { lastUpdateId: runtime.lastUpdateId } : {}),
-            preserveExisting: true,
-            ...(removedKeys.size > 0 ? { removeKeys: removedKeys } : {}),
           },
         );
       });

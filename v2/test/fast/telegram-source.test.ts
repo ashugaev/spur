@@ -387,6 +387,70 @@ describe("telegramSourceModule", () => {
   }
 
   describe("topic lifecycle commands", () => {
+    it.each(["completed", "killed"] as const)(
+      "does not resurrect externally %s Telegram bindings on unrelated updates",
+      async (status) => {
+        const dataDir = await createTempDir("spur-telegram-terminal-");
+        tempDirs.push(dataDir);
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        ]);
+        const { bot } = await startSource(dataDir);
+        metadataModule.writeSession(dataDir, {
+          id: "api-1",
+          project: "api",
+          agent: "codex",
+          prompt: "task",
+          branch: "feature/test",
+          worktree: false,
+          worktreePath: dataDir,
+          tmuxSession: "test",
+          launchCommand: "codex",
+          status,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+        metadataModule.deleteTelegramSourceStateForSession(dataDir, "api", "api-1");
+        await required(bot).emitText(telegramContext({ text: "/help", updateId: 22 }));
+        expect(readTelegramBindings(dataDir, "api", "telegram").size).toBe(0);
+      },
+    );
+
+    it("keeps a persisted replacement over the source's cached binding", async () => {
+      const dataDir = await createTempDir("spur-telegram-replacement-");
+      tempDirs.push(dataDir);
+      writeTelegramBindings(dataDir, "api", "telegram", [
+        { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+      ]);
+      const { bot } = await startSource(dataDir);
+      writeTelegramBindings(dataDir, "api", "telegram", [
+        { chatId: -1001, messageThreadId: 22, sessionId: "api-2" },
+      ]);
+      await required(bot).emitText(telegramContext({ text: "/help", updateId: 22 }));
+      expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
+        "api-2",
+      );
+    });
+
+    it("refuses a watch binding while its topic deletion is pending", async () => {
+      const { claimTelegramTopicDeletion } = await import("../../src/telegram-source-state.js");
+      const dataDir = await createTempDir("spur-telegram-deleting-");
+      tempDirs.push(dataDir);
+      const { bot } = await startSource(dataDir);
+      const release = claimTelegramTopicDeletion(dataDir, -1001, 22);
+      try {
+        const ctx = telegramContext({ text: "/watch api-2", updateId: 22 });
+        await required(bot).emitText(ctx);
+        expect(readTelegramBindings(dataDir, "api", "telegram").size).toBe(0);
+        expect(ctx.reply).toHaveBeenCalledWith(
+          expect.stringContaining("Failed to bind Spur session api-2"),
+        );
+        expect(readTelegramReplyTarget(dataDir, "api-2")).toBeNull();
+      } finally {
+        release?.();
+      }
+    });
+
     it.each(["complete", "kill"] as const)(
       "lifecycle identity recovery: %s uses recovered Context identity after startup getMe fails",
       async (action) => {
@@ -4425,9 +4489,6 @@ describe("telegramSourceModule", () => {
     await bot.emitText(telegramContext({ text: "/watch api-1" }));
     listSessions.mockResolvedValue([]);
 
-    const persistSpy = vi.spyOn(metadataModule, "writeTelegramBindings");
-    persistSpy.mockClear();
-
     const ctx1 = telegramContext({ text: "still there?" });
     const ctx2 = telegramContext({ text: "still there? (again)" });
     const a = bot.emitText(ctx1);
@@ -4440,11 +4501,9 @@ describe("telegramSourceModule", () => {
       ctx.reply.mock.calls.some((call: unknown[]) => call[0] === "Spawn already in progress here."),
     );
     expect(busyReplies).toHaveLength(1);
-    const removeKeyCalls = persistSpy.mock.calls.filter((call) => {
-      const options = call[4] as { removeKeys?: Iterable<string> } | undefined;
-      return options?.removeKeys !== undefined;
-    });
-    expect(removeKeyCalls).toHaveLength(1);
+    expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
+      "shp-5",
+    );
   });
 
   it("reports the spawn failure and retries on the next message", async () => {

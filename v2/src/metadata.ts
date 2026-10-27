@@ -2687,13 +2687,14 @@ export function deleteTelegramSourceStateForSession(
   dataDir: string,
   projectId: string,
   sessionId: string,
-): { heldBinding: boolean } {
+): { heldBinding: boolean; removedBindings: { sourceId: string; binding: TelegramBinding }[] } {
   const dir = join(dataDir, "source-state", "telegram", projectId);
   if (!existsSync(dir)) {
     deleteTelegramReplyTarget(dataDir, sessionId);
-    return { heldBinding: false };
+    return { heldBinding: false, removedBindings: [] };
   }
   let heldBinding = false;
+  const removedBindings: { sourceId: string; binding: TelegramBinding }[] = [];
 
   const choiceDir = join(dir, "choices");
   if (existsSync(choiceDir)) {
@@ -2712,6 +2713,9 @@ export function deleteTelegramSourceStateForSession(
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     const sourceId = entry.name.slice(0, -".json".length);
     const bindings = readTelegramBindings(dataDir, projectId, sourceId);
+    for (const binding of bindings.values()) {
+      if (binding.sessionId === sessionId) removedBindings.push({ sourceId, binding });
+    }
     const remaining = [...bindings.values()].filter((binding) => binding.sessionId !== sessionId);
     if (remaining.length !== bindings.size) {
       heldBinding = true;
@@ -2726,7 +2730,7 @@ export function deleteTelegramSourceStateForSession(
     }
   }
   deleteTelegramReplyTarget(dataDir, sessionId);
-  return { heldBinding };
+  return { heldBinding, removedBindings };
 }
 
 export function listActiveServiceProblems(
