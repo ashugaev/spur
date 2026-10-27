@@ -50553,12 +50553,12 @@ describe("SessionService", () => {
         }));
       }
 
-      function tailResult(reader: object = { filePath: "/rollout.jsonl" }): object {
+      function tailResult(): object {
         return {
           entries: messageEntries(total - windowSize, windowSize),
           totalEntries: total,
           startIndex: total - windowSize,
-          reader,
+          reader: { filePath: "/rollout.jsonl" },
         };
       }
 
@@ -50637,22 +50637,17 @@ describe("SessionService", () => {
     });
 
     describe("codex conversation reader lifetime", () => {
-      function readerResult(filePath: string): object {
-        return {
-          entries: [],
-          totalEntries: 0,
-          startIndex: 0,
-          reader: { filePath },
-        };
-      }
+      const readerResult = (reader: object): object => ({
+        entries: [],
+        totalEntries: 0,
+        startIndex: 0,
+        reader,
+      });
 
       it("reuses the cached codex reader across calls", async () => {
         readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
         const first = { filePath: "/rollout-a.jsonl" };
-        readCodexConversationTailMock.mockResolvedValueOnce({
-          ...readerResult("/rollout-a.jsonl"),
-          reader: first,
-        });
+        readCodexConversationTailMock.mockResolvedValueOnce(readerResult(first));
         const { SessionService } = await loadSessionServiceModule();
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -50700,7 +50695,9 @@ describe("SessionService", () => {
 
       it("evicts the codex reader when the session artifacts are removed", async () => {
         readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
-        readCodexConversationTailMock.mockResolvedValue(readerResult("/rollout-a.jsonl"));
+        readCodexConversationTailMock.mockResolvedValue(
+          readerResult({ filePath: "/rollout-a.jsonl" }),
+        );
         const { SessionService } = await loadSessionServiceModule();
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
         await service.getConversation("api-1");
@@ -50723,10 +50720,7 @@ describe("SessionService", () => {
       it("keeps the codex reader across pruneSessionScopedState for a terminal session", async () => {
         readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "completed" }));
         const first = { filePath: "/rollout-a.jsonl" };
-        readCodexConversationTailMock.mockResolvedValueOnce({
-          ...readerResult("/rollout-a.jsonl"),
-          reader: first,
-        });
+        readCodexConversationTailMock.mockResolvedValueOnce(readerResult(first));
         const { SessionService } = await loadSessionServiceModule();
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
         await service.getConversation("api-1");
