@@ -8034,12 +8034,18 @@ export class SessionService {
           sizes: true,
         },
       );
+      const archivedIds = report.groups
+        .filter((g) => g.archived)
+        .flatMap((g) => g.archiveSessionIds);
+      for (const id of archivedIds) {
+        this.evictConversationReaders(id);
+      }
       this.logEvent("session.gc.completed", {
         level: "info",
         message: `Session GC sweep: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived, ${report.totals.freedBytes ?? 0} byte(s) freed.`,
         details: {
           totals: report.totals,
-          sessionIds: report.groups.filter((g) => g.archived).flatMap((g) => g.archiveSessionIds),
+          sessionIds: archivedIds,
         },
       });
     } catch (error) {
@@ -18152,6 +18158,14 @@ export class SessionService {
     });
   }
 
+  // Session GC archives records without removeSessionArtifacts, so the
+  // sweep evicts through this too.
+  private evictConversationReaders(sessionId: string): void {
+    this.conversationReaders.delete(sessionId);
+    this.codexConversationReaders.delete(sessionId);
+    this.conversationReadChain.delete(sessionId);
+  }
+
   private removeSessionArtifacts(
     session: Pick<
       SessionRecord,
@@ -18166,9 +18180,7 @@ export class SessionService {
     deleteSessionUserActions(this.config.dataDir, sessionId);
     // Evict per-session in-memory reader caches so they do not grow unbounded
     // for the life of the daemon as sessions are created and discarded.
-    this.conversationReaders.delete(sessionId);
-    this.codexConversationReaders.delete(sessionId);
-    this.conversationReadChain.delete(sessionId);
+    this.evictConversationReaders(sessionId);
     this.claudeJsonlReaders.delete(sessionId);
     this.cursorJsonlReaders.delete(sessionId);
     this.cursorPaneReadyOverrides.delete(sessionId);

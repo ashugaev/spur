@@ -50717,6 +50717,51 @@ describe("SessionService", () => {
         );
       });
 
+      it("evicts the codex reader when session gc archives the record", async () => {
+        createSessionStore(
+          baseSession({
+            agent: "codex",
+            status: "completed",
+            worktree: false,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          }),
+        );
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          sessionGc: { ...baseConfig().sessionGc, enabled: true, olderThanDays: 0 },
+        });
+        archiveSessionsMock.mockReturnValueOnce({
+          archivedIds: ["api-1"] as never[],
+          archiveDir: "/tmp/sessions-archive",
+        });
+        readCodexConversationTailMock.mockResolvedValue(
+          readerResult({ filePath: "/rollout-a.jsonl" }),
+        );
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService(
+          "/tmp/spur.yaml",
+          "2026-03-18T10:00:00.000Z",
+        ) as unknown as {
+          runSessionGcSweep(): Promise<void>;
+          lastSessionGcSweepAt: number;
+          getConversation(id: string): Promise<unknown>;
+          dispose(): void;
+        };
+        await service.getConversation("api-1");
+        service.lastSessionGcSweepAt = 0;
+
+        await service.runSessionGcSweep();
+        await service.getConversation("api-1");
+
+        expect(archiveSessionsMock).toHaveBeenCalledTimes(1);
+        expect(readCodexConversationTailMock).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining("api-1"),
+          undefined,
+        );
+        service.dispose();
+      });
+
       it("keeps the codex reader across pruneSessionScopedState for a terminal session", async () => {
         readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "completed" }));
         const first = { filePath: "/rollout-a.jsonl" };
