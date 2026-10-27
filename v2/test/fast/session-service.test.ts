@@ -33246,6 +33246,93 @@ describe("SessionService", () => {
       expect(sidecarTmuxAliveMock).toHaveBeenCalledWith("api-2", "playwright");
     });
 
+    describe("missing desk anchor record", () => {
+      const strandedBase = {
+        project: "api",
+        agent: "claude" as const,
+        prompt: "hello",
+        branch: "api-2",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-2",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running" as const,
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        id: "api-2",
+        tmuxSession: "api-2",
+        deskId: "api-1",
+        sidecarNames: ["daemon", "playwright"],
+      };
+
+      const ownerMissingEvents = () =>
+        logSpurEventMock.mock.calls
+          .map(([, entry]) => entry)
+          .filter((entry) => entry.event === "session.sidecar.owner_missing");
+
+      async function strandedService() {
+        loadConfigMock.mockReturnValue(daemonAndPlaywrightProjectConfig());
+        const sessions = createSessionStore();
+        sessions.set("api-2", { ...strandedBase });
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+        workspaceExistsMock.mockReturnValue(true);
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        return { service, sessions };
+      }
+
+      it("get resolves, omits the desk-shared view and keeps the mcp view", async () => {
+        const { service } = await strandedService();
+
+        const result = await service.get("api-2");
+
+        expect(result.sidecars?.map((view) => view.name)).toEqual(["playwright"]);
+        expect(result.sidecars?.[0]).toMatchObject({ tmuxSession: "api-2--playwright" });
+      });
+
+      it("warns once per (session, anchor) and re-arms after the anchor reappears", async () => {
+        const { service, sessions } = await strandedService();
+
+        await service.get("api-2");
+        await service.get("api-2");
+        await service.list();
+        expect(ownerMissingEvents()).toHaveLength(1);
+        expect(ownerMissingEvents()[0]).toMatchObject({
+          level: "warn",
+          sessionId: "api-2",
+          details: { ownerId: "api-1" },
+        });
+
+        sessions.set("api-1", {
+          ...strandedBase,
+          id: "api-1",
+          tmuxSession: "api-1",
+          branch: "api-1",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          deskId: undefined,
+        });
+        await service.get("api-2");
+        expect(ownerMissingEvents()).toHaveLength(1);
+        sessions.delete("api-1");
+        await service.get("api-2");
+        expect(ownerMissingEvents()).toHaveLength(2);
+      });
+
+      it("full and dashboard list resolve and include the session", async () => {
+        const { service } = await strandedService();
+
+        expect((await service.list()).map((row) => row.id)).toContain("api-2");
+        expect((await service.list({ view: "dashboard" })).map((row) => row.id)).toContain("api-2");
+      });
+
+      it("explicit startSidecar of the desk-shared sidecar rejects with the anchor message", async () => {
+        const { service } = await strandedService();
+
+        await expect(service.startSidecar("api-2", "daemon")).rejects.toThrow(
+          /Desk anchor session api-1 not found/,
+        );
+      });
+    });
+
     it("#822: enrich reports alive:false and deadPane:true when the tmux session exists but the pane is dead", async () => {
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
