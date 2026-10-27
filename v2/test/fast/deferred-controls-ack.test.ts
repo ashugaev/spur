@@ -842,6 +842,7 @@ function baseConfig() {
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+      switchAuth: false,
     },
     diskRetention: { warnFreeGb: 10 },
     sessionGc: {
