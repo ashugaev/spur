@@ -447,6 +447,7 @@ const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDi
 const captureCodexRolloutBaselineMock = vi.fn();
 const findLatestCodexSessionFileMock = vi.fn();
 const readCodexRolloutStateMock = vi.fn();
+const readCodexConversationTailMock = vi.fn();
 const scanCodexRolloutForMessageMock = vi.fn();
 const ghMock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
@@ -773,6 +774,7 @@ vi.mock("../../src/agents/codex.js", () => ({
   codexHookHomePath: codexHookHomePathMock,
   captureCodexRolloutBaseline: captureCodexRolloutBaselineMock,
   findLatestCodexSessionFile: findLatestCodexSessionFileMock,
+  readCodexConversationTail: readCodexConversationTailMock,
   readCodexRolloutState: readCodexRolloutStateMock,
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
 }));
@@ -2497,6 +2499,7 @@ describe("SessionService", () => {
     tryRotateMock.mockReset();
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
     findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
+    readCodexConversationTailMock.mockReset().mockResolvedValue(null);
     readCodexRolloutStateMock.mockReset().mockResolvedValue({ rollout: null, rateLimit: null });
     // Default: a well-formed batched-lookup response that says "no PR for this
     // branch". An unparseable answer is no longer read as "no PR" — it is a
@@ -50504,29 +50507,240 @@ describe("SessionService", () => {
 
     it("derives messages and entries from the codex transcript reader", async () => {
       readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
-      readAgentConversationMock.mockResolvedValue([
-        { kind: "message", role: "user", text: "hi", timestampMs: 1 },
-        { kind: "tool", name: "exec_command", callId: "call_1" },
-        { kind: "message", role: "assistant", text: "hello back", timestampMs: 2 },
-      ]);
+      readCodexConversationTailMock.mockResolvedValue({
+        entries: [
+          { kind: "message", role: "user", text: "hi", timestampMs: 1 },
+          { kind: "tool", name: "exec_command", callId: "call_1" },
+          { kind: "message", role: "assistant", text: "hello back", timestampMs: 2 },
+        ],
+        totalEntries: 3,
+        startIndex: 0,
+        reader: { filePath: "/rollout.jsonl" },
+      });
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       const result = await service.getConversation("api-1");
 
-      expect(readAgentConversationMock).toHaveBeenCalledWith(
-        "codex",
-        expect.objectContaining({
-          worktreePath: "/tmp/spur-worktrees/api/api-1",
-          codexSessionsDir: expect.stringContaining("api-1"),
-        }),
+      expect(readCodexConversationTailMock).toHaveBeenCalledWith(
+        expect.stringContaining("api-1"),
+        undefined,
       );
+      expect(readAgentConversationMock).not.toHaveBeenCalled();
       expect(result.messages).toEqual([
         { role: "user", text: "hi", timestampMs: 1 },
         { role: "assistant", text: "hello back", timestampMs: 2 },
       ]);
       expect(result.entries.map((entry) => entry.kind)).toEqual(["message", "tool", "message"]);
+      expect(result.totalEntries).toBe(3);
+      expect(result.startIndex).toBe(0);
+    });
+
+    describe("codex window paging", () => {
+      // Window of 300 entries ending at total 450: absolute indexes 150..449.
+      const total = 450;
+      const windowSize = 300;
+
+      function messageEntries(
+        startIndex: number,
+        count: number,
+      ): { kind: "message"; role: "user"; text: string }[] {
+        return Array.from({ length: count }, (_, offset) => ({
+          kind: "message" as const,
+          role: "user" as const,
+          text: `m${startIndex + offset}`,
+        }));
+      }
+
+      function tailResult(reader: object = { filePath: "/rollout.jsonl" }): object {
+        return {
+          entries: messageEntries(total - windowSize, windowSize),
+          totalEntries: total,
+          startIndex: total - windowSize,
+          reader,
+        };
+      }
+
+      async function codexService(): Promise<
+        InstanceType<Awaited<ReturnType<typeof loadSessionServiceModule>>["SessionService"]>
+      > {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+        readCodexConversationTailMock.mockResolvedValue(tailResult());
+        const { SessionService } = await loadSessionServiceModule();
+        return new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      }
+
+      it("returns the last page of the window without a full read", async () => {
+        const service = await codexService();
+
+        const result = await service.getConversation("api-1");
+
+        expect(result.startIndex).toBe(350);
+        expect(result.totalEntries).toBe(total);
+        expect(result.entries).toEqual(messageEntries(350, 100));
+        expect(readAgentConversationMock).not.toHaveBeenCalled();
+      });
+
+      it("slices from inside the window without a full read", async () => {
+        const service = await codexService();
+
+        const result = await service.getConversation("api-1", { from: 200 });
+
+        expect(result.startIndex).toBe(200);
+        expect(result.entries).toEqual(messageEntries(200, 250));
+        expect(readAgentConversationMock).not.toHaveBeenCalled();
+      });
+
+      it("reads the full transcript when from is below the window", async () => {
+        const service = await codexService();
+        readAgentConversationMock.mockResolvedValue(messageEntries(0, total));
+
+        const result = await service.getConversation("api-1", { from: 10 });
+
+        expect(readAgentConversationMock).toHaveBeenCalledWith(
+          "codex",
+          expect.objectContaining({ codexSessionsDir: expect.stringContaining("api-1") }),
+        );
+        expect(result.startIndex).toBe(10);
+        expect(result.totalEntries).toBe(total);
+        expect(result.entries).toEqual(messageEntries(10, total - 10));
+      });
+
+      it("keeps the end of the transcript for preserveEnd at from == totalEntries", async () => {
+        const service = await codexService();
+
+        const result = await service.getConversation("api-1", {
+          from: total,
+          preserveEnd: true,
+        });
+
+        expect(result.startIndex).toBe(total);
+        expect(result.entries).toEqual([]);
+        expect(readAgentConversationMock).not.toHaveBeenCalled();
+      });
+
+      it("returns an empty response with the status fallback state when no rollout exists", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "killed" }));
+        readCodexConversationTailMock.mockResolvedValue(null);
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const result = await service.getConversation("api-1", { from: 5 });
+
+        expect(result.state).toBe("killed");
+        expect(result.entries).toEqual([]);
+        expect(result.totalEntries).toBe(0);
+        expect(result.startIndex).toBe(0);
+        expect(readAgentConversationMock).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("codex conversation reader lifetime", () => {
+      function readerResult(filePath: string): object {
+        return {
+          entries: [],
+          totalEntries: 0,
+          startIndex: 0,
+          reader: { filePath },
+        };
+      }
+
+      it("reuses the cached codex reader across calls", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+        const first = { filePath: "/rollout-a.jsonl" };
+        readCodexConversationTailMock.mockResolvedValueOnce({
+          ...readerResult("/rollout-a.jsonl"),
+          reader: first,
+        });
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await service.getConversation("api-1");
+        await service.getConversation("api-1");
+
+        expect(readCodexConversationTailMock).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining("api-1"),
+          first,
+        );
+      });
+
+      it("serializes overlapping codex reads so the shared reader is not clobbered", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+        // Each read builds on the reader it was handed: two overlapping polls
+        // that both saw the same stale reader would double-count.
+        readCodexConversationTailMock.mockImplementation(
+          async (_dir: string, reader?: { totalEntries?: number }) => {
+            const totalEntries = (reader?.totalEntries ?? 0) + 5;
+            await Promise.resolve();
+            return {
+              entries: [],
+              totalEntries,
+              startIndex: totalEntries,
+              reader: { filePath: "/x.jsonl", totalEntries },
+            };
+          },
+        );
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const [a, b] = await Promise.all([
+          service.getConversation("api-1"),
+          service.getConversation("api-1"),
+        ]);
+
+        const totals = [a.totalEntries, b.totalEntries].sort((x, y) => (x ?? 0) - (y ?? 0));
+        expect(totals).toEqual([5, 10]);
+        expect(readCodexConversationTailMock).toHaveBeenLastCalledWith(
+          expect.stringContaining("api-1"),
+          expect.objectContaining({ totalEntries: 5 }),
+        );
+      });
+
+      it("evicts the codex reader when the session artifacts are removed", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+        readCodexConversationTailMock.mockResolvedValue(readerResult("/rollout-a.jsonl"));
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await service.getConversation("api-1");
+
+        // @ts-expect-error test-only access to a private method
+        service.removeSessionArtifacts({
+          id: "api-1",
+          project: "api",
+          startupAttachmentIds: [],
+        });
+        await service.getConversation("api-1");
+
+        expect(readCodexConversationTailMock).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining("api-1"),
+          undefined,
+        );
+      });
+
+      it("keeps the codex reader across pruneSessionScopedState for a terminal session", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "completed" }));
+        const first = { filePath: "/rollout-a.jsonl" };
+        readCodexConversationTailMock.mockResolvedValueOnce({
+          ...readerResult("/rollout-a.jsonl"),
+          reader: first,
+        });
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await service.getConversation("api-1");
+
+        // @ts-expect-error test-only access to a private method
+        service.pruneSessionScopedState(new Set());
+        await service.getConversation("api-1");
+
+        expect(readCodexConversationTailMock).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining("api-1"),
+          first,
+        );
+      });
     });
 
     it("derives messages and entries from the cursor transcript reader", async () => {
