@@ -14,9 +14,6 @@ ACTION
   2  Append new stable facts and decisions since the last entry — facts, not conversation. Drop dead ends and exploration narrative.
   3  Append a short reflection: what changed this cycle, what it means for the next gate, what is settled vs still open.
 
-RULES
-  Fail closed if $SPUR_SESSION_WORK_DIR is unset.
-
 OUTPUT
 Compact handoff downstream gates consume — facts, not chat. Sections:
   Task model — the objective and observable done-state.

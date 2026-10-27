@@ -479,8 +479,9 @@ function readArtifactViewMode(): ArtifactViewMode {
   }
 }
 
-function artifactTabClass(active: boolean): string {
-  return `border-r border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase tracking-[0.12em] last:border-r-0 ${
+function artifactTabClass(active: boolean, wrapping = false): string {
+  const edge = wrapping ? "-ml-px -mt-px border" : "border-r last:border-r-0";
+  return `${edge} border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase tracking-[0.12em] ${
     active
       ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]"
       : "text-[var(--color-text-secondary)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
@@ -3725,12 +3726,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     {formatOptions.length > 1 ? (
                       <div
                         aria-label="Artifact format"
-                        className="inline-flex border border-[var(--color-border-default)]"
+                        className="inline-flex flex-wrap pl-px pt-px"
                         role="tablist"
                       >
                         <button
                           aria-pressed={activeArtifactFormat === null}
-                          className={artifactTabClass(activeArtifactFormat === null)}
+                          className={artifactTabClass(activeArtifactFormat === null, true)}
                           onClick={() => setArtifactFormat(null)}
                           type="button"
                         >
@@ -3742,7 +3743,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             <button
                               key={extension}
                               aria-pressed={active}
-                              className={artifactTabClass(active)}
+                              className={artifactTabClass(active, true)}
                               onClick={() => setArtifactFormat(active ? null : extension)}
                               type="button"
                             >
