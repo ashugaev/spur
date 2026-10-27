@@ -220,8 +220,9 @@ function RowActionsMenu({
   const [open, setOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const busy = running || Boolean(session.lifecyclePending);
+  const menuOpen = open && !busy;
   const { containerRef, buttonRef, menuRef, menuStyle } = useAnchoredMenu({
-    open,
+    open: menuOpen,
     onClose: () => setOpen(false),
     contentDeps: [session.status],
     preferredSide: "below",
@@ -236,9 +237,10 @@ function RowActionsMenu({
   if (canReopen(session)) items.push({ label: "Reopen", action: "reopen" });
   if (canComplete(session)) items.push({ label: "Complete", action: "complete" });
   const showKill = !isTerminalSession(session);
-  if (items.length === 0 && !showKill) return null;
+  if (items.length === 0 && !showKill)
+    return <span aria-hidden="true" className="hidden h-6 w-6 shrink-0 lg:inline-flex" />;
   const itemClass =
-    "block w-full px-2 py-1.5 text-left transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50";
+    "block w-full px-2 py-1.5 text-left outline-none transition hover:bg-[var(--color-hover-overlay)] focus-visible:bg-[var(--color-hover-overlay)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--color-accent)]";
   const select = async (action: SessionRowAction) => {
     setOpen(false);
     if (busy) return;
@@ -254,14 +256,15 @@ function RowActionsMenu({
 
   return (
     <span
-      className={`relative hidden shrink-0 lg:inline-flex ${open ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+      className={`relative hidden shrink-0 lg:inline-flex ${menuOpen ? "opacity-100" : "opacity-0 focus-within:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"}`}
       ref={containerRef}
     >
       <RowIconButton
-        activeClass="border-transparent text-[var(--color-text-tertiary)] hover:border-[var(--color-border-default)] hover:text-[var(--color-text-secondary)]"
+        activeClass="border-transparent text-[var(--color-text-tertiary)] outline-none hover:border-[var(--color-border-default)] hover:text-[var(--color-text-secondary)] focus-visible:border-[var(--color-accent)] focus-visible:text-[var(--color-text-primary)]"
         buttonRef={buttonRef}
-        disabled={false}
+        disabled={busy}
         label={`Actions for ${session.id}`}
+        menuOpen={menuOpen}
         onClick={() => setOpen((value) => !value)}
       >
         <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 24 24">
@@ -270,7 +273,7 @@ function RowActionsMenu({
           <circle cx="12" cy="19" r="1.6" />
         </svg>
       </RowIconButton>
-      {open ? (
+      {menuOpen ? (
         <div
           aria-label="Session actions"
           className="fixed z-30 w-44 border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
@@ -281,7 +284,6 @@ function RowActionsMenu({
           {items.map((item) => (
             <button
               className={`${itemClass} text-[var(--color-text-secondary)]`}
-              disabled={busy}
               key={item.action}
               onClick={() => void select(item.action)}
               role="menuitem"
@@ -300,7 +302,6 @@ function RowActionsMenu({
               ) : null}
               <button
                 className={`${itemClass} text-[var(--color-status-error)]`}
-                disabled={busy}
                 onClick={() => void select("kill")}
                 role="menuitem"
                 type="button"

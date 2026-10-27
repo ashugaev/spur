@@ -1316,6 +1316,10 @@ export function Dashboard() {
     refetchIntervalInBackground: true,
     placeholderData: (prev) => prev,
   });
+  useEffect(() => {
+    for (const id of lifecycleRef.current.takeExpired())
+      showErrorToast(`Session ${id} did not confirm the change`);
+  }, [lifecycleVersion, showErrorToast]);
   const rawSessions = data?.sessions ?? [];
   const effectiveRawSessions = useMemo(
     () => lifecycleRef.current.project(rawSessions),
@@ -2409,6 +2413,7 @@ export function Dashboard() {
         !("id" in payload) ||
         payload.id !== session.id
       ) {
+        if (!daemonOperation) lifecycleRef.current.hold(owner);
         await reconcileAttempt(owner);
         return lifecycleRef.current.isCurrent(owner);
       }

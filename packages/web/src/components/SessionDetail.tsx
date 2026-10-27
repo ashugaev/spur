@@ -1803,18 +1803,23 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     };
   }, [dismissLoadErrorToast, sessionId]);
 
-  const publishLifecycleSession = useCallback((row: SpurSessionView) => {
-    rawSessionRef.current = row;
-    const projected = lifecycleRef.current.project([row])[0];
-    if (projected) setSession(toDashboardSession(projected));
-    const owner = lifecycleActionRef.current;
-    if (owner && !lifecycleRef.current.isCurrent(owner)) {
-      lifecycleActionRef.current = null;
-      setBusyAction(null);
-    } else if (owner && !lifecycleRef.current.pending(row.id)) {
-      setBusyAction(null);
-    }
-  }, []);
+  const publishLifecycleSession = useCallback(
+    (row: SpurSessionView) => {
+      rawSessionRef.current = row;
+      const projected = lifecycleRef.current.project([row])[0];
+      if (projected) setSession(toDashboardSession(projected));
+      const owner = lifecycleActionRef.current;
+      if (owner && !lifecycleRef.current.isCurrent(owner)) {
+        lifecycleActionRef.current = null;
+        setBusyAction(null);
+      } else if (owner && !lifecycleRef.current.pending(row.id)) {
+        setBusyAction(null);
+      }
+      if (lifecycleRef.current.takeExpired().includes(row.id))
+        showErrorToast("Session did not confirm the change");
+    },
+    [showErrorToast],
+  );
 
   const fetchSession = useCallback(
     async (signal: AbortSignal) => {
@@ -2185,6 +2190,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         showQueuedAheadToast(payload);
       }
       if (!owner) await loadSession();
+      else if (!daemonOperation) consumer.hold(owner);
       return true;
     } catch (actionError) {
       if (!isCurrentAction()) return false;

@@ -88,7 +88,7 @@ describe("SessionRow actions menu", () => {
 
   it.each([
     [{ status: "running", runtimeAlive: true }, ["Pause", "Complete", "Kill"]],
-    [{ status: "paused", state: "stopped", runtimeAlive: false }, ["Restore", "Complete", "Kill"]],
+    [{ status: "stopped", state: "stopped", runtimeAlive: false }, ["Restore", "Complete", "Kill"]],
     [
       {
         status: "budget_limited",
@@ -111,21 +111,47 @@ describe("SessionRow actions menu", () => {
     expect(openMenu(makeSession(overrides))).toEqual(labels);
   });
 
-  it("dispatches the selected action and disables items while it runs", async () => {
+  it("dispatches the selected action and disables the trigger while it runs", async () => {
     let finish!: () => void;
     onSessionAction.mockReturnValue(new Promise<void>((resolve) => (finish = resolve)));
     openMenu(makeSession({ status: "running", runtimeAlive: true }));
+    const trigger = screen.getByRole("button", { name: "Actions for api-a1" });
+    expect(trigger).toHaveAttribute("aria-haspopup", "menu");
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
     fireEvent.click(screen.getByRole("menuitem", { name: "Kill" }));
     expect(onSessionAction).toHaveBeenCalledWith(expect.objectContaining({ id: "api-a1" }), "kill");
-    fireEvent.click(screen.getByRole("button", { name: "Actions for api-a1" }));
-    for (const item of screen.getAllByRole("menuitem")) expect(item).toBeDisabled();
+    expect(trigger).toBeDisabled();
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     finish();
-    await waitFor(() => expect(screen.getByRole("menuitem", { name: "Pause" })).not.toBeDisabled());
+    await waitFor(() => expect(trigger).not.toBeDisabled());
   });
 
-  it("disables items while a lifecycle transition is pending", () => {
-    openMenu(makeSession({ status: "paused", state: "stopped", lifecyclePending: "pause" }));
-    for (const item of screen.getAllByRole("menuitem")) expect(item).toBeDisabled();
+  it("reserves the slot without a trigger when no action applies", () => {
+    const { container } = render(
+      <SessionRow
+        session={makeSession({ status: "killed", state: "killed", runtimeAlive: false })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Actions for api-a1" })).not.toBeInTheDocument();
+    expect(container.querySelector('span[aria-hidden="true"].h-6.w-6')).not.toBeNull();
+  });
+
+  it("disables the trigger while a lifecycle transition is pending", () => {
+    render(
+      <SessionRow
+        session={makeSession({ status: "stopped", state: "stopped", lifecyclePending: "pause" })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+        onSessionAction={onSessionAction}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "Actions for api-a1" });
+    expect(trigger).toBeDisabled();
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 });
 

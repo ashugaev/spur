@@ -19,6 +19,7 @@ export function RowIconButton({
   activeClass,
   onClick,
   buttonRef,
+  menuOpen,
   children,
 }: {
   label: string;
@@ -26,10 +27,14 @@ export function RowIconButton({
   activeClass: string;
   onClick: () => void;
   buttonRef?: Ref<HTMLButtonElement>;
+  /** Set when the button toggles a menu. */
+  menuOpen?: boolean;
   children: ReactNode;
 }) {
   return (
     <button
+      aria-expanded={menuOpen}
+      aria-haspopup={menuOpen === undefined ? undefined : "menu"}
       aria-label={label}
       title={label}
       className={`${BASE_BTN} ${disabled ? DISABLED_BTN : activeClass}`}
