@@ -2,6 +2,7 @@ import {
   type Dir,
   type Dirent,
   type Stats,
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -209,11 +210,62 @@ export function ensureSessionArtifactsDir(dataDir: string, sessionId: string): s
   return dir;
 }
 
+function isPermissionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === "EACCES" || code === "EPERM";
+}
+
+// Agents leave read-only directories behind (chmod, pytest caches). Restores the owner
+// write+exec bit on every directory this uid owns, never following symlinks. Directories
+// owned by another uid are left as-is: chmod on them fails and is skipped.
+function restoreOwnerWriteOnDirs(dir: string): void {
+  const uid = process.getuid?.();
+  const stack = [dir];
+  while (stack.length > 0) {
+    const current = stack.pop() as string;
+    try {
+      const stats = lstatSync(current);
+      if (!stats.isDirectory()) {
+        continue;
+      }
+      if (stats.uid === uid) {
+        chmodSync(current, stats.mode | 0o700);
+      }
+      for (const entry of readdirSync(current, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          stack.push(join(current, entry.name));
+        }
+      }
+    } catch {
+      // Unreadable or foreign directory: nothing this uid can fix here.
+    }
+  }
+}
+
+/**
+ * Removes the session's artifacts dir. Never throws on a permission error: read-only
+ * directories this uid owns are made writable and the removal retried; entries owned by
+ * another uid stay on disk and the rest is removed best-effort.
+ */
 export function deleteSessionArtifactsDir(dataDir: string, sessionId: string): void {
-  rmSync(sessionArtifactsDir(dataDir, sessionId), {
-    force: true,
-    recursive: true,
-  });
+  const dir = sessionArtifactsDir(dataDir, sessionId);
+  try {
+    rmSync(dir, { force: true, recursive: true });
+    return;
+  } catch (error) {
+    if (!isPermissionError(error)) {
+      throw error;
+    }
+  }
+  restoreOwnerWriteOnDirs(dir);
+  try {
+    rmSync(dir, { force: true, recursive: true });
+  } catch (error) {
+    if (!isPermissionError(error)) {
+      throw error;
+    }
+    deleteSessionArtifactsExcept(dataDir, sessionId, []);
+  }
 }
 
 /**
@@ -311,9 +363,17 @@ export function deleteSessionArtifactsExcept(
       if (relPath === ARTIFACT_METADATA_FILE || keep.has(relPath)) {
         continue;
       }
-      rmSync(entryPath, { force: true });
+      try {
+        rmSync(entryPath, { force: true });
+      } catch (error) {
+        // A file under a directory this uid cannot write stays; complete must not fail on it.
+        if (!isPermissionError(error)) {
+          throw error;
+        }
+      }
     }
   };
+  restoreOwnerWriteOnDirs(dir);
   walk(dir, "");
 
   for (const relPath of directories) {

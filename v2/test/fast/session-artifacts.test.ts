@@ -1,10 +1,11 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   MAX_NESTED_ARTIFACT_ROWS,
   deleteSessionArtifactById,
+  deleteSessionArtifactsDir,
   deleteSessionArtifactsExcept,
   listSessionArtifacts,
   parseArtifactRelativePath,
@@ -383,6 +384,37 @@ describe("session artifact cleanup", () => {
     expect(existsSync(join(dir, "design", "design-spec.md"))).toBe(true);
     expect(existsSync(join(dir, "design", "scratch.md"))).toBe(false);
     expect(existsSync(join(dir, "notes"))).toBe(false);
+  });
+});
+
+describe.skipIf(process.getuid?.() === 0)("session artifact cleanup with read-only dirs", () => {
+  async function seedReadOnlyTree(dataDir: string, sessionId: string): Promise<string> {
+    const dir = sessionArtifactsDir(dataDir, sessionId);
+    const cache = join(dir, "handoff", "back", ".pytest_cache");
+    await mkdir(join(cache, "v"), { recursive: true });
+    await writeFile(join(cache, ".gitignore"), "*\n", "utf8");
+    await writeFile(join(cache, "v", "lastfailed"), "{}", "utf8");
+    await writeFile(join(dir, "shot.png"), "png", "utf8");
+    await chmod(join(cache, "v"), 0o500);
+    await chmod(cache, 0o555);
+    return dir;
+  }
+
+  it("removes the whole dir despite a read-only nested dir (EACCES on unlink)", async () => {
+    const dataDir = await newDataDir();
+    const dir = await seedReadOnlyTree(dataDir, "ro-1");
+
+    expect(() => deleteSessionArtifactsDir(dataDir, "ro-1")).not.toThrow();
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it("removes non-kept files under a read-only nested dir", async () => {
+    const dataDir = await newDataDir();
+    const dir = await seedReadOnlyTree(dataDir, "ro-2");
+
+    expect(() => deleteSessionArtifactsExcept(dataDir, "ro-2", ["shot.png"])).not.toThrow();
+    expect(existsSync(join(dir, "shot.png"))).toBe(true);
+    expect(existsSync(join(dir, "handoff"))).toBe(false);
   });
 });
 
