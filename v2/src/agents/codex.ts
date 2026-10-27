@@ -1823,6 +1823,48 @@ interface CodexLineFolder<F> {
   line: (fold: F, parsed: Record<string, unknown>) => void;
 }
 
+function isKnownCodexNonauthorityRecord(type: unknown, payload: unknown): boolean {
+  if (!isRecord(payload)) return false;
+  if (type === "world_state") {
+    return (
+      Object.keys(payload).length === 2 &&
+      typeof payload["full"] === "boolean" &&
+      isRecord(payload["state"])
+    );
+  }
+  if (type !== "token_usage_record" || Object.keys(payload).length !== 8) return false;
+  const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+  if (
+    ![payload["thread_id"], payload["session_id"]].every(
+      (value) => typeof value === "string" && uuid.test(value),
+    )
+  )
+    return false;
+  if (
+    ![payload["turn_id"], payload["root_turn_id"], payload["response_id"]].every(
+      (value) => typeof value === "string",
+    )
+  )
+    return false;
+  const required = [
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+  ];
+  return [payload["usage"], payload["turn_token_usage"], payload["thread_token_usage"]].every(
+    (usage) =>
+      isRecord(usage) &&
+      required.every((key) => Number.isSafeInteger(usage[key])) &&
+      Object.keys(usage).every(
+        (key) => required.includes(key) || key === "cache_write_input_tokens",
+      ) &&
+      (!Object.hasOwn(usage, "cache_write_input_tokens") ||
+        Number.isSafeInteger(usage["cache_write_input_tokens"])),
+  );
+}
+
 // One gate slot covers prefix verification and the scan, so concurrent opens
 // never exceed CODEX_ROLLOUT_READ_MAX_CONCURRENCY. Resumes from `cached` only
 // when the verified prefix is unchanged, else folds the whole file. Null: read
@@ -1859,7 +1901,8 @@ async function foldCodexJsonlFile<F>(
         isRecord(parsed) &&
         !["session_meta", "event_msg", "response_item", "turn_context"].includes(
           String(parsed["type"]),
-        )
+        ) &&
+        !isKnownCodexNonauthorityRecord(parsed["type"], parsed["payload"])
       )
         valid = false;
       if (

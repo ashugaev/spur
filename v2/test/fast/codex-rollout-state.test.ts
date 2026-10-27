@@ -30,6 +30,278 @@ import { hashHistoryTail, PREFIX_VERIFY_BYTES } from "../../src/agent-history-de
 import { SCAN_CHUNK_BYTES } from "../../src/jsonl-scan.js";
 import { reconcileTokenUsage } from "../../src/token-usage.js";
 
+describe("known nonauthority Codex records", () => {
+  const sinceMs = Date.parse("2026-06-28T08:10:00.000Z");
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const currentTurn = "hook-turn";
+  const row = (type: string, payload: unknown, seconds = 2) => ({
+    type,
+    timestamp: new Date(sinceMs + seconds * 1000).toISOString(),
+    payload,
+  });
+  const meta = row("session_meta", { id: threadId, source: "cli", thread_source: "user" }, -60);
+  const context = row("turn_context", { turn_id: currentTurn, model: "fixture-model" }, 1);
+  const call = (type = "function_call", seconds = 3) =>
+    row(
+      "response_item",
+      {
+        type: type === "request_user_input" ? "function_call" : type,
+        name: type === "request_user_input" ? type : "fixture_tool",
+        call_id: "call-current",
+      },
+      seconds,
+    );
+  const usage = () => ({
+    input_tokens: 4,
+    cached_input_tokens: 3,
+    output_tokens: 2,
+    reasoning_output_tokens: 1,
+    total_tokens: 6,
+    cache_write_input_tokens: 0,
+  });
+  const token = () => ({
+    thread_id: threadId,
+    turn_id: "attributed-turn",
+    session_id: "22222222-2222-4222-8222-222222222222",
+    root_turn_id: "attributed-root",
+    response_id: "response",
+    usage: usage(),
+    turn_token_usage: usage(),
+    thread_token_usage: usage(),
+  });
+  const world = (full: boolean) =>
+    row("world_state", {
+      full,
+      state: {
+        turn_id: "nested-turn",
+        source: "subagent",
+        parent_thread_id: "nested-parent",
+        items: [null, { id: threadId }],
+      },
+    });
+  const jsonl = (rows: unknown[]) => rows.map((value) => JSON.stringify(value)).join("\n") + "\n";
+  const read = (dir: string) =>
+    readCodexRolloutState(dir, undefined, threadId, { sinceMs, nowMs: sinceMs + 60_000 });
+
+  it.each(["function_call", "custom_tool_call", "request_user_input"])(
+    "preserves current turn through official world/token records before %s",
+    async (type) => {
+      const dir = await makeSessionsDir(
+        jsonl([
+          meta,
+          context,
+          world(true),
+          world(false),
+          row("token_usage_record", token()),
+          call(type),
+        ]),
+      );
+      const result = await read(dir);
+      expect(result.rollout).toMatchObject({
+        state: type === "request_user_input" ? "needs_input" : "working",
+        reason: type,
+        turnId: currentTurn,
+      });
+      expect(result.launchProof).toMatchObject({
+        kind: "primary",
+        complete: true,
+        threadId,
+        turnId: currentTurn,
+      });
+      expect(result.model).toBe("fixture-model");
+      expect(result.tokenUsage).toBeUndefined();
+      expect(result.rateLimit).toBeNull();
+    },
+  );
+
+  it.each(["turn_id", "root_turn_id", "response_id"] as const)(
+    "accepts an empty upstream String %s without promoting it",
+    async (field) => {
+      const dir = await makeSessionsDir(
+        jsonl([meta, context, row("token_usage_record", { ...token(), [field]: "" }), call()]),
+      );
+      expect((await read(dir)).launchProof).toMatchObject({ kind: "primary", turnId: currentTurn });
+    },
+  );
+
+  it.each(["omitted", "signed"])("accepts %s counters without new accounting", async (mode) => {
+    const { cache_write_input_tokens: _default, ...required } = usage();
+    const counters =
+      mode === "omitted"
+        ? required
+        : Object.fromEntries(Object.keys(usage()).map((key) => [key, -5]));
+    const dir = await makeSessionsDir(
+      jsonl([
+        meta,
+        context,
+        row("token_usage_record", {
+          ...token(),
+          usage: counters,
+          turn_token_usage: counters,
+          thread_token_usage: counters,
+        }),
+        call(),
+      ]),
+    );
+    const result = await read(dir);
+    expect(result.launchProof).toMatchObject({ kind: "primary", turnId: currentTurn });
+    expect(result.tokenUsage).toBeUndefined();
+  });
+
+  it.each([
+    {},
+    { full: true },
+    { state: {} },
+    { full: null, state: {} },
+    { full: 1, state: {} },
+    { full: true, state: null },
+    { full: true, state: [] },
+    { full: true, state: "object" },
+    { full: true, state: {}, future: true },
+  ])("rejects malformed world payload %j", async (payload) => {
+    const dir = await makeSessionsDir(jsonl([meta, context, row("world_state", payload), call()]));
+    expect((await read(dir)).launchProof).toEqual({ kind: "unknown" });
+  });
+
+  it.each(Object.keys(token()))("rejects missing required token field %s", async (field) => {
+    const payload = Object.fromEntries(Object.entries(token()).filter(([key]) => key !== field));
+    const dir = await makeSessionsDir(
+      jsonl([meta, context, row("token_usage_record", payload), call()]),
+    );
+    expect((await read(dir)).launchProof).toEqual({ kind: "unknown" });
+  });
+
+  it.each(["thread_id", "session_id"] as const)(
+    "rejects malformed typed UUID %s",
+    async (field) => {
+      for (const value of [null, 1, "not-a-uuid", threadId.replaceAll("-", "")]) {
+        const dir = await makeSessionsDir(
+          jsonl([meta, context, row("token_usage_record", { ...token(), [field]: value }), call()]),
+        );
+        expect((await read(dir)).launchProof, String(value)).toEqual({ kind: "unknown" });
+      }
+    },
+  );
+
+  it.each(["turn_id", "root_turn_id", "response_id"] as const)(
+    "rejects nonstring attribution %s",
+    async (field) => {
+      for (const value of [null, false, 7, {}]) {
+        const dir = await makeSessionsDir(
+          jsonl([meta, context, row("token_usage_record", { ...token(), [field]: value }), call()]),
+        );
+        expect((await read(dir)).launchProof).toEqual({ kind: "unknown" });
+      }
+    },
+  );
+
+  it.each(["usage", "turn_token_usage", "thread_token_usage"] as const)(
+    "validates every required/optional counter in %s",
+    async (section) => {
+      for (const key of Object.keys(usage())) {
+        for (const value of [null, "1", 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+          const dir = await makeSessionsDir(
+            jsonl([
+              meta,
+              context,
+              row("token_usage_record", { ...token(), [section]: { ...usage(), [key]: value } }),
+              call(),
+            ]),
+          );
+          expect((await read(dir)).launchProof, `${key}:${String(value)}`).toEqual({
+            kind: "unknown",
+          });
+        }
+        if (key !== "cache_write_input_tokens") {
+          const partial = Object.fromEntries(
+            Object.entries(usage()).filter(([field]) => field !== key),
+          );
+          const dir = await makeSessionsDir(
+            jsonl([
+              meta,
+              context,
+              row("token_usage_record", { ...token(), [section]: partial }),
+              call(),
+            ]),
+          );
+          expect((await read(dir)).launchProof, `missing:${key}`).toEqual({ kind: "unknown" });
+        }
+      }
+      for (const invalid of [null, [], { ...usage(), future: 0 }]) {
+        const dir = await makeSessionsDir(
+          jsonl([
+            meta,
+            context,
+            row("token_usage_record", { ...token(), [section]: invalid }),
+            call(),
+          ]),
+        );
+        expect((await read(dir)).launchProof).toEqual({ kind: "unknown" });
+      }
+    },
+  );
+
+  it.each(["extra token key", "unknown record", "future timestamp"])("holds %s", async (mode) => {
+    const item =
+      mode === "extra token key"
+        ? row("token_usage_record", { ...token(), future: true })
+        : mode === "unknown record"
+          ? row("future_record", token())
+          : row("token_usage_record", token(), 61);
+    const dir = await makeSessionsDir(jsonl([meta, context, item, call()]));
+    expect((await read(dir)).launchProof).toEqual({ kind: "unknown" });
+  });
+
+  it.each(["no context", "task boundary", "no primary"])(
+    "cannot promote world or usage IDs after %s",
+    async (mode) => {
+      const prefix =
+        mode === "no context"
+          ? [meta]
+          : mode === "no primary"
+            ? [context]
+            : [meta, context, row("event_msg", { type: "task_complete" }, 1.5)];
+      const dir = await makeSessionsDir(
+        jsonl([
+          ...prefix,
+          world(true),
+          row("token_usage_record", {
+            ...token(),
+            turn_id: currentTurn,
+            root_turn_id: currentTurn,
+          }),
+          call(),
+        ]),
+      );
+      const result = await read(dir);
+      expect(result.launchProof).toEqual({ kind: "unknown" });
+      if (mode !== "no primary") expect(result.rollout).not.toHaveProperty("turnId");
+    },
+  );
+
+  it("preserves context in a cached append without changing existing token totals", async () => {
+    const accounting = row(
+      "event_msg",
+      {
+        type: "token_count",
+        info: { total_token_usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } },
+      },
+      1.5,
+    );
+    const dir = await makeSessionsDir(jsonl([meta, context, accounting]));
+    const file = join(dir, "2026", "04", "19", "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    const before = await readCodexRolloutState(dir, reader);
+    await appendFile(file, jsonl([world(false), row("token_usage_record", token()), call()]));
+    const cached = await readCodexRolloutState(dir, reader);
+    expect(cached).toEqual(await readCodexRolloutState(dir));
+    expect(cached.rollout).toMatchObject({ state: "working", turnId: currentTurn });
+    expect(cached.tokenUsage).toEqual(before.tokenUsage);
+    expect(cached.tokenUsage?.totalTokens).toBe(12);
+    expect((await read(dir)).launchProof).toMatchObject({ kind: "primary", turnId: currentTurn });
+  });
+});
+
 describe("turn-context current-turn compatibility", () => {
   const sinceMs = Date.parse("2026-06-28T08:10:00.000Z");
   const hookTurn = "current-turn";
