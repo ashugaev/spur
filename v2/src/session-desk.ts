@@ -9,8 +9,8 @@ import type { SessionRecord, SidecarConfig } from "./types.js";
 // docs/configuration.md for the desk-group model.
 
 // `workspaceId` is written once at session creation
-// (session-service.ts resolveWorkspaceReuseContext) and session records are
-// never deleted from the store, so it is always a resolvable storage key.
+// (session-service.ts resolveWorkspaceReuseContext). archiveSessions can move
+// an anchor's record out of the store, so readers must tolerate its absence.
 //
 // The `?? deskId ?? id` fallback below is the ONLY place in the codebase
 // that reads the legacy `deskId` field: it exists so records normalized
