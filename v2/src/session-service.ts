@@ -19075,6 +19075,7 @@ export class SessionService {
     this.stateCache.delete(sessionId);
 
     if (session.status === "killed") {
+      await this.cleanupTerminalTelegram(session);
       this.logEvent("session.kill.noop", {
         level: "info",
         sessionId,
