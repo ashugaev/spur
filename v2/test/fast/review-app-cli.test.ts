@@ -221,7 +221,12 @@ test.each(["verified-pending", "announcement-failure", "write-failure"])(
         });
       if (path.endsWith("/issues/1/comments")) {
         if (options?.method !== "POST") return Response.json([]);
-        const payload = JSON.parse(String(options.body)) as { body: string };
+        let payload: { body: string };
+        try {
+          payload = JSON.parse(String(options.body)) as { body: string };
+        } catch (error) {
+          throw new Error("Invalid CLI fixture comment payload", { cause: error });
+        }
         comment = { id: 1, body: payload.body, user: { login: "code[bot]" } };
         return Response.json(comment);
       }

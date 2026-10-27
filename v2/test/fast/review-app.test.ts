@@ -15,6 +15,7 @@ import {
 } from "../../src/review-app.js";
 import { publishLaneState } from "../../src/review-state.js";
 import { execFileAsync } from "../helpers/common.js";
+import { readJson } from "../../src/github-app.js";
 
 const dirs: string[] = [];
 const faults = vi.hoisted(() => ({ approvedWrite: false, recovery: "", writes: 0 }));
@@ -857,7 +858,12 @@ async function legacyRecoveryFixture() {
     calls.push(`${options?.method ?? "GET"} ${path}`);
     if (path === "/repos/owner/repo/issues/4/comments") {
       if (options?.method !== "POST") return Response.json(comments);
-      const payload = JSON.parse(String(options.body)) as { body: string };
+      let payload: { body: string };
+      try {
+        payload = JSON.parse(String(options.body)) as { body: string };
+      } catch (error) {
+        throw new Error("Invalid recovery fixture comment payload", { cause: error });
+      }
       const row = { id: comments.length + 1, body: payload.body, user: { login: "code[bot]" } };
       comments.push(row);
       return Response.json(row);
@@ -1053,7 +1059,7 @@ test.each([
   await f.recover();
   const request = { ...f.request };
   const config = { ...f.config, code: { ...f.config.code } };
-  const current = JSON.parse(await readFile(request.receipt, "utf8")) as Record<string, unknown>;
+  const current = (await readJson(request.receipt)) as Record<string, unknown>;
   if (mode === "session") request.session = "other-reviewer";
   if (mode === "attempt") request.attempt = "other-attempt";
   if (mode === "H") request.H = "d".repeat(40);
@@ -1215,7 +1221,7 @@ test.each([
 ])("legacy recovery rejects touched PENDING %s before save or network", async (mode) => {
   const f = await legacyRecoveryFixture();
   await f.recover();
-  const current = JSON.parse(await readFile(f.request.receipt, "utf8")) as Record<string, unknown>;
+  const current = (await readJson(f.request.receipt)) as Record<string, unknown>;
   if (mode === "evidence") current.evidence = [{ status: "passed", evidence: "already assessed" }];
   if (mode === "localVerdict") current.localVerdict = "APPROVED";
   if (mode === "coverage") current.coverage = draft.coverage;
