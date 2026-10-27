@@ -1,5 +1,10 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { getGitHubRateLimitError, ghHeaders, handleGitHubRateLimit } from "@/lib/github-api";
+import {
+  type GitHubGraphQLError,
+  getGitHubRateLimitError,
+  ghHeaders,
+  handleGitHubRateLimit,
+} from "@/lib/github-api";
 import {
   GITHUB_PR_STATUS_FIELDS,
   isGitHubPrNode,
@@ -50,26 +55,39 @@ function buildAliasedQuery(entries: AliasEntry[]): {
   return { query: `query(${varDecls.join(",")}) {\n${fields.join("\n")}\n}`, variables };
 }
 
-// Maps each GraphQL error to the alias it belongs to via its `path` (GitHub
-// includes the failing field's alias as the first path segment, e.g.
-// `["pr1","pullRequest"]`). Errors without a resolvable alias are dropped
-// here rather than applied to every miss — a caller with no matching entry
-// falls back to `recordGitHubPrAbsent` instead of inheriting an unrelated
-// alias's error message.
-function gqlErrorsByAlias(errorsRaw: unknown): Map<string, string> {
+// Splits GraphQL errors into per-alias messages (GitHub includes the failing
+// field's alias as the first path segment, e.g. `["pr1","pullRequest"]`) and
+// whole-query messages (no resolvable alias, e.g. a RATE_LIMITED body). A
+// whole-query error applies only to aliases that came back without a PR node,
+// so it never overwrites a node that resolved.
+function splitGqlErrors(errorsRaw: unknown): {
+  byAlias: Map<string, string>;
+  queryWide: string | null;
+  typed: GitHubGraphQLError[];
+} {
   const byAlias = new Map<string, string>();
-  if (!Array.isArray(errorsRaw)) return byAlias;
+  const queryWide: string[] = [];
+  const typed: GitHubGraphQLError[] = [];
+  if (!Array.isArray(errorsRaw)) return { byAlias, queryWide: null, typed };
   for (const entry of errorsRaw) {
     if (!isRecord(entry)) continue;
-    const message = typeof entry["message"] === "string" ? entry["message"].trim() : "";
-    if (!message) continue;
+    const rawMessage = typeof entry["message"] === "string" ? entry["message"].trim() : "";
+    typed.push({
+      ...(typeof entry["type"] === "string" ? { type: entry["type"] } : {}),
+      ...(rawMessage ? { message: rawMessage } : {}),
+    });
+    // Same fallback as the single route: a message-less error is still an error.
+    const message = rawMessage || "GitHub GraphQL error";
     const path = entry["path"];
     const alias = Array.isArray(path) && typeof path[0] === "string" ? path[0] : null;
-    if (!alias) continue;
+    if (!alias) {
+      queryWide.push(message);
+      continue;
+    }
     const existing = byAlias.get(alias);
     byAlias.set(alias, existing ? `${existing}; ${message}` : message);
   }
-  return byAlias;
+  return { byAlias, queryWide: queryWide.length > 0 ? queryWide.join("; ") : null, typed };
 }
 
 function recordForMisses(
@@ -152,17 +170,23 @@ export async function POST(request: NextRequest) {
 
     const gqlRaw: unknown = await ghResponse.json().catch(() => null);
     const gqlData = isRecord(gqlRaw) && isRecord(gqlRaw["data"]) ? gqlRaw["data"] : {};
-    const errorsByAlias = gqlErrorsByAlias(isRecord(gqlRaw) ? gqlRaw["errors"] : undefined);
+    const {
+      byAlias: errorsByAlias,
+      queryWide,
+      typed,
+    } = splitGqlErrors(isRecord(gqlRaw) ? gqlRaw["errors"] : undefined);
+    handleGitHubRateLimit(ghResponse, typed);
 
     for (const entry of aliasEntries) {
       const aliasValue = gqlData[entry.alias];
       const node = isRecord(aliasValue) ? aliasValue["pullRequest"] : null;
       const aliasError = errorsByAlias.get(entry.alias);
+      const missError = aliasError ?? queryWide;
       let response: PrStatusResponse;
       if (isGitHubPrNode(node)) {
         response = recordGitHubPrNode(entry.key, node, aliasError);
-      } else if (aliasError) {
-        response = recordGitHubPrError(entry.key, aliasError);
+      } else if (missError) {
+        response = recordGitHubPrError(entry.key, missError);
       } else {
         response = recordGitHubPrAbsent(entry.key);
       }

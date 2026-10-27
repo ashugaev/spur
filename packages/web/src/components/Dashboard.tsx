@@ -47,6 +47,7 @@ import {
 } from "@/lib/file-attachments";
 import { JiraIcon, isReviewLinkLabel, usePrReadyUrls } from "@/lib/link-icons";
 import { matchesSessionSearch } from "@/lib/session-search";
+import { nextPollDelayMs } from "@/lib/poller";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
@@ -1276,6 +1277,18 @@ export function Dashboard() {
   const queryClient = useQueryClient();
   const sessionsQueryKey = useMemo(() => ["sessions"] as const, []);
   const lifecycleRef = useRef(new SessionLifecycleConsumer());
+  const sessionsReadMsRef = useRef(0);
+  const sessionsErrorBaselineRef = useRef(0);
+  const sessionsFailures = (state: {
+    dataUpdatedAt: number;
+    errorUpdatedAt: number;
+    errorUpdateCount: number;
+  }) => {
+    if (state.dataUpdatedAt >= state.errorUpdatedAt) {
+      sessionsErrorBaselineRef.current = state.errorUpdateCount;
+    }
+    return state.errorUpdateCount - sessionsErrorBaselineRef.current;
+  };
   const [lifecycleVersion, setLifecycleVersion] = useState(0);
   const publishTransitions = () => setLifecycleVersion((version) => version + 1);
   const {
@@ -1285,27 +1298,43 @@ export function Dashboard() {
   } = useQuery<SpurSessionsResponse>({
     queryKey: sessionsQueryKey,
     queryFn: async ({ signal }) => {
-      const read = lifecycleRef.current.beginRead();
-      const response = await fetch("/api/sessions", { signal });
-      if (signal.aborted) throw new Error("Session read aborted");
-      if (!response.ok) throw new Error(`sessions ${response.status}`);
-      const result = (await response.json()) as SpurSessionsResponse;
-      if (signal.aborted) throw new Error("Session read aborted");
-      const accepted = lifecycleRef.current.accept(
-        result.lifecycleInstanceId ?? "",
-        result.sessions,
-        read,
-      );
-      if (!accepted) {
-        const current = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
-        if (current) return current;
-        throw new Error("Session read superseded");
+      const startedAt = Date.now();
+      try {
+        const read = lifecycleRef.current.beginRead();
+        const response = await fetch("/api/sessions", { signal });
+        if (signal.aborted) throw new Error("Session read aborted");
+        if (!response.ok) throw new Error(`sessions ${response.status}`);
+        const result = (await response.json()) as SpurSessionsResponse;
+        if (signal.aborted) throw new Error("Session read aborted");
+        const accepted = lifecycleRef.current.accept(
+          result.lifecycleInstanceId ?? "",
+          result.sessions,
+          read,
+        );
+        if (!accepted) {
+          const current = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
+          if (current) return current;
+          throw new Error("Session read superseded");
+        }
+        publishTransitions();
+        return { ...result, sessions: accepted };
+      } finally {
+        sessionsReadMsRef.current = Date.now() - startedAt;
       }
-      publishTransitions();
-      return { ...result, sessions: accepted };
     },
-    refetchInterval: SESSIONS_POLL_INTERVAL_MS,
-    refetchIntervalInBackground: true,
+    // Consecutive final failures = errorUpdateCount since the last success
+    // (it bumps once per final failure; retry attempts do not count). Backoff and
+    // slow-read spacing share nextPollDelayMs with the other pollers.
+    refetchInterval: (query) =>
+      nextPollDelayMs(
+        SESSIONS_POLL_INTERVAL_MS,
+        sessionsFailures(query.state),
+        sessionsReadMsRef.current,
+      ),
+    refetchIntervalInBackground: false,
+    // A tab returning from hidden refetches at once, except while polls are
+    // failing: then the backoff schedule decides, so focus cannot bypass it.
+    refetchOnWindowFocus: (query) => sessionsFailures(query.state) === 0,
     placeholderData: (prev) => prev,
   });
   const rawSessions = data?.sessions ?? [];
@@ -1333,6 +1362,16 @@ export function Dashboard() {
   const sessionsErrorToastRef = useRef<{ id: number; message: string } | null>(null);
   const { phase: versionSwitchPhase } = useVersionSwitch();
   const { phase: backendPhase } = useBackendConnection();
+
+  // Outage polls back off up to 8x; a recovered backend must not wait that
+  // out. The refetch succeeds, which also resets the failure baseline.
+  const previousBackendPhaseRef = useRef(backendPhase);
+  useEffect(() => {
+    const recovered =
+      previousBackendPhaseRef.current === "disconnected" && backendPhase === "connected";
+    previousBackendPhaseRef.current = backendPhase;
+    if (recovered) void queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+  }, [backendPhase, queryClient, sessionsQueryKey]);
 
   useEffect(() => {
     if (!sessionsError) {
@@ -1560,7 +1599,8 @@ export function Dashboard() {
   // Bounded by prReady.loaded (itself bounded by prReadyOnly) rather than
   // its own facet query: computing this independently of the toggle would
   // require fetching PR readiness for every session at all times, which
-  // violates "no /api/pr-status/batch request while prReadyOnly is false".
+  // violates "while prReadyOnly is false, /api/pr-status/batch bodies carry
+  // only URLs of mounted rows and badges, never unmounted sessions".
   const prReadyCount = useMemo(() => {
     if (!prReady.loaded) return 0;
     const counts = buildFacetCounts(allSessions, "prReady", facetFilters, (s) => {

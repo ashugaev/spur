@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   fetchPrInfo,
@@ -33,6 +33,10 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  // Unmount every hook, then let the shared poller's pending coalesce timer
+  // fire (a no-op with no subscribers) so module state starts clean next test.
+  cleanup();
+  vi.runOnlyPendingTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -257,8 +261,7 @@ describe("fetchPrInfo", () => {
     );
     const { result: hook } = renderHook(() => usePrInfo(url));
     await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
     });
     expect(hook.current.state).toBe("open");
     expect(hook.current.ciStatus).toBe("success");
@@ -295,6 +298,10 @@ describe("fetchPrInfo", () => {
     const url = "https://github.com/org/repo/pull/duplicate-consumers";
     const first = renderHook(() => usePrInfo(url));
     const second = renderHook(() => usePrInfo(url));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
 
     await act(async () => {
       resolveFetch(
@@ -433,6 +440,9 @@ describe("usePrInfo hook", () => {
 
     // Initially EMPTY_PR_INFO
     expect(result.current.state).toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
 
     // Resolve the fetch
     await act(async () => {
@@ -453,11 +463,8 @@ describe("usePrInfo hook", () => {
     expect(result.current.totalThreads).toBe(2);
   });
 
-  it("polls at POLL_MS interval", async () => {
+  it("sends one shared fetch per cycle for hooks on the same URL", async () => {
     const url = "https://github.com/org/repo/pull/usePrInfo-poll-v2";
-    const POLL_MS = 120_000;
-
-    // Resolve immediately each time
     mockFetch.mockResolvedValue(
       jsonResponse({
         state: "open",
@@ -468,24 +475,28 @@ describe("usePrInfo hook", () => {
       }),
     );
 
-    const { unmount } = renderHook(() => usePrInfo(url));
-
-    // Let the initial fetch complete
+    const first = renderHook(() => usePrInfo(url));
+    const second = renderHook(() => usePrInfo(url));
     await act(async () => {
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
     });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
 
-    const callCountAfterMount = mockFetch.mock.calls.length;
-    expect(callCountAfterMount).toBeGreaterThanOrEqual(1);
-
-    // Advance past the cache TTL + one poll interval so the next poll fetch goes through
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(POLL_MS + 1);
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(119_999);
     });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
 
-    expect(mockFetch.mock.calls.length).toBeGreaterThan(callCountAfterMount);
-    unmount();
+    first.unmount();
+    second.unmount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600_000);
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -503,8 +514,7 @@ describe("primePrInfo", () => {
     );
     const { result } = renderHook(() => usePrInfo(url));
     await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
     });
     expect(result.current.state).toBe("open");
 
@@ -614,10 +624,9 @@ describe("fetchPrInfoBatch", () => {
         unresolvedThreads: 0,
       }),
     );
+    renderHook(() => usePrInfo(url));
     await act(async () => {
-      renderHook(() => usePrInfo(url));
-      await Promise.resolve();
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
     });
 
     // Batch response for the same URL carries a soft error (state: null, error set).
@@ -689,10 +698,7 @@ describe("usePrReadyUrls", () => {
     const { result } = renderHook(() => usePrReadyUrls(urls, true));
 
     await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
     });
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
@@ -712,10 +718,7 @@ describe("usePrReadyUrls", () => {
     const { result } = renderHook(() => usePrReadyUrls([url], true));
 
     await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
     });
 
     expect(result.current.loaded).toBe(false);
@@ -742,10 +745,7 @@ describe("usePrReadyUrls", () => {
     });
 
     await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
     });
 
     expect(result.current.loaded).toBe(true);
@@ -764,15 +764,15 @@ describe("usePrReadyUrls", () => {
     act(() => {
       rerender({ urls: [urlB] });
     });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
 
     expect(result.current.loaded).toBe(false);
 
     resolveSecondBatch(jsonResponse({ results: { [urlB]: prInfo } }));
     await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
     });
 
     expect(result.current.loaded).toBe(true);
@@ -800,10 +800,7 @@ describe("usePrReadyUrls", () => {
     const { result } = renderHook(() => usePrReadyUrls([url], true));
 
     await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
     });
 
     expect(result.current.loaded).toBe(true);
@@ -824,5 +821,313 @@ describe("usePrReadyUrls", () => {
     });
 
     expect(result.current.ready.has(url)).toBe(true);
+  });
+});
+
+describe("shared PR poller", () => {
+  const openPr = {
+    state: "open",
+    reviewDecision: null,
+    ciStatus: null,
+    canMerge: true,
+    mergeConflict: false,
+    totalThreads: 0,
+    unresolvedThreads: 0,
+  };
+
+  function setVisibility(state: "visible" | "hidden") {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
+
+  function batchBodies(): string[][] {
+    return mockFetch.mock.calls
+      .filter(([input]) => input === "/api/pr-status/batch")
+      .map(
+        ([, init]) => (JSON.parse((init as RequestInit).body as string) as { urls: string[] }).urls,
+      );
+  }
+
+  function singleGets(): string[] {
+    return mockFetch.mock.calls
+      .map(([input]) => String(input))
+      .filter((input) => input.startsWith("/api/pr-status?"));
+  }
+
+  // Echoes every requested URL back as an open PR, like the batch route.
+  function mockEchoBackend(extra: Record<string, unknown> = {}) {
+    mockFetch.mockImplementation(async (input, init) => {
+      if (input === "/api/pr-status/batch") {
+        const { urls } = JSON.parse((init as RequestInit).body as string) as { urls: string[] };
+        return jsonResponse({
+          results: Object.fromEntries(urls.map((url) => [url, { ...openPr, ...extra }])),
+        });
+      }
+      return jsonResponse({ ...openPr, ...extra });
+    });
+  }
+
+  async function advance(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  afterEach(() => {
+    setVisibility("visible");
+  });
+
+  it("30 mounted hooks on GitHub URLs cost one batch per 120s cycle and no single GETs", async () => {
+    mockEchoBackend();
+    const urls = Array.from(
+      { length: 30 },
+      (_, i) => `https://github.com/org/repo/pull/${1000 + i}`,
+    );
+    for (const url of urls) renderHook(() => usePrInfo(url));
+
+    await advance(0);
+    expect(batchBodies()).toHaveLength(1);
+    expect(batchBodies()[0]).toHaveLength(30);
+    await advance(120_000);
+    expect(batchBodies()).toHaveLength(2);
+    await advance(119_999);
+    expect(batchBodies()).toHaveLength(2);
+    await advance(1);
+    expect(batchBodies()).toHaveLength(3);
+    expect(singleGets()).toHaveLength(0);
+  });
+
+  it("the same URL on two hooks appears once in the batch", async () => {
+    mockEchoBackend();
+    const url = "https://github.com/org/repo/pull/1100";
+    renderHook(() => usePrInfo(url));
+    renderHook(() => usePrInfo(url));
+    await advance(0);
+    expect(batchBodies()).toEqual([[url]]);
+  });
+
+  it("keeps one batch per cycle for stale entries and sends nothing on remount", async () => {
+    mockEchoBackend({ stale: true });
+    const url = "https://github.com/org/repo/pull/1200";
+    const first = renderHook(() => usePrInfo(url));
+    await advance(0);
+    expect(batchBodies()).toHaveLength(1);
+
+    first.unmount();
+    renderHook(() => usePrInfo(url));
+    await advance(0);
+    expect(batchBodies()).toHaveLength(1);
+
+    await advance(120_000);
+    expect(batchBodies()).toHaveLength(2);
+  });
+
+  it("polls a GitLab URL with one GET per cycle", async () => {
+    mockEchoBackend();
+    const url = "https://gitlab.com/org/repo/-/merge_requests/7";
+    renderHook(() => usePrInfo(url));
+    await advance(0);
+    expect(singleGets()).toHaveLength(1);
+    expect(batchBodies()).toHaveLength(0);
+    await advance(120_000);
+    expect(singleGets()).toHaveLength(2);
+  });
+
+  it("stops polling when every hook unmounts", async () => {
+    mockEchoBackend();
+    const url = "https://github.com/org/repo/pull/1300";
+    const hook = renderHook(() => usePrInfo(url));
+    await advance(0);
+    hook.unmount();
+    await advance(600_000);
+    expect(batchBodies()).toHaveLength(1);
+  });
+
+  it("sends nothing while hidden and one batch on visible", async () => {
+    mockEchoBackend();
+    setVisibility("hidden");
+    renderHook(() => usePrInfo("https://github.com/org/repo/pull/1400"));
+    await advance(300_000);
+    expect(mockFetch).not.toHaveBeenCalled();
+    await act(async () => {
+      setVisibility("visible");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(batchBodies()).toHaveLength(1);
+  });
+
+  it("keeps loaded false until a run started after the URL set changed settles", async () => {
+    const urlA = "https://github.com/org/repo/pull/1500";
+    const urlB = "https://github.com/org/repo/pull/1501";
+    const resolvers: Array<(response: Response) => void> = [];
+    mockFetch.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const { result, rerender } = renderHook(({ urls }) => usePrReadyUrls(urls, true), {
+      initialProps: { urls: [urlA] },
+    });
+    await advance(0);
+    expect(resolvers).toHaveLength(1);
+
+    // Set changes to B while A's batch is in flight.
+    rerender({ urls: [urlB] });
+    await advance(0);
+    expect(resolvers).toHaveLength(1);
+
+    await act(async () => {
+      resolvers[0]?.(jsonResponse({ results: { [urlA]: openPr } }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.loaded).toBe(false);
+
+    // The follow-up run started after B subscribed; its success flips loaded.
+    expect(resolvers).toHaveLength(2);
+    await act(async () => {
+      resolvers[1]?.(jsonResponse({ results: { [urlB]: openPr } }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.loaded).toBe(true);
+    expect(result.current.ready.has(urlB)).toBe(true);
+  });
+
+  it("sends nothing on remount after a poll returned an unchanged result", async () => {
+    mockEchoBackend();
+    const url = "https://gitlab.com/org/repo/-/merge_requests/8";
+    const first = renderHook(() => usePrInfo(url));
+    await advance(0);
+    await advance(120_000);
+    // Second poll returned data equal to the cache, which writes nothing.
+    expect(singleGets()).toHaveLength(2);
+
+    first.unmount();
+    renderHook(() => usePrInfo(url));
+    await advance(0);
+    expect(singleGets()).toHaveLength(2);
+  });
+
+  it("sends nothing on remount after a batch skipped an errored result", async () => {
+    const url = "https://github.com/org/repo/pull/1800";
+    mockFetch.mockImplementation(async () =>
+      jsonResponse({
+        results: { [url]: { ...openPr, state: null, error: "GitHub API 503" } },
+      }),
+    );
+    const first = renderHook(() => usePrInfo(url));
+    await advance(0);
+    expect(batchBodies()).toHaveLength(1);
+
+    first.unmount();
+    renderHook(() => usePrInfo(url));
+    await advance(0);
+    expect(batchBodies()).toHaveLength(1);
+  });
+
+  it("keeps loaded false for an overlapping URL set until the follow-up run settles", async () => {
+    const urlA = "https://github.com/org/repo/pull/1600";
+    const urlShared = "https://github.com/org/repo/pull/1601";
+    const urlB = "https://github.com/org/repo/pull/1602";
+    const resolvers: Array<(response: Response) => void> = [];
+    mockFetch.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const { result, rerender } = renderHook(({ urls }) => usePrReadyUrls(urls, true), {
+      initialProps: { urls: [urlA, urlShared] },
+    });
+    await advance(0);
+    expect(resolvers).toHaveLength(1);
+
+    rerender({ urls: [urlShared, urlB] });
+    await advance(0);
+
+    // A's batch primes the shared URL; the new set must stay not loaded.
+    await act(async () => {
+      resolvers[0]?.(jsonResponse({ results: { [urlA]: openPr, [urlShared]: openPr } }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.loaded).toBe(false);
+
+    expect(resolvers).toHaveLength(2);
+    await act(async () => {
+      resolvers[1]?.(jsonResponse({ results: { [urlB]: openPr } }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.loaded).toBe(true);
+  });
+
+  it("never overlaps two batch runs across an unmount-all and remount", async () => {
+    const resolvers: Array<(response: Response) => void> = [];
+    mockFetch.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const urlA = "https://github.com/org/repo/pull/1700";
+    const urlB = "https://github.com/org/repo/pull/1701";
+    const first = renderHook(() => usePrInfo(urlA));
+    await advance(0);
+    expect(resolvers).toHaveLength(1);
+
+    first.unmount();
+    await advance(0);
+    renderHook(() => usePrInfo(urlB));
+    await advance(0);
+    expect(resolvers).toHaveLength(1);
+
+    await act(async () => {
+      resolvers[0]?.(jsonResponse({ results: { [urlA]: openPr } }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(resolvers).toHaveLength(2);
+    expect(batchBodies()[1]).toEqual([urlB]);
+
+    // Settle the second run so no in-flight state leaks into the next test.
+    await act(async () => {
+      resolvers[1]?.(jsonResponse({ results: { [urlB]: openPr } }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  });
+
+  it("re-reads the cache when a mounted hook's url changes to an already-fresh entry", async () => {
+    mockEchoBackend();
+    const urlX = "https://github.com/org/repo/pull/1900";
+    const urlY = "https://github.com/org/repo/pull/1901";
+    primePrInfo(urlY, { ...openPr, state: "merged", canMerge: false, ciStatus: null });
+    const { result, rerender } = renderHook(({ url }) => usePrInfo(url), {
+      initialProps: { url: urlX },
+    });
+    await advance(0);
+    expect(result.current.state).toBe("open");
+    expect(batchBodies()).toEqual([[urlX]]);
+
+    rerender({ url: urlY });
+    await advance(0);
+    expect(result.current.state).toBe("merged");
+    expect(batchBodies()).toEqual([[urlX]]);
+  });
+
+  it("settles a never-answering batch as failed after the timeout and runs again", async () => {
+    mockFetch.mockImplementation(
+      (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        }),
+    );
+    renderHook(() => usePrInfo("https://github.com/org/repo/pull/2000"));
+    await advance(0);
+    expect(batchBodies()).toHaveLength(1);
+
+    await advance(29_999);
+    expect(batchBodies()).toHaveLength(1);
+    // Timeout aborts the request; the failed run backs off to 2x the 120s base.
+    await advance(1);
+    await advance(240_000);
+    expect(batchBodies()).toHaveLength(2);
   });
 });
