@@ -95,30 +95,26 @@ import { useTagCatalog } from "@/hooks/useTagCatalog";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
-type CollapsibleBlock = AttentionLevel | "backlog";
-const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: CollapsibleBlock[] = ["stopped", "backlog"];
+const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const TAG_FILTERS_STORAGE_KEY = "spur:tag-filters";
 const LEGACY_TAG_FILTER_STORAGE_KEY = "spur:tag-filter";
 const DASHBOARD_SEARCH_TOOL_BUTTON_CLASS =
   "inline-flex h-7 w-7 shrink-0 items-center justify-center bg-transparent text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
+const BACKLOG_EXPANDED_STORAGE_KEY = "spur:backlog-expanded";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
 const SPAWN_DRAFT_SAVE_DELAY_MS = 500;
 const SHEPHERD_PROJECT_ID = "spur-shepherd";
 
-function readCollapsedCategories(): Set<CollapsibleBlock> {
+function readCollapsedCategories(): Set<AttentionLevel> {
   if (typeof window === "undefined") return new Set();
   const raw = window.localStorage.getItem(COLLAPSED_CATEGORIES_STORAGE_KEY);
   if (!raw) return new Set(DEFAULT_COLLAPSED_MOBILE_CATEGORIES);
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return new Set();
-    return new Set(
-      parsed.filter(
-        (v): v is CollapsibleBlock => v === "backlog" || LANE_ORDER_SET.has(v as string),
-      ),
-    );
+    return new Set(parsed.filter((v): v is AttentionLevel => LANE_ORDER_SET.has(v as string)));
   } catch {
     return new Set();
   }
@@ -1159,13 +1155,25 @@ export function Dashboard() {
     onTranscribed: setSearchQuery,
   });
   const [collapsedLevels, setCollapsedLevels] = useState(readCollapsedCategories);
-  const toggleCollapsed = useCallback((level: CollapsibleBlock) => {
+  const toggleCollapsed = useCallback((level: AttentionLevel) => {
     setCollapsedLevels((current) => {
       const next = new Set(current);
       if (next.has(level)) next.delete(level);
       else next.add(level);
       window.localStorage.setItem(COLLAPSED_CATEGORIES_STORAGE_KEY, JSON.stringify([...next]));
       return next;
+    });
+  }, []);
+  // Absence of a stored flag means collapsed, so every user starts collapsed.
+  const [backlogExpanded, setBacklogExpanded] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      window.localStorage.getItem(BACKLOG_EXPANDED_STORAGE_KEY) === "1",
+  );
+  const toggleBacklog = useCallback(() => {
+    setBacklogExpanded((current) => {
+      window.localStorage.setItem(BACKLOG_EXPANDED_STORAGE_KEY, current ? "0" : "1");
+      return !current;
     });
   }, []);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
@@ -3158,8 +3166,8 @@ export function Dashboard() {
                   items={visibleBacklog}
                   projectNameMap={projectNameMap}
                   onTake={openBacklogSpawnModal}
-                  collapsed={collapsedLevels.has("backlog")}
-                  onToggle={() => toggleCollapsed("backlog")}
+                  collapsed={!backlogExpanded}
+                  onToggle={toggleBacklog}
                 />
               ) : null}
               {visibleLevels.map((level) => (

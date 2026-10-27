@@ -514,6 +514,16 @@ describe("Dashboard", () => {
       expect(screen.queryByText("Task API-1")).not.toBeInTheDocument();
     });
 
+    it("starts collapsed for users with a stored collapsed-categories entry lacking backlog", async () => {
+      mockBacklog();
+      window.localStorage.setItem(MOBILE_COLLAPSED_CATEGORIES_STORAGE_KEY, JSON.stringify([]));
+      window.history.replaceState(null, "", "/?project=api");
+      render(<Dashboard />);
+
+      await screen.findByRole("button", { name: /Backlog/ });
+      expect(screen.queryByRole("link", { name: /API-1/ })).not.toBeInTheDocument();
+    });
+
     it("shows only the selected project's backlog, collapsed by default and expandable", async () => {
       mockBacklog();
       window.history.replaceState(null, "", "/?project=api");
@@ -525,9 +535,6 @@ describe("Dashboard", () => {
       fireEvent.click(toggle);
       expect(screen.getByRole("link", { name: /API-1/ })).toBeInTheDocument();
       expect(screen.queryByRole("link", { name: /WEB-1/ })).not.toBeInTheDocument();
-      expect(window.localStorage.getItem(MOBILE_COLLAPSED_CATEGORIES_STORAGE_KEY)).not.toContain(
-        "backlog",
-      );
 
       fireEvent.click(screen.getByRole("button", { name: /Backlog/ }));
       expect(screen.queryByRole("link", { name: /API-1/ })).not.toBeInTheDocument();
