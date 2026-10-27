@@ -1,0 +1,50 @@
+{
+  "child-prefix-replay.jsonl": {
+    "totalEntries": 0,
+    "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  "idle-fixture-session-trailing-tool-output-tail.jsonl": {
+    "totalEntries": 28,
+    "sha256": "498caee9f48bbccd2d5c51dc537d11b60dc8ad3e8b3acd1f77ef6f8c3e44eddd"
+  },
+  "interrupted-spur-00b0-tail.jsonl": {
+    "totalEntries": 2,
+    "sha256": "89039b67faebd9df87b79e30758d5fbbf7cbc145b1c7fa9934a27aa25a392c42"
+  },
+  "no-hook-spur1614.jsonl": {
+    "totalEntries": 0,
+    "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  "spur-67c0-history-tail.jsonl": {
+    "totalEntries": 0,
+    "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  "stale-working-spur-1c0e-tail.jsonl": {
+    "totalEntries": 8,
+    "sha256": "0709cdbdc6bfeb6c3afec4a02116b5e97f0d5c87bb315e8fdc86658a49040069"
+  },
+  "token-components.jsonl": {
+    "totalEntries": 0,
+    "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  "token-reset-aliases.jsonl": {
+    "totalEntries": 0,
+    "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  "waiting-while-working-fixture-session-tail.jsonl": {
+    "totalEntries": 28,
+    "sha256": "498caee9f48bbccd2d5c51dc537d11b60dc8ad3e8b3acd1f77ef6f8c3e44eddd"
+  },
+  "working-spur-436f.jsonl": {
+    "totalEntries": 9,
+    "sha256": "feee22ac10c755432fd7d4e5855d289f19ae82234de9388c66198d976dd1da9f"
+  },
+  "working-spur-67c0-rollout-tail.jsonl": {
+    "totalEntries": 35,
+    "sha256": "2b563eb0dbab09ecfc1ac13b73e3081416e6af75046a7608beb1e590f5cb9f46"
+  },
+  "working-unmatched-tool-call-tail.jsonl": {
+    "totalEntries": 2,
+    "sha256": "6380bf3793c5e5901ecc17cfb4d5c57c59d9cc6bdae88271d218baa8fdf59f97"
+  }
+}
