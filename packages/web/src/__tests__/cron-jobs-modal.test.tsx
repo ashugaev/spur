@@ -241,3 +241,101 @@ describe("CronJobsModal", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("CronJobsModal owner states", () => {
+  const withOwner = (owner: CronJobsResponse["projects"][number]["owner"]): CronJobsResponse => ({
+    ...READY,
+    projects: READY.projects.map((project) => ({ ...project, owner })),
+  });
+
+  it.each([
+    [
+      {
+        state: "parse_error",
+        path: "/repo/api/spur.yaml",
+        revision: "r",
+        error: "Bad indent at line 2, column 1",
+      },
+      "• spur.yaml invalid: Bad indent at line 2, column 1",
+    ],
+    [
+      {
+        state: "invalid",
+        path: "/repo/api/spur.yaml",
+        revision: "r",
+        error: "schedule must be a string",
+      },
+      "• spur.yaml invalid: schedule must be a string",
+    ],
+    [{ state: "missing", path: "/repo/api/spur.yaml" }, "• spur.yaml: config file not found"],
+    [
+      { state: "unreadable", path: "/repo/api/spur.yaml", error: "EACCES" },
+      "• spur.yaml unreadable: EACCES",
+    ],
+    [{ state: "project_removed" }, "• API removed from its config file, not loaded"],
+  ] as const)("renders the %o drift line", async (owner, text) => {
+    stubFetch(() => jsonResponse(withOwner(owner)));
+    renderModal();
+    await screen.findByText("audit");
+    expect(
+      screen.getByText((_, element) => element?.tagName === "SPAN" && element.textContent === text),
+    ).toBeInTheDocument();
+  });
+
+  it("shows removed rows for a project removed from its file", async () => {
+    stubFetch(() =>
+      jsonResponse({
+        ...withOwner({ state: "project_removed" }),
+        projects: withOwner({ state: "project_removed" }).projects.map((project) => ({
+          ...project,
+          sources: project.sources.map((source) => ({ ...source, disk: "removed" as const })),
+        })),
+      }),
+    );
+    renderModal();
+    await screen.findByText("audit");
+    expect(screen.getAllByTitle("removed on disk").length).toBeGreaterThan(0);
+  });
+
+  it("shows a send trigger prompt in settings", async () => {
+    stubFetch(() =>
+      jsonResponse({
+        eventsSince: null,
+        projects: [
+          {
+            projectId: "api",
+            projectName: "API",
+            owner: { state: "loaded", path: "/repo/api/spur.yaml", revision: "r", changed: false },
+            sources: [
+              {
+                sourceId: "digest",
+                schedule: "0 * * * *",
+                runOnStart: false,
+                disk: "same",
+                recentTicks: [],
+                triggers: [
+                  {
+                    triggerId: "poke",
+                    event: "cron:tick",
+                    disk: "same",
+                    action: { kind: "send", prompt: "Post the hourly digest" },
+                    recentActions: [],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      } satisfies CronJobsResponse),
+    );
+    renderModal();
+    fireEvent.click((await screen.findByText("poke")).closest("button") as HTMLElement);
+    const settings = screen.getByText("Settings").closest("section") as HTMLElement;
+    const pairs = Array.from(settings.querySelectorAll("dt")).map((dt) => [
+      dt.textContent,
+      dt.nextElementSibling?.textContent,
+    ]);
+    expect(pairs).toContainEqual(["Action", "send"]);
+    expect(pairs).toContainEqual(["Prompt", "Post the hourly digest"]);
+  });
+});

@@ -47,24 +47,39 @@ function noTickText(eventsSince: string | null): string {
 function driftLine(project: CronProjectView, allProjects: boolean): ReactNode {
   const prefix = allProjects ? `${project.projectName}: ` : "";
   const { owner } = project;
-  if (owner.state === "loaded") {
-    if (!owner.changed) return null;
-    return (
-      <span className={ATTENTION_TEXT}>
-        • {prefix}
-        {fileName(owner.path)} changed on disk, not loaded
-      </span>
-    );
+  switch (owner.state) {
+    case "loaded":
+      if (!owner.changed) return null;
+      return (
+        <span className={ATTENTION_TEXT}>
+          • {prefix}
+          {fileName(owner.path)} changed on disk, not loaded
+        </span>
+      );
+    case "invalid":
+    case "parse_error":
+    case "unreadable":
+      return (
+        <span className={ERROR_TEXT}>
+          • {prefix}
+          {fileName(owner.path)} {owner.state === "unreadable" ? "unreadable" : "invalid"}:{" "}
+          {owner.error}
+        </span>
+      );
+    case "missing":
+      return (
+        <span className={ATTENTION_TEXT}>
+          • {prefix}
+          {fileName(owner.path)}: config file not found
+        </span>
+      );
+    case "project_removed":
+      return (
+        <span className={ATTENTION_TEXT}>
+          • {project.projectName} removed from its config file, not loaded
+        </span>
+      );
   }
-  if (owner.state === "invalid") {
-    return (
-      <span className={ERROR_TEXT}>
-        • {prefix}
-        {fileName(owner.path)} invalid: {owner.error}
-      </span>
-    );
-  }
-  return <span className={ATTENTION_TEXT}>• config file not found for {project.projectName}</span>;
 }
 
 function SessionLink({ projectId, sessionId }: { projectId: string; sessionId: string }) {
@@ -128,6 +143,14 @@ function Setting({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+function PromptText({ prompt }: { prompt: string }) {
+  return (
+    <span className="line-clamp-6 whitespace-pre-wrap [overflow-wrap:anywhere]" title={prompt}>
+      {prompt}
+    </span>
+  );
+}
+
 function actionSummary(row: CronRow): string {
   if (!row.trigger) return "No action configured";
   if (row.trigger.action.kind === "send") return "send";
@@ -136,7 +159,9 @@ function actionSummary(row: CronRow): string {
 }
 
 function JobDetail({ row, eventsSince }: { row: CronRow; eventsSince: string | null }) {
-  const blocks = row.trigger?.action.kind === "spawn" ? row.trigger.action.blocks : [];
+  const action = row.trigger?.action;
+  const blocks = action?.kind === "spawn" ? action.blocks : [];
+  const sendPrompt = action?.kind === "send" ? action.prompt : null;
   return (
     <div className="flex flex-col gap-4 border-l-2 border-[var(--color-accent)] pb-3 pl-[11px] pr-[13px] pt-3">
       <section className={SECTION_CLASS}>
@@ -152,6 +177,11 @@ function JobDetail({ row, eventsSince }: { row: CronRow; eventsSince: string | n
               label={blocks.length > 1 ? `Block ${index + 1}` : null}
             />
           ))}
+          {sendPrompt ? (
+            <Setting label="Prompt">
+              <PromptText prompt={sendPrompt} />
+            </Setting>
+          ) : null}
         </dl>
       </section>
       <section className={SECTION_CLASS}>
@@ -192,12 +222,7 @@ function BlockSettings({ block, label }: { block: CronSpawnBlockView; label: str
       <Setting label="Effort">{block.reasoningEffort ?? "default"}</Setting>
       {block.mode ? <Setting label="Mode">{block.mode}</Setting> : null}
       <Setting label="Prompt">
-        <span
-          className="line-clamp-6 whitespace-pre-wrap [overflow-wrap:anywhere]"
-          title={block.prompt}
-        >
-          {block.prompt}
-        </span>
+        <PromptText prompt={block.prompt} />
       </Setting>
     </>
   );
