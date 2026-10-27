@@ -122,7 +122,9 @@ import { extractGithubErrorText, isGitHubRateLimitError, runGhPollCycle } from "
 import {
   codexHookHomePath,
   findLatestCodexSessionFile,
+  readCodexConversationTail,
   readCodexRolloutState,
+  type CodexConversationReaderState,
   type CodexRolloutReaderState,
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
@@ -1636,6 +1638,38 @@ function clampPageStart(
   )
     return candidate;
   return Math.max(totalEntries - CONVERSATION_PAGE_ENTRIES, 0);
+}
+
+async function pageConversationTail(
+  tail: { entries: TranscriptEntry[]; totalEntries: number; startIndex: number },
+  options: { from?: number; preserveEnd?: boolean } | undefined,
+  state: SessionState,
+  durationMs: number,
+  readFullEntries: () => Promise<TranscriptEntry[]>,
+): Promise<ConversationResponse> {
+  const { entries: tailEntries, totalEntries, startIndex: tailStartIndex } = tail;
+  const from = options?.from;
+
+  if (from === undefined || from >= tailStartIndex) {
+    // Within the retained window: slice the cached tail, no full read.
+    const sliceStart =
+      from === undefined
+        ? Math.max(tailStartIndex, totalEntries - CONVERSATION_PAGE_ENTRIES, 0)
+        : clampPageStart(from, tailStartIndex, totalEntries, options?.preserveEnd);
+    const entries = tailEntries.slice(sliceStart - tailStartIndex);
+    return buildConversationResponse(entries, totalEntries, sliceStart, state, durationMs);
+  }
+
+  // Deep scroll-back below the retained window: fall back to a full read.
+  const fullEntries = await readFullEntries();
+  const startIndex = clampPageStart(from, 0, fullEntries.length, options?.preserveEnd);
+  return buildConversationResponse(
+    fullEntries.slice(startIndex),
+    fullEntries.length,
+    startIndex,
+    state,
+    durationMs,
+  );
 }
 
 type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
@@ -3656,10 +3690,15 @@ export class SessionService {
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly conversationReaders = new Map<string, ClaudeConversationReaderState>();
+  // Kept for the life of the session, not pruned with live ids: a viewed
+  // terminal session would otherwise re-read its rollout every sweep.
+  private readonly codexConversationReaders = new Map<string, CodexConversationReaderState>();
   // Serializes conversation tail reads per session. getConversation is polled
   // every 4s and a slow read can overlap the next poll; chaining keeps the one
-  // shared reader's offset monotonic instead of racing read-modify-write.
-  private readonly conversationReadChain = new Map<string, Promise<void>>();
+  // shared reader's offset monotonic instead of racing read-modify-write. The
+  // slot object outlives every read queued on it and is dropped on eviction,
+  // so a read still in flight can tell it must not store its reader.
+  private readonly conversationReadChain = new Map<string, { tail: Promise<void> }>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly codexRolloutReaders = new Map<string, CodexRolloutReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
@@ -7997,12 +8036,18 @@ export class SessionService {
           sizes: true,
         },
       );
+      const archivedIds = report.groups
+        .filter((g) => g.archived)
+        .flatMap((g) => g.archiveSessionIds);
+      for (const id of archivedIds) {
+        this.evictConversationReaders(id);
+      }
       this.logEvent("session.gc.completed", {
         level: "info",
         message: `Session GC sweep: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived, ${report.totals.freedBytes ?? 0} byte(s) freed.`,
         details: {
           totals: report.totals,
-          sessionIds: report.groups.filter((g) => g.archived).flatMap((g) => g.archiveSessionIds),
+          sessionIds: archivedIds,
         },
       });
     } catch (error) {
@@ -11316,28 +11361,14 @@ export class SessionService {
         );
       }
 
-      const { entries: tailEntries, state, totalEntries, startIndex: tailStartIndex } = tail;
+      return pageConversationTail(tail, options, tail.state, durationMs, readFullEntries);
+    }
 
-      if (from === undefined || from >= tailStartIndex) {
-        // Within the retained window: slice the cached tail, no full read.
-        const sliceStart =
-          from === undefined
-            ? Math.max(tailStartIndex, totalEntries - CONVERSATION_PAGE_ENTRIES, 0)
-            : clampPageStart(from, tailStartIndex, totalEntries, options?.preserveEnd);
-        const entries = tailEntries.slice(sliceStart - tailStartIndex);
-        return buildConversationResponse(entries, totalEntries, sliceStart, state, durationMs);
-      }
-
-      // Deep scroll-back below the retained window: fall back to a full read.
-      const fullEntries = await readFullEntries();
-      const startIndex = clampPageStart(from, 0, fullEntries.length, options?.preserveEnd);
-      return buildConversationResponse(
-        fullEntries.slice(startIndex),
-        fullEntries.length,
-        startIndex,
-        state,
-        durationMs,
-      );
+    if (session.agent === "codex") {
+      const tail = await this.readCodexConversationSerialized(session);
+      const state = statusFallbackState(session);
+      if (!tail) return buildConversationResponse([], 0, 0, state, durationMs);
+      return pageConversationTail(tail, options, state, durationMs, readFullEntries);
     }
 
     const entries = await readFullEntries();
@@ -11359,16 +11390,32 @@ export class SessionService {
    * would otherwise both snapshot the same cached reader and the later write
    * would clobber the earlier, regressing the offset and double-counting.
    * Chaining on the prior read serializes them so the offset advances
-   * monotonically.
+   * monotonically. `read` gets `isLive`: false once the session was evicted
+   * mid-read, so it must not write its reader back.
    */
+  private serializeConversationRead<T>(
+    sessionId: string,
+    read: (isLive: () => boolean) => Promise<T>,
+  ): Promise<T> {
+    const slot = this.conversationReadChain.get(sessionId) ?? { tail: Promise.resolve() };
+    const run = slot.tail.then(() =>
+      read(() => this.conversationReadChain.get(sessionId) === slot),
+    );
+    slot.tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.conversationReadChain.set(sessionId, slot);
+    return run;
+  }
+
   private readConversationSerialized(session: SessionRecord): Promise<{
     entries: TranscriptEntry[];
     state: SessionState;
     totalEntries: number;
     startIndex: number;
   } | null> {
-    const prior = this.conversationReadChain.get(session.id) ?? Promise.resolve();
-    const run = prior.then(async () => {
+    return this.serializeConversationRead(session.id, async (isLive) => {
       const result = await readClaudeConversationTail(
         session.worktreePath,
         this.conversationReaders.get(session.id),
@@ -11376,17 +11423,26 @@ export class SessionService {
       );
       if (!result) return null;
       const { reader, hasMore: _hasMore, ...conversation } = result;
-      this.conversationReaders.set(session.id, reader);
+      if (isLive()) this.conversationReaders.set(session.id, reader);
       return conversation;
     });
-    this.conversationReadChain.set(
-      session.id,
-      run.then(
-        () => undefined,
-        () => undefined,
-      ),
-    );
-    return run;
+  }
+
+  private readCodexConversationSerialized(session: SessionRecord): Promise<{
+    entries: TranscriptEntry[];
+    totalEntries: number;
+    startIndex: number;
+  } | null> {
+    return this.serializeConversationRead(session.id, async (isLive) => {
+      const result = await readCodexConversationTail(
+        this.codexSessionsDir(session.id),
+        this.codexConversationReaders.get(session.id),
+      );
+      if (!result) return null;
+      const { reader, ...conversation } = result;
+      if (isLive()) this.codexConversationReaders.set(session.id, reader);
+      return conversation;
+    });
   }
 
   async getProjectSuggestions(
@@ -18108,6 +18164,14 @@ export class SessionService {
     });
   }
 
+  // Session GC archives records without removeSessionArtifacts, so the
+  // sweep evicts through this too.
+  private evictConversationReaders(sessionId: string): void {
+    this.conversationReaders.delete(sessionId);
+    this.codexConversationReaders.delete(sessionId);
+    this.conversationReadChain.delete(sessionId);
+  }
+
   private removeSessionArtifacts(
     session: Pick<
       SessionRecord,
@@ -18122,8 +18186,7 @@ export class SessionService {
     deleteSessionUserActions(this.config.dataDir, sessionId);
     // Evict per-session in-memory reader caches so they do not grow unbounded
     // for the life of the daemon as sessions are created and discarded.
-    this.conversationReaders.delete(sessionId);
-    this.conversationReadChain.delete(sessionId);
+    this.evictConversationReaders(sessionId);
     this.claudeJsonlReaders.delete(sessionId);
     this.cursorJsonlReaders.delete(sessionId);
     this.cursorPaneReadyOverrides.delete(sessionId);
