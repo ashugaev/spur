@@ -6184,6 +6184,267 @@ describe("SessionDetail artifacts", () => {
     expect(screen.getAllByText("None.")).toHaveLength(1);
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
+
+  describe("artifact format filter", () => {
+    type ArtifactSpec = { name: string; addedByUser?: boolean };
+
+    function artifactsFor(specs: ArtifactSpec[]) {
+      return specs.map(({ name, addedByUser }) => ({
+        id: name,
+        name,
+        size: 100,
+        mimeType: name.endsWith(".png")
+          ? "image/png"
+          : name.endsWith(".jpg")
+            ? "image/jpeg"
+            : "text/plain; charset=utf-8",
+        kind:
+          name.endsWith(".png") || name.endsWith(".jpg")
+            ? ("image" as const)
+            : ("download" as const),
+        origin: "intentional" as const,
+        ...(addedByUser ? { addedByUser: true } : {}),
+        createdAt: "2026-04-02T10:00:00.000Z",
+        updatedAt: "2026-04-02T10:00:00.000Z",
+      }));
+    }
+
+    function stubSessions(payloads: Record<string, () => ArtifactSpec[]>) {
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        for (const [id, specs] of Object.entries(payloads)) {
+          if (url === `/api/sessions/${id}`) {
+            return new Response(
+              JSON.stringify(sessionFixture({ id, artifacts: artifactsFor(specs()) })),
+              { status: 200 },
+            );
+          }
+          if (url === `/api/sessions/${id}/conversation`) {
+            return new Response(JSON.stringify(conversationFixture({ state: "working" })), {
+              status: 200,
+            });
+          }
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+    }
+
+    const baseSpecs: ArtifactSpec[] = [
+      { name: "a.png" },
+      { name: "b.png" },
+      { name: "notes.txt" },
+      { name: "Makefile" },
+    ];
+    const allNames = ["a.png", "b.png", "notes.txt", "Makefile"];
+
+    function formatControl() {
+      return screen.getByRole("tablist", { name: "Artifact format" });
+    }
+    function formatButton(name: string) {
+      return within(formatControl()).getByRole("button", { name });
+    }
+    function headerCount() {
+      const h2 = screen.getByText("Artifacts", { selector: "h2" });
+      return within(h2).getByText(/^\d+$/).textContent;
+    }
+    function expectOnly(present: string[]) {
+      for (const name of allNames) {
+        if (present.includes(name)) {
+          expect(screen.getByText(name)).toBeInTheDocument();
+        } else {
+          expect(screen.queryByText(name)).not.toBeInTheDocument();
+        }
+      }
+    }
+
+    it("shows extension options and narrows the grid to the selected format", async () => {
+      stubSessions({ "api-a1": () => baseSpecs });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+
+      const buttons = within(formatControl()).getAllByRole("button");
+      expect(buttons.map((button) => button.textContent)).toEqual([
+        "All",
+        "FILE (1)",
+        "PNG (2)",
+        "TXT (1)",
+      ]);
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      expect(headerCount()).toBe("4");
+
+      fireEvent.click(formatButton("PNG (2)"));
+
+      expectOnly(["a.png", "b.png"]);
+      expect(formatButton("PNG (2)")).toHaveAttribute("aria-pressed", "true");
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "false");
+      expect(headerCount()).toBe("2");
+    });
+
+    it("clicking the active format or All restores the full set", async () => {
+      stubSessions({ "api-a1": () => baseSpecs });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+
+      fireEvent.click(formatButton("PNG (2)"));
+      expectOnly(["a.png", "b.png"]);
+      fireEvent.click(formatButton("PNG (2)"));
+      expectOnly(allNames);
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+
+      fireEvent.click(formatButton("PNG (2)"));
+      expectOnly(["a.png", "b.png"]);
+      fireEvent.click(formatButton("All"));
+      expectOnly(allNames);
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+    });
+
+    it("filters list view rows by format", async () => {
+      stubSessions({ "api-a1": () => baseSpecs });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+
+      fireEvent.click(
+        within(screen.getByRole("tablist", { name: "Artifact view" })).getByRole("button", {
+          name: "List",
+        }),
+      );
+      fireEvent.click(formatButton("PNG (2)"));
+
+      const table = screen.getByRole("table");
+      expect(within(table).getByText("a.png")).toBeInTheDocument();
+      expect(within(table).getByText("b.png")).toBeInTheDocument();
+      expect(within(table).queryByText("notes.txt")).not.toBeInTheDocument();
+      expect(within(table).queryByText("Makefile")).not.toBeInTheDocument();
+    });
+
+    it("hides the format control when the category has one extension", async () => {
+      stubSessions({ "api-a1": () => [{ name: "a.png" }, { name: "b.png" }] });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+
+      expect(screen.queryByRole("tablist", { name: "Artifact format" })).not.toBeInTheDocument();
+    });
+
+    it("resets to All when a poll removes the selected format and does not resurrect it", async () => {
+      let specs = baseSpecs;
+      stubSessions({ "api-a1": () => specs });
+      vi.useFakeTimers();
+      try {
+        render(<SessionDetail sessionId="api-a1" />);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        fireEvent.click(formatButton("PNG (2)"));
+        expectOnly(["a.png", "b.png"]);
+
+        specs = baseSpecs.filter((spec) => !spec.name.endsWith(".png"));
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expectOnly(["notes.txt", "Makefile"]);
+        expect(screen.queryByText("None.")).not.toBeInTheDocument();
+        expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+
+        specs = baseSpecs;
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expectOnly(allNames);
+        expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resets to All when a poll leaves one extension", async () => {
+      let specs = baseSpecs;
+      stubSessions({ "api-a1": () => specs });
+      vi.useFakeTimers();
+      try {
+        render(<SessionDetail sessionId="api-a1" />);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        fireEvent.click(formatButton("PNG (2)"));
+
+        specs = baseSpecs.filter((spec) => spec.name.endsWith(".png"));
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expect(screen.queryByRole("tablist", { name: "Artifact format" })).not.toBeInTheDocument();
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+
+        specs = baseSpecs;
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expectOnly(allNames);
+        expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resets to All on category change", async () => {
+      stubSessions({
+        "api-a1": () => [
+          { name: "a.png" },
+          { name: "notes.txt" },
+          { name: "c.png", addedByUser: true },
+          { name: "d.jpg", addedByUser: true },
+        ],
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+
+      fireEvent.click(formatButton("PNG (1)"));
+      expect(screen.queryByText("notes.txt")).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Attached (2)" }));
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      expect(screen.getByText("c.png")).toBeInTheDocument();
+      expect(screen.getByText("d.jpg")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Agent (2)" }));
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      expect(screen.getByText("a.png")).toBeInTheDocument();
+      expect(screen.getByText("notes.txt")).toBeInTheDocument();
+    });
+
+    it("resets to All when switching session", async () => {
+      stubSessions({
+        "api-a1": () => [{ name: "a1-shot.png" }, { name: "a1-notes.txt" }],
+        "api-b2": () => [{ name: "b2-shot.png" }, { name: "b2-notes.txt" }],
+      });
+      const { rerender } = render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a1-shot.png")).toBeInTheDocument();
+      });
+
+      fireEvent.click(formatButton("PNG (1)"));
+      expect(screen.queryByText("a1-notes.txt")).not.toBeInTheDocument();
+
+      rerender(<SessionDetail sessionId="api-b2" />);
+      await waitFor(() => {
+        expect(screen.getByText("b2-shot.png")).toBeInTheDocument();
+      });
+      expect(screen.getByText("b2-notes.txt")).toBeInTheDocument();
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+    });
+  });
 });
 
 describe("SessionDetail load state", () => {

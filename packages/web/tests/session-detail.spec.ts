@@ -3394,6 +3394,106 @@ test.describe("S4b: Artifacts section", () => {
     expect(scrollWidth).toBeLessThanOrEqual(innerWidth);
   });
 
+  test("filters artifacts by format", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-format",
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "notes.txt",
+          name: "notes.txt",
+          size: 1024,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const format = page.getByRole("tablist", { name: "Artifact format" });
+    await format.getByRole("button", { name: "PNG (1)" }).click();
+
+    await expect(page.getByText("notes.txt")).toBeHidden();
+    await expect(page.getByText("shot.png")).toBeVisible();
+    await expect(format.getByRole("button", { name: "PNG (1)" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  test("format control wraps without horizontal scroll on a narrow viewport", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-format-narrow",
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "notes.txt",
+          name: "notes.txt",
+          size: 1024,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "run.webm",
+          name: "run.webm",
+          size: 1024,
+          mimeType: "video/webm",
+          kind: "video",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "upload.txt",
+          name: "upload.txt",
+          size: 1024,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          addedByUser: true,
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("tablist", { name: "Artifact category" })).toBeVisible();
+    await expect(page.getByRole("tablist", { name: "Artifact format" })).toBeVisible();
+
+    const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+    const innerWidth = await page.evaluate(() => window.innerWidth);
+    expect(scrollWidth).toBeLessThanOrEqual(innerWidth);
+  });
+
   test("renders artifact names with a leading neutral character in original visual order", async ({
     page,
   }) => {
