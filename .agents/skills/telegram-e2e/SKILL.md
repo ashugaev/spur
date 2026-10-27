@@ -55,7 +55,7 @@ SCENARIOS
   4. DM spawn: unbound autoSpawn or `/spawn` wizard creates canonical topic before launch; DM acknowledgment links it. Second agent owns separate topic; body/buttons/attention stay there.
   5. Legacy DM/group-main/foreign-topic text/reply/buttons: migrate and redirect without delivery/consent decision. Preserve other owners; exact-topic continuation succeeds.
   6. Voice: legacy input redirects before download/transcription/echo; canonical input delivers. DM wizard/autoSpawn receives task without transcript echo; changed wizard/ownership aborts stale intake.
-  7. No forum: spawn/manual operations work; reply unavailable, notices/buttons/typing silent. `source info` returns null without allocation. Legacy inspection/typing never allocates; typing requires existing canonical assignment.
+  7. No forum: spawn/manual operations work; reply unavailable, notices/buttons/typing silent. `source info` returns `source:null` without allocation. Legacy inspection/typing never allocates; typing requires existing canonical assignment.
   8. Inactive: `pause` an agent, reply-to its message: "<label> is not active. Message not delivered." Nothing delivered.
   9. Complete/kill: delete owned topics, clear routing/offers, report General outcome; no DM farewell. Preserve other owners; empty repeat sends/deletes nothing; late settlement never recreates topic.
   10. Command menu: after final-build source start/restart, compare dedicated TEST `getMyCommands` with TELEGRAM_COMMANDS; verify `getChatMenuButton` commands type. Record build/start identity; report overrides without deleting scopes.
