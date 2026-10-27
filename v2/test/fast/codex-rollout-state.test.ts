@@ -30,6 +30,236 @@ import { hashHistoryTail, PREFIX_VERIFY_BYTES } from "../../src/agent-history-de
 import { SCAN_CHUNK_BYTES } from "../../src/jsonl-scan.js";
 import { reconcileTokenUsage } from "../../src/token-usage.js";
 
+describe("turn-context current-turn compatibility", () => {
+  const sinceMs = Date.parse("2026-06-28T08:10:00.000Z");
+  const hookTurn = "current-turn";
+  const row = (type: string, payload: unknown, seconds: number) => ({
+    type,
+    timestamp: new Date(sinceMs + seconds * 1000).toISOString(),
+    payload,
+  });
+  const meta = row(
+    "session_meta",
+    { id: "primary-thread", source: "cli", thread_source: "user" },
+    -60,
+  );
+  const context = (payload: unknown, seconds = 1) => row("turn_context", payload, seconds);
+  const call = (type = "function_call", seconds = 2) =>
+    row("response_item", { type, name: "fixture_tool", call_id: "call-current" }, seconds);
+  const jsonl = (rows: unknown[]) => rows.map((value) => JSON.stringify(value)).join("\n") + "\n";
+  const read = (dir: string) =>
+    readCodexRolloutState(dir, undefined, "primary-thread", { sinceMs, nowMs: sinceMs + 60_000 });
+
+  it.each(["function_call", "custom_tool_call", "request_user_input"])(
+    "carries canonical turn_id without legacy id into %s and strict launch proof",
+    async (type) => {
+      const tool =
+        type === "request_user_input"
+          ? row("response_item", { type: "function_call", name: type, call_id: "call-current" }, 2)
+          : call(type);
+      const dir = await makeSessionsDir(
+        jsonl([
+          meta,
+          context({ turn_id: hookTurn, root_turn_id: "root-turn", model: "fixture-model" }),
+          tool,
+        ]),
+      );
+      const result = await read(dir);
+      expect.soft(result.rollout).toMatchObject({
+        state: type === "request_user_input" ? "needs_input" : "working",
+        reason: type,
+        turnId: hookTurn,
+      });
+      expect
+        .soft(result.launchProof)
+        .toMatchObject({ kind: "primary", complete: true, turnId: hookTurn });
+      expect(result.model).toBe("fixture-model");
+      expect(result.launchProof).not.toMatchObject({ turnId: "root-turn" });
+    },
+  );
+
+  it.each([{ id: hookTurn }, { turn_id: hookTurn, id: hookTurn }])(
+    "retains agreeing legacy context %j",
+    async (payload) => {
+      const dir = await makeSessionsDir(jsonl([meta, context(payload), call()]));
+      expect((await read(dir)).launchProof).toMatchObject({ kind: "primary", turnId: hookTurn });
+    },
+  );
+
+  it.each([
+    {},
+    { root_turn_id: hookTurn },
+    { turn_id: "" },
+    { turn_id: "  " },
+    { turn_id: null },
+    { turn_id: 7 },
+    { id: false },
+    { turn_id: hookTurn, id: "other" },
+    { turn_id: null, id: hookTurn },
+    { turn_id: hookTurn, id: null },
+    { turn_id: hookTurn, id: "" },
+  ])("does not inherit invalid context %j or rescue it from a prior context", async (payload) => {
+    const dir = await makeSessionsDir(
+      jsonl([meta, context({ turn_id: hookTurn }, 0), context(payload), call()]),
+    );
+    const result = await read(dir);
+    expect(result.rollout).toMatchObject({ state: "working", reason: "function_call" });
+    expect(result.rollout).not.toHaveProperty("turnId");
+    expect(result.launchProof).toEqual({ kind: "unknown" });
+  });
+
+  it.each([{ top: hookTurn }, { payload: hookTurn }, { top: hookTurn, payload: hookTurn }])(
+    "preserves valid explicit inline IDs without context %j",
+    async (ids) => {
+      const tool = call();
+      const dir = await makeSessionsDir(
+        jsonl([
+          meta,
+          {
+            ...tool,
+            ...(ids.top !== undefined ? { turn_id: ids.top } : {}),
+            payload: {
+              ...tool.payload,
+              ...(ids.payload !== undefined ? { turn_id: ids.payload } : {}),
+            },
+          },
+        ]),
+      );
+      expect((await read(dir)).launchProof).toMatchObject({ kind: "primary", turnId: hookTurn });
+    },
+  );
+
+  it.each([
+    { top: null },
+    { top: "" },
+    { top: " " },
+    { top: false },
+    { payload: [] },
+    { top: hookTurn, payload: null },
+    { top: null, payload: hookTurn },
+    { top: hookTurn, payload: "other" },
+    { top: "other" },
+  ])("never falls through malformed/conflicting inline IDs to context %j", async (ids) => {
+    const tool = call();
+    const dir = await makeSessionsDir(
+      jsonl([
+        meta,
+        context({ turn_id: hookTurn }),
+        {
+          ...tool,
+          ...(Object.hasOwn(ids, "top") ? { turn_id: ids.top } : {}),
+          payload: {
+            ...tool.payload,
+            ...(Object.hasOwn(ids, "payload") ? { turn_id: ids.payload } : {}),
+          },
+        },
+      ]),
+    );
+    const result = await read(dir);
+    expect(result.rollout).not.toHaveProperty("turnId");
+    expect(result.launchProof).toEqual({ kind: "unknown" });
+  });
+
+  it("invalidates contradicted context for the next untagged call", async () => {
+    const tool = call();
+    const dir = await makeSessionsDir(
+      jsonl([
+        meta,
+        context({ turn_id: hookTurn }),
+        { ...tool, turn_id: "other" },
+        call("custom_tool_call", 3),
+      ]),
+    );
+    expect((await read(dir)).launchProof).toEqual({ kind: "unknown" });
+  });
+
+  it.each(["task_started", "task_complete", "turn_aborted", "session_meta"])(
+    "clears context at %s even without a valid boundary turn",
+    async (type) => {
+      const boundary =
+        type === "session_meta"
+          ? { ...meta, timestamp: new Date(sinceMs + 1500).toISOString() }
+          : row("event_msg", { type }, 1.5);
+      const dir = await makeSessionsDir(
+        jsonl([meta, context({ turn_id: hookTurn }), boundary, call()]),
+      );
+      expect((await read(dir)).launchProof).toEqual({ kind: "unknown" });
+    },
+  );
+
+  it.each(["future", "invalid timestamp", "malformed payload"])(
+    "holds %s context",
+    async (mode) => {
+      const active =
+        mode === "future"
+          ? context({ turn_id: hookTurn }, 3)
+          : mode === "malformed payload"
+            ? context(null)
+            : { ...context({ turn_id: hookTurn }), timestamp: "invalid" };
+      const dir = await makeSessionsDir(
+        jsonl([meta, context({ turn_id: hookTurn }, 0), active, call()]),
+      );
+      const result = await read(dir);
+      expect(result.rollout).not.toHaveProperty("turnId");
+      expect(result.launchProof).toEqual({ kind: "unknown" });
+    },
+  );
+
+  it("does not borrow a context from another file", async () => {
+    const dir = await makeMultiFileSessionsDir([
+      {
+        filename: "first.jsonl",
+        content: jsonl([meta, context({ turn_id: hookTurn })]),
+        mtimeMs: sinceMs + 1000,
+      },
+      { filename: "second.jsonl", content: jsonl([meta, call()]), mtimeMs: sinceMs + 2000 },
+    ]);
+    expect((await readCodexRolloutState(dir)).rollout).not.toHaveProperty("turnId");
+    expect((await read(dir)).launchProof).toEqual({ kind: "unknown" });
+  });
+
+  it("clones context for cached appends and resets it at a new task/context", async () => {
+    const dir = await makeSessionsDir(jsonl([meta, context({ turn_id: hookTurn })]));
+    const file = join(dir, "2026", "04", "19", "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    await readCodexRolloutState(dir, reader);
+    const original = reader.files.get(file);
+    expect(original).toBeDefined();
+    await appendFile(file, jsonl([call()]));
+    expect((await readCodexRolloutState(dir, reader)).rollout?.turnId).toBe(hookTurn);
+    expect(reader.files.get(file)).not.toBe(original);
+    expect(original?.candidate?.result.rollout).toBeUndefined();
+    await appendFile(
+      file,
+      jsonl([
+        row("event_msg", { type: "task_started", turn_id: "next" }, 3),
+        call("custom_tool_call", 4),
+      ]),
+    );
+    expect((await readCodexRolloutState(dir, reader)).rollout).not.toHaveProperty("turnId");
+    await appendFile(file, jsonl([context({ turn_id: "next" }, 5), call("function_call", 6)]));
+    const cached = await readCodexRolloutState(dir, reader);
+    expect(cached.rollout?.turnId).toBe("next");
+    expect(original?.fold.currentTurn).toEqual({ id: hookTurn, timestampMs: sinceMs + 1000 });
+    expect(cached).toEqual(await readCodexRolloutState(dir));
+    expect((await read(dir)).launchProof).toMatchObject({ kind: "primary", turnId: "next" });
+  });
+
+  it.each(["rewrite", "truncate"])("drops cached context on %s", async (mode) => {
+    const dir = await makeSessionsDir(jsonl([meta, context({ turn_id: hookTurn }), call()]));
+    const file = join(dir, "2026", "04", "19", "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    expect((await readCodexRolloutState(dir, reader)).rollout?.turnId).toBe(hookTurn);
+    await writeFile(
+      file,
+      jsonl(mode === "rewrite" ? [meta, context({ root_turn_id: hookTurn }), call()] : [call()]),
+    );
+    const result = await readCodexRolloutState(dir, reader);
+    expect(result.rollout).not.toHaveProperty("turnId");
+    expect(result).toEqual(await readCodexRolloutState(dir));
+  });
+});
+
 describe("launch-owned primary Codex roster", () => {
   const sinceMs = Date.parse("2026-06-28T08:10:00.000Z");
   const nowMs = sinceMs + 60_000;

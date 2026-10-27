@@ -1197,6 +1197,7 @@ type CodexRolloutStateLine = Omit<CodexRolloutStateRecord, "filePath">;
 // a reader entry is never mutated: an append clones it first.
 interface CodexRolloutFold {
   meta?: { generationId: string; threadId: string; isSubagent: boolean; replayBeforeMs?: number };
+  currentTurn?: { id: string; timestampMs: number };
   // Every output call_id in the file, never pruned: a later call may reuse one.
   matchedCallIds: Set<string>;
   // State records since the newest anchor (non-TSA, no callId). Nothing older
@@ -1244,6 +1245,13 @@ const codexRolloutReaderQueues = new WeakMap<CodexRolloutReaderState, Promise<vo
 
 function readRolloutString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
+}
+
+function readAgreeingCodexTurnIds(values: unknown[]): string | undefined {
+  const first = values[0];
+  return typeof first === "string" && first.trim() && values.every((value) => value === first)
+    ? first
+    : undefined;
 }
 
 function codexRolloutStateRecord(
@@ -1671,6 +1679,28 @@ function foldCodexSessionMeta(fold: CodexRolloutFold, parsed: Record<string, unk
 
 function foldCodexRolloutLine(fold: CodexRolloutFold, parsed: Record<string, unknown>): void {
   foldCodexSessionMeta(fold, parsed);
+  const payload = parsed["payload"];
+  const payloadType = isRecord(payload) ? payload["type"] : undefined;
+  if (
+    parsed["type"] === "session_meta" ||
+    (parsed["type"] === "event_msg" &&
+      (payloadType === "task_started" ||
+        payloadType === "task_complete" ||
+        payloadType === "turn_aborted"))
+  ) {
+    delete fold.currentTurn;
+  }
+  if (parsed["type"] === "turn_context") {
+    delete fold.currentTurn;
+    if (isRecord(payload)) {
+      const id = readAgreeingCodexTurnIds(
+        ["turn_id", "id"].filter((key) => Object.hasOwn(payload, key)).map((key) => payload[key]),
+      );
+      const timestampMs =
+        typeof parsed["timestamp"] === "string" ? Date.parse(parsed["timestamp"]) : NaN;
+      if (id !== undefined && Number.isFinite(timestampMs)) fold.currentTurn = { id, timestampMs };
+    }
+  }
   const timestamps = [
     parsed["timestamp"],
     isRecord(parsed["payload"]) ? parsed["payload"]["timestamp"] : undefined,
@@ -1688,7 +1718,28 @@ function foldCodexRolloutLine(fold: CodexRolloutFold, parsed: Record<string, unk
   }
   const matchedCallId = readMatchedToolCallId(parsed);
   if (matchedCallId) fold.matchedCallIds.add(matchedCallId);
-  const state = extractCodexRolloutStateLine(parsed);
+  let state = extractCodexRolloutStateLine(parsed);
+  if (
+    state &&
+    isRecord(payload) &&
+    (state.reason === "function_call" ||
+      state.reason === "custom_tool_call" ||
+      state.reason === "request_user_input")
+  ) {
+    const explicit = [parsed, payload]
+      .filter((value) => Object.hasOwn(value, "turn_id"))
+      .map((value) => value["turn_id"]);
+    let turnId: string | undefined;
+    if (explicit.length > 0) {
+      const id = readAgreeingCodexTurnIds(explicit);
+      if (id !== undefined && (!fold.currentTurn || fold.currentTurn.id === id)) turnId = id;
+      else delete fold.currentTurn;
+    } else if (fold.currentTurn && fold.currentTurn.timestampMs <= state.timestampMs) {
+      turnId = fold.currentTurn.id;
+    }
+    const { turnId: _previousTurn, ...rest } = state;
+    state = { ...rest, ...(turnId !== undefined ? { turnId } : {}) };
+  }
   if (state) {
     if (state.reason !== "thread_settings_applied" && !state.callId) fold.stateTail = [state];
     else fold.stateTail.push(state);

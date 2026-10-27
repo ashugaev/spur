@@ -170,6 +170,7 @@
       "timestampMs": 1778405695113,
       "reason": "function_call",
       "callId": "call_AxYx29SoMiSOMp8I6vveuQvQ",
+      "turnId": "019e113c-438d-7f91-a097-302d939b4336",
       "filePath": "working-spur-67c0-rollout-tail.jsonl"
     },
     "rateLimit": {
