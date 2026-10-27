@@ -4,6 +4,7 @@ import {
   editTelegramTopic,
   sendTelegramChatAction,
   sendTelegramReply,
+  type TelegramPhoto,
 } from "../../src/telegram-source-state.js";
 import { presentConsent, proposeConsent } from "../../src/review-interface-consent.js";
 
@@ -268,6 +269,183 @@ describe("sendTelegramReply", () => {
       }),
     );
     expect(result).toEqual({ messageThreadId: 44, messageIds: [55] });
+  });
+});
+
+describe("sendTelegramReply images", () => {
+  const config = { token: "token-123" };
+  const png = (name: string): TelegramPhoto => ({
+    name,
+    contentType: "image/png",
+    data: new Uint8Array([1, 2, 3]),
+  });
+  const ok = (result: unknown): Response => new Response(JSON.stringify({ ok: true, result }));
+  const call = (index: number): { method: string; init: RequestInit } => {
+    const [url, init] = vi.mocked(fetch).mock.calls[index] as [string, RequestInit];
+    return { method: url.split("/").at(-1) as string, init };
+  };
+  const form = (index: number): FormData => {
+    const body = call(index).init.body;
+    expect(body).toBeInstanceOf(FormData);
+    return body as FormData;
+  };
+  const json = (index: number): Record<string, unknown> =>
+    JSON.parse(call(index).init.body as string) as Record<string, unknown>;
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("sends one image as sendPhoto into the thread, then the text below it", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(ok({ message_id: 10 }))
+      .mockResolvedValueOnce(ok({ message_id: 11 }));
+
+    const result = await sendTelegramReply(config, { chatId: -1001, messageThreadId: 7 }, "done", {
+      images: [png("a.png")],
+    });
+
+    expect(call(0).method).toBe("sendPhoto");
+    expect(call(0).init.headers).toBeUndefined();
+    const photo = form(0);
+    expect(photo.get("chat_id")).toBe("-1001");
+    expect(photo.get("message_thread_id")).toBe("7");
+    const file = photo.get("photo") as File;
+    expect(file.name).toBe("a.png");
+    expect(file.type).toBe("image/png");
+    expect([...new Uint8Array(await file.arrayBuffer())]).toEqual([1, 2, 3]);
+    expect(call(1).method).toBe("sendMessage");
+    expect(json(1)).toMatchObject({ chat_id: -1001, message_thread_id: 7, text: "done" });
+    expect(result).toEqual({ messageThreadId: 7, messageIds: [10, 11] });
+  });
+
+  it("sends several images as one album, then the text with the keyboard", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(ok([{ message_id: 10 }, { message_id: 11 }, { message_id: 12 }]))
+      .mockResolvedValueOnce(ok({ message_id: 13 }));
+
+    const result = await sendTelegramReply(config, { chatId: -1001, messageThreadId: 7 }, "done", {
+      images: [png("a.png"), png("b.png"), png("c.png")],
+      buttons: [{ text: "Approve", callbackData: "approve" }],
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(call(0).method).toBe("sendMediaGroup");
+    const album = form(0);
+    expect(album.get("message_thread_id")).toBe("7");
+    expect(JSON.parse(album.get("media") as string)).toEqual([
+      { type: "photo", media: "attach://p0" },
+      { type: "photo", media: "attach://p1" },
+      { type: "photo", media: "attach://p2" },
+    ]);
+    expect((album.get("p2") as File).name).toBe("c.png");
+    expect(json(1)).toMatchObject({
+      message_thread_id: 7,
+      reply_markup: { inline_keyboard: [[{ text: "Approve", callback_data: "approve" }]] },
+    });
+    expect(result).toEqual({ messageThreadId: 7, messageIds: [10, 11, 12, 13] });
+  });
+
+  it("posts the photos into a newly created topic, same thread as the text", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(ok({ message_thread_id: 44 }))
+      .mockResolvedValueOnce(ok({ message_id: 10 }))
+      .mockResolvedValueOnce(ok({ message_id: 11 }));
+
+    const result = await sendTelegramReply(config, { chatId: -1001 }, "done", {
+      topicName: "api-1",
+      images: [png("a.png")],
+    });
+
+    expect([0, 1, 2].map((index) => call(index).method)).toEqual([
+      "createForumTopic",
+      "sendPhoto",
+      "sendMessage",
+    ]);
+    expect(form(1).get("message_thread_id")).toBe("44");
+    expect(json(2)).toMatchObject({ message_thread_id: 44 });
+    expect(result).toEqual({ messageThreadId: 44, messageIds: [10, 11] });
+  });
+
+  it("sends new messages below the photos and deletes the placeholder instead of editing it", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(ok({ message_id: 10 }))
+      .mockResolvedValueOnce(ok({ message_id: 11 }))
+      .mockResolvedValueOnce(ok(true));
+
+    const result = await sendTelegramReply(
+      config,
+      { chatId: -1001, messageThreadId: 7, statusMessageId: 77 },
+      "done",
+      { images: [png("a.png")] },
+    );
+
+    expect([0, 1, 2].map((index) => call(index).method)).toEqual([
+      "sendPhoto",
+      "sendMessage",
+      "deleteMessage",
+    ]);
+    expect(form(0).get("message_thread_id")).toBe("7");
+    expect(json(1)).toMatchObject({ message_thread_id: 7, text: "done" });
+    expect(json(2)).toEqual({ chat_id: -1001, message_id: 77 });
+    expect(result).toEqual({ statusMessageIdConsumed: true, messageIds: [10, 11] });
+  });
+
+  it("swallows a failed placeholder delete without retrying it", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(ok({ message_id: 10 }))
+      .mockResolvedValueOnce(ok({ message_id: 11 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: false, description: "Internal" }), { status: 500 }),
+      );
+
+    const result = await sendTelegramReply(
+      config,
+      { chatId: -1001, messageThreadId: 7, statusMessageId: 77 },
+      "done",
+      { images: [png("a.png")] },
+    );
+
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(result).toEqual({ statusMessageIdConsumed: true, messageIds: [10, 11] });
+  });
+
+  it("names the delivered photo count when the text fails after the album", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(ok([{ message_id: 10 }, { message_id: 11 }]))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: false, description: "Bad Request: chat not found" }), {
+          status: 400,
+        }),
+      );
+
+    await expect(
+      sendTelegramReply(config, { chatId: -1001, messageThreadId: 7 }, "done", {
+        images: [png("a.png"), png("b.png")],
+      }),
+    ).rejects.toThrow(
+      "Telegram reply failed after 2 photo(s) were sent; resend the text without --image: Telegram reply failed: Bad Request: chat not found",
+    );
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("sends nothing else when the photo upload fails", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: false, description: "Bad Request: PHOTO_INVALID" }), {
+        status: 400,
+      }),
+    );
+
+    await expect(
+      sendTelegramReply(config, { chatId: -1001, messageThreadId: 7, statusMessageId: 77 }, "x", {
+        images: [png("a.png")],
+      }),
+    ).rejects.toThrow("Telegram reply failed: Bad Request: PHOTO_INVALID");
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
 
