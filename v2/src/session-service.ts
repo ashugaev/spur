@@ -12914,7 +12914,7 @@ export class SessionService {
         });
         await this.ensureTelegramTopic(sessionId, options.telegramOrigin);
         await this.withWorkspaceLifecycleLocks(sessionId, async () =>
-          this.assertSpawnNotKilled(sessionId),
+          this.assertSpawnNotKilled(placeholder.id),
         );
       }
       this.admissionReservations.delete(admissionReservation);
