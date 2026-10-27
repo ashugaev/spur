@@ -2479,6 +2479,7 @@ export function Dashboard() {
     },
     onForceKill: (session) => handleKillSession(session),
     pageBusy: false,
+    loadFull: true,
   });
 
   const handleRowAction = async (session: DashboardSession, action: SessionRowAction) => {

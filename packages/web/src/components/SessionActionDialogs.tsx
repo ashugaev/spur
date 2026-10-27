@@ -31,7 +31,9 @@ import {
   PRIMARY_SUBMIT_HINT,
 } from "@/lib/submit-hotkeys";
 import {
+  canSwitchAuth,
   isTerminalSession,
+  toDashboardSession,
   type DashboardSession,
   type SessionNotRestorablePayload,
   type SpurSessionView,
@@ -75,6 +77,8 @@ interface SessionActionDialogsOptions {
   onForceKill: (session: DashboardSession) => Promise<boolean>;
   /** Busy state owned by the page, such as a pending lifecycle action. */
   pageBusy: boolean;
+  /** Rows come from the list endpoint, which omits artifacts and Claude accounts. */
+  loadFull?: boolean;
   /** Mirrors handoff/respawn busy into the page's own busy state. */
   onBusyChange?: (busy: SessionDialogBusy) => void;
 }
@@ -87,11 +91,18 @@ export function useSessionActionDialogs({
   onUpdated,
   onForceKill,
   pageBusy,
+  loadFull = false,
   onBusyChange,
 }: SessionActionDialogsOptions) {
-  // Snapshot from open time; the live row wins while the page still lists it.
-  const [target, setTarget] = useState<DashboardSession | null>(null);
-  const session = target ? (resolve(target.id) ?? target) : null;
+  // Snapshot from open time; the live row wins while the page still lists it,
+  // unless the snapshot is a pinned full read.
+  const [target, setTargetState] = useState<DashboardSession | null>(null);
+  const [pinned, setPinned] = useState(false);
+  const setTarget = (next: DashboardSession, full = false) => {
+    setTargetState(next);
+    setPinned(full);
+  };
+  const session = target ? (pinned ? target : (resolve(target.id) ?? target)) : null;
   const sessionKey = session?.id ?? "";
   const [busy, setBusyState] = useState<SessionDialogBusy>(null);
   const setBusy = (next: SessionDialogBusy) => {
@@ -214,8 +225,41 @@ export function useSessionActionDialogs({
       .catch(() => {});
   };
 
-  const openRespawn = (target: DashboardSession) => {
-    setTarget(target);
+  /**
+   * List rows omit artifacts and Claude accounts. With `loadFull`, Respawn and
+   * Switch auth read the full session first and pin that snapshot.
+   */
+  const loadTarget = async (target: DashboardSession): Promise<DashboardSession | null> => {
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(target.id)}`, {
+        cache: "no-store",
+      });
+      if (!response.ok)
+        throw new Error(await readApiErrorMessage(response, "Failed to load Spur session"));
+      const full = toDashboardSession(
+        (await response.json()) as SpurSessionView,
+        target.projectName,
+      );
+      return full;
+    } catch (loadError) {
+      showErrorToast(errorMessage(loadError, "Failed to load Spur session"));
+      return null;
+    }
+  };
+
+  // Synchronous for an already-full row, so the detail page opens in the same tick.
+  const withFullTarget = async (
+    listed: DashboardSession,
+    apply: (target: DashboardSession) => void,
+  ) => {
+    if (!loadFull) return apply(listed);
+    const target = await loadTarget(listed);
+    if (target) apply(target);
+  };
+
+  const openRespawn = (listed: DashboardSession) => withFullTarget(listed, applyRespawn);
+  const applyRespawn = (target: DashboardSession) => {
+    setTarget(target, loadFull);
     setRespawnPrompt(target.prompt);
     setRespawnStartupAttachmentIds(target.startupAttachmentIds ?? []);
     setRespawnAttachments([]);
@@ -256,11 +300,16 @@ export function useSessionActionDialogs({
     setDeskSpawnOpen(true);
   };
 
-  const openSwitchAuth = (target: DashboardSession) => {
-    setTarget(target);
-    setSwitchAuthError(null);
-    setSwitchAuthOpen(true);
-  };
+  const openSwitchAuth = (listed: DashboardSession) =>
+    withFullTarget(listed, (target) => {
+      if (!canSwitchAuth(target)) {
+        showErrorToast("No authenticated Claude accounts to switch to");
+        return;
+      }
+      setTarget(target, loadFull);
+      setSwitchAuthError(null);
+      setSwitchAuthOpen(true);
+    });
 
   const openRecover = (target: DashboardSession, payload = buildLocalRecoverPayload(target)) => {
     setTarget(target);
@@ -280,7 +329,7 @@ export function useSessionActionDialogs({
     const target = session;
     if (!(await forceKill(target))) return;
     setRecoverPayload(null);
-    openRespawn(target);
+    await openRespawn(target);
   };
 
   const handleRespawn = async () => {

@@ -22,7 +22,6 @@ import {
   canRecover,
   canReopen,
   canRespawn,
-  canSwitchAuth,
   canUseDeskCheckout,
   getAttentionLevel,
   isRestorable,
@@ -250,7 +249,8 @@ function RowActionsMenu({
   const items: { label: string; action: SessionRowAction }[] = [];
   if (canUseDeskCheckout(session)) items.push({ label: "Desk agent", action: "desk" });
   if (canHandoff(session)) items.push({ label: "Handoff", action: "handoff" });
-  if (canSwitchAuth(session)) items.push({ label: "Switch auth", action: "switchAuth" });
+  // List rows omit Claude accounts; the dialog checks them after a full read.
+  if (session.agent === "claude") items.push({ label: "Switch auth", action: "switchAuth" });
   if (canPause(session)) items.push({ label: "Pause", action: "pause" });
   if (restorable && !budgetBlocked) items.push({ label: "Restore", action: "restore" });
   if (restorable && budgetBlocked) items.push({ label: "Continue anyway", action: "continue" });
