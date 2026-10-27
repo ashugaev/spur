@@ -162,7 +162,6 @@ interface TelegramRuntime {
   workbench: TelegramWorkbench;
   persistBindings(options?: {
     removeKeys?: string[];
-    reconcileKey?: string;
     bindKey?: string;
   }): Promise<void>;
   drainWrites(): Promise<void>;
@@ -292,7 +291,7 @@ async function rememberUpdate(
     runtime.lastUpdateId = updateId;
   } else if (reconcileKey === undefined) return true;
   try {
-    await runtime.persistBindings({ ...(reconcileKey !== undefined ? { reconcileKey } : {}) });
+    await runtime.persistBindings();
   } catch (error) {
     logPersistError(runtime.deps, error);
   }
@@ -2346,7 +2345,7 @@ async function startTelegramSource(
     autoSpawnInFlight: new Set(),
     workbench: new TelegramWorkbench(),
     persistBindings(
-      options: { removeKeys?: string[]; reconcileKey?: string; bindKey?: string } = {},
+      options: { removeKeys?: string[]; bindKey?: string } = {},
     ): Promise<void> {
       const removedKeys = new Set(options.removeKeys ?? []);
       const requestedBinding =
@@ -2370,7 +2369,6 @@ async function startTelegramSource(
             telegramTopicIsDeleting(deps.dataDir, binding.chatId, binding.messageThreadId)
           ) {
             bindings.delete(key);
-            removedKeys.add(key);
             if (key === options.bindKey) throw new Error("Topic or agent is no longer available");
           }
         }

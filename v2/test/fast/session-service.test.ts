@@ -2378,7 +2378,6 @@ describe("SessionService", () => {
       .mockImplementation((_dir, projectId, sessionId) => {
         const target = readTelegramReplyTargetMock();
         return {
-          heldBinding: target !== null,
           removedBindings:
             target?.projectId === projectId
               ? [
@@ -9208,7 +9207,6 @@ describe("SessionService", () => {
         sessions.set("api-1", { ...session, worktree: false });
         readTelegramReplyTargetMock.mockReturnValue(null);
         deleteTelegramSourceStateForSessionMock.mockReturnValue({
-          heldBinding: true,
           removedBindings: [
             {
               sourceId: "agentChat",
@@ -31548,7 +31546,6 @@ describe("SessionService", () => {
     deleteTelegramSourceStateForSessionMock.mockImplementation(() => {
       readTelegramReplyTargetMock.mockReturnValue(null);
       return {
-        heldBinding: true,
         removedBindings: [
           {
             sourceId: "agentChat",
@@ -31632,7 +31629,6 @@ describe("SessionService", () => {
     tmuxSessionExistsMock.mockResolvedValue(false);
     workspaceExistsMock.mockReturnValueOnce(true).mockReturnValue(false);
     deleteTelegramSourceStateForSessionMock.mockReturnValue({
-      heldBinding: false,
       removedBindings: [],
     });
 

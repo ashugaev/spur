@@ -493,7 +493,6 @@ describe("telegram source state", () => {
     });
 
     expect(deleteTelegramSourceStateForSession(dataDir, "api", "api-1")).toEqual({
-      heldBinding: true,
       removedBindings: [
         { sourceId: "telegram-a", binding: { chatId: 1, sessionId: "api-1" } },
         { sourceId: "telegram-b", binding: { chatId: 3, sessionId: "api-1" } },
@@ -507,7 +506,6 @@ describe("telegram source state", () => {
     expect(readTelegramLastUpdateId(dataDir, "api", "telegram-a")).toBe(55);
     expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
     expect(deleteTelegramSourceStateForSession(dataDir, "api", "api-1")).toEqual({
-      heldBinding: false,
       removedBindings: [],
     });
   });

@@ -2687,13 +2687,12 @@ export function deleteTelegramSourceStateForSession(
   dataDir: string,
   projectId: string,
   sessionId: string,
-): { heldBinding: boolean; removedBindings: { sourceId: string; binding: TelegramBinding }[] } {
+): { removedBindings: { sourceId: string; binding: TelegramBinding }[] } {
   const dir = join(dataDir, "source-state", "telegram", projectId);
   if (!existsSync(dir)) {
     deleteTelegramReplyTarget(dataDir, sessionId);
-    return { heldBinding: false, removedBindings: [] };
+    return { removedBindings: [] };
   }
-  let heldBinding = false;
   const removedBindings: { sourceId: string; binding: TelegramBinding }[] = [];
 
   const choiceDir = join(dir, "choices");
@@ -2718,7 +2717,6 @@ export function deleteTelegramSourceStateForSession(
     }
     const remaining = [...bindings.values()].filter((binding) => binding.sessionId !== sessionId);
     if (remaining.length !== bindings.size) {
-      heldBinding = true;
       const lastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
       writeTelegramBindings(
         dataDir,
@@ -2730,7 +2728,7 @@ export function deleteTelegramSourceStateForSession(
     }
   }
   deleteTelegramReplyTarget(dataDir, sessionId);
-  return { heldBinding, removedBindings };
+  return { removedBindings };
 }
 
 export function listActiveServiceProblems(
