@@ -428,7 +428,7 @@ describe("sendTelegramReply images", () => {
         images: [png("a.png"), png("b.png")],
       }),
     ).rejects.toThrow(
-      "Telegram reply failed after 2 photo(s) were sent; resend the text without --image: Telegram reply failed: Bad Request: chat not found",
+      "Telegram reply failed after 2 photo(s) were sent; resend the text only: Telegram reply failed: Bad Request: chat not found",
     );
     expect(fetch).toHaveBeenCalledTimes(2);
   });

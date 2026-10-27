@@ -10129,6 +10129,11 @@ describe("SessionService", () => {
         "a.png is 9000x1001; width+height must be at most 10000",
       ],
       ["a side ratio over 20", [image("a.png", png(2100, 100))], "a.png is 2100x100"],
+      [
+        "JPEG bytes without the start marker",
+        [image("a.jpg", Buffer.from([0xff, 0xe0, ...jpeg(10, 10).subarray(2)]))],
+        "not a readable jpg file",
+      ],
     ])("rejects %s before any send or write", async (_case, images, error) => {
       const service = await replyService();
 
@@ -10139,6 +10144,37 @@ describe("SessionService", () => {
           images,
         }),
       ).rejects.toThrow(error);
+      expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+      expect(writeInterfaceConsentMock).not.toHaveBeenCalled();
+      expect(writeTelegramOfferMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects invalid images with an approval manifest before the consent or offer write", async () => {
+      const service = await replyService();
+      consentPolicyMock.mockResolvedValue({ repositories: ["owner/repo"], approverUserId: 123 });
+      consentRepositoryMock.mockResolvedValue("owner/repo");
+      readCurrentBranchMock.mockResolvedValue("api-1");
+
+      await expect(
+        service.replyToSource("api-1", {
+          message: "approve?",
+          images: [image("a.gif", png(10, 10))],
+          requestInterfaceApproval: {
+            version: 1,
+            repository: "owner/repo",
+            baseBranch: "main",
+            surfaces: [
+              {
+                kind: "CLI",
+                id: "run",
+                before: ["old"],
+                after: ["--dry-run"],
+                constraints: ["no process created"],
+              },
+            ],
+          },
+        }),
+      ).rejects.toThrow("must end in .png");
       expect(sendTelegramReplyMock).not.toHaveBeenCalled();
       expect(writeInterfaceConsentMock).not.toHaveBeenCalled();
       expect(writeTelegramOfferMock).not.toHaveBeenCalled();

@@ -482,7 +482,7 @@ export async function sendTelegramReply(
     if (images.length === 0) throw error;
     const cause = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `Telegram reply failed after ${images.length} photo(s) were sent; resend the text without --image: ${cause}`,
+      `Telegram reply failed after ${images.length} photo(s) were sent; resend the text only: ${cause}`,
       { cause: error },
     );
   }
