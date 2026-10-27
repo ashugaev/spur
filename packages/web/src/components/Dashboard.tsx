@@ -1171,11 +1171,10 @@ export function Dashboard() {
       window.localStorage.getItem(BACKLOG_EXPANDED_STORAGE_KEY) === "1",
   );
   const toggleBacklog = useCallback(() => {
-    setBacklogExpanded((current) => {
-      window.localStorage.setItem(BACKLOG_EXPANDED_STORAGE_KEY, current ? "0" : "1");
-      return !current;
-    });
-  }, []);
+    const next = !backlogExpanded;
+    window.localStorage.setItem(BACKLOG_EXPANDED_STORAGE_KEY, next ? "1" : "0");
+    setBacklogExpanded(next);
+  }, [backlogExpanded]);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
   const [agentFilter, setAgentFilter] = useState<AgentName[]>([]);
   // Not persisted: PR readiness is remote state that flips without user

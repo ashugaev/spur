@@ -524,6 +524,18 @@ describe("Dashboard", () => {
       expect(screen.queryByRole("link", { name: /API-1/ })).not.toBeInTheDocument();
     });
 
+    it("restores the persisted expanded flag and writes it back on toggle", async () => {
+      mockBacklog();
+      window.localStorage.setItem("spur:backlog-expanded", "1");
+      window.history.replaceState(null, "", "/?project=api");
+      render(<Dashboard />);
+
+      expect(await screen.findByRole("link", { name: /API-1/ })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /Backlog/ }));
+      expect(window.localStorage.getItem("spur:backlog-expanded")).toBe("0");
+      expect(screen.queryByRole("link", { name: /API-1/ })).not.toBeInTheDocument();
+    });
+
     it("shows only the selected project's backlog, collapsed by default and expandable", async () => {
       mockBacklog();
       window.history.replaceState(null, "", "/?project=api");
