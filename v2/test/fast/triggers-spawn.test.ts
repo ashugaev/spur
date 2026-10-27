@@ -15,6 +15,7 @@ import {
 } from "../../src/metadata.js";
 import { SessionAdmissionDeniedError } from "../../src/session-service.js";
 import { startConfiguredTriggers } from "../../src/triggers.js";
+import type { SessionRecord, SpawnSessionRequest, WorkItemTriggerOrigin } from "../../src/types.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -56,6 +57,241 @@ function fixture(blocks = [{ prompt: "review" }]) {
     });
   return { dataDir, config, spawn, get, birth, deps, emit };
 }
+
+function queuedWorkItemFixture(
+  deskGroup: boolean,
+  blocks = [{ prompt: "anchor" }, { prompt: "sibling" }],
+) {
+  const f = fixture(blocks);
+  f.config.projects.test.triggers.review.event = "github:work_item.new";
+  Object.assign(f.config.projects.test.triggers.review, { spawnDeskGroup: deskGroup });
+  const data = {
+    externalId: "repo#queued",
+    url: "https://example.com/pr/2",
+    number: 2,
+    title: "queued",
+    repo: "repo",
+  };
+  const completions: Array<() => void> = [];
+  const accepted: SessionRecord[] = [];
+  let finishing = false;
+  f.spawn.mockImplementation(
+    async (
+      request: SpawnSessionRequest,
+      options?: { acceptQueued?: boolean; triggerOrigin?: WorkItemTriggerOrigin },
+    ) => {
+      const now = new Date().toISOString();
+      const record: SessionRecord = {
+        id: `test-queued-${accepted.length + 1}`,
+        project: "test",
+        agent: "claude",
+        prompt: request.prompt,
+        branch: "main",
+        worktree: false,
+        worktreePath: f.dataDir,
+        tmuxSession: "",
+        launchCommand: "",
+        status: "spawning",
+        createdAt: now,
+        updatedAt: now,
+        ...(options?.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
+        spawnReceipt: { version: 1, acceptedAt: now },
+        spawnIntent: {
+          version: 1,
+          phase: "queued",
+          request,
+          defaultBranch: "main",
+          preflightBatchId: "batch",
+          startupAttachments: [],
+          launchSelection: {},
+          submission: { state: "pending" },
+        },
+      };
+      accepted.push(record);
+      writeSession(f.dataDir, record);
+      const completion = new Promise<typeof record>((resolve) =>
+        completions.push(() => resolve(record)),
+      );
+      return options?.acceptQueued || finishing ? record : completion;
+    },
+  );
+  f.get.mockImplementation(async (id: string) => {
+    const record = readSession(f.dataDir, id);
+    if (!record) throw new Error(`Missing accepted session ${id}`);
+    return {
+      ...record,
+      state: record.status === "running" ? "working" : "stopped",
+      workspaceExists: true,
+    };
+  });
+  const emit = () =>
+    f.deps.bus.emit({ projectId: "test", sourceId: "tick", name: "github:work_item.new", data });
+  const members = () =>
+    readWorkItemLifecycles(f.dataDir, "test", "tick").get(data.externalId)?.members ?? [];
+  const finish = () => {
+    finishing = true;
+    for (const complete of completions.splice(0)) complete();
+  };
+  return { ...f, emit, members, accepted, finish };
+}
+
+describe("work-item queued acceptance", () => {
+  it.each([false, true])(
+    "binds accepted IDs and drains while native completion stays held (desk=%s)",
+    async (desk) => {
+      const f = queuedWorkItemFixture(desk);
+      let controller = startConfiguredTriggers(f.deps);
+      let stopping: Promise<void> | undefined;
+      try {
+        f.emit();
+        await vi.advanceTimersByTimeAsync(0);
+        const firstMembers = f.members();
+        expect(firstMembers).toHaveLength(desk ? 1 : 2);
+        expect(firstMembers).toEqual(
+          f.accepted.map((record, blockIndex) =>
+            expect.objectContaining({
+              blockIndex,
+              sessionId: record.id,
+              state: "spawning",
+              attempts: 1,
+              deferrals: 0,
+            }),
+          ),
+        );
+        for (const member of firstMembers) expect(member).not.toHaveProperty("startedAt");
+        expect(f.accepted).toHaveLength(desk ? 1 : 2);
+        for (const record of f.accepted)
+          expect(readSession(f.dataDir, record.id)).toMatchObject({
+            spawnIntent: { phase: "queued" },
+            spawnReceipt: { version: 1 },
+            triggerOrigin: { blockIndex: f.accepted.indexOf(record) },
+          });
+        let stopped = false;
+        stopping = controller.stop().then(() => {
+          stopped = true;
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(stopped).toBe(true);
+        await stopping;
+        controller = startConfiguredTriggers(f.deps);
+        f.emit();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(f.members()).toEqual(firstMembers);
+        expect(f.spawn).toHaveBeenCalledTimes(desk ? 1 : 2);
+        await vi.advanceTimersByTimeAsync(45 * 60_000);
+        f.emit();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(f.spawn).toHaveBeenCalledTimes(desk ? 1 : 2);
+        expect(f.members()[0]).toMatchObject({
+          sessionId: f.accepted[0]?.id,
+          attempts: 1,
+          deferrals: 0,
+        });
+        if (desk) {
+          const anchor = f.accepted[0];
+          if (!anchor) throw new Error("Missing accepted anchor");
+          const { spawnIntent: _intent, ...qualified } = anchor;
+          writeSession(f.dataDir, {
+            ...qualified,
+            status: "running",
+            agentSessionId: "qualified-native",
+            agentLaunchId: "qualified-launch",
+          });
+          await vi.advanceTimersByTimeAsync(45 * 60_000);
+          expect(f.spawn).toHaveBeenCalledTimes(1);
+          f.emit();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(f.spawn).toHaveBeenCalledTimes(2);
+          expect(f.spawn.mock.calls[1]?.[0]).toMatchObject({
+            prompt: "sibling",
+            reuseWorkspaceSessionId: anchor.id,
+          });
+          expect(f.members()).toEqual([
+            expect.objectContaining({
+              blockIndex: 0,
+              sessionId: anchor.id,
+              state: "running",
+              attempts: 1,
+            }),
+            expect.objectContaining({
+              blockIndex: 1,
+              sessionId: f.accepted[1]?.id,
+              state: "spawning",
+              attempts: 1,
+            }),
+          ]);
+        }
+      } finally {
+        const drained = controller.stop();
+        f.finish();
+        await stopping;
+        await drained;
+      }
+    },
+  );
+
+  it("continues pending non-anchor blocks beside an already running desk anchor", async () => {
+    const f = queuedWorkItemFixture(true, [
+      { prompt: "anchor" },
+      { prompt: "second" },
+      { prompt: "third" },
+    ]);
+    f.spawn.mockResolvedValueOnce({ id: "test-running", status: "running", state: "working" });
+    f.get.mockResolvedValue({
+      id: "test-running",
+      status: "running",
+      state: "working",
+      workspaceExists: true,
+    });
+    const controller = startConfiguredTriggers(f.deps);
+    try {
+      f.emit();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.members()).toEqual([
+        expect.objectContaining({ blockIndex: 0, state: "running", sessionId: "test-running" }),
+        expect.objectContaining({ blockIndex: 1, state: "spawning", sessionId: "test-queued-1" }),
+        expect.objectContaining({ blockIndex: 2, state: "spawning", sessionId: "test-queued-2" }),
+      ]);
+      expect(f.spawn).toHaveBeenCalledTimes(3);
+      expect(
+        f.spawn.mock.calls
+          .slice(1)
+          .every(([request]) => request.reuseWorkspaceSessionId === "test-running"),
+      ).toBe(true);
+    } finally {
+      const drained = controller.stop();
+      f.finish();
+      await drained;
+    }
+  });
+
+  it("keeps admitted foreground completion semantics", async () => {
+    const f = queuedWorkItemFixture(false, [{ prompt: "foreground" }]);
+    let complete!: () => void;
+    f.spawn.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          complete = () => resolve({ id: "test-foreground", status: "running", state: "working" });
+        }),
+    );
+    const controller = startConfiguredTriggers(f.deps);
+    try {
+      f.emit();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.members()[0]).not.toHaveProperty("sessionId");
+      complete();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.members()[0]).toMatchObject({
+        state: "running",
+        sessionId: "test-foreground",
+        attempts: 1,
+      });
+    } finally {
+      complete();
+      await controller.stop();
+    }
+  });
+});
 
 describe("durable spawn admission", () => {
   it("keeps equal-payload occurrences and routes distinct across disk reload", async () => {

@@ -1383,6 +1383,7 @@ async function runSpawnTrigger(
           if (refreshed?.state !== "spawning" || refreshed.claimedAt !== refreshedAt) continue;
           entry.claimedAt = refreshedAt;
           spawning = service.spawn(spawnRequest, {
+            acceptQueued: true,
             triggerOrigin: { triggerId, sourceId, externalId: ctx.workItem.externalId, blockIndex },
           });
         } else if (queue && work) {
