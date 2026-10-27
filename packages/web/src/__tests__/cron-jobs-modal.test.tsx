@@ -258,22 +258,51 @@ describe("CronJobsModal owner states", () => {
       },
       "• spur.yaml invalid: schedule must be a string",
     ],
-    [
-      { state: "ambiguous", failedFiles: 1 },
-      "• config for API not found; 1 config file failed to load",
-    ],
-    [
-      { state: "ambiguous", failedFiles: 2 },
-      "• config for API not found; 2 config files failed to load",
-    ],
     [{ state: "project_removed" }, "• API removed from its config file, not loaded"],
   ] as const)("renders the %o drift line", async (owner, text) => {
     stubFetch(() => jsonResponse(withOwner(owner)));
     renderModal();
     await screen.findByText("audit");
+    expect(spanWithText(text)).toBeInTheDocument();
+  });
+
+  function spanWithText(text: string): HTMLElement {
+    return screen.getByText(
+      (_, element) => element?.tagName === "SPAN" && element.textContent === text,
+    );
+  }
+
+  it("lists each failed config file with its parser message, capped at three", async () => {
+    const failed = (file: string) => ({
+      file,
+      reason: "parse_error" as const,
+      message: `Bad indent in ${file} at line 2, column 1`,
+    });
+    stubFetch(() =>
+      jsonResponse(
+        withOwner({
+          state: "ambiguous",
+          failedFiles: [
+            failed("spur.yaml"),
+            { file: "b.yaml", reason: "unreadable", message: "EACCES" },
+            failed("c.yaml"),
+            failed("d.yaml"),
+          ],
+        }),
+      ),
+    );
+    renderModal();
+    await screen.findByText("audit");
+    expect(spanWithText("• config for API not found; failed to load:")).toBeInTheDocument();
     expect(
-      screen.getByText((_, element) => element?.tagName === "SPAN" && element.textContent === text),
+      spanWithText("spur.yaml invalid: Bad indent in spur.yaml at line 2, column 1"),
     ).toBeInTheDocument();
+    expect(spanWithText("b.yaml unreadable: EACCES")).toBeInTheDocument();
+    expect(
+      spanWithText("c.yaml invalid: Bad indent in c.yaml at line 2, column 1"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/d\.yaml invalid/)).toBeNull();
+    expect(spanWithText("and 1 more")).toBeInTheDocument();
   });
 
   it("shows removed rows for a project removed from its file", async () => {

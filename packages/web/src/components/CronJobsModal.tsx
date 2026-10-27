@@ -30,6 +30,8 @@ const SECONDARY_TEXT = "text-[var(--color-text-secondary)]";
 const ERROR_TEXT = "text-[var(--color-status-error)]";
 const ATTENTION_TEXT = "text-[var(--color-status-attention)]";
 
+const FAILED_FILES_SHOWN = 3;
+
 const DISK_MARKER_TITLE: Partial<Record<CronRow["disk"], string>> = {
   changed: "changed on disk",
   added: "added on disk, not loaded",
@@ -65,9 +67,17 @@ function driftLine(project: CronProjectView, allProjects: boolean): ReactNode {
       );
     case "ambiguous":
       return (
-        <span className={ATTENTION_TEXT}>
-          • config for {project.projectName} not found; {owner.failedFiles} config file
-          {owner.failedFiles === 1 ? "" : "s"} failed to load
+        <span className={`flex flex-col ${ATTENTION_TEXT}`}>
+          <span>• config for {project.projectName} not found; failed to load:</span>
+          {owner.failedFiles.slice(0, FAILED_FILES_SHOWN).map((failed, index) => (
+            <span className={`pl-3 ${ERROR_TEXT}`} key={index}>
+              {failed.file} {failed.reason === "parse_error" ? "invalid" : "unreadable"}:{" "}
+              {failed.message}
+            </span>
+          ))}
+          {owner.failedFiles.length > FAILED_FILES_SHOWN ? (
+            <span className="pl-3">and {owner.failedFiles.length - FAILED_FILES_SHOWN} more</span>
+          ) : null}
         </span>
       );
     case "project_removed":

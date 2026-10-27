@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
+import { basename } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { loadInstanceConfigReadOnly, loadProjectConfig } from "./config.js";
 import { DEFAULT_EVENT_LOG_CONFIG, eventLogPath, type SpurLogEntry } from "./event-log.js";
@@ -12,6 +13,7 @@ import type {
   CronActionEvent,
   CronActionEventName,
   CronDiskState,
+  CronFailedConfigFile,
   CronJobsResponse,
   CronOwnerState,
   CronProjectView,
@@ -85,7 +87,12 @@ export function resolveCronOwnerFiles(
       files.push(
         (error as NodeJS.ErrnoException).code === "ENOENT"
           ? { state: "missing", path }
-          : { state: "unreadable", path, error: errorMessage(error) },
+          : // The errno code only: fs messages embed the absolute path.
+            {
+              state: "unreadable",
+              path,
+              error: (error as NodeJS.ErrnoException).code ?? "read failed",
+            },
       );
       continue;
     }
@@ -264,8 +271,23 @@ function actionEvent(entry: SpurLogEntry): CronActionEvent {
 
 type OwnerMatch =
   | Extract<CronOwnerFile, { state: "loaded" | "invalid" }>
-  | { state: "ambiguous"; failedFiles: number }
+  | Extract<CronOwnerState, { state: "ambiguous" }>
   | { state: "project_removed" };
+
+function failedFile(file: CronOwnerFile): CronFailedConfigFile | null {
+  switch (file.state) {
+    case "parse_error":
+      return { file: basename(file.path), reason: "parse_error", message: file.error };
+    case "missing":
+      return { file: basename(file.path), reason: "unreadable", message: "Config file not found" };
+    case "unreadable":
+      return { file: basename(file.path), reason: "unreadable", message: file.error };
+    case "loaded":
+    case "invalid":
+    case "rejected":
+      return null;
+  }
+}
 
 // The daemon keeps no load-time project -> file record, so ownership comes only
 // from a file that declares the project. With no declaring file, a file that
@@ -281,11 +303,12 @@ function ownerFor(projectId: string, files: readonly CronOwnerFile[]): OwnerMatc
   for (const file of files) {
     if (file.state === "invalid" && file.declaredProjectIds.includes(projectId)) return file;
   }
-  const failedFiles = files.filter(
-    (file) =>
-      file.state === "parse_error" || file.state === "missing" || file.state === "unreadable",
-  ).length;
-  return failedFiles > 0 ? { state: "ambiguous", failedFiles } : { state: "project_removed" };
+  const failedFiles = files
+    .map(failedFile)
+    .filter((entry): entry is CronFailedConfigFile => entry !== null);
+  return failedFiles.length > 0
+    ? { state: "ambiguous", failedFiles }
+    : { state: "project_removed" };
 }
 
 function ownerState(owner: OwnerMatch, sources: readonly CronSourceView[]): CronOwnerState {

@@ -345,8 +345,18 @@ describe("cron jobs drift", () => {
       },
     ]);
     const project = (await view(f, running)).projects[0];
-    expect(project?.owner).toEqual({ state: "ambiguous", failedFiles: 1 });
+    expect(project?.owner).toEqual({
+      state: "ambiguous",
+      failedFiles: [
+        {
+          file: "spur.yaml",
+          reason: "parse_error",
+          message: expect.stringMatching(/ at line \d+, column \d+$/) as unknown as string,
+        },
+      ],
+    });
     expect(JSON.stringify(project)).not.toContain("unterminated-secret-x");
+    expect(JSON.stringify(project)).not.toContain(f.root);
     expect(project?.sources[0]?.disk).toBe("unknown");
     expect(project?.sources[0]?.triggers[0]?.disk).toBe("unknown");
   });
@@ -426,9 +436,9 @@ describe("cron jobs owner resolution", () => {
     const side = response.projects.find((project) => project.projectId === "side");
     expect(side?.owner).toMatchObject({ state: "loaded", path: registryPath, changed: false });
     expect(side?.sources[0]?.disk).toBe("same");
-    expect(response.projects.find((project) => project.projectId === "demo")?.owner).toEqual({
+    expect(response.projects.find((project) => project.projectId === "demo")?.owner).toMatchObject({
       state: "ambiguous",
-      failedFiles: 1,
+      failedFiles: [{ file: "spur.yaml", reason: "parse_error" }],
     });
   });
 
@@ -446,8 +456,12 @@ describe("cron jobs owner resolution", () => {
     await writeFile(registryPath, "projects: [\n");
     const response = await view(f, running, [registryPath]);
     const demo = response.projects.find((project) => project.projectId === "demo");
-    expect(demo?.owner).toEqual({ state: "ambiguous", failedFiles: 1 });
-    expect(JSON.stringify(demo)).not.toContain("side.yaml");
+    // B is listed as a failed file only, never as the owner.
+    expect(demo?.owner).toMatchObject({
+      state: "ambiguous",
+      failedFiles: [{ file: "side.yaml", reason: "parse_error" }],
+    });
+    expect(demo?.owner).not.toHaveProperty("path");
     expect(demo?.sources[0]?.disk).toBe("unknown");
   });
 
@@ -460,7 +474,10 @@ describe("cron jobs owner resolution", () => {
       { state: "missing", path: f.bootstrapPath },
     ]);
     const project = (await view(f, running)).projects[0];
-    expect(project?.owner).toEqual({ state: "ambiguous", failedFiles: 1 });
+    expect(project?.owner).toEqual({
+      state: "ambiguous",
+      failedFiles: [{ file: "spur.yaml", reason: "unreadable", message: "Config file not found" }],
+    });
     expect(project?.sources[0]?.disk).toBe("unknown");
   });
 });

@@ -65,8 +65,14 @@ export type CronDiskState = "same" | "changed" | "added" | "removed" | "unknown"
 export type CronOwnerState =
   | { state: "loaded"; path: string; revision: string; changed: boolean }
   | { state: "invalid"; path: string; revision: string; error: string }
-  | { state: "ambiguous"; failedFiles: number }
+  | { state: "ambiguous"; failedFiles: CronFailedConfigFile[] }
   | { state: "project_removed" };
+
+export interface CronFailedConfigFile {
+  file: string;
+  reason: "parse_error" | "unreadable";
+  message: string;
+}
 
 export type CronActionEventName =
   | "trigger.spawn.completed"
