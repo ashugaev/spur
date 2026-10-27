@@ -50762,6 +50762,43 @@ describe("SessionService", () => {
         service.dispose();
       });
 
+      it("does not restore the codex reader from a read that straddles eviction", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+        let release: (value: object) => void = () => undefined;
+        readCodexConversationTailMock.mockReturnValueOnce(
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+        );
+        readCodexConversationTailMock.mockResolvedValue(
+          readerResult({ filePath: "/rollout-fresh.jsonl" }),
+        );
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const pending = service.getConversation("api-1");
+        await vi.waitFor(() => expect(readCodexConversationTailMock).toHaveBeenCalledTimes(1));
+
+        // @ts-expect-error test-only access to a private method
+        service.removeSessionArtifacts({
+          id: "api-1",
+          project: "api",
+          startupAttachmentIds: [],
+        });
+        release(readerResult({ filePath: "/rollout-stale.jsonl" }));
+        await pending;
+        // @ts-expect-error test-only access to a private field
+        expect(service.codexConversationReaders.has("api-1")).toBe(false);
+        // @ts-expect-error test-only access to a private field
+        expect(service.conversationReadChain.has("api-1")).toBe(false);
+        await service.getConversation("api-1");
+
+        expect(readCodexConversationTailMock).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining("api-1"),
+          undefined,
+        );
+      });
+
       it("keeps the codex reader across pruneSessionScopedState for a terminal session", async () => {
         readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "completed" }));
         const first = { filePath: "/rollout-a.jsonl" };

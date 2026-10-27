@@ -3695,8 +3695,10 @@ export class SessionService {
   private readonly codexConversationReaders = new Map<string, CodexConversationReaderState>();
   // Serializes conversation tail reads per session. getConversation is polled
   // every 4s and a slow read can overlap the next poll; chaining keeps the one
-  // shared reader's offset monotonic instead of racing read-modify-write.
-  private readonly conversationReadChain = new Map<string, Promise<void>>();
+  // shared reader's offset monotonic instead of racing read-modify-write. The
+  // slot object outlives every read queued on it and is dropped on eviction,
+  // so a read still in flight can tell it must not store its reader.
+  private readonly conversationReadChain = new Map<string, { tail: Promise<void> }>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly codexRolloutReaders = new Map<string, CodexRolloutReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
@@ -11388,18 +11390,22 @@ export class SessionService {
    * would otherwise both snapshot the same cached reader and the later write
    * would clobber the earlier, regressing the offset and double-counting.
    * Chaining on the prior read serializes them so the offset advances
-   * monotonically.
+   * monotonically. `read` gets `isLive`: false once the session was evicted
+   * mid-read, so it must not write its reader back.
    */
-  private serializeConversationRead<T>(sessionId: string, read: () => Promise<T>): Promise<T> {
-    const prior = this.conversationReadChain.get(sessionId) ?? Promise.resolve();
-    const run = prior.then(read);
-    this.conversationReadChain.set(
-      sessionId,
-      run.then(
-        () => undefined,
-        () => undefined,
-      ),
+  private serializeConversationRead<T>(
+    sessionId: string,
+    read: (isLive: () => boolean) => Promise<T>,
+  ): Promise<T> {
+    const slot = this.conversationReadChain.get(sessionId) ?? { tail: Promise.resolve() };
+    const run = slot.tail.then(() =>
+      read(() => this.conversationReadChain.get(sessionId) === slot),
     );
+    slot.tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.conversationReadChain.set(sessionId, slot);
     return run;
   }
 
@@ -11409,7 +11415,7 @@ export class SessionService {
     totalEntries: number;
     startIndex: number;
   } | null> {
-    return this.serializeConversationRead(session.id, async () => {
+    return this.serializeConversationRead(session.id, async (isLive) => {
       const result = await readClaudeConversationTail(
         session.worktreePath,
         this.conversationReaders.get(session.id),
@@ -11417,7 +11423,7 @@ export class SessionService {
       );
       if (!result) return null;
       const { reader, hasMore: _hasMore, ...conversation } = result;
-      this.conversationReaders.set(session.id, reader);
+      if (isLive()) this.conversationReaders.set(session.id, reader);
       return conversation;
     });
   }
@@ -11427,14 +11433,14 @@ export class SessionService {
     totalEntries: number;
     startIndex: number;
   } | null> {
-    return this.serializeConversationRead(session.id, async () => {
+    return this.serializeConversationRead(session.id, async (isLive) => {
       const result = await readCodexConversationTail(
         this.codexSessionsDir(session.id),
         this.codexConversationReaders.get(session.id),
       );
       if (!result) return null;
       const { reader, ...conversation } = result;
-      this.codexConversationReaders.set(session.id, reader);
+      if (isLive()) this.codexConversationReaders.set(session.id, reader);
       return conversation;
     });
   }
