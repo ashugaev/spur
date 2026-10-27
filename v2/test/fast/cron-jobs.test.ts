@@ -133,9 +133,11 @@ describe("cron jobs view", () => {
       "hidden-branch-x",
       "hidden-condition-x",
       "chat prompt hidden-x",
-      "overrides",
-      "selfDestruct",
-      "worktree",
+      // Key forms: the owner path inside TMPDIR may contain these words.
+      '"overrides":',
+      '"selfDestruct":',
+      '"worktree":',
+      '"branch":',
       "chat-reply",
     ]) {
       expect(body).not.toContain(hidden);
