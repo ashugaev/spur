@@ -168,7 +168,11 @@ const getReleasesMock = vi.fn();
 const getVersionMock = vi.fn();
 const reserveNextSessionIdMock = vi.fn();
 const listSessionsMock = vi.fn();
-const archiveSessionsMock = vi.fn(() => ({ archivedIds: [], archiveDir: "/tmp/sessions-archive" }));
+const archiveSessionsMock = vi.fn(() => ({
+  archivedIds: [],
+  retainedAnchorIds: [],
+  archiveDir: "/tmp/sessions-archive",
+}));
 const readAvailableBacklogItemsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
@@ -50732,6 +50736,7 @@ describe("SessionService", () => {
         });
         archiveSessionsMock.mockReturnValueOnce({
           archivedIds: ["api-1"] as never[],
+          retainedAnchorIds: [],
           archiveDir: "/tmp/sessions-archive",
         });
         readCodexConversationTailMock.mockResolvedValue(
