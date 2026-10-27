@@ -1,7 +1,24 @@
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Simulates a dir owned by another uid: chmod fails with EPERM, so it stays locked.
+const chmodState = vi.hoisted(() => ({ lockedPath: null as string | null }));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    chmodSync: (path: import("node:fs").PathLike, mode: import("node:fs").Mode) => {
+      if (chmodState.lockedPath !== null && String(path) === chmodState.lockedPath) {
+        throw Object.assign(new Error(`EPERM: operation not permitted, chmod '${path}'`), {
+          code: "EPERM",
+        });
+      }
+      actual.chmodSync(path, mode);
+    },
+  };
+});
 import {
   MAX_NESTED_ARTIFACT_ROWS,
   deleteSessionArtifactById,
@@ -415,6 +432,23 @@ describe.skipIf(process.getuid?.() === 0)("session artifact cleanup with read-on
     expect(() => deleteSessionArtifactsExcept(dataDir, "ro-2", ["shot.png"])).not.toThrow();
     expect(existsSync(join(dir, "shot.png"))).toBe(true);
     expect(existsSync(join(dir, "handoff"))).toBe(false);
+  });
+
+  it("removes what it can and does not throw when a locked dir cannot be chmod'd", async () => {
+    const dataDir = await newDataDir();
+    const dir = await seedReadOnlyTree(dataDir, "ro-3");
+    const cache = join(dir, "handoff", "back", ".pytest_cache");
+    await writeFile(join(dir, "handoff", "back", "conftest.py"), "x", "utf8");
+    chmodState.lockedPath = cache;
+    try {
+      expect(() => deleteSessionArtifactsDir(dataDir, "ro-3")).not.toThrow();
+    } finally {
+      chmodState.lockedPath = null;
+      await chmod(cache, 0o755);
+    }
+    expect(existsSync(join(dir, "shot.png"))).toBe(false);
+    expect(existsSync(join(dir, "handoff", "back", "conftest.py"))).toBe(false);
+    expect(existsSync(join(cache, ".gitignore"))).toBe(true);
   });
 });
 

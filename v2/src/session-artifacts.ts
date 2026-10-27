@@ -122,7 +122,14 @@ function readArtifactMetadata(dir: string): ArtifactMetadataMap {
 function writeArtifactMetadata(dir: string, metadata: ArtifactMetadataMap): void {
   const metadataPath = join(dir, ARTIFACT_METADATA_FILE);
   if (Object.keys(metadata).length === 0) {
-    rmSync(metadataPath, { force: true });
+    try {
+      rmSync(metadataPath, { force: true });
+    } catch (error) {
+      // A stale empty-map file under an unwritable dir is harmless; cleanup must not fail.
+      if (!isPermissionError(error)) {
+        throw error;
+      }
+    }
     return;
   }
   writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf-8");
@@ -217,7 +224,7 @@ function isPermissionError(error: unknown): boolean {
 
 // Agents leave read-only directories behind (chmod, pytest caches). Restores the owner
 // write+exec bit on every directory this uid owns, never following symlinks. Directories
-// owned by another uid are left as-is: chmod on them fails and is skipped.
+// owned by another uid, or whose chmod fails, are left as-is.
 function restoreOwnerWriteOnDirs(dir: string): void {
   const uid = process.getuid?.();
   const stack = [dir];
@@ -229,7 +236,11 @@ function restoreOwnerWriteOnDirs(dir: string): void {
         continue;
       }
       if (stats.uid === uid) {
-        chmodSync(current, stats.mode | 0o700);
+        try {
+          chmodSync(current, stats.mode | 0o700);
+        } catch {
+          // Locked anyway (EPERM): still descend, children may be fixable.
+        }
       }
       for (const entry of readdirSync(current, { withFileTypes: true })) {
         if (entry.isDirectory()) {
