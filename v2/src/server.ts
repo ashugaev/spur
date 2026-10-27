@@ -14,6 +14,7 @@ import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js
 import { AutoPingError, AutoPingService } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
 import { projectConversationPage } from "./conversation-page.js";
+import { readCronJobs, UnknownCronProjectError } from "./cron-jobs.js";
 import type { ProcSnapshot } from "./sidecars/reap.js";
 import {
   clearFailedDeploySwitchRecord,
@@ -1290,6 +1291,27 @@ export async function startServer(
 
       if (method === "GET" && path === "/projects") {
         sendJson(response, 200, service.listProjects());
+        return;
+      }
+
+      if (method === "GET" && path === "/projects/cron") {
+        const projectId = url.searchParams.get("project")?.trim() || undefined;
+        try {
+          sendJson(
+            response,
+            200,
+            await readCronJobs({
+              config: service.config,
+              bootstrapConfigPath: service.bootstrapConfigPath,
+              registryPaths: service.getRegistryPaths(),
+              knownProjectIds: new Set(service.listProjects().map((entry) => entry.id)),
+              ...(projectId !== undefined ? { projectId } : {}),
+            }),
+          );
+        } catch (error) {
+          if (!(error instanceof UnknownCronProjectError)) throw error;
+          sendError(response, 404, error.message);
+        }
         return;
       }
 
