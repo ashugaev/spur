@@ -124,9 +124,9 @@ test.describe("Version menu Auto checkbox", () => {
     if (!overflowLabelBox) throw new Error("version label has no box");
     const probeWidth = await label.evaluate((element) => {
       const probe = document.createElement("span");
+      // A 24ch box in the label's font; a run of glyphs would add letter-spacing.
       probe.style.display = "inline-block";
-      probe.style.whiteSpace = "nowrap";
-      probe.textContent = "0".repeat(24);
+      probe.style.width = "24ch";
       element.parentElement?.appendChild(probe);
       const width = probe.getBoundingClientRect().width;
       probe.remove();

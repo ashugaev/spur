@@ -217,6 +217,9 @@ describe("CronJobsModal", () => {
     const link = screen.getByRole("link", { name: "api-412" });
     expect(toggle.contains(link)).toBe(false);
     expect(fireEvent.keyDown(link, { key: "Enter" })).toBe(true);
+    // jsdom cannot navigate: cancel only the default action, on the link itself
+    // (the row's stopPropagation keeps the event from reaching window).
+    link.addEventListener("click", (event) => event.preventDefault());
     fireEvent.click(link);
     expect(toggle).toHaveAttribute("aria-expanded", "false");
   });
