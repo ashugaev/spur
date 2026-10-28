@@ -2747,6 +2747,39 @@ projects:
     }
   });
 
+  it("loads github source ignoreChecks", async () => {
+    const configured = loadConfig(
+      await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        ignoreChecks: [approvals, "Spur Approval Gate"]
+`),
+    );
+    expect(configured.projects.backend?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      ignoreChecks: ["approvals", "Spur Approval Gate"],
+    });
+  });
+
+  it("rejects invalid ignoreChecks", async () => {
+    for (const value of ["approvals", '[""]']) {
+      const path = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        ignoreChecks: ${value}
+`);
+      expect(() => loadConfig(path)).toThrow(/\.ignoreChecks/);
+    }
+  });
+
   describe("signPosts", () => {
     const marker = "[AI-generated, session: {session}]";
     const otherMarker = "[bot {session}]";
@@ -5376,6 +5409,7 @@ authRotation:
   autoRotateOnRateLimit: true
   cooldownMinutes: 30
   maxRotationsPerEpisode: 3
+  switchAuth: true
 projects:
   backend:
     path: $REPO_PATH
@@ -5387,6 +5421,7 @@ projects:
       autoRotateOnRateLimit: true,
       cooldownMinutes: 30,
       maxRotationsPerEpisode: 3,
+      switchAuth: true,
     });
   });
 
@@ -5403,6 +5438,7 @@ projects:
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+      switchAuth: false,
     });
   });
 
@@ -5410,6 +5446,7 @@ projects:
     const configPath = await writeConfig(`
 authRotation:
   autoRotateOnRateLimit: true
+  switchAuth: true
 projects:
   backend:
     path: $REPO_PATH
@@ -5421,6 +5458,7 @@ projects:
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+      switchAuth: false,
     });
   });
 

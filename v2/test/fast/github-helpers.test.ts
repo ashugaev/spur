@@ -371,6 +371,28 @@ describe("summarizeFailingCi", () => {
     }
   });
 
+  it("returns null when only ignoreChecks names fail", () => {
+    const checks: GitHubCheck[] = [
+      { name: "approvals", state: "FAILURE" },
+      { name: "Spur Approval Gate", state: "FAILURE" },
+      { name: "build", state: "SUCCESS" },
+    ];
+    expect(summarizeFailingCi(checks, ["approvals", "Spur Approval Gate"])).toBeNull();
+  });
+
+  it("lists only non-ignoreChecks failing names when mixed", () => {
+    const checks: GitHubCheck[] = [
+      { name: "approvals", state: "FAILURE" },
+      { name: "Labeler", state: "FAILURE" },
+    ];
+    expect(summarizeFailingCi(checks, ["approvals"])).toBe("CI is failing: Labeler.");
+  });
+
+  it("matches ignoreChecks case-sensitively", () => {
+    const checks: GitHubCheck[] = [{ name: "Approvals", state: "FAILURE" }];
+    expect(summarizeFailingCi(checks, ["approvals"])).toBe("CI is failing: Approvals.");
+  });
+
   const T0 = "2026-01-01T00:00:00Z";
   const T1 = "2026-01-01T00:05:00Z";
   const cr = (

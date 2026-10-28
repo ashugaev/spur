@@ -569,6 +569,33 @@ describe("cron jobs event tail", () => {
     expect(full.events).toHaveLength(3);
   });
 
+  it("keeps events across the full large window and UTF-8 across scan chunks", async () => {
+    const f = await fixture();
+    const first = tickLine("2026-10-01T00:00:00.000Z", "demo", "nightly");
+    const message = "failure é🙂";
+    const action = actionLine("2026-10-02T00:00:00.000Z", "trigger.spawn.failed", "audit", {
+      message,
+    });
+    const prefix = `${first}\n`;
+    const emojiOffset = Buffer.byteLength(action.slice(0, action.indexOf("🙂")));
+    // Split the four-byte character after its first byte at the 8 MiB boundary.
+    const paddingBytes = 8 * 1024 * 1024 - Buffer.byteLength(prefix) - emojiOffset - 1;
+    await writeLog(f, [
+      first,
+      "x".repeat(paddingBytes - 1),
+      action,
+      tickLine("2026-10-03T00:00:00.000Z", "demo", "nightly"),
+    ]);
+    const tail = await readCronEventTail(f.dataDir, 16 * 1024 * 1024);
+    expect(tail.eventsSince).toBe("2026-10-01T00:00:00.000Z");
+    expect(tail.events.map((entry) => entry.timestamp)).toEqual([
+      "2026-10-01T00:00:00.000Z",
+      "2026-10-02T00:00:00.000Z",
+      "2026-10-03T00:00:00.000Z",
+    ]);
+    expect(tail.events[1]?.message).toBe(message);
+  });
+
   it("reuses the last scan while the log size and mtime are unchanged", async () => {
     const f = await fixture();
     const path = await writeLog(f, [tickLine("2026-10-01T00:00:00.000Z", "demo", "nightly")]);

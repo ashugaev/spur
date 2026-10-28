@@ -322,6 +322,8 @@ export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> &
     // one bounded recheck request. Default 86400000 (24h, see
     // event-sources/github.ts POLL_DISABLED_RECHECK_INTERVAL_MS).
     pollDisabledRecheckMs?: number;
+    // Exact, case-sensitive check names excluded from github:ci_failed.
+    ignoreChecks?: string[];
   };
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
@@ -1020,6 +1022,8 @@ export interface AppConfig {
     autoRotateOnRateLimit: boolean;
     cooldownMinutes: number;
     maxRotationsPerEpisode: number;
+    // Manual "Switch auth" surface: daemon route plus SessionView.claudeAccounts.
+    switchAuth: boolean;
   };
   diskRetention: {
     warnFreeGb: number;
