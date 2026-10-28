@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { autoPingRouteFingerprint, type AutoPingService } from "./auto-ping.js";
 import { writeStderr } from "./io.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
+import { deriveSessionSlots } from "./session-pr.js";
 import { logSpurEvent, logUserInputEvent, type SpurLogEntry } from "./event-log.js";
 import {
   createSendBatchParser,
@@ -777,7 +778,8 @@ async function fillLegacyWorkItemBlocks(
     .filter(
       (session) =>
         session.project === ctx.projectId &&
-        session.slots?.links.some((link) => link.url === ctx.workItem.url),
+        session.triggerOrigin === undefined &&
+        deriveSessionSlots(session)?.links.some((link) => link.url === ctx.workItem.url),
     )
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   for (const match of matches) {

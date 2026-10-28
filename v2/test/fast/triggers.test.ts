@@ -6039,7 +6039,7 @@ describe("startConfiguredTriggers", () => {
     const MINUTE = 60_000;
 
     function deskConfig(
-      blocks: Array<{ agent?: string; prompt: string }> = [
+      blocks: Array<{ agent?: string; model?: string; prompt: string }> = [
         { agent: "claude", prompt: "Claude review {{url}}." },
         { agent: "opencode", prompt: "Opencode review {{url}}." },
       ],
@@ -7415,6 +7415,271 @@ describe("startConfiguredTriggers", () => {
       } finally {
         await controller.stop();
       }
+    });
+
+    describe("canonical legacy URL adoption", () => {
+      async function fixture(blocks?: Parameters<typeof deskConfig>[0], url = WORK_ITEM_BASE.url) {
+        const dataDir = mkdtempSync(join(tmpdir(), "spur-canonical-legacy-"));
+        const actual = await vi.importActual<typeof metadataModule>("../../src/metadata.js");
+        listSessionsMock.mockImplementation(actual.listSessions);
+        readSessionMock.mockImplementation(actual.readSession);
+        writeSessionMock.mockImplementation(actual.writeSession);
+        readWorkItemLifecyclesMock.mockImplementation(actual.readWorkItemLifecycles);
+        updateWorkItemMembersMock.mockImplementation(actual.updateWorkItemMembers);
+        const createdAt = new Date(Date.now() - 60 * MINUTE).toISOString();
+        actual.updateWorkItemMembers(
+          dataDir,
+          "api",
+          "pr-watch",
+          { ...WORK_ITEM_BASE, url, createdAt, autoComplete: false },
+          () => [
+            {
+              blockIndex: 0,
+              state: "failed",
+              error: "pre-upgrade spawn failed",
+              claimedAt: createdAt,
+              attempts: 0,
+              deferrals: 0,
+            },
+          ],
+        );
+        const record = (id: string, overrides: Partial<SessionRecord> = {}): SessionRecord => ({
+          id,
+          project: "api",
+          agent: "claude",
+          prompt: "legacy review",
+          branch: "main",
+          worktree: false,
+          worktreePath: dataDir,
+          tmuxSession: id,
+          launchCommand: "",
+          status: "running",
+          createdAt,
+          updatedAt: createdAt,
+          slots: { links: [{ label: "pr", url }] },
+          ...overrides,
+        });
+        const spawn = vi.fn().mockImplementation(
+          async (
+            request: {
+              agent?: SessionRecord["agent"];
+              model?: string;
+              prompt: string;
+              reuseWorkspaceSessionId?: string;
+            },
+            options: ReturnType<typeof workItemSpawnOptions>,
+          ) => {
+            const id = `api-born-${options.triggerOrigin.blockIndex}`;
+            const stored = record(id, {
+              agent: request.agent ?? "claude",
+              ...(request.model !== undefined ? { model: request.model } : {}),
+              prompt: request.prompt,
+              workspaceId: request.reuseWorkspaceSessionId ?? id,
+              triggerOrigin: options.triggerOrigin,
+            });
+            actual.writeSession(dataDir, stored);
+            return { ...stored, ...WORKING };
+          },
+        );
+        const get = vi.fn().mockImplementation(async (id: string) => {
+          const stored = actual.readSession(dataDir, id);
+          if (!stored) throw new Error(`Missing fixture session ${id}`);
+          return { ...stored, ...WORKING };
+        });
+        const config = { ...deskConfig(blocks), dataDir };
+        return {
+          actual,
+          dataDir,
+          config,
+          record,
+          spawn,
+          get,
+          event: () => ({ ...workItemEvent(), data: { ...workItemEvent().data, url } }),
+          members: () =>
+            actual
+              .readWorkItemLifecycles(dataDir, "api", "pr-watch")
+              .get(WORK_ITEM_BASE.externalId)
+              ?.members.filter((member) => member.triggerId === "pick-up") ?? [],
+          async start(customConfig: unknown = config) {
+            return startTriggers(customConfig, { spawn, get });
+          },
+          cleanup: () => rmSync(dataDir, { recursive: true, force: true }),
+        };
+      }
+
+      it("adopts canonical disk PR members without duplicate spawns", async () => {
+        const f = await fixture();
+        f.actual.writeSession(f.dataDir, f.record("api-legacy-1"));
+        f.actual.writeSession(f.dataDir, f.record("api-legacy-2", { agent: "opencode" }));
+        const stored = f.actual.listSessions(f.dataDir);
+        expect(stored).toHaveLength(2);
+        expect(stored.every((record) => record.pr?.url === WORK_ITEM_BASE.url)).toBe(true);
+        expect(stored.every((record) => record.slots?.links === undefined)).toBe(true);
+        const { bus, controller } = await f.start();
+        try {
+          bus.emit(f.event());
+          await vi.waitFor(() => {
+            expect(f.members().map((member) => member.sessionId)).toEqual([
+              "api-legacy-1",
+              "api-legacy-2",
+            ]);
+          });
+          expect(f.spawn).not.toHaveBeenCalled();
+        } finally {
+          await controller.stop();
+          f.cleanup();
+        }
+      });
+
+      it("migrates old disk PR links and spawns only the missing anchored member", async () => {
+        const f = await fixture();
+        const legacy = f.record("api-legacy-1");
+        f.actual.writeSession(f.dataDir, legacy);
+        const path = join(f.dataDir, "sessions", "api", "api-legacy-1.json");
+        writeFileSync(path, JSON.stringify(legacy));
+        expect(f.actual.readSession(f.dataDir, legacy.id)?.pr?.url).toBe(WORK_ITEM_BASE.url);
+        expect(f.actual.listSessions(f.dataDir)[0]?.slots?.links).toBeUndefined();
+        expect(readFileSync(path, "utf8")).not.toContain('"slots"');
+        const { bus, controller } = await f.start();
+        try {
+          bus.emit(f.event());
+          await vi.waitFor(() => {
+            expect(f.members().map((member) => member.sessionId)).toEqual([
+              "api-legacy-1",
+              "api-born-1",
+            ]);
+          });
+          expect(f.spawn).toHaveBeenCalledTimes(1);
+          expect(f.spawn).toHaveBeenCalledWith(
+            {
+              project: "api",
+              agent: "opencode",
+              prompt: `Opencode review ${WORK_ITEM_BASE.url}.`,
+              reuseWorkspaceSessionId: "api-legacy-1",
+              slots: { links: [{ label: "pr", url: WORK_ITEM_BASE.url }] },
+            },
+            workItemSpawnOptions(1),
+          );
+        } finally {
+          await controller.stop();
+          f.cleanup();
+        }
+      });
+
+      it("retains exact generic URL adoption", async () => {
+        const url = "https://tracker.example.test/items/42";
+        const f = await fixture(undefined, url);
+        f.actual.writeSession(f.dataDir, f.record("api-generic"));
+        const { bus, controller } = await f.start();
+        try {
+          bus.emit(f.event());
+          await vi.waitFor(() => expect(f.members()[1]?.sessionId).toBe("api-born-1"));
+          expect(f.members()[0]?.sessionId).toBe("api-generic");
+          expect(f.spawn).toHaveBeenCalledTimes(1);
+          expect(f.actual.readSession(f.dataDir, "api-generic")?.pr).toBeUndefined();
+        } finally {
+          await controller.stop();
+          f.cleanup();
+        }
+      });
+
+      it.each(["wrong URL", "wrong project", "configured tagged peer"])(
+        "rejects the %s from the legacy fallback",
+        async (variant) => {
+          const f = await fixture();
+          const candidate = f.record("api-foreign", {
+            ...(variant === "wrong URL"
+              ? { slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/41" }] } }
+              : {}),
+            ...(variant === "wrong project" ? { project: "other" } : {}),
+            ...(variant === "configured tagged peer"
+              ? { triggerOrigin: { ...workItemSpawnOptions().triggerOrigin, triggerId: "peer" } }
+              : {}),
+          });
+          f.actual.writeSession(f.dataDir, candidate);
+          const config = {
+            ...f.config,
+            projects: {
+              api: {
+                ...f.config.projects.api,
+                triggers: {
+                  ...f.config.projects.api.triggers,
+                  peer: { ...f.config.projects.api.triggers["pick-up"], event: "github:closed" },
+                },
+              },
+            },
+          };
+          const { bus, controller } = await f.start(config);
+          try {
+            bus.emit(f.event());
+            await vi.waitFor(() => expect(f.members()[1]?.sessionId).toBe("api-born-1"));
+            expect(f.members()[0]?.sessionId).toBe("api-born-0");
+            expect(f.spawn).toHaveBeenCalledTimes(2);
+            expect(f.members().some((member) => member.sessionId === candidate.id)).toBe(false);
+            expect(f.actual.readSession(f.dataDir, candidate.id)?.triggerOrigin).toEqual(
+              candidate.triggerOrigin,
+            );
+          } finally {
+            await controller.stop();
+            f.cleanup();
+          }
+        },
+      );
+
+      it("uses ordered matching model candidates once before generic and mismatched blocks", async () => {
+        const f = await fixture([
+          { prompt: "generic {{url}}" },
+          { agent: "claude", model: "N", prompt: "N {{url}}" },
+          { agent: "claude", model: "M", prompt: "M2 {{url}}" },
+          { agent: "claude", model: "M", prompt: "M3 {{url}}" },
+        ]);
+        for (const [id, createdAt] of [
+          ["api-model-oldest", "2026-06-01T10:00:00.000Z"],
+          ["api-model-newer", "2026-06-01T11:00:00.000Z"],
+        ] as const) {
+          f.actual.writeSession(f.dataDir, f.record(id, { model: "M", createdAt }));
+          expect(f.actual.readSession(f.dataDir, id)?.model).toBe("M");
+        }
+        const { bus, controller } = await f.start();
+        try {
+          bus.emit(f.event());
+          await vi.waitFor(() => expect(f.members()[3]?.sessionId).toBe("api-model-newer"));
+          expect(f.members().map((member) => member.sessionId)).toEqual([
+            "api-born-0",
+            "api-born-1",
+            "api-model-oldest",
+            "api-model-newer",
+          ]);
+          expect(f.spawn.mock.calls).toEqual([
+            [
+              {
+                project: "api",
+                prompt: `generic ${WORK_ITEM_BASE.url}`,
+                reuseWorkspaceSessionId: "api-model-oldest",
+                slots: { links: [{ label: "pr", url: WORK_ITEM_BASE.url }] },
+              },
+              workItemSpawnOptions(0),
+            ],
+            [
+              {
+                project: "api",
+                agent: "claude",
+                model: "N",
+                prompt: `N ${WORK_ITEM_BASE.url}`,
+                reuseWorkspaceSessionId: "api-model-oldest",
+                slots: { links: [{ label: "pr", url: WORK_ITEM_BASE.url }] },
+              },
+              workItemSpawnOptions(1),
+            ],
+          ]);
+          expect(f.actual.readSession(f.dataDir, "api-born-0")?.model).toBeUndefined();
+          expect(f.actual.readSession(f.dataDir, "api-born-1")?.model).toBe("N");
+          expect(new Set(f.members().map((member) => member.sessionId)).size).toBe(4);
+        } finally {
+          await controller.stop();
+          f.cleanup();
+        }
+      });
     });
 
     it("legacy partial desk retries only the unmatched block", async () => {
