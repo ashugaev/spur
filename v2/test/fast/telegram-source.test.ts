@@ -1,5 +1,6 @@
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
+import type * as Grammy from "grammy";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type {
   SourceProjectListItem,
@@ -7,7 +8,7 @@ import type {
   SourceWorkbench,
   SourceWorkSessionItem,
 } from "../../src/event-sources/types.js";
-import { readEventLog } from "../../src/event-log.js";
+import { readEventLog, resetEventLogCollapse } from "../../src/event-log.js";
 import * as metadataModule from "../../src/metadata.js";
 import * as consentModule from "../../src/review-interface-consent.js";
 import * as workspaceModule from "../../src/workspace.js";
@@ -27,7 +28,7 @@ import { createTempDir } from "../helpers/common.js";
 
 const botInstances: FakeBot[] = [];
 const runMock = vi.fn();
-const getMeMock = vi.fn().mockResolvedValue({ username: "SpurProjectsBot" });
+const getMeMock = vi.fn().mockResolvedValue({ id: 44, username: "SpurProjectsBot" });
 
 class FakeBot {
   readonly handlers = new Map<string, (ctx: unknown) => Promise<void>>();
@@ -75,6 +76,7 @@ vi.mock("@grammyjs/runner", () => ({
 
 const { parseTelegramCommand, telegramSourceModule, wrapTelegramSpawnPrompt } =
   await import("../../src/event-sources/telegram.js");
+const { Api, Context } = await vi.importActual<typeof Grammy>("grammy");
 
 const tempDirs: string[] = [];
 
@@ -86,6 +88,7 @@ function required<T>(value: T | undefined | null): T {
 function telegramContext(overrides: Record<string, unknown> = {}) {
   const { updateId, ...messageOverrides } = overrides;
   return {
+    me: { username: "SpurProjectsBot" },
     ...(typeof updateId === "number" ? { update: { update_id: updateId } } : {}),
     message: {
       message_id: 10,
@@ -240,6 +243,27 @@ async function startSource(
 }
 
 describe("parseTelegramCommand", () => {
+  it.each(["complete", "kill"])("parses %s without accepting arguments", (command) => {
+    expect(parseTelegramCommand(`/${command}`)).toEqual({ kind: command, invalidArgs: false });
+    expect(parseTelegramCommand(`/${command}@SPURBOT`, "spurbot")).toEqual({
+      kind: command,
+      invalidArgs: false,
+    });
+    expect(parseTelegramCommand(`/${command} force`)).toEqual({ kind: command, invalidArgs: true });
+    expect(parseTelegramCommand(`/${command}@otherbot`, "spurbot")).toBeNull();
+    for (const username of [undefined, ""]) {
+      expect(parseTelegramCommand(`/${command}@spurbot`, username)).toBeNull();
+      expect(parseTelegramCommand(`/${command}@otherbot force`, username)).toBeNull();
+      expect(parseTelegramCommand(`/${command}`, username)).toEqual({
+        kind: command,
+        invalidArgs: false,
+      });
+    }
+    expect(parseTelegramCommand(`/${command}@SPURBOT force`, "spurbot")).toEqual({
+      kind: command,
+      invalidArgs: true,
+    });
+  });
   it("parses watch commands with optional bot mention", () => {
     expect(parseTelegramCommand("/watch api-1")).toEqual({ kind: "watch", sessionId: "api-1" });
     expect(parseTelegramCommand("/watch@SpurProjectsBot api-2")).toEqual({
@@ -326,6 +350,8 @@ describe("telegramSourceModule", () => {
       },
     ];
     const capability = {
+      completeSession: vi.fn<(id: string) => Promise<void>>().mockResolvedValue(undefined),
+      killSession: vi.fn<(id: string) => Promise<void>>().mockResolvedValue(undefined),
       launchOptions: vi.fn(
         async ({
           project,
@@ -359,6 +385,341 @@ describe("telegramSourceModule", () => {
     } satisfies SourceWorkbench;
     return { sessions, capability };
   }
+
+  describe("topic lifecycle commands", () => {
+    it.each(["complete", "kill"] as const)(
+      "lifecycle identity recovery: %s uses recovered Context identity after startup getMe fails",
+      async (action) => {
+        const dataDir = await createTempDir("spur-telegram-lifecycle-");
+        tempDirs.push(dataDir);
+        const { capability } = workbenchFixture();
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        ]);
+        getMeMock.mockRejectedValueOnce(new Error("temporary getMe failure"));
+        const { bot, emit, spawnSession } = await startSource(dataDir, undefined, undefined, {
+          workbench: capability,
+        });
+        expect(
+          readEventLog(dataDir).some((entry) => entry.event === "source.telegram.auth_failed"),
+        ).toBe(true);
+        // Model the initialized Context supplied by runner recovery, not recovery timing.
+        const recoveredContext = (text: string, updateId: number) => {
+          const ctx = new Context(
+            {
+              update_id: updateId,
+              message: {
+                message_id: updateId,
+                date: 0,
+                message_thread_id: 22,
+                is_topic_message: true,
+                chat: { id: -1001, type: "supergroup", title: "Test" },
+                from: { id: 123, is_bot: false, first_name: "User" },
+                text,
+              },
+            },
+            new Api("test-token"),
+            {
+              id: 999,
+              is_bot: true,
+              first_name: "Spur",
+              username: "SpurProjectsBot",
+              can_join_groups: true,
+              can_read_all_group_messages: true,
+              supports_inline_queries: false,
+              can_connect_to_business: false,
+              has_main_web_app: false,
+              has_topics_enabled: false,
+              allows_users_to_create_topics: false,
+              can_manage_bots: false,
+              supports_join_request_queries: false,
+            },
+          );
+          vi.spyOn(ctx, "reply").mockImplementation(telegramContext().reply);
+          return ctx;
+        };
+        const foreign = recoveredContext(`/${action}@otherbot`, 10);
+        await required(bot).emitText(foreign);
+        expect(capability.completeSession).not.toHaveBeenCalled();
+        expect(capability.killSession).not.toHaveBeenCalled();
+        expect(emit).not.toHaveBeenCalled();
+        expect(spawnSession).not.toHaveBeenCalled();
+        expect(foreign.reply).not.toHaveBeenCalled();
+        const own = recoveredContext(`/${action}@sPuRpRoJeCtSbOt`, 11);
+        await required(bot).emitText(own);
+        const operation =
+          action === "complete" ? capability.completeSession : capability.killSession;
+        expect(operation).toHaveBeenCalledExactlyOnceWith("api-1");
+        expect(own.reply).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["complete", "kill"] as const)(
+      "lifecycle identity recovery: %s rejects mentions without identity and accepts bare commands",
+      async (action) => {
+        const dataDir = await createTempDir("spur-telegram-lifecycle-");
+        tempDirs.push(dataDir);
+        const { capability } = workbenchFixture();
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        ]);
+        const { bot, emit, spawnSession } = await startSource(dataDir, undefined, undefined, {
+          workbench: capability,
+        });
+        const addressed = {
+          ...telegramContext({ text: `/${action}@SpurProjectsBot` }),
+          me: undefined,
+        };
+        await required(bot).emitText(addressed);
+        expect(capability.completeSession).not.toHaveBeenCalled();
+        expect(capability.killSession).not.toHaveBeenCalled();
+        expect(emit).not.toHaveBeenCalled();
+        expect(spawnSession).not.toHaveBeenCalled();
+        expect(addressed.reply).not.toHaveBeenCalled();
+        await required(bot).emitText({ ...telegramContext({ text: `/${action}` }), me: undefined });
+        const operation =
+          action === "complete" ? capability.completeSession : capability.killSession;
+        expect(operation).toHaveBeenCalledExactlyOnceWith("api-1");
+      },
+    );
+
+    it.each(["complete", "kill"] as const)(
+      "%s uses durable topic target, clears cache, and sends no extra notice",
+      async (action) => {
+        const dataDir = await createTempDir("spur-telegram-lifecycle-");
+        tempDirs.push(dataDir);
+        const { capability } = workbenchFixture();
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+          { chatId: -1001, messageThreadId: 44, sessionId: "api-2" },
+        ]);
+        const { bot, emit, spawnSession } = await startSource(dataDir, undefined, undefined, {
+          workbench: capability,
+        });
+        const operation =
+          action === "complete" ? capability.completeSession : capability.killSession;
+        operation.mockImplementation(async (id) => {
+          metadataModule.deleteTelegramSourceStateForSession(dataDir, "api", id);
+        });
+        recordTelegramMessages(
+          dataDir,
+          "api",
+          "telegram",
+          { sessionId: "api-2", chatId: -1001 },
+          [99],
+        );
+        const ctx = telegramContext({
+          text: `/${action}@SpurProjectsBot`,
+          updateId: 10,
+          reply_to_message: { message_id: 99 },
+        });
+        await required(bot).emitText(ctx);
+        expect(operation).toHaveBeenCalledExactlyOnceWith("api-1");
+        expect(ctx.reply).not.toHaveBeenCalled();
+        await required(bot).emitText(telegramContext({ text: "/help", updateId: 11 }));
+        expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
+          { chatId: -1001, messageThreadId: 44, sessionId: "api-2" },
+        ]);
+        expect(emit).not.toHaveBeenCalled();
+        expect(spawnSession).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["api-2", undefined])(
+      "reconciles cached A against durable %s before numbered update persistence",
+      async (owner) => {
+        const dataDir = await createTempDir("spur-telegram-lifecycle-");
+        tempDirs.push(dataDir);
+        const { capability } = workbenchFixture();
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        ]);
+        const { bot } = await startSource(dataDir, undefined, undefined, { workbench: capability });
+        writeTelegramBindings(
+          dataDir,
+          "api",
+          "telegram",
+          owner ? [{ chatId: -1001, messageThreadId: 22, sessionId: owner }] : [],
+        );
+        const ctx = telegramContext({ text: "/kill", updateId: 10 });
+        await required(bot).emitText(ctx);
+        if (owner) expect(capability.killSession).toHaveBeenCalledExactlyOnceWith(owner);
+        else {
+          expect(capability.killSession).not.toHaveBeenCalled();
+          expect(ctx.reply).toHaveBeenCalledWith("No Spur session bound here.");
+        }
+        await required(bot).emitText(telegramContext({ text: "/help", updateId: 11 }));
+        expect(
+          [...readTelegramBindings(dataDir, "api", "telegram").values()].map(
+            (entry) => entry.sessionId,
+          ),
+        ).toEqual(owner ? [owner] : []);
+      },
+    );
+
+    it("loads late binding without update id and deduplicates numbered commands", async () => {
+      const dataDir = await createTempDir("spur-telegram-lifecycle-");
+      tempDirs.push(dataDir);
+      const { capability } = workbenchFixture();
+      const { bot } = await startSource(dataDir, undefined, undefined, { workbench: capability });
+      writeTelegramBindings(dataDir, "api", "telegram", [
+        { chatId: -1001, messageThreadId: 22, sessionId: "web-1" },
+      ]);
+      await required(bot).emitText(telegramContext({ text: "/complete" }));
+      await required(bot).emitText(telegramContext({ text: "/complete", updateId: 10 }));
+      await required(bot).emitText(telegramContext({ text: "/complete", updateId: 10 }));
+      expect(capability.completeSession).toHaveBeenCalledTimes(2);
+      expect(capability.completeSession).toHaveBeenLastCalledWith("web-1");
+    });
+
+    it.each([
+      { text: "/kill force", expected: "Usage: /kill" },
+      {
+        text: "/complete",
+        chat: { id: 123 },
+        expected: "Use /complete inside a bound forum topic.",
+      },
+      {
+        text: "/kill",
+        is_topic_message: undefined,
+        expected: "Use /kill inside a bound forum topic.",
+      },
+      { text: "/complete", from: { id: 999 }, expected: undefined },
+      { text: "/complete@otherbot", expected: undefined },
+    ])("rejects unsupported or unauthorized input %o", async ({ expected, ...message }) => {
+      const dataDir = await createTempDir("spur-telegram-lifecycle-");
+      tempDirs.push(dataDir);
+      const { capability } = workbenchFixture();
+      const { bot, emit, spawnSession } = await startSource(dataDir, undefined, undefined, {
+        workbench: capability,
+      });
+      const ctx = telegramContext({ ...message, updateId: 10 });
+      await required(bot).emitText(ctx);
+      if (expected) expect(ctx.reply).toHaveBeenCalledWith(expected);
+      expect(capability.completeSession).not.toHaveBeenCalled();
+      expect(capability.killSession).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+      expect(spawnSession).not.toHaveBeenCalled();
+    });
+
+    it("reports unavailable adapter without routing command", async () => {
+      const dataDir = await createTempDir("spur-telegram-lifecycle-");
+      tempDirs.push(dataDir);
+      writeTelegramBindings(dataDir, "api", "telegram", [
+        { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+      ]);
+      const { bot, emit } = await startSource(dataDir);
+      const ctx = telegramContext({ text: "/kill" });
+      await required(bot).emitText(ctx);
+      expect(ctx.reply).toHaveBeenCalledWith("Session operation unavailable.");
+      expect(emit).not.toHaveBeenCalled();
+    });
+
+    it.each(["user", "chat"])(
+      "rejects unauthorized %s before persisting stale cached binding",
+      async (gate) => {
+        const dataDir = await createTempDir("spur-telegram-lifecycle-");
+        tempDirs.push(dataDir);
+        const { capability } = workbenchFixture();
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        ]);
+        const { bot, emit, spawnSession } = await startSource(dataDir, undefined, undefined, {
+          workbench: capability,
+          config: gate === "chat" ? { allowedChats: [-2002] } : {},
+        });
+        writeTelegramBindings(dataDir, "api", "telegram", []);
+        const ctx = telegramContext({
+          text: "/kill",
+          updateId: 10,
+          ...(gate === "user" ? { from: { id: 999 } } : {}),
+        });
+        await required(bot).emitText(ctx);
+        expect(readTelegramBindings(dataDir, "api", "telegram").size).toBe(0);
+        expect(capability.killSession).not.toHaveBeenCalled();
+        expect(ctx.reply).not.toHaveBeenCalled();
+        expect(emit).not.toHaveBeenCalled();
+        expect(spawnSession).not.toHaveBeenCalled();
+      },
+    );
+
+    it("preserves binding on dirty rejection and redacts bot token", async () => {
+      const dataDir = await createTempDir("spur-telegram-lifecycle-");
+      tempDirs.push(dataDir);
+      const { capability } = workbenchFixture();
+      capability.killSession.mockRejectedValue(new Error("Dirty workspace token-123"));
+      writeTelegramBindings(dataDir, "api", "telegram", [
+        { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+      ]);
+      const { bot } = await startSource(dataDir, undefined, undefined, { workbench: capability });
+      const ctx = telegramContext({ text: "/kill", updateId: 10 });
+      await required(bot).emitText(ctx);
+      expect(ctx.reply).toHaveBeenCalledWith(
+        expect.stringContaining("Failed to kill session: Dirty workspace"),
+      );
+      expect(JSON.stringify(ctx.reply.mock.calls)).not.toContain("token-123");
+      expect([...readTelegramBindings(dataDir, "api", "telegram").values()][0]?.sessionId).toBe(
+        "api-1",
+      );
+    });
+
+    it.each(["api-2", undefined])(
+      "refuses a binding changed to %s during persistence",
+      async (owner) => {
+        const dataDir = await createTempDir("spur-telegram-lifecycle-");
+        tempDirs.push(dataDir);
+        const { capability } = workbenchFixture();
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        ]);
+        const { bot } = await startSource(dataDir, undefined, undefined, { workbench: capability });
+        const write = metadataModule.writeTelegramBindings;
+        const spy = vi
+          .spyOn(metadataModule, "writeTelegramBindings")
+          .mockImplementationOnce((...args) => {
+            write(...args);
+            write(
+              dataDir,
+              "api",
+              "telegram",
+              owner ? [{ chatId: -1001, messageThreadId: 22, sessionId: owner }] : [],
+            );
+          });
+        const ctx = telegramContext({ text: "/complete", updateId: 10 });
+        try {
+          await required(bot).emitText(ctx);
+          expect(capability.completeSession).not.toHaveBeenCalled();
+          expect(ctx.reply).toHaveBeenCalledWith(
+            owner
+              ? "Topic binding changed. Send the command again."
+              : "No Spur session bound here.",
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
+
+    it("keeps a replacement binding created during successful lifecycle cleanup", async () => {
+      const dataDir = await createTempDir("spur-telegram-lifecycle-");
+      tempDirs.push(dataDir);
+      const { capability } = workbenchFixture();
+      writeTelegramBindings(dataDir, "api", "telegram", [
+        { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+      ]);
+      const { bot } = await startSource(dataDir, undefined, undefined, { workbench: capability });
+      capability.completeSession.mockImplementation(async () => {
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-2" },
+        ]);
+      });
+      await required(bot).emitText(telegramContext({ text: "/complete", updateId: 10 }));
+      await required(bot).emitText(telegramContext({ text: "/help", updateId: 11 }));
+      expect([...readTelegramBindings(dataDir, "api", "telegram").values()][0]?.sessionId).toBe(
+        "api-2",
+      );
+    });
+  });
 
   function cardButton(mock: { mock: { calls: unknown[][] } }, text: string): string {
     for (const call of [...mock.mock.calls].reverse()) {
@@ -397,6 +758,7 @@ describe("telegramSourceModule", () => {
     return ctx;
   }
   beforeEach(() => {
+    resetEventLogCollapse();
     botInstances.splice(0);
     runMock.mockReset();
   });
@@ -4172,6 +4534,8 @@ describe("telegramSourceModule", () => {
       { command: "new", description: "Launch a task with project defaults" },
       { command: "work", description: "Inspect tasks needing attention" },
       { command: "unwatch", description: "Unbind this chat" },
+      { command: "complete", description: "Complete this topic's Spur session" },
+      { command: "kill", description: "Kill this topic's Spur session" },
     ]);
     expect(bot.api.setChatMenuButton).toHaveBeenCalledWith({
       menu_button: { type: "commands" },
@@ -4239,6 +4603,8 @@ describe("telegramSourceModule", () => {
       const help = telegramContext({ text: "/help" });
       await startedBot.emitText(help);
       expect(help.reply).toHaveBeenCalledWith(expect.stringContaining("/new"));
+      expect(help.reply).toHaveBeenCalledWith(expect.stringContaining("/complete"));
+      expect(help.reply).toHaveBeenCalledWith(expect.stringContaining("/kill"));
       await handle.stop();
       expect(stop).toHaveBeenCalledTimes(1);
     },
@@ -4303,6 +4669,17 @@ describe("telegramSourceModule", () => {
     expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("telegram runner failed"));
   });
 
+  it("exposes cached bot identity without another getMe", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const calls = getMeMock.mock.calls.length;
+    const { handle } = await startSource(dataDir, vi.fn(), vi.fn());
+    expect(handle.telegramBotIdentity).toEqual({ id: 44, username: "SpurProjectsBot" });
+    expect(handle.telegramBotIdentity).toEqual({ id: 44, username: "SpurProjectsBot" });
+    expect(getMeMock.mock.calls.length).toBe(calls + 1);
+    expect(JSON.stringify(handle.telegramBotIdentity)).not.toContain("token");
+  });
+
   it("logs auth_failed and still starts when getMe fails", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -4312,6 +4689,7 @@ describe("telegramSourceModule", () => {
     });
 
     expect(handle).toBeDefined();
+    expect(handle.telegramBotIdentity).toBeUndefined();
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining("telegram commands setup failed"),
     );

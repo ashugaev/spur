@@ -12,32 +12,21 @@ import {
   useRef,
   useState,
 } from "react";
-import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
-import { AgentSelect } from "@/components/AgentSelect";
+import { getAgentDisplayName } from "@/lib/agents";
 import { BusyContent } from "@/components/BusyContent";
 import { PendingLaunchBanner } from "@/components/PendingLaunchBanner";
 import { SubmitFailedBanner } from "@/components/SubmitFailedBanner";
 import { CenteredLoader } from "@/components/CenteredLoader";
-import { ModelReasoningField } from "@/components/ModelReasoningField";
-import {
-  initialReasoningIntent,
-  serializeReasoningIntent,
-  type ReasoningIntent,
-} from "@/lib/reasoning-effort";
 import { TokenCount } from "@/components/TokenCount";
-import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
-import { buildDeskSpawnPayload, buildRespawnSessionPayload } from "@/lib/spawn-payload";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
-import { RecoverActionDialog } from "@/components/RecoverActionDialog";
-import { SwitchAuthDialog } from "@/components/SwitchAuthDialog";
+import { artifactUrl, useSessionActionDialogs } from "@/components/SessionActionDialogs";
 import { TitleEditDialog } from "@/components/TitleEditDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { Skeleton } from "@/components/Skeleton";
-import { SpawnModal } from "@/components/SpawnModal";
 import { TagEditor } from "@/components/TagEditor";
 import { WakeControls } from "@/components/WakeControls";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
@@ -66,7 +55,7 @@ import { Spinner } from "@/components/icons/Spinner";
 import { TrashIcon } from "@/components/icons/TrashIcon";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { SessionTodo } from "@/components/SessionTodo";
-import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
+import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS, STATUS_CARD_CLASS } from "@/design/classes";
 import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
   formatAbsoluteTime,
@@ -101,7 +90,11 @@ import {
 import { insertTextAtCursor } from "@/lib/textarea";
 import { useToasts } from "@/hooks/useToasts";
 import { usePoll } from "@/hooks/usePoll";
-import { SessionLifecycleConsumer, type LifecycleIntent } from "@/lib/session-lifecycle";
+import {
+  killConfirmText,
+  SessionLifecycleConsumer,
+  type LifecycleIntent,
+} from "@/lib/session-lifecycle";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -115,6 +108,8 @@ import {
   canReopen,
   canRespawn,
   canSendMessage,
+  canSwitchAuth,
+  canUseDeskCheckout,
   hasServiceProblems,
   isGithubPrCheckUnavailablePayload,
   isOpenPrActionRequiredPayload,
@@ -128,7 +123,6 @@ import {
   type GithubPrCheckUnavailablePayload,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
-  type SessionNotRestorablePayload,
   type SpurSidecarPortConflict,
   type SpurSidecarPortConflictCandidate,
   type SpurSidecarStopResponse,
@@ -137,19 +131,6 @@ import {
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 import { resolveActivityStatus } from "@/lib/terminal-status";
-
-function buildLocalRecoverPayload(session: DashboardSession): SessionNotRestorablePayload {
-  const availableActions: SessionNotRestorablePayload["availableActions"] = ["force_kill"];
-  if (!isTerminalSession(session)) {
-    availableActions.push("respawn");
-  }
-  return {
-    code: "session_not_restorable",
-    sessionId: session.id,
-    reason: `Session ${session.id} is not restorable`,
-    availableActions,
-  };
-}
 
 function displayLinkLabel(label: string, url: string): string {
   if (label === "github-pr" || label === "github_pr") return "github pr";
@@ -401,8 +382,6 @@ const POLL_INTERVAL_MS = 4_000;
 // CONVERSATION_PAGE_ENTRIES (v2/src/claude-jsonl-state.ts).
 const CONVERSATION_SCROLL_PAGE_ENTRIES = 100;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
-const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
-const RESPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:respawn-prompt";
 
 // Reuses the shared `SPARK_GLYPH_PATH`, scaled and centered the same way as
 // `src/app/icon.tsx` (22px glyph, 5px margin, in a 32x32 tile) so the tab
@@ -449,14 +428,6 @@ const ARTIFACT_LIGHTBOX_INTERACTIVE_SELECTOR =
   "a,button,input,textarea,select,video,pre,[data-artifact-lightbox-interactive]";
 
 type SessionArtifact = DashboardSession["artifacts"][number];
-
-function artifactUrl(sessionId: string, artifactId: string): string {
-  const encodedPath = artifactId
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
-  return `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodedPath}`;
-}
 
 function artifactBasename(name: string): string {
   const segments = name.split("/");
@@ -1632,7 +1603,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     body?: Record<string, unknown>;
     payload: GithubPrCheckUnavailablePayload;
   } | null>(null);
-  const [recoverPayload, setRecoverPayload] = useState<SessionNotRestorablePayload | null>(null);
   const [titleEditing, setTitleEditing] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [titleSaving, setTitleSaving] = useState(false);
@@ -1651,86 +1621,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [locationSearch, setLocationSearch] = useState("");
   const [logsOpen, setLogsOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
+  const [logsError, setLogsError] = useState<{ status: 404 | 502; message: string } | null>(null);
+  const [logsRetrying, setLogsRetrying] = useState(false);
+  const logsRequestId = useRef(0);
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
-  const [respawnOpen, setRespawnOpen] = useState(false);
-  const [respawnPrompt, setRespawnPrompt] = useState("");
-  const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
-  const [respawnModel, setRespawnModel] = useState<string | null>(null);
-  const [respawnReasoningIntent, setRespawnReasoningIntent] = useState<ReasoningIntent>(
-    initialReasoningIntent(false),
-  );
-  // Settled/unsettled model resolution, reported by ModelSelect itself.
-  // Submit gates on this, not on `respawnModel === null` — a settled-empty
-  // catalog also has a null model but is a valid, submittable state.
-  const [respawnModelResolved, setRespawnModelResolved] = useState(false);
-  const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
-  const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
-  const [switchAuthOpen, setSwitchAuthOpen] = useState(false);
-  const [switchAuthPending, setSwitchAuthPending] = useState(false);
-  const [switchAuthError, setSwitchAuthError] = useState<string | null>(null);
-  const [handoffOpen, setHandoffOpen] = useState(false);
-  const [handoffNotes, setHandoffNotes] = useState("");
-  const [handoffAgent, setHandoffAgent] = useState<AgentName | null>(null);
-  const [handoffModel, setHandoffModel] = useState<string | null>(null);
-  const [handoffReasoningIntent, setHandoffReasoningIntent] = useState<ReasoningIntent>(
-    initialReasoningIntent(false),
-  );
-  // Settled/unsettled model resolution, reported by ModelSelect itself.
-  // Submit gates on this, not on `handoffModel === null` — a settled-empty
-  // catalog also has a null model but is a valid, submittable state.
-  const [handoffModelResolved, setHandoffModelResolved] = useState(false);
-  // Fetched once here and passed down into each modal's ModelSelect, instead
-  // of letting ModelSelect fetch its own copy (see Dashboard's spawnDefaults
-  // for the same pattern). projectId is empty while the owning modal is
-  // closed, so no request fires until it is actually open.
-  const respawnSpawnDefaults = useResolvedSpawnDefaults(
-    respawnOpen && session ? session.projectId : "",
-    respawnAgent ?? "claude",
-  );
-  const handoffSpawnDefaults = useResolvedSpawnDefaults(
-    handoffOpen && session ? session.projectId : "",
-    handoffAgent ?? "claude",
-  );
-  const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
-  const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
-  const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
-  const [deskSpawnModel, setDeskSpawnModel] = useState<string | null>(null);
-  const [deskSpawnReasoningIntent, setDeskSpawnReasoningIntent] = useState<ReasoningIntent>(
-    initialReasoningIntent(false),
-  );
-  const [deskSpawnModelResolved, setDeskSpawnModelResolved] = useState(false);
-  const deskSpawnDefaults = useResolvedSpawnDefaults(
-    deskSpawnOpen && session ? session.projectId : "",
-    deskSpawnAgent,
-  );
-  const [deskSpawnBranch, setDeskSpawnBranch] = useState("");
-  const [deskSpawnPlanMode, setDeskSpawnPlanMode] = useState(false);
-  const [deskSpawnSteps, setDeskSpawnSteps] = useState<{ id: number; value: string }[]>([]);
-  const [deskSpawnAttachments, setDeskSpawnAttachments] = useState<FileAttachment[]>([]);
-  const [deskSpawning, setDeskSpawning] = useState(false);
-  const deskSpawningRef = useRef(false);
-  const deskSpawnPromptRef = useRef<HTMLTextAreaElement>(null);
-  const deskSpawnStepIdRef = useRef(0);
-  const deskSpawnHistory = useInputHistory(DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY);
-  const deskSpawnVoice = useVoiceInput({
-    contextKey: `desk-spawn:${sessionId}`,
-    onTranscribed: (text) =>
-      setDeskSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
-  });
-  const respawningRef = useRef(false);
-  const respawnPromptRef = useRef<HTMLTextAreaElement>(null);
-  const respawnHistory = useInputHistory(RESPAWN_PROMPT_HISTORY_STORAGE_KEY);
-  const respawnVoice = useVoiceInput({
-    contextKey: `respawn:${sessionId}`,
-    onTranscribed: (text) =>
-      setRespawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
-  });
-  const handoffNotesRef = useRef<HTMLTextAreaElement>(null);
-  const handoffVoice = useVoiceInput({
-    contextKey: `handoff:${sessionId}`,
-    onTranscribed: (text) =>
-      setHandoffNotes((current) => (current.trim() ? `${current}\n${text}` : text)),
-  });
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
   // Absolute transcript index of the oldest page currently requested. null
   // means "follow the live tail" (the default, no `from` query param).
@@ -1763,7 +1657,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const lastLoadErrorToastRef = useRef<{ id: number; message: string } | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
   const openedMarkerRef = useRef<string | null>(null);
-  const respawnModalPrLink = session?.links.find((link) => link.label === "pr");
 
   useEffect(() => {
     sessionRef.current = session;
@@ -1796,18 +1689,23 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     };
   }, [dismissLoadErrorToast, sessionId]);
 
-  const publishLifecycleSession = useCallback((row: SpurSessionView) => {
-    rawSessionRef.current = row;
-    const projected = lifecycleRef.current.project([row])[0];
-    if (projected) setSession(toDashboardSession(projected));
-    const owner = lifecycleActionRef.current;
-    if (owner && !lifecycleRef.current.isCurrent(owner)) {
-      lifecycleActionRef.current = null;
-      setBusyAction(null);
-    } else if (owner && !lifecycleRef.current.pending(row.id)) {
-      setBusyAction(null);
-    }
-  }, []);
+  const publishLifecycleSession = useCallback(
+    (row: SpurSessionView) => {
+      rawSessionRef.current = row;
+      const projected = lifecycleRef.current.project([row])[0];
+      if (projected) setSession(toDashboardSession(projected));
+      const owner = lifecycleActionRef.current;
+      if (owner && !lifecycleRef.current.isCurrent(owner)) {
+        lifecycleActionRef.current = null;
+        setBusyAction(null);
+      } else if (owner && !lifecycleRef.current.pending(row.id)) {
+        setBusyAction(null);
+      }
+      if (lifecycleRef.current.takeExpired().includes(row.id))
+        showErrorToast("Session did not confirm the change");
+    },
+    [showErrorToast],
+  );
 
   const fetchSession = useCallback(
     async (signal: AbortSignal) => {
@@ -2061,10 +1959,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     body?: Record<string, unknown>,
     options: { skipKillConfirm?: boolean } = {},
   ) => {
-    const lifecycleAction = action === "complete" || action === "restore" || action === "reopen";
+    const daemonOperation = action === "complete" || action === "restore" || action === "reopen";
     const consumer = lifecycleRef.current;
     let owner: LifecycleIntent | null = null;
-    if (lifecycleAction) {
+    if (action !== "send") {
+      if (
+        action === "kill" &&
+        !options.skipKillConfirm &&
+        !window.confirm(killConfirmText(sessionId))
+      )
+        return false;
       if (consumer.pending(sessionId)) return false;
       if (!consumer.instanceId) {
         const read = consumer.beginRead();
@@ -2107,17 +2011,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         (consumer === lifecycleRef.current &&
           consumer.isCurrent(owner) &&
           lifecycleActionRef.current === owner));
-    if (
-      action === "kill" &&
-      !options.skipKillConfirm &&
-      !window.confirm(`Kill session ${sessionId}? This forces cleanup even with local changes.`)
-    ) {
-      return false;
-    }
 
     setBusyAction(action);
     try {
-      const requestBody = owner ? { ...body, operationId: owner.operationId } : body;
+      const requestBody =
+        owner && daemonOperation ? { ...body, operationId: owner.operationId } : body;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/${action}`, {
         method: "POST",
         headers: requestBody ? { "content-type": "application/json" } : undefined,
@@ -2142,7 +2040,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           return false;
         }
         if (action === "restore" && isSessionNotRestorablePayload(payload)) {
-          setRecoverPayload(payload);
+          if (session) actionDialogs.openRecover(session, payload);
           setError(null);
           return false;
         }
@@ -2178,6 +2076,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         showQueuedAheadToast(payload);
       }
       if (!owner) await loadSession();
+      else if (!daemonOperation) consumer.hold(owner);
       return true;
     } catch (actionError) {
       if (!isCurrentAction()) return false;
@@ -2235,7 +2134,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     const completed = await handleAction(openPrAction.action, body, { skipKillConfirm: true });
     if (completed) {
       setOpenPrAction(null);
-      setRecoverPayload(null);
+      actionDialogs.closeRecover();
     }
   };
 
@@ -2261,196 +2160,19 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
-  const handleRecoverForceKill = async () => {
-    const ok = await handleAction("kill", { force: true }, { skipKillConfirm: true });
-    if (ok) setRecoverPayload(null);
-  };
-
-  const handleRecoverRespawn = async () => {
-    const ok = await handleAction("kill", { force: true }, { skipKillConfirm: true });
-    if (!ok) return;
-    setRecoverPayload(null);
-    openRespawnEditor();
-  };
-
-  const handleRespawn = async () => {
-    if (respawningRef.current) return;
-    const submitRespawn = async (forceKillSource: boolean) => {
-      const nextPrompt = respawnPrompt.trim();
-      if (!session || !respawnAgent) return;
-      const payload = buildRespawnSessionPayload(
-        {
-          prompt: nextPrompt,
-          agent: respawnAgent,
-          model: respawnModel,
-          reasoningIntent: respawnReasoningIntent,
-          attachments: respawnAttachments,
-          startupAttachmentIds: respawnStartupAttachmentIds,
-        },
-        session.agent,
-        forceKillSource,
-      );
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!response.ok) {
-        throw new Error(await readApiErrorMessage(response, "Failed to respawn session"));
-      }
-      const data = (await response.json()) as SpurSessionView;
-      respawnHistory.saveEntry(nextPrompt);
-      setRespawnOpen(false);
-      router.push(buildSessionPath(data.id, projectId));
-    };
-
-    respawningRef.current = true;
-    setBusyAction("respawn");
-    try {
-      await submitRespawn(false);
-    } catch (respawnFirstError) {
-      const msg = errorMessage(respawnFirstError, "Failed to respawn session");
-      const prefix = "Kill confirmation required";
-      if (
-        msg.startsWith(prefix) &&
-        window.confirm(
-          `${msg}\n\nRespawn anyway and discard the old session worktree (including uncommitted changes or unpushed commits)?`,
-        )
-      ) {
-        try {
-          await submitRespawn(true);
-        } catch (respawnForceError) {
-          showErrorToast(errorMessage(respawnForceError, "Failed to respawn session"));
-        }
-      } else {
-        showErrorToast(msg);
-      }
-    } finally {
-      respawningRef.current = false;
-      setBusyAction(null);
-    }
-  };
-
-  const handleSwitchAuth = async (accountId: string, force: boolean) => {
-    setSwitchAuthPending(true);
-    setSwitchAuthError(null);
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/switch-auth`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(force ? { accountId, force: true } : { accountId }),
-      });
-      if (!response.ok) {
-        throw new Error(await readApiErrorMessage(response, "Failed to switch Claude account"));
-      }
-      const data = (await response.json()) as SpurSessionView;
-      const accepted = lifecycleRef.current.acceptUpdate(data);
+  const actionDialogs = useSessionActionDialogs({
+    resolve: (id) => (session?.id === id ? session : null),
+    showErrorToast,
+    onCreated: (created) => router.push(buildSessionPath(created.id, projectId)),
+    onUpdated: (row) => {
+      const accepted = lifecycleRef.current.acceptUpdate(row);
       if (accepted && accepted.id === currentSessionIdRef.current)
         publishLifecycleSession(accepted);
-      setSwitchAuthOpen(false);
-    } catch (switchAuthErr) {
-      setSwitchAuthError(errorMessage(switchAuthErr, "Failed to switch Claude account"));
-    } finally {
-      setSwitchAuthPending(false);
-    }
-  };
-
-  const openHandoffEditor = useCallback(() => {
-    if (!session) return;
-    setHandoffNotes("");
-    const defaultAgent =
-      AGENT_OPTIONS.find((candidate) => candidate !== session.agent) ?? session.agent;
-    setHandoffAgent(defaultAgent);
-    setHandoffModel(null);
-    setHandoffReasoningIntent(
-      initialReasoningIntent(defaultAgent === session.agent, session.reasoningEffort),
-    );
-    setHandoffOpen(true);
-  }, [session]);
-
-  const handleHandoff = async () => {
-    if (!session || !handoffAgent) return;
-    setBusyAction("handoff");
-    try {
-      const payload: Record<string, unknown> = { agent: handoffAgent };
-      // Only the settled-empty-catalog case omits `model`; every other model
-      // state (including a manual pick or a resolved default) sends it.
-      if (handoffModel !== null) payload.model = handoffModel;
-      const reasoningEffort = serializeReasoningIntent(handoffReasoningIntent);
-      if (reasoningEffort !== undefined) payload.reasoningEffort = reasoningEffort;
-      const notes = handoffNotes.trim();
-      if (notes) payload.notes = notes;
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/handoff`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!response.ok) {
-        throw new Error(await readApiErrorMessage(response, "Failed to hand off session"));
-      }
-      const data = (await response.json()) as SpurSessionView;
-      setHandoffOpen(false);
-      router.push(buildSessionPath(data.id, projectId));
-    } catch (handoffError) {
-      showErrorToast(errorMessage(handoffError, "Failed to hand off session"));
-    } finally {
-      setBusyAction(null);
-    }
-  };
-
-  const openDeskSpawn = () => {
-    if (!session) return;
-    setDeskSpawnAgent(session.agent);
-    setDeskSpawnModel(null);
-    setDeskSpawnReasoningIntent(initialReasoningIntent(false));
-    setDeskSpawnModelResolved(false);
-    setDeskSpawnPrompt("");
-    setDeskSpawnBranch(session.branch ?? "");
-    setDeskSpawnPlanMode(false);
-    setDeskSpawnSteps([]);
-    setDeskSpawnAttachments([]);
-    setDeskSpawnOpen(true);
-  };
-
-  const handleDeskSpawn = async () => {
-    if (!session || deskSpawningRef.current) return;
-    const nextPrompt = deskSpawnPrompt.trim();
-    deskSpawningRef.current = true;
-    setDeskSpawning(true);
-    try {
-      const payload = buildDeskSpawnPayload(
-        {
-          prompt: nextPrompt,
-          agent: deskSpawnAgent,
-          model: deskSpawnModel,
-          reasoningIntent: deskSpawnReasoningIntent,
-          attachments: deskSpawnAttachments,
-          branch: deskSpawnBranch,
-          planMode: deskSpawnPlanMode,
-          steps: deskSpawnSteps,
-        },
-        session,
-      );
-
-      const response = await fetch("/api/spawn", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!response.ok) {
-        throw new Error(await readApiErrorMessage(response, "Failed to spawn desk agent"));
-      }
-      const created = (await response.json()) as SpurSessionView;
-      deskSpawnHistory.saveEntry(nextPrompt);
-      setDeskSpawnOpen(false);
-      router.push(buildSessionPath(created.id, projectId));
-    } catch (deskError) {
-      showErrorToast(errorMessage(deskError, "Failed to spawn desk agent"));
-    } finally {
-      deskSpawningRef.current = false;
-      setDeskSpawning(false);
-    }
-  };
+    },
+    onForceKill: () => handleAction("kill", { force: true }, { skipKillConfirm: true }),
+    pageBusy: busyAction !== null,
+    onBusyChange: setBusyAction,
+  });
 
   const handleSidecarAction = async (
     sidecarName: string,
@@ -2511,19 +2233,36 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
-  const openLogs = async () => {
+  const openLogs = async (retry = false) => {
+    const requestId = ++logsRequestId.current;
     setLogsOpen(true);
+    if (retry) {
+      setLogsRetrying(true);
+    } else {
+      setLogEntries([]);
+      setLogsError(null);
+    }
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/logs`, {
         cache: "no-store",
       });
+      if (res.status === 404 || res.status === 502) {
+        const message = await readApiErrorMessage(res, "Failed to load logs");
+        if (requestId !== logsRequestId.current) return;
+        setLogEntries([]);
+        setLogsError({ status: res.status, message });
+        return;
+      }
       if (!res.ok) return;
       const data: unknown = await res.json();
-      if (Array.isArray(data)) {
+      if (requestId === logsRequestId.current && Array.isArray(data)) {
         setLogEntries(data as LogEntry[]);
+        setLogsError(null);
       }
     } catch {
       // Non-critical.
+    } finally {
+      if (requestId === logsRequestId.current) setLogsRetrying(false);
     }
   };
 
@@ -2540,51 +2279,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         if (rejectedMessage) showErrorToast(rejectedMessage);
       })
       .catch(() => {});
-  };
-
-  const addRespawnFiles = (files: FileList | File[] | null) => {
-    void fileAttachmentsFromFiles(files)
-      .then((entries) => {
-        if (entries.length === 0) return;
-        let rejectedMessage: string | null = null;
-        setRespawnAttachments((prev) => {
-          const result = mergeAttachmentsWithinLimit(prev, entries);
-          rejectedMessage = result.rejectedMessage;
-          return result.attachments;
-        });
-        if (rejectedMessage) showErrorToast(rejectedMessage);
-      })
-      .catch(() => {});
-  };
-
-  const addDeskSpawnFiles = (files: FileList | File[] | null) => {
-    void fileAttachmentsFromFiles(files)
-      .then((entries) => {
-        if (entries.length === 0) return;
-        let rejectedMessage: string | null = null;
-        setDeskSpawnAttachments((prev) => {
-          const result = mergeAttachmentsWithinLimit(prev, entries);
-          rejectedMessage = result.rejectedMessage;
-          return result.attachments;
-        });
-        if (rejectedMessage) showErrorToast(rejectedMessage);
-      })
-      .catch(() => {});
-  };
-
-  const addDeskSpawnStep = () => {
-    deskSpawnStepIdRef.current += 1;
-    setDeskSpawnSteps((current) => [...current, { id: deskSpawnStepIdRef.current, value: "" }]);
-  };
-
-  const removeDeskSpawnStep = (id: number) => {
-    setDeskSpawnSteps((current) => current.filter((step) => step.id !== id));
-  };
-
-  const updateDeskSpawnStep = (id: number, value: string) => {
-    setDeskSpawnSteps((current) =>
-      current.map((step) => (step.id === id ? { ...step, value } : step)),
-    );
   };
 
   const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
@@ -2791,12 +2485,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [selectArtifactOffset],
   );
   const selectNextArtifact = useCallback(() => selectArtifactOffset(1), [selectArtifactOffset]);
-  const startupArtifacts = useMemo(() => {
-    const startupAttachmentIds = session?.startupAttachmentIds ?? [];
-    return (
-      session?.artifacts.filter((artifact) => startupAttachmentIds.includes(artifact.id)) ?? []
-    );
-  }, [session]);
   const { surfacedLinks, visibleLinks } = splitSessionLinks(session?.links ?? []);
   const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
 
@@ -2859,7 +2547,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
 
-  const canUseDeskCheckout = Boolean(session?.workspaceExists && session.worktreePath.trim());
   const deskMembers = useMemo(() => {
     const members = (session?.deskGroupMembers ?? []).filter(
       (member) => member.status !== "killed",
@@ -2873,34 +2560,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       total: members.length,
     };
   }, [session?.deskGroupMembers, showAllDeskMembers]);
-  const openRespawnEditor = useCallback(() => {
-    if (!session) return;
-    setRespawnPrompt(session.prompt);
-    setRespawnStartupAttachmentIds(session.startupAttachmentIds ?? []);
-    setRespawnAttachments([]);
-    setRespawnAgent(session.agent);
-    // Not session.model directly: that would seed an unfiltered value ahead
-    // of ModelSelect's resolver, bypassing the isListed() check the `carry`
-    // rung otherwise applies (a model the session ran that has since left
-    // the agent's catalog would stay selected and submittable). Passing
-    // carry lets the resolver re-derive the same value, filtered.
-    setRespawnModel(null);
-    setRespawnReasoningIntent(initialReasoningIntent(true, session.reasoningEffort));
-    setRespawnOpen(true);
-  }, [session]);
-
-  const respawnVoiceDismiss = respawnVoice.dismissModal;
-  useEffect(() => {
-    if (respawnOpen) return;
-    respawnVoiceDismiss();
-  }, [respawnOpen, respawnVoiceDismiss]);
-
-  const handoffVoiceDismiss = handoffVoice.dismissModal;
-  useEffect(() => {
-    if (handoffOpen) return;
-    handoffVoiceDismiss();
-  }, [handoffOpen, handoffVoiceDismiss]);
-
   useEffect(() => {
     if (!requestedTerminalSessionId || !session || typeof window === "undefined") return;
     if (isSessionTerminal && canAttach) return;
@@ -3158,11 +2817,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             {session ? (
               <button
                 type="button"
-                disabled={busyAction !== null || deskSpawning || !canUseDeskCheckout}
+                disabled={
+                  busyAction !== null || actionDialogs.deskSpawning || !canUseDeskCheckout(session)
+                }
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
-                onClick={openDeskSpawn}
+                onClick={() => actionDialogs.openDeskSpawn(session)}
                 title={
-                  canUseDeskCheckout
+                  canUseDeskCheckout(session)
                     ? "Opens a second agent in this checkout directory with the same branch"
                     : "No reusable checkout is available"
                 }
@@ -3177,22 +2838,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 type="button"
                 disabled={busyAction !== null}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
-                onClick={openHandoffEditor}
+                onClick={() => actionDialogs.openHandoff(session)}
                 title="Pass this task to another agent in the same workspace"
               >
                 <BusyContent busy={busyAction === "handoff"}>Handoff</BusyContent>
               </button>
             ) : null}
-            {session.agent === "claude" &&
-            (session.claudeAccounts?.filter((account) => account.authenticated).length ?? 0) > 0 ? (
+            {canSwitchAuth(session) ? (
               <button
                 type="button"
                 disabled={busyAction !== null}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
-                onClick={() => {
-                  setSwitchAuthError(null);
-                  setSwitchAuthOpen(true);
-                }}
+                onClick={() => actionDialogs.openSwitchAuth(session)}
                 title="Switch credentials in place — the live process rereads the new account on its next request"
               >
                 Switch auth
@@ -3254,7 +2911,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <button
                 type="button"
                 disabled={busyAction !== null}
-                onClick={() => setRecoverPayload(buildLocalRecoverPayload(session))}
+                onClick={() => actionDialogs.openRecover(session)}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 Recover
@@ -3290,7 +2947,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 aria-label={busyAction === "respawn" ? "Respawning session" : undefined}
                 type="button"
                 disabled={busyAction !== null}
-                onClick={openRespawnEditor}
+                onClick={() => actionDialogs.openRespawn(session)}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 <BusyContent busy={busyAction === "respawn"}>Edit &amp; Respawn</BusyContent>
@@ -3967,14 +3624,57 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </div>
                 <button
                   type="button"
-                  className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
-                  onClick={() => setLogsOpen(false)}
+                  aria-label="Close logs"
+                  className="border border-transparent text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] focus-visible:border-[var(--color-accent)] focus-visible:outline-none"
+                  onClick={() => {
+                    logsRequestId.current += 1;
+                    setLogsRetrying(false);
+                    setLogsOpen(false);
+                  }}
                 >
                   ✕
                 </button>
               </div>
               <div className="flex-1 overflow-y-auto px-4 py-4">
-                {logEntries.length === 0 ? (
+                {logsError ? (
+                  <div
+                    role="alert"
+                    className={`flex h-full min-w-0 flex-col items-center justify-center gap-3 border px-4 text-center ${
+                      logsError.status === 404
+                        ? "border-[var(--color-chip-warn-border)] bg-[var(--color-bg-surface)]"
+                        : "border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)]"
+                    }`}
+                  >
+                    <div
+                      className={`flex items-center gap-2 font-bold uppercase tracking-[0.1em] ${
+                        logsError.status === 404
+                          ? "text-[var(--color-chip-warn-text)]"
+                          : "text-[var(--color-chip-error-text)]"
+                      }`}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={`h-2 w-2 shrink-0 ${
+                          logsError.status === 404
+                            ? "bg-[var(--color-status-attention)]"
+                            : "bg-[var(--color-status-error)]"
+                        }`}
+                      />
+                      Logs unavailable · HTTP {logsError.status}
+                    </div>
+                    <div className="max-w-full break-words text-[var(--color-text-primary)]">
+                      {logsError.message}
+                    </div>
+                    <button
+                      type="button"
+                      disabled={logsRetrying}
+                      className="border border-[var(--color-border-strong)] px-2 py-1.5 font-bold uppercase text-[var(--color-text-primary)] hover:bg-[var(--color-hover-overlay)] focus-visible:border-[var(--color-accent)] focus-visible:outline-none disabled:cursor-not-allowed disabled:text-[var(--color-text-tertiary)]"
+                      onClick={() => void openLogs(true)}
+                    >
+                      {logsRetrying ? "Retrying…" : "Retry"}
+                    </button>
+                  </div>
+                ) : logEntries.length === 0 ? (
                   <div className="flex h-full items-center justify-center border border-dashed border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-4 text-center text-[var(--color-text-tertiary)]">
                     No Spur log entries yet.
                   </div>
@@ -4014,26 +3714,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       ?.name ?? requestedTerminalSessionId?.replace(`${session.id}--`, ""))
                   : undefined
               }
-            />
-          ) : null}
-          {recoverPayload ? (
-            <RecoverActionDialog
-              busy={busyAction !== null}
-              canForceKill={!isTerminalSession(session)}
-              onCancel={() => setRecoverPayload(null)}
-              onForceKill={() => void handleRecoverForceKill()}
-              onRespawn={() => void handleRecoverRespawn()}
-              payload={recoverPayload}
-            />
-          ) : null}
-          {switchAuthOpen && session ? (
-            <SwitchAuthDialog
-              accounts={(session.claudeAccounts ?? []).filter((account) => account.authenticated)}
-              activeAccountId={session.activeClaudeAccountId ?? null}
-              status={switchAuthPending ? "pending" : switchAuthError ? "error" : "idle"}
-              errorMessage={switchAuthError}
-              onConfirm={(accountId, force) => void handleSwitchAuth(accountId, force)}
-              onCancel={() => setSwitchAuthOpen(false)}
             />
           ) : null}
           {openPrAction ? (
@@ -4167,310 +3847,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               </div>
             </div>
           ) : null}
-          {handoffOpen && session && handoffAgent ? (
-            <div
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="handoff-modal-title"
-              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
-              onClick={(event) => {
-                if (event.target === event.currentTarget && busyAction !== "handoff") {
-                  setHandoffOpen(false);
-                }
-              }}
-            >
-              <div
-                className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
-                onKeyDown={(event) => {
-                  if (isVoiceToggleHotkey(event)) {
-                    event.preventDefault();
-                    handoffVoice.toggleRecording();
-                    return;
-                  }
-                  if (isPrimarySubmitHotkey(event)) {
-                    event.preventDefault();
-                    void handleHandoff();
-                  }
-                }}
-              >
-                <div className="mb-4 flex items-center justify-between">
-                  <h2
-                    id="handoff-modal-title"
-                    className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
-                  >
-                    Handoff
-                  </h2>
-                  <button
-                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                    disabled={busyAction === "handoff"}
-                    onClick={() => setHandoffOpen(false)}
-                    type="button"
-                  >
-                    ✕
-                  </button>
-                </div>
-                {respawnModalPrLink ? (
-                  <div
-                    className="mb-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
-                    role="note"
-                  >
-                    This session links a PR ({respawnModalPrLink.url}). The handoff prompt asks the
-                    new agent to re-check PR state and CI before closing out.
-                  </div>
-                ) : null}
-                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                  <div className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]">
-                    Spur builds the main handoff prompt from this session&apos;s task, links,
-                    branch, and workspace. Add optional notes below.
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <AgentSelect
-                      ariaLabel="Handoff agent"
-                      onChange={(next) => {
-                        setHandoffAgent(next);
-                        setHandoffModel(null);
-                        setHandoffReasoningIntent(
-                          next === session.agent
-                            ? { kind: "clear" }
-                            : initialReasoningIntent(false),
-                        );
-                      }}
-                      value={handoffAgent}
-                    />
-                    <div className="contents">
-                      <ModelReasoningField
-                        submitting={busyAction === "handoff"}
-                        agent={handoffAgent}
-                        ariaLabel="Handoff model"
-                        carry={{ agent: session.agent, model: session.model }}
-                        onChange={setHandoffModel}
-                        onValidityChange={setHandoffModelResolved}
-                        lifecycle
-                        reasoningLabel="Handoff reasoning"
-                        reasoningIntent={handoffReasoningIntent}
-                        onReasoningChange={setHandoffReasoningIntent}
-                        projectReasoningEffort={handoffSpawnDefaults.reasoningEffort}
-                        spawnDefaults={handoffSpawnDefaults}
-                        value={handoffModel}
-                      />
-                    </div>
-                  </div>
-                  <FileAttachmentTextarea
-                    ariaLabel="Handoff notes"
-                    attachments={[]}
-                    clearLabel="Clear handoff notes"
-                    minHeightClass="min-h-[8rem]"
-                    onAddFiles={() => {}}
-                    onChange={setHandoffNotes}
-                    onRemoveAttachment={() => {}}
-                    placeholder={voicePlaceholder(
-                      "Optional notes for the next agent...",
-                      handoffVoice,
-                    )}
-                    textareaRef={handoffNotesRef}
-                    value={handoffNotes}
-                    voice={handoffVoice}
-                  />
-                  {handoffVoice.voiceError ? (
-                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
-                      {handoffVoice.voiceError}
-                    </div>
-                  ) : null}
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
-                      {handoffVoice.voiceBusy && !handoffVoice.recording ? (
-                        <VoiceStatusHint voice={handoffVoice} />
-                      ) : null}
-                    </span>
-                    <div className="flex flex-wrap items-center justify-end gap-2">
-                      <button
-                        className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] disabled:opacity-50"
-                        disabled={busyAction === "handoff"}
-                        onClick={() => setHandoffOpen(false)}
-                        type="button"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        aria-busy={busyAction === "handoff" || undefined}
-                        aria-label={busyAction === "handoff" ? "Handing off session" : undefined}
-                        className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                        disabled={busyAction === "handoff" || !handoffModelResolved}
-                        onClick={() => void handleHandoff()}
-                        type="button"
-                      >
-                        <BusyContent busy={busyAction === "handoff"}>
-                          <span>Handoff</span>
-                          <span
-                            aria-hidden="true"
-                            className="ml-2 whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/70"
-                          >
-                            {PRIMARY_SUBMIT_HINT}
-                          </span>
-                        </BusyContent>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          ) : null}
-          {respawnOpen && session && respawnAgent ? (
-            <SpawnModal
-              agent={respawnAgent}
-              agentAriaLabel="Respawn agent"
-              attachments={respawnAttachments}
-              canClose={busyAction !== "respawn"}
-              clearLabel="Clear respawn prompt"
-              history={{ entries: respawnHistory.entries, onSelect: setRespawnPrompt }}
-              mode={{
-                kind: "respawn",
-                model: {
-                  value: respawnModel,
-                  reasoningIntent: respawnReasoningIntent,
-                  onReasoningChange: setRespawnReasoningIntent,
-                  onChange: setRespawnModel,
-                  spawnDefaults: respawnSpawnDefaults,
-                  carry: { agent: session.agent, model: session.model },
-                  onResolvedChange: setRespawnModelResolved,
-                },
-                artifactSlot:
-                  startupArtifacts.length > 0 ? (
-                    <div className="space-y-2">
-                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                        Keep existing images
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        {startupArtifacts.map((artifact) => {
-                          const selected = respawnStartupAttachmentIds.includes(artifact.id);
-                          return (
-                            <button
-                              key={artifact.id}
-                              className={`relative border ${selected ? "border-[var(--color-accent)]" : "border-[var(--color-border-default)]"}`}
-                              onClick={() =>
-                                setRespawnStartupAttachmentIds((current) =>
-                                  current.includes(artifact.id)
-                                    ? current.filter((id) => id !== artifact.id)
-                                    : [...current, artifact.id],
-                                )
-                              }
-                              type="button"
-                            >
-                              <img
-                                alt={artifact.name}
-                                className="h-9 w-9 object-cover"
-                                src={artifactUrl(session.id, artifact.id)}
-                              />
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ) : null,
-                noteSlot: respawnModalPrLink ? (
-                  <div
-                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
-                    role="note"
-                  >
-                    <div>
-                      This session links a PR ({respawnModalPrLink.url}). Respawn drops the replaced
-                      worktree after success—confirm merges or updates first if needed.
-                    </div>
-                  </div>
-                ) : null,
-              }}
-              onAddFiles={addRespawnFiles}
-              onAgentChange={(next) => {
-                setRespawnAgent(next);
-                setRespawnModel(null);
-                setRespawnReasoningIntent(
-                  next === session.agent ? { kind: "clear" } : initialReasoningIntent(false),
-                );
-              }}
-              onClose={() => setRespawnOpen(false)}
-              onPromptChange={setRespawnPrompt}
-              onRemoveAttachment={(index) =>
-                setRespawnAttachments((current) =>
-                  current.filter((_, currentIndex) => currentIndex !== index),
-                )
-              }
-              onSubmit={() => void handleRespawn()}
-              prompt={respawnPrompt}
-              promptPlaceholder="Initial message..."
-              promptRef={respawnPromptRef}
-              showCancel
-              slashEndpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(respawnAgent)}`}
-              submitBusyAriaLabel="Respawning session"
-              submitDisabled={
-                busyAction === "respawn" ||
-                !respawnModelResolved ||
-                (!respawnPrompt.trim() &&
-                  respawnStartupAttachmentIds.length === 0 &&
-                  respawnAttachments.length === 0)
-              }
-              submitLabel="Respawn"
-              submitting={busyAction === "respawn"}
-              title="Edit & Respawn"
-              voice={respawnVoice}
-            />
-          ) : null}
-          {deskSpawnOpen && session ? (
-            <SpawnModal
-              agent={deskSpawnAgent}
-              agentAriaLabel="Desk spawn agent"
-              attachments={deskSpawnAttachments}
-              canClose={!deskSpawning}
-              clearLabel="Clear desk agent prompt"
-              history={{ entries: deskSpawnHistory.entries, onSelect: setDeskSpawnPrompt }}
-              mode={{
-                kind: "desk",
-                model: {
-                  value: deskSpawnModel,
-                  reasoningIntent: deskSpawnReasoningIntent,
-                  onReasoningChange: setDeskSpawnReasoningIntent,
-                  onChange: setDeskSpawnModel,
-                  spawnDefaults: deskSpawnDefaults,
-                  carry: { agent: session.agent, model: session.model },
-                  onResolvedChange: setDeskSpawnModelResolved,
-                },
-                branch: { value: deskSpawnBranch, onChange: setDeskSpawnBranch },
-                planMode: { value: deskSpawnPlanMode, onChange: setDeskSpawnPlanMode },
-                steps: {
-                  items: deskSpawnSteps,
-                  onUpdate: updateDeskSpawnStep,
-                  onAdd: addDeskSpawnStep,
-                  onRemove: removeDeskSpawnStep,
-                },
-              }}
-              onAddFiles={addDeskSpawnFiles}
-              onAgentChange={(next) => {
-                setDeskSpawnAgent(next);
-                setDeskSpawnModel(null);
-                setDeskSpawnReasoningIntent(initialReasoningIntent(false));
-                setDeskSpawnModelResolved(false);
-              }}
-              onClose={() => setDeskSpawnOpen(false)}
-              onPromptChange={setDeskSpawnPrompt}
-              onRemoveAttachment={(index) =>
-                setDeskSpawnAttachments((current) =>
-                  current.filter((_, currentIndex) => currentIndex !== index),
-                )
-              }
-              onSubmit={() => void handleDeskSpawn()}
-              prompt={deskSpawnPrompt}
-              promptAriaLabel="Desk agent prompt"
-              promptPlaceholder="First message"
-              promptRef={deskSpawnPromptRef}
-              showCancel
-              slashEndpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(deskSpawnAgent)}`}
-              submitBusyAriaLabel="Spawning desk agent"
-              submitDisabled={deskSpawning || !deskSpawnModelResolved}
-              submitLabel="Spawn"
-              submitting={deskSpawning}
-              title="Desk agent"
-              voice={deskSpawnVoice}
-            />
-          ) : null}
+          {actionDialogs.dialogs}
           <ArtifactLightbox
             artifact={selectedArtifact}
             artifactHref={selectedArtifactHref}
@@ -4499,16 +3876,49 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           />
         </>
       ) : error ? (
-        <div className="mt-5 max-w-xl border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-3 text-[var(--color-chip-error-text)]">
-          <p>Unable to load this session.</p>
-          <p className="mt-2 whitespace-pre-wrap break-words">{error}</p>
-          <button
-            type="button"
-            onClick={() => void loadSession()}
-            className="mt-3 border border-[var(--color-chip-error-border)] px-3 py-1.5 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-status-error)]/10"
+        <div className="flex flex-1 items-center justify-center py-5">
+          <section
+            aria-labelledby="session-load-error-heading"
+            className={`w-full max-w-sm ${STATUS_CARD_CLASS}`}
           >
-            Retry
-          </button>
+            <div className="flex items-start gap-3">
+              <svg
+                aria-hidden="true"
+                className="h-5 w-5 shrink-0 text-[var(--color-status-attention)]"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 7v6M12 17h.01" />
+              </svg>
+              <div className="min-w-0">
+                <h2
+                  className="font-bold text-[var(--color-text-primary)]"
+                  id="session-load-error-heading"
+                >
+                  Unable to load this session.
+                </h2>
+                <p
+                  className={`mt-1 normal-case tracking-normal text-[var(--color-text-secondary)] ${HARD_WRAP_TEXT_CLASS}`}
+                >
+                  {error}
+                </p>
+              </div>
+            </div>
+            <div className="mt-3 flex justify-end">
+              <button
+                type="button"
+                onClick={() => void loadSession()}
+                className="border border-[var(--color-status-attention)] px-3 py-1 font-bold uppercase text-[var(--color-status-attention)] outline-none transition-colors hover:bg-[var(--color-status-attention)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-attention)] focus-visible:text-[var(--color-bg-elevated)]"
+              >
+                Retry
+              </button>
+            </div>
+          </section>
         </div>
       ) : (
         <CenteredLoader className="flex-1" label="Loading session" />

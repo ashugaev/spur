@@ -9,6 +9,7 @@ Deploy from a GitHub checkout. `v2/` is the runtime source of truth; `pnpm main:
 ## Topology
 
 - Daemon on loopback `127.0.0.1:4310`.
+- MCP on loopback `127.0.0.1:4311/mcp`; [client setup](mcp.md).
 - Web UI on loopback `127.0.0.1:3012` — serves the terminal WebSocket on the same port at `/ws`.
 - `nginx` is the only externally-bound surface: loopback by default, optionally a private interface (VM/Tailscale/VPN IP) on `5555`. Never bind `0.0.0.0` unless the VM is intentionally public.
 - `ui.port` tracks the web unit's `PORT` (`3012` here), not the nginx front port — a mismatch is what `spur doctor`'s `web-ui-port-drift` reports.
@@ -60,6 +61,9 @@ ui:
   port: 3012
 ```
 
+Deploy preserves the selected instance across units, daemon restart and reboot; [config selection](configuration.md).
+Legacy `SPUR_CONFIG` in the daemon env is migrated without sharing daemon secrets with MCP.
+
 Spur uses a dedicated tmux socket (`spur-4310`), so plain `tmux ls` shows nothing — use `tmux -L spur-4310 ls`.
 
 Project config stays repo-local (`<repo>/spur.yaml`): `projects.<id>.path` points at the checkout. Register it after the daemon is up with `spur connect <repo>/spur.yaml`.
@@ -68,12 +72,14 @@ Daemon secret `/etc/spur/daemon.env` (mode `0600 root:root`), copied from `deplo
 
 ## Deploy
 
-Systemd units are templates (`deploy/spur-daemon.service`, `deploy/spur-web.service`) with `{{SPUR_ROOT}}` / `{{SPUR_SERVICE_USER}}` / `{{SPUR_SERVICE_HOME}}` placeholders. `pnpm main:deploy` (`scripts/main-deploy.sh`) substitutes them, writes to `/etc/systemd/system/`, builds in the managed clone `~/.spur/main-deploy/repo` (override with `MAIN_DEPLOY_ROOT`), restarts only after a successful build, and records the deployed SHA so cron retries a failed release. Never hand-edit the installed units (overwritten every deploy) — use systemd drop-ins for per-VM overrides.
+Systemd templates `deploy/spur-{daemon,web,mcp,mcp-tunnel}.service` use `{{SPUR_ROOT}}` / `{{SPUR_SERVICE_USER}}` / `{{SPUR_SERVICE_HOME}}` placeholders. `pnpm main:deploy` (`scripts/main-deploy.sh`) substitutes them, writes to `/etc/systemd/system/`, builds in the managed clone `~/.spur/main-deploy/repo` (override with `MAIN_DEPLOY_ROOT`), restarts only after a successful build, and records the deployed SHA so cron retries a failed release. Never hand-edit installed units — use systemd drop-ins.
 
 Load-bearing unit fields:
 
 - Daemon: `EnvironmentFile=/etc/spur/daemon.env`; `PATH` includes `~/.npm-global/bin`; `KillMode=process` (restart kills only the node process, tmux sessions survive); `MemoryHigh=75%`, `MemoryMax=85%`, `MemorySwapMax=2G` bound the daemon and direct-fallback tmux processes. Auto user scopes sit outside this unit's cgroup; the host sampler supplies the fleet signal.
 - Web: `WEB_HOST=127.0.0.1`, `PORT=3012` (one server for HTTP + `/ws`); `Wants=spur-daemon.service` (ordering only — the web UI keeps serving while the daemon is down).
+- MCP: loopback HTTP, `Restart=always`, daemon ordering without stopping MCP during daemon restart; enabled under `multi-user.target` for reboot recovery.
+- Tunnel: optional; private `/etc/spur/mcp-tunnel.env` enables `spur-mcp-tunnel.service`; [profile/key setup](mcp.md#connect-openai-products). Generic MCP needs no OpenAI account.
 
 On a 62 GiB host, the memory limits start reclaim near 46.5 GiB and cap this unit near 52.7 GiB, leaving about 15.5 GiB and 9.3 GiB outside it. Direct fallback shares the daemon cgroup; auto user scopes do not. Sustained unit pressure can throttle the memory guard, so the 10-point gap preserves control-path room before the hard cap. `MemorySwapMax=0` is the stricter no-unit-swap override. Repository template edits have no live effect until a later `pnpm main:deploy` applies them.
 
@@ -82,7 +88,7 @@ First install:
 ```bash
 pnpm main:deploy
 sudo systemctl daemon-reload
-sudo systemctl enable --now spur-daemon.service spur-web.service
+sudo systemctl enable --now spur-daemon.service spur-web.service spur-mcp.service
 ```
 
 Subsequent releases: `pnpm main:deploy` only (don't `pnpm build` or `systemctl restart` by hand).
@@ -98,6 +104,7 @@ bash scripts/test-deploy.sh
 Builds `packages/web`, bundles it into `v2/`, packs the tarball, validates its contents, installs to a temp prefix (removed on exit), boots `web-server.js` on an OS-assigned port until it answers `200`, then runs `spur --version`. Never calls `systemctl`.
 
 `SPUR_TEST_DEPLOY_PREFIX=<dir>` installs to `<dir>` instead of the temp prefix. Either way the script refuses a prefix equal to `$HOME/.local` — the production npm prefix.
+`SPUR_TEST_DEPLOY_EXPORT_DIR=<dir>` retains the verified tarball and checksum/source/runtime-build manifest after a successful smoke test; requires a clean committed worktree.
 
 ## Reverse proxy
 
@@ -133,13 +140,17 @@ server {
 ## Verify
 
 ```bash
-systemctl is-active spur-daemon.service spur-web.service   # active active
+systemctl is-active spur-daemon.service spur-web.service spur-mcp.service
+systemctl is-enabled spur-daemon.service spur-web.service spur-mcp.service
 curl -fsS http://127.0.0.1:4310/sessions                   # JSON array
 curl -fsSI http://127.0.0.1:3012 | head -1                 # 200
-ss -ltnp | grep -E ':(4310|3012|5555)\b'
+curl -fsS http://127.0.0.1:4311/healthz                   # matching runtime build IDs
+ss -ltnp | grep -E ':(4310|4311|3012|5555)\b'
 ```
 
 For a private-bound deploy, also probe `http://<private-ip>:5555` from another device, and confirm the public IP does not answer.
+Use the selected config's MCP port when it differs from `4311`; [port selection](mcp.md#connect-http).
+Initialize an MCP client through the installed `/mcp` service and call `list_projects`; [MCP](mcp.md).
 
 ## Release + auto-deploy
 
@@ -164,4 +175,7 @@ Optional hourly auto-release from the managed clone:
 ```bash
 journalctl -u spur-daemon.service -n 100 --no-pager
 journalctl -u spur-web.service -n 100 --no-pager
+journalctl -u spur-mcp.service -n 100 --no-pager
+# configured tunnel only
+journalctl -u spur-mcp-tunnel.service -n 100 --no-pager
 ```

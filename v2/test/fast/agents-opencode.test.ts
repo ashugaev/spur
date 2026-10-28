@@ -1,6 +1,7 @@
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -33,6 +34,7 @@ import {
   waitForOpenCodeLaunchMessage,
   parseOpenCodeLatestUserMessage,
   withOpenCodeLaunchIdentityLock,
+  assertOpenCodeCompatibility,
 } from "../../src/agents/opencode.js";
 
 // Any existing directory: the session's working directory the reads run in.
@@ -48,6 +50,37 @@ const readOpenCodeConversation = (sessionId: string) =>
   readOpenCodeConversationIn(sessionId, SESSION_CWD);
 
 describe("OpenCode adapter", () => {
+  it("kills and reaps a TERM-resistant compatibility probe within the restore drain budget", async ({
+    onTestFinished,
+  }) => {
+    const directory = await mkdtemp(join(tmpdir(), "spur-opencode-version-"));
+    const executable = fileURLToPath(
+      new URL("./fixtures/term-resistant-opencode.mjs", import.meta.url),
+    );
+    const pidFile = join(directory, "pid");
+    onTestFinished(async () => {
+      const pid = Number(await readFile(pidFile, "utf8").catch(() => "0"));
+      if (pid > 0) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Already reaped.
+        }
+      }
+      vi.unstubAllEnvs();
+      await rm(directory, { recursive: true, force: true });
+    });
+    vi.stubEnv("SPUR_OPENCODE_BIN", executable);
+    vi.stubEnv("SPUR_TEST_OPENCODE_PID", pidFile);
+    const startedAt = Date.now();
+    await expect(assertOpenCodeCompatibility()).rejects.toMatchObject({
+      cause: { killed: true, signal: "SIGKILL" },
+    });
+    expect(Date.now() - startedAt).toBeLessThan(15_000);
+    const pid = Number(await readFile(pidFile, "utf8"));
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 10_000);
+
   it("combines selected variant with MCP and permissions without replacing native selected options", () => {
     const config = JSON.parse(
       buildOpenCodeConfig([{ server: "tools", url: "http://localhost/mcp" }], true, {
@@ -810,6 +843,8 @@ describe("OpenCode adapter", () => {
 
       const dir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
       const logPath = join(dir, "spans.log");
+      const cwdLogPath = join(dir, "cwd.log");
+      const worktree = await realpath(dir);
       try {
         await writeFile(
           join(dir, "opencode"),
@@ -817,6 +852,7 @@ describe("OpenCode adapter", () => {
             "#!/usr/bin/env node",
             'const fs = require("node:fs");',
             `const log = ${JSON.stringify(logPath)};`,
+            `fs.appendFileSync(${JSON.stringify(cwdLogPath)}, process.cwd() + "\\n");`,
             `const limit = ${JSON.stringify(OPENCODE_EXPORT_MAX_CONCURRENCY)};`,
             "function sleep(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }",
             "function liveCount() {",
@@ -845,7 +881,10 @@ describe("OpenCode adapter", () => {
         vi.stubEnv("XDG_DATA_HOME", join(dir, "no-data"));
 
         const ids = Array.from({ length: CONCURRENT_READS }, (_, i) => `ses_${i}`);
-        await Promise.all(ids.map((id) => readOpenCodeState(id)));
+        await Promise.all(ids.map((id) => readOpenCodeStateIn(id, worktree)));
+
+        const cwds = (await readFile(cwdLogPath, "utf8")).trim().split("\n");
+        expect(cwds).toEqual(Array.from({ length: CONCURRENT_READS }, () => worktree));
 
         const spans = await readFile(logPath, "utf8");
         let live = 0;

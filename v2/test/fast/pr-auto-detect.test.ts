@@ -49,6 +49,7 @@ vi.mock("../../src/glab.js", () => ({
 }));
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
+  hasTrailingClaudeAuthenticationFailure: vi.fn(() => false),
 }));
 vi.mock("../../src/claude-session-status.js", () => ({
   readClaudeSessionStatus: readClaudeSessionStatusMock,
@@ -243,6 +244,7 @@ function baseConfig(): AppConfig {
     defaultAgent: "claude",
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
+    mcp: { port: 4311 },
     models: { codexHome: "/tmp/codex" },
     voice: {
       provider: "whisper_cpp",
@@ -1023,7 +1025,14 @@ describe("PR auto-detect", () => {
     await vi.advanceTimersByTimeAsync(35_000);
     expect(ghMock).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    // Relative clock jump to 10s short of the 30min throttle: advancing the
+    // whole span tick by tick fires every service interval ~1800 times and
+    // times out under CI load. The jump keeps the timers' relative schedule.
+    vi.setSystemTime(Date.now() + 30 * 60_000 - 45_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(ghMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(10_000);
     expect(ghMock).toHaveBeenCalledTimes(2);
 
     service.dispose();

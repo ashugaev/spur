@@ -1,5 +1,5 @@
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
@@ -74,4 +74,43 @@ it("holds the launcher bot lock through exec, disables a contender, releases on 
   } finally {
     if (owner.exitCode === null) owner.kill();
   }
+});
+
+it("opts out before loading a persisted Telegram TEST fixture", () => {
+  const path = mkdtempSync(join(tmpdir(), "spur-test-telegram-optout-"));
+  paths.push(path);
+  execFileSync("git", ["init", "-q"], { cwd: path });
+  mkdirSync(join(path, ".git/spur-telegram-test"), { mode: 0o700 });
+  writeFileSync(join(path, ".git/spur-telegram-test/credentials.json"), "malformed", {
+    mode: 0o600,
+  });
+  const input = join(path, "project.yaml");
+  writeFileSync(input, `projects:\n  fixture:\n    path: ${path}\n`);
+  const launcher = readFileSync(resolve("../scripts/spur-isolated-daemon.sh"), "utf8");
+  const start = launcher.indexOf("# Hold the bot lock");
+  const end = launcher.indexOf("\n# Advertise only final configs", start);
+  const boundary = launcher.slice(start, end);
+  const script = `set -euo pipefail\nNODE_BIN="$1"\nWRITE_CONFIG_PATH="$2"\nCONFIG_DIR="$3"\nWRITE_CONFIG_ARGS=(--input "$4" --output "$3/output.yaml" --worktree "$3" --project fixture)\n${boundary}\n`;
+  const args = [
+    "-c",
+    script,
+    "fixture",
+    process.execPath,
+    resolve("bin/write-isolated-project-config.mjs"),
+    path,
+    input,
+  ];
+  expect(() =>
+    execFileSync("bash", args, {
+      env: { ...process.env, SPUR_ISOLATED_WITHOUT_TELEGRAM: "0" },
+      stdio: "pipe",
+    }),
+  ).toThrow();
+  const output = execFileSync("bash", args, {
+    env: { ...process.env, SPUR_ISOLATED_WITHOUT_TELEGRAM: "1" },
+    encoding: "utf8",
+  });
+  expect(output).toContain("Telegram TEST disabled");
+  expect(readFileSync(join(path, "telegram-lock"), "utf8")).toBe("");
+  expect(loadProjectConfig(join(path, "output.yaml")).projects["fixture"]?.sources).toEqual({});
 });

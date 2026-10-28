@@ -1,6 +1,6 @@
 import type * as Crypto from "node:crypto";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
-import { connect, type Socket } from "node:net";
+import { connect, createServer as createTcpServer, type Socket } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   WEBHOOK_BODY_TIMEOUT_MS,
@@ -141,17 +141,40 @@ beforeEach(() => {
   cryptoSpies.timingSafeEqual.mockClear();
 });
 
-async function rawRequest(port: number, raw: string): Promise<string> {
+async function rawRequest(
+  port: number,
+  raw: string,
+  shutdownAfterContinue?: (socket: Socket) => void | Promise<void>,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const socket = connect({ host: "127.0.0.1", port });
     let output = "";
+    let shutdownStarted = false;
+    let shutdownFinished = Promise.resolve();
     socket.setEncoding("utf8");
     socket.once("connect", () => socket.write(raw));
     socket.on("data", (chunk: string) => {
       output += chunk;
+      if (
+        shutdownAfterContinue &&
+        !shutdownStarted &&
+        output.startsWith("HTTP/1.1 100 Continue\r\n\r\n")
+      ) {
+        shutdownStarted = true;
+        try {
+          shutdownFinished = Promise.resolve(shutdownAfterContinue(socket));
+          void shutdownFinished.catch(reject);
+        } catch (error) {
+          reject(error);
+        }
+      }
     });
-    socket.once("error", reject);
-    socket.once("close", () => resolve(output));
+    socket.on("error", (error: NodeJS.ErrnoException) => {
+      if (!shutdownStarted || error.code !== "ECONNRESET") reject(error);
+    });
+    socket.once("close", () => {
+      void shutdownFinished.then(() => resolve(output), reject);
+    });
   });
 }
 
@@ -590,18 +613,60 @@ describe("webhookSourceModule", () => {
     await replacement.handle.stop();
   });
 
+  it("rejects a reset before admission and controlled shutdown", async () => {
+    const server = createTcpServer((socket) => socket.resetAndDestroy());
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("missing test port");
+    const shutdown = vi.fn();
+    try {
+      await expect(
+        rawRequest(address.port, "POST /hook HTTP/1.1\r\n\r\n", shutdown),
+      ).rejects.toMatchObject({ code: "ECONNRESET" });
+      expect(shutdown).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it.each(["ECONNRESET", "EPIPE"])(
+    "handles injected %s after controlled shutdown without hiding other errors",
+    async (code) => {
+      const controller = new AbortController();
+      const emit = vi.fn();
+      const { port } = await startSource({ emit, signal: controller.signal });
+      const error = Object.assign(new Error("injected socket error"), { code });
+      const pending = rawRequest(
+        port,
+        `POST /hook HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${SECRET}\r\nContent-Type: application/json\r\nContent-Length: 100\r\nExpect: 100-continue\r\n\r\n{`,
+        (socket) => {
+          controller.abort();
+          socket.emit("error", error);
+        },
+      );
+      if (code === "ECONNRESET") {
+        const output = await pending;
+        expect(output).toContain("100 Continue");
+        expect(output).not.toContain("202 Accepted");
+      } else {
+        await expect(pending).rejects.toBe(error);
+      }
+      expect(emit).not.toHaveBeenCalled();
+    },
+  );
+
   it("aborts a held body without emission or success", async () => {
     const controller = new AbortController();
     const emit = vi.fn();
     const { port } = await startSource({ emit, signal: controller.signal });
-    const pending = rawRequest(
+    const output = await rawRequest(
       port,
-      `POST /hook HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${SECRET}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{`,
+      `POST /hook HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${SECRET}\r\nContent-Type: application/json\r\nContent-Length: 100\r\nExpect: 100-continue\r\n\r\n{`,
+      () => controller.abort(),
     );
-
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    controller.abort();
-    const output = await pending;
+    expect(output).toContain("100 Continue");
     expect(output).not.toContain("202 Accepted");
     expect(emit).not.toHaveBeenCalled();
   });
@@ -676,14 +741,12 @@ describe("webhookSourceModule", () => {
   it("stops a held body without emission or success", async () => {
     const emit = vi.fn();
     const { port, handle } = await startSource({ emit });
-    const pending = rawRequest(
+    const output = await rawRequest(
       port,
-      `POST /hook HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${SECRET}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{`,
+      `POST /hook HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${SECRET}\r\nContent-Type: application/json\r\nContent-Length: 100\r\nExpect: 100-continue\r\n\r\n{`,
+      () => handle.stop(),
     );
-
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    await handle.stop();
-    const output = await pending;
+    expect(output).toContain("100 Continue");
     expect(output).not.toContain("202 Accepted");
     expect(emit).not.toHaveBeenCalled();
   });

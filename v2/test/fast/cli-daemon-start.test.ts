@@ -120,6 +120,25 @@ describe("spur daemon CLI", () => {
     expect(callOrder).toEqual(["ensureNpmPinFile", "startServer"]);
   });
 
+  it("exports the resolved config path as SPUR_CONFIG so daemon children inherit it", async () => {
+    const previous = process.env["SPUR_CONFIG"];
+    delete process.env["SPUR_CONFIG"];
+    let seen: string | undefined;
+    startServerMock.mockImplementationOnce(async () => {
+      seen = process.env["SPUR_CONFIG"];
+      return {
+        info: () => ({ baseUrl: "http://127.0.0.1:4310", pid: 4242, startedAt: "2026-01-01" }),
+      };
+    });
+    try {
+      await parseCli(["daemon", "start", "--json"]);
+    } finally {
+      if (previous === undefined) delete process.env["SPUR_CONFIG"];
+      else process.env["SPUR_CONFIG"] = previous;
+    }
+    expect(seen).toBe("/tmp/spur.yaml");
+  });
+
   it("reports a pin-file write failure via stderr instead of aborting the boot", async () => {
     ensureNpmPinFileMock.mockImplementation(() => {
       throw new Error("EACCES: permission denied");
