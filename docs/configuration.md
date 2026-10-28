@@ -4,6 +4,7 @@
 
 Instance selection: `--config` > `SPUR_CONFIG` > private `~/.spur/installed-instance.json` (`0600`, `{configPath}`) > `~/.spur/config.yaml`; `v2/src/config.ts`, `v2/src/installed-instance.ts`.
 Project config: nearest `spur.yaml`/`spur.yml`, `projects:` only; merge/per-session resolution: `v2/src/config.ts`; voice: [voice.md](voice.md).
+Repository `landing` preview sidecar: `spur.yaml`, `scripts/spur-landing.sh`; [preview and origin](../CONTRIBUTING.md#setup).
 
 Spur ToDo is always on, no config field. See [todo](commands.md#todo).
 `mcp.port` (instance-only, `1..65535`, loopback, default first port from `4311` distinct from daemon/UI): `v2/src/config.ts`, `v2/src/ports.ts`; [MCP](mcp.md).
