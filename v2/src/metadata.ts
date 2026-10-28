@@ -3034,16 +3034,25 @@ function writeTelegramChoices(
  * Records one offer for a session in a chat, retiring that session's previous
  * offer there. Empty `choices` retires without recording: two live questions
  * would let a click answer the wrong one, since the reply carries the value
- * alone.
+ * alone. `keepInterfaceConsent` spares interface-approval choices: their click
+ * is bound to a challenge, not to the latest question.
  */
 export function writeTelegramOffer(
   dataDir: string,
   projectId: string,
   sourceId: string,
-  offer: { sessionId: string; chatId: number; choices: TelegramChoice[] },
+  offer: {
+    sessionId: string;
+    chatId: number;
+    choices: TelegramChoice[];
+    keepInterfaceConsent: boolean;
+  },
 ): void {
   const kept = readTelegramChoices(dataDir, projectId, sourceId).filter(
-    (choice) => choice.sessionId !== offer.sessionId || choice.chatId !== offer.chatId,
+    (choice) =>
+      choice.sessionId !== offer.sessionId ||
+      choice.chatId !== offer.chatId ||
+      (offer.keepInterfaceConsent && choice.interfaceConsent !== undefined),
   );
   writeTelegramChoices(dataDir, projectId, sourceId, [...kept, ...offer.choices]);
 }
