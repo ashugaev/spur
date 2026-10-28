@@ -19,6 +19,7 @@
 ## Project routes
 
 - `GET /projects`
+- `GET /projects/cron?project=<id>` — cron sources, bound triggers, owner-file drift, last tick/action from the live event log; `project` optional; `404` unknown project; `v2/src/cron-jobs.ts`.
 - `POST /projects`
 - `PATCH /projects/:id`
 - `DELETE /projects/:id`
@@ -61,7 +62,7 @@
 - `POST /sessions/:id/reopen` — restore request fields and single reopen receipt; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/handoff` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
 - `POST /sessions/:id/respawn` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
-- `POST /sessions/:id/switch-auth`
+- `POST /sessions/:id/switch-auth` — 404 unless `authRotation.switchAuth: true`
 - `GET /sessions/:id/todo`
 - `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo)
 - `GET /sessions/:id/auto-ping-suppressions`

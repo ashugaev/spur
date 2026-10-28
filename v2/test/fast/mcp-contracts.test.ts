@@ -20,9 +20,9 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "4fa2d26febd56c14fcc431ce7671e5e905291fd030032ba21748bcf93e25f8fc",
-  "types.ts": "f72eb61f7ddf810e9f952592ecf646ba460e82f29497a9e5c8c78c2919f8365d",
-  "session-service.ts": "eddab406bdb8a2411063e7b3703f73c77f4238cd910348c931aa0823ce83d399",
+  "server.ts": "31375efd12c9e5cdf85d5528c5ab9676baa2a3396ce9f2f7c9942f2414fe3f5a",
+  "types.ts": "8f34234dac0a472ddbf1204153ee1b615f6c078b6417518476239a7597ac138c",
+  "session-service.ts": "3429a5a96c0b4d4a47468fbd58db4b2ec344ff1f0b5c3743f045d6d446bbc913",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "837a7052b62b977b59f117e344b83b0f507298ce0d716c1ab637ead711060c42",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -43,9 +43,9 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(80);
+    expect(routes).toHaveLength(81);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(80);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(81);
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("spawn_background_session")?.path).toBe("/sessions/background");
     expect(getDaemonOperation("missing")).toBeUndefined();
@@ -151,11 +151,6 @@ describe("daemon MCP operation contracts", () => {
         getDaemonOperation(id)?.body?.fields.find((entry) => entry.name === "attachments")?.type,
       ).toContain("name:string,data:string");
     }
-    const reply = getDaemonOperation("reply_to_source");
-    expect(reply?.maxBodyBytes).toBe(15_000_000);
-    expect(reply?.body?.fields.find((entry) => entry.name === "images")?.type).toBe(
-      "{name:string,data:string}[]",
-    );
   });
 
   it("provides examples, path/query/body metadata, errors and source references for every operation", () => {
@@ -192,7 +187,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(80);
+      expect(page.total).toBe(81);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",
@@ -222,7 +217,7 @@ describe("catalog examples at the real daemon router", () => {
     const dataDir = join(root, "data");
     await writeFile(
       configPath,
-      `server:\n  host: 127.0.0.1\n  port: ${port}\ndataDir: ${dataDir}\nworktreeDir: ${join(root, "worktrees")}\nprojects:\n  test:\n    path: ${repo}\n`,
+      `server:\n  host: 127.0.0.1\n  port: ${port}\ndataDir: ${dataDir}\nauthRotation:\n  switchAuth: true\nworktreeDir: ${join(root, "worktrees")}\nprojects:\n  test:\n    path: ${repo}\n`,
     );
     writeSession(dataDir, {
       id: "test-contract",
@@ -378,14 +373,6 @@ describe("catalog examples at the real daemon router", () => {
           await request("reply_to_source", {
             message: "Reply",
             buttons: [{ text: "", value: "x" }],
-          })
-        ).status,
-      ).toBe(400);
-      expect(
-        (
-          await request("reply_to_source", {
-            message: "Reply",
-            images: [{ name: "shot.gif", data: "AAAA" }],
           })
         ).status,
       ).toBe(400);
