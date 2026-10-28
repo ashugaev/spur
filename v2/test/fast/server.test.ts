@@ -580,6 +580,51 @@ describe("startServer", () => {
     }
   });
 
+  it.each([
+    { enabled: false, status: 404 },
+    { enabled: true, status: 400 },
+  ])(
+    "POST /sessions/:id/switch-auth gate with authRotation.switchAuth=$enabled returns $status",
+    async ({ enabled, status }) => {
+      const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+      const repoDir = join(root, "repo");
+      const port = await findFreePort();
+      await mkdir(repoDir, { recursive: true });
+      const configPath = join(root, "spur.yaml");
+      await writeFile(
+        configPath,
+        [
+          "server:",
+          "  host: 127.0.0.1",
+          `  port: ${port}`,
+          `dataDir: ${join(root, "data")}`,
+          `worktreeDir: ${join(root, "worktrees")}`,
+          ...(enabled ? ["authRotation:", "  switchAuth: true"] : []),
+          "projects:",
+          "  demo:",
+          `    path: ${repoDir}`,
+        ].join("\n"),
+        "utf8",
+      );
+
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
+
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/switch-auth`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ accountId: "" }),
+        });
+        expect(response.status).toBe(status);
+      } finally {
+        await server.stop();
+      }
+    },
+  );
+
   it("returns 429 naming the cap and live count when spawn is denied by the admission cap", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
