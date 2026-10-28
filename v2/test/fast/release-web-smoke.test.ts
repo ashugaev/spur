@@ -199,7 +199,10 @@ test("abort during startup stops the owned child", async () => {
 
 test("bounded shutdown escalates only the child that ignores SIGTERM", async () => {
   const child = await fixture("ignore-term");
-  await runBundledWebSmoke(child.entry, options);
+  await runBundledWebSmoke(child.entry, {
+    startupTimeoutMs: options.startupTimeoutMs,
+    upgradeTimeoutMs: options.upgradeTimeoutMs,
+  });
   await child.assertStopped();
 });
 
