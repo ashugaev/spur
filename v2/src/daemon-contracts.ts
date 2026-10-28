@@ -150,6 +150,32 @@ const restore = body("RestoreSessionRequest", [
 ]);
 const limit = field("limit", "integer", "Maximum returned entries.", false, 200);
 const project = field("configPath", "string", "Nonblank project configuration path.", true);
+const cronJobIdentity = [
+  field("project", "string", "Existing project ID.", true),
+  field("source", "string", "Existing Cron source ID.", true),
+  field("trigger", "string", "Existing spawn trigger bound to the source.", true),
+];
+const cronJobValidation: readonly ContractResponse[] = [
+  {
+    status: 422,
+    contentType: "application/json",
+    description:
+      "Invalid config/schedule/block or unsupported YAML/action; error, code and optional field.",
+  },
+];
+const cronJobUpdate: ContractBody = {
+  ...body("CronJobEditUpdate", [
+    field("revision", "string", "64 lowercase SHA256 hex characters from the disk draft.", true),
+    field("schedule", "string", "Cron schedule shared by all triggers on this source.", true),
+    field(
+      "blocks",
+      "CronJobEditBlock[]",
+      "Existing block order/count; all properties required; null clears an override.",
+      true,
+    ),
+  ]),
+  definitions: `interface CronJobEditBlock { prompt: string; agent: ${agent.type}|null; model: string|null; reasoningEffort: ${effort.type}|null; }`,
+};
 const requestBodies = {
   spawn,
   send,
@@ -299,6 +325,7 @@ interface OperationOptions {
   status?: number;
   catchAllPathParams?: readonly string[];
   source?: string;
+  extraResponses?: readonly ContractResponse[];
 }
 
 function operation(
@@ -396,6 +423,7 @@ function operation(
         contentType: "application/json",
         description: "Daemon starting or upstream dependency unavailable.",
       },
+      ...(options.extraResponses ?? []),
     ],
     examples: (options.examples ?? [{}]).map((example) => ({
       ...(pathParams.length ? { pathParams: examplePathParams } : {}),
@@ -521,6 +549,50 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
       query: [field("project", "string", "Project id; omit for all projects.", false)],
       examples: [{}, { query: { project: "example-project" } }],
       response: "CronJobsResponse",
+    },
+  ),
+  operation(
+    "get_cron_job_draft",
+    "GET",
+    "/projects/cron/edit",
+    "Read the selected Cron spawn job's raw YAML draft and revision.",
+    {
+      query: cronJobIdentity,
+      examples: [{ query: { project: "example-project", source: "nightly", trigger: "audit" } }],
+      response:
+        "CronJobEditDraft; selected disk values, owner, revision and shared-source trigger IDs.",
+      source: "v2/src/cron-job-editor.ts",
+      extraResponses: cronJobValidation,
+    },
+  ),
+  operation(
+    "save_cron_job_draft",
+    "PATCH",
+    "/projects/cron/edit",
+    "Save validated Cron spawn settings to YAML without applying runtime changes.",
+    {
+      query: cronJobIdentity,
+      body: cronJobUpdate,
+      examples: [
+        {
+          query: { project: "example-project", source: "nightly", trigger: "audit" },
+          body: {
+            revision: "a".repeat(64),
+            schedule: "0 4 * * *",
+            blocks: [
+              {
+                prompt: "Inspect scheduled tasks",
+                agent: null,
+                model: null,
+                reasoningEffort: null,
+              },
+            ],
+          },
+        },
+      ],
+      response: 'CronJobEditResult; saved:true, activation:"pending"; no runtime reload.',
+      source: "v2/src/cron-job-editor.ts",
+      extraResponses: cronJobValidation,
     },
   ),
   operation("list_backlog", "GET", "/backlog/available", "List available backlog work."),
