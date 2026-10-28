@@ -26619,6 +26619,28 @@ describe("SessionService", () => {
       readCgroupPressureMock.mockReturnValue({ someAvg10: 1, someAvg60: 1, fullAvg10: 0 });
     }
 
+    it("propagates an unexpected admission error without queuing or launching", async () => {
+      createSessionStore();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      const internals = service as unknown as QueueService & { assertAdmissible(): void };
+      const failure = new Error("Admission observation failed");
+      vi.spyOn(internals, "assertAdmissible").mockImplementation(() => {
+        throw failure;
+      });
+      try {
+        await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toBe(failure);
+        expect(internals.spawnAdmissionWaiters.size).toBe(0);
+        expect(internals.admissionReservations.size).toBe(0);
+        expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    });
+
     it.each(["ram", "swap", "psi"] as const)(
       "accepts %s pressure, retains queued messages, and launches once below the wake floor",
       async (pressure) => {
@@ -52908,106 +52930,166 @@ describe("SessionService", () => {
     });
   });
 
-  describe("handoff resource queue", () => {
-    it("complete cancels a delivered handoff grant before source teardown", async () => {
+  describe("handoff admission contract", () => {
+    async function setup(mode: "cap" | "memory" | "disposed") {
       const config = baseConfig();
       config.admission.memoryGuard.shedEnabled = false;
+      config.admission.maxLiveSessions = mode === "cap" ? 1 : 10;
       loadConfigMock.mockReturnValue(config);
       readHostMemoryMock.mockReturnValue({
         totalBytes: 65_000_000 * 1024,
-        availableBytes: 7_000_000_000,
+        availableBytes: mode === "memory" ? 7_000_000_000 : 20_000_000_000,
         swapTotalBytes: 0,
         swapFreeBytes: 0,
       });
       const sessions = createSessionStore(
-        sessionRecord({ id: "api-1", worktreePath: "/tmp/spur-worktrees/api/api-1" }),
+        sessionRecord({
+          id: "api-1",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          selfDestruct: { enabled: true },
+        }),
       );
+      if (mode === "cap") sessions.set("api-2", sessionRecord({ id: "api-2" }));
       workspaceExistsMock.mockReturnValue(true);
-      const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      const internals = service as unknown as SessionServiceInternals & {
+      await useRealTodoLedger();
+      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      const actor = { kind: "agent", agent: "claude", sessionId: "api-1" } as const;
+      const itemId = (
+        await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Prepare handoff", reason: "Fixture" },
+          actor,
+        )
+      ).items[0]?.id;
+      if (!itemId) throw new Error("Expected handoff fixture ToDo item");
+      await service.mutateTodo("api-1", { action: "complete", itemId, reason: "Prepared" }, actor);
+      if (mode === "disposed") service.dispose();
+      const internals = service as unknown as {
         spawnAdmissionWaiters: Set<unknown>;
+        handoffsInFlight: Map<string, unknown>;
+        admissionReservations: Map<symbol, string>;
         drainSpawnAdmissions(): void;
       };
-      const outcome = service
-        .handoff("api-1", { agent: "cursor" }, { todoActor: { kind: "human", origin: "ui" } })
-        .catch((error: unknown) => error);
-      await vi.waitFor(() => expect(internals.spawnAdmissionWaiters.size).toBe(1));
-      readHostMemoryMock.mockReturnValue({
-        totalBytes: 65_000_000 * 1024,
-        availableBytes: 20_000_000_000,
-        swapTotalBytes: 0,
-        swapFreeBytes: 0,
-      });
-      internals.drainSpawnAdmissions();
-      expect(internals.admissionReservations.size).toBe(1);
-      await service.complete(
-        "api-1",
-        { skipPrCheck: true },
-        { todoActor: { kind: "human", origin: "ui" } },
-      );
-      expect(await outcome).toBeInstanceOf(Error);
-      expect(sessions.get("api-1")?.status).toBe("completed");
-      expect(createTmuxSessionMock).not.toHaveBeenCalled();
-      expect(internals.handoffsInFlight.size).toBe(0);
-      expect(internals.spawnAdmissionWaiters.size).toBe(0);
-      expect(internals.admissionReservations.size).toBe(0);
-    });
+      const original = structuredClone(sessions.get("api-1"));
+      const ledgerPath = join(TEST_DATA_DIR, "sessions", "api-1", "todo.jsonl");
+      const ledger = readFileSync(ledgerPath, "utf8");
+      writeSessionMock.mockClear();
+      return {
+        service,
+        sessions,
+        internals,
+        original,
+        ledgerPath,
+        ledger,
+        SessionAdmissionDeniedError,
+      };
+    }
+
+    it.each(["cap", "memory", "disposed"] as const)(
+      "rejects %s before teardown without leaving a resource waiter",
+      async (mode) => {
+        const {
+          service,
+          sessions,
+          internals,
+          original,
+          ledgerPath,
+          ledger,
+          SessionAdmissionDeniedError,
+        } = await setup(mode);
+        let outcome: { error: unknown } | undefined;
+        const originalHandoff = service.handoff("api-1", { agent: "cursor" }).then(
+          () => {
+            outcome = { error: undefined };
+          },
+          (error: unknown) => {
+            outcome = { error };
+          },
+        );
+        try {
+          await waitForRealTime(() =>
+            expect(outcome !== undefined || internals.spawnAdmissionWaiters.size > 0).toBe(true),
+          );
+          expect(outcome).toBeDefined();
+          if (mode === "disposed") {
+            expect(outcome?.error).toMatchObject({ reason: "disposed" });
+          } else {
+            expect(outcome?.error).toBeInstanceOf(SessionAdmissionDeniedError);
+            expect(outcome?.error).toMatchObject({
+              statusCode: 429,
+              reason: mode === "cap" ? "cap" : "memory_guard",
+            });
+          }
+          expect(sessions.get("api-1")).toEqual(original);
+          expect(readFileSync(ledgerPath, "utf8")).toBe(ledger);
+          expect(writeSessionMock).not.toHaveBeenCalled();
+          expect(killTmuxSessionMock).not.toHaveBeenCalled();
+          expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(internals.handoffsInFlight.size).toBe(0);
+          expect(internals.spawnAdmissionWaiters.size).toBe(0);
+          expect(internals.admissionReservations.size).toBe(0);
+          readHostMemoryMock.mockReturnValue({
+            totalBytes: 65_000_000 * 1024,
+            availableBytes: 20_000_000_000,
+            swapTotalBytes: 0,
+            swapFreeBytes: 0,
+          });
+          if (mode === "cap")
+            sessions.set("api-2", sessionRecord({ id: "api-2", status: "stopped" }));
+          internals.drainSpawnAdmissions();
+          await Promise.resolve();
+          expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          expect(sessions.get("api-1")).toEqual(original);
+        } finally {
+          service.dispose();
+          await originalHandoff;
+        }
+      },
+    );
 
     it.each(["complete", "completeDesk", "selfDestruct", "kill"] as const)(
-      "%s cancels a resource wait without recovery or lifecycle lock conflict",
+      "%s remains usable after a denied handoff without a waiting claim",
       async (operation) => {
-        const config = baseConfig();
-        config.admission.memoryGuard.shedEnabled = false;
-        loadConfigMock.mockReturnValue(config);
-        readHostMemoryMock.mockReturnValue({
-          totalBytes: 65_000_000 * 1024,
-          availableBytes: 7_000_000_000,
-          swapTotalBytes: 0,
-          swapFreeBytes: 0,
-        });
-        const sessions = createSessionStore(
-          sessionRecord({
-            id: "api-1",
-            worktreePath: "/tmp/spur-worktrees/api/api-1",
-            selfDestruct: { enabled: true },
-          }),
-        );
-        workspaceExistsMock.mockReturnValue(true);
-        const { SessionService } = await loadSessionServiceModule();
-        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-        const internals = service as unknown as SessionServiceInternals & {
-          spawnAdmissionWaiters: Set<unknown>;
-        };
-        const handoff = service.handoff(
-          "api-1",
-          { agent: "cursor" },
-          { todoActor: { kind: "human", origin: "ui" } },
-        );
-        const outcome = handoff.catch((error: unknown) => error);
-        await vi.waitFor(() => expect(internals.spawnAdmissionWaiters.size).toBe(1));
-        expect(sessions.get("api-1")?.status).toBe("running");
-        expect(killTmuxSessionMock).not.toHaveBeenCalled();
-        expect(internals.sessionLifecycleLocks.size).toBe(0);
-
-        if (operation === "kill") {
-          await service.kill("api-1", { skipPrCheck: true, force: true });
-        } else if (operation === "selfDestruct") {
-          await service.selfDestruct("api-1");
-        } else {
-          await service[operation](
-            "api-1",
-            { skipPrCheck: true },
-            { todoActor: { kind: "human", origin: "ui" } },
+        const { service, sessions, internals, SessionAdmissionDeniedError } = await setup("memory");
+        try {
+          await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toBeInstanceOf(
+            SessionAdmissionDeniedError,
           );
+          expect(internals.handoffsInFlight.size).toBe(0);
+          expect(internals.spawnAdmissionWaiters.size).toBe(0);
+          expect(internals.admissionReservations.size).toBe(0);
+          readHostMemoryMock.mockReturnValue({
+            totalBytes: 65_000_000 * 1024,
+            availableBytes: 20_000_000_000,
+            swapTotalBytes: 0,
+            swapFreeBytes: 0,
+          });
+          if (operation === "kill") {
+            await service.kill("api-1", { skipPrCheck: true, force: true });
+          } else if (operation === "selfDestruct") {
+            await service.selfDestruct("api-1");
+          } else {
+            await service[operation](
+              "api-1",
+              { skipPrCheck: true },
+              { todoActor: { kind: "human", origin: "ui" } },
+            );
+          }
+          expect(sessions.get("api-1")?.status).toBe(operation === "kill" ? "killed" : "completed");
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          expect(internals.handoffsInFlight.size).toBe(0);
+          expect(internals.spawnAdmissionWaiters.size).toBe(0);
+          expect(internals.admissionReservations.size).toBe(0);
+        } finally {
+          service.dispose();
         }
-        expect(await outcome).toBeInstanceOf(Error);
-        expect(sessions.get("api-1")?.status).toBe(operation === "kill" ? "killed" : "completed");
-        expect(createTmuxSessionMock).not.toHaveBeenCalled();
-        expect(internals.handoffsInFlight.size).toBe(0);
-        expect(internals.spawnAdmissionWaiters.size).toBe(0);
-        expect(internals.admissionReservations.size).toBe(0);
-        expect(internals.sessionLifecycleLocks.size).toBe(0);
       },
     );
   });
@@ -53305,7 +53387,7 @@ describe("SessionService", () => {
       );
     });
 
-    it("handoff resource queue leaves the over-cap source live and untouched", async () => {
+    it("rejects an over-cap handoff with the source live and untouched", async () => {
       const config = baseConfig();
       loadConfigMock.mockReturnValue({
         ...config,
@@ -53327,7 +53409,10 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expectResourceWait(service, service.handoff("api-1", { agent: "cursor" }));
+      await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toMatchObject({
+        statusCode: 429,
+        reason: "cap",
+      });
 
       expect(killTmuxSessionMock).not.toHaveBeenCalled();
       expect(writeSessionMock).not.toHaveBeenCalled();
@@ -55679,7 +55764,11 @@ describe("SessionService", () => {
         void operation.catch(() => {});
         try {
           if (action === "handoff") {
-            expect((await service.get("api-1")).lifecycle.operation).toBeNull();
+            expect((await service.get("api-1")).lifecycle.operation).toMatchObject({
+              action: "complete",
+              phase: "pending",
+              targetIds: ["api-1"],
+            });
             release();
             await predecessor;
             await activationReady;

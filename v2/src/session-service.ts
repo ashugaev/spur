@@ -3161,7 +3161,7 @@ interface PreparedSpawn {
 }
 
 class SpawnAdmissionCancelledError extends Error {
-  constructor(readonly reason: "disposed" | "killed" | "handoff") {
+  constructor(readonly reason: "disposed" | "killed") {
     super(`Spawn admission cancelled: ${reason}`);
   }
 }
@@ -3173,13 +3173,6 @@ interface SpawnAdmissionWaiter {
   reservation?: symbol;
   resolve: (reservation: symbol) => void;
   reject: (error: SpawnAdmissionCancelledError) => void;
-}
-
-interface HandoffAdmission {
-  token: symbol;
-  session: SessionRecord;
-  launchSelection: AgentLaunchSelection;
-  admissionReservation: symbol;
 }
 
 interface BackgroundSpawnOptions {
@@ -3755,10 +3748,7 @@ export class SessionService {
   private readonly foregroundSpawnReceipts = new Map<symbol, ForegroundSpawnReceipt>();
   private readonly handoffsInFlight = new Map<
     string,
-    {
-      token: symbol;
-      phase: "waiting" | "activating";
-    }
+    { token: symbol; lifecycleIds: string[]; sourceStamp: HandoffSourceStamp }
   >();
   // Session ids this process is actively reopening. Guards against two
   // overlapping reopen() calls both passing the completed-status check and
@@ -6406,9 +6396,6 @@ export class SessionService {
     operationId: string | undefined,
     work: () => Promise<SessionView | { completedIds: string[] }>,
   ): Promise<SessionView | CompleteDeskResponse> {
-    if (action === "complete") {
-      for (const id of targetIds) this.cancelWaitingHandoff(id);
-    }
     for (const id of targetIds) {
       if (!readSession(this.config.dataDir, id)) {
         throw new SessionResourceNotFoundError(`Session not found: ${id}`);
@@ -19987,7 +19974,6 @@ export class SessionService {
           session = await this.applyOpenPrAction(session, request.prAction);
         }
       }
-      this.cancelWaitingHandoff(sessionId);
       if (session.spawnIntent) {
         session = this.retireDurableSpawn(
           withQueuedMessages({ ...session, status: "killed", updatedAt: nowIso() }, [], false),
@@ -22707,85 +22693,18 @@ export class SessionService {
     request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
   ): Promise<SessionView> {
-    const waiting = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
-      const session = this.validateHandoffSource(sessionId, options);
-      if (this.handoffsInFlight.has(sessionId)) {
-        throw new Error(`Handoff already in flight for ${sessionId}`);
-      }
-      const agent = parseAgentName(request.agent);
-      const token = Symbol(`handoff:${sessionId}`);
-      this.handoffsInFlight.set(sessionId, {
-        token,
-        phase: "waiting",
-      });
-      try {
-        const launchSelection = await resolveSpawnRequestLaunchSelection(
-          resolveRespawnRequest(session, {
-            agent,
-            ...(request.model !== undefined ? { model: request.model } : {}),
-            ...(request.reasoningEffort !== undefined
-              ? { reasoningEffort: request.reasoningEffort }
-              : {}),
-          }),
-          this.getProject(session.project),
-          agent,
-          this.config.models.codexHome,
-        );
-        if (this.handoffsInFlight.get(sessionId)?.token !== token) {
-          throw new SpawnAdmissionCancelledError("handoff");
-        }
-        return { token, session, launchSelection };
-      } catch (error) {
-        if (this.handoffsInFlight.get(sessionId)?.token === token) {
-          this.handoffsInFlight.delete(sessionId);
-        }
-        throw error;
-      }
-    });
-    let reservation: symbol | undefined;
-    try {
-      if (this.handoffsInFlight.get(sessionId)?.token !== waiting.token) {
-        throw new SpawnAdmissionCancelledError("handoff");
-      }
-      reservation = await this.waitForSpawnAdmission(waiting.session.project, {
-        replacingSessionId: sessionId,
-      });
-      const claim = this.handoffsInFlight.get(sessionId);
-      if (claim?.token !== waiting.token) throw new SpawnAdmissionCancelledError("handoff");
-      this.consumeSpawnAdmission(reservation);
-      claim.phase = "activating";
-      const admissionReservation = reservation;
-      return await this.runLifecycle("complete", [sessionId], undefined, () =>
-        this.handoffTransaction(sessionId, request, options, {
-          ...waiting,
-          admissionReservation,
-        }),
-      );
-    } finally {
-      if (reservation !== undefined) this.admissionReservations.delete(reservation);
-      if (this.handoffsInFlight.get(sessionId)?.token === waiting.token) {
-        this.handoffsInFlight.delete(sessionId);
-      }
-    }
-  }
-
-  private cancelWaitingHandoff(sessionId: string): void {
-    const claim = this.handoffsInFlight.get(sessionId);
-    if (claim?.phase !== "waiting") return;
-    this.handoffsInFlight.delete(sessionId);
-    for (const waiter of this.spawnAdmissionWaiters) {
-      if (waiter.replacingSessionId === sessionId) this.cancelSpawnAdmission(waiter, "handoff");
-    }
+    return this.runLifecycle("complete", [sessionId], undefined, () =>
+      this.handoffTransaction(sessionId, request, options),
+    );
   }
 
   private async handoffTransaction(
     sessionId: string,
     request: HandoffSessionRequest,
-    options: { todoActor?: TodoActor } | undefined,
-    waiting: HandoffAdmission,
+    options?: { todoActor?: TodoActor },
   ): Promise<SessionView> {
     const prepared = await this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.prepareHandoffLocked(sessionId, request, options, waiting),
+      this.prepareHandoffLocked(sessionId, request, options),
     );
     try {
       const spawned = await this.spawn(prepared.spawnRequest, prepared.spawnOptions);
@@ -22852,13 +22771,20 @@ export class SessionService {
       return await this.enrich(finalized);
     } finally {
       this.foregroundSpawnReceipts.delete(prepared.receiptToken);
+      await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+        if (this.handoffsInFlight.get(sessionId)?.token === prepared.token) {
+          this.handoffsInFlight.delete(sessionId);
+        }
+      });
+      this.admissionReservations.delete(prepared.admissionReservation);
     }
   }
 
-  private validateHandoffSource(
+  private async prepareHandoffLocked(
     sessionId: string,
+    request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
-  ): SessionRecord {
+  ): Promise<PreparedHandoff> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -22886,29 +22812,26 @@ export class SessionService {
       this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
       throw error;
     }
-    return session;
-  }
-
-  private async prepareHandoffLocked(
-    sessionId: string,
-    request: HandoffSessionRequest,
-    options: { todoActor?: TodoActor } | undefined,
-    waiting: HandoffAdmission,
-  ): Promise<PreparedHandoff> {
-    const session = this.validateHandoffSource(sessionId, options);
-    const admissionReservation = waiting.admissionReservation;
-    if (
-      this.handoffsInFlight.get(sessionId)?.token !== waiting.token ||
-      workspaceIdOf(session) !== workspaceIdOf(waiting.session) ||
-      session.worktreePath !== waiting.session.worktreePath ||
-      session.closeoutOwner !== waiting.session.closeoutOwner
-    ) {
-      throw new Error(`Handoff source changed before admission for ${sessionId}`);
-    }
+    const admissionReservation = this.reserveSpawnAdmission(session.project, session.id, false);
 
     try {
+      if (this.handoffsInFlight.has(sessionId)) {
+        throw new Error(`Handoff already in flight for ${sessionId}`);
+      }
       const agent = parseAgentName(request.agent);
-      const launchSelection = waiting.launchSelection;
+      const carriedRequest = resolveRespawnRequest(session, {
+        agent,
+        ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.reasoningEffort !== undefined
+          ? { reasoningEffort: request.reasoningEffort }
+          : {}),
+      });
+      const launchSelection = await resolveSpawnRequestLaunchSelection(
+        carriedRequest,
+        this.getProject(session.project),
+        agent,
+        this.config.models.codexHome,
+      );
       const notes = request.notes?.trim();
       const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
       const { attachments: clonedAttachments, missingIds: missingStartupAttachmentIds } =
@@ -22979,7 +22902,7 @@ export class SessionService {
         },
       });
 
-      const token = waiting.token;
+      const token = Symbol(`handoff:${sessionId}`);
       const receiptToken = Symbol(`handoff-receipt:${sessionId}`);
       const lifecycleIds = this.lifecycleIdsFor(sourceForSpawn);
       const sourceStamp: HandoffSourceStamp = {
@@ -22992,6 +22915,7 @@ export class SessionService {
         updatedAt: sourceForSpawn.updatedAt,
         tmuxSession: sourceForSpawn.tmuxSession,
       };
+      this.handoffsInFlight.set(sessionId, { token, lifecycleIds, sourceStamp });
       const knownTags = new Set(this.config.tags.map((tag) => tag.name));
       const carryTags = (session.slots?.tags ?? []).filter((tag) => knownTags.has(tag));
       return {
@@ -24336,16 +24260,24 @@ export class SessionService {
     replacingSessionId?: string,
     quiet = true,
   ): symbol | null {
-    if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
     try {
-      this.assertAdmissible(projectId, "spawn", {
-        ...(replacingSessionId ? { replacingSessionId } : {}),
-        quiet,
-      });
+      return this.reserveSpawnAdmission(projectId, replacingSessionId, quiet);
     } catch (error) {
       if (error instanceof SessionAdmissionDeniedError) return null;
       throw error;
     }
+  }
+
+  private reserveSpawnAdmission(
+    projectId: string,
+    replacingSessionId?: string,
+    quiet = true,
+  ): symbol {
+    if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
+    this.assertAdmissible(projectId, "spawn", {
+      ...(replacingSessionId ? { replacingSessionId } : {}),
+      quiet,
+    });
     const reservation = Symbol(projectId);
     this.admissionReservations.set(reservation, projectId);
     return reservation;
