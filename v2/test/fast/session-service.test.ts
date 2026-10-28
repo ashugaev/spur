@@ -30232,8 +30232,11 @@ describe("SessionService", () => {
       const launches = boundary === "fresh fallback" ? 2 : 1;
       if (boundary === "fresh fallback")
         createTmuxSessionMock.mockRejectedValueOnce(new Error("resume create failed"));
-      if (boundary === "queued")
-        sessions.set(record.id, { ...record, status: "running", stopReason: undefined });
+      if (boundary === "queued") {
+        const queuedRecord: SessionRecord = { ...record, status: "running" };
+        delete queuedRecord.stopReason;
+        sessions.set(record.id, queuedRecord);
+      }
       try {
         if (boundary === "queued") {
           await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
