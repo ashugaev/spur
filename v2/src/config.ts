@@ -2044,6 +2044,7 @@ const DEFAULT_AUTH_ROTATION: AppConfig["authRotation"] = {
   autoRotateOnRateLimit: false,
   cooldownMinutes: 60,
   maxRotationsPerEpisode: 2,
+  switchAuth: false,
 };
 
 // Minutes a running/waiting session may sit idle before pollAttentionStates
@@ -2073,6 +2074,9 @@ function parseAuthRotation(value: unknown): AppConfig["authRotation"] {
     maxRotationsPerEpisode:
       asNonNegativeNumber(root["maxRotationsPerEpisode"], "authRotation.maxRotationsPerEpisode") ??
       DEFAULT_AUTH_ROTATION.maxRotationsPerEpisode,
+    switchAuth:
+      asOptionalBoolean(root["switchAuth"], "authRotation.switchAuth") ??
+      DEFAULT_AUTH_ROTATION.switchAuth,
   };
 }
 

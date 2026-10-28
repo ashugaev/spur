@@ -5377,6 +5377,7 @@ authRotation:
   autoRotateOnRateLimit: true
   cooldownMinutes: 30
   maxRotationsPerEpisode: 3
+  switchAuth: true
 projects:
   backend:
     path: $REPO_PATH
@@ -5388,6 +5389,7 @@ projects:
       autoRotateOnRateLimit: true,
       cooldownMinutes: 30,
       maxRotationsPerEpisode: 3,
+      switchAuth: true,
     });
   });
 
@@ -5404,6 +5406,7 @@ projects:
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+      switchAuth: false,
     });
   });
 
@@ -5411,6 +5414,7 @@ projects:
     const configPath = await writeConfig(`
 authRotation:
   autoRotateOnRateLimit: true
+  switchAuth: true
 projects:
   backend:
     path: $REPO_PATH
@@ -5422,6 +5426,7 @@ projects:
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+      switchAuth: false,
     });
   });
 

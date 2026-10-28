@@ -82,7 +82,7 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `models.codexHome` (`~/.codex`, instance only).
 - `SPUR_CLAUDE_BIN`/`SPUR_CODEX_BIN`/`SPUR_CURSOR_BIN`/`SPUR_OPENCODE_BIN`: process env, per-agent executable override.
 - `tags.<name>.{description,color}`: `description` required, instance only.
-- `authRotation.{autoRotateOnRateLimit false, cooldownMinutes 60, maxRotationsPerEpisode 2}`: instance only.
+- `authRotation.{autoRotateOnRateLimit false, cooldownMinutes 60, maxRotationsPerEpisode 2, switchAuth false}`: instance only. `switchAuth` gates per-session [Switch auth](claude-accounts.md#per-session-switch); off hides it in web and `POST /sessions/:id/switch-auth` returns 404.
 - `diskRetention.warnFreeGb` (`10`, instance only, drives `doctor`'s `home-disk-headroom`).
 - `rateLimitReactivation.afterHours` (`0`, instance only).
 - `staleAfterMinutes` (`720`, instance/per-project). See [Stale mode](#stale-mode).
