@@ -48,6 +48,53 @@ function inlineKeyboard(buttons: TelegramInlineButton[]): TelegramInlineKeyboard
 
 const TELEGRAM_MESSAGE_LIMIT = 4096;
 const TELEGRAM_RETRY_DELAYS_MS = [250, 1_000] as const;
+const topicDeletions = new Set<string>();
+
+export function telegramTopicIsDeleting(
+  dataDir: string,
+  chatId: number,
+  topicId?: number,
+): boolean {
+  return topicDeletions.has(JSON.stringify([dataDir, chatId, topicId]));
+}
+
+export function claimTelegramTopicDeletion(
+  dataDir: string,
+  chatId: number,
+  topicId: number,
+): (() => void) | null {
+  const key = JSON.stringify([dataDir, chatId, topicId]);
+  if (topicDeletions.has(key)) return null;
+  topicDeletions.add(key);
+  return () => {
+    topicDeletions.delete(key);
+  };
+}
+
+interface TelegramTransport {
+  signal: AbortSignal;
+}
+
+async function lifecycleTransport<T>(
+  task: (transport: TelegramTransport) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 35_000);
+  try {
+    return await task({ signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function abortable<T>(task: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const aborted = (): void => reject(new Error("Telegram request timed out"));
+    signal.addEventListener("abort", aborted, { once: true });
+    task.then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
+  });
+}
 
 class TelegramApiError extends Error {
   constructor(
@@ -59,8 +106,19 @@ class TelegramApiError extends Error {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const aborted = (): void => {
+      clearTimeout(timer);
+      reject(new Error("Telegram request timed out"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", aborted);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", aborted, { once: true });
+  });
 }
 
 function retryDelay(error: unknown, attempt: number): number | null {
@@ -80,24 +138,38 @@ async function callTelegram<T>(
   config: Pick<TelegramSourceConfig, "token">,
   method: string,
   body: Record<string, unknown> | FormData,
-  options: { retry?: false } = {},
+  options: { retry?: false; transport?: TelegramTransport | undefined; create?: true } = {},
 ): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
+    const controller = options.transport ? new AbortController() : undefined;
+    const timer = controller ? setTimeout(() => controller.abort(), 10_000) : undefined;
+    const signal =
+      controller && options.transport
+        ? AbortSignal.any([controller.signal, options.transport.signal])
+        : undefined;
     try {
-      const response = await fetch(
+      const request = fetch(
         `https://api.telegram.org/bot${config.token}/${method}`,
         body instanceof FormData
-          ? { method: "POST", body }
+          ? {
+              method: "POST",
+              body,
+              ...(signal ? { signal } : {}),
+            }
           : {
               method: "POST",
               headers: { "content-type": "application/json" },
               body: JSON.stringify(body),
+              ...(signal ? { signal } : {}),
             },
       );
+      const response = await (signal ? abortable(request, signal) : request);
       let payload: TelegramApiResponse<T> | null = null;
       try {
-        payload = (await response.json()) as TelegramApiResponse<T>;
+        const parsed = response.json();
+        payload = (await (signal ? abortable(parsed, signal) : parsed)) as TelegramApiResponse<T>;
       } catch {
+        signal?.throwIfAborted();
         // Use status text below.
       }
       if (response.ok && payload?.ok !== false && payload && "result" in payload) {
@@ -111,9 +183,18 @@ async function callTelegram<T>(
           : undefined,
       );
     } catch (error) {
-      const delayMs = options.retry === false ? null : retryDelay(error, attempt);
+      options.transport?.signal.throwIfAborted();
+      const delayMs =
+        options.retry === false ||
+        (options.transport && attempt >= 2) ||
+        (options.create && !(error instanceof TelegramApiError && error.status === 429))
+          ? null
+          : retryDelay(error, attempt);
+      if (options.transport && delayMs !== null && delayMs > 5_000) throw error;
       if (delayMs === null) throw error;
-      await sleep(delayMs);
+      await sleep(delayMs, options.transport?.signal);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 }
@@ -148,20 +229,26 @@ export async function sendTelegramChatAction(
   }
 }
 
-async function createTelegramTopic(
+export async function createTelegramTopic(
   config: Pick<TelegramSourceConfig, "token">,
   chatId: number,
   name: string,
-): Promise<number | null> {
-  try {
-    const topic = await callTelegram<TelegramForumTopic>(config, "createForumTopic", {
-      chat_id: chatId,
-      name,
-    });
-    return Number.isInteger(topic.message_thread_id) ? topic.message_thread_id : null;
-  } catch {
-    return null;
-  }
+): Promise<number> {
+  return lifecycleTransport(async (transport) => {
+    const topic = await callTelegram<TelegramForumTopic | null>(
+      config,
+      "createForumTopic",
+      {
+        chat_id: chatId,
+        name,
+      },
+      { transport, create: true },
+    );
+    if (!topic || !Number.isInteger(topic.message_thread_id) || topic.message_thread_id <= 1) {
+      throw new Error("Telegram topic creation returned no valid topic id");
+    }
+    return topic.message_thread_id;
+  });
 }
 
 export async function editTelegramTopic(
@@ -183,19 +270,41 @@ export async function editTelegramTopic(
   }
 }
 
-export async function closeTelegramTopic(
+export async function deleteTelegramTopic(
   config: Pick<TelegramSourceConfig, "token">,
   chatId: number,
   messageThreadId: number,
-): Promise<void> {
-  try {
-    await callTelegram(config, "closeForumTopic", {
-      chat_id: chatId,
-      message_thread_id: messageThreadId,
-    });
-  } catch {
-    // Best-effort; closing the topic must never block session cleanup.
-  }
+): Promise<"deleted" | "already_absent"> {
+  return lifecycleTransport(async (transport) => {
+    try {
+      await callTelegram(
+        config,
+        "deleteForumTopic",
+        {
+          chat_id: chatId,
+          message_thread_id: messageThreadId,
+        },
+        { transport },
+      );
+      return "deleted";
+    } catch (error) {
+      if (
+        error instanceof TelegramApiError &&
+        error.status === 400 &&
+        /(?:TOPIC_DELETED|MESSAGE_THREAD_NOT_FOUND|message thread not found)/i.test(
+          error.description,
+        )
+      )
+        return "already_absent";
+      throw error instanceof TelegramApiError
+        ? new Error(
+            error.status === 403 || /(?:RIGHT|ADMIN)/i.test(error.description)
+              ? "Bot needs administrator can_delete_messages permission"
+              : error.description.replaceAll(config.token, "<telegram-token>"),
+          )
+        : new Error("Telegram topic deletion failed or timed out");
+    }
+  });
 }
 
 /** One validated image to upload as a Telegram photo. */
@@ -304,14 +413,20 @@ async function sendPlainTelegramMessage(
   messageThreadId?: number,
   replyMarkup?: TelegramInlineKeyboard,
   parseMode?: "HTML",
+  transport?: TelegramTransport,
 ): Promise<number | undefined> {
-  const sent = await callTelegram<{ message_id?: unknown } | undefined>(config, "sendMessage", {
-    chat_id: chatId,
-    text,
-    ...(parseMode ? { parse_mode: parseMode } : {}),
-    ...(messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
-    ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-  });
+  const sent = await callTelegram<{ message_id?: unknown } | undefined>(
+    config,
+    "sendMessage",
+    {
+      chat_id: chatId,
+      text,
+      ...(parseMode ? { parse_mode: parseMode } : {}),
+      ...(messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+    },
+    { transport },
+  );
   return Number.isInteger(sent?.message_id) ? (sent?.message_id as number) : undefined;
 }
 
@@ -322,6 +437,7 @@ async function sendTelegramMessage(
   chunk: OutgoingChunk,
   messageThreadId?: number,
   replyMarkup?: TelegramInlineKeyboard,
+  transport?: TelegramTransport,
 ): Promise<number | undefined> {
   try {
     return await sendPlainTelegramMessage(
@@ -331,10 +447,19 @@ async function sendTelegramMessage(
       messageThreadId,
       replyMarkup,
       "HTML",
+      transport,
     );
   } catch (error) {
     if (!isParseError(error)) throw error;
-    return sendPlainTelegramMessage(config, chatId, chunk.plain, messageThreadId, replyMarkup);
+    return sendPlainTelegramMessage(
+      config,
+      chatId,
+      chunk.plain,
+      messageThreadId,
+      replyMarkup,
+      undefined,
+      transport,
+    );
   }
 }
 
@@ -345,15 +470,21 @@ async function editTelegramMessage(
   messageId: number,
   chunk: OutgoingChunk,
   replyMarkup?: TelegramInlineKeyboard,
+  transport?: TelegramTransport,
 ): Promise<void> {
   const edit = (text: string, parseMode?: "HTML"): Promise<unknown> =>
-    callTelegram(config, "editMessageText", {
-      chat_id: chatId,
-      message_id: messageId,
-      text,
-      ...(parseMode ? { parse_mode: parseMode } : {}),
-      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-    });
+    callTelegram(
+      config,
+      "editMessageText",
+      {
+        chat_id: chatId,
+        message_id: messageId,
+        text,
+        ...(parseMode ? { parse_mode: parseMode } : {}),
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+      },
+      { transport },
+    );
   try {
     await edit(chunk.html, "HTML");
   } catch (error) {
@@ -362,26 +493,35 @@ async function editTelegramMessage(
   }
 }
 
+interface TelegramReplyOptions {
+  buttons?: TelegramInlineButton[];
+  preformatted?: string;
+  sessionLabel?: string;
+  lifecycle?: boolean;
+  images?: TelegramPhoto[];
+}
+
 export async function sendTelegramReply(
   config: Pick<TelegramSourceConfig, "token">,
   target: Pick<TelegramReplyTarget, "chatId" | "messageThreadId" | "statusMessageId">,
   text: string,
-  options: {
-    topicName?: string;
-    buttons?: TelegramInlineButton[];
-    preformatted?: string;
-    sessionLabel?: string;
-    images?: TelegramPhoto[];
-  } = {},
+  options: TelegramReplyOptions = {},
 ): Promise<TelegramReplySendResult> {
-  const createdThreadId =
-    target.statusMessageId === undefined &&
-    target.messageThreadId === undefined &&
-    target.chatId < 0 &&
-    options.topicName
-      ? await createTelegramTopic(config, target.chatId, options.topicName)
-      : null;
-  const messageThreadId = target.messageThreadId ?? createdThreadId ?? undefined;
+  return options.lifecycle
+    ? lifecycleTransport((transport) =>
+        sendTelegramReplyWithTransport(config, target, text, options, transport),
+      )
+    : sendTelegramReplyWithTransport(config, target, text, options);
+}
+
+async function sendTelegramReplyWithTransport(
+  config: Pick<TelegramSourceConfig, "token">,
+  target: Pick<TelegramReplyTarget, "chatId" | "messageThreadId" | "statusMessageId">,
+  text: string,
+  options: TelegramReplyOptions,
+  transport?: TelegramTransport,
+): Promise<TelegramReplySendResult> {
+  const messageThreadId = target.messageThreadId;
   const label =
     target.chatId < 0 && messageThreadId !== undefined ? "" : (options.sessionLabel ?? "");
   const prefix = label ? `${label}\n\n` : "";
@@ -429,6 +569,7 @@ export async function sendTelegramReply(
         target.statusMessageId,
         firstChunk,
         firstChunkMarkup,
+        transport,
       );
       messageIds.push(target.statusMessageId);
     } catch (error) {
@@ -443,6 +584,8 @@ export async function sendTelegramReply(
             firstChunk.plain,
             target.messageThreadId,
             firstChunkMarkup,
+            undefined,
+            transport,
           ),
         );
       }
@@ -455,6 +598,7 @@ export async function sendTelegramReply(
           chunk,
           target.messageThreadId,
           chunkMarkup(index + 1),
+          transport,
         ),
       );
     }
@@ -475,6 +619,7 @@ export async function sendTelegramReply(
           chunk,
           messageThreadId,
           chunkMarkup(index),
+          transport,
         ),
       );
     }

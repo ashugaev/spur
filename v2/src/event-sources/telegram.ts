@@ -2,7 +2,6 @@ import { run, type RunnerHandle } from "@grammyjs/runner";
 import { Bot, type Context } from "grammy";
 import { logSpurEvent } from "../event-log.js";
 import {
-  deleteTelegramReplyTarget,
   readInterfaceConsent,
   writeInterfaceConsent,
   readSession,
@@ -15,7 +14,6 @@ import {
   takeTelegramChoice,
   telegramBindingKey,
   writeTelegramBindings,
-  writeTelegramOffer,
   writeTelegramReplyTarget,
 } from "../metadata.js";
 import {
@@ -27,6 +25,7 @@ import {
   type TelegramChoice,
   type TelegramMessageEventData,
   type TelegramSourceConfig,
+  type TelegramConversation,
 } from "../types.js";
 import type {
   SourceHandle,
@@ -36,7 +35,7 @@ import type {
   SourceSessionListItem,
   SourceStartDeps,
 } from "./types.js";
-import { formatTelegramSessionLabel } from "../telegram-source-state.js";
+import { formatTelegramSessionLabel, telegramTopicIsDeleting } from "../telegram-source-state.js";
 import { telegramStatusEmoji } from "../telegram-status-emoji.js";
 import {
   ConsentRejectedError,
@@ -170,7 +169,7 @@ interface TelegramRuntime {
   pendingSpawns: Map<string, TelegramPendingSpawn>;
   autoSpawnInFlight: Set<string>;
   workbench: TelegramWorkbench;
-  persistBindings(options?: { removeKeys?: string[]; reconcileKey?: string }): Promise<void>;
+  persistBindings(): Promise<void>;
   drainWrites(): Promise<void>;
 }
 
@@ -298,7 +297,7 @@ async function rememberUpdate(
     runtime.lastUpdateId = updateId;
   } else if (reconcileKey === undefined) return true;
   try {
-    await runtime.persistBindings({ ...(reconcileKey !== undefined ? { reconcileKey } : {}) });
+    await runtime.persistBindings();
   } catch (error) {
     logPersistError(runtime.deps, error);
   }
@@ -318,23 +317,6 @@ function isSameTelegramTarget(
   messageThreadId?: number,
 ): boolean {
   return binding.chatId === chatId && binding.messageThreadId === messageThreadId;
-}
-
-function sessionBindingConflict(
-  runtime: TelegramRuntime,
-  chatId: number,
-  messageThreadId: number | undefined,
-  sessionId: string,
-): boolean {
-  for (const binding of runtime.bindings.values()) {
-    if (
-      binding.sessionId === sessionId &&
-      !isSameTelegramTarget(binding, chatId, messageThreadId)
-    ) {
-      return true;
-    }
-  }
-  return false;
 }
 
 function telegramPendingSpawnKey(
@@ -672,7 +654,7 @@ export function wrapTelegramSpawnPrompt(taskText: string): string {
 }
 
 async function editOrReply(
-  ctx: Pick<TelegramTextContext, "reply" | "api">,
+  ctx: TelegramTextContext,
   chatId: number,
   statusMessageId: number | undefined,
   text: string,
@@ -688,47 +670,16 @@ async function editOrReply(
   await ctx.reply(text);
 }
 
-/**
- * Reassign the group's plain-message binding and retire displaced outbound
- * target/offers. Group-main recorded replies still reach their sender.
- */
-async function detachDisplacedSession(
-  runtime: TelegramRuntime,
-  ctx: Pick<TelegramTextContext, "reply">,
-  chatId: number,
-  messageThreadId: number | undefined,
-  taker: SourceSessionListItem,
-  displacedId: string,
-): Promise<void> {
-  const deps = runtime.deps;
-  try {
-    const target = readTelegramReplyTarget(deps.dataDir, displacedId);
-    if (target && isSameTelegramTarget(target, chatId, messageThreadId)) {
-      deleteTelegramReplyTarget(deps.dataDir, displacedId);
-    }
-    writeTelegramOffer(deps.dataDir, deps.projectId, deps.sourceId, {
-      sessionId: displacedId,
-      chatId,
-      choices: [],
-      keepInterfaceConsent: false,
-    });
-    const displaced = await findSession(deps, displacedId);
-    const label = (session: Pick<SourceSessionListItem, "id" | "title">): string =>
-      formatTelegramSessionLabel(session.id, session.title?.trim() || undefined);
-    await ctx.reply(
-      messageThreadId === undefined
-        ? `${label(taker)} receives plain messages in this chat. Reply to an agent's message to reach that agent.`
-        : `${label(taker)} took over this thread from ${label(displaced ?? { id: displacedId })}.`,
-    );
-  } catch (error) {
-    logPersistError(deps, error);
-  }
-}
-
 type TelegramSpawnOutcome =
   | { phase: "not_submitted"; error?: unknown }
   | { phase: "submitted_unknown"; error: unknown }
-  | { phase: "created"; session: SourceSessionListItem; bound: boolean; error?: unknown };
+  | {
+      phase: "created";
+      session: SourceSessionListItem;
+      bound: boolean;
+      conversation?: TelegramConversation;
+      error?: unknown;
+    };
 
 async function bindSpawnedSession(
   runtime: TelegramRuntime,
@@ -764,7 +715,10 @@ async function bindSpawnedSession(
     submitted = true;
     const session = await deps.spawnSession({
       ...request,
-      prompt: wrapTelegramSpawnPrompt(request.prompt ?? ""),
+      prompt:
+        deps.config.chatId !== undefined && deps.config.chatId < 0
+          ? wrapTelegramSpawnPrompt(request.prompt ?? "")
+          : (request.prompt ?? ""),
       telegramOrigin: {
         projectId: deps.projectId,
         sourceId: deps.sourceId,
@@ -777,26 +731,17 @@ async function bindSpawnedSession(
     if (!current()) {
       return { phase: "created", session, bound: false };
     }
-    // Plain messages follow the binding; group-main replies can reach other senders.
-    const key = telegramBindingKey(chatId, messageThreadId);
-    if (chatId < 0 && !runtime.bindings.has(key)) mergePersistedBindings(runtime);
-    const displacedId = chatId < 0 ? runtime.bindings.get(key)?.sessionId : undefined;
-    await bindTelegramThread(runtime, chatId, messageThreadId, session.id);
-    bound = true;
+    const conversation = await bindTelegramThread(runtime, chatId, messageThreadId, session.id);
+    bound = conversation.kind === "topic";
     rememberSent(deps, session.id, chatId, statusMessageId);
     if (!options)
       await editOrReply(
         ctx,
         chatId,
         statusMessageId,
-        chatId < 0 && messageThreadId !== undefined
-          ? "Spawned and bound."
-          : `Spawned and bound: ${session.id}.`,
+        `Spawned ${session.id}. ${conversationText(conversation)}`,
       );
-    if (displacedId !== undefined && displacedId !== session.id) {
-      await detachDisplacedSession(runtime, ctx, chatId, messageThreadId, session, displacedId);
-    }
-    return { phase: "created", session, bound };
+    return { phase: "created", session, bound, conversation };
   } catch (error) {
     if (
       created &&
@@ -826,11 +771,7 @@ async function bindSpawnedSession(
 }
 
 /**
- * Records an inbound Telegram touch as the session's reply target. Carries the
- * unconsumed status message and the last reply stamp across the whole-file
- * replace. A placeholder is kept for a private chat or a forum topic, never for
- * a group main chat (its first reply must create the topic), and never leaves
- * the chat and thread it was posted in.
+ * Records input in the checked assigned topic, preserving its pending placeholder.
  */
 function recordTelegramReplyTarget(
   deps: SourceStartDeps<TelegramSourceConfig>,
@@ -839,18 +780,13 @@ function recordTelegramReplyTarget(
     chatId: number;
     messageThreadId?: number;
     statusMessageId?: number;
-    /** Bind path: keep the previous inbound stamp while the chat and thread are unchanged. */
-    keepInboundStamp?: boolean;
   },
 ): void {
   const previous = readTelegramReplyTarget(deps.dataDir, target.sessionId);
   const sameTarget =
     previous !== null && isSameTelegramTarget(previous, target.chatId, target.messageThreadId);
   const carriedStatus = sameTarget ? previous.statusMessageId : undefined;
-  const lastInboundAt =
-    target.keepInboundStamp && sameTarget && previous.lastInboundAt !== undefined
-      ? previous.lastInboundAt
-      : new Date().toISOString();
+  const lastInboundAt = new Date().toISOString();
   const keepsNewStatus =
     target.statusMessageId !== undefined &&
     (target.chatId > 0 || target.messageThreadId !== undefined);
@@ -873,34 +809,18 @@ async function bindTelegramThread(
   chatId: number,
   messageThreadId: number | undefined,
   sessionId: string,
-): Promise<void> {
+): Promise<TelegramConversation> {
   const deps = runtime.deps;
-  const key = telegramBindingKey(chatId, messageThreadId);
-  const previous = runtime.bindings.get(key);
-  runtime.bindings.set(telegramBindingKey(chatId, messageThreadId), {
+  if (!deps.telegramConversations) throw new Error("Telegram conversations unavailable");
+  const conversation = await deps.telegramConversations.ensureTopic(sessionId, {
+    projectId: deps.projectId,
+    sourceId: deps.sourceId,
     chatId,
     ...(messageThreadId !== undefined ? { messageThreadId } : {}),
-    sessionId,
   });
-  try {
-    await runtime.persistBindings();
-  } catch (error) {
-    if (previous) {
-      runtime.bindings.set(key, previous);
-    } else {
-      runtime.bindings.delete(key);
-    }
-    logPersistError(deps, error);
-    throw error;
-  }
-  // A bind is not an inbound message: it must not move lastInboundAt past an
-  // agent reply that already landed.
-  recordTelegramReplyTarget(deps, {
-    sessionId,
-    chatId,
-    ...(messageThreadId !== undefined ? { messageThreadId } : {}),
-    keepInboundStamp: true,
-  });
+  runtime.bindings.clear();
+  mergePersistedBindings(runtime);
+  return conversation;
 }
 
 async function unbindTelegramThread(
@@ -910,22 +830,67 @@ async function unbindTelegramThread(
 ): Promise<{ deleted: boolean; binding: TelegramBinding | undefined }> {
   const deps = runtime.deps;
   const key = telegramBindingKey(chatId, messageThreadId);
-  const binding = runtime.bindings.get(key);
-  const deleted = runtime.bindings.delete(key);
-  try {
-    await runtime.persistBindings({ removeKeys: [key] });
-  } catch (error) {
-    if (binding) {
-      runtime.bindings.set(key, binding);
-    }
-    logPersistError(deps, error);
-    throw error;
-  }
-  const target = binding ? readTelegramReplyTarget(deps.dataDir, binding.sessionId) : null;
-  if (binding && target && target.chatId === chatId && target.messageThreadId === messageThreadId) {
-    deleteTelegramReplyTarget(deps.dataDir, binding.sessionId);
-  }
+  const binding = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId).get(key);
+  if (!binding) return { deleted: false, binding: undefined };
+  if (!deps.telegramConversations) throw new Error("Telegram conversations unavailable");
+  const deleted = await deps.telegramConversations.unwatch(binding.sessionId, {
+    projectId: deps.projectId,
+    sourceId: deps.sourceId,
+    chatId,
+    ...(messageThreadId !== undefined ? { messageThreadId } : {}),
+  });
+  runtime.bindings.clear();
+  mergePersistedBindings(runtime);
   return { deleted, binding };
+}
+
+function conversationText(conversation: TelegramConversation): string {
+  return conversation.kind === "disabled"
+    ? "Telegram conversation unavailable; configure a forum chatId."
+    : `Continue in [agent topic](https://t.me/c/${String(conversation.chatId).replace(/^-100/, "")}/${conversation.messageThreadId}).`;
+}
+
+function conversationIsCurrent(
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  sessionId: string,
+  conversation: TelegramConversation,
+): conversation is Extract<TelegramConversation, { kind: "topic" }> {
+  if (conversation.kind !== "topic" || deps.config.chatId !== conversation.chatId) return false;
+  const record = readSession(deps.dataDir, sessionId);
+  if (record?.status === "completed" || record?.status === "killed") return false;
+  const target = readTelegramReplyTarget(deps.dataDir, sessionId);
+  return (
+    target?.projectId === conversation.projectId &&
+    target.sourceId === conversation.sourceId &&
+    target.chatId === conversation.chatId &&
+    target.messageThreadId === conversation.messageThreadId &&
+    readTelegramBindings(deps.dataDir, conversation.projectId, conversation.sourceId).get(
+      telegramBindingKey(conversation.chatId, conversation.messageThreadId),
+    )?.sessionId === sessionId &&
+    !telegramTopicIsDeleting(deps.dataDir, conversation.chatId, conversation.messageThreadId)
+  );
+}
+
+async function guardAgentInput(
+  runtime: TelegramRuntime,
+  ctx: Pick<TelegramTextContext, "reply">,
+  message: TelegramTextMessage,
+  sessionId: string,
+): Promise<TelegramConversation | null> {
+  const conversation = await bindTelegramThread(
+    runtime,
+    message.chat.id,
+    message.message_thread_id,
+    sessionId,
+  );
+  if (
+    !conversationIsCurrent(runtime.deps, sessionId, conversation) ||
+    !isSameTelegramTarget(conversation, message.chat.id, message.message_thread_id)
+  ) {
+    await ctx.reply(conversationText(conversation));
+    return null;
+  }
+  return conversation;
 }
 
 type AutoSpawnAcquireResult =
@@ -1060,32 +1025,10 @@ async function bindWorkbenchSession(
   runtime: TelegramRuntime,
   card: WorkbenchCard,
   session: SourceSessionListItem,
-): Promise<void> {
+): Promise<TelegramConversation> {
   const { chatId, threadId, userId } = card.owner;
-  mergePersistedBindings(runtime);
-  if (sessionBindingConflict(runtime, chatId, threadId, session.id)) {
-    throw new Error("Session is already bound elsewhere");
-  }
-  const displacedId =
-    chatId < 0 ? runtime.bindings.get(telegramBindingKey(chatId, threadId))?.sessionId : undefined;
   clearPendingSpawn(runtime, chatId, threadId, userId);
-  await bindTelegramThread(runtime, chatId, threadId, session.id);
-  if (!workbenchCurrent(runtime, card)) return;
-  if (displacedId && displacedId !== session.id) {
-    await detachDisplacedSession(
-      runtime,
-      {
-        reply: async (text) => {
-          const sent = await ctx.reply?.(text);
-          return sent as TelegramSentMessage | undefined;
-        },
-      },
-      chatId,
-      threadId,
-      session,
-      displacedId,
-    );
-  }
+  return bindTelegramThread(runtime, chatId, threadId, session.id);
 }
 
 async function notifyUnboundWorkbenchResult(
@@ -1190,7 +1133,7 @@ async function handleWorkbenchCallback(
       }
       if (outcome.phase === "created") {
         await editWorkbenchCard(ctx, runtime, card, {
-          text: `${outcome.bound && !outcome.error && owner.chatId < 0 && owner.threadId !== undefined ? "Created. Bound here." : `Created ${outcome.session.id}. ${outcome.bound ? "Bound here." : "Not bound; use Continue here or /work."}`}${outcome.error ? `\n${redactedErrorText(runtime.deps, outcome.error)}` : ""}`,
+          text: `Created ${outcome.session.id}. ${outcome.conversation ? conversationText(outcome.conversation) : "No Telegram conversation; use /work to inspect."}${outcome.error ? `\n${redactedErrorText(runtime.deps, outcome.error)}` : ""}`,
           rows: outcome.bound
             ? []
             : [
@@ -1225,9 +1168,6 @@ async function handleWorkbenchCallback(
       if (!workbenchCurrent(runtime, card)) return;
       if (session.id !== action.sessionId || session.project !== action.project)
         throw new Error("Session changed");
-      mergePersistedBindings(runtime);
-      if (sessionBindingConflict(runtime, owner.chatId, owner.threadId, session.id))
-        throw new Error("Session is already bound elsewhere");
       if (action.kind === "restore") {
         if (!runtime.deps.listProjects) throw new Error("Project listing unavailable");
         const projects = await runtime.deps.listProjects();
@@ -1254,9 +1194,9 @@ async function handleWorkbenchCallback(
         !session.canContinue
       )
         throw new Error("Continue unavailable");
-      await bindWorkbenchSession(ctx, runtime, card, session);
+      const conversation = await bindWorkbenchSession(ctx, runtime, card, session);
       await editWorkbenchCard(ctx, runtime, card, {
-        text: `${owner.chatId < 0 && owner.threadId !== undefined ? "Bound." : `Bound ${session.id}.`} Plain messages here go to this task.`,
+        text: conversationText(conversation),
         rows: [],
       });
       return;
@@ -1512,14 +1452,15 @@ async function handleTelegramCallback(
     await ctx.answerCallbackQuery("Session is no longer active.");
     return;
   }
-  if (sessionBindingConflict(runtime, message.chat.id, message.message_thread_id, sessionId)) {
-    await ctx.answerCallbackQuery("Session is already bound elsewhere.");
-    return;
-  }
-
   clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
+  let conversation: TelegramConversation;
   try {
-    await bindTelegramThread(runtime, message.chat.id, message.message_thread_id, sessionId);
+    conversation = await bindTelegramThread(
+      runtime,
+      message.chat.id,
+      message.message_thread_id,
+      sessionId,
+    );
   } catch (error) {
     await ctx.answerCallbackQuery("Bind failed.");
     const failureMessage = `Failed to bind Spur session ${sessionId}: ${redactedErrorText(deps, error)}`;
@@ -1530,11 +1471,8 @@ async function handleTelegramCallback(
     }
     return;
   }
-  const forum = message.chat.id < 0 && message.message_thread_id !== undefined;
-  const reply = forum
-    ? "Bound this Telegram thread."
-    : `Bound this Telegram thread to Spur session ${sessionId}.`;
-  await ctx.answerCallbackQuery(forum ? "Bound." : `Bound ${sessionId}.`);
+  const reply = conversationText(conversation);
+  await ctx.answerCallbackQuery("Conversation selected.");
   if (ctx.editMessageText) {
     await ctx.editMessageText(reply);
   } else {
@@ -1674,7 +1612,49 @@ async function handleAgentChoiceCallback(
       deps,
       singleChoiceButton(`Sending: ${pending.text}…`, callbackData),
     );
-  const outcome = await claimAgentChoice(deps, pending, token, chatId, from.id).catch(
+  let session: SourceSessionListItem | null;
+  try {
+    session = await findSession(deps, pending.sessionId);
+  } catch (error) {
+    await reject(choiceRejection("internal", error), pending);
+    return;
+  }
+  if (!session) {
+    await reject(choiceRejection("session-missing"), pending);
+    return;
+  }
+  const inputThreadId =
+    message.date === 0
+      ? pending.messageThreadId
+      : telegramMessageThreadId(message, message.message_thread_id ?? pending.messageThreadId);
+  const conversation = await bindTelegramThread(
+    runtime,
+    message.chat.id,
+    inputThreadId,
+    session.id,
+  );
+  if (
+    !conversationIsCurrent(deps, session.id, conversation) ||
+    !isSameTelegramTarget(conversation, message.chat.id, inputThreadId)
+  ) {
+    if (sending) {
+      await editChoiceMarkup(ctx, deps, message.reply_markup ?? { inline_keyboard: [] });
+    }
+    await ctx.answerCallbackQuery("Continue in the assigned topic.");
+    await ctx.reply?.(conversationText(conversation));
+    return;
+  }
+  if (session.inactive) {
+    await reject(
+      {
+        reason: "session-inactive",
+        alert: `${formatTelegramSessionLabel(session.id, session.title?.trim() || undefined)} is not active.`,
+      },
+      pending,
+    );
+    return;
+  }
+  const outcome = await claimAgentChoice(deps, pending, token, chatId, from.id, conversation).catch(
     (error: unknown) =>
       error instanceof ConsentRejectedError
         ? choiceRejection(error.reason)
@@ -1705,6 +1685,7 @@ async function handleAgentChoiceCallback(
     chat: { id: choice.chatId },
     from,
   };
+  if (!conversationIsCurrent(deps, choice.sessionId, conversation)) return;
   // A click posts no status message of its own.
   recordTelegramReplyTarget(deps, {
     sessionId: choice.sessionId,
@@ -1721,6 +1702,7 @@ async function claimAgentChoice(
   token: string,
   chatId: number,
   actor: number,
+  conversation: TelegramConversation,
 ): Promise<TelegramChoice | ChoiceRejection> {
   const session = await findSession(deps, pending.sessionId);
   if (!session) return choiceRejection("session-missing");
@@ -1730,7 +1712,7 @@ async function claimAgentChoice(
       alert: `${formatTelegramSessionLabel(session.id, session.title?.trim() || undefined)} is not active.`,
     };
   const decision = pending.interfaceConsent
-    ? await decideConsentClick(deps, pending.sessionId, token, chatId, actor)
+    ? await decideConsentClick(deps, pending.sessionId, token, chatId, actor, conversation)
     : undefined;
   const choice = takeTelegramChoice(deps.dataDir, deps.projectId, deps.sourceId, token, chatId);
   // Lost the race with a sibling click or a superseding reply.
@@ -1746,6 +1728,7 @@ async function decideConsentClick(
   token: string,
   chatId: number,
   actor: number,
+  conversation: TelegramConversation,
 ): Promise<InterfaceConsent> {
   const policy = await consentPolicy(deps.config.allowedUsers).catch((error: unknown) => {
     throw new ConsentRejectedError("policy-unavailable", errorText(error));
@@ -1787,6 +1770,7 @@ async function decideConsentClick(
   const current = readInterfaceConsent(deps.dataDir, sessionId);
   const currentSession = readSession(deps.dataDir, sessionId);
   if (
+    !conversationIsCurrent(deps, sessionId, conversation) ||
     !active?.interfaceConsent ||
     !current ||
     current.generation !== record.generation ||
@@ -1920,31 +1904,21 @@ async function handleTelegramText(
       await ctx.reply(`No active Spur session ${command.sessionId}.`);
       return;
     }
-    if (
-      sessionBindingConflict(runtime, message.chat.id, message.message_thread_id, command.sessionId)
-    ) {
-      await ctx.reply(`Spur session ${command.sessionId} is already bound elsewhere.`);
-      return;
-    }
     clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
     try {
-      await bindTelegramThread(
+      const conversation = await bindTelegramThread(
         runtime,
         message.chat.id,
         message.message_thread_id,
         command.sessionId,
       );
+      await ctx.reply(conversationText(conversation));
     } catch (error) {
       await ctx.reply(
         `Failed to bind Spur session ${command.sessionId}: ${redactedErrorText(deps, error)}`,
       );
       return;
     }
-    await ctx.reply(
-      message.chat.id < 0 && message.message_thread_id !== undefined
-        ? "Bound this Telegram thread."
-        : `Bound this Telegram thread to Spur session ${command.sessionId}.`,
-    );
     return;
   }
   if (command?.kind === "watch_menu") {
@@ -2048,25 +2022,14 @@ async function routeTelegramPrompt(
 
   // Private/group-main bot-message replies reach their sender without
   // changing bindings or auto-spawning.
-  const repliedTo = message.reply_to_message?.message_id;
-  // Forum topics retain their binding, including after another session takes over.
-  const ownerId =
-    repliedTo === undefined || (message.chat.id < 0 && message.message_thread_id !== undefined)
-      ? null
-      : findTelegramMessageSession(
-          deps.dataDir,
-          deps.projectId,
-          deps.sourceId,
-          message.chat.id,
-          repliedTo,
-        );
+  const ownerId = telegramReplyOwner(deps, message);
   if (ownerId !== null) {
     const owner = await findSession(deps, ownerId);
     if (!owner) {
       await ctx.reply(`Spur session ${ownerId} is gone. Message not delivered.`);
       return;
     }
-    await deliverRoutedPrompt(deps, ctx, message, owner, text);
+    await deliverRoutedPrompt(runtime, ctx, message, owner, text);
     return;
   }
 
@@ -2132,7 +2095,23 @@ async function routeTelegramPrompt(
     await ctx.reply(`Spur session ${binding.sessionId} is gone. Unbound. Use /watch or /spawn.`);
     return;
   }
-  await deliverRoutedPrompt(deps, ctx, message, session, text);
+  await deliverRoutedPrompt(runtime, ctx, message, session, text);
+}
+
+function telegramReplyOwner(
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  message: TelegramTextMessage,
+): string | null {
+  const repliedTo = message.reply_to_message?.message_id;
+  return repliedTo === undefined || (message.chat.id < 0 && message.message_thread_id !== undefined)
+    ? null
+    : findTelegramMessageSession(
+        deps.dataDir,
+        deps.projectId,
+        deps.sourceId,
+        message.chat.id,
+        repliedTo,
+      );
 }
 
 /**
@@ -2155,12 +2134,15 @@ function placeholderText(label: string, state: string): string {
  * message gets a notice instead, so the user never waits on a dead agent.
  */
 async function deliverRoutedPrompt(
-  deps: SourceStartDeps<TelegramSourceConfig>,
+  runtime: TelegramRuntime,
   ctx: Pick<TelegramTextContext, "reply" | "api">,
   message: TelegramTextMessage,
   session: SourceSessionListItem,
   text: string,
 ): Promise<void> {
+  const deps = runtime.deps;
+  const conversation = await guardAgentInput(runtime, ctx, message, session.id);
+  if (!conversation) return;
   const label = formatTelegramSessionLabel(session.id, session.title?.trim() || undefined);
   if (session.inactive) {
     await ctx.reply(`${label} is not active. Message not delivered.`);
@@ -2173,6 +2155,15 @@ async function deliverRoutedPrompt(
     deps.logger.warn?.(
       `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${errorText(error)}`,
     );
+  }
+  const currentSession = await findSession(deps, session.id);
+  if (
+    !currentSession ||
+    currentSession.inactive ||
+    !conversationIsCurrent(deps, session.id, conversation)
+  ) {
+    await ctx.reply("Agent conversation changed. Message not delivered.");
+    return;
   }
   // Read and replaced in one synchronous step: a reply that claimed the old
   // placeholder before this point is not superseded, and one that starts after
@@ -2336,6 +2327,7 @@ async function transcribeAndRoute(
   message: TelegramTextMessage,
   from: { id: number; username?: string },
   statusMessageId: number | undefined,
+  intake: VoiceIntake,
 ): Promise<void> {
   const deps = runtime.deps;
   const webBaseUrl = await deps.resolveWebBaseUrl();
@@ -2385,16 +2377,70 @@ async function transcribeAndRoute(
     return;
   }
 
+  if (!voiceIntakeIsCurrent(runtime, message, from.id, intake)) {
+    await editOrReply(
+      ctx,
+      message.chat.id,
+      statusMessageId,
+      "Voice context changed. Send the message again.",
+    );
+    return;
+  }
   try {
-    await editOrReply(ctx, message.chat.id, statusMessageId, `Heard: "${trimmed}"`);
+    await editOrReply(
+      ctx,
+      message.chat.id,
+      statusMessageId,
+      intake.kind === "agent" ? `Heard: "${trimmed}"` : "Voice task received.",
+    );
   } catch (error) {
     deps.logger.warn?.(
       `[source:${deps.projectId}/${deps.sourceId}] telegram voice echo failed: ${redactedErrorText(deps, error)}`,
     );
   }
-  if (isAborted(deps)) return;
+  if (isAborted(deps) || !voiceIntakeIsCurrent(runtime, message, from.id, intake)) return;
 
-  await routeTelegramPrompt(runtime, ctx, message, from, trimmed);
+  if (intake.kind === "agent") {
+    if (!conversationIsCurrent(deps, intake.sessionId, intake.conversation)) return;
+    const session = await findSession(deps, intake.sessionId);
+    if (session && conversationIsCurrent(deps, intake.sessionId, intake.conversation))
+      await deliverRoutedPrompt(runtime, ctx, message, session, trimmed);
+  } else {
+    await routeTelegramPrompt(runtime, ctx, message, from, trimmed);
+  }
+}
+
+type VoiceIntake =
+  | { kind: "agent"; sessionId: string; conversation: TelegramConversation }
+  | { kind: "spawn"; binding: string | undefined; pending: TelegramPendingSpawn; autoSpawn?: never }
+  | {
+      kind: "spawn";
+      binding: string | undefined;
+      pending: null;
+      autoSpawn: TelegramAutoSpawnConfig;
+    };
+
+function voiceIntakeIsCurrent(
+  runtime: TelegramRuntime,
+  message: TelegramTextMessage,
+  userId: number,
+  intake: VoiceIntake,
+): boolean {
+  const deps = runtime.deps;
+  if (intake.kind === "agent")
+    return conversationIsCurrent(deps, intake.sessionId, intake.conversation);
+  const binding = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId).get(
+    telegramBindingKey(message.chat.id, message.message_thread_id),
+  )?.sessionId;
+  if (binding !== intake.binding) return false;
+  const pending = peekPendingSpawn(runtime, message.chat.id, message.message_thread_id, userId);
+  if (intake.pending !== null) return pending === intake.pending;
+  return (
+    pending === null &&
+    deps.config.autoSpawn?.enabled === true &&
+    deps.config.autoSpawn.agent === intake.autoSpawn.agent &&
+    deps.config.autoSpawn.project === intake.autoSpawn.project
+  );
 }
 
 /**
@@ -2417,6 +2463,37 @@ async function handleTelegramVoice(
   if (!isAllowed(deps.config, message.chat.id, from)) return;
   if (!from) return;
 
+  const binding = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId).get(
+    telegramBindingKey(message.chat.id, message.message_thread_id),
+  )?.sessionId;
+  const replyOwner = telegramReplyOwner(deps, message);
+  const pending = peekPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
+  let intake: VoiceIntake;
+  if (
+    replyOwner !== null ||
+    (binding !== undefined && !(pending && pending !== "expired" && pending.project !== undefined))
+  ) {
+    const sessionId = replyOwner ?? binding;
+    if (sessionId === undefined) return;
+    const conversation = await guardAgentInput(runtime, ctx, message, sessionId);
+    if (!conversation) return;
+    const session = await findSession(deps, sessionId);
+    if (!session || session.inactive || !conversationIsCurrent(deps, sessionId, conversation)) {
+      await ctx.reply("Agent is not active. Message not delivered.");
+      return;
+    }
+    intake = { kind: "agent", sessionId, conversation };
+  } else if (pending && pending !== "expired") {
+    intake = { kind: "spawn", binding, pending };
+  } else if (deps.config.autoSpawn?.enabled === true) {
+    intake = { kind: "spawn", binding, pending: null, autoSpawn: { ...deps.config.autoSpawn } };
+  } else {
+    await ctx.reply(
+      pending === "expired" ? SPAWN_EXPIRED_TEXT : "Use /spawn to send a voice task.",
+    );
+    return;
+  }
+
   let statusMessageId: number | undefined;
   try {
     statusMessageId = extractMessageId(await ctx.reply("Transcribing voice message..."));
@@ -2426,15 +2503,20 @@ async function handleTelegramVoice(
     );
   }
 
-  void transcribeAndRoute(runtime, ctx, message, from, statusMessageId).catch(
-    async (error: unknown) => {
-      deps.logger.warn?.(
-        `[source:${deps.projectId}/${deps.sourceId}] telegram voice failed: ${redactedErrorText(deps, error)}`,
-      );
-      if (isAborted(deps)) return;
-      await noticeUndelivered(deps, ctx);
-    },
+  void transcribeAndRoute(runtime, ctx, message, from, statusMessageId, intake).catch(
+    (error: unknown) => reportVoiceFailure(deps, ctx, error),
   );
+}
+
+async function reportVoiceFailure(
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  ctx: TelegramTextContext,
+  error: unknown,
+): Promise<void> {
+  deps.logger.warn?.(
+    `[source:${deps.projectId}/${deps.sourceId}] telegram voice failed: ${redactedErrorText(deps, error)}`,
+  );
+  if (!isAborted(deps)) await noticeUndelivered(deps, ctx);
 }
 
 async function startTelegramSource(
@@ -2451,15 +2533,22 @@ async function startTelegramSource(
     pendingSpawns: new Map(),
     autoSpawnInFlight: new Set(),
     workbench: new TelegramWorkbench(),
-    persistBindings(options: { removeKeys?: string[]; reconcileKey?: string } = {}): Promise<void> {
-      const removedKeys = new Set(options.removeKeys ?? []);
+    persistBindings(): Promise<void> {
       const next = writeQueue.then(() => {
-        if (options.reconcileKey !== undefined) {
-          const current = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId).get(
-            options.reconcileKey,
-          );
-          if (current) bindings.set(options.reconcileKey, current);
-          else bindings.delete(options.reconcileKey);
+        const persisted = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId);
+        bindings.clear();
+        for (const [key, binding] of persisted) {
+          bindings.set(key, binding);
+        }
+        for (const [key, binding] of bindings) {
+          const record = readSession(deps.dataDir, binding.sessionId);
+          if (
+            record?.status === "completed" ||
+            record?.status === "killed" ||
+            telegramTopicIsDeleting(deps.dataDir, binding.chatId, binding.messageThreadId)
+          ) {
+            bindings.delete(key);
+          }
         }
         return writeTelegramBindings(
           deps.dataDir,
@@ -2468,8 +2557,6 @@ async function startTelegramSource(
           bindings.values(),
           {
             ...(runtime.lastUpdateId !== undefined ? { lastUpdateId: runtime.lastUpdateId } : {}),
-            preserveExisting: true,
-            ...(removedKeys.size > 0 ? { removeKeys: removedKeys } : {}),
           },
         );
       });
@@ -2513,7 +2600,11 @@ async function startTelegramSource(
     await handleTelegramText(ctx as TelegramTextContext, runtime);
   });
   bot.on("message:voice", async (ctx: Context) => {
-    await handleTelegramVoice(ctx as TelegramTextContext, runtime);
+    try {
+      await handleTelegramVoice(ctx as TelegramTextContext, runtime);
+    } catch (error) {
+      await reportVoiceFailure(deps, ctx as TelegramTextContext, error);
+    }
   });
   bot.on("callback_query:data", async (ctx: Context) => {
     await handleTelegramCallback(ctx as TelegramCallbackContext, runtime);

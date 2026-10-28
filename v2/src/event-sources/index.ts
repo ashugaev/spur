@@ -23,6 +23,7 @@ import type {
   SourceSpawnSessionRequest,
   SourceSessionListItem,
   SourceWorkbench,
+  SourceStartDeps,
 } from "./types.js";
 
 interface StartConfiguredSourcesDeps {
@@ -34,6 +35,7 @@ interface StartConfiguredSourcesDeps {
   spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
   listProjects?(): Promise<SourceProjectListItem[]>;
   workbench?: SourceWorkbench;
+  telegramConversations?: SourceStartDeps["telegramConversations"];
 }
 
 /**
@@ -139,6 +141,9 @@ export async function startConfiguredSources(
           listSessions: deps.listSessions,
           getSession: deps.getSession,
           ...(deps.workbench ? { workbench: deps.workbench } : {}),
+          ...(deps.telegramConversations
+            ? { telegramConversations: deps.telegramConversations }
+            : {}),
           ...(deps.spawnSession ? { spawnSession: deps.spawnSession } : {}),
           ...(deps.listProjects ? { listProjects: deps.listProjects } : {}),
           emit(name: string, data?: unknown): void {
