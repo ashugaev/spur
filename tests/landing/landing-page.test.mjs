@@ -128,7 +128,18 @@ test("event-source FAQ distinguishes spawn sources and live-session messages", (
   const { visible, json } = faqAnswer("What can trigger an agent automatically?");
 
   assert.equal(visible, json);
-  for (const source of ["GitHub", "GitLab", "Telegram", "service", "Cron", "GitHub CI", "Sentry", "queried Jira", "scripts", "webhooks"]) {
+  for (const source of [
+    "GitHub",
+    "GitLab",
+    "Telegram",
+    "service",
+    "Cron",
+    "GitHub CI",
+    "Sentry",
+    "queried Jira",
+    "scripts",
+    "webhooks",
+  ]) {
     assert.ok(visible.includes(source), `missing source: ${source}`);
   }
   assert.match(visible, /Cron,[^.]+spawn new sessions\./);
@@ -153,17 +164,19 @@ test("feature cards describe supported controls and their limits", () => {
   assert.match(features, /Full operator access/);
   assert.match(features, /Unknown usage stays\s+unenforced/);
   assert.match(features, /warn only/);
-  assert.match(features, /choices follow\s+the selected agent and model/);
+  assert.match(features, /choices follow\s+the\s+selected agent and model/);
   for (const command of ["/new", "/work", "/watch"]) {
     assert.ok(features.includes(`<code>${command}</code>`), `missing Telegram action: ${command}`);
   }
-  assert.match(features, /Detached containers need their own teardown/);
+  assert.match(features, /Detached\s+containers need their own teardown/);
   assert.doesNotMatch(features, /die with the\s+session/);
 });
 
 test("installation requirements match supported Node engines and installed services", async () => {
   const install = section("install");
-  const manifest = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8"));
+  const manifest = JSON.parse(
+    await readFile(new URL("../../package.json", import.meta.url), "utf8"),
+  );
   assert.equal(manifest.engines.node, "^22.13.0 || >=24");
   assert.match(install, /Node 22\.13\+ \(22\.x\) or 24\+/);
   assert.doesNotMatch(install, /Node 20|both as systemd/);
