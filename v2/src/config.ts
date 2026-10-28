@@ -840,6 +840,10 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     provider === "github"
       ? asOptionalPositiveInteger(raw["pollDisabledRecheckMs"], `${label}.pollDisabledRecheckMs`)
       : undefined;
+  const ignoreChecks =
+    provider === "github"
+      ? asOptionalStringArray(raw["ignoreChecks"], `${label}.ignoreChecks`)
+      : undefined;
   const selfMarker =
     provider === "github" ? asOptionalString(raw["selfMarker"], `${label}.selfMarker`) : undefined;
   if (selfMarker !== undefined && !selfMarker.includes("{session}")) {
@@ -871,6 +875,7 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     ...(adaptivePoll !== undefined ? { adaptivePoll } : {}),
     ...(maxReviewBatchTargets !== undefined ? { maxReviewBatchTargets } : {}),
     ...(pollDisabledRecheckMs !== undefined ? { pollDisabledRecheckMs } : {}),
+    ...(ignoreChecks !== undefined ? { ignoreChecks } : {}),
     ...(selfMarker !== undefined ? { selfMarker } : {}),
     ...(signPosts === true ? { signPosts } : {}),
   } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
