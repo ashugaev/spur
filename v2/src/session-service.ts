@@ -24681,6 +24681,7 @@ export class SessionService {
       preflightTokenUsage: _preflightTokenUsage,
       cursorRestoreBoundary: _cursorRestoreBoundary,
       codexRestoreStartedAt: _codexRestoreStartedAt,
+      restoredAt: _restoredAt,
       launchCommand: _launchCommand,
       stateSubscriptions: _stateSubscriptions,
       allowedTriggers: _allowedTriggers,
@@ -25053,6 +25054,7 @@ export class SessionService {
       preflightTokenUsage: _preflightTokenUsage,
       cursorRestoreBoundary: _cursorRestoreBoundary,
       codexRestoreStartedAt: _codexRestoreStartedAt,
+      restoredAt: _restoredAt,
       // The record's queue state is internal; the view carries queuedMessagesView.
       queuedMessages: _queuedMessages,
       errorSource: _errorSource,

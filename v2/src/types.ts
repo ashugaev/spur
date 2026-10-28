@@ -1382,6 +1382,7 @@ export interface SessionView extends Omit<
   | "preflightTokenUsage"
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
+  | "restoredAt"
   | "errorSource"
 > {
   lifecycle: SessionLifecycleSnapshot;
@@ -1422,6 +1423,7 @@ export type DashboardOmittedField =
   | "queuedMessages"
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
+  | "restoredAt"
   | "pipeline"
   | "sidecarNames"
   | "sidecarPorts"

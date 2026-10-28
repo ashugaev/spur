@@ -29001,6 +29001,7 @@ describe("SessionService", () => {
         prompt: "Ship the feature",
         originalTaskPrompt: "Ship it",
         agentLaunchId: "launch-generation-1",
+        restoredAt: "2026-03-18T10:00:00.000Z",
       }),
     );
     tmuxSessionExistsMock.mockResolvedValue(true);
@@ -29022,15 +29023,20 @@ describe("SessionService", () => {
       expect(listed[0]).not.toHaveProperty(field);
     }
     expect(listed[0]).not.toHaveProperty("agentLaunchId");
+    expect(listed[0]).not.toHaveProperty("restoredAt");
     expect(listSessionArtifactsMock).not.toHaveBeenCalled();
 
     const detail = await service.get("api-1");
     expect(detail).not.toHaveProperty("agentLaunchId");
+    expect(detail).not.toHaveProperty("restoredAt");
     expect(detail.artifacts).toEqual([]);
     expect(detail.launchCommand).toBe("claude --dangerously-skip-permissions");
     expect(detail.prompt).toBe("Ship the feature");
     expect(detail.originalTaskPrompt).toBe("Ship it");
     expect(listSessionArtifactsMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    const dashboard = await service.list({ view: "dashboard" });
+    expect(dashboard[0]).not.toHaveProperty("restoredAt");
+    expect(sessions.get("api-1")?.restoredAt).toBe("2026-03-18T10:00:00.000Z");
   });
 
   it("splits queued manual messages from future pipeline steps in session views (G4 view split)", async () => {
