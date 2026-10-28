@@ -15386,6 +15386,7 @@ export class SessionService {
         sessionId,
         chatId: origin.chatId,
         choices: [],
+        keepInterfaceConsent: false,
       });
       const target = readTelegramReplyTarget(this.config.dataDir, sessionId);
       if (

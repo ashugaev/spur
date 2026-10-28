@@ -654,7 +654,7 @@ export function wrapTelegramSpawnPrompt(taskText: string): string {
 }
 
 async function editOrReply(
-  ctx: Pick<TelegramTextContext, "reply" | "api">,
+  ctx: TelegramTextContext,
   chatId: number,
   statusMessageId: number | undefined,
   text: string,
@@ -670,42 +670,6 @@ async function editOrReply(
   await ctx.reply(text);
 }
 
-/**
- * Reassign the group's plain-message binding and retire displaced outbound
- * target/offers. Group-main recorded replies still reach their sender.
- */
-async function detachDisplacedSession(
-  runtime: TelegramRuntime,
-  ctx: Pick<TelegramTextContext, "reply">,
-  chatId: number,
-  messageThreadId: number | undefined,
-  taker: SourceSessionListItem,
-  displacedId: string,
-): Promise<void> {
-  const deps = runtime.deps;
-  try {
-    const target = readTelegramReplyTarget(deps.dataDir, displacedId);
-    if (target && isSameTelegramTarget(target, chatId, messageThreadId)) {
-      deleteTelegramReplyTarget(deps.dataDir, displacedId);
-    }
-    writeTelegramOffer(deps.dataDir, deps.projectId, deps.sourceId, {
-      sessionId: displacedId,
-      chatId,
-      choices: [],
-      keepInterfaceConsent: false,
-    });
-    const displaced = await findSession(deps, displacedId);
-    const label = (session: Pick<SourceSessionListItem, "id" | "title">): string =>
-      formatTelegramSessionLabel(session.id, session.title?.trim() || undefined);
-    await ctx.reply(
-      messageThreadId === undefined
-        ? `${label(taker)} receives plain messages in this chat. Reply to an agent's message to reach that agent.`
-        : `${label(taker)} took over this thread from ${label(displaced ?? { id: displacedId })}.`,
-    );
-  } catch (error) {
-    logPersistError(deps, error);
-  }
-}
 type TelegramSpawnOutcome =
   | { phase: "not_submitted"; error?: unknown }
   | { phase: "submitted_unknown"; error: unknown }
