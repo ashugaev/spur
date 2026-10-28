@@ -64993,6 +64993,63 @@ describe("SessionService", () => {
     });
 
     describe("wake: restore() on a parked (stale_timeout) session", () => {
+      it.each(["failed", "successful"] as const)(
+        "preserves persisted sidecar updates after %s auto-start when recording restore time",
+        async (outcome) => {
+          loadConfigMock.mockReturnValue({
+            ...baseConfig(),
+            projects: {
+              api: {
+                ...baseConfig().projects.api,
+                sidecars: {
+                  proxy: { command: "pnpm proxy", autoStart: true },
+                  dependency: { command: "pnpm dependency" },
+                },
+              },
+            },
+          });
+          mockAgentWaitingState("claude");
+          findAgentSessionIdMock.mockResolvedValue("session-uuid");
+          const sessions = createSessionStore();
+          sessions.set(
+            "api-1",
+            staleParkableSession({
+              status: "stopped",
+              stopReason: "stale_timeout",
+              agentSessionId: "session-uuid",
+              sidecarPorts: { proxy: { http: 3000 } },
+              sidecarProcs: { proxy: { pid: 100, pgid: 100, starttime: 1 } },
+            }),
+          );
+          mockExitedThenRestoredProcess();
+          const service = await createDisposedSessionService();
+          const internals = service as unknown as {
+            startSidecarWithDependencies(args: { session: SessionRecord }): Promise<SessionRecord>;
+          };
+          const sidecarPorts = { dependency: { http: 3001 } };
+          const sidecarProcs = { dependency: { pid: 200, pgid: 200, starttime: 2 } };
+          vi.spyOn(internals, "startSidecarWithDependencies").mockImplementation(
+            async ({ session }) => {
+              // A dependency persists before its parent startup/cleanup finishes.
+              const fresh = { ...session, sidecarPorts, sidecarProcs };
+              sessions.set(session.id, fresh);
+              if (outcome === "failed") throw new Error("proxy startup failed after cleanup");
+              return fresh;
+            },
+          );
+
+          const restored = await service.restore("api-1");
+          const persisted = sessions.get("api-1");
+          expect(persisted?.sidecarPorts).toEqual(sidecarPorts);
+          expect(persisted?.sidecarProcs).toEqual(sidecarProcs);
+          expect(persisted?.restoredAt).toBe(new Date(Date.now()).toISOString());
+          expect(restored.status).toBe("running");
+          expect(persisted).not.toHaveProperty("stopReason");
+          expect(persisted).not.toHaveProperty("error");
+          service.dispose();
+        },
+      );
+
       it("starts a full idle window on restore, preserved across daemon restart (issue 961)", async () => {
         loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
         mockAgentWaitingState("claude");

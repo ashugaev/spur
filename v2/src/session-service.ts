@@ -20697,14 +20697,18 @@ export class SessionService {
       );
       operation?.assertActive();
       writeSession(this.config.dataDir, persistedRestored);
-      const restoredWithSidecars = await this.startAutoStartSidecars(
+      await this.startAutoStartSidecars(
         persistedRestored,
         this.getProject(current.project),
         undefined,
         operation,
       );
       operation?.assertActive();
-      restoredWithSidecars.restoredAt = nowIso();
+      // Best-effort auto-start can persist dependency starts or cleanup before
+      // throwing. Its returned snapshot can predate those writes.
+      const latestAfterSidecars = readSession(this.config.dataDir, sessionId);
+      if (!latestAfterSidecars) throw new Error(`Session ${sessionId} disappeared during restore`);
+      const restoredWithSidecars = { ...latestAfterSidecars, restoredAt: nowIso() };
       writeSession(this.config.dataDir, restoredWithSidecars);
       await this.refreshDashboardCacheEntry(restoredWithSidecars);
       operation?.assertActive();
