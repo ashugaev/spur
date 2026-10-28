@@ -609,9 +609,55 @@ describe("telegram source state", () => {
     const dataDir = await newDataDir();
     writeTelegramOffer(dataDir, "api", "tg", offerOf([choice({ token: "t1" })]));
 
-    writeTelegramOffer(dataDir, "api", "tg", offerOf([]));
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([], "api-1", -1001, true));
 
     expect(readTelegramChoices(dataDir, "api", "tg")).toHaveLength(0);
+  });
+
+  it("keeps a pending interface approval through later replies of the session", async () => {
+    const dataDir = await newDataDir();
+    const consentOffer = (offerId: string, challenge: string) =>
+      offerOf(
+        ["approved", "rejected", "revoked"].map((decision) =>
+          choice({
+            token: `${offerId}-${decision}`,
+            offerId,
+            value: decision,
+            interfaceConsent: {
+              challenge,
+              decision: decision as "approved" | "rejected" | "revoked",
+            },
+          }),
+        ),
+      );
+    const tokens = () => readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token);
+    writeTelegramOffer(dataDir, "api", "tg", consentOffer("consent-1", "c1"));
+
+    // Buttonless reply and ordinary question keep the approval; the ordinary
+    // question is still retired by the next reply.
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([], "api-1", -1001, true));
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "ask", offerId: "offer-ask" })], "api-1", -1001, true),
+    );
+    expect(tokens()).toEqual([
+      "consent-1-approved",
+      "consent-1-rejected",
+      "consent-1-revoked",
+      "ask",
+    ]);
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([], "api-1", -1001, true));
+    expect(tokens()).toEqual(["consent-1-approved", "consent-1-rejected", "consent-1-revoked"]);
+
+    // A new approval supersedes the old challenge.
+    writeTelegramOffer(dataDir, "api", "tg", consentOffer("consent-2", "c2"));
+    expect(tokens()).toEqual(["consent-2-approved", "consent-2-rejected", "consent-2-revoked"]);
+
+    // Retire-all (displacement) drops the approval too.
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([]));
+    expect(tokens()).toEqual([]);
   });
 
   it("drops expired choices and caps the store", async () => {
@@ -685,8 +731,13 @@ describe("telegram source state", () => {
   });
 });
 
-function offerOf(choices: TelegramChoice[], sessionId = "api-1", chatId = -1001) {
-  return { sessionId, chatId, choices };
+function offerOf(
+  choices: TelegramChoice[],
+  sessionId = "api-1",
+  chatId = -1001,
+  keepInterfaceConsent = false,
+) {
+  return { sessionId, chatId, choices, keepInterfaceConsent };
 }
 
 function choice(
