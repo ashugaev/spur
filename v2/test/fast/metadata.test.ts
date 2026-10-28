@@ -1037,6 +1037,18 @@ describe("session workspaceId normalization", () => {
     expect(readSession(dataDir, "api-2")?.workspaceId).toBe("api-1");
   });
 
+  it("persists the restore idle baseline and accepts legacy records without one", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = { ...legacyBase, id: "api-1", tmuxSession: "api-1" };
+    const restoredAt = "2026-03-18T10:05:00.000Z";
+    writeSession(dataDir, { ...record, restoredAt });
+    expect(readSession(dataDir, record.id)?.restoredAt).toBe(restoredAt);
+    writeSession(dataDir, record);
+    expect(readSession(dataDir, record.id)?.restoredAt).toBeUndefined();
+    writeSession(dataDir, { ...record, restoredAt: "invalid" });
+    expect(readSession(dataDir, record.id)?.restoredAt).toBeUndefined();
+  });
+
   it("persists only valid error provenance beside an error", async () => {
     const dataDir = await newDataDir();
     const record: SessionRecord = {

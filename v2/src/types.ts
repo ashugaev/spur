@@ -1211,6 +1211,8 @@ export interface SessionRecord {
   preflightTokenUsage?: PreflightTokenUsageRecord;
   createdAt: string;
   updatedAt: string;
+  /** Latest successful restore; restarts the stale-parking idle window. */
+  restoredAt?: string;
   lastOpenedAt?: string;
   retainInList?: boolean;
   slots?: SessionSlots;
