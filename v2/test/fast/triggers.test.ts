@@ -749,6 +749,7 @@ const WORK_ITEM_BASE = {
 
 function workItemSpawnOptions(blockIndex = 0) {
   return {
+    acceptQueued: true,
     triggerOrigin: {
       triggerId: "pick-up",
       sourceId: "pr-watch",
@@ -5435,6 +5436,7 @@ describe("startConfiguredTriggers", () => {
           slots: { links: [{ label: "pr", url: "https://sentry.io/issues/7/" }] },
         },
         {
+          acceptQueued: true,
           triggerOrigin: {
             triggerId: "triage",
             sourceId: "sentry-issues",
@@ -5508,6 +5510,7 @@ describe("startConfiguredTriggers", () => {
             ...(url ? { slots: { links: [{ label: "pr", url }] } } : {}),
           },
           {
+            acceptQueued: true,
             triggerOrigin: {
               triggerId: "handle",
               sourceId: "check",
