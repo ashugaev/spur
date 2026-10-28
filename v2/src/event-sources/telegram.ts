@@ -1654,17 +1654,11 @@ async function handleAgentChoiceCallback(
     );
     return;
   }
-  const outcome = await claimAgentChoice(
-    deps,
-    pending,
-    token,
-    chatId,
-    from.id,
-    conversation,
-  ).catch((error: unknown) =>
-    error instanceof ConsentRejectedError
-      ? choiceRejection(error.reason)
-      : choiceRejection("internal", error),
+  const outcome = await claimAgentChoice(deps, pending, token, chatId, from.id, conversation).catch(
+    (error: unknown) =>
+      error instanceof ConsentRejectedError
+        ? choiceRejection(error.reason)
+        : choiceRejection("internal", error),
   );
   if ("reason" in outcome) {
     await reject(outcome, pending);
