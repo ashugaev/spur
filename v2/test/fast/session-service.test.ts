@@ -5996,7 +5996,7 @@ describe("SessionService", () => {
       agentLaunchId: sessions.get("api-1")?.agentLaunchId,
     });
     await advanceSeconds(16);
-    await vi.waitFor(() => {
+    await waitForRealTime(() => {
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
