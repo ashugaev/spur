@@ -104,6 +104,7 @@ import { POST as createProject } from "@/app/api/projects/route";
 import { POST as switchAuth } from "@/app/api/sessions/[id]/switch-auth/route";
 import { GET as listClaudeAccounts } from "@/app/api/claude-accounts/route";
 import { GET as getSpawnDefaults } from "@/app/api/projects/[id]/spawn-defaults/route";
+import { GET as getCronJobs } from "@/app/api/cron/route";
 import { POST as postAutoUpdate } from "@/app/api/runtime/auto-update/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
@@ -4041,6 +4042,47 @@ describe("Spur web API routes", () => {
       const response = await getSpawnDefaults(
         new NextRequest("http://localhost:3000/api/projects/api/spawn-defaults?agent=claude"),
         { params: Promise.resolve({ id: "api" }) },
+      );
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(404);
+      expect(payload.error).toBe("Unknown project: api");
+    });
+
+    // ── GET /api/cron ─────────────────────────────────────────────────────
+
+    it("GET /api/cron forwards a trimmed project", async () => {
+      const body = { projects: [], eventsSince: "2026-10-27T00:00:00.000Z" };
+      mockedSpurRequestJson.mockResolvedValue(body);
+
+      const response = await getCronJobs(
+        new NextRequest("http://localhost:3000/api/cron?project=%20api%20"),
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith("/projects/cron?project=api", {
+        timeoutMs: 10_000,
+      });
+      expect(await response.json()).toEqual(body);
+    });
+
+    it("GET /api/cron without project or with empty project sends no param", async () => {
+      mockedSpurRequestJson.mockResolvedValue({ projects: [], eventsSince: null });
+
+      await getCronJobs(new NextRequest("http://localhost:3000/api/cron?project="));
+      await getCronJobs(new NextRequest("http://localhost:3000/api/cron"));
+
+      expect(mockedSpurRequestJson.mock.calls).toEqual([
+        ["/projects/cron", { timeoutMs: 10_000 }],
+        ["/projects/cron", { timeoutMs: 10_000 }],
+      ]);
+    });
+
+    it("GET /api/cron surfaces the daemon error status", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("Unknown project: api", 404));
+
+      const response = await getCronJobs(
+        new NextRequest("http://localhost:3000/api/cron?project=api"),
       );
       const payload = (await response.json()) as { error: string };
 

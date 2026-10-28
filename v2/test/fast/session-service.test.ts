@@ -168,7 +168,11 @@ const getReleasesMock = vi.fn();
 const getVersionMock = vi.fn();
 const reserveNextSessionIdMock = vi.fn();
 const listSessionsMock = vi.fn();
-const archiveSessionsMock = vi.fn(() => ({ archivedIds: [], archiveDir: "/tmp/sessions-archive" }));
+const archiveSessionsMock = vi.fn(() => ({
+  archivedIds: [],
+  retainedAnchorIds: [],
+  archiveDir: "/tmp/sessions-archive",
+}));
 const readAvailableBacklogItemsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
@@ -447,6 +451,7 @@ const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDi
 const captureCodexRolloutBaselineMock = vi.fn();
 const findLatestCodexSessionFileMock = vi.fn();
 const readCodexRolloutStateMock = vi.fn();
+const readCodexConversationTailMock = vi.fn();
 const scanCodexRolloutForMessageMock = vi.fn();
 const ghMock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
@@ -477,12 +482,14 @@ const activeSessionServices: Array<{
   dispose(): void;
 }> = [];
 const timerPromisesSleepMock = vi.fn<(ms: number) => Promise<void>>();
+const timerPromisesImmediateMock = vi.fn<() => Promise<void>>();
 
 vi.mock("node:timers/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof timersPromisesModule>();
   return {
     ...actual,
     setTimeout: timerPromisesSleepMock,
+    setImmediate: timerPromisesImmediateMock,
   };
 });
 
@@ -771,6 +778,7 @@ vi.mock("../../src/agents/codex.js", () => ({
   codexHookHomePath: codexHookHomePathMock,
   captureCodexRolloutBaseline: captureCodexRolloutBaselineMock,
   findLatestCodexSessionFile: findLatestCodexSessionFileMock,
+  readCodexConversationTail: readCodexConversationTailMock,
   readCodexRolloutState: readCodexRolloutStateMock,
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
 }));
@@ -2145,6 +2153,7 @@ describe("SessionService", () => {
     const timersPromises =
       await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
     timerPromisesSleepMock.mockReset().mockImplementation((ms) => timersPromises.setTimeout(ms));
+    timerPromisesImmediateMock.mockReset().mockResolvedValue(undefined);
     rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
     resetAccountStoreMocks();
 
@@ -2494,6 +2503,7 @@ describe("SessionService", () => {
     tryRotateMock.mockReset();
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
     findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
+    readCodexConversationTailMock.mockReset().mockResolvedValue(null);
     readCodexRolloutStateMock.mockReset().mockResolvedValue({ rollout: null, rateLimit: null });
     // Default: a well-formed batched-lookup response that says "no PR for this
     // branch". An unparseable answer is no longer read as "no PR" — it is a
@@ -28991,6 +29001,7 @@ describe("SessionService", () => {
         prompt: "Ship the feature",
         originalTaskPrompt: "Ship it",
         agentLaunchId: "launch-generation-1",
+        restoredAt: "2026-03-18T10:00:00.000Z",
       }),
     );
     tmuxSessionExistsMock.mockResolvedValue(true);
@@ -29012,15 +29023,20 @@ describe("SessionService", () => {
       expect(listed[0]).not.toHaveProperty(field);
     }
     expect(listed[0]).not.toHaveProperty("agentLaunchId");
+    expect(listed[0]).not.toHaveProperty("restoredAt");
     expect(listSessionArtifactsMock).not.toHaveBeenCalled();
 
     const detail = await service.get("api-1");
     expect(detail).not.toHaveProperty("agentLaunchId");
+    expect(detail).not.toHaveProperty("restoredAt");
     expect(detail.artifacts).toEqual([]);
     expect(detail.launchCommand).toBe("claude --dangerously-skip-permissions");
     expect(detail.prompt).toBe("Ship the feature");
     expect(detail.originalTaskPrompt).toBe("Ship it");
     expect(listSessionArtifactsMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    const dashboard = await service.list({ view: "dashboard" });
+    expect(dashboard[0]).not.toHaveProperty("restoredAt");
+    expect(sessions.get("api-1")?.restoredAt).toBe("2026-03-18T10:00:00.000Z");
   });
 
   it("splits queued manual messages from future pipeline steps in session views (G4 view split)", async () => {
@@ -33234,6 +33250,111 @@ describe("SessionService", () => {
       );
       expect(sidecarTmuxAliveMock).toHaveBeenCalledWith("api-1", "daemon");
       expect(sidecarTmuxAliveMock).toHaveBeenCalledWith("api-2", "playwright");
+    });
+
+    describe("missing desk anchor record", () => {
+      const strandedBase = {
+        project: "api",
+        agent: "claude" as const,
+        prompt: "hello",
+        branch: "api-2",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-2",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running" as const,
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        id: "api-2",
+        tmuxSession: "api-2",
+        deskId: "api-1",
+        sidecarNames: ["daemon", "playwright"],
+      };
+
+      const ownerMissingEvents = () =>
+        logSpurEventMock.mock.calls
+          .map(([, entry]) => entry)
+          .filter((entry) => entry.event === "session.sidecar.owner_missing");
+
+      async function strandedService() {
+        loadConfigMock.mockReturnValue(daemonAndPlaywrightProjectConfig());
+        const sessions = createSessionStore();
+        sessions.set("api-2", { ...strandedBase });
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+        workspaceExistsMock.mockReturnValue(true);
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        return { service, sessions };
+      }
+
+      it("get resolves, omits the desk-shared view and keeps the mcp view", async () => {
+        const { service } = await strandedService();
+
+        const result = await service.get("api-2");
+
+        expect(result.sidecars?.map((view) => view.name)).toEqual(["playwright"]);
+        expect(result.sidecars?.[0]).toMatchObject({ tmuxSession: "api-2--playwright" });
+      });
+
+      it("warns once per (session, anchor) and re-arms after the anchor reappears", async () => {
+        const { service, sessions } = await strandedService();
+
+        await service.get("api-2");
+        await service.get("api-2");
+        await service.list();
+        expect(ownerMissingEvents()).toHaveLength(1);
+        expect(ownerMissingEvents()[0]).toMatchObject({
+          level: "warn",
+          sessionId: "api-2",
+          details: { ownerId: "api-1" },
+        });
+
+        sessions.set("api-1", {
+          ...strandedBase,
+          id: "api-1",
+          tmuxSession: "api-1",
+          branch: "api-1",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        });
+        await service.get("api-2");
+        expect(ownerMissingEvents()).toHaveLength(1);
+        sessions.delete("api-1");
+        await service.get("api-2");
+        expect(ownerMissingEvents()).toHaveLength(2);
+      });
+
+      it("prunes the dedupe key once the session leaves the store", async () => {
+        const { service, sessions } = await strandedService();
+        const stranded = sessions.get("api-2");
+        if (!stranded) {
+          throw new Error("fixture session api-2 missing");
+        }
+
+        await service.get("api-2");
+        expect(ownerMissingEvents()).toHaveLength(1);
+
+        sessions.delete("api-2");
+        await (
+          service as unknown as { runDashboardCacheTick: () => Promise<void> }
+        ).runDashboardCacheTick();
+        sessions.set("api-2", stranded);
+        await service.get("api-2");
+        expect(ownerMissingEvents()).toHaveLength(2);
+      });
+
+      it("full and dashboard list resolve and include the session", async () => {
+        const { service } = await strandedService();
+
+        expect((await service.list()).map((row) => row.id)).toContain("api-2");
+        expect((await service.list({ view: "dashboard" })).map((row) => row.id)).toContain("api-2");
+      });
+
+      it("explicit startSidecar of the desk-shared sidecar rejects with the anchor message", async () => {
+        const { service } = await strandedService();
+
+        await expect(service.startSidecar("api-2", "daemon")).rejects.toThrow(
+          /Desk anchor session api-1 not found/,
+        );
+      });
     });
 
     it("#822: enrich reports alive:false and deadPane:true when the tmux session exists but the pane is dead", async () => {
@@ -50501,29 +50622,317 @@ describe("SessionService", () => {
 
     it("derives messages and entries from the codex transcript reader", async () => {
       readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
-      readAgentConversationMock.mockResolvedValue([
-        { kind: "message", role: "user", text: "hi", timestampMs: 1 },
-        { kind: "tool", name: "exec_command", callId: "call_1" },
-        { kind: "message", role: "assistant", text: "hello back", timestampMs: 2 },
-      ]);
+      readCodexConversationTailMock.mockResolvedValue({
+        entries: [
+          { kind: "message", role: "user", text: "hi", timestampMs: 1 },
+          { kind: "tool", name: "exec_command", callId: "call_1" },
+          { kind: "message", role: "assistant", text: "hello back", timestampMs: 2 },
+        ],
+        totalEntries: 3,
+        startIndex: 0,
+        reader: { filePath: "/rollout.jsonl" },
+      });
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       const result = await service.getConversation("api-1");
 
-      expect(readAgentConversationMock).toHaveBeenCalledWith(
-        "codex",
-        expect.objectContaining({
-          worktreePath: "/tmp/spur-worktrees/api/api-1",
-          codexSessionsDir: expect.stringContaining("api-1"),
-        }),
+      expect(readCodexConversationTailMock).toHaveBeenCalledWith(
+        expect.stringContaining("api-1"),
+        undefined,
       );
+      expect(readAgentConversationMock).not.toHaveBeenCalled();
       expect(result.messages).toEqual([
         { role: "user", text: "hi", timestampMs: 1 },
         { role: "assistant", text: "hello back", timestampMs: 2 },
       ]);
       expect(result.entries.map((entry) => entry.kind)).toEqual(["message", "tool", "message"]);
+      expect(result.totalEntries).toBe(3);
+      expect(result.startIndex).toBe(0);
+    });
+
+    describe("codex window paging", () => {
+      // Window of 300 entries ending at total 450: absolute indexes 150..449.
+      const total = 450;
+      const windowSize = 300;
+
+      function messageEntries(
+        startIndex: number,
+        count: number,
+      ): { kind: "message"; role: "user"; text: string }[] {
+        return Array.from({ length: count }, (_, offset) => ({
+          kind: "message" as const,
+          role: "user" as const,
+          text: `m${startIndex + offset}`,
+        }));
+      }
+
+      function tailResult(): object {
+        return {
+          entries: messageEntries(total - windowSize, windowSize),
+          totalEntries: total,
+          startIndex: total - windowSize,
+          reader: { filePath: "/rollout.jsonl" },
+        };
+      }
+
+      async function codexService(): Promise<
+        InstanceType<Awaited<ReturnType<typeof loadSessionServiceModule>>["SessionService"]>
+      > {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+        readCodexConversationTailMock.mockResolvedValue(tailResult());
+        const { SessionService } = await loadSessionServiceModule();
+        return new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      }
+
+      it("returns the last page of the window without a full read", async () => {
+        const service = await codexService();
+
+        const result = await service.getConversation("api-1");
+
+        expect(result.startIndex).toBe(350);
+        expect(result.totalEntries).toBe(total);
+        expect(result.entries).toEqual(messageEntries(350, 100));
+        expect(readAgentConversationMock).not.toHaveBeenCalled();
+      });
+
+      it("slices from inside the window without a full read", async () => {
+        const service = await codexService();
+
+        const result = await service.getConversation("api-1", { from: 200 });
+
+        expect(result.startIndex).toBe(200);
+        expect(result.entries).toEqual(messageEntries(200, 250));
+        expect(readAgentConversationMock).not.toHaveBeenCalled();
+      });
+
+      it("reads the full transcript when from is below the window", async () => {
+        const service = await codexService();
+        readAgentConversationMock.mockResolvedValue(messageEntries(0, total));
+
+        const result = await service.getConversation("api-1", { from: 10 });
+
+        expect(readAgentConversationMock).toHaveBeenCalledWith(
+          "codex",
+          expect.objectContaining({ codexSessionsDir: expect.stringContaining("api-1") }),
+        );
+        expect(result.startIndex).toBe(10);
+        expect(result.totalEntries).toBe(total);
+        expect(result.entries).toEqual(messageEntries(10, total - 10));
+      });
+
+      it("keeps the end of the transcript for preserveEnd at from == totalEntries", async () => {
+        const service = await codexService();
+
+        const result = await service.getConversation("api-1", {
+          from: total,
+          preserveEnd: true,
+        });
+
+        expect(result.startIndex).toBe(total);
+        expect(result.entries).toEqual([]);
+        expect(readAgentConversationMock).not.toHaveBeenCalled();
+      });
+
+      it("returns an empty response with the status fallback state when no rollout exists", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "killed" }));
+        readCodexConversationTailMock.mockResolvedValue(null);
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const result = await service.getConversation("api-1", { from: 5 });
+
+        expect(result.state).toBe("killed");
+        expect(result.entries).toEqual([]);
+        expect(result.totalEntries).toBe(0);
+        expect(result.startIndex).toBe(0);
+        expect(readAgentConversationMock).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("codex conversation reader lifetime", () => {
+      const readerResult = (reader: object): object => ({
+        entries: [],
+        totalEntries: 0,
+        startIndex: 0,
+        reader,
+      });
+
+      it("reuses the cached codex reader across calls", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+        const first = { filePath: "/rollout-a.jsonl" };
+        readCodexConversationTailMock.mockResolvedValueOnce(readerResult(first));
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await service.getConversation("api-1");
+        await service.getConversation("api-1");
+
+        expect(readCodexConversationTailMock).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining("api-1"),
+          first,
+        );
+      });
+
+      it("serializes overlapping codex reads so the shared reader is not clobbered", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+        // Each read builds on the reader it was handed: two overlapping polls
+        // that both saw the same stale reader would double-count.
+        readCodexConversationTailMock.mockImplementation(
+          async (_dir: string, reader?: { totalEntries?: number }) => {
+            const totalEntries = (reader?.totalEntries ?? 0) + 5;
+            await Promise.resolve();
+            return {
+              entries: [],
+              totalEntries,
+              startIndex: totalEntries,
+              reader: { filePath: "/x.jsonl", totalEntries },
+            };
+          },
+        );
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const [a, b] = await Promise.all([
+          service.getConversation("api-1"),
+          service.getConversation("api-1"),
+        ]);
+
+        const totals = [a.totalEntries, b.totalEntries].sort((x, y) => (x ?? 0) - (y ?? 0));
+        expect(totals).toEqual([5, 10]);
+        expect(readCodexConversationTailMock).toHaveBeenLastCalledWith(
+          expect.stringContaining("api-1"),
+          expect.objectContaining({ totalEntries: 5 }),
+        );
+      });
+
+      it("evicts the codex reader when the session artifacts are removed", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+        readCodexConversationTailMock.mockResolvedValue(
+          readerResult({ filePath: "/rollout-a.jsonl" }),
+        );
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await service.getConversation("api-1");
+
+        // @ts-expect-error test-only access to a private method
+        service.removeSessionArtifacts({
+          id: "api-1",
+          project: "api",
+          startupAttachmentIds: [],
+        });
+        await service.getConversation("api-1");
+
+        expect(readCodexConversationTailMock).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining("api-1"),
+          undefined,
+        );
+      });
+
+      it("evicts the codex reader when session gc archives the record", async () => {
+        createSessionStore(
+          baseSession({
+            agent: "codex",
+            status: "completed",
+            worktree: false,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          }),
+        );
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          sessionGc: { ...baseConfig().sessionGc, enabled: true, olderThanDays: 0 },
+        });
+        archiveSessionsMock.mockReturnValueOnce({
+          archivedIds: ["api-1"] as never[],
+          retainedAnchorIds: [],
+          archiveDir: "/tmp/sessions-archive",
+        });
+        readCodexConversationTailMock.mockResolvedValue(
+          readerResult({ filePath: "/rollout-a.jsonl" }),
+        );
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService(
+          "/tmp/spur.yaml",
+          "2026-03-18T10:00:00.000Z",
+        ) as unknown as {
+          runSessionGcSweep(): Promise<void>;
+          lastSessionGcSweepAt: number;
+          getConversation(id: string): Promise<unknown>;
+          dispose(): void;
+        };
+        await service.getConversation("api-1");
+        service.lastSessionGcSweepAt = 0;
+
+        await service.runSessionGcSweep();
+        await service.getConversation("api-1");
+
+        expect(archiveSessionsMock).toHaveBeenCalledTimes(1);
+        expect(readCodexConversationTailMock).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining("api-1"),
+          undefined,
+        );
+        service.dispose();
+      });
+
+      it("does not restore the codex reader from a read that straddles eviction", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
+        let release: (value: object) => void = () => undefined;
+        readCodexConversationTailMock.mockReturnValueOnce(
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+        );
+        readCodexConversationTailMock.mockResolvedValue(
+          readerResult({ filePath: "/rollout-fresh.jsonl" }),
+        );
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const pending = service.getConversation("api-1");
+        await vi.waitFor(() => expect(readCodexConversationTailMock).toHaveBeenCalledTimes(1));
+
+        // @ts-expect-error test-only access to a private method
+        service.removeSessionArtifacts({
+          id: "api-1",
+          project: "api",
+          startupAttachmentIds: [],
+        });
+        release(readerResult({ filePath: "/rollout-stale.jsonl" }));
+        await pending;
+        // @ts-expect-error test-only access to a private field
+        expect(service.codexConversationReaders.has("api-1")).toBe(false);
+        // @ts-expect-error test-only access to a private field
+        expect(service.conversationReadChain.has("api-1")).toBe(false);
+        await service.getConversation("api-1");
+
+        expect(readCodexConversationTailMock).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining("api-1"),
+          undefined,
+        );
+      });
+
+      it("keeps the codex reader across pruneSessionScopedState for a terminal session", async () => {
+        readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "completed" }));
+        const first = { filePath: "/rollout-a.jsonl" };
+        readCodexConversationTailMock.mockResolvedValueOnce(readerResult(first));
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await service.getConversation("api-1");
+
+        // @ts-expect-error test-only access to a private method
+        service.pruneSessionScopedState(new Set());
+        await service.getConversation("api-1");
+
+        expect(readCodexConversationTailMock).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining("api-1"),
+          first,
+        );
+      });
     });
 
     it("derives messages and entries from the cursor transcript reader", async () => {
@@ -51388,28 +51797,41 @@ describe("SessionService", () => {
         }
       });
 
-      it.each(["list", "get"] as const)(
-        "returns retryable 503 after bounded rebuilds when %s sees churn on every build",
-        async (route) => {
-          const records = plainSeed();
-          const { service, internals } = await setup();
-          try {
-            settleOp(internals, "api-1");
-            let changes = 0;
-            const watch = watchBuilds(internals, (id) => {
-              if (id === "api-1") rewrite(records, id, { branch: `changed ${++changes}` });
-            });
-            listSessionsMock.mockClear();
-            const call =
-              route === "list" ? service.list({ includeCompleted: true }) : service.get("api-1");
-            await expect(call).rejects.toMatchObject(snapshotChanged);
-            expect(watch.builds("api-1")).toBe(4);
-            if (route === "list") expect(listSessionsMock).toHaveBeenCalledTimes(5);
-          } finally {
-            service.dispose();
-          }
-        },
-      );
+      it("list returns every row, the churning one as its last build, after bounded rebuilds", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          let changes = 0;
+          const watch = watchBuilds(internals, (id) => {
+            if (id === "api-1") rewrite(records, id, { branch: `changed ${++changes}` });
+          });
+          listSessionsMock.mockClear();
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-1", "api-2"]);
+          expect(rows.find((row) => row.id === "api-1")?.branch).toBe("changed 3");
+          expect(watch.builds("api-1")).toBe(4);
+          expect(listSessionsMock).toHaveBeenCalledTimes(5);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("get returns retryable 503 after bounded rebuilds under churn on every build", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          let changes = 0;
+          const watch = watchBuilds(internals, (id) => {
+            if (id === "api-1") rewrite(records, id, { branch: `changed ${++changes}` });
+          });
+          await expect(service.get("api-1")).rejects.toMatchObject(snapshotChanged);
+          expect(watch.builds("api-1")).toBe(4);
+        } finally {
+          service.dispose();
+        }
+      });
 
       it.each([
         { churnBuilds: 3, builds: 4 },
@@ -51437,6 +51859,135 @@ describe("SessionService", () => {
         },
       );
 
+      const enrichFailedEvents = () =>
+        logSpurEventMock.mock.calls
+          .map(([, entry]) => entry)
+          .filter((entry) => entry.event === "session.list.enrich_failed");
+
+      it("full list drops only the row whose enrich throws and logs enrich_failed", async () => {
+        plainSeed();
+        const { service, internals } = await setup();
+        try {
+          const original = internals.enrichWithClassified.bind(internals);
+          vi.spyOn(internals, "enrichWithClassified").mockImplementation(
+            async (record, ...rest) => {
+              if (record.id === "api-1") throw new Error("enrich boom");
+              return original(record, ...rest);
+            },
+          );
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-2"]);
+          expect(enrichFailedEvents()).toMatchObject([{ level: "warn", sessionId: "api-1" }]);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("dashboard list drops only the uncached row whose assemble throws", async () => {
+        plainSeed();
+        const { service, internals } = await setup();
+        try {
+          await internals.runDashboardCacheTick();
+          settleOp(internals, "api-1");
+          (service as unknown as { dashboardCache: Map<string, unknown> }).dashboardCache.delete(
+            "api-1",
+          );
+          const original = internals.assembleDashboard.bind(internals);
+          vi.spyOn(internals, "assembleDashboard").mockImplementation(async (record) => {
+            if (record.id === "api-1") throw new Error("assemble boom");
+            return original(record);
+          });
+          const rows = await service.list({ view: "dashboard", includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-2"]);
+          expect(enrichFailedEvents()).toMatchObject([{ level: "warn", sessionId: "api-1" }]);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("dashboard list still refuses with 503 when assemble yields nothing for an existing row", async () => {
+        plainSeed();
+        const { service, internals } = await setup();
+        try {
+          await internals.runDashboardCacheTick();
+          settleOp(internals, "api-1");
+          (service as unknown as { dashboardCache: Map<string, unknown> }).dashboardCache.delete(
+            "api-1",
+          );
+          vi.spyOn(internals, "assembleDashboard").mockResolvedValue(undefined as never);
+          await expect(
+            service.list({ view: "dashboard", includeCompleted: true }),
+          ).rejects.toMatchObject(snapshotChanged);
+          expect(enrichFailedEvents()).toHaveLength(0);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("list drops a stale row whose rebuild throws; get still rejects with the rebuild error", async () => {
+        plainSeed();
+        const { service, internals } = await setup();
+        try {
+          const original = internals.enrichWithClassified.bind(internals);
+          let apiOneBuilds = 0;
+          vi.spyOn(internals, "enrichWithClassified").mockImplementation(
+            async (record, ...rest) => {
+              if (record.id !== "api-1") return original(record, ...rest);
+              apiOneBuilds += 1;
+              if (apiOneBuilds > 1) throw new Error("rebuild boom");
+              const row = await original(record, ...rest);
+              settleOp(internals, "api-1");
+              return row;
+            },
+          );
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-2"]);
+          expect(enrichFailedEvents()).toMatchObject([{ level: "warn", sessionId: "api-1" }]);
+
+          apiOneBuilds = 0;
+          await expect(service.get("api-1")).rejects.toThrow("rebuild boom");
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("list drops a pending pickup row whose rebuild throws", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          const original = internals.enrichWithClassified.bind(internals);
+          vi.spyOn(internals, "enrichWithClassified").mockImplementation(
+            async (record, ...rest) => {
+              if (record.id === "api-3") throw new Error("pickup boom");
+              const row = await original(record, ...rest);
+              if (record.id === "api-1") {
+                const base = records.get("api-1");
+                if (!base) throw new Error("Missing fixture");
+                if (!records.has("api-3")) {
+                  rewrite(records, "api-1", { branch: "rewritten" });
+                  records.set("api-3", {
+                    ...base,
+                    id: "api-3",
+                    workspaceId: "api-3",
+                    branch: "api-3",
+                    tmuxSession: "api-3",
+                    status: "completed",
+                  });
+                  internals.lifecycle.begin("reopen", ["api-3"], "pending-reopen");
+                }
+              }
+              return row;
+            },
+          );
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-1", "api-2"]);
+          expect(enrichFailedEvents().map((entry) => entry.sessionId)).toContain("api-3");
+        } finally {
+          service.dispose();
+        }
+      });
+
       it("does not rebuild revision-0 rows that churn", async () => {
         const records = plainSeed();
         const { service, internals } = await setup();
@@ -51454,17 +52005,22 @@ describe("SessionService", () => {
         }
       });
 
-      it("returns 503 after bounded rebuilds when the lifecycle revision moves every pass", async () => {
+      it("list carries the build-time receipt when the lifecycle revision moves every pass", async () => {
         plainSeed();
         const { service, internals } = await setup();
         try {
           settleOp(internals, "api-1");
+          const buildRevisions: number[] = [];
           const watch = watchBuilds(internals, (id) => {
-            if (id === "api-1") settleOp(internals, id);
+            if (id !== "api-1") return;
+            buildRevisions.push(internals.lifecycle.snapshot(id).revision);
+            settleOp(internals, id);
           });
-          await expect(service.list({ includeCompleted: true })).rejects.toMatchObject(
-            snapshotChanged,
-          );
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-1", "api-2"]);
+          const lifecycle = rows.find((row) => row.id === "api-1")?.lifecycle;
+          expect(lifecycle?.revision).toBeLessThan(internals.lifecycle.snapshot("api-1").revision);
+          expect(buildRevisions).toContain(lifecycle?.revision);
           expect(watch.builds("api-1")).toBe(4);
         } finally {
           service.dispose();
@@ -51555,7 +52111,7 @@ describe("SessionService", () => {
         }
       });
 
-      it("refuses naming the picked-up session when a pickup and a stale row remain at the last pass", async () => {
+      it("omits a pending session first seen at the last pass and returns the moving row", async () => {
         const records = plainSeed();
         const { service, internals } = await setup();
         try {
@@ -51576,13 +52132,8 @@ describe("SessionService", () => {
             });
             internals.lifecycle.begin("reopen", ["api-3"], "pending-reopen");
           });
-          await expect(service.list({ includeCompleted: true })).rejects.toMatchObject({
-            ...snapshotChanged,
-            payload: {
-              code: "session_lifecycle_snapshot_changed",
-              lifecycle: { operation: { operationId: "pending-reopen", phase: "pending" } },
-            },
-          });
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-1", "api-2"]);
         } finally {
           service.dispose();
         }
@@ -51849,8 +52400,31 @@ describe("SessionService", () => {
         }
       });
 
+      it("dashboard list returns every row when one churns on every build", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          settleOp(internals, "api-2");
+          await internals.runDashboardCacheTick();
+          let changes = 0;
+          const watch = watchDashboardBuilds(internals, (id) => {
+            if (id === "api-1") rewrite(records, id, { branch: `changed ${++changes}` });
+          });
+          rewrite(records, "api-1", { branch: "changed 0" });
+          listSessionsMock.mockClear();
+          const rows = await service.list({ view: "dashboard", includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-1", "api-2"]);
+          expect(rows.find((row) => row.id === "api-1")?.branch).toBe("changed 2");
+          expect(watch.builds("api-1")).toBe(3);
+          expect(listSessionsMock).toHaveBeenCalledTimes(6);
+        } finally {
+          service.dispose();
+        }
+      });
+
       describe("deadline and abort", () => {
-        it("refuses after the budget once a rebuild pass ran, never before the first", async () => {
+        it("stops rebuilding after the budget once a rebuild pass ran, never before the first", async () => {
           vi.useFakeTimers({ toFake: ["Date"] });
           try {
             for (const churnAlways of [true, false]) {
@@ -51865,8 +52439,7 @@ describe("SessionService", () => {
                   if (build === 2) vi.setSystemTime(Date.now() + 60_000);
                 });
                 const listed = service.list({ includeCompleted: true });
-                if (churnAlways) await expect(listed).rejects.toMatchObject(snapshotChanged);
-                else await expect(listed).resolves.toHaveLength(2);
+                await expect(listed).resolves.toHaveLength(2);
                 expect(watch.builds("api-1")).toBe(2);
               } finally {
                 service.dispose();
@@ -52124,6 +52697,12 @@ describe("SessionService", () => {
   });
 
   describe("dashboard cache", () => {
+    function dashboardEvents(event: string) {
+      return logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === event);
+    }
+
     function seedDashboardSessions(count: number, idleCount = 0): Map<string, SessionRecord> {
       const sessions = createSessionStore();
       for (let index = 1; index <= count; index += 1) {
@@ -52355,6 +52934,10 @@ describe("SessionService", () => {
 
       await vi.advanceTimersByTimeAsync(2_000);
       expect(enrichSpy).toHaveBeenCalledTimes(1);
+      expect(dashboardEvents("session.dashboard_cache.refresh_failed")).toMatchObject([
+        { sessionId: "api-1" },
+      ]);
+      expect(dashboardEvents("session.dashboard_cache.failed")).toHaveLength(0);
 
       const afterFailure = await service.list({ view: "dashboard" });
       expect(afterFailure.map((view) => view.id)).toEqual(["api-1"]);
@@ -52369,7 +52952,73 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("retries the same idle slice after enrichment fails", async () => {
+    it("one failing record does not block the others and keeps its prior view", async () => {
+      seedDashboardSessions(2);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as SessionServiceInternals & {
+        runDashboardCacheTick(): Promise<void>;
+      };
+      await service.list({ view: "dashboard" });
+      const enrichSpy = vi.spyOn(internals, "enrichDashboard");
+      enrichSpy.mockImplementation(async (session: SessionRecord) => ({
+        id: session.id,
+        model: "old",
+      }));
+      await internals.runDashboardCacheTick();
+
+      enrichSpy.mockImplementation(async (session: SessionRecord) => {
+        if (session.id === "api-1") throw new Error("boom");
+        return { id: session.id, model: "fresh" };
+      });
+      await internals.runDashboardCacheTick();
+
+      const listed = await service.list({ view: "dashboard" });
+      expect(Object.fromEntries(listed.map((view) => [view.id, view.model]))).toEqual({
+        "api-1": "old",
+        "api-2": "fresh",
+      });
+      expect(dashboardEvents("session.dashboard_cache.refresh_failed")).toMatchObject([
+        { sessionId: "api-1" },
+      ]);
+      expect(dashboardEvents("session.dashboard_cache.failed")).toHaveLength(0);
+      service.dispose();
+    });
+
+    it("survives a synchronous enrich throw on one record and refreshes the others", async () => {
+      seedDashboardSessions(2);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as SessionServiceInternals & {
+        runDashboardCacheTick(): Promise<void>;
+      };
+      await service.list({ view: "dashboard" });
+      const enrichSpy = vi.spyOn(internals, "enrichDashboard");
+      enrichSpy.mockImplementation(async (session: SessionRecord) => ({
+        id: session.id,
+        model: "old",
+      }));
+      await internals.runDashboardCacheTick();
+
+      enrichSpy.mockImplementation(((session: SessionRecord) => {
+        if (session.id === "api-1") throw new Error("sync boom");
+        return Promise.resolve({ id: session.id, model: "fresh" });
+      }) as never);
+      await internals.runDashboardCacheTick();
+
+      const listed = await service.list({ view: "dashboard" });
+      expect(Object.fromEntries(listed.map((view) => [view.id, view.model]))).toEqual({
+        "api-1": "old",
+        "api-2": "fresh",
+      });
+      expect(dashboardEvents("session.dashboard_cache.refresh_failed")).toMatchObject([
+        { sessionId: "api-1" },
+      ]);
+      expect(dashboardEvents("session.dashboard_cache.failed")).toHaveLength(0);
+      service.dispose();
+    });
+
+    it("does not pin the idle cursor to a failing record", async () => {
       seedDashboardSessions(0, 10);
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -52377,11 +53026,10 @@ describe("SessionService", () => {
       await service.list({ view: "dashboard", includeCompleted: true });
 
       const selected: string[] = [];
-      let failSelectedSlice = true;
       vi.spyOn(sessionServiceInternals(service), "enrichDashboard").mockImplementation(
         async (session: SessionRecord) => {
           selected.push(session.id);
-          if (failSelectedSlice && session.id === "done-2") {
+          if (session.id === "done-2") {
             throw new Error("idle enrichment failed");
           }
           return { id: session.id };
@@ -52392,13 +53040,11 @@ describe("SessionService", () => {
       expect(selected).toEqual(["done-1", "done-2", "done-3", "done-4"]);
 
       selected.length = 0;
-      failSelectedSlice = false;
-      await vi.advanceTimersByTimeAsync(2_000);
-      expect(selected).toEqual(["done-1", "done-2", "done-3", "done-4"]);
-
-      selected.length = 0;
       await vi.advanceTimersByTimeAsync(2_000);
       expect(selected).toEqual(["done-5", "done-6", "done-7", "done-8"]);
+      expect(
+        (await service.list({ view: "dashboard", includeCompleted: true })).map((v) => v.id),
+      ).toContain("done-2");
       service.dispose();
     });
 
@@ -53258,6 +53904,200 @@ describe("SessionService", () => {
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--proxy");
       service.dispose();
+    });
+
+    describe("per-record cost and ordering", () => {
+      const daemonSidecar = {
+        command: "pnpm daemon",
+        autoStart: false,
+        ports: { http: { env: "SPUR_RESERVED_PORT_DAEMON", start: 4100, end: 4100 } },
+      };
+
+      function mockSidecarConfig(sidecars: Record<string, unknown>) {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: { api: { ...baseConfig().projects.api, sidecars } },
+        });
+      }
+
+      function addReaperSession(
+        sessions: Map<string, SessionRecord>,
+        id: string,
+        overrides: Partial<SessionRecord> = {},
+      ) {
+        sessions.set(id, {
+          ...(sessions.get("api-1") as SessionRecord),
+          id,
+          tmuxSession: id,
+          branch: id,
+          worktreePath: `/tmp/spur-worktrees/api/${id}`,
+          status: "completed",
+          ...overrides,
+        });
+      }
+
+      async function createReaper() {
+        const service = (await createDisposedSessionService()) as unknown as {
+          reapOrphanedTmux(): Promise<void>;
+          dispose(): void;
+        };
+        return service;
+      }
+
+      function reaperFailedMessages(): string[] {
+        return logSpurEventMock.mock.calls
+          .map(([, entry]) => entry)
+          .filter((entry) => entry.event === "session.reaper.failed")
+          .map((entry) => entry.message as string);
+      }
+
+      it("T1: lists sessions once for a pass where no sidecar is a teardown candidate", async () => {
+        const sessions = seedReaperSession({ status: "completed", sidecarNames: ["proxy"] });
+        for (let index = 2; index <= 20; index += 1) {
+          addReaperSession(sessions, `api-${index}`, { sidecarNames: ["proxy"] });
+        }
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        sidecarTmuxAliveMock.mockResolvedValue(false);
+        const service = await createReaper();
+        listSessionsMock.mockClear();
+        hasEstablishedConnectionsMock.mockClear();
+        killTmuxSessionMock.mockClear();
+        writeSessionMock.mockClear();
+
+        await service.reapOrphanedTmux();
+
+        expect(listSessionsMock).toHaveBeenCalledTimes(1);
+        expect(hasEstablishedConnectionsMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(writeSessionMock).not.toHaveBeenCalled();
+        service.dispose();
+      });
+
+      it("T1b: skips an absent configured sidecar before the desk-sibling scan", async () => {
+        mockSidecarConfig({ daemon: daemonSidecar });
+        const sessions = seedReaperSession({
+          status: "completed",
+          sidecarNames: ["daemon"],
+          sidecarPorts: { daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 } },
+        });
+        addReaperSession(sessions, "api-2", { deskId: "api-1", status: "running" });
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        sidecarTmuxAliveMock.mockResolvedValue(false);
+        const service = await createReaper();
+        listSessionsMock.mockClear();
+        hasEstablishedConnectionsMock.mockClear();
+
+        await service.reapOrphanedTmux();
+
+        expect(listSessionsMock).toHaveBeenCalledTimes(1);
+        expect(hasEstablishedConnectionsMock).not.toHaveBeenCalledWith(4100);
+        service.dispose();
+      });
+
+      it("T2: yields one event-loop turn before each record's first tmux read", async () => {
+        const sessions = seedReaperSession({ status: "completed" });
+        for (let index = 2; index <= 5; index += 1) addReaperSession(sessions, `api-${index}`);
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        const service = await createReaper();
+        const marks: number[] = [];
+        getTmuxSessionPresenceMock.mockClear();
+        timerPromisesImmediateMock.mockImplementation(async () => {
+          marks.push(getTmuxSessionPresenceMock.mock.calls.length);
+        });
+
+        await service.reapOrphanedTmux();
+
+        expect(marks).toEqual([0, 1, 2, 3, 4]);
+        service.dispose();
+      });
+
+      describe("probe failure on a sidecar", () => {
+        const probeDiagnostic = "tmux list-windows failed: boom";
+
+        function seedProbeFailureDesk(options: { siblingRunning: boolean }): void {
+          mockSidecarConfig({ daemon: daemonSidecar });
+          const sessions = seedReaperSession({ status: "completed", sidecarNames: ["daemon"] });
+          if (options.siblingRunning) {
+            addReaperSession(sessions, "api-2", { deskId: "api-1", status: "running" });
+          }
+          addReaperSession(sessions, "api-3", { sidecarNames: ["proxy"] });
+          tmuxSessionExistsMock.mockResolvedValue(false);
+          getSidecarTmuxPresenceMock.mockImplementation(async (id, name) => {
+            if (id === "api-1" && name === "daemon") {
+              return { present: false, unresponsive: false, diagnostic: probeDiagnostic };
+            }
+            return { present: id === "api-3" && name === "proxy", unresponsive: false };
+          });
+        }
+
+        it("T3: a sibling-vetoed sidecar's probe failure does not abort the pass", async () => {
+          seedProbeFailureDesk({ siblingRunning: true });
+          const service = await createReaper();
+
+          await service.reapOrphanedTmux();
+
+          expect(killTmuxSessionMock).toHaveBeenCalledWith("api-3--proxy");
+          expect(reaperFailedMessages()).toEqual([]);
+          service.dispose();
+        });
+
+        it("T4: an unvetoed sidecar's probe failure aborts the pass with the diagnostic", async () => {
+          seedProbeFailureDesk({ siblingRunning: false });
+          const service = await createReaper();
+
+          await service.reapOrphanedTmux();
+
+          expect(reaperFailedMessages()).toEqual([expect.stringContaining("boom")]);
+          expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-3--proxy");
+          service.dispose();
+        });
+      });
+
+      it("T5: an MCP sidecar bypasses the sibling veto, a configured non-MCP sidecar does not", async () => {
+        mockSidecarConfig({
+          daemon: daemonSidecar,
+          mcpsvc: {
+            command: "node mcp.js --port $MCP_PORT",
+            autoStart: false,
+            ports: { http: { env: "MCP_PORT", start: 4200, end: 4200 } },
+            mcp: { server: "mcpsvc", portId: "http", path: "/mcp" },
+          },
+        });
+        const sessions = seedReaperSession({
+          status: "completed",
+          sidecarNames: ["daemon", "mcpsvc"],
+          sidecarPorts: { daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 }, mcpsvc: { MCP_PORT: 4200 } },
+        });
+        addReaperSession(sessions, "api-2", { deskId: "api-1", status: "running" });
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+        const service = await createReaper();
+        hasEstablishedConnectionsMock.mockClear();
+
+        await service.reapOrphanedTmux();
+
+        expect(hasEstablishedConnectionsMock).toHaveBeenCalledWith(4200);
+        expect(hasEstablishedConnectionsMock).not.toHaveBeenCalledWith(4100);
+        expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--daemon");
+        service.dispose();
+      });
+
+      it("T6: a desk member with a retained error blocks a live sidecar teardown", async () => {
+        const sessions = seedReaperSession({ status: "completed", sidecarNames: ["proxy"] });
+        addReaperSession(sessions, "api-2", {
+          deskId: "api-1",
+          status: "stopped",
+          error: "provider failed",
+        });
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+        const service = await createReaper();
+
+        await service.reapOrphanedTmux();
+
+        expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--proxy");
+        service.dispose();
+      });
     });
   });
 
@@ -60873,12 +61713,45 @@ describe("SessionService", () => {
     });
 
     describe("resolveParkActivityAt", () => {
+      it.each([
+        ["2026-03-18T09:10:00.000Z", undefined, "2026-03-18T09:05:00.000Z", "09:10"],
+        [
+          "2026-03-18T09:00:00.000Z",
+          "2026-03-18T09:10:00.000Z",
+          "2026-03-18T09:05:00.000Z",
+          "09:10",
+        ],
+        [
+          "2026-03-18T09:00:00.000Z",
+          "2026-03-18T09:05:00.000Z",
+          "2026-03-18T09:10:00.000Z",
+          "09:10",
+        ],
+      ])(
+        "uses the latest activity, reset, or restore baseline",
+        async (activity, reset, restoredAt, expected) => {
+          const { resolveParkActivityAt } = await loadSessionServiceModule();
+          expect(
+            resolveParkActivityAt(
+              {
+                agentActivityAt: new Date(activity),
+                ...(reset ? { rateLimitExpiredAtMs: Date.parse(reset) } : {}),
+              },
+              restoredAt,
+            ),
+          ).toEqual(new Date(`2026-03-18T${expected}:00.000Z`));
+        },
+      );
+
       it("returns null when agentActivityAt is null (fail-safe: never park)", async () => {
         const { resolveParkActivityAt } = await loadSessionServiceModule();
         expect(
           resolveParkActivityAt({ agentActivityAt: null, rateLimitExpiredAtMs: 1_000 }),
         ).toBeNull();
         expect(resolveParkActivityAt({ agentActivityAt: null })).toBeNull();
+        expect(
+          resolveParkActivityAt({ agentActivityAt: null }, "2026-03-18T09:10:00.000Z"),
+        ).toBeNull();
       });
 
       it("returns rateLimitExpiredAtMs when it is later than agentActivityAt", async () => {
@@ -64126,6 +64999,109 @@ describe("SessionService", () => {
     });
 
     describe("wake: restore() on a parked (stale_timeout) session", () => {
+      it.each(["failed", "successful"] as const)(
+        "preserves persisted sidecar updates after %s auto-start when recording restore time",
+        async (outcome) => {
+          loadConfigMock.mockReturnValue({
+            ...baseConfig(),
+            projects: {
+              api: {
+                ...baseConfig().projects.api,
+                sidecars: {
+                  proxy: { command: "pnpm proxy", autoStart: true },
+                  dependency: { command: "pnpm dependency" },
+                },
+              },
+            },
+          });
+          mockAgentWaitingState("claude");
+          findAgentSessionIdMock.mockResolvedValue("session-uuid");
+          const sessions = createSessionStore();
+          sessions.set(
+            "api-1",
+            staleParkableSession({
+              status: "stopped",
+              stopReason: "stale_timeout",
+              agentSessionId: "session-uuid",
+              sidecarPorts: { proxy: { http: 3000 } },
+              sidecarProcs: { proxy: { pid: 100, pgid: 100, starttime: 1 } },
+            }),
+          );
+          mockExitedThenRestoredProcess();
+          const service = await createDisposedSessionService();
+          const internals = service as unknown as {
+            startSidecarWithDependencies(args: { session: SessionRecord }): Promise<SessionRecord>;
+          };
+          const sidecarPorts = { dependency: { http: 3001 } };
+          const sidecarProcs = { dependency: { pid: 200, pgid: 200, starttime: 2 } };
+          vi.spyOn(internals, "startSidecarWithDependencies").mockImplementation(
+            async ({ session }) => {
+              // A dependency persists before its parent startup/cleanup finishes.
+              const fresh = { ...session, sidecarPorts, sidecarProcs };
+              sessions.set(session.id, fresh);
+              if (outcome === "failed") throw new Error("proxy startup failed after cleanup");
+              return fresh;
+            },
+          );
+
+          const restored = await service.restore("api-1");
+          const persisted = sessions.get("api-1");
+          expect(persisted?.sidecarPorts).toEqual(sidecarPorts);
+          expect(persisted?.sidecarProcs).toEqual(sidecarProcs);
+          expect(persisted?.restoredAt).toBe(new Date(Date.now()).toISOString());
+          expect(restored.status).toBe("running");
+          expect(persisted).not.toHaveProperty("stopReason");
+          expect(persisted).not.toHaveProperty("error");
+          service.dispose();
+        },
+      );
+
+      it("starts a full idle window on restore, preserved across daemon restart (issue 961)", async () => {
+        loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
+        mockAgentWaitingState("claude");
+        findAgentSessionIdMock.mockResolvedValue("session-uuid");
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          staleParkableSession({
+            status: "stopped",
+            stopReason: "stale_timeout",
+            agentSessionId: "session-uuid",
+          }),
+        );
+        mockExitedThenRestoredProcess();
+        const service = await createDisposedSessionService();
+        const restored = await service.restore("api-1");
+        expect(restored.status).toBe("running");
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(40_000);
+        killTmuxSessionMock.mockClear();
+        staleInternals(service).stateCache.clear();
+        await staleInternals(service).pollAttentionStates(false);
+        await staleInternals(service).parkStaleSession(restored);
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+
+        service.dispose();
+        const restarted = await createDisposedSessionService();
+        await staleInternals(restarted).pollAttentionStates(false);
+        await staleInternals(restarted).parkStaleSession(restored);
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+
+        // Grace expires: retaining a restore timestamp must not disable parking.
+        await vi.advanceTimersByTimeAsync(60 * 60_000);
+        staleInternals(restarted).stateCache.clear();
+        killTmuxSessionMock.mockImplementation(async () => {
+          isProcessRunningInTmuxMock.mockResolvedValue(false);
+        });
+        await staleInternals(restarted).pollAttentionStates(false);
+        expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+        expect(sessions.get("api-1")).toMatchObject({
+          status: "stopped",
+          stopReason: "stale_timeout",
+        });
+        restarted.dispose();
+      });
+
       it("sends no restore message, replays staleSidecars, and clears stopReason/staleSidecars", async () => {
         loadConfigMock.mockReturnValue({
           ...baseConfig(),

@@ -19,6 +19,7 @@
 ## Project routes
 
 - `GET /projects`
+- `GET /projects/cron?project=<id>` — cron sources, bound triggers, owner-file drift, last tick/action from the live event log; `project` optional; `404` unknown project; `v2/src/cron-jobs.ts`.
 - `POST /projects`
 - `PATCH /projects/:id`
 - `DELETE /projects/:id`
@@ -33,7 +34,7 @@
 
 ## Session routes
 
-- `GET /sessions` — array body, `sidecars[].url` ready endpoint; `v2/src/types.ts`; producing `x-spur-lifecycle-instance-id` header, per-row `lifecycle`; `v2/src/session-lifecycle.ts`.
+- `GET /sessions` — array body, `sidecars[].url` ready endpoint; `v2/src/types.ts`; producing `x-spur-lifecycle-instance-id` header, per-row `lifecycle`; `v2/src/session-lifecycle.ts`; never `503` on lifecycle churn, a still-moving row carries its last build and that build's receipt.
 - `POST /sessions` — optional `reasoningEffort` overrides project default; provider/model validation in `v2/src/session-service.ts`.
 - `POST /sessions/background` — `409 spawn_in_progress|spawn_committed|spawn_failed` body `{ code, sessionId, error }` when `preflightBatchId` is already claimed; `sessionId` is the claiming session; `v2/src/session-service.ts`.
 - `POST /shepherd/spawn`

@@ -27,7 +27,7 @@ import {
 } from "./session-lifecycle.js";
 import { userInfo } from "node:os";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
+import { setImmediate as yieldToEventLoop, setTimeout as sleep } from "node:timers/promises";
 import {
   agentBusyQueuedSendAwaitsPrompt,
   agentHasLaunchSubmitAck,
@@ -122,7 +122,9 @@ import { extractGithubErrorText, isGitHubRateLimitError, runGhPollCycle } from "
 import {
   codexHookHomePath,
   findLatestCodexSessionFile,
+  readCodexConversationTail,
   readCodexRolloutState,
+  type CodexConversationReaderState,
   type CodexRolloutReaderState,
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
@@ -1660,6 +1662,38 @@ function clampPageStart(
   return Math.max(totalEntries - CONVERSATION_PAGE_ENTRIES, 0);
 }
 
+async function pageConversationTail(
+  tail: { entries: TranscriptEntry[]; totalEntries: number; startIndex: number },
+  options: { from?: number; preserveEnd?: boolean } | undefined,
+  state: SessionState,
+  durationMs: number,
+  readFullEntries: () => Promise<TranscriptEntry[]>,
+): Promise<ConversationResponse> {
+  const { entries: tailEntries, totalEntries, startIndex: tailStartIndex } = tail;
+  const from = options?.from;
+
+  if (from === undefined || from >= tailStartIndex) {
+    // Within the retained window: slice the cached tail, no full read.
+    const sliceStart =
+      from === undefined
+        ? Math.max(tailStartIndex, totalEntries - CONVERSATION_PAGE_ENTRIES, 0)
+        : clampPageStart(from, tailStartIndex, totalEntries, options?.preserveEnd);
+    const entries = tailEntries.slice(sliceStart - tailStartIndex);
+    return buildConversationResponse(entries, totalEntries, sliceStart, state, durationMs);
+  }
+
+  // Deep scroll-back below the retained window: fall back to a full read.
+  const fullEntries = await readFullEntries();
+  const startIndex = clampPageStart(from, 0, fullEntries.length, options?.preserveEnd);
+  return buildConversationResponse(
+    fullEntries.slice(startIndex),
+    fullEntries.length,
+    startIndex,
+    state,
+    durationMs,
+  );
+}
+
 type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
 
 function nowIso(): string {
@@ -2841,19 +2875,23 @@ function buildLastActivityAt(
 // past expiry. rateLimitExpiredAtMs is only ever later than or equal to
 // agentActivityAt (the reset instant is always after the record that carried
 // it), but the max is taken explicitly rather than assumed.
+// Successful restore is also operator activity: its persisted timestamp grants
+// a full idle window even when resuming produces no new transcript activity.
 export function resolveParkActivityAt(
   classified: Pick<SessionStateResult, "agentActivityAt" | "rateLimitExpiredAtMs">,
+  restoredAt?: string,
 ): Date | null {
   if (classified.agentActivityAt === null) {
     return null;
   }
-  if (classified.rateLimitExpiredAtMs === undefined) {
-    return classified.agentActivityAt;
+  let activityAt = classified.agentActivityAt;
+  for (const baseline of [classified.rateLimitExpiredAtMs, restoredAt]) {
+    if (baseline !== undefined) {
+      const baselineAt = new Date(baseline);
+      if (baselineAt > activityAt) activityAt = baselineAt;
+    }
   }
-  const rateLimitExpiredAt = new Date(classified.rateLimitExpiredAtMs);
-  return rateLimitExpiredAt > classified.agentActivityAt
-    ? rateLimitExpiredAt
-    : classified.agentActivityAt;
+  return activityAt;
 }
 
 // A terminating record's sidecarPorts can hold BOTH desk-shared (anchor-
@@ -3622,6 +3660,9 @@ export class SessionService {
   // (never-reaped) sidecar would otherwise warn every SIDECAR_REAPER_INTERVAL_MS
   // tick forever. Keyed on `${ownerId}::${sidecarName}`.
   private readonly sidecarAgeWarnLastLoggedAt = new Map<string, number>();
+  // `${session.id}\0${ownerId}` keys already warned by
+  // session.sidecar.owner_missing: one warn per (session, anchor) per process.
+  private readonly sidecarOwnerMissingWarned = new Set<string>();
   // Session ids this process is actively spawning. A spawning session tracked
   // here still has its spawn pipeline running (worktree/tools/tmux setup), so
   // its dead runtime is expected and must not be reconciled to stopped.
@@ -3679,10 +3720,15 @@ export class SessionService {
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly conversationReaders = new Map<string, ClaudeConversationReaderState>();
+  // Kept for the life of the session, not pruned with live ids: a viewed
+  // terminal session would otherwise re-read its rollout every sweep.
+  private readonly codexConversationReaders = new Map<string, CodexConversationReaderState>();
   // Serializes conversation tail reads per session. getConversation is polled
   // every 4s and a slow read can overlap the next poll; chaining keeps the one
-  // shared reader's offset monotonic instead of racing read-modify-write.
-  private readonly conversationReadChain = new Map<string, Promise<void>>();
+  // shared reader's offset monotonic instead of racing read-modify-write. The
+  // slot object outlives every read queued on it and is dropped on eviction,
+  // so a read still in flight can tell it must not store its reader.
+  private readonly conversationReadChain = new Map<string, { tail: Promise<void> }>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly codexRolloutReaders = new Map<string, CodexRolloutReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
@@ -6337,18 +6383,34 @@ export class SessionService {
     );
   }
 
+  private logListEnrichFailed(sessionId: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.logEvent("session.list.enrich_failed", {
+      level: "warn",
+      sessionId,
+      message: `Session list dropped ${sessionId}: ${message}`,
+    });
+  }
+
   private async finalizeLifecycleRows<T extends { id: string; slots?: SessionSlots }>(
     rows: {
       view: T;
       source: SessionRecord | null;
-      revision: number;
+      receipt: SessionLifecycleSnapshot;
       identity?: boolean;
     }[],
     rebuild: (
       record: SessionRecord,
       listing: SessionRecord[] | undefined,
     ) => Promise<{ view: T; source: SessionRecord | null } | undefined>,
-    options: { includePending: boolean; signal?: AbortSignal | undefined },
+    // "refuse" throws 503 once the rebuild budget is spent; "lastBuild" returns
+    // each still-moving row as last built with the receipt captured at that
+    // build, and omits a pending session first seen on the final pass.
+    options: {
+      includePending: boolean;
+      onExhausted: "refuse" | "lastBuild";
+      signal?: AbortSignal | undefined;
+    },
   ): Promise<(T & { lifecycle: SessionLifecycleSnapshot })[]> {
     const rebuildExisting = async (record: SessionRecord, listing: SessionRecord[] | undefined) => {
       try {
@@ -6362,6 +6424,12 @@ export class SessionService {
           !readSession(this.config.dataDir, record.id)
         )
           return undefined;
+        // List callers (lastBuild) drop the one row that cannot be rebuilt
+        // instead of failing the whole listing; refuse callers keep the throw.
+        if (options.onExhausted === "lastBuild" && !(error instanceof SessionLifecycleError)) {
+          this.logListEnrichFailed(record.id, error);
+          return undefined;
+        }
         throw error;
       }
     };
@@ -6371,9 +6439,9 @@ export class SessionService {
       record: SessionRecord,
       receipt: SessionLifecycleSnapshot,
     ) => {
-      if (receipt.revision === 0 && row.revision === 0) return false;
+      if (receipt.revision === 0 && row.receipt.revision === 0) return false;
       return (
-        receipt.revision !== row.revision ||
+        receipt.revision !== row.receipt.revision ||
         (record !== row.source &&
           (row.identity === true || !isDeepStrictEqual(record, row.source))) ||
         !isDeepStrictEqual(
@@ -6433,6 +6501,9 @@ export class SessionService {
         pass === LIFECYCLE_REBUILD_PASSES ||
         (pass > 0 && Date.now() - startedAt >= LIFECYCLE_ASSEMBLY_BUDGET_MS)
       ) {
+        if (options.onExhausted === "lastBuild") {
+          return live.map((row) => ({ ...row.view, lifecycle: row.receipt }));
+        }
         const refused = pickup[0]?.id ?? (stale[0] as (typeof stale)[number]).view.id;
         throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(refused));
       }
@@ -6449,7 +6520,7 @@ export class SessionService {
             }
             row.view = rebuilt.view;
             row.source = rebuilt.source;
-            row.revision = (receipts.get(id) as SessionLifecycleSnapshot).revision;
+            row.receipt = receipts.get(id) as SessionLifecycleSnapshot;
             row.identity = false;
           }),
         ),
@@ -6459,7 +6530,7 @@ export class SessionService {
             return rebuilt
               ? {
                   ...rebuilt,
-                  revision: (receipts.get(record.id) as SessionLifecycleSnapshot).revision,
+                  receipt: receipts.get(record.id) as SessionLifecycleSnapshot,
                   identity: false,
                 }
               : undefined;
@@ -7033,7 +7104,7 @@ export class SessionService {
     }
     const classified = await this.classifySessionRecord(candidate);
     const latest = classified.session;
-    const parkActivityAt = resolveParkActivityAt(classified);
+    const parkActivityAt = resolveParkActivityAt(classified, latest.restoredAt);
     const deliveryPending: boolean = this.shouldRunDelivery(latest);
     if (
       latest.project === SHEPHERD_PROJECT_ID ||
@@ -7276,7 +7347,7 @@ export class SessionService {
           // anything (see resolveParkActivityAt's own comment). A null result
           // means no transcript signal exists at all — fail safe and never
           // park rather than fall back to the tmux attach clock.
-          const parkActivityAt = resolveParkActivityAt(classified);
+          const parkActivityAt = resolveParkActivityAt(classified, classified.session.restoredAt);
           if (
             session.project !== SHEPHERD_PROJECT_ID &&
             !this.spawnsInFlight.has(session.id) &&
@@ -7554,6 +7625,11 @@ export class SessionService {
           this.historyCaptureStamps.delete(stampKey);
         }
       }
+      for (const key of this.sidecarOwnerMissingWarned) {
+        if (!includedIds.has(key.slice(0, key.indexOf("\0")))) {
+          this.sidecarOwnerMissingWarned.delete(key);
+        }
+      }
 
       // A session is due for enrichment when it can still change on its own
       // (isLiveSessionRecord), when its on-disk record object changed since
@@ -7601,22 +7677,33 @@ export class SessionService {
       }
 
       const enriched = await Promise.all(
-        due.map((session) =>
-          this.enrichDashboard(session).catch((error: unknown) => {
+        due.map(async (session) => {
+          try {
+            return await this.enrichDashboard(session);
+          } catch (error) {
             if (
               error instanceof SessionResourceNotFoundError &&
               !readSession(this.config.dataDir, session.id)
             ) {
               return undefined;
             }
-            throw error;
-          }),
-        ),
+            // One failing record keeps its prior cache entry and stays due;
+            // it must not abort the tick for every other record.
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.dashboard_cache.refresh_failed", {
+              level: "warn",
+              sessionId: session.id,
+              message: `Dashboard cache refresh failed for ${session.id}: ${message}`,
+            });
+            return "failed" as const;
+          }
+        }),
       );
       if (this.isDeliveryStopped()) return;
       for (const [index, session] of due.entries()) {
         if (refreshedDuringTick(session.id)) continue;
         const view = enriched[index];
+        if (view === "failed") continue;
         if (!view) {
           this.dashboardCache.delete(session.id);
           this.dashboardEnrichedRecords.delete(session.id);
@@ -7778,10 +7865,14 @@ export class SessionService {
       let liveUnderTerminal = 0;
       // One fleet fork for the whole pass: absent records read the shared
       // snapshot instead of each forcing their own list-windows. Holds while
-      // the fork finishes within RUNTIME_PROBE_CACHE_TTL_MS; a slower call
-      // degrades to a re-fork per expired read, as before.
+      // the fork finishes within RUNTIME_PROBE_CACHE_TTL_MS; the per-record
+      // yield below can outlast it, which re-forks once per expired window.
       await refreshTmuxFleetSnapshot();
       for (const session of sessions) {
+        // A warm snapshot settles every await below as a microtask, so a pass
+        // over a large store would otherwise run to completion without
+        // returning to the event loop. Top of the body: six branches continue.
+        await yieldToEventLoop();
         let agentAlive = false;
         let presence = await getTmuxSessionPresence(session.tmuxSession);
         if (presence.present) {
@@ -7836,30 +7927,47 @@ export class SessionService {
         // Snapshot "absent" can be 2s stale: a mid-pass reopen makes this owner restorable.
         const latest = readSession(this.config.dataDir, session.id);
         if (!latest || !isTerminalSessionStatus(latest.status)) continue;
-        // A desk-shared sidecar's pane is named after the desk anchor, so on a
-        // terminal anchor this loop would otherwise reap the pane a restorable
-        // sibling is still using. Same active-workspace semantics as the
-        // policy pass (collectSidecarReapCandidates): any non-terminal member
-        // holds the shared pane.
-        const deskSiblingsAlive = this.hasActiveWorkspaceMembers(session);
-        // Resolved unconditionally (not only when deskSiblingsAlive): every
-        // sidecar's owner id below needs it, since a desk-shared sidecar's
-        // pane is named after the desk anchor/owner, never this session's
-        // own id.
+        // Resolved unconditionally: every sidecar's owner id below needs it,
+        // since a desk-shared sidecar's pane is named after the desk
+        // anchor/owner, never this session's own id.
         let reapProject: ProjectConfig | undefined;
         try {
           reapProject = this.resolveProjectForSession(session);
         } catch {
           reapProject = undefined;
         }
+        // A desk-shared sidecar's pane is named after the desk anchor, so on a
+        // terminal anchor this loop would otherwise reap the pane a restorable
+        // sibling is still using. Same active-workspace semantics as the
+        // policy pass (collectSidecarReapCandidates): any non-terminal member
+        // holds the shared pane. Computed at the first configured non-MCP sidecar
+        // that is still a teardown candidate, at most once per record.
+        let deskSiblingsAlive: boolean | undefined;
         for (const sidecarName of session.sidecarNames ?? []) {
           const reapSidecar = reapProject?.sidecars[sidecarName];
-          if (deskSiblingsAlive && reapSidecar !== undefined && !reapSidecar.mcp) {
-            continue;
-          }
           const ownerId = this.sidecarOwnerIdForName(session, reapProject, sidecarName);
           const owner = readSession(this.config.dataDir, ownerId);
-          const paneAlive = await sidecarTmuxAlive(ownerId, sidecarName);
+          const sidecarPresence = await getSidecarTmuxPresence(ownerId, sidecarName);
+          const identity = owner?.sidecarProcs?.[sidecarName];
+          // Pane confirmed absent and no recorded identity: neither teardown
+          // branch below can fire, so skip the vetoes' workspace scans. A probe
+          // diagnostic is not confirmed absence and stays a candidate.
+          if (!sidecarPresence.present && sidecarPresence.diagnostic === undefined && !identity) {
+            continue;
+          }
+          if (
+            reapSidecar !== undefined &&
+            !reapSidecar.mcp &&
+            (deskSiblingsAlive ??= this.hasActiveWorkspaceMembers(session))
+          ) {
+            continue;
+          }
+          // After the sibling veto: a vetoed sidecar's unreadable probe never
+          // aborts the pass.
+          if (sidecarPresence.diagnostic !== undefined) {
+            throw new TmuxProbeUnknownError(sidecarPresence.diagnostic);
+          }
+          const paneAlive = sidecarPresence.present;
           // The established-connection veto, applied here too — this loop
           // reaches a desk-shared sidecar by owner id the same as the
           // reaper-tick candidate pass, and is not exempt from the same hard
@@ -7895,7 +8003,6 @@ export class SessionService {
           // sibling's own probe id could never see under the old
           // session.id-only probe); fall through to the recorded identity,
           // mirroring killSidecar.
-          const identity = owner?.sidecarProcs?.[sidecarName];
           if (owner && identity) {
             this.invalidateSidecarEndpoint(ownerId, sidecarName);
             const outcome = await reapRecordedIdentity(identity, owner.worktreePath);
@@ -7990,12 +8097,18 @@ export class SessionService {
           sizes: true,
         },
       );
+      const archivedIds = report.groups
+        .filter((g) => g.archived)
+        .flatMap((g) => g.archiveSessionIds);
+      for (const id of archivedIds) {
+        this.evictConversationReaders(id);
+      }
       this.logEvent("session.gc.completed", {
         level: "info",
         message: `Session GC sweep: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived, ${report.totals.freedBytes ?? 0} byte(s) freed.`,
         details: {
           totals: report.totals,
-          sessionIds: report.groups.filter((g) => g.archived).flatMap((g) => g.archiveSessionIds),
+          sessionIds: archivedIds,
         },
       });
     } catch (error) {
@@ -10392,7 +10505,8 @@ export class SessionService {
     const name = normalizeSlotLabel(link.label);
     const sidecar = this.resolveProjectForSession(session)?.sidecars[name];
     if (!sidecar) return false;
-    const owner = this.resolveSidecarOwnerRecord(session, sidecar);
+    const owner = this.findSidecarOwnerRecord(session, sidecar);
+    if (!owner) return false;
     const current = this.resolveSidecarUrlLink(owner, name, sidecar);
     return (
       current !== undefined && normalizeSlotUrl(link.url) === normalizeSlotUrl(current.linkUrl)
@@ -10539,14 +10653,15 @@ export class SessionService {
     if (names.length === 0) return [];
     const hasIdentity = names.some((name) => {
       const sidecar = project?.sidecars[name];
-      const owner = sidecar ? this.resolveSidecarOwnerRecord(session, sidecar) : session;
-      return owner.sidecarProcs?.[name] !== undefined;
+      const owner = sidecar ? this.findSidecarOwnerRecord(session, sidecar) : session;
+      return owner?.sidecarProcs?.[name] !== undefined;
     });
     const claims = new Map(
       await Promise.all(
         names.map(async (name) => {
           const sidecar = project?.sidecars[name];
-          const owner = sidecar ? this.resolveSidecarOwnerRecord(session, sidecar) : session;
+          const owner = sidecar ? this.findSidecarOwnerRecord(session, sidecar) : session;
+          if (!owner) return [name, { signature: undefined, starttime: null }] as const;
           const identity = owner.sidecarProcs?.[name];
           return [
             name,
@@ -10570,7 +10685,8 @@ export class SessionService {
     for (const name of names) {
       const sidecar = project?.sidecars[name];
       const current = readSession(this.config.dataDir, session.id) ?? session;
-      const owner = sidecar ? this.resolveSidecarOwnerRecord(current, sidecar) : current;
+      const owner = sidecar ? this.findSidecarOwnerRecord(current, sidecar) : current;
+      if (!owner) continue;
       const identity = owner.sidecarProcs?.[name];
       const ageSeconds = identity
         ? observation.processes.byPid.get(identity.pid)?.etimes
@@ -10659,8 +10775,7 @@ export class SessionService {
       if (!view.url) continue;
       const claim = this.sidecarViewClaims.get(view);
       const sidecar = project?.sidecars[view.name];
-      const owner =
-        session && sidecar ? this.resolveSidecarOwnerRecord(session, sidecar) : undefined;
+      const owner = session && sidecar ? this.findSidecarOwnerRecord(session, sidecar) : undefined;
       const entry = claim
         ? this.sidecarEndpoints.get(this.sidecarEndpointKey(claim.ownerId, view.name))
         : undefined;
@@ -10685,24 +10800,33 @@ export class SessionService {
   // Resolves the record that owns a sidecar's tmux pane and reserved ports:
   // the in-hand record itself for a per-session (mcp) sidecar or a non-desk
   // session (zero extra IO — sidecarOwnerId returns session.id unchanged),
-  // else a fresh read of the desk anchor's own record. Session records are
-  // never deleted from the store, so a missing anchor is an invariant break,
-  // not a fallback case.
-  private resolveSidecarOwnerRecord(
+  // else a fresh read of the desk anchor's own record. archiveSessions can
+  // remove an anchor record, so readers must tolerate absence: undefined,
+  // warned once per (session, anchor) per process.
+  private findSidecarOwnerRecord(
     session: SessionRecord,
     sidecar: Pick<SidecarConfig, "mcp">,
-  ): SessionRecord {
+  ): SessionRecord | undefined {
     const ownerId = sidecarOwnerId(session, sidecar);
     if (ownerId === session.id) {
       return session;
     }
+    const key = `${session.id}\0${ownerId}`;
     const anchor = readSession(this.config.dataDir, ownerId);
-    if (!anchor) {
-      throw new Error(
-        `Desk anchor session ${ownerId} not found (owner of sidecar for ${session.id})`,
-      );
+    if (anchor) {
+      this.sidecarOwnerMissingWarned.delete(key);
+      return anchor;
     }
-    return anchor;
+    if (!this.sidecarOwnerMissingWarned.has(key)) {
+      this.sidecarOwnerMissingWarned.add(key);
+      this.logEvent("session.sidecar.owner_missing", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Desk anchor session ${ownerId} not found (owner of sidecar for ${session.id}); desk-shared sidecar views omitted.`,
+        details: { ownerId },
+      });
+    }
+    return undefined;
   }
 
   // Owner id for a sidecar known only by name. A name with no config entry
@@ -10780,7 +10904,12 @@ export class SessionService {
       // this function returns, persisted onto the caller's own record by
       // every call site) get updated — a sibling starting an anchor-owned
       // sidecar must get its own record back unchanged, never the anchor's.
-      const owner = this.resolveSidecarOwnerRecord(currentSession, sidecar);
+      const owner = this.findSidecarOwnerRecord(currentSession, sidecar);
+      if (!owner) {
+        throw new Error(
+          `Desk anchor session ${sidecarOwnerId(currentSession, sidecar)} not found (owner of sidecar for ${currentSession.id})`,
+        );
+      }
       const updated = await this.startSidecarInternal({
         session: owner,
         project: args.project,
@@ -10912,33 +11041,36 @@ export class SessionService {
         .map((view) => ({
           view,
           source: this.dashboardEnrichedRecords.get(view.id) ?? null,
-          revision: this.lifecycle.snapshot(view.id).revision,
+          receipt: this.lifecycle.snapshot(view.id),
           identity: true,
         }));
       for (const { id } of allSessions) {
-        // One synchronous span: capture the revision, then read the record.
-        const revision = this.lifecycle.snapshot(id).revision;
-        if (this.dashboardCache.has(id) || revision === 0) continue;
+        // One synchronous span: capture the receipt, then read the record.
+        const receipt = this.lifecycle.snapshot(id);
+        if (this.dashboardCache.has(id) || receipt.revision === 0) continue;
         const record = readSession(this.config.dataDir, id);
         if (!record) continue;
+        let assembled: Awaited<ReturnType<typeof this.assembleDashboard>>;
         try {
-          const assembled = await this.assembleDashboard(record);
-          if (assembled) rows.push({ ...assembled, revision, identity: false });
-          else if (readSession(this.config.dataDir, record.id))
-            throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(record.id));
+          assembled = await this.assembleDashboard(record);
         } catch (error) {
           if (
             error instanceof SessionResourceNotFoundError &&
             !readSession(this.config.dataDir, record.id)
           )
             continue;
-          throw error;
+          if (error instanceof SessionLifecycleError) throw error;
+          this.logListEnrichFailed(record.id, error);
+          continue;
         }
+        if (assembled) rows.push({ ...assembled, receipt, identity: false });
+        else if (readSession(this.config.dataDir, record.id))
+          throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(record.id));
       }
       const views = await this.finalizeLifecycleRows(
         rows,
         (record) => this.assembleDashboard(record),
-        { includePending: true, signal: options.signal },
+        { includePending: true, onExhausted: "lastBuild", signal: options.signal },
       );
       for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
       return views.filter(included);
@@ -10949,28 +11081,30 @@ export class SessionService {
     const claudeAccounts = this.computeClaudeAccountsView();
     const rows = await Promise.all(
       sessions.map(async (session) => {
-        const revision = this.lifecycle.snapshot(session.id).revision;
+        const receipt = this.lifecycle.snapshot(session.id);
         try {
           const { view, source } = await this.enrichWithClassified(
             session,
             claudeAccounts,
             allSessions,
           );
-          return { view, source, revision };
+          return { view, source, receipt };
         } catch (error) {
           if (
             error instanceof SessionResourceNotFoundError &&
             !readSession(this.config.dataDir, session.id)
           )
             return undefined;
-          throw error;
+          if (error instanceof SessionLifecycleError) throw error;
+          this.logListEnrichFailed(session.id, error);
+          return undefined;
         }
       }),
     );
     const views = await this.finalizeLifecycleRows(
       rows.filter((row) => row !== undefined),
       (record, listing) => this.enrichWithClassified(record, undefined, listing),
-      { includePending: true, signal: options?.signal },
+      { includePending: true, onExhausted: "lastBuild", signal: options?.signal },
     );
     for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
     return views.filter(included);
@@ -11309,28 +11443,14 @@ export class SessionService {
         );
       }
 
-      const { entries: tailEntries, state, totalEntries, startIndex: tailStartIndex } = tail;
+      return pageConversationTail(tail, options, tail.state, durationMs, readFullEntries);
+    }
 
-      if (from === undefined || from >= tailStartIndex) {
-        // Within the retained window: slice the cached tail, no full read.
-        const sliceStart =
-          from === undefined
-            ? Math.max(tailStartIndex, totalEntries - CONVERSATION_PAGE_ENTRIES, 0)
-            : clampPageStart(from, tailStartIndex, totalEntries, options?.preserveEnd);
-        const entries = tailEntries.slice(sliceStart - tailStartIndex);
-        return buildConversationResponse(entries, totalEntries, sliceStart, state, durationMs);
-      }
-
-      // Deep scroll-back below the retained window: fall back to a full read.
-      const fullEntries = await readFullEntries();
-      const startIndex = clampPageStart(from, 0, fullEntries.length, options?.preserveEnd);
-      return buildConversationResponse(
-        fullEntries.slice(startIndex),
-        fullEntries.length,
-        startIndex,
-        state,
-        durationMs,
-      );
+    if (session.agent === "codex") {
+      const tail = await this.readCodexConversationSerialized(session);
+      const state = statusFallbackState(session);
+      if (!tail) return buildConversationResponse([], 0, 0, state, durationMs);
+      return pageConversationTail(tail, options, state, durationMs, readFullEntries);
     }
 
     const entries = await readFullEntries();
@@ -11352,16 +11472,32 @@ export class SessionService {
    * would otherwise both snapshot the same cached reader and the later write
    * would clobber the earlier, regressing the offset and double-counting.
    * Chaining on the prior read serializes them so the offset advances
-   * monotonically.
+   * monotonically. `read` gets `isLive`: false once the session was evicted
+   * mid-read, so it must not write its reader back.
    */
+  private serializeConversationRead<T>(
+    sessionId: string,
+    read: (isLive: () => boolean) => Promise<T>,
+  ): Promise<T> {
+    const slot = this.conversationReadChain.get(sessionId) ?? { tail: Promise.resolve() };
+    const run = slot.tail.then(() =>
+      read(() => this.conversationReadChain.get(sessionId) === slot),
+    );
+    slot.tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.conversationReadChain.set(sessionId, slot);
+    return run;
+  }
+
   private readConversationSerialized(session: SessionRecord): Promise<{
     entries: TranscriptEntry[];
     state: SessionState;
     totalEntries: number;
     startIndex: number;
   } | null> {
-    const prior = this.conversationReadChain.get(session.id) ?? Promise.resolve();
-    const run = prior.then(async () => {
+    return this.serializeConversationRead(session.id, async (isLive) => {
       const result = await readClaudeConversationTail(
         session.worktreePath,
         this.conversationReaders.get(session.id),
@@ -11369,17 +11505,26 @@ export class SessionService {
       );
       if (!result) return null;
       const { reader, hasMore: _hasMore, ...conversation } = result;
-      this.conversationReaders.set(session.id, reader);
+      if (isLive()) this.conversationReaders.set(session.id, reader);
       return conversation;
     });
-    this.conversationReadChain.set(
-      session.id,
-      run.then(
-        () => undefined,
-        () => undefined,
-      ),
-    );
-    return run;
+  }
+
+  private readCodexConversationSerialized(session: SessionRecord): Promise<{
+    entries: TranscriptEntry[];
+    totalEntries: number;
+    startIndex: number;
+  } | null> {
+    return this.serializeConversationRead(session.id, async (isLive) => {
+      const result = await readCodexConversationTail(
+        this.codexSessionsDir(session.id),
+        this.codexConversationReaders.get(session.id),
+      );
+      if (!result) return null;
+      const { reader, ...conversation } = result;
+      if (isLive()) this.codexConversationReaders.set(session.id, reader);
+      return conversation;
+    });
   }
 
   async getProjectSuggestions(
@@ -18140,6 +18285,14 @@ export class SessionService {
     });
   }
 
+  // Session GC archives records without removeSessionArtifacts, so the
+  // sweep evicts through this too.
+  private evictConversationReaders(sessionId: string): void {
+    this.conversationReaders.delete(sessionId);
+    this.codexConversationReaders.delete(sessionId);
+    this.conversationReadChain.delete(sessionId);
+  }
+
   private removeSessionArtifacts(
     session: Pick<
       SessionRecord,
@@ -18154,8 +18307,7 @@ export class SessionService {
     deleteSessionUserActions(this.config.dataDir, sessionId);
     // Evict per-session in-memory reader caches so they do not grow unbounded
     // for the life of the daemon as sessions are created and discarded.
-    this.conversationReaders.delete(sessionId);
-    this.conversationReadChain.delete(sessionId);
+    this.evictConversationReaders(sessionId);
     this.claudeJsonlReaders.delete(sessionId);
     this.cursorJsonlReaders.delete(sessionId);
     this.cursorPaneReadyOverrides.delete(sessionId);
@@ -20478,6 +20630,7 @@ export class SessionService {
             operation,
           );
           operation?.assertActive();
+          persistedRecovered.restoredAt = nowIso();
           writeSession(this.config.dataDir, persistedRecovered);
           await this.refreshDashboardCacheEntry(persistedRecovered);
           operation?.assertActive();
@@ -20606,13 +20759,19 @@ export class SessionService {
       );
       operation?.assertActive();
       writeSession(this.config.dataDir, persistedRestored);
-      const restoredWithSidecars = await this.startAutoStartSidecars(
+      await this.startAutoStartSidecars(
         persistedRestored,
         this.getProject(current.project),
         undefined,
         operation,
       );
       operation?.assertActive();
+      // Best-effort auto-start can persist dependency starts or cleanup before
+      // throwing. Its returned snapshot can predate those writes.
+      const latestAfterSidecars = readSession(this.config.dataDir, sessionId);
+      if (!latestAfterSidecars) throw new Error(`Session ${sessionId} disappeared during restore`);
+      const restoredWithSidecars = { ...latestAfterSidecars, restoredAt: nowIso() };
+      writeSession(this.config.dataDir, restoredWithSidecars);
       await this.refreshDashboardCacheEntry(restoredWithSidecars);
       operation?.assertActive();
       requestGitHubMergeConflictRestoreReplays(
@@ -24584,6 +24743,7 @@ export class SessionService {
       preflightTokenUsage: _preflightTokenUsage,
       cursorRestoreBoundary: _cursorRestoreBoundary,
       codexRestoreStartedAt: _codexRestoreStartedAt,
+      restoredAt: _restoredAt,
       launchCommand: _launchCommand,
       stateSubscriptions: _stateSubscriptions,
       allowedTriggers: _allowedTriggers,
@@ -24812,14 +24972,14 @@ export class SessionService {
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],
   ): Promise<SessionView> {
-    const revision = this.lifecycle.snapshot(session.id).revision;
+    const receipt = this.lifecycle.snapshot(session.id);
     const { view, classified, source } = await this.enrichWithClassified(
       session,
       claudeAccounts,
       sessionBatch,
     );
     const rows = await this.finalizeLifecycleRows(
-      [{ view: this.withSessionDetail(view, classified.session), source, revision }],
+      [{ view: this.withSessionDetail(view, classified.session), source, receipt }],
       async (record) => {
         const rebuilt = await this.enrichWithClassified(record);
         return {
@@ -24827,7 +24987,7 @@ export class SessionService {
           source: rebuilt.source,
         };
       },
-      { includePending: false },
+      { includePending: false, onExhausted: "refuse" },
     );
     const result = rows[0];
     if (!result) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
@@ -24956,6 +25116,7 @@ export class SessionService {
       preflightTokenUsage: _preflightTokenUsage,
       cursorRestoreBoundary: _cursorRestoreBoundary,
       codexRestoreStartedAt: _codexRestoreStartedAt,
+      restoredAt: _restoredAt,
       // The record's queue state is internal; the view carries queuedMessagesView.
       queuedMessages: _queuedMessages,
       errorSource: _errorSource,

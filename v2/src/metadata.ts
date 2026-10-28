@@ -295,12 +295,32 @@ function isSessionRecord(value: unknown): value is SessionRecord {
 // Distinguishes "file vanished between readdir and read" (a benign race with
 // a concurrent GC archive) from every other read failure, which must still
 // surface — a corrupt record on disk is a real problem, not a race.
+function isEnoent(error: unknown): boolean {
+  return isRecord(error) && error["code"] === "ENOENT";
+}
+
 // readSessionFile wraps every failure from its inner try (including a
 // readFileSync ENOENT) in a fresh Error with `cause: error`, so the original
 // error code only survives on `cause`, never on the thrown error itself.
 function isEnoentCause(error: unknown): boolean {
-  const cause = error instanceof Error ? error.cause : undefined;
-  return isRecord(cause) && cause["code"] === "ENOENT";
+  return isEnoent(error instanceof Error ? error.cause : undefined);
+}
+
+// Runs one per-entry fs read of a multi-entry scan: null when the entry
+// vanished mid-scan (ENOENT), any other failure still throws.
+function readUnlessVanished<T>(read: () => T): T | null {
+  try {
+    return read();
+  } catch (error) {
+    if (isEnoent(error)) return null;
+    throw error;
+  }
+}
+
+function readJsonNames(dir: string): string[] | null {
+  return readUnlessVanished(() =>
+    readdirSync(dir).filter((fileName) => fileName.endsWith(".json")),
+  );
 }
 
 function tryReadSessionFile(path: string): SessionRecord | null {
@@ -1156,6 +1176,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     Number.isFinite(Date.parse(normalizedSession.codexRestoreStartedAt))
       ? { codexRestoreStartedAt: normalizedSession.codexRestoreStartedAt }
       : {}),
+    ...(typeof normalizedSession.restoredAt === "string" &&
+    Number.isFinite(Date.parse(normalizedSession.restoredAt))
+      ? { restoredAt: normalizedSession.restoredAt }
+      : {}),
     prompt: normalizedSession.prompt,
     ...(normalizedSession.originalTaskPrompt
       ? { originalTaskPrompt: normalizedSession.originalTaskPrompt }
@@ -1323,10 +1347,10 @@ function pruneStaleSessionDirListingEntries(rootDir: string, visitedDirs: Set<st
 function listSessionDirJsonNames(dir: string): readonly string[] {
   const fingerprint = statFingerprint(dir);
   if (!fingerprint) {
-    // Vanished between the root readdir and this stat: surface the same
-    // readdir error as an uncached listing.
+    // Vanished between the root readdir and this stat, or unreadable: an
+    // uncached listing skips a vanished dir and throws any other error.
     sessionDirListingCache.delete(dir);
-    return readdirSync(dir).filter((fileName) => fileName.endsWith(".json"));
+    return readJsonNames(dir) ?? [];
   }
 
   const cached = sessionDirListingCache.get(dir);
@@ -1337,7 +1361,11 @@ function listSessionDirJsonNames(dir: string): readonly string[] {
   // Eligibility is decided BEFORE the readdir: a snapshot young when taken
   // stays uncached however long this reader stalls before storing it.
   const cacheable = Date.now() - fingerprint.mtimeMs > DIR_LISTING_MIN_AGE_MS;
-  const names = readdirSync(dir).filter((fileName) => fileName.endsWith(".json"));
+  const names = readJsonNames(dir);
+  if (!names) {
+    sessionDirListingCache.delete(dir);
+    return [];
+  }
   // Keyed on the PRE-readdir fingerprint: a mutation between the stat and the
   // readdir is stored under the older mtime, so the next stat misses once.
   if (cacheable) {
@@ -1396,13 +1424,29 @@ export function readSession(dataDir: string, sessionId: string): SessionRecord |
 // indexed-but-missing entry on its next lookup). Un-archiving is `mv` back
 // into sessions/<project>/<id>.json; the next findSessionFilePath scan or
 // writeSession repairs the index.
+//
+// A member that is workspaceIdOf() of any record staying in sessions/ (any
+// project) is not moved: archiving a desk anchor strands its dependents.
+// Those ids come back in retainedAnchorIds. Throws before any move when a
+// record file is corrupt.
 export function archiveSessions(
   dataDir: string,
   members: readonly Pick<SessionRecord, "id" | "project">[],
-): { archivedIds: string[]; archiveDir: string } {
+): { archivedIds: string[]; retainedAnchorIds: string[]; archiveDir: string } {
   const archiveDir = join(dataDir, "sessions-archive");
   const archivedIds: string[] = [];
+  const retainedAnchorIds: string[] = [];
+  const memberIds = new Set(members.map((member) => member.id));
+  const heldAnchorIds = new Set(
+    listSessions(dataDir)
+      .filter((record) => !memberIds.has(record.id))
+      .map(workspaceIdOf),
+  );
   for (const member of members) {
+    if (heldAnchorIds.has(member.id)) {
+      retainedAnchorIds.push(member.id);
+      continue;
+    }
     const sourcePath = sessionFilePath(dataDir, member.project, member.id);
     if (!existsSync(sourcePath)) {
       continue;
@@ -1429,7 +1473,7 @@ export function archiveSessions(
     writeSessionIndexFile(dataDir, nextIndex);
   }
 
-  return { archivedIds, archiveDir };
+  return { archivedIds, retainedAnchorIds, archiveDir };
 }
 
 export function writeServiceInstance(dataDir: string, service: ServiceInstanceRecord): void {
@@ -1447,9 +1491,9 @@ export function listServiceInstances(dataDir: string): ServiceInstanceRecord[] {
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const sessionDir = join(rootDir, entry.name);
-    for (const fileName of readdirSync(sessionDir)) {
-      if (!fileName.endsWith(".json")) continue;
-      services.push(readServiceInstanceFile(join(sessionDir, fileName)));
+    for (const fileName of readJsonNames(sessionDir) ?? []) {
+      const service = readUnlessVanished(() => readServiceInstanceFile(join(sessionDir, fileName)));
+      if (service) services.push(service);
     }
   }
 
@@ -1465,9 +1509,9 @@ export function listServiceInstancesForSession(
   if (!existsSync(dir)) return [];
 
   const services: ServiceInstanceRecord[] = [];
-  for (const fileName of readdirSync(dir)) {
-    if (!fileName.endsWith(".json")) continue;
-    services.push(readServiceInstanceFile(join(dir, fileName)));
+  for (const fileName of readJsonNames(dir) ?? []) {
+    const service = readUnlessVanished(() => readServiceInstanceFile(join(dir, fileName)));
+    if (service) services.push(service);
   }
   services.sort((left, right) => left.serviceId.localeCompare(right.serviceId));
   return services;
@@ -1532,8 +1576,7 @@ export function listRuntimeLogCursorKeys(
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const sessionDir = join(rootDir, entry.name);
-    for (const fileName of readdirSync(sessionDir)) {
-      if (!fileName.endsWith(".json")) continue;
+    for (const fileName of readJsonNames(sessionDir) ?? []) {
       keys.push({
         sessionId: entry.name,
         key: fileName.slice(0, -".json".length),
@@ -1553,10 +1596,10 @@ export function readReviewSourceSnapshots(
   if (!existsSync(dir)) return new Map();
 
   const snapshots = new Map<string, ReviewSnapshot>();
-  for (const fileName of readdirSync(dir)) {
-    if (!fileName.endsWith(".json")) continue;
+  for (const fileName of readJsonNames(dir) ?? []) {
     const sessionId = fileName.slice(0, -".json".length);
-    snapshots.set(sessionId, parseReviewSnapshot(join(dir, fileName)));
+    const snapshot = readUnlessVanished(() => parseReviewSnapshot(join(dir, fileName)));
+    if (snapshot) snapshots.set(sessionId, snapshot);
   }
   return snapshots;
 }
@@ -2704,8 +2747,8 @@ export function listActiveServiceProblems(
     if (!entry.isDirectory()) continue;
     const path = join(dir, entry.name, `${sessionId}.json`);
     if (!existsSync(path)) continue;
-    const state = readServiceSourceStateFile(path);
-    if (state.serviceId !== serviceId) continue;
+    const state = readUnlessVanished(() => readServiceSourceStateFile(path));
+    if (!state || state.serviceId !== serviceId) continue;
     for (const [ruleId, ruleState] of Object.entries(state.rules)) {
       if (ruleState.active) {
         activeRules.add(ruleId);
@@ -2742,8 +2785,8 @@ export function deleteServiceSourceStatesForService(
     if (!entry.isDirectory()) continue;
     const path = join(dir, entry.name, `${sessionId}.json`);
     if (!existsSync(path)) continue;
-    const state = readServiceSourceStateFile(path);
-    if (state.serviceId === serviceId) {
+    const state = readUnlessVanished(() => readServiceSourceStateFile(path));
+    if (state?.serviceId === serviceId) {
       rmSync(path, { force: true });
     }
   }

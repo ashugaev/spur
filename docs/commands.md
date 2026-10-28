@@ -3,7 +3,7 @@
 > Scope: CLI usage index, names and syntax only. Full behavior: `v2/src/cli.ts`, the command's own source file, or `spur <cmd> --help`. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md). CI scheduling: [ci-admission.md](ci-admission.md).
 
 Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance; fallback: [configuration.md](configuration.md).
-`review-app prepare|block|status|publish`: daemon-free lane lifecycle, App access and pinned reviews; row evidence required, legacy coverage optional; `v2/src/review-app.ts`.
+`review-app prepare|block|recover|status|publish`: daemon-free lane lifecycle, App access and pinned reviews; `recover --legacy-sha256 <digest>` requires exact legacy bytes, returns verified PENDING; row evidence required, legacy coverage optional; `v2/src/review-app.ts`.
 `review-gate evaluate`: approval aggregation with `GITHUB_TOKEN` and `--policy`; `v2/src/review-gate.ts`.
 `mcp [--http]`, `mcp-tunnel`: full-access daemon MCP over stdio/loopback HTTP, optional supervised tunnel; `v2/src/mcp.ts`, `v2/src/mcp-tunnel.ts`; [client setup](mcp.md).
 
@@ -46,7 +46,7 @@ Read-only host/config/daemon health check; `--scaffold` writes local `spur.yaml`
 
 ## update
 
-`spur update [version] [--force]`: install/monitor/rollback in `v2/src/update.ts`; daemon version/PID readiness in `v2/src/update-health.ts` (shared with `reinit`).
+`spur update [version] [--force]`: install/monitor/rollback in `v2/src/update.ts`; install/reinit failures clear the active attempt and retain `lastFailure` in `~/.spur/rollback-state.json`; daemon version/PID readiness in `v2/src/update-health.ts` (shared with `reinit`).
 
 ## spawn
 
@@ -74,9 +74,7 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 
 ## auto-ping
 
-`spur auto-ping unsubscribe --event <handle> [--session <id>] [--json]`: one occurrence, 24h post-work suppression — `v2/src/auto-ping.ts`.
-`spur auto-ping unsubscribe --thread <handle> [--session <id>] [--json]`: provider thread — `v2/src/auto-ping.ts`.
-`spur auto-ping unsubscribe --subscription <handle> [--session <id>] [--json]`: route; exactly one scope required, unredeemed handles expire after 30d — `v2/src/auto-ping.ts`.
+`spur auto-ping unsubscribe --event <handle> [--session <id>] [--json]`: one occurrence, 24h post-work suppression — `v2/src/auto-ping.ts`. `spur auto-ping unsubscribe --thread <handle> [--session <id>] [--json]`: provider thread — `v2/src/auto-ping.ts`. `spur auto-ping unsubscribe --subscription <handle> [--session <id>] [--json]`: route; exactly one scope required, unredeemed handles expire after 30d — `v2/src/auto-ping.ts`.
 `spur auto-ping list [--session <id>] [--json]`: `SPUR_SESSION` selects the session inside agents — `v2/src/auto-ping.ts`.
 `spur auto-ping resume <suppressionId> [--session <id>] [--json]`: `SPUR_SESSION` supplies session inside agents — `v2/src/auto-ping.ts`.
 

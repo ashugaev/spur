@@ -45,7 +45,7 @@ DOCS
   Doc index: https://raw.githubusercontent.com/ashugaev/spur/main/README.md
   Any path under `docs/` resolves as https://raw.githubusercontent.com/ashugaev/spur/main/<path>
   Commands, session tools and variables: docs/commands.md
-  Reviewer publication evidence: docs/commands.md
+  Reviewer publication evidence and trusted legacy receipt recovery: docs/commands.md
   Routes, bounded conversation pages, pre-flight batches, lifecycle receipts, restore cancellation: docs/daemon-api.md
   Config, admission, trigger-spawn retry, reviewer App/consent: docs/configuration.md; events: docs/configuration.md#events
   GitHub PR feedback ownership, quotes and post marker: docs/configuration.md#field-reference
