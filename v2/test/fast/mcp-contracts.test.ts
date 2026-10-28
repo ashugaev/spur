@@ -20,9 +20,9 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "9e54afedeea20722039b87835d5bf7185be3255ada3ab91c7fdf3bb82a02f8aa",
-  "types.ts": "04cc8a27b3877956d0786c95da5a17a490acdf902a0b485c4a5e9d7c8b8c04a8",
-  "session-service.ts": "dcd10de271c5f81f8e044e166f467f2c48405f3410ea71d040e6cb4ee6870981",
+  "server.ts": "604bae1ba0fc2ec28d1d0702b483c5f10065aeac693b600498791ef97041afef",
+  "types.ts": "d7e3eee66cd19a38f1d3fc0db2734cd84386db38f6af5b514afbef9b1b1db892",
+  "session-service.ts": "762b43ed5e6c7fc9d0cd95173ec1300f250fff5c1ca9f7a0588bb779d5f3d8b4",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "837a7052b62b977b59f117e344b83b0f507298ce0d716c1ab637ead711060c42",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -217,7 +217,7 @@ describe("catalog examples at the real daemon router", () => {
     const dataDir = join(root, "data");
     await writeFile(
       configPath,
-      `server:\n  host: 127.0.0.1\n  port: ${port}\ndataDir: ${dataDir}\nworktreeDir: ${join(root, "worktrees")}\nprojects:\n  test:\n    path: ${repo}\n`,
+      `server:\n  host: 127.0.0.1\n  port: ${port}\ndataDir: ${dataDir}\nauthRotation:\n  switchAuth: true\nworktreeDir: ${join(root, "worktrees")}\nprojects:\n  test:\n    path: ${repo}\n`,
     );
     writeSession(dataDir, {
       id: "test-contract",

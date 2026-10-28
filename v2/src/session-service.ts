@@ -24926,7 +24926,9 @@ export class SessionService {
   // Snapshot of authenticated claude accounts for SessionView.claudeAccounts.
   // Computed once per listSessions() batch and threaded into every enrich so a
   // batch of N claude sessions does one listAccounts read instead of N.
+  // Empty when authRotation.switchAuth is off: the web hides Switch auth on it.
   private computeClaudeAccountsView(): { id: string; label?: string; authenticated: boolean }[] {
+    if (!this.config.authRotation.switchAuth) return [];
     return listAccounts(this.config.dataDir).map((account) => ({
       id: account.id,
       ...(account.label ? { label: account.label } : {}),
