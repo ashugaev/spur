@@ -9037,6 +9037,7 @@ describe("SessionService", () => {
         listSessionsMock.mockImplementation(actual.listSessions);
         readInterfaceConsentMock.mockImplementation(actual.readInterfaceConsent);
         writeInterfaceConsentMock.mockImplementation(actual.writeInterfaceConsent);
+        writeTelegramOfferMock.mockImplementation(actual.writeTelegramOffer);
       }
       if (kind === "delivery-failure")
         sendTelegramReplyMock.mockRejectedValueOnce(new Error("Telegram unavailable"));
@@ -9134,6 +9135,17 @@ describe("SessionService", () => {
         TEST_DATA_DIR,
         expect.objectContaining({ sessionId: "api-1", lastReplyAt: expect.any(String) }),
       );
+      if (kind === "real-consent") {
+        // A buttonless follow-up leaves the approval buttons clickable.
+        await service.replyToSource("api-1", { message: "follow-up" });
+        const actual = await vi.importActual<typeof metadataModule>("../../src/metadata.js");
+        expect(
+          actual
+            .readTelegramChoices(TEST_DATA_DIR, "api", "agentChat")
+            .filter((choice) => choice.sessionId === "api-1")
+            .map((choice) => choice.interfaceConsent?.decision),
+        ).toEqual(["approved", "rejected", "revoked"]);
+      }
     },
   );
 
@@ -9970,6 +9982,7 @@ describe("SessionService", () => {
       sessionId: "api-1",
       chatId: -1001,
       choices: [],
+      keepInterfaceConsent: true,
     });
     // Retired only once the send landed: a throw would leave the keyboard up.
     expect(sendTelegramReplyMock.mock.invocationCallOrder[0]).toBeLessThan(

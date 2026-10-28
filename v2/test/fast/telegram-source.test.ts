@@ -8,7 +8,7 @@ import type {
   SourceWorkbench,
   SourceWorkSessionItem,
 } from "../../src/event-sources/types.js";
-import { readEventLog, resetEventLogCollapse } from "../../src/event-log.js";
+import { flushEventLogCollapse, readEventLog, resetEventLogCollapse } from "../../src/event-log.js";
 import * as metadataModule from "../../src/metadata.js";
 import * as consentModule from "../../src/review-interface-consent.js";
 import * as workspaceModule from "../../src/workspace.js";
@@ -747,6 +747,7 @@ describe("telegramSourceModule", () => {
       },
       answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
       editMessageText: vi.fn().mockResolvedValue(undefined),
+      editMessageReplyMarkup: vi.fn().mockResolvedValue(undefined),
       reply: vi.fn().mockResolvedValue({ message_id: 701 }),
     };
   }
@@ -835,6 +836,7 @@ describe("telegramSourceModule", () => {
         sessionId: "api-1",
         chatId: -1001,
         choices: [choice],
+        keepInterfaceConsent: false,
       });
       vi.spyOn(consentModule, "consentPolicy").mockResolvedValue({
         repositories: ["owner/repo"],
@@ -876,6 +878,7 @@ describe("telegramSourceModule", () => {
           sessionId: "api-1",
           chatId: -1001,
           choices: [ordinary],
+          keepInterfaceConsent: true,
         });
         await bot.emitCallback(cardCallback("spur_choice:ordinary"));
         expect(metadataModule.readInterfaceConsent(dataDir, "api-1")).toEqual(record);
@@ -885,6 +888,7 @@ describe("telegramSourceModule", () => {
           sessionId: "api-1",
           chatId: -1001,
           choices: [choice],
+          keepInterfaceConsent: false,
         });
         const inbox = await openWorkbench(bot, "/work");
         const detail = cardCallback(cardButton(inbox.reply, "api · api-1 · needs_input"));
@@ -894,14 +898,23 @@ describe("telegramSourceModule", () => {
         expect(findTelegramChoice(dataDir, "api", "telegram", "old", -1001)).not.toBeNull();
         expect(metadataModule.readInterfaceConsent(dataDir, "api-1")).toEqual(record);
         expect(reconcile).not.toHaveBeenCalled();
-        const callback = bot.emitCallback({
+        const consentMarkup = {
+          inline_keyboard: [
+            [{ text: "Approve", callback_data: "spur_choice:old" }],
+            [{ text: "Reject", callback_data: "spur_choice:old-reject" }],
+            [{ text: "Revoke", callback_data: "spur_choice:old-revoke" }],
+          ],
+        };
+        const consentClick = {
           callbackQuery: {
             data: "spur_choice:old",
             from: { id: 123 },
-            message: { message_id: 7, chat: { id: -1001 } },
+            message: { message_id: 7, chat: { id: -1001 }, reply_markup: consentMarkup },
           },
           answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
-        });
+          editMessageReplyMarkup: vi.fn().mockResolvedValue(undefined),
+        };
+        const callback = bot.emitCallback(consentClick);
         await waiting;
         if (
           [
@@ -956,14 +969,23 @@ describe("telegramSourceModule", () => {
               : replacement === "buttonless"
                 ? []
                 : [choice],
+          // A buttonless reply models replyToSource, which spares the approval.
+          keepInterfaceConsent: replacement === "buttonless",
         });
         release("feature/example");
         await callback;
-        if (replacement === "compatible-relocation") {
+        expect(consentClick.editMessageReplyMarkup.mock.calls[0]?.[0]).toEqual({
+          reply_markup: {
+            inline_keyboard: [[{ text: "Sending: Approve…", callback_data: "spur_choice:old" }]],
+          },
+        });
+        expect(consentClick.answerCallbackQuery).toHaveBeenCalledOnce();
+        if (["compatible-relocation", "buttonless"].includes(replacement)) {
           expect(metadataModule.readInterfaceConsent(dataDir, "api-1")?.decision).toBe("approved");
           expect(reconcile).toHaveBeenCalledOnce();
           expect(emit).toHaveBeenCalledOnce();
           expect(findTelegramChoice(dataDir, "api", "telegram", "old", -1001)).toBeNull();
+          expect(consentClick.answerCallbackQuery).toHaveBeenCalledWith("Sent: Approve");
           return;
         }
         if (replacement === "workspace-changed")
@@ -971,11 +993,326 @@ describe("telegramSourceModule", () => {
         else expect(metadataModule.readInterfaceConsent(dataDir, "api-1")).toEqual(renewed);
         expect(reconcile).not.toHaveBeenCalled();
         expect(emit).not.toHaveBeenCalled();
+        // A superseded offer is gone, so its keyboard goes; a live one comes back.
+        expect(consentClick.editMessageReplyMarkup).toHaveBeenLastCalledWith({
+          reply_markup: replacement === "renewal" ? { inline_keyboard: [] } : consentMarkup,
+        });
+        expect(consentClick.answerCallbackQuery).toHaveBeenCalledWith({
+          text: ["renewal", "second-relocation"].includes(replacement)
+            ? "A newer interface approval replaced this one."
+            : replacement === "revocation"
+              ? "This interface approval is already decided."
+              : "The session branch or workspace changed since approval was requested.",
+          show_alert: true,
+        });
       } finally {
         vi.restoreAllMocks();
       }
     },
   );
+
+  describe("interface approval clicks", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    const sendingRow = (text: string, token: string) => ({
+      reply_markup: { inline_keyboard: [[{ text, callback_data: `spur_choice:${token}` }]] },
+    });
+
+    async function approvalFixture(allowedUsers = [123]) {
+      const dataDir = await createTempDir("spur-consent-click-");
+      tempDirs.push(dataDir);
+      const record = {
+        ...consentModule.proposeConsent(
+          {
+            session: "api-1",
+            repository: "owner/repo",
+            branch: "feature/example",
+            baseBranch: "main",
+            projectId: "api",
+            sourceId: "telegram",
+            chatId: -1001,
+            approverUserId: 123,
+            manifest: {
+              version: 1,
+              repository: "owner/repo",
+              baseBranch: "main",
+              surfaces: [
+                { kind: "CLI", id: "run", before: ["old"], after: ["new"], constraints: [] },
+              ],
+            },
+          },
+          null,
+        ),
+        delivery: "sent" as const,
+      };
+      metadataModule.writeInterfaceConsent(dataDir, record);
+      metadataModule.writeSession(dataDir, {
+        id: "api-1",
+        project: "api",
+        branch: "feature/example",
+        worktreePath: "/fixture",
+        agent: "codex",
+        prompt: "fixture",
+        worktree: true,
+        tmuxSession: "fixture",
+        launchCommand: "fixture",
+        status: "running",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      } satisfies SessionRecord);
+      const labels = {
+        approved: "Approve interface",
+        rejected: "Reject interface",
+        revoked: "Revoke interface approval",
+      };
+      const choices = (["approved", "rejected", "revoked"] as const).map((decision) => ({
+        token: `tok-${decision}`,
+        offerId: "consent",
+        sessionId: "api-1",
+        chatId: -1001,
+        messageThreadId: 370,
+        text: labels[decision],
+        value: decision,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        interfaceConsent: { challenge: record.challenge, decision },
+      }));
+      writeTelegramOffer(dataDir, "api", "telegram", {
+        sessionId: "api-1",
+        chatId: -1001,
+        choices,
+        keepInterfaceConsent: false,
+      });
+      const policy = vi
+        .spyOn(consentModule, "consentPolicy")
+        .mockResolvedValue({ repositories: ["owner/repo"], approverUserId: 123 });
+      const branch = vi
+        .spyOn(workspaceModule, "readCurrentBranch")
+        .mockResolvedValue("feature/example");
+      const reconcile = vi
+        .spyOn(consentModule, "reconcileInterfaceConsent")
+        .mockResolvedValue(undefined);
+      const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), {
+        config: { allowedUsers },
+      });
+      const markup = {
+        inline_keyboard: choices.map((choice) => [
+          { text: choice.text, callback_data: `spur_choice:${choice.token}` },
+        ]),
+      };
+      const click = (userId: number) => ({
+        callbackQuery: {
+          data: "spur_choice:tok-approved",
+          from: { id: userId },
+          message: {
+            message_id: 90,
+            message_thread_id: 370,
+            is_topic_message: true as const,
+            text: "Approve?\n\nInterface approval · owner/repo",
+            chat: { id: -1001 },
+            reply_markup: markup,
+          },
+        },
+        answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+        editMessageText: vi.fn().mockResolvedValue(undefined),
+        editMessageReplyMarkup: vi.fn().mockResolvedValue(undefined),
+      });
+      const rejections = () =>
+        readEventLog(dataDir).filter((entry) => entry.event === "source.telegram.choice_rejected");
+      return {
+        dataDir,
+        record,
+        bot: required(bot),
+        emit,
+        policy,
+        branch,
+        reconcile,
+        markup,
+        click,
+        rejections,
+      };
+    }
+
+    it("approves a forum-topic click with Sending before any lookup, then Selected", async () => {
+      const { dataDir, bot, emit, policy, branch, reconcile, click } = await approvalFixture();
+      const ctx = click(123);
+
+      await bot.emitCallback(ctx);
+
+      expect(ctx.editMessageReplyMarkup.mock.calls).toEqual([
+        [sendingRow("Sending: Approve interface…", "tok-approved")],
+        [sendingRow("Selected: Approve interface", "tok-approved")],
+      ]);
+      expect(ctx.editMessageText).not.toHaveBeenCalled();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledOnce();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith("Sent: Approve interface");
+      const sendingAt = ctx.editMessageReplyMarkup.mock.invocationCallOrder[0] ?? Infinity;
+      expect(sendingAt).toBeLessThan(policy.mock.invocationCallOrder[0] ?? 0);
+      expect(sendingAt).toBeLessThan(branch.mock.invocationCallOrder[0] ?? 0);
+      expect(ctx.answerCallbackQuery.mock.invocationCallOrder[0]).toBeLessThan(
+        reconcile.mock.invocationCallOrder[0] ?? 0,
+      );
+      expect(metadataModule.readInterfaceConsent(dataDir, "api-1")?.decision).toBe("approved");
+      expect(emit).toHaveBeenCalledOnce();
+      expect(emit).toHaveBeenCalledWith(
+        "telegram:message",
+        expect.objectContaining({ sessionId: "api-1", messageThreadId: 370, text: "approved" }),
+      );
+      expect(findTelegramChoice(dataDir, "api", "telegram", "tok-approved", -1001)).toBeNull();
+
+      // Replaying the spent button changes nothing.
+      const replay = click(123);
+      await bot.emitCallback(replay);
+      expect(replay.answerCallbackQuery).toHaveBeenCalledWith({
+        text: "This choice is no longer active.",
+        show_alert: true,
+      });
+      expect(replay.editMessageReplyMarkup).not.toHaveBeenCalled();
+      expect(emit).toHaveBeenCalledOnce();
+      expect(reconcile).toHaveBeenCalledOnce();
+      expect(metadataModule.readInterfaceConsent(dataDir, "api-1")?.decision).toBe("approved");
+    });
+
+    it("restores the keyboard and names the approver for a non-approver click", async () => {
+      const { dataDir, record, bot, emit, markup, click, rejections } = await approvalFixture([
+        123, 456,
+      ]);
+      const ctx = click(456);
+
+      await bot.emitCallback(ctx);
+
+      expect(ctx.editMessageReplyMarkup.mock.calls).toEqual([
+        [sendingRow("Sending: Approve interface…", "tok-approved")],
+        [{ reply_markup: markup }],
+      ]);
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledOnce();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+        text: "Only the designated approver can decide this interface approval.",
+        show_alert: true,
+      });
+      expect(metadataModule.readInterfaceConsent(dataDir, "api-1")?.decision).toBe("pending");
+      expect(findTelegramChoice(dataDir, "api", "telegram", "tok-approved", -1001)).not.toBeNull();
+      expect(emit).not.toHaveBeenCalled();
+      const logged = rejections();
+      expect(logged.map((entry) => entry.details)).toEqual([
+        { reason: "not-approver", chatId: -1001, userId: 456, consent: true },
+      ]);
+      const serialized = JSON.stringify(logged);
+      for (const secret of ["Approve", "tok-approved", record.challenge])
+        expect(serialized).not.toContain(secret);
+    });
+
+    it("approves after a buttonless follow-up reply of the same session", async () => {
+      const { dataDir, bot, emit, click } = await approvalFixture();
+      writeTelegramOffer(dataDir, "api", "telegram", {
+        sessionId: "api-1",
+        chatId: -1001,
+        choices: [],
+        keepInterfaceConsent: true,
+      });
+
+      await bot.emitCallback(click(123));
+
+      expect(metadataModule.readInterfaceConsent(dataDir, "api-1")?.decision).toBe("approved");
+      expect(emit).toHaveBeenCalledOnce();
+    });
+
+    it("empties the spent keyboard when recording the decision fails after the take", async () => {
+      const { dataDir, bot, emit, markup, click, rejections } = await approvalFixture();
+      vi.spyOn(metadataModule, "writeInterfaceConsent").mockImplementationOnce(() => {
+        throw new Error("disk full");
+      });
+      const ctx = click(123);
+
+      await bot.emitCallback(ctx);
+
+      expect(ctx.editMessageReplyMarkup).toHaveBeenLastCalledWith({
+        reply_markup: { inline_keyboard: [] },
+      });
+      expect(ctx.editMessageReplyMarkup).not.toHaveBeenCalledWith({ reply_markup: markup });
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledOnce();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+        text: "Choice failed. Try again.",
+        show_alert: true,
+      });
+      expect(emit).not.toHaveBeenCalled();
+      expect(findTelegramChoice(dataDir, "api", "telegram", "tok-approved", -1001)).toBeNull();
+      expect(rejections().map((entry) => entry.details?.reason)).toEqual(["internal"]);
+    });
+
+    it("leaves the keyboard alone on rejection when the Sending edit failed", async () => {
+      const { bot, click, rejections } = await approvalFixture([123, 456]);
+      const ctx = click(456);
+      ctx.editMessageReplyMarkup.mockRejectedValueOnce(new Error("message is not modified"));
+
+      await bot.emitCallback(ctx);
+
+      expect(ctx.editMessageReplyMarkup).toHaveBeenCalledOnce();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+        text: "Only the designated approver can decide this interface approval.",
+        show_alert: true,
+      });
+      expect(rejections().map((entry) => entry.details?.reason)).toEqual(["not-approver"]);
+    });
+  });
+
+  describe("dropped callbacks", () => {
+    const drops = (dataDir: string) =>
+      readEventLog(dataDir).filter((entry) => entry.event === "source.telegram.callback_dropped");
+
+    it.each([
+      ["duplicate", { data: "spur_choice:none", from: { id: 123 } }],
+      ["no-data", { from: { id: 123 } }],
+      ["not-allowed", { data: "spur_choice:none", from: { id: 999 } }],
+      ["no-sender", { data: "spur_choice:none" }],
+    ] as const)("logs a %s drop without answering", async (reason, query) => {
+      const dataDir = await createTempDir("spur-telegram-drop-");
+      tempDirs.push(dataDir);
+      const { bot } = await startSource(dataDir);
+      const ctx = {
+        update: { update_id: 5 },
+        callbackQuery: { ...query, message: { message_id: 90, chat: { id: -1001 } } },
+        answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      };
+      if (reason === "duplicate") {
+        await required(bot).emitCallback(ctx);
+        ctx.answerCallbackQuery.mockClear();
+      }
+
+      await required(bot).emitCallback(ctx);
+
+      expect(ctx.answerCallbackQuery).not.toHaveBeenCalled();
+      expect(drops(dataDir).map((entry) => entry.details)).toEqual([
+        {
+          reason,
+          updateId: 5,
+          chatId: -1001,
+          ...("from" in query ? { userId: query.from.id } : {}),
+        },
+      ]);
+    });
+
+    it("counts repeated drops in one collapse window", async () => {
+      const dataDir = await createTempDir("spur-telegram-drop-");
+      tempDirs.push(dataDir);
+      const { bot } = await startSource(dataDir);
+      const stranger = () => ({
+        callbackQuery: {
+          data: "spur_choice:none",
+          from: { id: 999 },
+          message: { message_id: 90, chat: { id: -1001 } },
+        },
+        answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      });
+
+      await required(bot).emitCallback(stranger());
+      await required(bot).emitCallback(stranger());
+      flushEventLogCollapse(dataDir);
+
+      expect(drops(dataDir).map((entry) => entry.details?.suppressedCount)).toEqual([undefined, 1]);
+    });
+  });
 
   it("workbench /new task plus project tap submits displayed defaults once with multiline task and origin", async () => {
     const dataDir = await createTempDir("spur-telegram-workbench-");
@@ -1712,9 +2049,17 @@ describe("telegramSourceModule", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
     const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
     const editMessageText = vi.fn().mockResolvedValue(undefined);
+    const editMessageReplyMarkup = vi.fn().mockResolvedValue(undefined);
+    const offerMarkup = {
+      inline_keyboard: [
+        [{ text: "Yes", callback_data: "spur_choice:tok0" }],
+        [{ text: "Later", callback_data: "spur_choice:tok1" }],
+      ],
+    };
 
     await bot.emitCallback({
       callbackQuery: {
@@ -1725,15 +2070,35 @@ describe("telegramSourceModule", () => {
           text: "Deploy now?",
           is_topic_message: true,
           chat: { id: -1001 },
+          reply_markup: offerMarkup,
         },
         from: { id: 123, username: "alek" },
       },
       answerCallbackQuery,
       editMessageText,
+      editMessageReplyMarkup,
     });
 
+    expect(answerCallbackQuery).toHaveBeenCalledOnce();
     expect(answerCallbackQuery).toHaveBeenCalledWith("Sent: Yes");
-    expect(editMessageText).toHaveBeenCalledWith("Deploy now?\n\nSelected: Yes");
+    // The keyboard reports progress; the message text and formatting stay.
+    expect(editMessageReplyMarkup.mock.calls).toEqual([
+      [
+        {
+          reply_markup: {
+            inline_keyboard: [[{ text: "Sending: Yes…", callback_data: "spur_choice:tok0" }]],
+          },
+        },
+      ],
+      [
+        {
+          reply_markup: {
+            inline_keyboard: [[{ text: "Selected: Yes", callback_data: "spur_choice:tok0" }]],
+          },
+        },
+      ],
+    ]);
+    expect(editMessageText).not.toHaveBeenCalled();
     expect(emit).toHaveBeenCalledWith("telegram:message", {
       sessionId: "api-1",
       chatId: -1001,
@@ -1754,16 +2119,22 @@ describe("telegramSourceModule", () => {
     // The sibling button is dead: the click consumed the whole offer.
     emit.mockClear();
     answerCallbackQuery.mockClear();
+    editMessageReplyMarkup.mockClear();
     await bot.emitCallback({
       callbackQuery: {
         data: "spur_choice:tok1",
-        message: { message_id: 90, chat: { id: -1001 } },
+        message: { message_id: 90, chat: { id: -1001 }, reply_markup: offerMarkup },
         from: { id: 123, username: "alek" },
       },
       answerCallbackQuery,
       editMessageText,
+      editMessageReplyMarkup,
     });
-    expect(answerCallbackQuery).toHaveBeenCalledWith("This choice is no longer active.");
+    expect(answerCallbackQuery).toHaveBeenCalledWith({
+      text: "This choice is no longer active.",
+      show_alert: true,
+    });
+    expect(editMessageReplyMarkup).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalled();
   });
 
@@ -1788,6 +2159,7 @@ describe("telegramSourceModule", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
     const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
 
@@ -1836,6 +2208,7 @@ describe("telegramSourceModule", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
     await bot.emitCallback({
       callbackQuery: {
@@ -1888,6 +2261,7 @@ describe("telegramSourceModule", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
 
     await bot.emitCallback({
@@ -1916,6 +2290,7 @@ describe("telegramSourceModule", () => {
         sessionId: "api-1",
         chatId: -1001,
         choices: [],
+        keepInterfaceConsent: true,
       });
       return Promise.resolve([{ id: "api-1", project: "api", agent: "codex", state: "waiting" }]);
     });
@@ -1935,20 +2310,33 @@ describe("telegramSourceModule", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
     const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const editMessageReplyMarkup = vi.fn().mockResolvedValue(undefined);
 
     await bot.emitCallback({
       callbackQuery: {
         data: "spur_choice:tok0",
-        message: { message_id: 90, chat: { id: -1001 } },
+        message: {
+          message_id: 90,
+          chat: { id: -1001 },
+          reply_markup: { inline_keyboard: [[{ text: "Yes", callback_data: "spur_choice:tok0" }]] },
+        },
         from: { id: 123, username: "alek" },
       },
       answerCallbackQuery,
+      editMessageReplyMarkup,
     });
 
-    // Never "Sent" for a click that delivered nothing.
-    expect(answerCallbackQuery).toHaveBeenCalledWith("This choice is no longer active.");
+    // Never "Sent" for a click that delivered nothing; the spent keyboard goes.
+    expect(answerCallbackQuery).toHaveBeenCalledWith({
+      text: "This choice is no longer active.",
+      show_alert: true,
+    });
+    expect(editMessageReplyMarkup).toHaveBeenLastCalledWith({
+      reply_markup: { inline_keyboard: [] },
+    });
     expect(answerCallbackQuery).not.toHaveBeenCalledWith("Sent: Yes");
     expect(emit).not.toHaveBeenCalled();
   });
@@ -1972,6 +2360,7 @@ describe("telegramSourceModule", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
 
     await bot.emitCallback({
@@ -2011,8 +2400,10 @@ describe("telegramSourceModule", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
     const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const inactive = { text: "This choice is no longer active.", show_alert: true };
 
     await bot.emitCallback({
       callbackQuery: {
@@ -2022,7 +2413,7 @@ describe("telegramSourceModule", () => {
       },
       answerCallbackQuery,
     });
-    expect(answerCallbackQuery).toHaveBeenLastCalledWith("This choice is no longer active.");
+    expect(answerCallbackQuery).toHaveBeenLastCalledWith(inactive);
 
     // A token from another chat must not fire, and stays unconsumed.
     await bot.emitCallback({
@@ -2033,7 +2424,7 @@ describe("telegramSourceModule", () => {
       },
       answerCallbackQuery,
     });
-    expect(answerCallbackQuery).toHaveBeenLastCalledWith("This choice is no longer active.");
+    expect(answerCallbackQuery).toHaveBeenLastCalledWith(inactive);
 
     // Right chat, but the offering session is gone.
     await bot.emitCallback({
@@ -2044,7 +2435,10 @@ describe("telegramSourceModule", () => {
       },
       answerCallbackQuery,
     });
-    expect(answerCallbackQuery).toHaveBeenLastCalledWith("Session is no longer active.");
+    expect(answerCallbackQuery).toHaveBeenLastCalledWith({
+      text: "Session is no longer active.",
+      show_alert: true,
+    });
     expect(emit).not.toHaveBeenCalled();
     expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
     // The offer survives a dead lookup: consuming it would strand the question.
@@ -3598,7 +3992,7 @@ describe("telegramSourceModule", () => {
     expect(readTelegramReplyTarget(dataDir, "api-1")?.statusMessageId).toBe(601);
   });
 
-  it("keeps the Selected edit plain for an offer containing < and &", async () => {
+  it("marks the pick on the keyboard and never rewrites the offer text", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const { bot } = await startSource(dataDir);
@@ -3617,9 +4011,12 @@ describe("telegramSourceModule", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
     const editMessageText = vi.fn().mockResolvedValue(undefined);
+    const editMessageReplyMarkup = vi.fn().mockResolvedValue(undefined);
 
+    // No keyboard on the callback: nothing to roll back, so no "Sending" step.
     await bot.emitCallback({
       callbackQuery: {
         data: "spur_choice:tok0",
@@ -3628,10 +4025,19 @@ describe("telegramSourceModule", () => {
       },
       answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
       editMessageText,
+      editMessageReplyMarkup,
     });
 
-    expect(editMessageText).toHaveBeenCalledTimes(1);
-    expect(editMessageText.mock.calls[0]).toEqual(["a < b & c\n\nSelected: Yes"]);
+    expect(editMessageText).not.toHaveBeenCalled();
+    expect(editMessageReplyMarkup.mock.calls).toEqual([
+      [
+        {
+          reply_markup: {
+            inline_keyboard: [[{ text: "Selected: Yes", callback_data: "spur_choice:tok0" }]],
+          },
+        },
+      ],
+    ]);
   });
 
   it("drops a DM placeholder when a click moves the session to a group", async () => {
@@ -3658,6 +4064,7 @@ describe("telegramSourceModule", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
 
     await bot.emitCallback({
@@ -3795,8 +4202,11 @@ describe("telegramSourceModule", () => {
           text: "Yes",
           value: "yes",
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          // Displacement retires a pending interface approval too.
+          interfaceConsent: { challenge: "c1", decision: "approved" },
         },
       ],
+      keepInterfaceConsent: false,
     });
     recordTelegramMessages(
       dataDir,
@@ -3872,11 +4282,13 @@ describe("telegramSourceModule", () => {
       sessionId: "api-1",
       chatId: -1001,
       choices: [offer(-1001, "here")],
+      keepInterfaceConsent: false,
     });
     writeTelegramOffer(dataDir, "api", "telegram", {
       sessionId: "api-1",
       chatId: -2002,
       choices: [offer(-2002, "elsewhere")],
+      keepInterfaceConsent: false,
     });
 
     await bot.emitText(telegramContext({ text: "/spawn claude do X" }));
@@ -4059,21 +4471,39 @@ describe("telegramSourceModule", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
     const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const editMessageReplyMarkup = vi.fn().mockResolvedValue(undefined);
+    const offerMarkup = {
+      inline_keyboard: [[{ text: "Yes", callback_data: "spur_choice:tok0" }]],
+    };
 
     await bot.emitCallback({
       callbackQuery: {
         data: "spur_choice:tok0",
-        message: { message_id: 90, chat: { id: -1001 } },
+        message: { message_id: 90, chat: { id: -1001 }, reply_markup: offerMarkup },
         from: { id: 123, username: "alek" },
       },
       answerCallbackQuery,
+      editMessageReplyMarkup,
     });
 
-    expect(answerCallbackQuery).toHaveBeenCalledWith("api-1 is not active.");
+    expect(answerCallbackQuery).toHaveBeenCalledOnce();
+    expect(answerCallbackQuery).toHaveBeenCalledWith({
+      text: "api-1 is not active.",
+      show_alert: true,
+    });
+    // "Sending" first, then the untouched keyboard back.
+    expect(editMessageReplyMarkup).toHaveBeenCalledTimes(2);
+    expect(editMessageReplyMarkup).toHaveBeenLastCalledWith({ reply_markup: offerMarkup });
     expect(emit).not.toHaveBeenCalled();
     expect(findTelegramChoice(dataDir, "api", "telegram", "tok0", -1001)).not.toBeNull();
+    expect(
+      readEventLog(dataDir)
+        .filter((entry) => entry.event === "source.telegram.choice_rejected")
+        .map((entry) => [entry.sessionId, entry.details?.reason]),
+    ).toEqual([["api-1", "session-inactive"]]);
   });
 
   it("keeps lastInboundAt behind an agent reply when the spawn bind runs, and a real inbound re-arms it", async () => {
@@ -5605,9 +6035,9 @@ describe("telegramSourceModule inbound delivery under lookup failure", () => {
     expect(ctx.reply).not.toHaveBeenCalled();
   });
 
-  it("replies once and keeps the offer clickable when a choice callback fails", async () => {
+  it("alerts once and keeps the offer clickable when a choice callback fails", async () => {
     const error = new Error("lookup failed");
-    const { bot, catchHandler, dataDir } = await startBound(vi.fn().mockRejectedValue(error));
+    const { bot, dataDir } = await startBound(vi.fn().mockRejectedValue(error));
     writeTelegramOffer(dataDir, "api", "telegram", {
       sessionId: "api-1",
       chatId: -1001,
@@ -5623,7 +6053,11 @@ describe("telegramSourceModule inbound delivery under lookup failure", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
+    const offerMarkup = {
+      inline_keyboard: [[{ text: "Yes", callback_data: "spur_choice:tok0" }]],
+    };
     const ctx = {
       callbackQuery: {
         data: "spur_choice:tok0",
@@ -5633,20 +6067,39 @@ describe("telegramSourceModule inbound delivery under lookup failure", () => {
           text: "Deploy?",
           is_topic_message: true,
           chat: { id: -1001 },
+          reply_markup: offerMarkup,
         },
         from: { id: 123, username: "alek" },
       },
       answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
       editMessageText: vi.fn().mockResolvedValue(undefined),
+      editMessageReplyMarkup: vi.fn().mockResolvedValue(undefined),
       reply: vi.fn().mockResolvedValue({}),
     };
 
-    await expect(bot.emitCallback(ctx)).rejects.toBe(error);
-    await catchHandler({ error, ctx });
+    await bot.emitCallback(ctx);
 
-    expect(ctx.reply).toHaveBeenCalledTimes(1);
-    expect(ctx.reply).toHaveBeenCalledWith(UNDELIVERED);
+    expect(ctx.answerCallbackQuery).toHaveBeenCalledOnce();
+    expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+      text: "Choice failed. Try again.",
+      show_alert: true,
+    });
+    expect(ctx.reply).not.toHaveBeenCalled();
+    expect(ctx.editMessageReplyMarkup).toHaveBeenLastCalledWith({ reply_markup: offerMarkup });
     expect(findTelegramChoice(dataDir, "api", "telegram", "tok0", -1001)).not.toBeNull();
+    expect(
+      readEventLog(dataDir)
+        .filter((entry) => entry.event === "source.telegram.choice_rejected")
+        .map((entry) => entry.details),
+    ).toEqual([
+      {
+        reason: "internal",
+        chatId: -1001,
+        userId: 123,
+        consent: false,
+        error: "lookup failed",
+      },
+    ]);
   });
 
   it("replies once when a detached voice route fails", async () => {

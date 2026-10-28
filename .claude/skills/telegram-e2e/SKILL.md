@@ -50,7 +50,7 @@ SCENARIOS
   Each passes within 60s of the user action, with no duplicate prompt in the agent pane.
 
   1. Agent send: spawn in test project with "notify me in Telegram, buttons X and Y". Forum answer starts with agent body, keyboard renders, topic title precedes session id. Subsequent answers omit session label; successful forum binding confirmations omit identity.
-  2. Click: toast, message edited to "Selected: X", keyboard gone, agent answers.
+  2. Click: keyboard turns "Sending: X…" then single "Selected: X" button, message text unchanged, toast "Sent: X", agent answers.
   3. Topic reply: reply-to the agent message. Placeholder "Received. <label> is thinking..." appears, then is edited into the answer.
   4. DM spawn: plain task to the bot DM. "Spawned and bound", then the labeled answer in the DM.
   5. Second DM agent: `/spawn`, pick agent and project, send a task. Its first reply lands in the DM, never in the forum.
@@ -60,6 +60,7 @@ SCENARIOS
   9. Gone (DM/group-main): `kill --pr-action leave_open`, reply-to message: "Spur session <id> is gone. Message not delivered." Binding unchanged.
   10. Command menu: after final-build source start/restart, compare dedicated TEST `getMyCommands` with TELEGRAM_COMMANDS; verify `getChatMenuButton` commands type. Record build/start identity; report overrides without deleting scopes.
   11. Images: forum agent runs `spur source reply` with 2 `--image` PNGs and 2 buttons. MTProto read: album in the session topic, never General; album ids below text id; keyboard on text. Repeat with 1 image and `--request-interface-approval`: photo, then approval text with Before/After. Reply-to in the topic, agent answers with 1 image: placeholder deleted, photo then text in that topic. Record message ids.
+  12. Interface approval in a forum topic: daemon env `SPUR_REVIEW_APP_CONFIG` names the approver. Agent sends `"$SPUR_SESSION_TOOL_DIR/spur" source reply "..." --request-interface-approval <manifest>`, then a buttonless follow-up. Approver click still approves: "Sending" then "Selected", agent gets `approved` once. Non-approver click: keyboard restored, alert names the approver, events.jsonl `source.telegram.choice_rejected` reason `not-approver`. Spent button click: alert "This choice is no longer active.", no second delivery.
 
 
 CLEANUP
