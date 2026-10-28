@@ -1088,6 +1088,18 @@ describe("session workspaceId normalization", () => {
     expect(readSession(dataDir, "api-2")?.workspaceId).toBe("api-1");
   });
 
+  it("persists the restore idle baseline and accepts legacy records without one", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = { ...legacyBase, id: "api-1", tmuxSession: "api-1" };
+    const restoredAt = "2026-03-18T10:05:00.000Z";
+    writeSession(dataDir, { ...record, restoredAt });
+    expect(readSession(dataDir, record.id)?.restoredAt).toBe(restoredAt);
+    writeSession(dataDir, record);
+    expect(readSession(dataDir, record.id)?.restoredAt).toBeUndefined();
+    writeSession(dataDir, { ...record, restoredAt: "invalid" });
+    expect(readSession(dataDir, record.id)?.restoredAt).toBeUndefined();
+  });
+
   it("persists only valid error provenance beside an error", async () => {
     const dataDir = await newDataDir();
     const record: SessionRecord = {
@@ -2339,6 +2351,111 @@ describe("archiveSessions", () => {
         .sort(),
     ).toEqual(["api-3"]);
     expect(readSession(dataDir, "api-3")?.id).toBe("api-3");
+  });
+
+  it("keeps an anchor held by a remaining record of another project", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    writeSession(dataDir, {
+      ...sessionBase,
+      id: "web-2",
+      project: "web",
+      tmuxSession: "web-2",
+      status: "stopped",
+      workspaceId: "api-1",
+    });
+
+    const result = archiveSessions(dataDir, [{ id: "api-1", project: "api" }]);
+
+    expect(result.archivedIds).toEqual([]);
+    expect(result.retainedAnchorIds).toEqual(["api-1"]);
+    expect(readSession(dataDir, "api-1")?.id).toBe("api-1");
+    const index = JSON.parse(
+      readFileSync(join(dataDir, "sessions", ".index.json"), "utf-8"),
+    ) as Record<string, string>;
+    expect(index["api-1"]).toBeDefined();
+  });
+
+  it("keeps the anchor of a running dependent and still archives unrelated members", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    writeSession(dataDir, {
+      ...sessionBase,
+      id: "api-2",
+      tmuxSession: "api-2",
+      status: "running",
+      workspaceId: "api-1",
+    });
+    writeSession(dataDir, { ...sessionBase, id: "api-3", tmuxSession: "api-3" });
+
+    const result = archiveSessions(dataDir, [
+      { id: "api-1", project: "api" },
+      { id: "api-3", project: "api" },
+    ]);
+
+    expect(result.archivedIds).toEqual(["api-3"]);
+    expect(result.retainedAnchorIds).toEqual(["api-1"]);
+    expect(readSession(dataDir, "api-1")).not.toBeNull();
+    expect(readSession(dataDir, "api-3")).toBeNull();
+  });
+
+  it("keeps the anchor of a remaining completed dependent", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    writeSession(dataDir, {
+      ...sessionBase,
+      id: "api-2",
+      tmuxSession: "api-2",
+      status: "completed",
+      workspaceId: "api-1",
+    });
+
+    const result = archiveSessions(dataDir, [{ id: "api-1", project: "api" }]);
+
+    expect(result.retainedAnchorIds).toEqual(["api-1"]);
+    expect(readSession(dataDir, "api-1")).not.toBeNull();
+  });
+
+  it("archives an anchor together with all its dependents", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    writeSession(dataDir, {
+      ...sessionBase,
+      id: "api-2",
+      tmuxSession: "api-2",
+      workspaceId: "api-1",
+    });
+
+    const result = archiveSessions(dataDir, [
+      { id: "api-1", project: "api" },
+      { id: "api-2", project: "api" },
+    ]);
+
+    expect(result.archivedIds.sort()).toEqual(["api-1", "api-2"]);
+    expect(result.retainedAnchorIds).toEqual([]);
+    expect(listSessions(dataDir)).toEqual([]);
+  });
+
+  it("keeps an anchor referenced only by a legacy deskId", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    const dir = join(dataDir, "sessions", "api");
+    writeFileSync(
+      join(dir, "api-2.json"),
+      JSON.stringify({
+        ...sessionBase,
+        id: "api-2",
+        tmuxSession: "api-2",
+        deskId: "api-1",
+        status: "stopped",
+      }),
+      "utf-8",
+    );
+
+    const result = archiveSessions(dataDir, [{ id: "api-1", project: "api" }]);
+
+    expect(result.retainedAnchorIds).toEqual(["api-1"]);
+    expect(readSession(dataDir, "api-1")).not.toBeNull();
   });
 });
 
