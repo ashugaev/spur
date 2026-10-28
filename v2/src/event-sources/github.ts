@@ -690,6 +690,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         deps.sourceId,
         deps.config.maxReviewBatchTargets,
         deps.config.selfMarker,
+        deps.config.ignoreChecks,
       );
       for (const session of pollableSessions) {
         try {

@@ -1023,6 +1023,7 @@ function baseConfig() {
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+      switchAuth: false,
     },
     diskRetention: { warnFreeGb: 10 },
     sessionGc: {
@@ -18832,9 +18833,27 @@ describe("SessionService", () => {
       ];
     }
 
+    it("omits claudeAccounts when authRotation.switchAuth is off", async () => {
+      mockClaudeJsonlState("waiting");
+      seedTwoAccounts();
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ claudeAccountId: "acc-1" }));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect((await service.get("api-1")).claudeAccounts).toBeUndefined();
+      const [listed] = (await service.list()) as SessionView[];
+      expect(listed?.claudeAccounts).toBeUndefined();
+      service.dispose();
+    });
+
     it("returns the same claudeAccounts whether enrich computes the list or receives the batch one", async () => {
       mockClaudeJsonlState("waiting");
       seedTwoAccounts();
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        authRotation: { ...baseConfig().authRotation, switchAuth: true },
+      });
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession({ claudeAccountId: "acc-1" }));
       const { SessionService } = await loadSessionServiceModule();
@@ -18856,6 +18875,10 @@ describe("SessionService", () => {
     it("computes the claude accounts snapshot once per listSessions batch", async () => {
       mockClaudeJsonlState("waiting");
       seedTwoAccounts();
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        authRotation: { ...baseConfig().authRotation, switchAuth: true },
+      });
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession({ id: "api-1", claudeAccountId: "acc-1" }));
       sessions.set("api-2", runningSession({ id: "api-2", claudeAccountId: "acc-1" }));
@@ -29513,6 +29536,7 @@ describe("SessionService", () => {
           autoRotateOnRateLimit: true,
           cooldownMinutes: 60,
           maxRotationsPerEpisode: 2,
+          switchAuth: false,
         },
       });
       testAccounts = [
@@ -29581,6 +29605,7 @@ describe("SessionService", () => {
           autoRotateOnRateLimit: false,
           cooldownMinutes: 60,
           maxRotationsPerEpisode: 2,
+          switchAuth: false,
         },
       });
       const sessions = createSessionStore();
@@ -62021,6 +62046,7 @@ describe("SessionService", () => {
           autoRotateOnRateLimit: true,
           cooldownMinutes: 60,
           maxRotationsPerEpisode: 2,
+          switchAuth: false,
           ...overrides,
         },
       };
