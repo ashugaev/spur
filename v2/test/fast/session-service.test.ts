@@ -30238,7 +30238,9 @@ describe("SessionService", () => {
         if (boundary === "queued") {
           await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
         } else {
-          await expect(service.deliver(record.id, "trigger after stale wake")).rejects.toMatchObject({
+          await expect(
+            service.deliver(record.id, "trigger after stale wake"),
+          ).rejects.toMatchObject({
             name: "TmuxProbeUnknownError",
             message: diagnostic,
           });
@@ -30323,7 +30325,9 @@ describe("SessionService", () => {
                 : {}),
               ...(change === "launch" ? { agentLaunchId: "replacement-launch" } : {}),
               ...(change === "owner" ? { agentSessionId: "replacement-owner" } : {}),
-              ...(change === "error" ? { error: "provider unavailable", errorSource: "other" } : {}),
+              ...(change === "error"
+                ? { error: "provider unavailable", errorSource: "other" }
+                : {}),
               ...(change === "source" ? { errorSource: "other" } : {}),
               ...(change === "server" ? { serverErrorAt: "2026-03-18T10:05:00.000Z" } : {}),
               queuedMessages: { messages: ["replacement queue"], awaitingPrompt: true },
@@ -30333,7 +30337,12 @@ describe("SessionService", () => {
               const lifecycle = sessionServiceInternals(service).lifecycle;
               const owner = lifecycle.begin("complete", [record.id]);
               if (change === "settled lifecycle")
-                lifecycle.settle(owner, true, () => "succeeded", () => true);
+                lifecycle.settle(
+                  owner,
+                  true,
+                  () => "succeeded",
+                  () => true,
+                );
             }
             return {
               runtimeAlive: true,
@@ -30423,7 +30432,9 @@ describe("SessionService", () => {
       } else {
         const { TmuxProbeUnknownError } = await import("../../src/runtime-tmux.js");
         waitForTmuxReadyMock.mockRejectedValueOnce(
-          origin === "generic probe" ? new TmuxProbeUnknownError(diagnostic) : new Error(diagnostic),
+          origin === "generic probe"
+            ? new TmuxProbeUnknownError(diagnostic)
+            : new Error(diagnostic),
         );
       }
       try {
