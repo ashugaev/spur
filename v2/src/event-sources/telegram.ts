@@ -1654,11 +1654,17 @@ async function handleAgentChoiceCallback(
     );
     return;
   }
-  const outcome = await claimAgentChoice(deps, pending, token, chatId, from.id).catch(
-    (error: unknown) =>
-      error instanceof ConsentRejectedError
-        ? choiceRejection(error.reason)
-        : choiceRejection("internal", error),
+  const outcome = await claimAgentChoice(
+    deps,
+    pending,
+    token,
+    chatId,
+    from.id,
+    conversation,
+  ).catch((error: unknown) =>
+    error instanceof ConsentRejectedError
+      ? choiceRejection(error.reason)
+      : choiceRejection("internal", error),
   );
   if ("reason" in outcome) {
     await reject(outcome, pending);
@@ -1702,6 +1708,7 @@ async function claimAgentChoice(
   token: string,
   chatId: number,
   actor: number,
+  conversation: TelegramConversation,
 ): Promise<TelegramChoice | ChoiceRejection> {
   const session = await findSession(deps, pending.sessionId);
   if (!session) return choiceRejection("session-missing");
@@ -1711,7 +1718,7 @@ async function claimAgentChoice(
       alert: `${formatTelegramSessionLabel(session.id, session.title?.trim() || undefined)} is not active.`,
     };
   const decision = pending.interfaceConsent
-    ? await decideConsentClick(deps, pending.sessionId, token, chatId, actor)
+    ? await decideConsentClick(deps, pending.sessionId, token, chatId, actor, conversation)
     : undefined;
   const choice = takeTelegramChoice(deps.dataDir, deps.projectId, deps.sourceId, token, chatId);
   // Lost the race with a sibling click or a superseding reply.
@@ -1727,6 +1734,7 @@ async function decideConsentClick(
   token: string,
   chatId: number,
   actor: number,
+  conversation: TelegramConversation,
 ): Promise<InterfaceConsent> {
   const policy = await consentPolicy(deps.config.allowedUsers).catch((error: unknown) => {
     throw new ConsentRejectedError("policy-unavailable", errorText(error));
@@ -1768,6 +1776,7 @@ async function decideConsentClick(
   const current = readInterfaceConsent(deps.dataDir, sessionId);
   const currentSession = readSession(deps.dataDir, sessionId);
   if (
+    !conversationIsCurrent(deps, sessionId, conversation) ||
     !active?.interfaceConsent ||
     !current ||
     current.generation !== record.generation ||

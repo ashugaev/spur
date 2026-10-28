@@ -1425,6 +1425,22 @@ describe("telegramSourceModule", () => {
       });
       expect(rejections().map((entry) => entry.details?.reason)).toEqual(["not-approver"]);
     });
+
+    it("aborts consent approval if the session becomes terminal while reading current branch", async () => {
+      const { dataDir, bot, emit, reconcile, click } = await approvalFixture();
+      vi.spyOn(workspaceModule, "readCurrentBranch").mockImplementation(async () => {
+        writeTelegramBindings(dataDir, "api", "telegram", []);
+        return "feature/example";
+      });
+      const ctx = click(123);
+
+      await bot.emitCallback(ctx);
+
+      expect(metadataModule.readInterfaceConsent(dataDir, "api-1")?.decision).toBe("pending");
+      expect(reconcile).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+      expect(findTelegramChoice(dataDir, "api", "telegram", "tok-approved", -1001)).not.toBeNull();
+    });
   });
 
   describe("dropped callbacks", () => {
@@ -2588,6 +2604,7 @@ describe("telegramSourceModule", () => {
               : {}),
           },
         ],
+        keepInterfaceConsent: false,
       });
       const take = vi.spyOn(metadataModule, "takeTelegramChoice");
       const decide = vi.spyOn(consentModule, "decideConsent");
