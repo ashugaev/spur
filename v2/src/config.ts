@@ -341,7 +341,7 @@ function parseReasoningEffort(
   return value;
 }
 
-function parseTriggerSpawnBlock(
+export function parseTriggerSpawnBlock(
   raw: Record<string, unknown>,
   label: string,
 ): TriggerSpawnBlockConfig {
@@ -2466,8 +2466,17 @@ function parseConfigFile(
   mode: ConfigMode,
   defaults?: ConfigDefaults,
 ): AppConfig {
+  return parseConfigDocument(configPath, readFileSync(configPath, "utf-8"), mode, defaults);
+}
+
+function parseConfigDocument(
+  configPath: string,
+  text: string,
+  mode: ConfigMode,
+  defaults?: ConfigDefaults,
+): AppConfig {
   const configDir = dirname(configPath);
-  const raw = parseYaml(readFileSync(configPath, "utf-8")) as unknown;
+  const raw = parseYaml(text) as unknown;
   const root = asObject(raw, "config");
 
   const resolvedDefaults = defaults ?? defaultConfigDefaults(configDir);
@@ -2960,45 +2969,56 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
   return parseConfigFile(
     configPath,
     "project",
-    defaults
-      ? {
-          serverHost: defaults.server.host,
-          serverPort: defaults.server.port,
-          dataDir: defaults.dataDir,
-          worktreeDir: defaults.worktreeDir,
-          defaultAgent: defaults.defaultAgent,
-          tmuxSocketName: defaults.tmux.socketName,
-          uiPort: defaults.ui.port,
-          mcpPort: defaults.mcp.port,
-          codexHome: defaults.models.codexHome,
-          voiceProvider: defaults.voice.provider,
-          voiceLanguage: defaults.voice.language,
-          voiceModel: defaults.voice.model,
-          ...(defaults.voice.provider === "openai_compatible"
-            ? {
-                voiceBaseUrl: defaults.voice.baseUrl,
-                voiceApiKey: defaults.voice.apiKey,
-              }
-            : defaults.voice.provider === "azure_openai"
-              ? {
-                  ...(defaults.voice.endpoint !== undefined
-                    ? { voiceEndpoint: defaults.voice.endpoint }
-                    : {}),
-                  ...(defaults.voice.apiKey !== undefined
-                    ? { voiceApiKey: defaults.voice.apiKey }
-                    : {}),
-                  ...(defaults.voice.apiVersion !== undefined
-                    ? { voiceApiVersion: defaults.voice.apiVersion }
-                    : {}),
-                }
-              : (defaults.voice.provider === "whisper_cpp" ||
-                    defaults.voice.provider === "faster_whisper") &&
-                  defaults.voice.modelPath !== undefined
-                ? { voiceModelPath: defaults.voice.modelPath }
-                : {}),
-        }
-      : undefined,
+    defaults ? projectConfigDefaults(defaults) : undefined,
   );
+}
+
+// Parse captured bytes against their logical owner path, including symlink-relative paths.
+export function parseConfigText(
+  configPath: string,
+  text: string,
+  projectDefaults?: AppConfig,
+): AppConfig {
+  return parseConfigDocument(
+    configPath,
+    text,
+    projectDefaults ? "project" : "instance",
+    projectDefaults ? projectConfigDefaults(projectDefaults) : undefined,
+  );
+}
+
+function projectConfigDefaults(defaults: AppConfig): ConfigDefaults {
+  return {
+    serverHost: defaults.server.host,
+    serverPort: defaults.server.port,
+    dataDir: defaults.dataDir,
+    worktreeDir: defaults.worktreeDir,
+    defaultAgent: defaults.defaultAgent,
+    tmuxSocketName: defaults.tmux.socketName,
+    uiPort: defaults.ui.port,
+    mcpPort: defaults.mcp.port,
+    codexHome: defaults.models.codexHome,
+    voiceProvider: defaults.voice.provider,
+    voiceLanguage: defaults.voice.language,
+    voiceModel: defaults.voice.model,
+    ...(defaults.voice.provider === "openai_compatible"
+      ? { voiceBaseUrl: defaults.voice.baseUrl, voiceApiKey: defaults.voice.apiKey }
+      : defaults.voice.provider === "azure_openai"
+        ? {
+            ...(defaults.voice.endpoint !== undefined
+              ? { voiceEndpoint: defaults.voice.endpoint }
+              : {}),
+            ...(defaults.voice.apiKey !== undefined ? { voiceApiKey: defaults.voice.apiKey } : {}),
+            ...(defaults.voice.apiVersion !== undefined
+              ? { voiceApiVersion: defaults.voice.apiVersion }
+              : {}),
+          }
+        : (defaults.voice.provider === "whisper_cpp" ||
+              defaults.voice.provider === "faster_whisper") &&
+            defaults.voice.modelPath !== undefined
+          ? { voiceModelPath: defaults.voice.modelPath }
+          : {}),
+  };
 }
 
 export function loadConfig(input?: string): AppConfig {

@@ -15,6 +15,12 @@ import { AutoPingError, AutoPingService } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
 import { projectConversationPage } from "./conversation-page.js";
 import { readCronJobs, UnknownCronProjectError } from "./cron-jobs.js";
+import {
+  CronJobEditError,
+  cronJobIdentity,
+  readCronJobDraft,
+  saveCronJobDraft,
+} from "./cron-job-editor.js";
 import type { ProcSnapshot } from "./sidecars/reap.js";
 import {
   clearFailedDeploySwitchRecord,
@@ -1291,6 +1297,40 @@ export async function startServer(
 
       if (method === "GET" && path === "/projects") {
         sendJson(response, 200, service.listProjects());
+        return;
+      }
+
+      if ((method === "GET" || method === "PATCH") && path === "/projects/cron/edit") {
+        try {
+          const identity = cronJobIdentity(url.searchParams);
+          const context = {
+            running: service.config,
+            bootstrapConfigPath: service.bootstrapConfigPath,
+            registryPaths: service.getRegistryPaths(),
+          };
+          let body: unknown;
+          if (method === "PATCH") {
+            try {
+              body = await readJsonBody<unknown>(request);
+            } catch {
+              throw new CronJobEditError(400, "invalid_body", "Invalid editor JSON body.");
+            }
+          }
+          sendJson(
+            response,
+            200,
+            method === "GET"
+              ? readCronJobDraft(context, identity)
+              : saveCronJobDraft(context, identity, body),
+          );
+        } catch (error) {
+          if (!(error instanceof CronJobEditError)) throw error;
+          sendJson(response, error.status, {
+            error: error.message,
+            code: error.code,
+            ...(error.field !== undefined ? { field: error.field } : {}),
+          });
+        }
         return;
       }
 

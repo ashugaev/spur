@@ -1929,6 +1929,32 @@ export interface CronJobsResponse {
   eventsSince: string | null;
 }
 
+export interface CronJobEditBlock {
+  prompt: string;
+  agent: AgentName | null;
+  model: string | null;
+  reasoningEffort: ProviderReasoningEffort | null;
+}
+
+export interface CronJobEditUpdate {
+  revision: string;
+  schedule: string;
+  blocks: CronJobEditBlock[];
+}
+
+export interface CronJobEditDraft extends CronJobEditUpdate {
+  projectId: string;
+  sourceId: string;
+  triggerId: string;
+  ownerPath: string;
+  sourceTriggerIds: string[];
+}
+
+export interface CronJobEditResult extends CronJobEditDraft {
+  saved: true;
+  activation: "pending";
+}
+
 export interface SessionLaunchOptions {
   project: string;
   agent: AgentName;

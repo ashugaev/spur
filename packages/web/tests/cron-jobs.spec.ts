@@ -1,5 +1,5 @@
 import { test, expect, type Page, mockSessions, type ProjectInfo } from "./fixtures.js";
-import type { CronJobsResponse } from "../src/lib/types";
+import type { CronJobEditDraft, CronJobEditUpdate, CronJobsResponse } from "../src/lib/types";
 
 const PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 
@@ -151,5 +151,117 @@ test.describe("Cron jobs modal", () => {
     await page.goto("/");
     await expect(page.getByRole("button", { name: "Cron jobs" })).toBeVisible();
     expect(urls).toEqual([]);
+  });
+});
+
+const EDIT_DRAFT: CronJobEditDraft = {
+  projectId: "my-project",
+  sourceId: "nightly",
+  triggerId: "audit",
+  ownerPath: "/repo/my-project/spur.yaml",
+  revision: "a".repeat(64),
+  schedule: "0 5 * * *",
+  sourceTriggerIds: ["audit", "sibling"],
+  blocks: [
+    { prompt: "Disk prompt", agent: "claude", model: "custom-unlisted", reasoningEffort: "high" },
+    { prompt: "Second disk prompt", agent: null, model: null, reasoningEffort: null },
+  ],
+};
+
+async function openEditor(page: Page) {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Cron jobs" }).click();
+  await page.getByRole("button", { name: /audit/ }).click();
+  await page.getByRole("button", { name: "Edit YAML" }).click();
+  await expect(page.getByLabel("Block 1 prompt")).toBeVisible();
+}
+
+test.describe("Cron YAML editor", () => {
+  test("saves disk drafts, preserves defaults and reopens saved values while runtime stays unchanged", async ({
+    page,
+  }) => {
+    await mockSessions(page, [], PROJECTS);
+    await mockCron(page);
+    let draft = structuredClone(EDIT_DRAFT);
+    await page.route("**/api/cron/edit?**", async (route) => {
+      if (route.request().method() === "PATCH") {
+        const body = route.request().postDataJSON() as CronJobEditUpdate;
+        expect(body.blocks[1]?.agent).toBeNull();
+        expect(body.blocks[0]?.model).toBe("custom-unlisted");
+        draft = { ...draft, ...body, revision: "b".repeat(64) };
+        await route.fulfill({ json: { ...draft, saved: true, activation: "pending" } });
+      } else await route.fulfill({ json: draft });
+    });
+    await openEditor(page);
+    await expect(page.getByLabel("Schedule")).toHaveValue("0 5 * * *");
+    await expect(page.getByText(/schedule affects: audit, sibling/)).toBeVisible();
+    await page.getByLabel("Block 2 prompt").fill("Saved second prompt");
+    await page.getByRole("button", { name: "Save YAML" }).click();
+    await expect(page.getByText("Saved to YAML. Pending activation.")).toBeVisible();
+    await page.getByRole("button", { name: "Back to cron jobs" }).click();
+    await expect(page.getByText("Audit errored sessions")).toBeVisible();
+    await page.getByRole("button", { name: "Edit YAML" }).click();
+    await expect(page.getByLabel("Block 2 prompt")).toHaveValue("Saved second prompt");
+  });
+
+  test("preserves conflicted text and requires discard before reloading", async ({ page }) => {
+    await mockSessions(page, [], PROJECTS);
+    await mockCron(page);
+    let reads = 0;
+    await page.route("**/api/cron/edit?**", async (route) => {
+      if (route.request().method() === "PATCH") {
+        await route.fulfill({
+          status: 409,
+          json: { error: "Config file changed. Reload before saving.", code: "config_changed" },
+        });
+      } else {
+        reads += 1;
+        await route.fulfill({
+          json: reads === 1 ? EDIT_DRAFT : { ...EDIT_DRAFT, schedule: "0 7 * * *" },
+        });
+      }
+    });
+    await openEditor(page);
+    await page.getByLabel("Block 1 prompt").fill("Keep conflicted text");
+    await page.getByRole("button", { name: "Save YAML" }).click();
+    await expect(page.getByRole("alert")).toContainText("Config file changed");
+    await expect(page.getByRole("button", { name: "Save YAML" })).toBeDisabled();
+    await expect(page.getByLabel("Block 1 prompt")).toHaveValue("Keep conflicted text");
+    page.once("dialog", (dialog) => dialog.dismiss());
+    await page.getByRole("button", { name: "Reload YAML" }).click();
+    await expect(page.getByLabel("Block 1 prompt")).toHaveValue("Keep conflicted text");
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByRole("button", { name: "Reload YAML" }).click();
+    await expect(page.getByLabel("Schedule")).toHaveValue("0 7 * * *");
+    await expect(page.getByLabel("Block 1 prompt")).toHaveValue("Disk prompt");
+  });
+
+  test("keeps mobile validation readable and guards keyboard dismissal", async ({ page }) => {
+    await mockSessions(page, [], PROJECTS);
+    await mockCron(page);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.route("**/api/cron/edit?**", async (route) => {
+      await route.fulfill(
+        route.request().method() === "PATCH"
+          ? { status: 422, json: { error: "Invalid cron schedule.", field: "schedule" } }
+          : { json: EDIT_DRAFT },
+      );
+    });
+    await openEditor(page);
+    await page.getByLabel("Schedule").fill("invalid cron");
+    await page.getByRole("button", { name: "Save YAML" }).click();
+    await expect(page.getByRole("alert")).toContainText("Invalid cron schedule.");
+    await expect(page.getByLabel("Schedule")).toHaveAttribute("aria-invalid", "true");
+    const overflow = await page
+      .getByRole("dialog")
+      .locator("form")
+      .evaluate((form) => form.scrollWidth > form.clientWidth);
+    expect(overflow).toBe(false);
+    page.once("dialog", (dialog) => dialog.dismiss());
+    await page.keyboard.press("Escape");
+    await expect(page.getByLabel("Schedule")).toHaveValue("invalid cron");
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("button", { name: "Edit YAML" })).toBeFocused();
   });
 });

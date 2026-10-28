@@ -3,7 +3,14 @@
 import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { CenteredLoader } from "@/components/CenteredLoader";
-import { buildCronRows, fetchCronJobs, type CronRow, type CronRun } from "@/lib/cron-jobs";
+import { CronJobEditor } from "@/components/CronJobEditor";
+import {
+  buildCronRows,
+  fetchCronJobs,
+  type CronJobEditIdentity,
+  type CronRow,
+  type CronRun,
+} from "@/lib/cron-jobs";
 import { formatAbsoluteTime, formatRelativeTime, formatShortTimestamp } from "@/lib/format";
 import { buildSessionPath } from "@/lib/project-routes";
 import type {
@@ -165,14 +172,37 @@ function actionSummary(row: CronRow): string {
   return count > 1 ? `spawn · ${count} blocks` : "spawn";
 }
 
-function JobDetail({ row, eventsSince }: { row: CronRow; eventsSince: string | null }) {
+function JobDetail({
+  row,
+  eventsSince,
+  onEdit,
+}: {
+  row: CronRow;
+  eventsSince: string | null;
+  onEdit: (row: CronRow, button: HTMLButtonElement) => void;
+}) {
   const action = row.trigger?.action;
   const blocks = action?.kind === "spawn" ? action.blocks : [];
   const sendPrompt = action?.kind === "send" ? action.prompt : null;
   return (
     <div className="flex flex-col gap-4 border-l-2 border-[var(--color-accent)] pb-3 pl-[11px] pr-[13px] pt-3">
       <section className={SECTION_CLASS}>
-        <h3 className={SECTION_HEADING_CLASS}>Settings</h3>
+        <div className="flex items-center justify-between gap-3">
+          <h3 className={SECTION_HEADING_CLASS}>Settings</h3>
+          {action?.kind === "spawn" ? (
+            <button
+              className="border border-[var(--color-border-default)] px-2 py-1 font-bold uppercase text-[var(--color-text-primary)] outline-none hover:border-[var(--color-accent)] focus-visible:border-[var(--color-accent)]"
+              onClick={(event) => onEdit(row, event.currentTarget)}
+              type="button"
+            >
+              Edit YAML
+            </button>
+          ) : (
+            <span className={SECONDARY_TEXT}>
+              {action?.kind === "send" ? "Send triggers are read-only" : "No spawn trigger to edit"}
+            </span>
+          )}
+        </div>
         <dl className="grid grid-cols-[6rem_minmax(0,1fr)] gap-x-3 gap-y-1">
           <Setting label="Cron">{row.source.schedule}</Setting>
           <Setting label="Run on start">{row.source.runOnStart ? "yes" : "no"}</Setting>
@@ -240,11 +270,13 @@ function JobRow({
   eventsSince,
   open,
   onToggle,
+  onEdit,
 }: {
   row: CronRow;
   eventsSince: string | null;
   open: boolean;
   onToggle: () => void;
+  onEdit: (row: CronRow, button: HTMLButtonElement) => void;
 }) {
   const marker = DISK_MARKER_TITLE[row.disk];
   const tickTitle = row.lastTick ? formatAbsoluteTime(row.lastTick) : noTickText(eventsSince);
@@ -292,12 +324,20 @@ function JobRow({
           {row.source.schedule} · {tickText}
         </span>
       </div>
-      {open ? <JobDetail eventsSince={eventsSince} row={row} /> : null}
+      {open ? <JobDetail eventsSince={eventsSince} onEdit={onEdit} row={row} /> : null}
     </div>
   );
 }
 
-function JobList({ data, allProjects }: { data: CronJobsResponse; allProjects: boolean }) {
+function JobList({
+  data,
+  allProjects,
+  onEdit,
+}: {
+  data: CronJobsResponse;
+  allProjects: boolean;
+  onEdit: (row: CronRow, button: HTMLButtonElement) => void;
+}) {
   const [openKey, setOpenKey] = useState<string | null>(null);
   const rows = buildCronRows(data, allProjects);
   if (rows.length === 0) {
@@ -330,6 +370,7 @@ function JobList({ data, allProjects }: { data: CronJobsResponse; allProjects: b
           key={row.key}
           onToggle={() => setOpenKey((current) => (current === row.key ? null : row.key))}
           open={openKey === row.key}
+          onEdit={onEdit}
           row={row}
         />
       ))}
@@ -348,33 +389,44 @@ export function CronJobsModal({
 }) {
   const [projectId, setProjectId] = useState(initialProjectId);
   const [state, setState] = useState<LoadState>({ status: "pending" });
+  const [editing, setEditing] = useState<CronJobEditIdentity | null>(null);
+  const [refresh, setRefresh] = useState(0);
   const selectRef = useRef<HTMLSelectElement>(null);
+  const editorCloseRef = useRef<(() => void) | null>(null);
+  const editButtonRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
-    selectRef.current?.focus();
-  }, []);
+    if (editing === null) (editButtonRef.current ?? selectRef.current)?.focus();
+  }, [editing]);
+
+  const requestClose = () => {
+    if (editing) editorCloseRef.current?.();
+    else onClose();
+  };
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      onClose();
+      requestClose();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onClose]);
+  });
 
   useEffect(() => {
     const controller = new AbortController();
-    setState({ status: "pending" });
+    if (refresh === 0) setState({ status: "pending" });
     fetchCronJobs(projectId, controller.signal).then(
-      (data) => setState({ status: "ready", data }),
+      (data) => {
+        if (!controller.signal.aborted) setState({ status: "ready", data });
+      },
       () => {
         if (!controller.signal.aborted) setState({ status: "error" });
       },
     );
     return () => controller.abort();
-  }, [projectId]);
+  }, [projectId, refresh]);
 
   return (
     <div
@@ -382,53 +434,79 @@ export function CronJobsModal({
       aria-modal="true"
       className="fixed inset-0 z-[85] flex items-start justify-center bg-[var(--color-modal-backdrop)] px-4 pb-4 pt-[max(2.75rem,calc(var(--safe-top)_+_0.75rem))]"
       onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
+        if (event.target === event.currentTarget) requestClose();
       }}
       role="dialog"
     >
       <div className="flex max-h-[80vh] w-[min(640px,100%)] flex-col border border-[var(--color-border-strong)] bg-[var(--color-bg-base)]">
-        <div className="flex shrink-0 items-center gap-3 border-b border-[var(--color-border-default)] px-[13px] py-2">
-          <h2
-            className={`font-bold uppercase tracking-[0.1em] ${PRIMARY_TEXT}`}
-            id="cron-modal-title"
-          >
-            Cron
-          </h2>
-          <select
-            aria-label="Cron project"
-            className="h-7 min-w-0 border border-[var(--color-input-border)] bg-[var(--color-input-bg)] px-2 text-[var(--color-input-text)] outline-none transition focus:border-[var(--color-accent)] focus-visible:border-[var(--color-accent)]"
-            onChange={(event) => setProjectId(event.target.value)}
-            ref={selectRef}
-            value={projectId}
-          >
-            <option value="">All Projects</option>
-            {projects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
-              </option>
-            ))}
-          </select>
-          <span className="flex-1" />
-          <button
-            aria-label="Close cron"
-            className={`uppercase ${SECONDARY_TEXT} outline-none transition underline-offset-2 hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-accent)] focus-visible:underline`}
-            onClick={onClose}
-            type="button"
-          >
-            esc
-          </button>
-        </div>
+        {editing ? (
+          <CronJobEditor
+            closeRequestRef={editorCloseRef}
+            identity={editing}
+            onBack={() => setEditing(null)}
+            onSaved={() => setRefresh((value) => value + 1)}
+          />
+        ) : null}
+        <div className={editing ? "hidden" : "contents"}>
+          <div className="flex shrink-0 items-center gap-3 border-b border-[var(--color-border-default)] px-[13px] py-2">
+            <h2
+              className={`font-bold uppercase tracking-[0.1em] ${PRIMARY_TEXT}`}
+              id={editing ? undefined : "cron-modal-title"}
+            >
+              Cron
+            </h2>
+            <select
+              aria-label="Cron project"
+              className="h-7 min-w-0 border border-[var(--color-input-border)] bg-[var(--color-input-bg)] px-2 text-[var(--color-input-text)] outline-none transition focus:border-[var(--color-accent)] focus-visible:border-[var(--color-accent)]"
+              onChange={(event) => {
+                setRefresh(0);
+                setProjectId(event.target.value);
+              }}
+              ref={selectRef}
+              value={projectId}
+            >
+              <option value="">All Projects</option>
+              {projects.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
+            <span className="flex-1" />
+            <button
+              aria-label="Close cron"
+              className={`uppercase ${SECONDARY_TEXT} outline-none transition underline-offset-2 hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-accent)] focus-visible:underline`}
+              onClick={onClose}
+              type="button"
+            >
+              esc
+            </button>
+          </div>
 
-        <div className="flex-1 overflow-y-auto">
-          {state.status === "ready" ? (
-            <JobList allProjects={projectId === ""} data={state.data} key={projectId} />
-          ) : state.status === "pending" ? (
-            <CenteredLoader className="py-6" label="Loading cron jobs" />
-          ) : (
-            <div className={`px-[13px] py-6 text-center ${ERROR_TEXT}`}>
-              Could not load cron jobs
-            </div>
-          )}
+          <div className="flex-1 overflow-y-auto">
+            {state.status === "ready" ? (
+              <JobList
+                allProjects={projectId === ""}
+                data={state.data}
+                key={projectId}
+                onEdit={(row, button) => {
+                  if (!row.trigger) return;
+                  editButtonRef.current = button;
+                  setEditing({
+                    projectId: row.projectId,
+                    sourceId: row.source.sourceId,
+                    triggerId: row.trigger.triggerId,
+                  });
+                }}
+              />
+            ) : state.status === "pending" ? (
+              <CenteredLoader className="py-6" label="Loading cron jobs" />
+            ) : (
+              <div className={`px-[13px] py-6 text-center ${ERROR_TEXT}`}>
+                Could not load cron jobs
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
