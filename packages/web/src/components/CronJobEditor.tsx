@@ -48,6 +48,7 @@ export function CronJobEditor({
   closeRequestRef: MutableRefObject<(() => void) | null>;
 }) {
   const [state, setState] = useState<EditorState>({ status: "loading" });
+  const loading = state.status === "loading";
   const [reload, setReload] = useState(0);
   const scheduleRef = useRef<HTMLInputElement>(null);
   const feedbackRef = useRef<HTMLDivElement>(null);
@@ -199,7 +200,7 @@ export function CronJobEditor({
           esc
         </button>
       </div>
-      {state.status === "loading" ? (
+      {loading ? (
         <div
           aria-busy="true"
           aria-label="Loading disk settings"
