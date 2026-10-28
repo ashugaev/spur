@@ -15,7 +15,7 @@ import {
 import { cleanupTrackedTempDirs, createTempDir } from "../helpers/common.js";
 
 vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
+  const actual = await importOriginal<typeof fs>();
   return {
     ...actual,
     writeFileSync: vi.fn(actual.writeFileSync),
@@ -334,7 +334,7 @@ describe("CronJob YAML editor", () => {
     const f = await fixture();
     const body = update(readCronJobDraft(f.context, ID));
     body.blocks[0]!.prompt = "UI edit";
-    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const actual = await vi.importActual<typeof fs>("node:fs");
     vi.mocked(fs.writeFileSync).mockImplementationOnce((path, data, options) => {
       actual.writeFileSync(path, data, options);
       actual.writeFileSync(f.path, f.text.replace("Audit sessions", "Other sessions"));
@@ -354,7 +354,7 @@ describe("CronJob YAML editor", () => {
     await symlink(first, f.path);
     const body = update(readCronJobDraft(f.context, ID));
     body.blocks[0]!.prompt = "UI edit";
-    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const actual = await vi.importActual<typeof fs>("node:fs");
     vi.mocked(fs.writeFileSync).mockImplementationOnce((path, data, options) => {
       actual.writeFileSync(path, data, options);
       actual.unlinkSync(f.path);

@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
-import { CenteredLoader } from "@/components/CenteredLoader";
+import { BusyContent } from "@/components/BusyContent";
+import { Spinner } from "@/components/icons/Spinner";
 import { INPUT_CLASS } from "@/design/classes";
 import { AGENT_OPTIONS } from "@/lib/agents";
 import {
@@ -199,7 +200,14 @@ export function CronJobEditor({
         </button>
       </div>
       {state.status === "loading" ? (
-        <CenteredLoader className="py-6" label="Loading disk settings" />
+        <div
+          aria-busy="true"
+          aria-label="Loading disk settings"
+          className="flex justify-center py-6"
+          role="status"
+        >
+          <Spinner />
+        </div>
       ) : state.status === "error" ? (
         <div className="flex flex-col gap-3 p-3 text-[var(--color-status-error)]" role="alert">
           {state.message}
@@ -362,11 +370,13 @@ export function CronJobEditor({
               Cancel
             </button>
             <button
+              aria-busy={state.saving || undefined}
+              aria-label={state.saving ? "Saving YAML" : undefined}
               className="bg-[var(--color-accent)] px-2 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] outline-none transition hover:bg-[var(--color-accent-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
               disabled={state.saving || state.conflict || !dirty || invalid}
               type="submit"
             >
-              {state.saving ? "Saving…" : "Save YAML"}
+              <BusyContent busy={state.saving}>Save YAML</BusyContent>
             </button>
           </div>
         </form>

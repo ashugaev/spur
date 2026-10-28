@@ -16,11 +16,13 @@ import { parseConfigText, parseTriggerSpawnBlock } from "./config.js";
 import { ownerFor, resolveCronOwnerFiles } from "./cron-jobs.js";
 import { deriveMinimumIntervalMs } from "./event-sources/cron.js";
 import type {
+  AgentName,
   AppConfig,
   CronJobEditBlock,
   CronJobEditDraft,
   CronJobEditResult,
   CronJobEditUpdate,
+  ProviderReasoningEffort,
 } from "./types.js";
 
 export class CronJobEditError extends Error {
@@ -205,8 +207,8 @@ function snapshot(context: CronJobEditorContext, identity: CronJobIdentity) {
   if (!project) {
     throw new CronJobEditError(404, "not_found", "Project no longer exists on disk.");
   }
-  const source = project.sources?.[sourceId];
-  const trigger = project.triggers?.[triggerId];
+  const source = project.sources[sourceId];
+  const trigger = project.triggers[triggerId];
   if (!source || !trigger || trigger.source !== sourceId) {
     throw new CronJobEditError(
       404,
@@ -251,14 +253,16 @@ function snapshot(context: CronJobEditorContext, identity: CronJobIdentity) {
     ownerPath: owner.path,
     revision,
     schedule: sourceNode.get("schedule") as string,
-    sourceTriggerIds: Object.entries(project.triggers ?? {})
+    sourceTriggerIds: Object.entries(project.triggers)
       .filter(([, entry]) => entry.source === sourceId)
       .map(([id]) => id),
-    blocks: trigger.spawn.blocks.map((block, index) => ({
-      prompt: blockNodes[index]!.get("prompt") as string,
-      agent: block.agent ?? null,
-      model: blockNodes[index]!.has("model") ? (blockNodes[index]!.get("model") as string) : null,
-      reasoningEffort: block.reasoningEffort ?? null,
+    blocks: blockNodes.map((node) => ({
+      prompt: node.get("prompt") as string,
+      agent: node.has("agent") ? (node.get("agent") as AgentName) : null,
+      model: node.has("model") ? (node.get("model") as string) : null,
+      reasoningEffort: node.has("reasoningEffort")
+        ? (node.get("reasoningEffort") as ProviderReasoningEffort)
+        : null,
     })),
   };
   return { draft, physicalPath, doc, sourceNode, blockNodes, projectDefaults };
@@ -303,7 +307,8 @@ export function saveCronJobDraft(
     }
     current.sourceNode.set("schedule", update.schedule);
     update.blocks.forEach((block, index) => {
-      const node = current.blockNodes[index]!;
+      const node = current.blockNodes[index];
+      if (!node) conflict();
       for (const key of ["prompt", "agent", "model", "reasoningEffort"] as const) {
         if (block[key] === null) node.delete(key);
         else node.set(key, block[key]);

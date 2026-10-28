@@ -310,6 +310,7 @@ describe("CronJob editor", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Save YAML" }));
     expect(await screen.findByText("Saved to YAML. Pending activation.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Save YAML" })).not.toHaveAttribute("aria-busy");
     expect(screen.getByRole("status")).toHaveFocus();
     expect(patch).toHaveBeenCalledWith({
       revision: DRAFT.revision,
@@ -406,7 +407,11 @@ describe("CronJob editor", () => {
       target: { value: "Saving prompt" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save YAML" }));
-    expect(await screen.findByRole("button", { name: "Saving…" })).toBeDisabled();
+    const savingButton = await screen.findByRole("button", { name: "Saving YAML" });
+    expect(savingButton).toBeDisabled();
+    expect(savingButton).toHaveAttribute("aria-busy", "true");
+    expect(savingButton.querySelector("[data-busy-content]")).toBeInTheDocument();
+    expect(within(savingButton).queryByText("Saving…")).toBeNull();
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.getByLabelText("Block 1 prompt")).toBeVisible();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
@@ -435,6 +440,11 @@ describe("CronJob editor", () => {
     fireEvent.click(screen.getByText("audit"));
     fireEvent.click(screen.getByRole("button", { name: "Edit YAML" }));
     expect(screen.getByRole("status", { name: "Loading disk settings" })).toBeVisible();
+    expect(screen.getByRole("status", { name: "Loading disk settings" })).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
+    expect(screen.getByRole("status", { name: "Loading disk settings" }).textContent).toBe("");
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Only Cron spawn triggers can be edited.",
     );
