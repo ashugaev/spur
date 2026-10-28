@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ghModule from "../../src/gh.js";
 import type * as prLookupModule from "../../src/pr-lookup.js";
+import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
 import type { AppConfig, ProjectConfig, SessionRecord, SessionSlots } from "../../src/types.js";
 
 const { existsSyncMock } = vi.hoisted(() => ({
@@ -127,8 +128,7 @@ vi.mock("../../src/agent-hook-state.js", () => ({
   readAgentHookState: vi.fn(),
 }));
 vi.mock("../../src/runtime-tmux.js", async (importOriginal) => ({
-  TmuxProbeUnknownError: (await importOriginal<typeof import("../../src/runtime-tmux.js")>())
-    .TmuxProbeUnknownError,
+  TmuxProbeUnknownError: (await importOriginal<typeof RuntimeTmuxModule>()).TmuxProbeUnknownError,
   createTmuxSession: vi.fn(),
   createTmuxCommandSession: vi.fn(),
   createTmuxSidecarSession: vi.fn(),
