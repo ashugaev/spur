@@ -113,7 +113,10 @@ describe("GET /projects/cron", () => {
       join(dataDir, "config-registry.json"),
       JSON.stringify({ configPaths: [ownerPath], unconfiguredProjects: [] }),
     );
-    const server = await startServer(bootstrapPath, { info: () => undefined, warn: () => undefined });
+    const server = await startServer(bootstrapPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
     try {
       const response = await fetch(`http://127.0.0.1:${port}/projects/cron?project=registered`);
       expect(response.status).toBe(200);
