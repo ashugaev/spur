@@ -22,6 +22,7 @@ import {
   type TelegramAutoSpawnConfig,
   type TelegramBinding,
   type TelegramBotIdentity,
+  type TelegramChoice,
   type TelegramMessageEventData,
   type TelegramSourceConfig,
   type TelegramConversation,
@@ -37,10 +38,13 @@ import type {
 import { formatTelegramSessionLabel, telegramTopicIsDeleting } from "../telegram-source-state.js";
 import { telegramStatusEmoji } from "../telegram-status-emoji.js";
 import {
+  ConsentRejectedError,
   consentPolicy,
   decideConsent,
   reconcileInterfaceConsent,
   repositoryOf,
+  type ConsentRejectReason,
+  type InterfaceConsent,
 } from "../review-interface-consent.js";
 import { workspaceIdOf } from "../session-desk.js";
 import { readCurrentBranch } from "../workspace.js";
@@ -122,6 +126,10 @@ interface TelegramSentMessage {
   message_id?: number;
 }
 
+interface TelegramInlineMarkup {
+  inline_keyboard: { text: string; callback_data?: string; url?: string }[][];
+}
+
 interface TelegramCallbackContext {
   update?: {
     update_id?: number;
@@ -134,6 +142,7 @@ interface TelegramCallbackContext {
       message_thread_id?: number | undefined;
       is_topic_message?: true;
       text?: string;
+      reply_markup?: TelegramInlineMarkup;
       chat: {
         id: number;
       };
@@ -143,8 +152,9 @@ interface TelegramCallbackContext {
       username?: string;
     };
   };
-  answerCallbackQuery(text?: string): Promise<unknown>;
+  answerCallbackQuery(text?: string | { text: string; show_alert?: boolean }): Promise<unknown>;
   editMessageText?(text: string, options?: unknown): Promise<unknown>;
+  editMessageReplyMarkup?(other: { reply_markup: TelegramInlineMarkup }): Promise<unknown>;
   reply?(text: string, options?: unknown): Promise<unknown>;
   api?: {
     editMessageText(chatId: number, messageId: number, text: string): Promise<unknown>;
@@ -660,6 +670,42 @@ async function editOrReply(
   await ctx.reply(text);
 }
 
+/**
+ * Reassign the group's plain-message binding and retire displaced outbound
+ * target/offers. Group-main recorded replies still reach their sender.
+ */
+async function detachDisplacedSession(
+  runtime: TelegramRuntime,
+  ctx: Pick<TelegramTextContext, "reply">,
+  chatId: number,
+  messageThreadId: number | undefined,
+  taker: SourceSessionListItem,
+  displacedId: string,
+): Promise<void> {
+  const deps = runtime.deps;
+  try {
+    const target = readTelegramReplyTarget(deps.dataDir, displacedId);
+    if (target && isSameTelegramTarget(target, chatId, messageThreadId)) {
+      deleteTelegramReplyTarget(deps.dataDir, displacedId);
+    }
+    writeTelegramOffer(deps.dataDir, deps.projectId, deps.sourceId, {
+      sessionId: displacedId,
+      chatId,
+      choices: [],
+      keepInterfaceConsent: false,
+    });
+    const displaced = await findSession(deps, displacedId);
+    const label = (session: Pick<SourceSessionListItem, "id" | "title">): string =>
+      formatTelegramSessionLabel(session.id, session.title?.trim() || undefined);
+    await ctx.reply(
+      messageThreadId === undefined
+        ? `${label(taker)} receives plain messages in this chat. Reply to an agent's message to reach that agent.`
+        : `${label(taker)} took over this thread from ${label(displaced ?? { id: displacedId })}.`,
+    );
+  } catch (error) {
+    logPersistError(deps, error);
+  }
+}
 type TelegramSpawnOutcome =
   | { phase: "not_submitted"; error?: unknown }
   | { phase: "submitted_unknown"; error: unknown }
@@ -1253,12 +1299,30 @@ async function handleTelegramCallback(
     ? { ...query.message, message_thread_id: telegramMessageThreadId(query.message) }
     : undefined;
   const deps = runtime.deps;
-  if (!(await rememberUpdate(runtime, ctx.update))) return;
+  const updateId = ctx.update?.update_id;
+  const drop = (
+    reason: "duplicate" | "no-data" | "no-message" | "not-allowed" | "no-sender",
+  ): void =>
+    logSpurEvent(deps.dataDir, {
+      event: "source.telegram.callback_dropped",
+      level: "warn",
+      projectId: deps.projectId,
+      sourceId: deps.sourceId,
+      message: `Telegram callback dropped: ${reason}`,
+      details: {
+        reason,
+        ...(updateId !== undefined ? { updateId } : {}),
+        ...(message ? { chatId: message.chat.id } : {}),
+        ...(query?.from ? { userId: query.from.id } : {}),
+      },
+    });
+  if (!(await rememberUpdate(runtime, ctx.update))) return drop("duplicate");
   runtime.workbench.prune();
-  if (!data || !message) return;
+  if (!data) return drop("no-data");
+  if (!message) return drop("no-message");
   const from = query.from;
-  if (!isAllowed(deps.config, message.chat.id, from)) return;
-  if (!from) return;
+  if (!from) return drop("no-sender");
+  if (!isAllowed(deps.config, message.chat.id, from)) return drop("not-allowed");
 
   if (data.startsWith(WORKBENCH_CALLBACK_PREFIX)) {
     await handleWorkbenchCallback(
@@ -1452,10 +1516,88 @@ async function handleTelegramCallback(
   }
 }
 
+type ChoiceRejectReason =
+  | ConsentRejectReason
+  | "inactive"
+  | "session-missing"
+  | "session-inactive"
+  | "internal";
+
+/** Alert per rejected click; every text stays under Telegram's 200-char answer limit. */
+const CHOICE_REJECT_TEXT: Record<Exclude<ChoiceRejectReason, "session-inactive">, string> = {
+  inactive: "This choice is no longer active.",
+  retired: "This choice is no longer active.",
+  "session-missing": "Session is no longer active.",
+  "not-approver": "Only the designated approver can decide this interface approval.",
+  expired: "This interface approval expired. Ask the agent to request it again.",
+  decided: "This interface approval is already decided.",
+  superseded: "A newer interface approval replaced this one.",
+  "not-delivered": "This interface approval was not delivered.",
+  "binding-mismatch": "This interface approval belongs to another chat or source.",
+  "policy-unavailable": "Interface approval policy is unavailable or changed.",
+  "policy-changed": "Interface approval policy is unavailable or changed.",
+  "task-changed": "The session branch or workspace changed since approval was requested.",
+  internal: "Choice failed. Try again.",
+};
+
+interface ChoiceRejection {
+  reason: ChoiceRejectReason;
+  alert: string;
+  error?: unknown;
+}
+
+function choiceRejection(
+  reason: Exclude<ChoiceRejectReason, "session-inactive">,
+  error?: unknown,
+): ChoiceRejection {
+  return { reason, alert: CHOICE_REJECT_TEXT[reason], ...(error !== undefined ? { error } : {}) };
+}
+
+function singleChoiceButton(text: string, callbackData: string): TelegramInlineMarkup {
+  return { inline_keyboard: [[{ text, callback_data: callbackData }]] };
+}
+
+/** Best-effort keyboard edit; resolves whether Telegram accepted it. */
+async function editChoiceMarkup(
+  ctx: TelegramCallbackContext,
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  markup: TelegramInlineMarkup,
+): Promise<boolean> {
+  if (!ctx.editMessageReplyMarkup) return false;
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: markup });
+    return true;
+  } catch (error) {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram choice keyboard edit failed: ${redactedErrorText(deps, error)}`,
+    );
+    return false;
+  }
+}
+
+/**
+ * Best-effort: Telegram expires callback queries, and a rejected answer must
+ * not swallow a click that was already consumed.
+ */
+async function answerChoice(
+  ctx: TelegramCallbackContext,
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  answer: string | { text: string; show_alert: true },
+): Promise<void> {
+  try {
+    await ctx.answerCallbackQuery(answer);
+  } catch (error) {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram choice ack failed: ${redactedErrorText(deps, error)}`,
+    );
+  }
+}
+
 /**
  * Delivers a click on an agent-offered button as an ordinary user message to
  * the session that offered it. The token is single-use and carries the whole
- * offer with it, so sibling buttons go dead on the first click.
+ * offer with it, so sibling buttons go dead on the first click. The keyboard
+ * turns "Sending" before any lookup; a rejection restores it and alerts why.
  */
 async function handleAgentChoiceCallback(
   ctx: TelegramCallbackContext,
@@ -1465,21 +1607,56 @@ async function handleAgentChoiceCallback(
   from: { id: number; username?: string },
 ): Promise<void> {
   const deps = runtime.deps;
-  const pending = findTelegramChoice(
-    deps.dataDir,
-    deps.projectId,
-    deps.sourceId,
-    token,
-    message.chat.id,
-  );
+  const chatId = message.chat.id;
+  const callbackData = `${TELEGRAM_CHOICE_CALLBACK_PREFIX}${token}`;
+  let sending = false;
+  const reject = async (rejection: ChoiceRejection, pending?: TelegramChoice): Promise<void> => {
+    // Only a keyboard this click changed is put back: the original while the
+    // offer is live, none once it is spent.
+    if (sending) {
+      const live = findTelegramChoice(deps.dataDir, deps.projectId, deps.sourceId, token, chatId);
+      const restore = live ? message.reply_markup : undefined;
+      await editChoiceMarkup(ctx, deps, restore ?? { inline_keyboard: [] });
+    }
+    logSpurEvent(deps.dataDir, {
+      event: "source.telegram.choice_rejected",
+      level: "warn",
+      projectId: deps.projectId,
+      sourceId: deps.sourceId,
+      ...(pending ? { sessionId: pending.sessionId } : {}),
+      message: `Telegram choice rejected: ${rejection.reason}`,
+      details: {
+        reason: rejection.reason,
+        chatId,
+        userId: from.id,
+        consent: pending?.interfaceConsent !== undefined,
+        ...(rejection.error !== undefined
+          ? { error: redactedErrorText(deps, rejection.error) }
+          : {}),
+      },
+    });
+    await answerChoice(ctx, deps, { text: rejection.alert, show_alert: true });
+  };
+  const pending = findTelegramChoice(deps.dataDir, deps.projectId, deps.sourceId, token, chatId);
   if (!pending) {
-    await ctx.answerCallbackQuery("This choice is no longer active.");
+    await reject(choiceRejection("inactive"));
     return;
   }
-  // Liveness before consumption: a dead lookup must leave the offer clickable.
-  const session = await findSession(deps, pending.sessionId);
+  if (message.reply_markup)
+    sending = await editChoiceMarkup(
+      ctx,
+      deps,
+      singleChoiceButton(`Sending: ${pending.text}…`, callbackData),
+    );
+  let session: SourceSessionListItem | null;
+  try {
+    session = await findSession(deps, pending.sessionId);
+  } catch (error) {
+    await reject(choiceRejection("internal", error), pending);
+    return;
+  }
   if (!session) {
-    await ctx.answerCallbackQuery("Session is no longer active.");
+    await reject(choiceRejection("session-missing"), pending);
     return;
   }
   const inputThreadId =
@@ -1496,136 +1673,42 @@ async function handleAgentChoiceCallback(
     !conversationIsCurrent(deps, session.id, conversation) ||
     !isSameTelegramTarget(conversation, message.chat.id, inputThreadId)
   ) {
+    if (sending) {
+      await editChoiceMarkup(ctx, deps, message.reply_markup ?? { inline_keyboard: [] });
+    }
     await ctx.answerCallbackQuery("Continue in the assigned topic.");
     await ctx.reply?.(conversationText(conversation));
     return;
   }
   if (session.inactive) {
-    await ctx.answerCallbackQuery(
-      `${formatTelegramSessionLabel(session.id, session.title?.trim() || undefined)} is not active.`,
+    await reject(
+      {
+        reason: "session-inactive",
+        alert: `${formatTelegramSessionLabel(session.id, session.title?.trim() || undefined)} is not active.`,
+      },
+      pending,
     );
     return;
   }
-  let choice: ReturnType<typeof takeTelegramChoice> = null;
-  if (pending.interfaceConsent) {
-    try {
-      const policy = await consentPolicy(deps.config.allowedUsers);
-      const record = readInterfaceConsent(deps.dataDir, pending.sessionId);
-      if (
-        !record ||
-        policy.approverUserId !== record.approverUserId ||
-        !policy.repositories.includes(record.repository)
-      )
-        throw new Error("Interface approval policy changed");
-      const actualSession = readSession(deps.dataDir, pending.sessionId);
-      if (
-        !actualSession ||
-        actualSession.project !== record.projectId ||
-        actualSession.branch !== record.branch ||
-        workspaceIdOf(actualSession) !== record.authority ||
-        (await readCurrentBranch(actualSession.worktreePath)) !== record.branch
-      )
-        throw new Error("Interface approval task changed");
-      const relocated = readSession(deps.dataDir, pending.sessionId);
-      if (
-        !relocated ||
-        relocated.project !== record.projectId ||
-        relocated.branch !== record.branch ||
-        workspaceIdOf(relocated) !== record.authority
-      )
-        throw new Error("Interface approval task changed");
-      const validatedPath = relocated.worktreePath;
-      if (validatedPath !== actualSession.worktreePath) {
-        const [branch, repository] = await Promise.all([
-          readCurrentBranch(validatedPath),
-          repositoryOf(validatedPath),
-        ]);
-        if (branch !== record.branch || repository !== record.repository)
-          throw new Error("Interface approval task changed");
-      }
-      const active = findTelegramChoice(
-        deps.dataDir,
-        deps.projectId,
-        deps.sourceId,
-        token,
-        message.chat.id,
-      );
-      const current = readInterfaceConsent(deps.dataDir, pending.sessionId);
-      const currentSession = readSession(deps.dataDir, pending.sessionId);
-      if (
-        !conversationIsCurrent(deps, session.id, conversation) ||
-        !active?.interfaceConsent ||
-        !current ||
-        current.generation !== record.generation ||
-        current.challenge !== record.challenge ||
-        current.authority !== record.authority ||
-        !currentSession ||
-        currentSession.project !== record.projectId ||
-        currentSession.branch !== record.branch ||
-        currentSession.worktreePath !== validatedPath ||
-        workspaceIdOf(currentSession) !== record.authority
-      )
-        throw new Error("Interface approval superseded");
-      const decision = decideConsent(current, {
-        session: pending.sessionId,
-        sourceId: deps.sourceId,
-        projectId: deps.projectId,
-        chatId: message.chat.id,
-        actor: from.id,
-        challenge: active.interfaceConsent.challenge,
-        decision: active.interfaceConsent.decision,
-      });
-      choice = takeTelegramChoice(
-        deps.dataDir,
-        deps.projectId,
-        deps.sourceId,
-        token,
-        message.chat.id,
-      );
-      if (!choice) throw new Error("Interface approval choice retired");
-      writeInterfaceConsent(deps.dataDir, decision);
-      // Failed external publication keeps the durable outbox for the next lifecycle call.
-      await reconcileInterfaceConsent(deps.dataDir, pending.sessionId).catch(() => {
-        deps.logger.warn?.("Interface consent publication blocked; decision retained locally.");
-      });
-    } catch {
-      await ctx.answerCallbackQuery(
-        "Interface approval is inactive or requires the designated approver.",
-      );
-      return;
-    }
-  }
-  choice ??= takeTelegramChoice(
-    deps.dataDir,
-    deps.projectId,
-    deps.sourceId,
-    token,
-    message.chat.id,
+  const outcome = await claimAgentChoice(deps, pending, token, chatId, from.id).catch(
+    (error: unknown) =>
+      error instanceof ConsentRejectedError
+        ? choiceRejection(error.reason)
+        : choiceRejection("internal", error),
   );
-  // Lost the race with a sibling click or a superseding reply.
-  if (!choice) {
-    await ctx.answerCallbackQuery("This choice is no longer active.");
+  if ("reason" in outcome) {
+    await reject(outcome, pending);
     return;
   }
-  // Best-effort: Telegram expires callback queries, and a rejected answer must
-  // not swallow a click that was already consumed.
-  try {
-    await ctx.answerCallbackQuery(`Sent: ${choice.text}`);
-  } catch (error) {
-    deps.logger.warn?.(
-      `[source:${deps.projectId}/${deps.sourceId}] telegram choice ack failed: ${errorText(error)}`,
-    );
-  }
-  // Replacing the text also drops the keyboard, so the answered offer cannot be clicked again.
-  if (ctx.editMessageText && message.text) {
-    try {
-      await ctx.editMessageText(`${message.text}\n\nSelected: ${choice.text}`);
-    } catch (error) {
-      deps.logger.warn?.(
-        `[source:${deps.projectId}/${deps.sourceId}] telegram choice edit failed: ${errorText(error)}`,
-      );
-    }
-  }
+  const choice = outcome;
+  await answerChoice(ctx, deps, `Sent: ${choice.text}`);
+  // Text and formatting stay; the spent keyboard shows the pick.
+  await editChoiceMarkup(ctx, deps, singleChoiceButton(`Selected: ${choice.text}`, callbackData));
+  // Failed external publication keeps the durable outbox for the next lifecycle call.
+  if (choice.interfaceConsent)
+    await reconcileInterfaceConsent(deps.dataDir, choice.sessionId).catch(() => {
+      deps.logger.warn?.("Interface consent publication blocked; decision retained locally.");
+    });
   // The clicked message is the truth about the thread: an offer sent before a
   // forum topic existed carries none, and a stale one would strand the reply.
   const messageThreadId =
@@ -1638,7 +1721,7 @@ async function handleAgentChoiceCallback(
     chat: { id: choice.chatId },
     from,
   };
-  if (!conversationIsCurrent(deps, session.id, conversation)) return;
+  if (!conversationIsCurrent(deps, choice.sessionId, conversation)) return;
   // A click posts no status message of its own.
   recordTelegramReplyTarget(deps, {
     sessionId: choice.sessionId,
@@ -1646,6 +1729,102 @@ async function handleAgentChoiceCallback(
     ...(messageThreadId !== undefined ? { messageThreadId } : {}),
   });
   deps.emit(TELEGRAM_MESSAGE_EVENT, eventData(clickMessage, choice.sessionId, choice.value));
+}
+
+/** Liveness before consumption: a dead lookup must leave the offer clickable. */
+async function claimAgentChoice(
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  pending: TelegramChoice,
+  token: string,
+  chatId: number,
+  actor: number,
+): Promise<TelegramChoice | ChoiceRejection> {
+  const session = await findSession(deps, pending.sessionId);
+  if (!session) return choiceRejection("session-missing");
+  if (session.inactive)
+    return {
+      reason: "session-inactive",
+      alert: `${formatTelegramSessionLabel(session.id, session.title?.trim() || undefined)} is not active.`,
+    };
+  const decision = pending.interfaceConsent
+    ? await decideConsentClick(deps, pending.sessionId, token, chatId, actor)
+    : undefined;
+  const choice = takeTelegramChoice(deps.dataDir, deps.projectId, deps.sourceId, token, chatId);
+  // Lost the race with a sibling click or a superseding reply.
+  if (!choice) return choiceRejection("retired");
+  if (decision) writeInterfaceConsent(deps.dataDir, decision);
+  return choice;
+}
+
+/** Re-validates policy and task binding of an approval click; throws a named rejection. */
+async function decideConsentClick(
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  sessionId: string,
+  token: string,
+  chatId: number,
+  actor: number,
+): Promise<InterfaceConsent> {
+  const policy = await consentPolicy(deps.config.allowedUsers).catch((error: unknown) => {
+    throw new ConsentRejectedError("policy-unavailable", errorText(error));
+  });
+  const record = readInterfaceConsent(deps.dataDir, sessionId);
+  if (
+    !record ||
+    policy.approverUserId !== record.approverUserId ||
+    !policy.repositories.includes(record.repository)
+  )
+    throw new ConsentRejectedError("policy-changed", "Interface approval policy changed");
+  const actualSession = readSession(deps.dataDir, sessionId);
+  if (
+    !actualSession ||
+    actualSession.project !== record.projectId ||
+    actualSession.branch !== record.branch ||
+    workspaceIdOf(actualSession) !== record.authority ||
+    (await readCurrentBranch(actualSession.worktreePath)) !== record.branch
+  )
+    throw new ConsentRejectedError("task-changed", "Interface approval task changed");
+  const relocated = readSession(deps.dataDir, sessionId);
+  if (
+    !relocated ||
+    relocated.project !== record.projectId ||
+    relocated.branch !== record.branch ||
+    workspaceIdOf(relocated) !== record.authority
+  )
+    throw new ConsentRejectedError("task-changed", "Interface approval task changed");
+  const validatedPath = relocated.worktreePath;
+  if (validatedPath !== actualSession.worktreePath) {
+    const [branch, repository] = await Promise.all([
+      readCurrentBranch(validatedPath),
+      repositoryOf(validatedPath),
+    ]);
+    if (branch !== record.branch || repository !== record.repository)
+      throw new ConsentRejectedError("task-changed", "Interface approval task changed");
+  }
+  const active = findTelegramChoice(deps.dataDir, deps.projectId, deps.sourceId, token, chatId);
+  const current = readInterfaceConsent(deps.dataDir, sessionId);
+  const currentSession = readSession(deps.dataDir, sessionId);
+  if (
+    !active?.interfaceConsent ||
+    !current ||
+    current.generation !== record.generation ||
+    current.challenge !== record.challenge ||
+    current.authority !== record.authority ||
+    !currentSession ||
+    currentSession.project !== record.projectId ||
+    currentSession.branch !== record.branch ||
+    currentSession.worktreePath !== validatedPath ||
+    workspaceIdOf(currentSession) !== record.authority
+  )
+    throw new ConsentRejectedError("superseded", "Interface approval superseded");
+  return decideConsent(current, {
+    session: sessionId,
+    sourceId: deps.sourceId,
+    projectId: deps.projectId,
+    chatId,
+    actor,
+    challenge: active.interfaceConsent.challenge,
+    decision: active.interfaceConsent.decision,
+  });
 }
 
 async function handleTelegramText(

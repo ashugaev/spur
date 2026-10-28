@@ -22,7 +22,7 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 const reviewedFingerprints = {
   "server.ts": "975a3e65499622850345dd4d7bb70f446b30d3549f702ee40005ee5c59638d4f",
   "types.ts": "bc92deb5077c49ff0c61d67f286d08d81467c834c06b63200fc3f2ab3b69fb22",
-  "session-service.ts": "f0087cd03b9a99744c1e61a024a035138fa876a9e82c3270d66614fe89d6e7ef",
+  "session-service.ts": "fb53b0c87eb98f225f12d345218246321c45fc9a40ff9a23170a1b8c2f7cad31",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "837a7052b62b977b59f117e344b83b0f507298ce0d716c1ab637ead711060c42",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -31,7 +31,7 @@ const reviewedFingerprints = {
   "todo.ts": "2170888ce1a3527e303f5f6b27edd7ccbfabf2d9ad26d22cdc9518f891095288",
   "auto-ping.ts": "71ec9460c075728fcba93167d1d1f2d8e25df3188d90166e52a7a473f198428b",
   "review-interface.ts": "3cd868f605946f29e66e96b0721adddebd9b2783a9101924d8ec489a1e37122b",
-  "review-interface-consent.ts": "187cc6f066b425a52fee53602a620660817c80e1658c92d8ab8383ffa183b159",
+  "review-interface-consent.ts": "03fc56319c45e14e4685e169387ee96677487abf12aaea0ad8a313090cda7d3d",
 };
 
 afterEach(() => vi.restoreAllMocks());

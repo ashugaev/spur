@@ -15499,6 +15499,7 @@ export class SessionService {
           sessionId,
           chatId: target.chatId,
           choices,
+          keepInterfaceConsent: consent === undefined,
         });
       this.claimTelegramPlaceholder(sessionId, target);
     });
@@ -15533,12 +15534,14 @@ export class SessionService {
           writeInterfaceConsent(this.config.dataDir, { ...current, delivery: "sent" });
       }
       // A buttonless reply supersedes the question it answers, so it retires the
-      // pending offer — after the send, since a throw leaves the keyboard up.
+      // pending offer — after the send, since a throw leaves the keyboard up. A
+      // pending interface approval stays: its click is bound to its challenge.
       if (choices.length === 0) {
         writeTelegramOffer(this.config.dataDir, target.projectId, target.sourceId, {
           sessionId,
           chatId: target.chatId,
           choices: [],
+          keepInterfaceConsent: true,
         });
       }
       // Never recreate published routing removed mid-send by unwatch or takeover.

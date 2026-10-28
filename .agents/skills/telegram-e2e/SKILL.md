@@ -50,7 +50,7 @@ SCENARIOS
   Each passes within 60s of the user action, with no duplicate prompt in the agent pane.
 
   1. Agent send: request Telegram buttons X/Y. Forum answer starts with body, keyboard renders, topic title precedes session id. Later answers omit session label; forum binding confirmations omit identity.
-  2. Click: toast, message edited to "Selected: X", keyboard gone, agent answers.
+  2. Click: keyboard turns "Sending: X…" then single "Selected: X" button, message text unchanged, toast "Sent: X", agent answers.
   3. Topic reply: reply-to agent message; placeholder "Received. <label> is thinking..." becomes answer.
   4. DM spawn: unbound autoSpawn or `/spawn` wizard creates canonical topic before launch; DM acknowledgment links it. Second agent owns separate topic; body/buttons/attention stay there.
   5. Legacy DM/group-main/foreign-topic text/reply/buttons: migrate and redirect without delivery/consent decision. Preserve other owners; exact-topic continuation succeeds.
@@ -60,6 +60,7 @@ SCENARIOS
   9. Complete/kill: delete owned topics, clear routing/offers, report General outcome; no DM farewell. Preserve other owners; empty repeat sends/deletes nothing; late settlement never recreates topic.
   10. Command menu: after final-build source start/restart, compare dedicated TEST `getMyCommands` with TELEGRAM_COMMANDS; verify `getChatMenuButton` commands type. Record build/start identity; report overrides without deleting scopes.
   11. Failure: rejected create blocks launch/content fallback; ambiguous create never retried. Failed delete/send preserves terminal state, reports/logs outcome within `v2/src/telegram-source-state.ts` bounds.
+  12. Interface approval in a forum topic: daemon env `SPUR_REVIEW_APP_CONFIG` names the approver. Agent sends `"$SPUR_SESSION_TOOL_DIR/spur" source reply "..." --request-interface-approval <manifest>`, then a buttonless follow-up. Approver click still approves: "Sending" then "Selected", agent gets `approved` once. Non-approver click: keyboard restored, alert names the approver, events.jsonl `source.telegram.choice_rejected` reason `not-approver`. Spent button click: alert "This choice is no longer active.", no second delivery.
 
   Voice needs isolated-ui/provider and existing process `SPUR_CONFIG` dir; stale path selects default provider, returns502 `missing_model`. Restart sidecar; check `/api/runtime/voice/transcribe` with `curl -F audio=@<file>`.
 
