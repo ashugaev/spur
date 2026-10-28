@@ -97,6 +97,135 @@ afterEach(async () => {
 });
 
 describe("detectCodexRateLimit", () => {
+  describe("Codex quota expiry", () => {
+    const reset = 1791949078;
+
+    it.each([reset - 60, reset + 60, undefined, "invalid"])(
+      "permits paid-credit continuation regardless of exhausted reset %s",
+      (resetsAt) => {
+        for (const key of ["primary", "secondary"]) {
+          expect(
+            detectCodexRateLimit({
+              [key]: { used_percent: 100, resets_at: resetsAt },
+              credits: { has_credits: true },
+            }),
+          ).toEqual({ limited: false, reason: "" });
+        }
+      },
+    );
+
+    it("keeps explicit refusal timeless despite paid credits and elapsed resets", () => {
+      expect(
+        detectCodexRateLimit({
+          primary: { used_percent: 100, resets_at: reset },
+          secondary: { used_percent: 100, resets_at: reset - 60 },
+          credits: { has_credits: true },
+          rate_limit_reached_type: "weekly",
+        }),
+      ).toEqual({ limited: true, reason: "codex weekly" });
+    });
+
+    it.each([false, undefined, null, "true", 1])(
+      "keeps malformed exhausted resets timeless without literal paid credits %s",
+      (hasCredits) => {
+        for (const key of ["primary", "secondary"]) {
+          const sibling = key === "primary" ? "secondary" : "primary";
+          expect(
+            detectCodexRateLimit({
+              [key]: { used_percent: 100, resets_at: "invalid" },
+              [sibling]: { used_percent: 100, resets_at: reset },
+              credits: { has_credits: hasCredits },
+            }),
+          ).toEqual({ limited: true, reason: "codex 5h window exhausted" });
+        }
+      },
+    );
+
+    it.each(["primary", "secondary"])("expires %s at its epoch-second reset", (key) => {
+      const detection = detectCodexRateLimit({
+        [key]: { used_percent: 100, window_minutes: 10080, resets_at: reset },
+      });
+      if (!detection) throw new Error("Expected quota detection");
+      expect(detection?.resetAtMs).toBe(reset * 1000);
+      expect(rateLimitExpired(detection, reset * 1000 - 1)).toBe(false);
+      expect(rateLimitExpired(detection, reset * 1000)).toBe(true);
+      expect(rateLimitExpired(detection, reset * 1000 + 1)).toBe(true);
+    });
+
+    it.each([
+      [reset, reset + 60],
+      [reset + 60, reset],
+      [reset, reset],
+    ])("waits for both exhausted resets %s and %s", (primaryReset, secondaryReset) => {
+      const detection = detectCodexRateLimit({
+        primary: { used_percent: 100, resets_at: primaryReset },
+        secondary: { used_percent: 101, resets_at: secondaryReset },
+      });
+      if (!detection) throw new Error("Expected quota detection");
+      const first = Math.min(primaryReset, secondaryReset) * 1000;
+      const last = Math.max(primaryReset, secondaryReset) * 1000;
+      expect(detection).toEqual({
+        limited: true,
+        reason: "codex 5h window exhausted",
+        resetAtMs: last,
+      });
+      expect(rateLimitExpired(detection, first - 1)).toBe(false);
+      expect(rateLimitExpired(detection, first)).toBe(first === last);
+      expect(rateLimitExpired(detection, last - 1)).toBe(false);
+      expect(rateLimitExpired(detection, last)).toBe(true);
+      expect(rateLimitExpired(detection, last + 1)).toBe(true);
+    });
+
+    it("ignores healthy sibling reset metadata", () => {
+      expect(
+        detectCodexRateLimit({
+          primary: { used_percent: 100, resets_at: reset },
+          secondary: { used_percent: 99, resets_at: null },
+        })?.resetAtMs,
+      ).toBe(reset * 1000);
+    });
+
+    it.each([
+      undefined,
+      null,
+      "1791949078",
+      true,
+      reset + 0.5,
+      0,
+      -1,
+      NaN,
+      Infinity,
+      Number.MAX_SAFE_INTEGER + 1,
+      Number.MAX_SAFE_INTEGER,
+      8640000000001,
+    ])("keeps invalid exhausted reset %s fail-closed in either window", (invalid) => {
+      for (const key of ["primary", "secondary"]) {
+        const sibling = key === "primary" ? "secondary" : "primary";
+        const detection = detectCodexRateLimit({
+          [key]: { used_percent: 100, resets_at: invalid },
+          [sibling]: { used_percent: 100, resets_at: reset },
+        });
+        if (!detection) throw new Error("Expected quota detection");
+        expect(detection?.limited).toBe(true);
+        expect(detection?.resetAtMs).toBeUndefined();
+        expect(rateLimitExpired(detection, reset * 1000 + 1)).toBe(false);
+      }
+    });
+
+    it("keeps hard credits and reached type timeless despite expired reset metadata", () => {
+      for (const payload of [
+        { ...CODEX_OUT_OF_CREDITS, primary: { resets_at: reset } },
+        { primary: { used_percent: 100, resets_at: reset }, rate_limit_reached_type: "weekly" },
+      ]) {
+        const detection = detectCodexRateLimit(payload);
+        if (!detection) throw new Error("Expected quota detection");
+        expect(detection?.limited).toBe(true);
+        expect(detection?.resetAtMs).toBeUndefined();
+        expect(rateLimitExpired(detection, reset * 1000 + 1)).toBe(false);
+      }
+    });
+  });
+
   it.each([
     { primary: { used_percent: 100, window_minutes: 10080 }, secondary: null },
     { primary: { used_percent: 100, window_minutes: 300 }, secondary: null },

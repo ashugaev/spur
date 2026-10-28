@@ -2719,6 +2719,222 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it.each(["tail", "older-page"] as const)(
+    "keeps the loading row when an accepted %s response batches with an older-page request",
+    async (acceptedPage) => {
+      const acceptedIndex = acceptedPage === "tail" ? 200 : 100;
+      const acceptedUrl = `/api/sessions/api-a1/conversation${acceptedPage === "tail" ? "" : "?from=100"}`;
+      const olderUrl = `/api/sessions/api-a1/conversation?from=${acceptedIndex - 100}`;
+      let tailCalls = 0;
+      let resolveTail: (value: ReturnType<typeof conversationFixture>) => void = () => undefined;
+      const tailPayload = new Promise<ReturnType<typeof conversationFixture>>((resolve) => {
+        resolveTail = resolve;
+      });
+      const readTail = vi.fn(() => tailPayload);
+      let resolveOlder: (value: Response) => void = () => undefined;
+      const olderPage = new Promise<Response>((resolve) => {
+        resolveOlder = resolve;
+      });
+      const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+        }
+        if (url === olderUrl) return olderPage;
+        if (url === acceptedUrl) {
+          tailCalls += 1;
+          const response = new Response(
+            JSON.stringify(
+              conversationFixture({ startIndex: acceptedIndex, totalEntries: 500, hasMore: true }),
+            ),
+            { status: 200 },
+          );
+          if (tailCalls === 2) response.json = readTail;
+          return response;
+        }
+        if (url === "/api/sessions/api-a1/conversation") {
+          return new Response(
+            JSON.stringify(
+              conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true }),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+
+      render(<SessionDetail sessionId="api-a1" />);
+      await screen.findByText("Original prompt");
+      const scrollEl = screen.getByTestId("conversation-scroll");
+      Object.defineProperty(scrollEl, "scrollTop", {
+        configurable: true,
+        writable: true,
+        value: 0,
+      });
+      Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
+      Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
+      if (acceptedPage === "older-page") {
+        fireEvent.scroll(scrollEl);
+        await waitFor(() =>
+          expect(fetchMock).toHaveBeenCalledWith(acceptedUrl, expect.any(Object)),
+        );
+      }
+      await waitFor(() => expect(readTail).toHaveBeenCalledOnce(), { timeout: 6_000 });
+
+      // Accept the prior page before the scroll, but commit both state updates
+      // together. That response does not own the new older-page spinner.
+      await act(async () => {
+        resolveTail(
+          conversationFixture({ startIndex: acceptedIndex, totalEntries: 500, hasMore: true }),
+        );
+        await tailPayload;
+        fireEvent.scroll(scrollEl);
+      });
+      expect(fetchMock).toHaveBeenCalledWith(olderUrl, expect.any(Object));
+      expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+
+      await act(async () => {
+        resolveOlder(
+          new Response(
+            JSON.stringify(
+              conversationFixture({
+                startIndex: acceptedIndex - 100,
+                totalEntries: 500,
+                hasMore: true,
+              }),
+            ),
+            { status: 200 },
+          ),
+        );
+      });
+      expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([
+    ["tail", false],
+    ["tail", true],
+    ["session", false],
+    ["session", true],
+    ["failure", true],
+  ] as const)(
+    "clears older loading cancellation on %s while discarding the cancelled response (error: %s)",
+    async (cancellation, oldFails) => {
+      let resolveOlder: (value: Response) => void = () => undefined;
+      const olderPage = new Promise<Response>((resolve) => {
+        resolveOlder = resolve;
+      });
+      let resolveReloaded: (value: Response) => void = () => undefined;
+      const reloadedPage = new Promise<Response>((resolve) => {
+        resolveReloaded = resolve;
+      });
+      let olderRequests = 0;
+      const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1" || url === "/api/sessions/api-b2") {
+          return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+        }
+        if (url.endsWith("/conversation?from=100")) {
+          olderRequests += 1;
+          return olderRequests === 1
+            ? olderPage
+            : reloadedPage.then((response) => response.clone());
+        }
+        if (url.includes("/conversation")) {
+          return new Response(
+            JSON.stringify(
+              conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true }),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      const { rerender } = render(<SessionDetail sessionId="api-a1" />);
+      await screen.findByText("Original prompt");
+      const scrollEl = screen.getByTestId("conversation-scroll");
+      Object.defineProperty(scrollEl, "scrollTop", {
+        configurable: true,
+        writable: true,
+        value: 0,
+      });
+      Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
+      Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
+      fireEvent.scroll(scrollEl);
+      await screen.findByLabelText("Loading older messages");
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/sessions/api-a1/conversation?from=100",
+        expect.any(Object),
+      );
+
+      if (cancellation === "session") {
+        rerender(<SessionDetail sessionId="api-b2" />);
+        await waitFor(() =>
+          expect(fetchMock).toHaveBeenCalledWith(
+            "/api/sessions/api-b2/conversation",
+            expect.any(Object),
+          ),
+        );
+      } else if (cancellation === "tail") {
+        scrollEl.scrollTop = 700;
+        fireEvent.scroll(scrollEl);
+      }
+      if (cancellation !== "failure") {
+        expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+        await screen.findByText("Original prompt");
+        const reloadedScroll = screen.getByTestId("conversation-scroll");
+        Object.defineProperty(reloadedScroll, "scrollTop", {
+          configurable: true,
+          writable: true,
+          value: 0,
+        });
+        fireEvent.scroll(reloadedScroll);
+        await screen.findByLabelText("Loading older messages");
+        expect(olderRequests).toBeGreaterThanOrEqual(2);
+      }
+      await act(async () => {
+        resolveOlder(
+          oldFails
+            ? new Response(null, { status: 500 })
+            : new Response(
+                JSON.stringify(
+                  conversationFixture({
+                    startIndex: 100,
+                    messages: [{ role: "assistant", text: "Cancelled older page", timestampMs: 1 }],
+                  }),
+                ),
+                { status: 200 },
+              ),
+        );
+      });
+      expect(screen.queryByText("Cancelled older page")).not.toBeInTheDocument();
+      if (cancellation !== "failure") {
+        expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+        await act(async () => {
+          resolveReloaded(
+            new Response(
+              JSON.stringify(
+                conversationFixture({
+                  startIndex: 100,
+                  messages: [{ role: "assistant", text: "Reloaded older page", timestampMs: 1 }],
+                }),
+              ),
+              { status: 200 },
+            ),
+          );
+        });
+        expect(screen.getByText("Reloaded older page")).toBeInTheDocument();
+      }
+      expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+    },
+  );
+
   it("keeps the loading row when a tail poll issued before the scroll resolves mid-flight", async () => {
     // Regression: a no-from poll in flight when the user scrolls to the top
     // used to win the race and overwrite `conversation`, which cleared the
