@@ -49,10 +49,15 @@ export function CronJobEditor({
   const [state, setState] = useState<EditorState>({ status: "loading" });
   const [reload, setReload] = useState(0);
   const scheduleRef = useRef<HTMLInputElement>(null);
+  const feedbackRef = useRef<HTMLDivElement>(null);
   const savingRef = useRef(false);
   const dirty =
     state.status === "ready" &&
     JSON.stringify(state.values) !== JSON.stringify(editableValues(state.original));
+  const feedback =
+    state.status === "ready"
+      ? (state.error ?? (state.saved ? "Saved to YAML. Pending activation." : null))
+      : null;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -84,6 +89,10 @@ export function CronJobEditor({
   useEffect(() => {
     if (state.status === "ready") scheduleRef.current?.focus();
   }, [state.status]);
+
+  useEffect(() => {
+    if (feedback) feedbackRef.current?.focus();
+  }, [feedback]);
 
   const requestBack = () => {
     if (savingRef.current) return;
@@ -213,12 +222,14 @@ export function CronJobEditor({
           <p className="break-all text-[var(--color-text-secondary)]">
             Editing YAML: {state.original.ownerPath}
           </p>
-          {state.error ? (
+          {feedback ? (
             <div
-              className={`flex flex-col gap-2 border p-2 ${state.conflict ? "border-[var(--color-status-attention)] text-[var(--color-status-attention)]" : "border-[var(--color-status-error)] text-[var(--color-status-error)]"}`}
-              role="alert"
+              className={`flex flex-col gap-2 border p-2 ${state.conflict || state.saved ? "border-[var(--color-status-attention)] text-[var(--color-status-attention)]" : "border-[var(--color-status-error)] text-[var(--color-status-error)]"}`}
+              ref={feedbackRef}
+              role={state.error ? "alert" : "status"}
+              tabIndex={-1}
             >
-              <span>{state.error}</span>
+              <span>{feedback}</span>
               {state.conflict ? (
                 <>
                   <span>Your draft is kept. Reload discards it and reads the latest YAML.</span>
@@ -235,14 +246,6 @@ export function CronJobEditor({
                 </>
               ) : null}
             </div>
-          ) : null}
-          {state.saved ? (
-            <p
-              className="border border-[var(--color-status-attention)] p-2 text-[var(--color-status-attention)]"
-              role="status"
-            >
-              Saved to YAML. Pending activation.
-            </p>
           ) : null}
           <fieldset className="flex min-w-0 flex-col gap-4" disabled={state.saving}>
             <label className={LABEL_CLASS}>
@@ -359,7 +362,7 @@ export function CronJobEditor({
               Cancel
             </button>
             <button
-              className={`${BUTTON_CLASS} border-[var(--color-accent)]`}
+              className="bg-[var(--color-accent)] px-2 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] outline-none transition hover:bg-[var(--color-accent-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
               disabled={state.saving || state.conflict || !dirty || invalid}
               type="submit"
             >

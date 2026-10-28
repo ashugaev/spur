@@ -310,6 +310,7 @@ describe("CronJob editor", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Save YAML" }));
     expect(await screen.findByText("Saved to YAML. Pending activation.")).toBeVisible();
+    expect(screen.getByRole("status")).toHaveFocus();
     expect(patch).toHaveBeenCalledWith({
       revision: DRAFT.revision,
       schedule: "0 6 * * *",
@@ -336,6 +337,7 @@ describe("CronJob editor", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Save YAML" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Config file changed");
+    expect(screen.getByRole("alert")).toHaveFocus();
     expect(screen.getByLabelText("Block 1 prompt")).toHaveValue("Keep my draft");
     expect(screen.getByRole("button", { name: "Save YAML" })).toBeDisabled();
     const count = fetchMock.mock.calls.length;
@@ -363,6 +365,7 @@ describe("CronJob editor", () => {
     fireEvent.change(screen.getByLabelText("Schedule"), { target: { value: "invalid cron" } });
     fireEvent.click(screen.getByRole("button", { name: "Save YAML" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Invalid cron schedule.");
+    expect(screen.getByRole("alert")).toHaveFocus();
     expect(screen.getByLabelText("Schedule")).toHaveAttribute("aria-invalid", "true");
     expect(screen.getByLabelText("Schedule")).toHaveValue("invalid cron");
     fireEvent.click(screen.getByRole("button", { name: "Save YAML" }));
