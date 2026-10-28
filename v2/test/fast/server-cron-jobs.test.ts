@@ -79,6 +79,58 @@ async function bootServer(): Promise<{ port: number; stop: () => Promise<void> }
 }
 
 describe("GET /projects/cron", () => {
+  it("uses the active bootstrap and registered owner outside the working directory", async () => {
+    const root = await createTempDir("spur-cron-registered-owner-");
+    const dataDir = join(root, "data");
+    const repoDir = join(root, "repo");
+    await mkdir(dataDir);
+    await mkdir(repoDir);
+    const port = await findFreePort();
+    const bootstrapPath = join(root, "instance.yaml");
+    const ownerPath = join(repoDir, "spur.yaml");
+    await writeFile(
+      bootstrapPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${join(root, "worktrees")}`,
+        "projects: {}",
+      ].join("\n"),
+    );
+    await writeFile(
+      ownerPath,
+      [
+        "projects:",
+        "  registered:",
+        `    path: ${repoDir}`,
+        "    sources:",
+        "      yearly: {type: cron, schedule: '0 0 1 1 *', runOnStart: false}",
+      ].join("\n"),
+    );
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: [ownerPath], unconfiguredProjects: [] }),
+    );
+    const server = await startServer(bootstrapPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects/cron?project=registered`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        projects: [
+          {
+            projectId: "registered",
+            owner: { state: "loaded", path: ownerPath, changed: false },
+            sources: [{ sourceId: "yearly", schedule: "0 0 1 1 *", disk: "same" }],
+          },
+        ],
+      });
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("returns cron sources, triggers and last events, filters by project and 404s unknown ids", async () => {
     const { port, stop } = await bootServer();
     try {
