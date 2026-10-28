@@ -1321,6 +1321,7 @@ describe("durable spawn metadata", () => {
       };
       session.codexRestoreStartedAt = session.createdAt;
       session.codexRestoreLaunchId = "restore-owner";
+      session.restoredAt = session.createdAt;
       session.spawnIntent.phase = phase;
       if (phase === "launching" || phase === "submitted") {
         session.agentLaunchId = "launch-1";
@@ -1338,6 +1339,13 @@ describe("durable spawn metadata", () => {
       expect(listSessions(dataDir)[0]?.spawnIntent).toEqual(session.spawnIntent);
       expect(readSession(dataDir, session.id)?.triggerOrigin).toEqual(session.triggerOrigin);
       expect(readSession(dataDir, session.id)?.codexRestoreLaunchId).toBe("restore-owner");
+      writeSession(dataDir, { ...session, restoredAt: "invalid" });
+      expect(readSession(dataDir, session.id)).toMatchObject({
+        codexRestoreLaunchId: "restore-owner",
+        spawnIntent: session.spawnIntent,
+        spawnReceipt: session.spawnReceipt,
+      });
+      expect(readSession(dataDir, session.id)?.restoredAt).toBeUndefined();
     },
   );
 
@@ -1506,6 +1514,18 @@ describe("session workspaceId normalization", () => {
     });
 
     expect(readSession(dataDir, "api-2")?.workspaceId).toBe("api-1");
+  });
+
+  it("persists the restore idle baseline and accepts legacy records without one", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = { ...legacyBase, id: "api-1", tmuxSession: "api-1" };
+    const restoredAt = "2026-03-18T10:05:00.000Z";
+    writeSession(dataDir, { ...record, restoredAt });
+    expect(readSession(dataDir, record.id)?.restoredAt).toBe(restoredAt);
+    writeSession(dataDir, record);
+    expect(readSession(dataDir, record.id)?.restoredAt).toBeUndefined();
+    writeSession(dataDir, { ...record, restoredAt: "invalid" });
+    expect(readSession(dataDir, record.id)?.restoredAt).toBeUndefined();
   });
 
   it("persists only valid error provenance beside an error", async () => {

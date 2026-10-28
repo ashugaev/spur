@@ -2897,19 +2897,23 @@ function buildLastActivityAt(
 // past expiry. rateLimitExpiredAtMs is only ever later than or equal to
 // agentActivityAt (the reset instant is always after the record that carried
 // it), but the max is taken explicitly rather than assumed.
+// Successful restore is also operator activity: its persisted timestamp grants
+// a full idle window even when resuming produces no new transcript activity.
 export function resolveParkActivityAt(
   classified: Pick<SessionStateResult, "agentActivityAt" | "rateLimitExpiredAtMs">,
+  restoredAt?: string,
 ): Date | null {
   if (classified.agentActivityAt === null) {
     return null;
   }
-  if (classified.rateLimitExpiredAtMs === undefined) {
-    return classified.agentActivityAt;
+  let activityAt = classified.agentActivityAt;
+  for (const baseline of [classified.rateLimitExpiredAtMs, restoredAt]) {
+    if (baseline !== undefined) {
+      const baselineAt = new Date(baseline);
+      if (baselineAt > activityAt) activityAt = baselineAt;
+    }
   }
-  const rateLimitExpiredAt = new Date(classified.rateLimitExpiredAtMs);
-  return rateLimitExpiredAt > classified.agentActivityAt
-    ? rateLimitExpiredAt
-    : classified.agentActivityAt;
+  return activityAt;
 }
 
 // A terminating record's sidecarPorts can hold BOTH desk-shared (anchor-
@@ -7204,7 +7208,7 @@ export class SessionService {
     }
     const classified = await this.classifySessionRecord(candidate);
     const latest = classified.session;
-    const parkActivityAt = resolveParkActivityAt(classified);
+    const parkActivityAt = resolveParkActivityAt(classified, latest.restoredAt);
     const deliveryPending: boolean = this.shouldRunDelivery(latest);
     if (
       latest.project === SHEPHERD_PROJECT_ID ||
@@ -7447,7 +7451,7 @@ export class SessionService {
           // anything (see resolveParkActivityAt's own comment). A null result
           // means no transcript signal exists at all — fail safe and never
           // park rather than fall back to the tmux attach clock.
-          const parkActivityAt = resolveParkActivityAt(classified);
+          const parkActivityAt = resolveParkActivityAt(classified, classified.session.restoredAt);
           if (
             session.project !== SHEPHERD_PROJECT_ID &&
             !this.spawnsInFlight.has(session.id) &&
@@ -21899,6 +21903,7 @@ export class SessionService {
             operation,
           );
           operation?.assertActive();
+          persistedRecovered.restoredAt = nowIso();
           writeSession(this.config.dataDir, persistedRecovered);
           await this.refreshDashboardCacheEntry(persistedRecovered);
           operation?.assertActive();
@@ -22028,13 +22033,19 @@ export class SessionService {
       );
       operation?.assertActive();
       writeSession(this.config.dataDir, persistedRestored);
-      const restoredWithSidecars = await this.startAutoStartSidecars(
+      await this.startAutoStartSidecars(
         persistedRestored,
         this.getProject(current.project),
         undefined,
         operation,
       );
       operation?.assertActive();
+      // Best-effort auto-start can persist dependency starts or cleanup before
+      // throwing. Its returned snapshot can predate those writes.
+      const latestAfterSidecars = readSession(this.config.dataDir, sessionId);
+      if (!latestAfterSidecars) throw new Error(`Session ${sessionId} disappeared during restore`);
+      const restoredWithSidecars = { ...latestAfterSidecars, restoredAt: nowIso() };
+      writeSession(this.config.dataDir, restoredWithSidecars);
       await this.refreshDashboardCacheEntry(restoredWithSidecars);
       operation?.assertActive();
       requestGitHubMergeConflictRestoreReplays(
@@ -26315,6 +26326,7 @@ export class SessionService {
       codexRestoreLaunchId: _codexRestoreLaunchId,
       spawnIntent: _spawnIntent,
       spawnReceipt: _spawnReceipt,
+      restoredAt: _restoredAt,
       launchCommand: _launchCommand,
       stateSubscriptions: _stateSubscriptions,
       allowedTriggers: _allowedTriggers,
@@ -26737,6 +26749,7 @@ export class SessionService {
       codexRestoreLaunchId: _codexRestoreLaunchId,
       spawnIntent: _spawnIntent,
       spawnReceipt: _spawnReceipt,
+      restoredAt: _restoredAt,
       // The record's queue state is internal; the view carries queuedMessagesView.
       queuedMessages: _queuedMessages,
       errorSource: _errorSource,

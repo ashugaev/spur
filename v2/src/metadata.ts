@@ -1549,6 +1549,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     normalizedSession.codexRestoreLaunchId.trim().length > 0
       ? { codexRestoreLaunchId: normalizedSession.codexRestoreLaunchId }
       : {}),
+    ...(typeof normalizedSession.restoredAt === "string" &&
+    Number.isFinite(Date.parse(normalizedSession.restoredAt))
+      ? { restoredAt: normalizedSession.restoredAt }
+      : {}),
     prompt: normalizedSession.prompt,
     ...(normalizedSession.spawnIntent !== undefined
       ? { spawnIntent: normalizedSession.spawnIntent }
