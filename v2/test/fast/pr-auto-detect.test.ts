@@ -126,7 +126,9 @@ vi.mock("../../src/agent-hook-state.js", () => ({
   deleteAgentHookState: vi.fn(),
   readAgentHookState: vi.fn(),
 }));
-vi.mock("../../src/runtime-tmux.js", () => ({
+vi.mock("../../src/runtime-tmux.js", async (importOriginal) => ({
+  TmuxProbeUnknownError: (await importOriginal<typeof import("../../src/runtime-tmux.js")>())
+    .TmuxProbeUnknownError,
   createTmuxSession: vi.fn(),
   createTmuxCommandSession: vi.fn(),
   createTmuxSidecarSession: vi.fn(),

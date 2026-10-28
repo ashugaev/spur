@@ -35,7 +35,9 @@ vi.mock("../../src/io.js", () => ({
   writeStdout: writeStdoutMock,
 }));
 
-vi.mock("../../src/runtime-tmux.js", () => ({
+vi.mock("../../src/runtime-tmux.js", async (importOriginal) => ({
+  TmuxProbeUnknownError: (await importOriginal<typeof import("../../src/runtime-tmux.js")>())
+    .TmuxProbeUnknownError,
   setTmuxSocketName: vi.fn(),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   withTmuxSocketArgs: vi.fn((args: string[]) => args),

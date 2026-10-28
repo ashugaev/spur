@@ -22,7 +22,7 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 const reviewedFingerprints = {
   "server.ts": "9e54afedeea20722039b87835d5bf7185be3255ada3ab91c7fdf3bb82a02f8aa",
   "types.ts": "04cc8a27b3877956d0786c95da5a17a490acdf902a0b485c4a5e9d7c8b8c04a8",
-  "session-service.ts": "9a52cf30d9d230b6cc67461d4b4d622fe0f7705c106c751a8d01bf64091600c7",
+  "session-service.ts": "dcd10de271c5f81f8e044e166f467f2c48405f3410ea71d040e6cb4ee6870981",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "837a7052b62b977b59f117e344b83b0f507298ce0d716c1ab637ead711060c42",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
