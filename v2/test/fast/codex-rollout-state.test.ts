@@ -470,7 +470,7 @@ describe("known nonauthority Codex records", () => {
 describe("turn-context current-turn compatibility", () => {
   const sinceMs = Date.parse("2026-06-28T08:10:00.000Z");
   const hookTurn = "current-turn";
-  const row = (type: string, payload: unknown, seconds: number) => ({
+  const row = <Payload>(type: string, payload: Payload, seconds: number) => ({
     type,
     timestamp: new Date(sinceMs + seconds * 1000).toISOString(),
     payload,

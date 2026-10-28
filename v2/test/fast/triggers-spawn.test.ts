@@ -80,6 +80,7 @@ function queuedWorkItemFixture(
       request: SpawnSessionRequest,
       options?: { acceptQueued?: boolean; triggerOrigin?: WorkItemTriggerOrigin },
     ) => {
+      if (request.prompt === undefined) throw new Error("Missing queued work-item prompt");
       const now = new Date().toISOString();
       const record: SessionRecord = {
         id: `test-queued-${accepted.length + 1}`,
@@ -125,7 +126,13 @@ function queuedWorkItemFixture(
     };
   });
   const emit = () =>
-    f.deps.bus.emit({ projectId: "test", sourceId: "tick", name: "github:work_item.new", data });
+    f.deps.bus.emit({
+      projectId: "test",
+      sourceId: "tick",
+      name: "github:work_item.new",
+      occurrenceId: "queued-work-item",
+      data,
+    });
   const members = () =>
     readWorkItemLifecycles(f.dataDir, "test", "tick").get(data.externalId)?.members ?? [];
   const finish = () => {
