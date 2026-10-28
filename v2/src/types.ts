@@ -1022,6 +1022,8 @@ export interface AppConfig {
     autoRotateOnRateLimit: boolean;
     cooldownMinutes: number;
     maxRotationsPerEpisode: number;
+    // Manual "Switch auth" surface: daemon route plus SessionView.claudeAccounts.
+    switchAuth: boolean;
   };
   diskRetention: {
     warnFreeGb: number;
