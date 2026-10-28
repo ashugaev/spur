@@ -1176,6 +1176,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     Number.isFinite(Date.parse(normalizedSession.codexRestoreStartedAt))
       ? { codexRestoreStartedAt: normalizedSession.codexRestoreStartedAt }
       : {}),
+    ...(typeof normalizedSession.restoredAt === "string" &&
+    Number.isFinite(Date.parse(normalizedSession.restoredAt))
+      ? { restoredAt: normalizedSession.restoredAt }
+      : {}),
     prompt: normalizedSession.prompt,
     ...(normalizedSession.originalTaskPrompt
       ? { originalTaskPrompt: normalizedSession.originalTaskPrompt }
