@@ -30,6 +30,171 @@ import { hashHistoryTail, PREFIX_VERIFY_BYTES } from "../../src/agent-history-de
 import { SCAN_CHUNK_BYTES } from "../../src/jsonl-scan.js";
 import { reconcileTokenUsage } from "../../src/token-usage.js";
 
+describe("known-record wrapper timing", () => {
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const sinceMs = Date.parse("2026-06-28T08:10:00.000Z");
+  const meta = {
+    type: "session_meta",
+    timestamp: "2026-06-28T08:09:00.000Z",
+    payload: { id: threadId, source: "cli", thread_source: "user" },
+  };
+  const complete = {
+    type: "event_msg",
+    timestamp: "2026-06-28T08:10:01.000Z",
+    payload: { type: "task_complete", turn_id: "hook-turn" },
+  };
+  const jsonl = (rows: unknown[]) => rows.map((row) => JSON.stringify(row)).join("\n") + "\n";
+  const read = (dir: string, reader?: CodexRolloutReaderState) =>
+    readCodexRolloutState(dir, reader, threadId, { sinceMs, nowMs: sinceMs + 60_000 });
+  const known = (type: string, timestamp: unknown) => {
+    const usage = {
+      input_tokens: 2,
+      cached_input_tokens: 1,
+      output_tokens: 1,
+      reasoning_output_tokens: 0,
+      total_tokens: 3,
+    };
+    return {
+      type,
+      timestamp,
+      payload:
+        type === "world_state"
+          ? { full: true, state: { timestamp: "2026-06-28T08:10:00.500Z" } }
+          : {
+              thread_id: threadId,
+              session_id: "22222222-2222-4222-8222-222222222222",
+              turn_id: "2026-06-28T08:10:00.500Z",
+              root_turn_id: "hook-turn",
+              response_id: "response",
+              usage,
+              turn_token_usage: usage,
+              thread_token_usage: usage,
+            },
+    };
+  };
+
+  it.each(["valid-control", "missing-timestamp", "invalid-timestamp"])(
+    "ports native Browser timing reproduction: %s",
+    async (variant) => {
+      const world = {
+        type: "world_state",
+        ...(variant === "valid-control"
+          ? { timestamp: "2026-06-28T08:10:00.500Z" }
+          : variant === "invalid-timestamp"
+            ? { timestamp: "invalid" }
+            : {}),
+        payload: { full: true, state: {} },
+      };
+      const dir = await makeSessionsDir(jsonl([meta, world, complete]));
+      const result = await read(dir);
+      expect(result.rollout).toMatchObject({
+        state: "waiting",
+        reason: "task_complete",
+        turnId: "hook-turn",
+      });
+      if (variant === "valid-control")
+        expect(result.launchProof).toMatchObject({
+          kind: "primary",
+          complete: true,
+          threadId,
+          turnId: "hook-turn",
+        });
+      else expect(result.launchProof).toEqual({ kind: "unknown" });
+    },
+  );
+
+  it.each(["world_state", "token_usage_record"])(
+    "rejects every malformed outer timestamp for %s without dropping rollout",
+    async (type) => {
+      for (const timestamp of [undefined, null, 42, "", " ", "invalid", {}]) {
+        const dir = await makeSessionsDir(jsonl([meta, known(type, timestamp), complete]));
+        const result = await read(dir);
+        expect(result.rollout).toMatchObject({
+          state: "waiting",
+          reason: "task_complete",
+          turnId: "hook-turn",
+        });
+        expect(result.launchProof, String(timestamp)).toEqual({ kind: "unknown" });
+        const permissive = await readCodexRolloutState(dir);
+        expect(permissive.rollout).toEqual(result.rollout);
+        expect(permissive.launchProof).toBeUndefined();
+      }
+    },
+  );
+
+  it.each(["world_state", "token_usage_record"])(
+    "retains working turn through valid offset/old timestamps for %s",
+    async (type) => {
+      for (const timestamp of ["2026-06-28T10:10:00.500+02:00", "2026-06-28T08:00:00.000Z"]) {
+        const context = {
+          type: "turn_context",
+          timestamp: "2026-06-28T08:10:00.100Z",
+          payload: { turn_id: "hook-turn" },
+        };
+        const call = {
+          type: "response_item",
+          timestamp: "2026-06-28T08:10:01.000Z",
+          payload: { type: "function_call", name: "fixture_tool", call_id: "timing-call" },
+        };
+        const dir = await makeSessionsDir(jsonl([meta, context, known(type, timestamp), call]));
+        const result = await read(dir);
+        expect(result.rollout).toMatchObject({
+          state: "working",
+          reason: "function_call",
+          turnId: "hook-turn",
+        });
+        expect(result.launchProof).toMatchObject({
+          kind: "primary",
+          complete: true,
+          turnId: "hook-turn",
+        });
+      }
+    },
+  );
+
+  it.each(["world_state", "token_usage_record"])(
+    "preserves existing future-window refusal for %s",
+    async (type) => {
+      const dir = await makeSessionsDir(
+        jsonl([meta, known(type, "2026-06-28T08:11:01.000Z"), complete]),
+      );
+      const result = await read(dir);
+      expect(result.rollout).toMatchObject({ state: "waiting", reason: "task_complete" });
+      expect(result.launchProof).toEqual({ kind: "unknown" });
+    },
+  );
+
+  it.each(["world_state", "token_usage_record"])(
+    "does not trust a permissive warm cache across an appended invalid %s wrapper",
+    async (type) => {
+      const dir = await makeSessionsDir(jsonl([meta, complete]));
+      const file = join(dir, "2026", "04", "19", "rollout-test.jsonl");
+      const reader: CodexRolloutReaderState = { files: new Map() };
+      const before = await readCodexRolloutState(dir, reader);
+      expect((await read(dir, reader)).launchProof).toMatchObject({ kind: "primary" });
+      await appendFile(file, jsonl([known(type, undefined)]));
+      expect((await readCodexRolloutState(dir, reader)).rollout).toEqual(before.rollout);
+      const result = await read(dir, reader);
+      expect(result.rollout).toEqual(before.rollout);
+      expect(result.launchProof).toEqual({ kind: "unknown" });
+      expect((await read(dir)).launchProof).toEqual({ kind: "unknown" });
+    },
+  );
+
+  it.each(["session_meta", "event_msg", "response_item", "turn_context"])(
+    "leaves the existing %s timing policy unchanged",
+    async (type) => {
+      const payload = type === "session_meta" ? meta.payload : {};
+      const dir = await makeSessionsDir(jsonl([meta, { type, payload }, complete]));
+      expect((await read(dir)).launchProof).toMatchObject({
+        kind: "primary",
+        complete: true,
+        turnId: "hook-turn",
+      });
+    },
+  );
+});
+
 describe("known nonauthority Codex records", () => {
   const sinceMs = Date.parse("2026-06-28T08:10:00.000Z");
   const threadId = "11111111-1111-4111-8111-111111111111";

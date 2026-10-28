@@ -1823,8 +1823,17 @@ interface CodexLineFolder<F> {
   line: (fold: F, parsed: Record<string, unknown>) => void;
 }
 
-function isKnownCodexNonauthorityRecord(type: unknown, payload: unknown): boolean {
-  if (!isRecord(payload)) return false;
+function isKnownCodexNonauthorityRecord(
+  type: unknown,
+  payload: unknown,
+  timestamp: unknown,
+): boolean {
+  if (
+    typeof timestamp !== "string" ||
+    !Number.isFinite(Date.parse(timestamp)) ||
+    !isRecord(payload)
+  )
+    return false;
   if (type === "world_state") {
     return (
       Object.keys(payload).length === 2 &&
@@ -1902,7 +1911,7 @@ async function foldCodexJsonlFile<F>(
         !["session_meta", "event_msg", "response_item", "turn_context"].includes(
           String(parsed["type"]),
         ) &&
-        !isKnownCodexNonauthorityRecord(parsed["type"], parsed["payload"])
+        !isKnownCodexNonauthorityRecord(parsed["type"], parsed["payload"], parsed["timestamp"])
       )
         valid = false;
       if (
