@@ -1211,6 +1211,8 @@ export interface SessionRecord {
   preflightTokenUsage?: PreflightTokenUsageRecord;
   createdAt: string;
   updatedAt: string;
+  /** Latest successful restore; restarts the stale-parking idle window. */
+  restoredAt?: string;
   lastOpenedAt?: string;
   retainInList?: boolean;
   slots?: SessionSlots;
@@ -1380,6 +1382,7 @@ export interface SessionView extends Omit<
   | "preflightTokenUsage"
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
+  | "restoredAt"
   | "errorSource"
 > {
   lifecycle: SessionLifecycleSnapshot;
@@ -1420,6 +1423,7 @@ export type DashboardOmittedField =
   | "queuedMessages"
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
+  | "restoredAt"
   | "pipeline"
   | "sidecarNames"
   | "sidecarPorts"
