@@ -15185,11 +15185,14 @@ export class SessionService {
         };
     // Persisted before the send: a click can only arrive once Telegram has the
     // keyboard, and the row must already be there when it does.
+    // A new interface approval supersedes the old challenge; an ordinary
+    // question leaves a pending approval clickable.
     if (choices.length > 0) {
       writeTelegramOffer(this.config.dataDir, target.projectId, target.sourceId, {
         sessionId,
         chatId: target.chatId,
         choices,
+        keepInterfaceConsent: consent === undefined,
       });
     }
     this.claimTelegramPlaceholder(sessionId, target);
@@ -15223,12 +15226,14 @@ export class SessionService {
         writeInterfaceConsent(this.config.dataDir, { ...current, delivery: "sent" });
     }
     // A buttonless reply supersedes the question it answers, so it retires the
-    // pending offer — after the send, since a throw leaves the keyboard up.
+    // pending offer — after the send, since a throw leaves the keyboard up. A
+    // pending interface approval stays: its click is bound to its challenge.
     if (choices.length === 0) {
       writeTelegramOffer(this.config.dataDir, target.projectId, target.sourceId, {
         sessionId,
         chatId: target.chatId,
         choices: [],
+        keepInterfaceConsent: true,
       });
     }
     // A target that existed when the send began is never re-created: it was
