@@ -5790,7 +5790,7 @@ describe("startConfiguredTriggers", () => {
     {
       reason: "owner_completed",
       level: "info",
-      lifecycle: runningWorkItemLifecycle(),
+      lifecycle: workItemLifecycle([workItemMember()], { autoComplete: false }),
       get: {
         id: "api-9",
         status: "completed" as const,
@@ -5827,7 +5827,7 @@ describe("startConfiguredTriggers", () => {
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
-      config: workItemSpawnConfig() as never,
+      config: workItemSpawnConfig({ autoComplete: reason !== "owner_completed" }) as never,
       bus,
       sessionService: { get: getMock, spawn: spawnMock } as never,
       logger: { warn: vi.fn() },
@@ -5848,6 +5848,43 @@ describe("startConfiguredTriggers", () => {
       ) as [string, { level: string; details: { reason: string } }];
       expect(entry.level).toBe(level);
       expect(entry.details.reason).toBe(reason);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("startup auto-completion suppresses an already completed owner as work_item_completed", async () => {
+    const spawn = vi.fn();
+    useWorkItemLifecycleStore([runningWorkItemLifecycle()]);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: {
+        get: vi.fn().mockResolvedValue({
+          id: "api-9",
+          status: "completed",
+          state: "stopped",
+          workspaceExists: true,
+        }),
+        spawn,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      await vi.waitFor(() => expect(updateWorkItemMembersMock).toHaveBeenCalled());
+      bus.emit(workItemEvent());
+      await vi.waitFor(() =>
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          DATA_DIR,
+          expect.objectContaining({
+            event: "trigger.spawn.suppressed",
+            details: expect.objectContaining({ reason: "work_item_completed" }),
+          }),
+        ),
+      );
+      expect(spawn).not.toHaveBeenCalled();
     } finally {
       await controller.stop();
     }
