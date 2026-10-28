@@ -16,6 +16,8 @@ The default `~/.claude` login auto-adopts as account `default` when its `.creden
 
 ## Per-session switch
 
+Off by default. Enable with [`authRotation.switchAuth: true`](configuration.md), instance config only.
+
 Claude only. Credential swap in place, no kill or relaunch.
 
 Ready = credentials present + onboarding complete. A session predating the session-home layout relaunches once, as migration. A switch mid-work forces through regardless. `projects/` in the session home symlinks to `~/.claude/projects`, so `--resume <uuid>` keeps history across a rotation.
