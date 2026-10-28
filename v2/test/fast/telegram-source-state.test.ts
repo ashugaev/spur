@@ -466,6 +466,11 @@ describe("sendTelegramReply formatting", () => {
       for (const clause of ["Approve scope", "no flag", "--dry-run", "no process created"]) {
         expect(payload.text.split(clause)).toHaveLength(2);
       }
+      expect(payload.text).toContain("<b>Interface approval</b>");
+      expect(payload.text).toContain(
+        "\n\n<b>CLI: run</b>\nBefore: no flag\nAfter: --dry-run\nConstraints: no process created",
+      );
+      expect(payload.text).not.toContain("none");
       expect(fetchMock.mock.calls[0]?.[0]).toMatch(
         statusMessageId ? /\/editMessageText$/ : /\/sendMessage$/,
       );
