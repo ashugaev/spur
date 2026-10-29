@@ -2177,8 +2177,7 @@ async function deliverRoutedPrompt(
   stillCurrent?: () => boolean,
 ): Promise<void> {
   const deps = runtime.deps;
-  const current = (): boolean =>
-    !isAborted(deps) && !runtime.mediaAbort.signal.aborted && (!stillCurrent || stillCurrent());
+  const current = (): boolean => !mediaIsAborted(runtime) && (!stillCurrent || stillCurrent());
   if (!current()) return;
   const conversation = await guardAgentInput(runtime, ctx, message, session.id);
   if (!conversation || !current()) return;
@@ -2329,6 +2328,10 @@ function isAborted(deps: SourceStartDeps<TelegramSourceConfig>): boolean {
   return deps.signal.aborted;
 }
 
+function mediaIsAborted(runtime: TelegramRuntime): boolean {
+  return runtime.deps.signal.aborted || runtime.mediaAbort.signal.aborted;
+}
+
 // ffmpeg + whisper_cpp can run to ~4 minutes on a slow host
 // (packages/web/src/lib/voice.ts:951-963); this bounds the detached task so
 // a stuck transcription cannot hold a voice note open indefinitely.
@@ -2386,7 +2389,7 @@ function telegramIntakeIsCurrent(
   intake: TelegramIntake,
 ): boolean {
   const deps = runtime.deps;
-  if (isAborted(deps) || runtime.mediaAbort.signal.aborted) return false;
+  if (mediaIsAborted(runtime)) return false;
   if (!isAllowed(deps.config, message.chat.id, { id: userId })) return false;
   const binding = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId).get(
     telegramBindingKey(message.chat.id, message.message_thread_id),
@@ -2425,7 +2428,7 @@ async function captureMediaIntake(
     const sessionId = replyOwner ?? binding;
     if (sessionId === undefined) return null;
     const conversation = await guardAgentInput(runtime, ctx, message, sessionId);
-    if (!conversation || isAborted(deps) || runtime.mediaAbort.signal.aborted) return null;
+    if (!conversation || mediaIsAborted(runtime)) return null;
     const intake: TelegramIntake = { kind: "agent", binding, sessionId, conversation };
     const session = await findSession(deps, sessionId);
     if (!telegramIntakeIsCurrent(runtime, message, from.id, intake)) return null;
@@ -2564,7 +2567,7 @@ async function downloadTelegramMedia(
   const chunks: Uint8Array[] = [];
   let byteLength = 0;
   try {
-    while (true) {
+    for (;;) {
       const chunk = await reader.read();
       if (chunk.done) break;
       byteLength += chunk.value.byteLength;
@@ -2672,8 +2675,7 @@ async function runMediaTask(
       if (project === undefined) throw new Error("Pick a project for the pending /spawn.");
       clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
       const consumedCurrent = (): boolean =>
-        !isAborted(deps) &&
-        !runtime.mediaAbort.signal.aborted &&
+        !mediaIsAborted(runtime) &&
         peekPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id) === null &&
         readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId).get(
           telegramBindingKey(message.chat.id, message.message_thread_id),
@@ -2712,7 +2714,7 @@ async function runMediaTask(
     deps.logger.warn?.(
       `[source:${deps.projectId}/${deps.sourceId}] telegram attachment failed: ${redactedErrorText(deps, error)}`,
     );
-    if (!isAborted(deps) && !runtime.mediaAbort.signal.aborted)
+    if (!mediaIsAborted(runtime))
       await ctx.reply(`Attachment task failed: ${redactedErrorText(deps, error)}`);
   }
 }
@@ -2740,9 +2742,9 @@ async function handleTelegramMedia(
   runtime: TelegramRuntime,
 ): Promise<void> {
   const deps = runtime.deps;
-  if (isAborted(deps) || runtime.mediaAbort.signal.aborted) return;
+  if (mediaIsAborted(runtime)) return;
   if (!(await rememberUpdate(runtime, ctx.update))) return;
-  if (isAborted(deps) || runtime.mediaAbort.signal.aborted) return;
+  if (mediaIsAborted(runtime)) return;
   const message = ctx.message
     ? { ...ctx.message, message_thread_id: telegramMessageThreadId(ctx.message) }
     : undefined;
@@ -2752,7 +2754,7 @@ async function handleTelegramMedia(
   const from = message.from;
   if (!message.media_group_id) {
     const intake = await captureMediaIntake(ctx, runtime, message, from);
-    if (isAborted(deps) || runtime.mediaAbort.signal.aborted) return;
+    if (mediaIsAborted(runtime)) return;
     if (intake) detachMediaTask(runtime, runMediaTask(runtime, [member], from, intake));
     return;
   }
@@ -2775,11 +2777,11 @@ async function handleTelegramMedia(
       return;
     }
     const intake = await captureMediaIntake(ctx, runtime, message, from);
-    if (!intake || isAborted(deps) || runtime.mediaAbort.signal.aborted) return;
+    if (!intake || mediaIsAborted(runtime)) return;
     const deadlineTimer = setTimeout(() => {
       const collecting = runtime.mediaGroups.get(key);
       if (!collecting || collecting.processing) return;
-      if (isAborted(deps) || runtime.mediaAbort.signal.aborted) {
+      if (mediaIsAborted(runtime)) {
         clearTimeout(collecting.quietTimer);
         runtime.mediaGroups.delete(key);
         return;
@@ -2925,8 +2927,7 @@ async function startTelegramSource(
         deps.logger.warn?.(
           `[source:${deps.projectId}/${deps.sourceId}] telegram attachment failed: ${redactedErrorText(deps, error)}`,
         );
-        if (!isAborted(deps) && !runtime.mediaAbort.signal.aborted)
-          await noticeUndelivered(deps, ctx as TelegramTextContext);
+        if (!mediaIsAborted(runtime)) await noticeUndelivered(deps, ctx as TelegramTextContext);
       }
     },
   );
