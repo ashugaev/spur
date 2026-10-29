@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as hostMemory from "../../src/host-memory.js";
+import * as configuredSources from "../../src/event-sources/index.js";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,6 +38,49 @@ import {
 import { findFreePort, startOnFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
+  it("queued Telegram topic gate adapter forwards origin without acceptQueued", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-topic-adapter-"));
+    const port = await findFreePort();
+    const configPath = join(root, "config.yaml");
+    await writeFile(
+      configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`,
+    );
+    let adapter: Parameters<typeof configuredSources.startConfiguredSources>[0]["spawnSession"];
+    const sources = vi
+      .spyOn(configuredSources, "startConfiguredSources")
+      .mockImplementation(async (options) => {
+        adapter = options.spawnSession;
+        return {
+          telegramBotIdentity: () => null,
+          stop: () => undefined,
+          clearPollDisabledOverride: () => null,
+        };
+      });
+    const spawn = vi
+      .spyOn(SessionService.prototype, "spawn")
+      .mockRejectedValue(new Error("captured"));
+    let server: StartedServer | undefined;
+    try {
+      server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+      if (!adapter) throw new Error("Missing configured source spawn adapter");
+      const telegramOrigin = { projectId: "demo", sourceId: "chat", chatId: 123 };
+      await expect(
+        adapter({ project: "demo", prompt: "topic task", agent: "codex", telegramOrigin }),
+      ).rejects.toThrow("captured");
+      expect(spawn).toHaveBeenCalledExactlyOnceWith(
+        { project: "demo", prompt: "topic task", agent: "codex" },
+        { telegramOrigin },
+      );
+      expect(spawn.mock.calls[0]?.[1]).not.toHaveProperty("acceptQueued");
+    } finally {
+      await server?.stop();
+      spawn.mockRestore();
+      sources.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("GET source-info returns association, absence, and unknown-session 404", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-source-info-server-"));
     const port = await findFreePort();
@@ -83,6 +127,32 @@ describe("startServer", () => {
     } finally {
       await server.stop();
       sourceInfo.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("queued Telegram topic gate preserves the 15000000-byte reply body cap before dispatch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-source-reply-cap-"));
+    const port = await findFreePort();
+    const configPath = join(root, "config.yaml");
+    await writeFile(
+      configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`,
+    );
+    const reply = vi.spyOn(SessionService.prototype, "replyToSource");
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/api-1/source-reply`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "A".repeat(15_000_001) }),
+      });
+      expect(response.ok).toBe(false);
+      expect(await response.json()).toMatchObject({ error: "Request body exceeds 15000000 bytes" });
+      expect(reply).not.toHaveBeenCalled();
+    } finally {
+      await server.stop();
+      reply.mockRestore();
       await rm(root, { recursive: true, force: true });
     }
   });

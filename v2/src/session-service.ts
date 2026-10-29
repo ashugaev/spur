@@ -699,6 +699,7 @@ const PANE_WRITE_FENCE_MS = 30_000;
 // still clearing an indefinite-"working" hang.
 const CODEX_HUNG_AFTER_TOOLS_MS = 300_000;
 const TAGGED_NATIVE_LAUNCH_UNCERTAIN = "Tagged native launch remains uncertain";
+const QUEUED_TELEGRAM_TOPIC_UNRESOLVED = "Queued Telegram topic creation remains unresolved";
 const RESTORE_WARMUP_MS = 30_000;
 const RESTORE_SETTLE_MS = 2_000;
 const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
@@ -3603,6 +3604,17 @@ interface TelegramReplyTargetChanges {
 interface ResolvedTelegramNotice {
   target: TelegramReplyTarget;
   source: TelegramSourceConfig;
+}
+
+interface PreparedTelegramTopicCreation {
+  kind: "create";
+  session: SessionRecord;
+  source: TelegramSourceConfig;
+  token: string;
+  target: TelegramReplyTarget;
+  stored: TelegramReplyTarget | null;
+  queued: boolean;
+  revision: number;
 }
 
 function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" | "slots">): string {
@@ -12908,6 +12920,20 @@ export class SessionService {
     const persisted = readSession(this.config.dataDir, record.id);
     if (
       record.spawnIntent &&
+      persisted?.spawnIntent?.telegramOrigin &&
+      (persisted.status !== "spawning" ||
+        persisted.error !== undefined ||
+        persisted.errorSource !== undefined ||
+        !isDeepStrictEqual(persisted.spawnReceipt, record.spawnReceipt) ||
+        !isDeepStrictEqual(
+          persisted.spawnIntent.telegramOrigin,
+          record.spawnIntent.telegramOrigin,
+        ) ||
+        !isDeepStrictEqual(persisted.spawnIntent.request, record.spawnIntent.request))
+    )
+      throw new InvalidSourceReplyInputError(persisted.error ?? QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
+    if (
+      record.spawnIntent &&
       persisted?.spawnReceipt &&
       (!persisted.spawnIntent ||
         ((persisted.spawnIntent.phase === "launching" ||
@@ -14519,6 +14545,7 @@ export class SessionService {
   private async runBackgroundSpawnAttempt(
     prepared: PreparedSpawn,
     attempt: number,
+    assertTopic?: (agentLaunchId?: string) => void,
   ): Promise<BackgroundSpawnAttemptResult> {
     const {
       agent,
@@ -14537,12 +14564,22 @@ export class SessionService {
     let initialPromptSent = false;
     let launchedRecord: SessionRecord | undefined;
     let launchCandidate: SessionRecord | undefined;
+    let stampedLaunchId: string | undefined;
+    const checkpoint: typeof this.checkpointSpawn = (...args) => {
+      assertTopic?.(stampedLaunchId);
+      return this.checkpointSpawn(...args);
+    };
+    const write = (record: SessionRecord): SessionRecord => {
+      assertTopic?.(stampedLaunchId);
+      return this.writeSpawnRecord(record);
+    };
     try {
       this.assertSpawnNotKilled(sessionId);
+      assertTopic?.();
       const current = readSession(this.config.dataDir, sessionId);
       if (current?.spawnIntent) {
         prepared.placeholder = { ...current };
-        if (current.error !== undefined) {
+        if (current.error !== undefined && !assertTopic) {
           delete prepared.placeholder.error;
           delete prepared.placeholder.errorSource;
           writeSession(this.config.dataDir, prepared.placeholder);
@@ -14588,6 +14625,7 @@ export class SessionService {
               );
               this.assertSpawnNotKilled(sessionId);
               prepared.placeholder = { ...prepared.placeholder, preflightTokenUsage: usage };
+              assertTopic?.();
               writeSession(this.config.dataDir, prepared.placeholder);
               if (executionError) {
                 throw executionError instanceof Error
@@ -14677,7 +14715,7 @@ export class SessionService {
         ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
         updatedAt: nowIso(),
       };
-      this.writeSpawnRecord(spawnPlaceholder);
+      write(spawnPlaceholder);
       ensureTodoLedger(this.config.dataDir, spawnPlaceholder);
       prepared.placeholder = spawnPlaceholder;
 
@@ -14731,7 +14769,7 @@ export class SessionService {
         });
       }
 
-      prepared.placeholder = this.checkpointSpawn(
+      prepared.placeholder = checkpoint(
         { ...prepared.placeholder, worktreePath: workspacePath },
         "workspace_ready",
       );
@@ -14863,45 +14901,38 @@ export class SessionService {
               freshLaunch: true,
             })
           : null;
-      runningRecord = this.checkpointSpawn(
-        { ...runningRecord, status: "spawning" },
-        agent === "opencode" ? "workspace_ready" : "launching",
-        {
-          state: promptDeliveredOnLaunch && agent !== "opencode" ? "uncertain" : "pending",
-          ...(promptDeliveredOnLaunch && agent !== "opencode" ? { uncertainAt: nowIso() } : {}),
-          message: startupMessage,
-          ...(startupBinding ? { ackBaseline: startupBinding.baseline } : {}),
-        },
-      );
-      prepared.placeholder = runningRecord;
+      const launchSubmission = {
+        state: promptDeliveredOnLaunch && agent !== "opencode" ? "uncertain" : "pending",
+        ...(promptDeliveredOnLaunch && agent !== "opencode" ? { uncertainAt: nowIso() } : {}),
+        message: startupMessage,
+        ...(startupBinding ? { ackBaseline: startupBinding.baseline } : {}),
+      } satisfies DurableSpawnIntent["submission"];
       const launchAndBind = async (): Promise<void> => {
         const openCodeSessionBaseline =
           launchAgent === "opencode"
             ? await captureOpenCodeSessionBaseline(workspacePath)
             : undefined;
-        if (openCodeSessionBaseline) {
-          runningRecord = this.checkpointSpawn(runningRecord, "launching", {
-            ...runningRecord.spawnIntent?.submission,
-            state: promptDeliveredOnLaunch ? "uncertain" : "pending",
-            ...(promptDeliveredOnLaunch ? { uncertainAt: nowIso() } : {}),
-          });
-        }
-
         stage = attempt > 1 ? `retry.${attempt}.tmux.create` : "tmux.create";
-        this.assertSpawnNotKilled(sessionId);
-        const codexAttempt = codexLaunchAttempt(launchAgent, agentLaunchId);
-        runningRecord = { ...runningRecord, ...codexAttempt };
-        if (launchAgent === "codex") {
+        await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+          this.assertSpawnNotKilled(sessionId);
+          assertTopic?.();
           const latest = readSession(this.config.dataDir, launchSessionId);
           if (latest)
             runningRecord = withQueuedMessages(runningRecord, queuedMessages(latest), true);
-          prepared.placeholder = {
-            ...prepared.placeholder,
-            agentLaunchId,
-            ...codexAttempt,
-          };
-          writeSession(this.config.dataDir, { ...runningRecord, status: "spawning" });
-        }
+          runningRecord = checkpoint(
+            {
+              ...runningRecord,
+              ...codexLaunchAttempt(launchAgent, agentLaunchId),
+              status: "spawning",
+            },
+            openCodeSessionBaseline || agent !== "opencode" ? "launching" : "workspace_ready",
+            openCodeSessionBaseline
+              ? { ...launchSubmission, state: promptDeliveredOnLaunch ? "uncertain" : "pending" }
+              : launchSubmission,
+          );
+          stampedLaunchId = agentLaunchId;
+          prepared.placeholder = runningRecord;
+        });
         launchCandidate = runningRecord;
         await createTmuxSession({
           sessionName: launchSessionId,
@@ -14909,18 +14940,26 @@ export class SessionService {
           launchCommand: launchPlan.launchCommand,
           launchScriptDir: sessionToolDir,
           env: sessionEnv,
+          beforeLaunch: () => {
+            this.assertSpawnNotKilled(sessionId);
+            assertTopic?.(agentLaunchId);
+          },
+        });
+        await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+          this.assertSpawnNotKilled(sessionId);
+          assertTopic?.(agentLaunchId);
         });
         const current = readSession(this.config.dataDir, runningRecord.id);
         if (current && hasQueuedMessages(current)) {
           runningRecord = withQueuedMessages(runningRecord, queuedMessages(current), true);
         }
         launchedRecord = runningRecord;
-        this.writeSpawnRecord(runningRecord);
+        write(runningRecord);
         const pane = await this.lookupPanePidQuietly(launchSessionId, { fresh: true });
         if (pane.status === "ok" && pane.panePid !== null) {
           const starttime = await readProcessStarttime(pane.panePid);
           if (starttime !== null) {
-            runningRecord = this.checkpointSpawn(runningRecord, "launching", undefined, {
+            runningRecord = checkpoint(runningRecord, "launching", undefined, {
               pid: pane.panePid,
               starttime,
             });
@@ -14955,7 +14994,7 @@ export class SessionService {
         if (openCodeSessionBaseline) {
           const agentSessionId = await waitForNewOpenCodeSessionId(openCodeSessionBaseline);
           runningRecord = { ...runningRecord, agentSessionId, updatedAt: nowIso() };
-          this.writeSpawnRecord(runningRecord);
+          write(runningRecord);
         }
       };
       if (launchAgent === "opencode") {
@@ -14970,7 +15009,7 @@ export class SessionService {
       if (launchPlan.initialMessage.trim()) {
         stage = attempt > 1 ? `retry.${attempt}.prompt.send` : "prompt.send";
         const launchSentAt = Date.now();
-        runningRecord = this.checkpointSpawn(runningRecord, "launching", {
+        runningRecord = checkpoint(runningRecord, "launching", {
           ...runningRecord.spawnIntent?.submission,
           state: "uncertain",
           uncertainAt: new Date(launchSentAt).toISOString(),
@@ -14979,7 +15018,7 @@ export class SessionService {
         const sendOutcome = await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
           freshLaunch: true,
           onPaneWritten: (ackBaseline, pastedAt) => {
-            runningRecord = this.checkpointSpawn(runningRecord, "launching", {
+            runningRecord = checkpoint(runningRecord, "launching", {
               state: "uncertain",
               uncertainAt: new Date(pastedAt).toISOString(),
               message: launchPlan.initialMessage,
@@ -15030,7 +15069,7 @@ export class SessionService {
           : openCodeLaunchConfirmed ||
             (startupBinding !== null && (await startupBinding.scan(startupMessage)).found));
       if (deliveryConfirmed) {
-        runningRecord = this.checkpointSpawn(runningRecord, "submitted", {
+        runningRecord = checkpoint(runningRecord, "submitted", {
           ...runningRecord.spawnIntent?.submission,
           state: "confirmed",
         });
@@ -15055,7 +15094,7 @@ export class SessionService {
       if (latestAttempt && hasQueuedMessages(latestAttempt)) {
         updatedRecord = withQueuedMessages(updatedRecord, queuedMessages(latestAttempt), true);
       }
-      updatedRecord = this.writeSpawnRecord(updatedRecord);
+      updatedRecord = write(updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       if (updatedRecord.spawnIntent?.submission.state === "confirmed") {
         if (updatedRecord.triggerOrigin) {
@@ -15120,6 +15159,8 @@ export class SessionService {
         }
         return "completed";
       }
+      if (assertTopic && (error instanceof InvalidSourceReplyInputError || !launchCandidate))
+        throw error;
       let launchProvenAbsent = false;
       if (interrupted?.spawnIntent?.phase === "launching") {
         const evidence = await this.observeDurableRuntime(interrupted);
@@ -15289,12 +15330,24 @@ export class SessionService {
                 ),
                 completion.promise,
               ]);
+            const origin = prepared.placeholder.spawnIntent?.telegramOrigin;
+            const assertTopic = origin
+              ? this.queuedTelegramLaunchGuard(prepared.placeholder)
+              : undefined;
+            if (origin) {
+              await this.ensureTelegramTopic(prepared.sessionId, origin);
+              assertTopic?.();
+              const current = readSession(this.config.dataDir, prepared.sessionId);
+              if (!current?.spawnIntent) throw new SpawnAdmissionCancelledError("killed");
+              prepared.placeholder = { ...current };
+            }
             for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
               const reservation = await this.waitForSpawnAdmission(prepared.request.project, {
                 sessionId: prepared.sessionId,
               });
               try {
                 await this.withWorkspaceLifecycleLocks(prepared.sessionId, async () => {
+                  assertTopic?.();
                   this.consumeSpawnAdmission(reservation);
                   const current = readSession(this.config.dataDir, prepared.sessionId);
                   if (!current || current.status !== "spawning") {
@@ -15305,7 +15358,7 @@ export class SessionService {
               } finally {
                 this.admissionReservations.delete(reservation);
               }
-              const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
+              const result = await this.runBackgroundSpawnAttempt(prepared, attempt, assertTopic);
               if (result === "completed") {
                 return;
               }
@@ -15316,6 +15369,12 @@ export class SessionService {
                 prepared.sessionId,
                 error instanceof Error ? error.message : String(error),
               );
+            }
+            if (prepared.placeholder.spawnIntent?.telegramOrigin) {
+              this.spawnCompletions
+                .get(prepared.sessionId)
+                ?.reject(error instanceof Error ? error : new Error(String(error)));
+              this.spawnCompletions.delete(prepared.sessionId);
             }
           } finally {
             this.durableSpawnRuns.delete(prepared.sessionId);
@@ -15377,6 +15436,11 @@ export class SessionService {
     const current = readSession(this.config.dataDir, sessionId);
     if (!current?.spawnIntent || isTerminalSessionStatus(current.status)) return;
     this.registerDurableSpawn(current);
+    if (
+      current.spawnIntent.telegramOrigin &&
+      (current.error !== undefined || current.errorSource !== undefined)
+    )
+      return;
     if (current.agent === "codex" && current.triggerOrigin) {
       if (
         current.error &&
@@ -16524,9 +16588,80 @@ export class SessionService {
     sessionId: string,
     origin?: TelegramSpawnOrigin,
   ): Promise<TelegramConversation> {
+    if (this.isQueuedTelegramTopicSpawn(readSession(this.config.dataDir, sessionId))) {
+      const run = this.ensureQueuedTelegramTopic(sessionId, origin);
+      void this.trackBackgroundLoop(
+        run.then(
+          () => undefined,
+          () => undefined,
+        ),
+      );
+      return run;
+    }
     return this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.ensureTelegramTopicLocked(sessionId, origin),
     );
+  }
+
+  private isQueuedTelegramTopicSpawn(session: SessionRecord | null): boolean {
+    return (
+      session?.spawnIntent?.telegramOrigin !== undefined &&
+      (session.spawnIntent.phase === "queued" || session.spawnIntent.phase === "workspace_ready")
+    );
+  }
+
+  private queuedTelegramLaunchGuard(
+    session: SessionRecord,
+  ): ((agentLaunchId?: string) => void) | undefined {
+    const origin = session.spawnIntent?.telegramOrigin;
+    if (!origin) return undefined;
+    const source = this.config.projects[origin.projectId]?.sources[origin.sourceId];
+    if (!source || source.type !== "telegram" || source.chatId === undefined || source.chatId >= 0)
+      return undefined;
+    const token = source.token;
+    const chatId = source.chatId;
+    const owner = structuredClone(session);
+    const revision = this.lifecycle.snapshot(session.id).revision;
+    return (agentLaunchId) => {
+      const current = readSession(this.config.dataDir, session.id);
+      const target = current ? this.telegramReplyTarget(current) : null;
+      const currentSource = this.config.projects[origin.projectId]?.sources[origin.sourceId];
+      if (
+        this.admissionStopped ||
+        !current ||
+        current.status !== "spawning" ||
+        !current.spawnIntent ||
+        current.error !== undefined ||
+        current.errorSource !== undefined ||
+        this.lifecycle.snapshot(session.id).revision !== revision ||
+        !isDeepStrictEqual(current.spawnReceipt, owner.spawnReceipt) ||
+        !isDeepStrictEqual(current.spawnIntent.request, owner.spawnIntent?.request) ||
+        !isDeepStrictEqual(current.spawnIntent.telegramOrigin, owner.spawnIntent?.telegramOrigin) ||
+        (agentLaunchId !== undefined && current.agentLaunchId !== agentLaunchId) ||
+        currentSource !== source ||
+        source.token !== token ||
+        source.chatId !== chatId ||
+        !target ||
+        target.sessionId !== session.id ||
+        target.projectId !== origin.projectId ||
+        target.sourceId !== origin.sourceId ||
+        target.chatId !== chatId ||
+        this.telegramTopicHasOtherOwner(current, target)
+      )
+        throw new InvalidSourceReplyInputError(current?.error ?? QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
+    };
+  }
+
+  private async ensureQueuedTelegramTopic(
+    sessionId: string,
+    origin?: TelegramSpawnOrigin,
+  ): Promise<TelegramConversation> {
+    const prepared = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      if (!this.isQueuedTelegramTopicSpawn(readSession(this.config.dataDir, sessionId)))
+        throw new InvalidSourceReplyInputError(QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
+      return this.prepareTelegramTopic(sessionId, origin, true);
+    });
+    return prepared.kind === "create" ? this.createPreparedTelegramTopic(prepared) : prepared;
   }
 
   private telegramAssignmentMatches(
@@ -16547,10 +16682,29 @@ export class SessionService {
     sessionId: string,
     origin?: TelegramSpawnOrigin,
   ): Promise<TelegramConversation> {
+    if (this.isQueuedTelegramTopicSpawn(readSession(this.config.dataDir, sessionId)))
+      throw new InvalidSourceReplyInputError(QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
+    const prepared = this.prepareTelegramTopic(sessionId, origin, false);
+    return prepared.kind === "create" ? this.createPreparedTelegramTopic(prepared) : prepared;
+  }
+
+  private prepareTelegramTopic(
+    sessionId: string,
+    origin: TelegramSpawnOrigin | undefined,
+    queued: boolean,
+  ): TelegramConversation | PreparedTelegramTopicCreation {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     if (isTerminalSessionStatus(session.status))
       throw new InvalidSourceReplyInputError(`Session ${sessionId} is ${session.status}`);
+    if (
+      queued &&
+      (this.admissionStopped ||
+        session.status !== "spawning" ||
+        ((session.error !== undefined || session.errorSource !== undefined) &&
+          !(session.error === QUEUED_TELEGRAM_TOPIC_UNRESOLVED && session.errorSource === "other")))
+    )
+      throw new InvalidSourceReplyInputError(session.error ?? QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
     const stored = readTelegramReplyTarget(this.config.dataDir, sessionId);
     if (
       origin &&
@@ -16573,6 +16727,8 @@ export class SessionService {
       source.chatId === undefined ||
       source.chatId >= 0
     ) {
+      if (queued && session.error === QUEUED_TELEGRAM_TOPIC_UNRESOLVED)
+        throw new InvalidSourceReplyInputError(QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
       retireTelegramLegacyState(this.config.dataDir, projectId, sourceId, sessionId);
       writeTelegramReplyTarget(this.config.dataDir, {
         sessionId,
@@ -16585,10 +16741,15 @@ export class SessionService {
     const existing = this.telegramReplyTarget(session, stored);
     if (
       existing &&
+      (!queued ||
+        (existing.sessionId === sessionId &&
+          existing.projectId === session.spawnIntent?.telegramOrigin?.projectId &&
+          existing.sourceId === session.spawnIntent.telegramOrigin.sourceId)) &&
       existing.messageThreadId !== undefined &&
       !this.telegramTopicHasOtherOwner(session, existing)
     ) {
       retireTelegramLegacyState(this.config.dataDir, projectId, sourceId, sessionId, existing);
+      if (queued) this.clearQueuedTelegramTopicHold(session);
       return {
         kind: "topic",
         projectId,
@@ -16597,66 +16758,142 @@ export class SessionService {
         messageThreadId: existing.messageThreadId,
       };
     }
+    if (queued) {
+      const partial =
+        stored?.messageThreadId !== undefined ||
+        [...readTelegramBindings(this.config.dataDir, projectId, sourceId).values()].some(
+          (binding) => binding.sessionId === sessionId,
+        );
+      if (session.error === QUEUED_TELEGRAM_TOPIC_UNRESOLVED)
+        throw new InvalidSourceReplyInputError(QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
+      writeSession(this.config.dataDir, {
+        ...session,
+        error: QUEUED_TELEGRAM_TOPIC_UNRESOLVED,
+        errorSource: "other",
+      });
+      if (partial) throw new InvalidSourceReplyInputError(QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
+    }
     const name = telegramTopicName({
       id: session.id,
       agent: session.agent,
       state: session.status === "errored" ? "error" : "working",
       ...(session.slots ? { slots: session.slots } : {}),
     });
-    const chatId = source.chatId;
-    const creationSource = { token: source.token };
-    const topicId = await createTelegramTopic(creationSource, chatId, name);
-    const target: TelegramReplyTarget = {
-      sessionId,
-      projectId,
-      sourceId,
-      chatId,
-      messageThreadId: topicId,
-      topicName: name,
-      updatedAt: nowIso(),
-    };
-    try {
-      const current = readSession(this.config.dataDir, sessionId);
-      const currentSource = this.config.projects[projectId]?.sources[sourceId];
-      if (
-        !current ||
-        isTerminalSessionStatus(current.status) ||
-        !currentSource ||
-        currentSource.type !== "telegram" ||
-        currentSource.chatId !== chatId ||
-        currentSource.token !== creationSource.token ||
-        this.telegramTopicHasOtherOwner(current, target) ||
-        telegramTopicIsDeleting(this.config.dataDir, target.chatId, topicId)
-      )
-        throw new InvalidSourceReplyInputError("Telegram conversation changed during creation");
-      this.bindTelegramChatIfFree(target, sessionId);
-      writeTelegramReplyTarget(this.config.dataDir, target);
-      retireTelegramLegacyState(this.config.dataDir, projectId, sourceId, sessionId, target);
-      return {
-        kind: "topic",
+    return {
+      kind: "create",
+      session: structuredClone(session),
+      source,
+      token: source.token,
+      target: {
+        sessionId,
         projectId,
         sourceId,
-        chatId: target.chatId,
-        messageThreadId: topicId,
+        chatId: source.chatId,
+        topicName: name,
+        updatedAt: nowIso(),
+      },
+      stored: stored ? structuredClone(stored) : null,
+      queued,
+      revision: this.lifecycle.snapshot(sessionId).revision,
+    };
+  }
+
+  private clearQueuedTelegramTopicHold(session: SessionRecord): void {
+    if (session.error !== QUEUED_TELEGRAM_TOPIC_UNRESOLVED || session.errorSource !== "other")
+      return;
+    const { error: _error, errorSource: _source, ...cleared } = session;
+    writeSession(this.config.dataDir, cleared);
+  }
+
+  private async createPreparedTelegramTopic(
+    prepared: PreparedTelegramTopicCreation,
+  ): Promise<TelegramConversation> {
+    const { session, queued, token } = prepared;
+    const { sessionId, projectId, sourceId, chatId } = prepared.target;
+    const creationSource = { token };
+    const topicId = await createTelegramTopic(
+      creationSource,
+      chatId,
+      prepared.target.topicName ?? "",
+    );
+    const target = { ...prepared.target, messageThreadId: topicId };
+    const publication = { bound: false, written: false, complete: false };
+    try {
+      const publish = async (): Promise<TelegramConversation> => {
+        const current = readSession(this.config.dataDir, sessionId);
+        const currentSource = this.config.projects[projectId]?.sources[sourceId];
+        if (
+          !current ||
+          isTerminalSessionStatus(current.status) ||
+          !currentSource ||
+          currentSource.type !== "telegram" ||
+          currentSource.chatId !== chatId ||
+          currentSource.token !== creationSource.token ||
+          (queued &&
+            (this.admissionStopped ||
+              current.status !== "spawning" ||
+              this.lifecycle.snapshot(sessionId).revision !== prepared.revision ||
+              !isDeepStrictEqual(current.spawnIntent, session.spawnIntent) ||
+              !isDeepStrictEqual(current.spawnReceipt, session.spawnReceipt) ||
+              !isDeepStrictEqual(
+                current.spawnIntent?.telegramOrigin,
+                session.spawnIntent?.telegramOrigin,
+              ) ||
+              current.error !== QUEUED_TELEGRAM_TOPIC_UNRESOLVED ||
+              current.errorSource !== "other" ||
+              currentSource !== prepared.source ||
+              !isDeepStrictEqual(
+                readTelegramReplyTarget(this.config.dataDir, sessionId),
+                prepared.stored,
+              ))) ||
+          this.telegramTopicHasOtherOwner(current, target) ||
+          telegramTopicIsDeleting(this.config.dataDir, target.chatId, topicId)
+        )
+          throw new InvalidSourceReplyInputError("Telegram conversation changed during creation");
+        this.bindTelegramChatIfFree(target, sessionId);
+        publication.bound = true;
+        writeTelegramReplyTarget(this.config.dataDir, target);
+        publication.written = true;
+        publication.complete = true;
+        retireTelegramLegacyState(this.config.dataDir, projectId, sourceId, sessionId, target);
+        if (queued) this.clearQueuedTelegramTopicHold(current);
+        return {
+          kind: "topic",
+          projectId,
+          sourceId,
+          chatId: target.chatId,
+          messageThreadId: topicId,
+        };
       };
+      return queued ? await this.withWorkspaceLifecycleLocks(sessionId, publish) : await publish();
     } catch (error) {
-      try {
-        const bindings = readTelegramBindings(this.config.dataDir, projectId, sourceId);
-        const key = telegramBindingKey(target.chatId, topicId);
-        if (bindings.get(key)?.sessionId === sessionId) {
-          bindings.delete(key);
-          writeTelegramBindings(this.config.dataDir, projectId, sourceId, bindings.values());
+      if (!queued || !publication.complete) {
+        try {
+          const bindings = readTelegramBindings(this.config.dataDir, projectId, sourceId);
+          const key = telegramBindingKey(target.chatId, topicId);
+          if ((!queued || publication.bound) && bindings.get(key)?.sessionId === sessionId) {
+            bindings.delete(key);
+            writeTelegramBindings(this.config.dataDir, projectId, sourceId, bindings.values());
+          }
+          if (
+            (!queued || publication.written) &&
+            readTelegramReplyTarget(this.config.dataDir, sessionId)?.messageThreadId === topicId
+          )
+            deleteTelegramReplyTarget(this.config.dataDir, sessionId);
+        } catch (cleanupError) {
+          this.logTelegramNoticeFailure(sessionId, "unpublished topic metadata", cleanupError);
         }
-        if (readTelegramReplyTarget(this.config.dataDir, sessionId)?.messageThreadId === topicId)
-          deleteTelegramReplyTarget(this.config.dataDir, sessionId);
-      } catch (cleanupError) {
-        this.logTelegramNoticeFailure(sessionId, "unpublished topic metadata", cleanupError);
-      }
-      try {
-        if (!this.telegramTopicHasOtherOwner(session, target))
-          await deleteTelegramTopic(creationSource, target.chatId, topicId);
-      } catch (cleanupError) {
-        this.logTelegramNoticeFailure(sessionId, "unpublished topic deletion", cleanupError);
+        try {
+          if (
+            !this.telegramTopicHasOtherOwner(session, target) &&
+            (!queued ||
+              publication.written ||
+              readTelegramReplyTarget(this.config.dataDir, sessionId)?.messageThreadId !== topicId)
+          )
+            await deleteTelegramTopic(creationSource, target.chatId, topicId);
+        } catch (cleanupError) {
+          this.logTelegramNoticeFailure(sessionId, "unpublished topic deletion", cleanupError);
+        }
       }
       throw error;
     }

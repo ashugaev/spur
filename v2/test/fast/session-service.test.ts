@@ -73,6 +73,7 @@ import {
   type ServiceInstanceRecord,
   type SessionMemoryRecord,
   type SessionRecord,
+  type TelegramBinding,
   type SessionLifecycleSnapshot,
   type SessionSidecarView,
   type SessionState,
@@ -72640,6 +72641,801 @@ describe("SessionService", () => {
       });
       return { promise, resolve, reject };
     }
+
+    async function queuedTopicFixture() {
+      const { config } = telegramProjectConfig();
+      config.projects.api.worktree = false;
+      config.admission.memoryGuard.shedEnabled = false;
+      loadConfigMock.mockReturnValue(config);
+      const memory = (availableBytes: number) =>
+        readHostMemoryMock.mockReturnValue({
+          totalBytes: 65_000_000 * 1024,
+          availableBytes,
+          swapTotalBytes: 0,
+          swapFreeBytes: 0,
+        });
+      memory(7_000_000_000);
+      mockAgentWaitingState("codex");
+      const sessions = createSessionStore();
+      const bindings = new Map<string, TelegramBinding>();
+      readTelegramBindingsMock.mockImplementation(() => new Map(bindings));
+      writeTelegramBindingsMock.mockImplementation(
+        (_dir: string, _project: string, _source: string, rows: Iterable<TelegramBinding>) => {
+          const values = [...rows];
+          bindings.clear();
+          for (const value of values)
+            bindings.set(`${value.chatId}:${value.messageThreadId}`, value);
+        },
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+        found: true,
+        lastScannedFile: null,
+      });
+      const origin = { projectId: "api", sourceId: "agentChat", chatId: 123 };
+      const request = { project: "api", prompt: "queued Telegram task", agent: "codex" as const };
+      const tick = () =>
+        (service as unknown as { runMemoryShedTick(): Promise<void> }).runMemoryShedTick();
+      return { service, sessions, bindings, config, memory, origin, request, tick, SessionService };
+    }
+
+    it("queued Telegram topic gate settles normal accepted-view enrichment before its own claim", async () => {
+      const f = await queuedTopicFixture();
+      const entered = deferred<undefined>();
+      const release = deferred<undefined>();
+      const topic = deferred<number>();
+      createTelegramTopicMock.mockReturnValueOnce(topic.promise);
+      const internals = f.service as unknown as {
+        enrich(
+          record: SessionRecord,
+          accounts?: { id: string; label?: string; authenticated: boolean }[],
+          batch?: SessionRecord[],
+        ): Promise<SessionView>;
+      };
+      const enrich = internals.enrich.bind(internals);
+      const observing = vi.spyOn(internals, "enrich").mockImplementationOnce(async (...args) => {
+        entered.resolve(undefined);
+        await release.promise;
+        return enrich(...args);
+      });
+      const accepting = f.service.spawn(f.request, {
+        acceptQueued: true,
+        telegramOrigin: f.origin,
+      });
+      void accepting.catch(() => undefined);
+      try {
+        await entered.promise;
+        const saved = clone(f.sessions.get("api-1"));
+        expect((await f.service.get("api-1")).id).toBe("api-1");
+        expect(createTelegramTopicMock).not.toHaveBeenCalled();
+        release.resolve(undefined);
+        const accepted = await accepting;
+        await vi.waitFor(() => expect(createTelegramTopicMock).toHaveBeenCalledTimes(1));
+        expect((await f.service.get(accepted.id)).status).toBe("spawning");
+        expect(f.sessions.get(accepted.id)?.spawnReceipt).toEqual(saved?.spawnReceipt);
+        expect(f.sessions.get(accepted.id)?.spawnIntent?.telegramOrigin).toEqual(f.origin);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      } finally {
+        release.resolve(undefined);
+        observing.mockRestore();
+        f.service.dispose();
+        topic.resolve(55);
+        await accepting.catch(() => undefined);
+        await f.service.settleBackgroundSpawns();
+      }
+    });
+
+    it("queued Telegram topic gate retains rejected creation across recovery and default completion", async () => {
+      const f = await queuedTopicFixture();
+      createTelegramTopicMock.mockRejectedValueOnce(new Error("ambiguous topic response"));
+      const spawning = f.service.spawn(f.request, { telegramOrigin: f.origin });
+      void spawning.catch(() => undefined);
+      try {
+        await expect(spawning).rejects.toThrow("ambiguous topic response");
+        const held = clone(f.sessions.get("api-1"));
+        expect(held).toMatchObject({
+          status: "spawning",
+          spawnIntent: { phase: "queued", telegramOrigin: f.origin },
+          error: "Queued Telegram topic creation remains unresolved",
+          errorSource: "other",
+        });
+        if (!held) throw new Error("Missing accepted record");
+        const { classifyWorkItemOwner } = await import("../../src/triggers.js");
+        expect(
+          classifyWorkItemOwner({ id: held.id, status: "spawning" } as SessionView, held),
+        ).toBe("pending");
+        await f.service.discardFailedSpawn(held.id);
+        await f.tick();
+        await f.service.settleBackgroundSpawns();
+        await f.tick();
+        await f.service.settleBackgroundSpawns();
+        expect(f.sessions.get(held.id)?.spawnReceipt).toEqual(held.spawnReceipt);
+        f.service.dispose();
+        const replacement = new f.SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        try {
+          await (
+            replacement as unknown as { runMemoryShedTick(): Promise<void> }
+          ).runMemoryShedTick();
+          await replacement.settleBackgroundSpawns();
+          expect(f.sessions.get(held.id)).toEqual(held);
+          expect(createTelegramTopicMock).toHaveBeenCalledTimes(1);
+          expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        } finally {
+          replacement.dispose();
+        }
+      } finally {
+        f.service.dispose();
+        await f.service.settleBackgroundSpawns();
+      }
+    });
+
+    it.each(["worker-first", "public-first"] as const)(
+      "queued Telegram topic gate tracks the actual %s creator through dispose and cleanup",
+      async (order) => {
+        const f = await queuedTopicFixture();
+        const topic = deferred<number>();
+        createTelegramTopicMock.mockReturnValueOnce(topic.promise);
+        const heldMarker = "Queued Telegram topic creation remains unresolved";
+        let creator: Promise<unknown> | undefined;
+        let accepted: SessionView;
+        const releaseWorker = deferred<undefined>();
+        let restoreWorker: (() => void) | undefined;
+        try {
+          if (order === "public-first") {
+            const internals = f.service as unknown as {
+              startBackgroundSpawn(...args: unknown[]): Promise<SessionView>;
+            };
+            const original = internals.startBackgroundSpawn.bind(internals);
+            const entered = deferred<undefined>();
+            const worker = vi
+              .spyOn(internals, "startBackgroundSpawn")
+              .mockImplementation(async (...args) => {
+                entered.resolve(undefined);
+                await releaseWorker.promise;
+                return original(...args);
+              });
+            restoreWorker = () => worker.mockRestore();
+            const accepting = f.service.spawn(f.request, {
+              acceptQueued: true,
+              telegramOrigin: f.origin,
+            });
+            void accepting.catch(() => undefined);
+            await entered.promise;
+            accepted = await accepting;
+            creator = f.service.ensureTelegramTopic("api-1", f.origin);
+            void creator.catch(() => undefined);
+            await vi.waitFor(() => expect(createTelegramTopicMock).toHaveBeenCalledTimes(1));
+            releaseWorker.resolve(undefined);
+          } else {
+            accepted = await f.service.spawn(f.request, {
+              acceptQueued: true,
+              telegramOrigin: f.origin,
+            });
+            await vi.waitFor(() => expect(createTelegramTopicMock).toHaveBeenCalledTimes(1));
+          }
+          const saved = clone(f.sessions.get(accepted.id));
+          await expect(f.service.ensureTelegramTopic(accepted.id, f.origin)).rejects.toThrow(
+            heldMarker,
+          );
+          expect(f.sessions.get(accepted.id)?.spawnReceipt).toEqual(saved?.spawnReceipt);
+          f.service.dispose();
+          let drained = false;
+          const drain = f.service.settleBackgroundSpawns().then(() => {
+            drained = true;
+          });
+          await Promise.resolve();
+          await Promise.resolve();
+          expect(drained).toBe(false);
+          topic.resolve(55);
+          await creator?.catch(() => undefined);
+          await drain;
+          expect(drained).toBe(true);
+          expect(createTelegramTopicMock).toHaveBeenCalledTimes(1);
+          expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(1);
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          expect(f.sessions.get(accepted.id)?.spawnIntent).toEqual(saved?.spawnIntent);
+        } finally {
+          releaseWorker.resolve(undefined);
+          restoreWorker?.();
+          topic.resolve(55);
+          f.service.dispose();
+          await creator?.catch(() => undefined);
+          await f.service.settleBackgroundSpawns();
+        }
+      },
+    );
+
+    it("queued Telegram topic gate returns the public creator result and preserves a concurrent queue", async () => {
+      const f = await queuedTopicFixture();
+      const topic = deferred<number>();
+      const release = deferred<undefined>();
+      const internals = f.service as unknown as {
+        startBackgroundSpawn(...args: unknown[]): Promise<SessionView>;
+      };
+      const start = internals.startBackgroundSpawn.bind(internals);
+      const worker = vi
+        .spyOn(internals, "startBackgroundSpawn")
+        .mockImplementation(async (...args) => {
+          await release.promise;
+          return start(...args);
+        });
+      createTelegramTopicMock.mockReturnValueOnce(topic.promise);
+      const accepted = await f.service.spawn(f.request, {
+        acceptQueued: true,
+        telegramOrigin: f.origin,
+      });
+      const creator = f.service.ensureTelegramTopic(accepted.id, f.origin);
+      const receipt = clone(f.sessions.get(accepted.id)?.spawnReceipt);
+      try {
+        await vi.waitFor(() => expect(createTelegramTopicMock).toHaveBeenCalledTimes(1));
+        release.resolve(undefined);
+        await expect(f.service.ensureTelegramTopic(accepted.id, f.origin)).rejects.toThrow(
+          "remains unresolved",
+        );
+        const current = f.sessions.get(accepted.id);
+        if (!current) throw new Error("Missing accepted owner");
+        const queuedMessages = { messages: ["concurrent input"], awaitingPrompt: true };
+        f.sessions.set(accepted.id, { ...current, queuedMessages });
+        topic.resolve(55);
+        await expect(creator).resolves.toMatchObject({
+          kind: "topic",
+          chatId: -1001,
+          messageThreadId: 55,
+        });
+        await f.service.settleBackgroundSpawns();
+        expect(f.sessions.get(accepted.id)).toMatchObject({
+          queuedMessages,
+          spawnReceipt: receipt,
+        });
+        expect(f.sessions.get(accepted.id)?.error).toBeUndefined();
+        expect(createTelegramTopicMock).toHaveBeenCalledTimes(1);
+        expect(deleteTelegramTopicMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      } finally {
+        release.resolve(undefined);
+        topic.resolve(55);
+        worker.mockRestore();
+        f.service.dispose();
+        await creator.catch(() => undefined);
+        await f.service.settleBackgroundSpawns();
+      }
+    });
+
+    it.each(["diagnostic", "source", "receipt", "intent", "target"] as const)(
+      "queued Telegram topic gate rejects deferred publication after a peer changes %s",
+      async (change) => {
+        const f = await queuedTopicFixture();
+        const topic = deferred<number>();
+        createTelegramTopicMock.mockReturnValueOnce(topic.promise);
+        const accepted = await f.service.spawn(f.request, {
+          acceptQueued: true,
+          telegramOrigin: f.origin,
+        });
+        try {
+          await vi.waitFor(() => expect(createTelegramTopicMock).toHaveBeenCalledTimes(1));
+          const current = f.sessions.get(accepted.id);
+          if (!current?.spawnIntent || !current.spawnReceipt)
+            throw new Error("Missing durable owner");
+          if (change === "diagnostic")
+            f.sessions.set(accepted.id, {
+              ...current,
+              error: "peer veto",
+              errorSource: "runtime_probe",
+            });
+          else if (change === "receipt")
+            f.sessions.set(accepted.id, {
+              ...current,
+              spawnReceipt: { ...current.spawnReceipt, acceptedAt: "2026-03-18T11:00:00.000Z" },
+            });
+          else if (change === "intent")
+            f.sessions.set(accepted.id, {
+              ...current,
+              spawnIntent: {
+                ...current.spawnIntent,
+                request: { ...current.spawnIntent.request, prompt: "peer request" },
+              },
+            });
+          else if (change === "target") {
+            writeTelegramReplyTargetMock(TEST_DATA_DIR, {
+              sessionId: accepted.id,
+              projectId: "api",
+              sourceId: "agentChat",
+              chatId: -1001,
+              messageThreadId: 77,
+              updatedAt: "2026-03-18T10:00:00.000Z",
+            });
+            f.bindings.set("-1001:77", {
+              chatId: -1001,
+              messageThreadId: 77,
+              sessionId: accepted.id,
+            });
+          } else {
+            const source = f.service.config.projects.api?.sources.agentChat;
+            if (source?.type !== "telegram") throw new Error("Missing source");
+            source.token = "peer-token";
+          }
+          const peer = clone(f.sessions.get(accepted.id));
+          topic.resolve(55);
+          await f.service.settleBackgroundSpawns();
+          expect(f.sessions.get(accepted.id)).toEqual(peer);
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          expect(createTelegramTopicMock).toHaveBeenCalledTimes(1);
+          expect(deleteTelegramTopicMock).toHaveBeenCalledWith(expect.anything(), -1001, 55);
+          if (change === "target") {
+            expect(readTelegramReplyTargetMock()?.messageThreadId).toBe(77);
+            expect(f.bindings.get("-1001:77")?.sessionId).toBe(accepted.id);
+          }
+        } finally {
+          topic.resolve(55);
+          f.service.dispose();
+          await f.service.settleBackgroundSpawns();
+        }
+      },
+    );
+
+    it.each(["kill", "pause"] as const)(
+      "queued Telegram topic gate permits %s while creation is deferred",
+      async (action) => {
+        const f = await queuedTopicFixture();
+        const topic = deferred<number>();
+        createTelegramTopicMock.mockReturnValueOnce(topic.promise);
+        const accepted = await f.service.spawn(f.request, {
+          acceptQueued: true,
+          telegramOrigin: f.origin,
+        });
+        try {
+          await vi.waitFor(() => expect(createTelegramTopicMock).toHaveBeenCalledTimes(1));
+          await f.service[action](accepted.id);
+          expect(f.sessions.get(accepted.id)?.status).toBe(
+            action === "kill" ? "killed" : "stopped",
+          );
+          topic.resolve(55);
+          await f.service.settleBackgroundSpawns();
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(1);
+          expect(readTelegramReplyTargetMock()?.messageThreadId).not.toBe(55);
+        } finally {
+          topic.resolve(55);
+          f.service.dispose();
+          await f.service.settleBackgroundSpawns();
+        }
+      },
+    );
+
+    it("queued Telegram topic gate preserves a peer diagnostic and queue after publication while admission waits", async () => {
+      const f = await queuedTopicFixture();
+      const accepted = await f.service.spawn(f.request, {
+        acceptQueued: true,
+        telegramOrigin: f.origin,
+      });
+      try {
+        await vi.waitFor(() => expect(readTelegramReplyTargetMock()?.messageThreadId).toBe(55));
+        const current = f.sessions.get(accepted.id);
+        if (!current) throw new Error("Missing accepted owner");
+        const peer = {
+          ...current,
+          error: "peer diagnosis",
+          errorSource: "runtime_probe" as const,
+          queuedMessages: { messages: ["peer queue"], awaitingPrompt: true },
+        };
+        f.sessions.set(accepted.id, peer);
+        f.memory(20_000_000_000);
+        await f.tick();
+        await f.service.settleBackgroundSpawns();
+        expect(f.sessions.get(accepted.id)).toEqual(peer);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(createTelegramTopicMock).toHaveBeenCalledTimes(1);
+      } finally {
+        f.service.dispose();
+        await f.service.settleBackgroundSpawns();
+      }
+    });
+
+    it.each(["marker", "publication", "clear"] as const)(
+      "queued Telegram topic gate holds a failed %s persistence without another create",
+      async (stage) => {
+        const f = await queuedTopicFixture();
+        const persist = writeSessionMock.getMockImplementation();
+        const targetWrite = writeTelegramReplyTargetMock.getMockImplementation();
+        if (!persist || !targetWrite) throw new Error("Missing persistent fixture");
+        let failed = false;
+        writeSessionMock.mockImplementation((dir: string, record: SessionRecord) => {
+          const marker = record.error === "Queued Telegram topic creation remains unresolved";
+          const clearing =
+            record.error === undefined &&
+            f.sessions.get(record.id)?.error ===
+              "Queued Telegram topic creation remains unresolved" &&
+            readTelegramReplyTargetMock()?.messageThreadId === 55;
+          if (!failed && ((stage === "marker" && marker) || (stage === "clear" && clearing))) {
+            failed = true;
+            throw new Error(`failed ${stage} persistence`);
+          }
+          return persist(dir, record);
+        });
+        writeTelegramReplyTargetMock.mockImplementation((dir, target) => {
+          if (!failed && stage === "publication" && target.messageThreadId === 55) {
+            failed = true;
+            throw new Error("failed publication persistence");
+          }
+          return targetWrite(dir, target);
+        });
+        const spawning = f.service.spawn(f.request, { telegramOrigin: f.origin });
+        try {
+          await expect(spawning).rejects.toThrow(`failed ${stage} persistence`);
+          expect(failed).toBe(true);
+          const saved = clone(f.sessions.get("api-1"));
+          expect(saved).toMatchObject({
+            status: "spawning",
+            spawnReceipt: { version: 1 },
+            spawnIntent: { phase: "queued" },
+          });
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          expect(createTelegramTopicMock).toHaveBeenCalledTimes(stage === "marker" ? 0 : 1);
+          if (stage === "clear") {
+            expect(readTelegramReplyTargetMock()).toMatchObject({ messageThreadId: 55 });
+            expect(f.bindings.get("-1001:55")?.sessionId).toBe("api-1");
+            expect(deleteTelegramTopicMock).not.toHaveBeenCalled();
+            await expect(f.service.ensureTelegramTopic("api-1", f.origin)).resolves.toMatchObject({
+              kind: "topic",
+              messageThreadId: 55,
+            });
+            expect(f.sessions.get("api-1")?.error).toBeUndefined();
+          } else {
+            await f.tick();
+            await f.service.settleBackgroundSpawns();
+            expect(f.sessions.get("api-1")).toEqual(saved);
+            expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(stage === "publication" ? 1 : 0);
+          }
+        } finally {
+          f.service.dispose();
+          await f.service.settleBackgroundSpawns();
+        }
+      },
+    );
+
+    it.each(["release", "peer"] as const)(
+      "queued Telegram topic gate waits for its actual workspace launch lock: %s",
+      async (action) => {
+        const f = await queuedTopicFixture();
+        const prepared = deferred<undefined>();
+        const releasePreparation = deferred<undefined>();
+        const held = deferred<undefined>();
+        const releaseLock = deferred<undefined>();
+        const internals = f.service as unknown as SessionServiceInternals & {
+          startMcpSidecars(
+            record: SessionRecord,
+            project: ProjectConfig,
+          ): Promise<{ session: SessionRecord; mcpBindings: SidecarMcpBinding[] }>;
+        };
+        const start = internals.startMcpSidecars.bind(internals);
+        vi.spyOn(internals, "startMcpSidecars").mockImplementation(async (...args) => {
+          const result = await start(...args);
+          prepared.resolve(undefined);
+          await releasePreparation.promise;
+          return result;
+        });
+        const acquire = internals.withWorkspaceLifecycleLocks.bind(internals);
+        const locks = vi.spyOn(internals, "withWorkspaceLifecycleLocks");
+        const accepted = await f.service.spawn(f.request, {
+          acceptQueued: true,
+          telegramOrigin: f.origin,
+        });
+        let blocker: Promise<void> | undefined;
+        try {
+          f.memory(20_000_000_000);
+          await f.tick();
+          await prepared.promise;
+          blocker = acquire(accepted.id, async () => {
+            held.resolve(undefined);
+            await releaseLock.promise;
+          });
+          await held.promise;
+          const beforeLaunch = locks.mock.calls.length;
+          releasePreparation.resolve(undefined);
+          await vi.waitFor(() => expect(locks.mock.calls.length).toBeGreaterThan(beforeLaunch));
+          expect(f.sessions.get(accepted.id)?.agentLaunchId).toBeUndefined();
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          const current = f.sessions.get(accepted.id);
+          if (!current) throw new Error("Missing launch owner");
+          if (action === "peer")
+            f.sessions.set(accepted.id, {
+              ...current,
+              error: "lock holder veto",
+              errorSource: "runtime_probe",
+            });
+          releaseLock.resolve(undefined);
+          await blocker;
+          await f.service.settleBackgroundSpawns();
+          expect(createTmuxSessionMock).toHaveBeenCalledTimes(action === "release" ? 1 : 0);
+          if (action === "peer")
+            expect(f.sessions.get(accepted.id)).toMatchObject({
+              error: "lock holder veto",
+              errorSource: "runtime_probe",
+            });
+          else expect(f.sessions.get(accepted.id)?.agentLaunchId).toEqual(expect.any(String));
+          expect(createTelegramTopicMock).toHaveBeenCalledTimes(1);
+        } finally {
+          releasePreparation.resolve(undefined);
+          releaseLock.resolve(undefined);
+          await blocker;
+          f.service.dispose();
+          await f.service.settleBackgroundSpawns();
+        }
+      },
+    );
+
+    it.each(
+      (["before-stamp", "before-native"] as const).flatMap((boundary) =>
+        (["peer", "source", "pause", "kill"] as const).map((action) => ({ boundary, action })),
+      ),
+    )(
+      "queued Telegram topic gate checks current ownership $boundary/$action",
+      async ({ boundary, action }) => {
+        const f = await queuedTopicFixture();
+        const entered = deferred<undefined>();
+        const release = deferred<undefined>();
+        let nativeStarts = 0;
+        const internals = f.service as unknown as {
+          startMcpSidecars(
+            record: SessionRecord,
+            project: ProjectConfig,
+          ): Promise<{ session: SessionRecord; mcpBindings: SidecarMcpBinding[] }>;
+        };
+        const start = internals.startMcpSidecars.bind(internals);
+        const preparation = vi
+          .spyOn(internals, "startMcpSidecars")
+          .mockImplementation(async (...args) => {
+            const prepared = await start(...args);
+            if (boundary === "before-stamp") {
+              entered.resolve(undefined);
+              await release.promise;
+            }
+            return prepared;
+          });
+        createTmuxSessionMock.mockClear();
+        createTmuxSessionMock.mockImplementation(async (options) => {
+          expect(options.beforeLaunch).toBeTypeOf("function");
+          if (boundary === "before-native") {
+            entered.resolve(undefined);
+            await release.promise;
+          }
+          await options.beforeLaunch?.();
+          nativeStarts += 1;
+        });
+        const accepted = await f.service.spawn(f.request, {
+          acceptQueued: true,
+          telegramOrigin: f.origin,
+        });
+        try {
+          f.memory(20_000_000_000);
+          await f.tick();
+          await entered.promise;
+          const record = f.sessions.get(accepted.id);
+          if (!record) throw new Error("Missing launch owner");
+          if (boundary === "before-stamp") expect(record.agentLaunchId).toBeUndefined();
+          else expect(record.agentLaunchId).toEqual(expect.any(String));
+          if (action === "peer")
+            f.sessions.set(accepted.id, {
+              ...record,
+              error: "peer launch veto",
+              errorSource: "runtime_probe",
+              queuedMessages: { messages: ["peer retained"], awaitingPrompt: true },
+            });
+          else if (action === "source") {
+            const source = f.service.config.projects.api?.sources.agentChat;
+            if (source?.type !== "telegram") throw new Error("Missing source");
+            source.token = "rotated-token";
+          } else await f.service[action](accepted.id);
+          release.resolve(undefined);
+          await f.service.settleBackgroundSpawns();
+          expect(nativeStarts).toBe(0);
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          if (action === "peer")
+            expect(f.sessions.get(accepted.id)).toMatchObject({
+              error: "peer launch veto",
+              errorSource: "runtime_probe",
+              queuedMessages: { messages: ["peer retained"] },
+            });
+          if (action === "pause" || action === "kill")
+            expect(f.sessions.get(accepted.id)?.status).toBe(
+              action === "kill" ? "killed" : "stopped",
+            );
+        } finally {
+          release.resolve(undefined);
+          preparation.mockRestore();
+          f.service.dispose();
+          await f.service.settleBackgroundSpawns();
+        }
+      },
+    );
+
+    it.each(
+      (["queued", "workspace_ready"] as const).flatMap((phase) =>
+        (["target-only", "binding-only", "foreign-owner", "deleting", "complete"] as const).map(
+          (kind) => ({ phase, kind }),
+        ),
+      ),
+    )(
+      "queued Telegram topic gate requires complete acknowledged ownership after recovery: $phase/$kind",
+      async ({ phase, kind }) => {
+        const f = await queuedTopicFixture();
+        createTelegramTopicMock.mockRejectedValueOnce(new Error("lost response"));
+        const spawning = f.service.spawn(f.request, { telegramOrigin: f.origin });
+        await expect(spawning).rejects.toThrow("lost response");
+        f.service.dispose();
+        const original = f.sessions.get("api-1");
+        if (!original?.spawnIntent) throw new Error("Missing durable owner");
+        const saved = { ...clone(original), spawnIntent: { ...original.spawnIntent, phase } };
+        f.sessions.set("api-1", saved);
+        const target = {
+          sessionId: "api-1",
+          projectId: "api",
+          sourceId: "agentChat",
+          chatId: -1001,
+          messageThreadId: 55,
+          updatedAt: "2026-03-18T10:00:00.000Z",
+        };
+        if (kind !== "binding-only") readTelegramReplyTargetMock.mockReturnValue(target);
+        if (kind !== "target-only")
+          f.bindings.set("-1001:55", {
+            chatId: -1001,
+            messageThreadId: 55,
+            sessionId: kind === "foreign-owner" ? "api-2" : "api-1",
+          });
+        const { claimTelegramTopicDeletion } = await import("../../src/telegram-source-state.js");
+        const release =
+          kind === "deleting" ? claimTelegramTopicDeletion(TEST_DATA_DIR, -1001, 55) : null;
+        const replacement = new f.SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        try {
+          if (kind === "complete") {
+            await expect(replacement.ensureTelegramTopic("api-1", f.origin)).resolves.toMatchObject(
+              {
+                kind: "topic",
+                messageThreadId: 55,
+              },
+            );
+            expect(f.sessions.get("api-1")?.error).toBeUndefined();
+          } else {
+            await expect(replacement.ensureTelegramTopic("api-1", f.origin)).rejects.toThrow(
+              "remains unresolved",
+            );
+            expect(f.sessions.get("api-1")).toEqual(saved);
+          }
+          expect(createTelegramTopicMock).toHaveBeenCalledTimes(1);
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          expect(deleteTelegramTopicMock).not.toHaveBeenCalled();
+        } finally {
+          release?.();
+          replacement.dispose();
+          await replacement.settleBackgroundSpawns();
+        }
+      },
+    );
+
+    it("queued Telegram topic gate holds images and consent until the same canonical ACK", async () => {
+      const f = await queuedTopicFixture();
+      const topic = deferred<number>();
+      createTelegramTopicMock.mockReturnValueOnce(topic.promise);
+      const accepted = await f.service.spawn(f.request, {
+        acceptQueued: true,
+        telegramOrigin: f.origin,
+      });
+      const reply = {
+        message: "image after topic",
+        images: [
+          {
+            name: "qa.png",
+            data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aU9sAAAAASUVORK5CYII=",
+          },
+        ],
+      };
+      try {
+        await vi.waitFor(() => expect(createTelegramTopicMock).toHaveBeenCalledTimes(1));
+        await expect(f.service.replyToSource(accepted.id, reply)).rejects.toThrow(
+          "remains unresolved",
+        );
+        expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+        expect(writeTelegramOfferMock).not.toHaveBeenCalled();
+        expect(writeInterfaceConsentMock).not.toHaveBeenCalled();
+        topic.resolve(55);
+        await vi.waitFor(() => expect(f.sessions.get(accepted.id)?.error).toBeUndefined());
+        const result = await f.service.replyToSource(accepted.id, reply);
+        expect(result).toMatchObject({ chatId: -1001, messageThreadId: 55, images: 1 });
+        expect(sendTelegramReplyMock).toHaveBeenCalledTimes(1);
+        expect(sendTelegramReplyMock.mock.calls[0]?.[1]).toMatchObject({
+          chatId: -1001,
+          messageThreadId: 55,
+        });
+        expect(sendTelegramReplyMock.mock.calls[0]?.[3]).toMatchObject({
+          images: [expect.objectContaining({ name: "qa.png", contentType: "image/png" })],
+        });
+        expect(createTelegramTopicMock).toHaveBeenCalledTimes(1);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      } finally {
+        topic.resolve(55);
+        f.service.dispose();
+        await f.service.settleBackgroundSpawns();
+      }
+    });
+
+    it("queued Telegram topic gate holds the default admission fallback before native launch", async () => {
+      const { config } = telegramProjectConfig();
+      config.projects.api.worktree = false;
+      config.admission.memoryGuard.shedEnabled = false;
+      loadConfigMock.mockReturnValue(config);
+      const memory = (availableBytes: number) =>
+        readHostMemoryMock.mockReturnValue({
+          totalBytes: 65_000_000 * 1024,
+          availableBytes,
+          swapTotalBytes: 0,
+          swapFreeBytes: 0,
+        });
+      memory(7_000_000_000);
+      mockAgentWaitingState("codex");
+      const sessions = createSessionStore();
+      const topic = deferred<number>();
+      let boundary: "topic" | "native" | undefined;
+      let nativeStarts = 0;
+      createTelegramTopicMock.mockImplementationOnce(() => {
+        boundary = "topic";
+        return topic.promise;
+      });
+      createTmuxSessionMock.mockImplementationOnce(async (options) => {
+        await options.beforeLaunch?.();
+        nativeStarts += 1;
+        boundary ??= "native";
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+        found: true,
+        lastScannedFile: null,
+      });
+      const origin = { projectId: "api", sourceId: "agentChat", chatId: 123 };
+      const spawning = service.spawn(
+        { project: "api", prompt: "queued Telegram task", agent: "codex" },
+        { telegramOrigin: origin },
+      );
+      void spawning.catch(() => undefined);
+      try {
+        await vi.waitFor(() => expect(sessions.get("api-1")?.spawnIntent?.phase).toBe("queued"));
+        const receipt = clone(sessions.get("api-1")?.spawnReceipt);
+        expect(receipt).toBeDefined();
+        memory(20_000_000_000);
+        await (service as unknown as { runMemoryShedTick(): Promise<void> }).runMemoryShedTick();
+        await vi.waitFor(() => expect(boundary).toBeDefined());
+        expect({ nativeStarts, topicCalls: createTelegramTopicMock.mock.calls.length }).toEqual({
+          nativeStarts: 0,
+          topicCalls: 1,
+        });
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")?.spawnReceipt).toEqual(receipt);
+        topic.resolve(55);
+        await vi.waitFor(() => expect(nativeStarts).toBe(1));
+        expect(readTelegramReplyTargetMock()).toMatchObject({
+          chatId: -1001,
+          messageThreadId: 55,
+        });
+        expect((await spawning).id).toBe("api-1");
+        expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+      } finally {
+        service.dispose();
+        topic.resolve(55);
+        await service.settleBackgroundSpawns();
+        await spawning.catch(() => undefined);
+      }
+    });
 
     it.each(["release", "complete", "kill"] as const)(
       "topic-main holds the new Codex launch lock after topic preparation: %s",

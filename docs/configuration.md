@@ -55,6 +55,7 @@ A mode is a prompt suffix naming a skill, set via `projects.<id>.modes.<name>.{s
 `chatId<0` selects canonical agent forum; missing/positive `chatId` disables agent communication; `allowedUsers`/`allowedChats` gates manual access — `v2/src/session-service.ts`, `v2/src/event-sources/telegram.ts`.
 Task launch, attention cards, topic lifecycle: [`/new`, `/work`, `/complete`, `/kill`](commands.md#source-reply); complete/kill topic deletion requires bot administrator `can_delete_messages`.
 [`source reply`](commands.md#source-reply), questions, attention and typing use assigned topic; Telegram spawn assigns before launch; legacy destinations migrate on input/output — `v2/src/session-service.ts`.
+Queued topics: accepted ID/intent retained; launch and competing requests hold until acknowledged assignment; uncertain creation is not retried automatically — `v2/src/session-service.ts`.
 DMs support commands/spawn tasks; existing-agent text, buttons and voice outside assigned topic redirect without delivery — `v2/src/event-sources/telegram.ts`.
 Failed inbound update from an allowed user answers `Message not delivered. Send it again.` once in the same chat/topic; taps on buttons older than 48h answer in the group main — `v2/src/event-sources/telegram.ts`.
 `/spawn` creates its own canonical topic; `/watch` and `/work` Continue return topic links; `/unwatch` removes selected binding and retains topic — `v2/src/event-sources/telegram.ts`, `v2/src/session-service.ts`.
@@ -126,7 +127,7 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 
 Spawn waits automatically for memory-guard or live-session-cap recovery; `v2/src/session-service.ts`.
 Accepted background and resource-queued HTTP spawns retain session id, launch intent, messages, attachments, and selected account across daemon restart; `v2/src/session-service.ts`, `v2/src/metadata.ts`.
-Recovery adopts confirmed existing runtime; uncertain runtime or startup delivery holds and rechecks automatically; `v2/src/session-service.ts`.
+Recovery adopts confirmed existing runtime; uncertain runtime or startup delivery holds and rechecks automatically; [queued topic creation](#telegram-binding) retains its separate hold policy — `v2/src/session-service.ts`.
 OpenCode recovery without a persisted native session id stays `session.spawn.recovery_held`; history and prompt acknowledgment cannot supply ownership; `v2/src/session-service.ts`.
 
 Restore and wake reject memory-guard or cap denial (`429`); `v2/src/session-service.ts`.
