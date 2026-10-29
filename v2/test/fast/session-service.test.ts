@@ -1576,11 +1576,7 @@ async function useRealTodoLedger(): Promise<void> {
 describe("SessionService", () => {
   describe("sidecar endpoint readiness", () => {
     async function setup() {
-      const config = {
-        ...baseConfig(),
-        projects: { api: { ...baseConfig().projects.api, restoreAfterReboot: false } },
-      };
-      config.projects.api.sidecars = {
+      const sidecars: Record<"dev" | "daemon", ProjectConfig["sidecars"][string]> = {
         dev: {
           command: "node app.js",
           autoStart: false,
@@ -1599,6 +1595,12 @@ describe("SessionService", () => {
           ports: {
             tcp: { env: "DAEMON_PORT", start: 4000, end: 4000 },
           },
+        },
+      };
+      const config = {
+        ...baseConfig(),
+        projects: {
+          api: { ...baseConfig().projects.api, restoreAfterReboot: false, sidecars },
         },
       };
       loadConfigMock.mockReturnValue(config);
@@ -1700,9 +1702,15 @@ describe("SessionService", () => {
         { port: 4001, listening: false },
       ]);
       expect(snapshotListenersMock).toHaveBeenCalledTimes(1);
-      internals.dashboardCache.set(owner.id, await internals.enrichDashboard(sessions.get(owner.id) ?? owner));
+      internals.dashboardCache.set(
+        owner.id,
+        await internals.enrichDashboard(sessions.get(owner.id) ?? owner),
+      );
       const list = await service.list({ view: "dashboard" });
-      expect(list.find((view) => view.id === owner.id)?.sidecars.find((view) => view.name === "daemon")?.ports).toMatchObject([
+      expect(
+        list.find((view) => view.id === owner.id)?.sidecars?.find((view) => view.name === "daemon")
+          ?.ports,
+      ).toMatchObject([
         { port: 4000, listening: true },
         { port: 4001, listening: false },
       ]);
@@ -1710,8 +1718,9 @@ describe("SessionService", () => {
 
       nextObservation();
       snapshotListenersMock.mockResolvedValue({ ok: false });
-      expect((await service.get(owner.id)).sidecars.find((view) => view.name === "daemon")?.ports)
-        .toMatchObject([{ listening: null }, { listening: null }]);
+      expect(
+        (await service.get(owner.id)).sidecars.find((view) => view.name === "daemon")?.ports,
+      ).toMatchObject([{ listening: null }, { listening: null }]);
       service.dispose();
     });
 
@@ -2071,7 +2080,9 @@ describe("SessionService", () => {
       async (boundary) => {
         const { service, owner, internals } = await setup();
         internals.dashboardCache.set(owner.id, await internals.enrichDashboard(owner));
-        expect(internals.dashboardCache.get(owner.id)?.sidecars?.[0]?.ports[0]?.listening).toBe(true);
+        expect(internals.dashboardCache.get(owner.id)?.sidecars?.[0]?.ports[0]?.listening).toBe(
+          true,
+        );
         const entered = signal();
         const release = signal();
         if (boundary === "history") {
@@ -2100,7 +2111,9 @@ describe("SessionService", () => {
         expect(views?.[0]).not.toHaveProperty("url");
         expect(internals.dashboardCache.get(owner.id)?.sidecars?.[0]?.url).toBeUndefined();
         expect(views?.[0]?.ports[0]?.listening).toBeNull();
-        expect(internals.dashboardCache.get(owner.id)?.sidecars?.[0]?.ports[0]?.listening).toBeNull();
+        expect(
+          internals.dashboardCache.get(owner.id)?.sidecars?.[0]?.ports[0]?.listening,
+        ).toBeNull();
         service.dispose();
       },
     );
@@ -2111,7 +2124,9 @@ describe("SessionService", () => {
       expect(internals.dashboardCache.get(owner.id)?.sidecars?.[0]?.ports[0]?.listening).toBe(true);
       internals.invalidateSidecarEndpoint(owner.id, "dev");
       const list = await service.list({ view: "dashboard" });
-      expect(list.find((view) => view.id === owner.id)?.sidecars[0]?.ports[0]?.listening).toBeNull();
+      expect(
+        list.find((view) => view.id === owner.id)?.sidecars?.[0]?.ports[0]?.listening,
+      ).toBeNull();
       service.dispose();
     });
 

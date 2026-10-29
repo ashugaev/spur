@@ -1297,7 +1297,7 @@ function sidecarPortRows(view: SessionView, name?: string): SidecarPortRow[] {
       env: port.env,
       port: port.port,
       alive: sidecar.alive,
-      listening: port.listening,
+      listening: port.listening ?? null,
     })),
   );
   // Plain string comparison, not localeCompare: this output is machine-read

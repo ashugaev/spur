@@ -123,6 +123,28 @@ describe("sidecar ports CLI", () => {
     expect(writeStdoutMock).toHaveBeenCalledWith("[]");
   });
 
+  it("reports unknown listener state from an older daemon in text and JSON", async () => {
+    getJsonMock.mockResolvedValue({
+      id: "api-1",
+      sidecars: [
+        {
+          name: "web",
+          alive: true,
+          ports: [{ id: "http", env: "WEB_PORT", port: 4100 }],
+          tmuxSession: "api-1--web",
+        },
+      ],
+    });
+
+    await parseCli(["sidecar", "ports", "--session", "api-1"]);
+    expect(writeStdoutMock).toHaveBeenLastCalledWith("web\thttp\tWEB_PORT\t4100\talive\tunknown");
+
+    await parseCli(["sidecar", "ports", "--session", "api-1", "--json"]);
+    expect(JSON.parse(writeStdoutMock.mock.lastCall?.[0] as string)).toEqual([
+      { sidecar: "web", id: "http", env: "WEB_PORT", port: 4100, alive: true, listening: null },
+    ]);
+  });
+
   it("prints sidecar/id/env/port/alive objects in --json mode", async () => {
     getJsonMock.mockResolvedValue(sessionView);
 
@@ -131,7 +153,14 @@ describe("sidecar ports CLI", () => {
     expect(writeStdoutMock).toHaveBeenCalledWith(
       JSON.stringify(
         [
-          { sidecar: "echo", id: "http", env: "SPUR_RESERVED_PORT_ECHO", port: 8930, alive: false, listening: false },
+          {
+            sidecar: "echo",
+            id: "http",
+            env: "SPUR_RESERVED_PORT_ECHO",
+            port: 8930,
+            alive: false,
+            listening: false,
+          },
           {
             sidecar: "echo",
             id: "ws",
@@ -140,7 +169,14 @@ describe("sidecar ports CLI", () => {
             alive: false,
             listening: null,
           },
-          { sidecar: "web", id: "http", env: "SPUR_RESERVED_PORT_WEB", port: 4100, alive: true, listening: true },
+          {
+            sidecar: "web",
+            id: "http",
+            env: "SPUR_RESERVED_PORT_WEB",
+            port: 4100,
+            alive: true,
+            listening: true,
+          },
         ],
         null,
         2,
