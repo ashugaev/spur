@@ -15,13 +15,15 @@ import {
 import { createTempDir, findFreePort } from "../helpers/common.js";
 import { writeSession } from "../../src/metadata.js";
 import { startServer } from "../../src/server.js";
+import type { CronJobEditDraft } from "../../src/types.js";
 
 const source = (name: string) => readFile(new URL(`../../src/${name}`, import.meta.url), "utf8");
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "504fbff75f32216fbdf07d41fe8a6af1ffd8b53a11af2a9ce8aaa9526a0a33a7",
-  "types.ts": "6ffe69a07999cb25d84769a2deec6c3fb606350a80fbda44d5b3a09c25f38d04",
+  "server.ts": "2fe4973793b9746b32711b0295668b2765e751b642b12b5a0ade336fc02b4d2b",
+  "types.ts": "fdd958796299b45c28df4edb111af4ed3b79e6290bd49590f61964c8778cec4b",
+  "cron-job-editor.ts": "33fc7b2993819693ef511d9312f9eb8f4260feb2f263421aec2d4e5ac613ec06",
   "session-service.ts": "1fe92b40ddaea6185f66451dd8e191819ede2c052c99f04d1d7d3c3924f191fb",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "837a7052b62b977b59f117e344b83b0f507298ce0d716c1ab637ead711060c42",
@@ -43,9 +45,9 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(81);
+    expect(routes).toHaveLength(83);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(81);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(83);
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("spawn_background_session")?.path).toBe("/sessions/background");
     expect(getDaemonOperation("missing")).toBeUndefined();
@@ -111,6 +113,40 @@ describe("daemon MCP operation contracts", () => {
     expect(() => inventoryDaemonRoutes("const broken =")).toThrow("syntactically invalid");
   });
 
+  it("inventories every combined method once without counting nested body parsing", () => {
+    expect(
+      inventoryDaemonRoutes(`const handleRequest = () => {
+      if ((method === "GET" || method === "PATCH") && path === "/edit") {
+        if (method === "PATCH") readBody();
+      }
+    };`),
+    ).toEqual(["GET /edit", "PATCH /edit"]);
+  });
+
+  it.each([
+    'if (method === "PATCH") readBody();',
+    'if ((method === "GET" || path === "/edit")) dispatch();',
+    'if ((method === "GET" || method == "PATCH") && path === "/edit") dispatch();',
+    'if (method === "HEAD" && path === "/edit") dispatch();',
+    'if (method === "GET" && path === "/edit") { if (method === "PATCH") readBody(); }',
+    'if (method === "GET" && path === "/edit") { if (method === "GET" && path === "/hidden") dispatch(); }',
+    'if ((method === "GET" || method === "PATCH") && path === "/edit") { if (method === "PATCH" && path.startsWith("/hidden")) dispatch(); }',
+    'if ((method === "GET" || method === "PATCH") && path === "/edit") { if (method === "PATCH" && path !== "/edit") dispatch(); }',
+  ])("rejects unproven method/dispatch refinements", (branch) => {
+    expect(() => inventoryDaemonRoutes(`const handleRequest = () => { ${branch} };`)).toThrow(
+      /Unknown/,
+    );
+  });
+
+  it("rejects duplicate concrete routes in combined or separate dispatches", () => {
+    expect(() =>
+      inventoryDaemonRoutes(`const handleRequest = () => {
+      if ((method === "GET" || method === "PATCH") && path === "/edit") dispatch();
+      if (method === "PATCH" && path === "/edit") dispatchAgain();
+    };`),
+    ).toThrow("Duplicate daemon routes");
+  });
+
   it("keeps all request DTO fields, including optional task/provider inputs", async () => {
     const types = await source("types.ts");
     const mappings = [
@@ -130,6 +166,7 @@ describe("daemon MCP operation contracts", () => {
       ["start_sidecar", "StartSidecarRequest"],
       ["complete_session", "CompleteSessionRequest"],
       ["kill_session", "KillSessionRequest"],
+      ["save_cron_job_draft", "CronJobEditUpdate"],
     ] as const;
     for (const [id, dto] of mappings) {
       const actual = getDaemonOperation(id)?.body?.fields.map(({ name, required }) => ({
@@ -151,6 +188,36 @@ describe("daemon MCP operation contracts", () => {
         getDaemonOperation(id)?.body?.fields.find((entry) => entry.name === "attachments")?.type,
       ).toContain("name:string,data:string");
     }
+  });
+
+  it("describes the scoped Cron disk draft and nullable save-only contract", async () => {
+    for (const operationId of ["get_cron_job_draft", "save_cron_job_draft"]) {
+      const operation = getDaemonOperation(operationId);
+      expect(operation?.path).toBe("/projects/cron/edit");
+      expect(operation?.query.map(({ name, required }) => ({ name, required }))).toEqual([
+        { name: "project", required: true },
+        { name: "source", required: true },
+        { name: "trigger", required: true },
+      ]);
+      expect(operation?.sources).toContain("v2/src/cron-job-editor.ts");
+      expect(operation?.responses.map(({ status }) => status)).toContain(422);
+    }
+    const read = getDaemonOperation("get_cron_job_draft");
+    expect(read?.method).toBe("GET");
+    expect(read?.body).toBeNull();
+    const save = getDaemonOperation("save_cron_job_draft");
+    expect(save?.method).toBe("PATCH");
+    const definitions = save?.body?.definitions;
+    if (!definitions) throw new Error("Missing editor block contract");
+    expect(interfaceFields(definitions, "CronJobEditBlock")).toEqual(
+      interfaceFields(await source("types.ts"), "CronJobEditBlock"),
+    );
+    for (const key of ["agent", "model", "reasoningEffort"]) {
+      expect(definitions).toMatch(new RegExp(`${key}: [^;]+\\|null;`));
+    }
+    expect(save?.responses.find(({ status }) => status === 200)?.description).toContain(
+      'activation:"pending"',
+    );
   });
 
   it("provides examples, path/query/body metadata, errors and source references for every operation", () => {
@@ -187,7 +254,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(81);
+      expect(page.total).toBe(83);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",
@@ -208,7 +275,7 @@ describe("daemon MCP operation contracts", () => {
 });
 
 describe("catalog examples at the real daemon router", () => {
-  async function fixture() {
+  async function fixture(cron = false) {
     const root = await createTempDir("spur-mcp-contract-");
     const repo = join(root, "repo");
     await mkdir(repo);
@@ -217,7 +284,7 @@ describe("catalog examples at the real daemon router", () => {
     const dataDir = join(root, "data");
     await writeFile(
       configPath,
-      `server:\n  host: 127.0.0.1\n  port: ${port}\ndataDir: ${dataDir}\nauthRotation:\n  switchAuth: true\nworktreeDir: ${join(root, "worktrees")}\nprojects:\n  test:\n    path: ${repo}\n`,
+      `server:\n  host: 127.0.0.1\n  port: ${port}\ndataDir: ${dataDir}\nauthRotation:\n  switchAuth: true\nworktreeDir: ${join(root, "worktrees")}\nprojects:\n  test:\n    path: ${repo}\n${cron ? "    sources:\n      nightly: {type: cron, schedule: '0 0 1 1 *', runOnStart: false}\n    triggers:\n      audit:\n        source: nightly\n        event: cron:tick\n        spawn: {prompt: inspect tasks}\n" : ""}`,
     );
     writeSession(dataDir, {
       id: "test-contract",
@@ -238,23 +305,73 @@ describe("catalog examples at the real daemon router", () => {
       operationId: string,
       requestBody?: unknown,
       params: Record<string, string> = {},
+      query: Record<string, string> = {},
     ) => {
       const operation = getDaemonOperation(operationId);
       if (!operation) throw new Error(`Unknown example ${operationId}`);
       const values = { sessionId: "test-contract", scope: "task", key: "contract", ...params };
-      const path = operation.path.replace(/\{([^}]+)\}/g, (_match, name: string) => {
+      let path = operation.path.replace(/\{([^}]+)\}/g, (_match, name: string) => {
         const value = values[name as keyof typeof values];
         if (!value) throw new Error(`Missing example path value: ${name}`);
         return encodeURIComponent(value);
       });
+      const search = new URLSearchParams(query);
+      if (search.size) path += `?${search}`;
       return fetch(`http://127.0.0.1:${port}${path}`, {
         method: operation.method,
         headers: { "content-type": "application/json", "x-spur-origin": "mcp" },
         ...(requestBody !== undefined ? { body: JSON.stringify(requestBody) } : {}),
       });
     };
-    return { server, request };
+    return { server, request, configPath };
   }
+
+  it("executes scoped Cron draft/save catalog requests without changing loaded settings or sessions", async () => {
+    const { server, request, configPath } = await fixture(true);
+    const query = { project: "test", source: "nightly", trigger: "audit" };
+    try {
+      const sessionsBefore = await (await request("list_sessions")).json();
+      const loadedBefore = structuredClone(server.config.projects["test"]);
+      const read = await request("get_cron_job_draft", undefined, {}, query);
+      expect(read.status).toBe(200);
+      const draft = (await read.json()) as CronJobEditDraft;
+      const body = {
+        revision: draft.revision,
+        schedule: "0 1 1 1 *",
+        blocks: [
+          { prompt: "Updated from operator MCP", agent: null, model: null, reasoningEffort: null },
+        ],
+      };
+      const save = await request("save_cron_job_draft", body, {}, query);
+      expect(save.status).toBe(200);
+      expect(await save.json()).toMatchObject({
+        saved: true,
+        activation: "pending",
+        blocks: body.blocks,
+      });
+      const reopened = (await (
+        await request("get_cron_job_draft", undefined, {}, query)
+      ).json()) as CronJobEditDraft;
+      expect(reopened.revision).not.toBe(draft.revision);
+      expect(reopened.blocks).toEqual(body.blocks);
+      expect(await readFile(configPath, "utf8")).toContain("Updated from operator MCP");
+      expect((await request("save_cron_job_draft", body, {}, query)).status).toBe(409);
+      expect(
+        (
+          await request(
+            "save_cron_job_draft",
+            { ...body, revision: reopened.revision, schedule: "invalid" },
+            {},
+            query,
+          )
+        ).status,
+      ).toBe(422);
+      expect(server.config.projects["test"]).toEqual(loadedBefore);
+      expect(await (await request("list_sessions")).json()).toEqual(sessionsBefore);
+    } finally {
+      await server.stop();
+    }
+  });
 
   it("executes every ToDo variant and session/shared-memory writes through MCP operator rights", async () => {
     const { server, request } = await fixture();
