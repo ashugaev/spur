@@ -34403,7 +34403,7 @@ describe("SessionService", () => {
             name: "daemon",
             alive: true,
             tmuxSession: "api-1--daemon",
-            ports: [{ id: "http", env: "SPUR_RESERVED_PORT_DAEMON", port: 4100 }],
+            ports: [{ id: "http", env: "SPUR_RESERVED_PORT_DAEMON", port: 4100, listening: null }],
           }),
           expect.objectContaining({
             name: "playwright",
@@ -48612,7 +48612,7 @@ describe("SessionService", () => {
       {
         name: "ui",
         alive: false,
-        ports: [{ id: "http", env: "SPUR_RESERVED_PORT_UI", port: 3010 }],
+        ports: [{ id: "http", env: "SPUR_RESERVED_PORT_UI", port: 3010, listening: null }],
         tmuxSession: "api-1--ui",
       },
     ]);
