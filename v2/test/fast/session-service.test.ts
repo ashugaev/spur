@@ -72728,6 +72728,113 @@ describe("SessionService", () => {
       }
     });
 
+    it.each(["no-forum", "positive-chat", "missing-source"] as const)(
+      "queued Telegram topic gate retries ordinary recovered preparation without a forum: %s",
+      async (sourceKind) => {
+        const f = await queuedTopicFixture();
+        const sources: ProjectConfig["sources"] = f.config.projects.api.sources;
+        const source = sources.agentChat;
+        if (source?.type !== "telegram") throw new Error("Missing fixture source");
+        if (sourceKind === "no-forum") delete source.chatId;
+        else if (sourceKind === "positive-chat") source.chatId = 123;
+        else delete sources.agentChat;
+        const accepted = await f.service.spawn(
+          {
+            ...f.request,
+            attachments: [
+              { name: "notes.txt", data: Buffer.from("recovery input").toString("base64") },
+            ],
+          },
+          { acceptQueued: true, telegramOrigin: f.origin },
+        );
+        const saved = clone(f.sessions.get(accepted.id));
+        const attachmentId = saved?.startupAttachmentIds?.[0];
+        if (!attachmentId) throw new Error("Missing accepted attachment");
+        const path = join(artifactDirForSession(accepted.id), attachmentId);
+        expect(readFileSync(path, "utf8")).toBe("recovery input");
+        f.service.dispose();
+        await f.service.settleBackgroundSpawns();
+        const restored = new f.SessionService("/tmp/spur.yaml", "2026-03-18T10:06:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        const recovery = restored as unknown as { runMemoryShedTick(): Promise<void> };
+        vi.spyOn(sessionServiceInternals(restored), "waitForSubmitAck").mockResolvedValue({
+          found: true,
+          lastScannedFile: null,
+        });
+        try {
+          await recovery.runMemoryShedTick();
+          await restored.settleBackgroundSpawns();
+          expect(f.sessions.get(accepted.id)?.error).toBe(
+            `Missing startup artifact ${attachmentId} for ${accepted.id}`,
+          );
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          readSessionArtifactMock.mockReturnValue({
+            id: attachmentId,
+            name: "notes.txt",
+            path,
+            kind: "text",
+            size: 14,
+            mimeType: "text/plain",
+            createdAt: "2026-03-18T10:00:00.000Z",
+            updatedAt: "2026-03-18T10:00:00.000Z",
+            origin: "intentional",
+            addedByUser: true,
+          });
+          f.memory(20_000_000_000);
+          await recovery.runMemoryShedTick();
+          await restored.settleBackgroundSpawns();
+          expect(f.sessions.get(accepted.id)).toMatchObject({
+            status: "running",
+            spawnReceipt: saved?.spawnReceipt,
+          });
+          expect(f.sessions.get(accepted.id)?.spawnIntent).toBeUndefined();
+          expect(f.sessions.get(accepted.id)?.error).toBeUndefined();
+          expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+          expect(createTelegramTopicMock).not.toHaveBeenCalled();
+          expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+        } finally {
+          restored.dispose();
+          await restored.settleBackgroundSpawns();
+        }
+      },
+    );
+
+    it.each(["no-forum", "positive-chat", "missing-source"] as const)(
+      "queued Telegram topic gate retains its unresolved marker when the source loses its forum: %s",
+      async (sourceKind) => {
+        const f = await queuedTopicFixture();
+        createTelegramTopicMock.mockRejectedValueOnce(new Error("ambiguous topic response"));
+        await expect(f.service.spawn(f.request, { telegramOrigin: f.origin })).rejects.toThrow(
+          "ambiguous topic response",
+        );
+        const saved = clone(f.sessions.get("api-1"));
+        const sources: ProjectConfig["sources"] = f.config.projects.api.sources;
+        const source = sources.agentChat;
+        if (source?.type !== "telegram") throw new Error("Missing fixture source");
+        if (sourceKind === "no-forum") delete source.chatId;
+        else if (sourceKind === "positive-chat") source.chatId = 123;
+        else delete sources.agentChat;
+        f.service.dispose();
+        await f.service.settleBackgroundSpawns();
+        const restored = new f.SessionService("/tmp/spur.yaml", "2026-03-18T10:06:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        try {
+          await expect(restored.ensureTelegramTopic("api-1")).rejects.toThrow("remains unresolved");
+          f.memory(20_000_000_000);
+          await (restored as unknown as { runMemoryShedTick(): Promise<void> }).runMemoryShedTick();
+          await restored.settleBackgroundSpawns();
+          expect(f.sessions.get("api-1")).toEqual(saved);
+          expect(createTelegramTopicMock).toHaveBeenCalledTimes(1);
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        } finally {
+          restored.dispose();
+          await restored.settleBackgroundSpawns();
+        }
+      },
+    );
+
     it("queued Telegram topic gate retains rejected creation across recovery and default completion", async () => {
       const f = await queuedTopicFixture();
       createTelegramTopicMock.mockRejectedValueOnce(new Error("ambiguous topic response"));
@@ -73172,11 +73279,12 @@ describe("SessionService", () => {
       },
     );
 
-    it.each(
-      (["before-stamp", "before-native"] as const).flatMap((boundary) =>
+    it.each([
+      ...(["before-stamp", "before-native"] as const).flatMap((boundary) =>
         (["peer", "source", "pause", "kill"] as const).map((action) => ({ boundary, action })),
       ),
-    )(
+      { boundary: "before-native" as const, action: "generation" as const },
+    ])(
       "queued Telegram topic gate checks current ownership $boundary/$action",
       async ({ boundary, action }) => {
         const f = await queuedTopicFixture();
@@ -73229,6 +73337,8 @@ describe("SessionService", () => {
               errorSource: "runtime_probe",
               queuedMessages: { messages: ["peer retained"], awaitingPrompt: true },
             });
+          else if (action === "generation")
+            f.sessions.set(accepted.id, { ...record, agentLaunchId: "peer-launch-generation" });
           else if (action === "source") {
             const source = f.service.config.projects.api?.sources.agentChat;
             if (source?.type !== "telegram") throw new Error("Missing source");

@@ -16697,13 +16697,7 @@ export class SessionService {
     if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     if (isTerminalSessionStatus(session.status))
       throw new InvalidSourceReplyInputError(`Session ${sessionId} is ${session.status}`);
-    if (
-      queued &&
-      (this.admissionStopped ||
-        session.status !== "spawning" ||
-        ((session.error !== undefined || session.errorSource !== undefined) &&
-          !(session.error === QUEUED_TELEGRAM_TOPIC_UNRESOLVED && session.errorSource === "other")))
-    )
+    if (queued && (this.admissionStopped || session.status !== "spawning"))
       throw new InvalidSourceReplyInputError(session.error ?? QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
     const stored = readTelegramReplyTarget(this.config.dataDir, sessionId);
     if (
@@ -16738,6 +16732,12 @@ export class SessionService {
       });
       return { kind: "disabled" };
     }
+    if (
+      queued &&
+      (session.error !== undefined || session.errorSource !== undefined) &&
+      !(session.error === QUEUED_TELEGRAM_TOPIC_UNRESOLVED && session.errorSource === "other")
+    )
+      throw new InvalidSourceReplyInputError(session.error ?? QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
     const existing = this.telegramReplyTarget(session, stored);
     if (
       existing &&
