@@ -2864,7 +2864,7 @@ describe("SessionDetail voice input", () => {
     it("keeps older loading when a decoded tail and scroll share a React batch", async () => {
       vi.useFakeTimers();
       const heldTail = deferred<Response>();
-      const decoded = deferred<void>();
+      const decoded = deferred<undefined>();
       const older = deferred<Response>();
       let tailCalls = 0;
       const view = await mountPaging((url) => {
@@ -2878,7 +2878,7 @@ describe("SessionDetail voice input", () => {
         expect(tailCalls).toBe(2);
         const tail = response(200);
         tail.json = async () => {
-          decoded.resolve();
+          decoded.resolve(undefined);
           return page(200);
         };
         await act(async () => {
@@ -2907,7 +2907,7 @@ describe("SessionDetail voice input", () => {
     it("keeps loading owned by the newly requested older page", async () => {
       vi.useFakeTimers();
       const previous = deferred<Response>();
-      const decoded = deferred<void>();
+      const decoded = deferred<undefined>();
       const next = deferred<Response>();
       let olderCalls = 0;
       const view = await mountPaging((url) => {
@@ -2924,7 +2924,7 @@ describe("SessionDetail voice input", () => {
         expect(olderCalls).toBe(2);
         const oldPage = response(100);
         oldPage.json = async () => {
-          decoded.resolve();
+          decoded.resolve(undefined);
           return page(100);
         };
         await act(async () => {
