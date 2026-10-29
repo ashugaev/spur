@@ -240,6 +240,7 @@ import {
   formatTelegramSessionLabel,
   sendTelegramChatAction,
   sendTelegramReply,
+  type TelegramPhoto,
   telegramTopicIsDeleting,
   type TelegramReplySendResult,
 } from "./telegram-source-state.js";
@@ -2185,6 +2186,129 @@ function parseSourceReplyButtons(raw: unknown): SourceReplyButton[] {
     buttons.push({ text, value });
   }
   return buttons;
+}
+
+const MAX_SOURCE_REPLY_IMAGES = 4;
+const MAX_SOURCE_REPLY_IMAGE_BYTES = 10_000_000;
+const MAX_SOURCE_REPLY_IMAGE_SIDES = 10_000;
+const MAX_SOURCE_REPLY_IMAGE_RATIO = 20;
+const SOURCE_REPLY_IMAGE_TYPES = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+} as const satisfies Record<string, TelegramPhoto["contentType"]>;
+
+/** Width and height from the format header, or null when the bytes are not that format. */
+function imageDimensions(
+  bytes: Buffer,
+  contentType: TelegramPhoto["contentType"],
+): { width: number; height: number } | null {
+  const ascii = (start: number, end: number): string => bytes.toString("latin1", start, end);
+  if (contentType === "image/png") {
+    if (bytes.length < 24 || ascii(0, 8) !== "\x89PNG\r\n\x1a\n" || ascii(12, 16) !== "IHDR") {
+      return null;
+    }
+    return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  }
+  if (contentType === "image/webp") {
+    if (bytes.length < 30 || ascii(0, 4) !== "RIFF" || ascii(8, 12) !== "WEBP") return null;
+    const chunk = ascii(12, 16);
+    if (chunk === "VP8 " && bytes.readUIntBE(23, 3) === 0x9d012a) {
+      return { width: bytes.readUInt16LE(26) & 0x3fff, height: bytes.readUInt16LE(28) & 0x3fff };
+    }
+    if (chunk === "VP8L" && bytes[20] === 0x2f) {
+      const bits = bytes.readUInt32LE(21);
+      return { width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1 };
+    }
+    if (chunk === "VP8X") {
+      return { width: bytes.readUIntLE(24, 3) + 1, height: bytes.readUIntLE(27, 3) + 1 };
+    }
+    return null;
+  }
+  if (bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  // JPEG: walk the marker segments to the first start-of-frame.
+  let offset = 2;
+  while (offset + 4 <= bytes.length) {
+    if (bytes[offset] !== 0xff) return null;
+    const marker = bytes[offset + 1] as number;
+    if (marker === 0xff) {
+      offset += 1;
+      continue;
+    }
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) {
+      offset += 2;
+      continue;
+    }
+    if (marker === 0xd9 || marker === 0xda) return null;
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      if (offset + 9 > bytes.length) return null;
+      return { height: bytes.readUInt16BE(offset + 5), width: bytes.readUInt16BE(offset + 7) };
+    }
+    const length = bytes.readUInt16BE(offset + 2);
+    if (length < 2) return null;
+    offset += 2 + length;
+  }
+  return null;
+}
+
+// Reached straight from the HTTP body, so every field is validated here.
+function parseSourceReplyImages(raw: unknown): TelegramPhoto[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    throw new InvalidSourceReplyInputError("images must be an array");
+  }
+  if (raw.length > MAX_SOURCE_REPLY_IMAGES) {
+    throw new InvalidSourceReplyInputError(
+      `images must hold at most ${MAX_SOURCE_REPLY_IMAGES} entries`,
+    );
+  }
+  const photos: TelegramPhoto[] = [];
+  let totalBytes = 0;
+  for (const entry of raw) {
+    const record = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
+    const name = typeof record["name"] === "string" ? record["name"].trim() : "";
+    const extension = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
+    const contentType = Object.hasOwn(SOURCE_REPLY_IMAGE_TYPES, extension)
+      ? SOURCE_REPLY_IMAGE_TYPES[extension as keyof typeof SOURCE_REPLY_IMAGE_TYPES]
+      : undefined;
+    if (!name.includes(".") || !contentType) {
+      throw new InvalidSourceReplyInputError(
+        `image name must end in .png, .jpg, .jpeg or .webp: ${name}`,
+      );
+    }
+    const data = record["data"];
+    if (
+      typeof data !== "string" ||
+      !data ||
+      data.length % 4 !== 0 ||
+      !/^[A-Za-z0-9+/]*={0,2}$/u.test(data)
+    ) {
+      throw new InvalidSourceReplyInputError(`image data must be non-empty base64: ${name}`);
+    }
+    const bytes = Buffer.from(data, "base64");
+    totalBytes += bytes.length;
+    if (totalBytes > MAX_SOURCE_REPLY_IMAGE_BYTES) {
+      throw new InvalidSourceReplyInputError(
+        `images must total at most ${MAX_SOURCE_REPLY_IMAGE_BYTES} bytes`,
+      );
+    }
+    const size = imageDimensions(bytes, contentType);
+    if (!size || size.width === 0 || size.height === 0) {
+      throw new InvalidSourceReplyInputError(`image is not a readable ${extension} file: ${name}`);
+    }
+    if (
+      size.width + size.height > MAX_SOURCE_REPLY_IMAGE_SIDES ||
+      Math.max(size.width, size.height) / Math.min(size.width, size.height) >
+        MAX_SOURCE_REPLY_IMAGE_RATIO
+    ) {
+      throw new InvalidSourceReplyInputError(
+        `image ${name} is ${size.width}x${size.height}; width+height must be at most ${MAX_SOURCE_REPLY_IMAGE_SIDES} and the side ratio at most ${MAX_SOURCE_REPLY_IMAGE_RATIO}`,
+      );
+    }
+    photos.push({ name, contentType, data: bytes });
+  }
+  return photos;
 }
 
 function buildTelegramChoices(
@@ -15423,6 +15547,7 @@ export class SessionService {
       throw new InvalidSourceReplyInputError("message must be a non-empty string");
     }
     let buttons = parseSourceReplyButtons(request.buttons);
+    const images = parseSourceReplyImages(request.images);
     const assignment = await this.ensureTelegramTopic(sessionId);
     if (assignment.kind === "disabled")
       throw new InvalidSourceReplyInputError(
@@ -15518,6 +15643,7 @@ export class SessionService {
               })),
             }
           : {}),
+        ...(images.length > 0 ? { images } : {}),
       },
     ).catch((error: unknown) => {
       if (consent) {
@@ -15576,6 +15702,7 @@ export class SessionService {
         ? { messageThreadId: replyTarget.messageThreadId }
         : {}),
       ...(choices.length > 0 ? { buttons: choices.length } : {}),
+      ...(images.length > 0 ? { images: images.length } : {}),
     };
   }
 
