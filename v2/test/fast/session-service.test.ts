@@ -1682,7 +1682,9 @@ describe("SessionService", () => {
       };
       sessions.set(owner.id, {
         ...owner,
-        sidecarPorts: { ...owner.sidecarPorts, daemon: { BOUND_PORT: 4000, UNBOUND_PORT: 4001 } },
+        sidecarNames: ["daemon"],
+        sidecarPorts: { daemon: { BOUND_PORT: 4000, UNBOUND_PORT: 4001 } },
+        sidecarProcs: {},
       });
       sidecarTmuxAliveMock.mockResolvedValue(true);
       snapshotListenersMock.mockResolvedValue({
