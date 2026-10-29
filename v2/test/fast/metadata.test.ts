@@ -2595,8 +2595,7 @@ describe("session record shape guard", () => {
 
   it.each(REQUIRED_SESSION_FIELDS)("readSession throws when %s is missing", async (field) => {
     const dataDir = await newDataDir();
-    const body = full("api-1");
-    delete body[field];
+    const body = Object.fromEntries(Object.entries(full("api-1")).filter(([key]) => key !== field));
     writeRawSession(dataDir, "api-1", body);
     expect(() => readSession(dataDir, "api-1")).toThrow(/Invalid session metadata shape/);
   });
