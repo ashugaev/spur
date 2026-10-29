@@ -1056,13 +1056,45 @@ describe("startConfiguredTriggers", () => {
 
     it("retains the identical disk batch before input and delivers once after controller reconstruction", async () => {
       const f = await fixture();
+      let reject: ((error: Error) => void) | undefined;
+      f.get.mockImplementationOnce(
+        () =>
+          new Promise((_resolve, fail) => {
+            reject = fail;
+          }),
+      );
       let controller = f.start();
       try {
         f.bus.emit(mergeConflictEvent());
         await vi.advanceTimersByTimeAsync(1);
+        expect(f.get).toHaveBeenCalledTimes(1);
         const saved = f.pending();
-        expect(saved).toBeDefined();
-        expect(saved?.retryAccounting?.every((row) => row.deliveryAttempts === 0)).toBe(true);
+        expect(saved).toMatchObject({
+          queueKey: "api:send:api-1",
+          workId: expect.stringMatching(/\S/),
+          revision: 1,
+          projectId: "api",
+          triggerId: "send",
+          sourceId: "pr-watch",
+          batch: {
+            kind: "review",
+            sessionId: "api-1",
+            signals: [mergeConflictSignal()],
+            autoPing: {
+              routeFingerprint: expect.stringMatching(/\S/),
+              destination: { kind: "session", sessionId: "api-1" },
+            },
+          },
+          retryAccounting: [expect.objectContaining({ deliveryAttempts: 0, ciAttempts: 0 })],
+        });
+        expect(Object.values(saved?.batch.autoPing?.items ?? {})).toEqual([
+          expect.objectContaining({ occurrenceId: "github-merge-conflict-1" }),
+        ]);
+        expect(f.deliver).not.toHaveBeenCalled();
+        reject?.(f.changed());
+        await vi.advanceTimersByTimeAsync(1);
+        expect(f.pending()).toEqual(saved);
+        expect(loggedEvents("trigger.send.dropped")).toHaveLength(0);
         expect(f.deliver).not.toHaveBeenCalled();
         await vi.advanceTimersByTimeAsync(15_000);
         expect(f.pending()).toEqual(saved);
@@ -1079,6 +1111,7 @@ describe("startConfiguredTriggers", () => {
         await advanceSendWindow();
         expect(f.deliver).toHaveBeenCalledTimes(1);
       } finally {
+        reject?.(f.changed());
         await controller.stop();
         f.cleanup();
       }
