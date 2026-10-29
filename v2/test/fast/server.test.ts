@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as hostMemory from "../../src/host-memory.js";
+import * as configuredSources from "../../src/event-sources/index.js";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,6 +38,34 @@ import {
 import { findFreePort, startOnFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
+  it("wires source attachment preparation to the requested session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-source-preparation-"));
+    const port = await findFreePort();
+    const configPath = join(root, "config.yaml");
+    await writeFile(configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`);
+    const sources = vi.spyOn(configuredSources, "startConfiguredSources").mockResolvedValue({
+      stop: vi.fn(), telegramBotIdentity: () => null, clearPollDisabledOverride: () => null,
+    });
+    const prepare = vi.spyOn(SessionService.prototype, "prepareSourceMessage").mockReturnValue("saved refs");
+    const send = vi.spyOn(SessionService.prototype, "send");
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const callback = sources.mock.calls[0]?.[0].prepareSessionMessage;
+      expect(callback).toBeDefined();
+      const request = { message: "inspect", attachments: [{ name: "file.bin", data: "eA==" }] };
+      expect(await callback?.("target-session", request)).toBe("saved refs");
+      expect(prepare).toHaveBeenCalledExactlyOnceWith("target-session", request);
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      await server.stop();
+      sources.mockRestore();
+      prepare.mockRestore();
+      send.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("GET source-info returns association, absence, and unknown-session 404", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-source-info-server-"));
     const port = await findFreePort();

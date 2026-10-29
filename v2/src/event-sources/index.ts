@@ -33,6 +33,7 @@ interface StartConfiguredSourcesDeps {
   listSessions(): Promise<SourceSessionListItem[]>;
   getSession(sessionId: string): Promise<SourceSessionListItem | null>;
   spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
+  prepareSessionMessage?: SourceStartDeps["prepareSessionMessage"];
   listProjects?(): Promise<SourceProjectListItem[]>;
   workbench?: SourceWorkbench;
   telegramConversations?: SourceStartDeps["telegramConversations"];
@@ -145,6 +146,9 @@ export async function startConfiguredSources(
             ? { telegramConversations: deps.telegramConversations }
             : {}),
           ...(deps.spawnSession ? { spawnSession: deps.spawnSession } : {}),
+          ...(deps.prepareSessionMessage
+            ? { prepareSessionMessage: deps.prepareSessionMessage }
+            : {}),
           ...(deps.listProjects ? { listProjects: deps.listProjects } : {}),
           emit(name: string, data?: unknown): void {
             const sessionId = extractSessionId(data);

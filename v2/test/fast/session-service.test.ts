@@ -70,6 +70,7 @@ import {
   type ScheduleSessionWakeRequest,
   type SendMessageRequest,
   MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS,
   type ServiceInstanceRecord,
   type SessionMemoryRecord,
   type SessionRecord,
@@ -8827,6 +8828,73 @@ describe("SessionService", () => {
       expect(killTmuxSessionMock).not.toHaveBeenCalled();
       expect(createWorktreeMock).not.toHaveBeenCalled();
       expect(sessions.get("api-1")?.status).toBe(action === "respawn" ? "completed" : "running");
+    },
+  );
+
+  it("source attachment preparation stores files at workspace anchor without sending", async () => {
+    mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+    const sessions = createSessionStore(runningSession({
+      id: "api-sibling", workspaceId: "api-anchor", worktreePath: TEST_ARTIFACTS_ROOT,
+    }));
+    const service = await createDisposedSessionService();
+    const text = service.prepareSourceMessage("api-sibling", {
+      message: " inspect file ",
+      attachments: [{ name: "data.csv", data: Buffer.from("csv-bytes").toString("base64") }],
+    });
+    expect(text).toBe("[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-data.csv]\ninspect file");
+    expect(readFileSync(join(artifactDirForSession("api-anchor"), "1773828300000-data.csv"), "utf8"))
+      .toBe("csv-bytes");
+    expect(setSessionArtifactOriginMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR, "api-anchor", "1773828300000-data.csv", "intentional",
+    );
+    expect(setSessionArtifactUserAddedMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR, "api-anchor", "1773828300000-data.csv", true,
+    );
+    expect(inputLogEntries("api-sibling")).toEqual([expect.objectContaining({
+      details: expect.objectContaining({ attachments: [{ id: "1773828300000-data.csv", name: "data.csv" }] }),
+    })]);
+    expect(sessions.get("api-sibling")?.queuedMessages).toBeUndefined();
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "completed", "killed", "errored", "spawning", "workspace"] as const)(
+    "source attachment preparation rejects %s target before effects",
+    async (scenario) => {
+      mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+      createSessionStore(...(scenario === "missing" ? [] : [runningSession({
+        worktreePath: scenario === "workspace" ? join(TEST_ARTIFACTS_ROOT, "absent-worktree") : TEST_ARTIFACTS_ROOT,
+        status: scenario === "workspace" ? "running" : scenario,
+      })]));
+      const service = await createDisposedSessionService();
+      expect(() => service.prepareSourceMessage("api-1", {
+        message: "inspect", attachments: [{ name: "file.bin", data: "eA==" }],
+      })).toThrow();
+      expect(existsSync(artifactDirForSession("api-1"))).toBe(false);
+      expect(setSessionArtifactOriginMock).not.toHaveBeenCalled();
+      expect(inputLogEntries("api-1")).toEqual([]);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["name", "empty", "base64", "oversize", "count"])(
+    "source attachment preparation validates complete %s list before writing",
+    async (invalid) => {
+      mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+      createSessionStore(runningSession({ worktreePath: TEST_ARTIFACTS_ROOT }));
+      const service = await createDisposedSessionService();
+      const second = { name: invalid === "name" ? "../bad" : "second.bin",
+        data: invalid === "empty" ? "" : invalid === "base64" ? "%%%"
+          : invalid === "oversize" ? Buffer.alloc(MAX_ATTACHMENT_BYTES + 1).toString("base64") : "eQ==" };
+      expect(() => service.prepareSourceMessage("api-1", {
+        message: "inspect",
+        attachments: invalid === "count"
+          ? Array.from({ length: MAX_ATTACHMENTS + 1 }, () => ({ name: "file.bin", data: "eA==" }))
+          : [{ name: "first.bin", data: "eA==" }, second],
+      })).toThrow();
+      expect(existsSync(artifactDirForSession("api-1"))).toBe(false);
+      expect(setSessionArtifactOriginMock).not.toHaveBeenCalled();
+      expect(inputLogEntries("api-1")).toEqual([]);
     },
   );
 
