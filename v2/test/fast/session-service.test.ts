@@ -6649,11 +6649,20 @@ describe("SessionService", () => {
         readTelegramReplyTargetMock.mockReturnValue({
           sessionId: "api-1",
           projectId: "api",
-          sourceId: kind === "invalid" ? "removed" : "chat",
+          sourceId: "agentChat",
           chatId: -1001,
           messageThreadId: 22,
-          updatedAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T10:02:00.000Z",
         });
+      const bindings = new Map();
+      bindings.set("-1001:22", {
+        chatId: -1001,
+        messageThreadId: 22,
+        sessionId: "api-1",
+        projectId: "api",
+        sourceId: "agentChat",
+      });
+      readTelegramBindingsMock.mockReturnValue(bindings);
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const project = service.config.projects.api;
@@ -10797,6 +10806,7 @@ describe("SessionService", () => {
       runOnStart: false,
       token: "token-123",
       allowedUsers: [123],
+      chatId: -1001,
     };
     const png = (width: number, height: number, padding = 0): Buffer => {
       const bytes = Buffer.alloc(33 + padding);
