@@ -386,7 +386,7 @@ export interface TelegramSourceConfig extends BaseSourceConfig {
   token: string;
   allowedUsers?: number[];
   allowedChats?: number[];
-  /** Destination for agent-initiated sends from a session with no inbound Telegram message. */
+  /** Canonical forum for agent conversations; absent or positive disables the stream. */
   chatId?: number;
   autoSpawn?: TelegramAutoSpawnConfig;
 }
@@ -444,6 +444,10 @@ export interface TelegramReplyTarget extends TelegramBinding {
   lastReplyAt?: string;
   updatedAt: string;
 }
+
+export type TelegramConversation =
+  | { kind: "disabled" }
+  | { kind: "topic"; projectId: string; sourceId: string; chatId: number; messageThreadId: number };
 
 export type SourceConfig =
   | CronSourceConfig
@@ -1554,8 +1558,8 @@ export interface SpawnSessionRequest {
 }
 
 /**
- * Telegram chat a source-initiated spawn came from. Internal to the daemon:
- * only the source adapter passes it (spawn options), never the HTTP body.
+ * Manual Telegram ingress and source provenance for canonical topic assignment.
+ * Source adapter spawn options only; never accepted from the HTTP body.
  */
 export type TelegramSpawnOrigin = Pick<
   TelegramReplyTarget,
@@ -1600,6 +1604,7 @@ export interface SourceReplyRequest {
   message: string;
   buttons?: SourceReplyButton[];
   requestInterfaceApproval?: unknown;
+  images?: SendMessageAttachment[];
 }
 
 export interface SourceReplyResponse {
@@ -1611,6 +1616,7 @@ export interface SourceReplyResponse {
   chatId: number;
   messageThreadId?: number;
   buttons?: number;
+  images?: number;
 }
 
 export interface SourcePollEnableResponse {

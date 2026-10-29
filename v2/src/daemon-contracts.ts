@@ -366,6 +366,7 @@ function operation(
       "spawn_shepherd",
       "send_message",
       "respawn_session",
+      "reply_to_source",
     ].includes(operationId)
       ? 15_000_000
       : 1_000_000,
@@ -999,13 +1000,13 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "reply_to_source",
     "POST",
     "/sessions/{sessionId}/source-reply",
-    "Send reply and optional choices to session source.",
+    "Send reply and optional choices in assigned Telegram forum topic.",
     {
       body: body("SourceReplyRequest", [
         field(
           "message",
           "string",
-          "Nonblank reply text; configured Telegram reply target required.",
+          "Nonblank text; nonterminal session and configured Telegram forum required.",
           true,
         ),
         field(
@@ -1018,9 +1019,25 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
           '{version:1,repository:string,baseBranch:string,surfaces:{kind:"UI"|"CLI"|"config"|"API"|"prompt"|"workflow",id:string,before:string[],after:string[],constraints:string[]}[]}',
           "InterfaceManifest; excludes buttons. Nonblank clauses, unique kind/id surfaces; repository/base/source must match native approval policy. Requesting approval never grants it.",
         ),
+        field(
+          "images",
+          "{name:string,data:string}[]",
+          "At most 4 base64 PNG/JPEG/WebP files named .png/.jpg/.jpeg/.webp, 10000000 decoded bytes total; each width+height at most 10000, side ratio at most 20. Sent as photos before the text.",
+        ),
       ]),
       examples: [
         { body: { message: "Choose", buttons: [{ text: "Continue", value: "continue" }] } },
+        {
+          body: {
+            message: "Screenshot",
+            images: [
+              {
+                name: "shot.png",
+                data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+              },
+            ],
+          },
+        },
         {
           body: {
             message: "Approve interface",
@@ -1048,8 +1065,8 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "get_source_info",
     "GET",
     "/sessions/{sessionId}/source-info",
-    "Read session Telegram chat association and cached bot identity.",
-    { response: "SourceInfoResponse" },
+    "Read existing canonical Telegram topic and cached bot identity without allocating.",
+    { response: "SourceInfoResponse; source:null without an eligible assigned topic." },
   ),
   operation(
     "enable_source_poll",
@@ -1129,7 +1146,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "complete_session",
     "POST",
     "/sessions/{sessionId}/complete",
-    "Complete session or desk with explicit PR disposition.",
+    "Complete session or desk with explicit PR disposition and owned Telegram topic cleanup.",
     {
       body: requestBodies.complete,
       examples: [
@@ -1144,10 +1161,16 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "/sessions/{sessionId}/self-destruct",
     "Perform session self-destruction.",
   ),
-  operation("kill_session", "POST", "/sessions/{sessionId}/kill", "Terminate session runtime.", {
-    body: requestBodies.kill,
-    examples: [{ body: { force: true, prAction: "leave_open" } }],
-  }),
+  operation(
+    "kill_session",
+    "POST",
+    "/sessions/{sessionId}/kill",
+    "Terminate session runtime and attempt owned Telegram topic deletion.",
+    {
+      body: requestBodies.kill,
+      examples: [{ body: { force: true, prAction: "leave_open" } }],
+    },
+  ),
   operation(
     "restore_session",
     "POST",

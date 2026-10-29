@@ -25,6 +25,8 @@ import type {
 } from "./types.js";
 
 const RECENT_LIMIT = 5;
+// Reduce queued reads when dashboard transcript I/O competes for the filesystem.
+const EVENT_SCAN_CHUNK_BYTES = 8 << 20;
 const CRON_TICK_EVENT = "cron:tick";
 const SOURCE_EMITTED_EVENT = "source.event.emitted";
 const CRON_ACTION_EVENTS: ReadonlySet<string> = new Set<CronActionEventName>([
@@ -197,6 +199,8 @@ async function scanCronEventTail(
       return true;
     },
     size,
+    undefined,
+    EVENT_SCAN_CHUNK_BYTES,
   );
   return { events, eventsSince };
 }

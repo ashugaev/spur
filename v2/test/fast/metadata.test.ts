@@ -35,6 +35,7 @@ import {
   readReviewSourceSnapshot,
   writeReviewSourceSnapshot,
   readTelegramBindings,
+  retireTelegramLegacyState,
   readTelegramLastUpdateId,
   readTelegramChoices,
   readTelegramReplyTarget,
@@ -472,6 +473,58 @@ describe("work-item lifecycle registry", () => {
 });
 
 describe("telegram source state", () => {
+  it("retires own legacy bindings/offers while preserving forum cleanup ownership and other sessions", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramBindings(
+      dataDir,
+      "api",
+      "tg",
+      [
+        { sessionId: "api-1", chatId: 123 },
+        { sessionId: "api-1", chatId: -1001 },
+        { sessionId: "api-1", chatId: -1001, messageThreadId: 22 },
+        { sessionId: "api-1", chatId: -1001, messageThreadId: 23 },
+        { sessionId: "api-2", chatId: 456 },
+      ],
+      { lastUpdateId: 75 },
+    );
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "legacy", chatId: 123 })], "api-1", 123),
+    );
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([
+        choice({ token: "old", messageThreadId: 22 }),
+        choice({ token: "current", messageThreadId: 23 }),
+      ]),
+    );
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "other", sessionId: "api-2", chatId: 456 })], "api-2", 456),
+    );
+    retireTelegramLegacyState(dataDir, "api", "tg", "api-1", {
+      chatId: -1001,
+      messageThreadId: 23,
+    });
+    expect([...readTelegramBindings(dataDir, "api", "tg").values()]).toEqual([
+      { sessionId: "api-1", chatId: -1001, messageThreadId: 22 },
+      { sessionId: "api-1", chatId: -1001, messageThreadId: 23 },
+      { sessionId: "api-2", chatId: 456 },
+    ]);
+    expect(readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token)).toEqual([
+      "current",
+      "other",
+    ]);
+    expect(readTelegramLastUpdateId(dataDir, "api", "tg")).toBe(75);
+  });
+
   it("removes bindings and reply targets for one session", async () => {
     const dataDir = await newDataDir();
     writeTelegramBindings(
@@ -493,7 +546,10 @@ describe("telegram source state", () => {
     });
 
     expect(deleteTelegramSourceStateForSession(dataDir, "api", "api-1")).toEqual({
-      heldBinding: true,
+      removedBindings: [
+        { sourceId: "telegram-a", binding: { chatId: 1, sessionId: "api-1" } },
+        { sourceId: "telegram-b", binding: { chatId: 3, sessionId: "api-1" } },
+      ],
     });
 
     expect([...readTelegramBindings(dataDir, "api", "telegram-a").values()]).toEqual([
@@ -503,7 +559,7 @@ describe("telegram source state", () => {
     expect(readTelegramLastUpdateId(dataDir, "api", "telegram-a")).toBe(55);
     expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
     expect(deleteTelegramSourceStateForSession(dataDir, "api", "api-1")).toEqual({
-      heldBinding: false,
+      removedBindings: [],
     });
   });
 
@@ -609,9 +665,55 @@ describe("telegram source state", () => {
     const dataDir = await newDataDir();
     writeTelegramOffer(dataDir, "api", "tg", offerOf([choice({ token: "t1" })]));
 
-    writeTelegramOffer(dataDir, "api", "tg", offerOf([]));
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([], "api-1", -1001, true));
 
     expect(readTelegramChoices(dataDir, "api", "tg")).toHaveLength(0);
+  });
+
+  it("keeps a pending interface approval through later replies of the session", async () => {
+    const dataDir = await newDataDir();
+    const consentOffer = (offerId: string, challenge: string) =>
+      offerOf(
+        ["approved", "rejected", "revoked"].map((decision) =>
+          choice({
+            token: `${offerId}-${decision}`,
+            offerId,
+            value: decision,
+            interfaceConsent: {
+              challenge,
+              decision: decision as "approved" | "rejected" | "revoked",
+            },
+          }),
+        ),
+      );
+    const tokens = () => readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token);
+    writeTelegramOffer(dataDir, "api", "tg", consentOffer("consent-1", "c1"));
+
+    // Buttonless reply and ordinary question keep the approval; the ordinary
+    // question is still retired by the next reply.
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([], "api-1", -1001, true));
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "ask", offerId: "offer-ask" })], "api-1", -1001, true),
+    );
+    expect(tokens()).toEqual([
+      "consent-1-approved",
+      "consent-1-rejected",
+      "consent-1-revoked",
+      "ask",
+    ]);
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([], "api-1", -1001, true));
+    expect(tokens()).toEqual(["consent-1-approved", "consent-1-rejected", "consent-1-revoked"]);
+
+    // A new approval supersedes the old challenge.
+    writeTelegramOffer(dataDir, "api", "tg", consentOffer("consent-2", "c2"));
+    expect(tokens()).toEqual(["consent-2-approved", "consent-2-rejected", "consent-2-revoked"]);
+
+    // Retire-all (displacement) drops the approval too.
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([]));
+    expect(tokens()).toEqual([]);
   });
 
   it("drops expired choices and caps the store", async () => {
@@ -685,8 +787,13 @@ describe("telegram source state", () => {
   });
 });
 
-function offerOf(choices: TelegramChoice[], sessionId = "api-1", chatId = -1001) {
-  return { sessionId, chatId, choices };
+function offerOf(
+  choices: TelegramChoice[],
+  sessionId = "api-1",
+  chatId = -1001,
+  keepInterfaceConsent = false,
+) {
+  return { sessionId, chatId, choices, keepInterfaceConsent };
 }
 
 function choice(
