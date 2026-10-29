@@ -3146,17 +3146,47 @@ export function deleteTelegramReplyTarget(dataDir: string, sessionId: string): v
   rmSync(telegramReplyTargetFilePath(dataDir, sessionId), { force: true });
 }
 
+export function retireTelegramLegacyState(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  assigned?: Pick<TelegramBinding, "chatId" | "messageThreadId">,
+): void {
+  const bindings = readTelegramBindings(dataDir, projectId, sourceId);
+  const originalSize = bindings.size;
+  for (const [key, binding] of bindings) {
+    if (
+      binding.sessionId === sessionId &&
+      (binding.chatId > 0 || (binding.messageThreadId ?? 1) <= 1)
+    )
+      bindings.delete(key);
+  }
+  if (bindings.size !== originalSize) {
+    writeTelegramBindings(dataDir, projectId, sourceId, bindings.values());
+  }
+  const choices = readTelegramChoices(dataDir, projectId, sourceId);
+  const kept = choices.filter(
+    (choice) =>
+      choice.sessionId !== sessionId ||
+      (assigned !== undefined &&
+        choice.chatId === assigned.chatId &&
+        choice.messageThreadId === assigned.messageThreadId),
+  );
+  if (kept.length !== choices.length) writeTelegramChoices(dataDir, projectId, sourceId, kept);
+}
+
 export function deleteTelegramSourceStateForSession(
   dataDir: string,
   projectId: string,
   sessionId: string,
-): { heldBinding: boolean } {
+): { removedBindings: { sourceId: string; binding: TelegramBinding }[] } {
   const dir = join(dataDir, "source-state", "telegram", projectId);
   if (!existsSync(dir)) {
     deleteTelegramReplyTarget(dataDir, sessionId);
-    return { heldBinding: false };
+    return { removedBindings: [] };
   }
-  let heldBinding = false;
+  const removedBindings: { sourceId: string; binding: TelegramBinding }[] = [];
 
   const choiceDir = join(dir, "choices");
   if (existsSync(choiceDir)) {
@@ -3175,9 +3205,11 @@ export function deleteTelegramSourceStateForSession(
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     const sourceId = entry.name.slice(0, -".json".length);
     const bindings = readTelegramBindings(dataDir, projectId, sourceId);
+    for (const binding of bindings.values()) {
+      if (binding.sessionId === sessionId) removedBindings.push({ sourceId, binding });
+    }
     const remaining = [...bindings.values()].filter((binding) => binding.sessionId !== sessionId);
     if (remaining.length !== bindings.size) {
-      heldBinding = true;
       const lastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
       writeTelegramBindings(
         dataDir,
@@ -3189,7 +3221,7 @@ export function deleteTelegramSourceStateForSession(
     }
   }
   deleteTelegramReplyTarget(dataDir, sessionId);
-  return { heldBinding };
+  return { removedBindings };
 }
 
 export function listActiveServiceProblems(

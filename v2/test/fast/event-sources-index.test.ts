@@ -392,6 +392,22 @@ describe("startConfiguredSources", () => {
     await controller.stop();
   });
 
+  it("forwards runtime Telegram conversation assignment and unwatch", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const telegramConversations = { ensureTopic: vi.fn(), unwatch: vi.fn() };
+    const controller = await startConfiguredSources({
+      config: buildConfig(tmpDir, {
+        api: { path: tmpDir, sources: { nightly: { type: "cron" } } },
+      }) as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+      getSession: vi.fn().mockResolvedValue(null),
+      telegramConversations,
+    });
+    expect(cronStartMock.mock.calls[0]?.[0].telegramConversations).toBe(telegramConversations);
+    await controller.stop();
+  });
+
   it("forwards the by-id session lookup to source modules", async () => {
     const { startConfiguredSources } = await loadStartConfiguredSources();
     const getSession = vi.fn().mockResolvedValue(null);

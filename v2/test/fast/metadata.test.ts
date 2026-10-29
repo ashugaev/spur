@@ -35,6 +35,7 @@ import {
   readReviewSourceSnapshot,
   writeReviewSourceSnapshot,
   readTelegramBindings,
+  retireTelegramLegacyState,
   readTelegramLastUpdateId,
   readTelegramChoices,
   readTelegramReplyTarget,
@@ -708,6 +709,58 @@ describe("work-item lifecycle registry", () => {
 });
 
 describe("telegram source state", () => {
+  it("retires own legacy bindings/offers while preserving forum cleanup ownership and other sessions", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramBindings(
+      dataDir,
+      "api",
+      "tg",
+      [
+        { sessionId: "api-1", chatId: 123 },
+        { sessionId: "api-1", chatId: -1001 },
+        { sessionId: "api-1", chatId: -1001, messageThreadId: 22 },
+        { sessionId: "api-1", chatId: -1001, messageThreadId: 23 },
+        { sessionId: "api-2", chatId: 456 },
+      ],
+      { lastUpdateId: 75 },
+    );
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "legacy", chatId: 123 })], "api-1", 123),
+    );
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([
+        choice({ token: "old", messageThreadId: 22 }),
+        choice({ token: "current", messageThreadId: 23 }),
+      ]),
+    );
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "other", sessionId: "api-2", chatId: 456 })], "api-2", 456),
+    );
+    retireTelegramLegacyState(dataDir, "api", "tg", "api-1", {
+      chatId: -1001,
+      messageThreadId: 23,
+    });
+    expect([...readTelegramBindings(dataDir, "api", "tg").values()]).toEqual([
+      { sessionId: "api-1", chatId: -1001, messageThreadId: 22 },
+      { sessionId: "api-1", chatId: -1001, messageThreadId: 23 },
+      { sessionId: "api-2", chatId: 456 },
+    ]);
+    expect(readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token)).toEqual([
+      "current",
+      "other",
+    ]);
+    expect(readTelegramLastUpdateId(dataDir, "api", "tg")).toBe(75);
+  });
+
   it("removes bindings and reply targets for one session", async () => {
     const dataDir = await newDataDir();
     writeTelegramBindings(
@@ -729,7 +782,10 @@ describe("telegram source state", () => {
     });
 
     expect(deleteTelegramSourceStateForSession(dataDir, "api", "api-1")).toEqual({
-      heldBinding: true,
+      removedBindings: [
+        { sourceId: "telegram-a", binding: { chatId: 1, sessionId: "api-1" } },
+        { sourceId: "telegram-b", binding: { chatId: 3, sessionId: "api-1" } },
+      ],
     });
 
     expect([...readTelegramBindings(dataDir, "api", "telegram-a").values()]).toEqual([
@@ -739,7 +795,7 @@ describe("telegram source state", () => {
     expect(readTelegramLastUpdateId(dataDir, "api", "telegram-a")).toBe(55);
     expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
     expect(deleteTelegramSourceStateForSession(dataDir, "api", "api-1")).toEqual({
-      heldBinding: false,
+      removedBindings: [],
     });
   });
 
