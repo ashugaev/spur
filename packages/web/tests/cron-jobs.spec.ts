@@ -228,8 +228,9 @@ test.describe("Cron YAML editor", () => {
     await openEditor(page);
     await page.getByLabel("Block 1 prompt").fill("Keep conflicted text");
     await page.getByRole("button", { name: "Save YAML" }).click();
-    await expect(page.getByRole("alert")).toContainText("Config file changed");
-    await expect(page.getByRole("alert")).toBeFocused();
+    const alert = page.getByRole("dialog").getByRole("alert");
+    await expect(alert).toContainText("Config file changed");
+    await expect(alert).toBeFocused();
     await expect(page.getByRole("button", { name: "Reload YAML" })).toBeInViewport({ ratio: 1 });
     await expect(page.getByRole("button", { name: "Save YAML" })).toBeDisabled();
     await expect(page.getByLabel("Block 1 prompt")).toHaveValue("Keep conflicted text");
@@ -256,9 +257,10 @@ test.describe("Cron YAML editor", () => {
     await openEditor(page);
     await page.getByLabel("Schedule").fill("invalid cron");
     await page.getByRole("button", { name: "Save YAML" }).click();
-    await expect(page.getByRole("alert")).toContainText("Invalid cron schedule.");
-    await expect(page.getByRole("alert")).toBeFocused();
-    await expect(page.getByRole("alert")).toBeInViewport({ ratio: 1 });
+    const alert = page.getByRole("dialog").getByRole("alert");
+    await expect(alert).toContainText("Invalid cron schedule.");
+    await expect(alert).toBeFocused();
+    await expect(alert).toBeInViewport({ ratio: 1 });
     await expect(page.getByLabel("Schedule")).toHaveAttribute("aria-invalid", "true");
     const overflow = await page
       .getByRole("dialog")
