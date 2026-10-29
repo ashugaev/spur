@@ -60,7 +60,7 @@ Failed inbound update from an allowed user answers `Message not delivered. Send 
 `/spawn` creates its own canonical topic; `/watch` and `/work` Continue return topic links; `/unwatch` removes selected binding and retains topic — `v2/src/event-sources/telegram.ts`, `v2/src/session-service.ts`.
 Recorded bot-message owners: 1000 per source, oldest evicted first — `v2/src/metadata.ts`.
 Pending button choices: 200 per source, oldest offers evicted first; session cleanup retires its choices — `v2/src/metadata.ts`.
-Assigned-topic placeholders: `Received. <label> is thinking...`, `is busy; your message is queued.`, `needs input in its terminal; your message is queued.`; next agent send edits placeholder — `v2/src/event-sources/telegram.ts`, `v2/src/session-service.ts`.
+Assigned-topic placeholders: `Received. <label> is thinking...`, `is busy; your message is queued.`, `needs input in its terminal; your message is queued.`; next agent send edits placeholder; a reply with images deletes it after the text lands — `v2/src/event-sources/telegram.ts`, `v2/src/session-service.ts`, `v2/src/telegram-source-state.ts`.
 Queued Telegram sends suppress `is waiting.` notices and ToDo nudges — `v2/src/session-service.ts`.
 Assigned-topic typing: delivered, unanswered messages while session works; 10 min cap — `v2/src/session-service.ts`.
 Agent Markdown: bold, strike, inline/fenced code, HTTP(S) links and headings render as HTML; Telegram parse rejection retries plain text — `v2/src/telegram-markdown.ts`, `v2/src/telegram-source-state.ts`.

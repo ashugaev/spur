@@ -37,6 +37,7 @@ import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as eventLogModule from "../../src/event-log.js";
 import type * as sessionSlotsModule from "../../src/session-slots.js";
 import type * as telegramSourceStateModule from "../../src/telegram-source-state.js";
+import type { TelegramPhoto } from "../../src/telegram-source-state.js";
 import type * as interfaceConsentModule from "../../src/review-interface-consent.js";
 import type * as metadataModule from "../../src/metadata.js";
 import type { InterfaceConsent } from "../../src/review-interface-consent.js";
@@ -6870,8 +6871,17 @@ describe("SessionService", () => {
           sourceId: kind === "invalid" ? "removed" : "chat",
           chatId: -1001,
           messageThreadId: 22,
-          updatedAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T10:02:00.000Z",
         });
+      const bindings = new Map();
+      bindings.set("-1001:22", {
+        chatId: -1001,
+        messageThreadId: 22,
+        sessionId: "api-1",
+        projectId: "api",
+        sourceId: kind === "invalid" ? "removed" : "chat",
+      });
+      readTelegramBindingsMock.mockReturnValue(bindings);
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const project = service.config.projects.api;
@@ -11274,6 +11284,272 @@ describe("SessionService", () => {
     ).rejects.toThrow("buttons must hold at most 8 entries");
     expect(sendTelegramReplyMock).not.toHaveBeenCalled();
     expect(writeTelegramOfferMock).not.toHaveBeenCalled();
+  });
+
+  describe("reply images", () => {
+    const telegramSource = {
+      type: "telegram" as const,
+      runOnStart: false,
+      token: "token-123",
+      allowedUsers: [123],
+      chatId: -1001,
+    };
+    const png = (width: number, height: number, padding = 0): Buffer => {
+      const bytes = Buffer.alloc(33 + padding);
+      bytes.write("\x89PNG\r\n\x1a\n", 0, "latin1");
+      bytes.writeUInt32BE(13, 8);
+      bytes.write("IHDR", 12, "latin1");
+      bytes.writeUInt32BE(width, 16);
+      bytes.writeUInt32BE(height, 20);
+      return bytes;
+    };
+    // SOI, one APP0 segment to walk past, then SOF0.
+    const jpeg = (width: number, height: number): Buffer =>
+      Buffer.from([
+        0xff,
+        0xd8,
+        0xff,
+        0xe0,
+        0x00,
+        0x04,
+        0x00,
+        0x00,
+        0xff,
+        0xc0,
+        0x00,
+        0x11,
+        0x08,
+        height >> 8,
+        height & 0xff,
+        width >> 8,
+        width & 0xff,
+        0x03,
+      ]);
+    const webp = (chunk: "VP8 " | "VP8L" | "VP8X", width: number, height: number): Buffer => {
+      const bytes = Buffer.alloc(30);
+      bytes.write("RIFF", 0, "latin1");
+      bytes.write("WEBP", 8, "latin1");
+      bytes.write(chunk, 12, "latin1");
+      if (chunk === "VP8 ") {
+        bytes.writeUIntBE(0x9d012a, 23, 3);
+        bytes.writeUInt16LE(width, 26);
+        bytes.writeUInt16LE(height, 28);
+      } else if (chunk === "VP8L") {
+        bytes[20] = 0x2f;
+        bytes.writeUInt32LE((width - 1) | ((height - 1) << 14), 21);
+      } else {
+        bytes.writeUIntLE(width - 1, 24, 3);
+        bytes.writeUIntLE(height - 1, 27, 3);
+      }
+      return bytes;
+    };
+    const image = (name: string, bytes: Buffer): { name: string; data: string } => ({
+      name,
+      data: bytes.toString("base64"),
+    });
+
+    async function replyService() {
+      const config = baseConfig();
+      config.projects.api.sources = { agentChat: telegramSource };
+      loadConfigMock.mockReturnValue(config);
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1", status: "running" }));
+      readTelegramReplyTargetMock.mockReturnValue({
+        sessionId: "api-1",
+        projectId: "api",
+        sourceId: "agentChat",
+        chatId: -1001,
+        messageThreadId: 22,
+        updatedAt: "2026-03-18T10:02:00.000Z",
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      return new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    }
+
+    it.each([
+      [
+        "more than 4 images",
+        Array.from({ length: 5 }, (_unused, index) => image(`${index}.png`, png(10, 10))),
+        "images must hold at most 4 entries",
+      ],
+      [
+        "over 10000000 bytes in total",
+        [image("a.png", png(10, 10, 5_000_000)), image("b.png", png(10, 10, 5_000_000))],
+        "images must total at most 10000000 bytes",
+      ],
+      ["an unsupported extension", [image("a.gif", png(10, 10))], "must end in .png"],
+      ["no extension", [{ name: "png", data: png(10, 10).toString("base64") }], "must end in"],
+      ["non-base64 data", [{ name: "a.png", data: "@@@@" }], "non-empty base64"],
+      ["empty data", [{ name: "a.png", data: "" }], "non-empty base64"],
+      [
+        "an unreadable header",
+        [image("a.png", Buffer.from("not an image at all, just text"))],
+        "not a readable png file",
+      ],
+      ["PNG bytes under a .jpg name", [image("a.jpg", png(10, 10))], "not a readable jpg file"],
+      [
+        "width+height over 10000",
+        [image("a.png", png(9000, 1001))],
+        "a.png is 9000x1001; width+height must be at most 10000",
+      ],
+      ["a side ratio over 20", [image("a.png", png(2100, 100))], "a.png is 2100x100"],
+      [
+        "JPEG bytes without the start marker",
+        [image("a.jpg", Buffer.from([0xff, 0xe0, ...jpeg(10, 10).subarray(2)]))],
+        "not a readable jpg file",
+      ],
+    ])("rejects %s before any send or write", async (_case, images, error) => {
+      const service = await replyService();
+
+      await expect(
+        service.replyToSource("api-1", {
+          message: "look",
+          buttons: [{ text: "Yes", value: "yes" }],
+          images,
+        }),
+      ).rejects.toThrow(error);
+      expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+      expect(writeInterfaceConsentMock).not.toHaveBeenCalled();
+      expect(writeTelegramOfferMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects invalid images with an approval manifest before the consent or offer write", async () => {
+      const service = await replyService();
+      consentPolicyMock.mockResolvedValue({ repositories: ["owner/repo"], approverUserId: 123 });
+      consentRepositoryMock.mockResolvedValue("owner/repo");
+      readCurrentBranchMock.mockResolvedValue("api-1");
+
+      await expect(
+        service.replyToSource("api-1", {
+          message: "approve?",
+          images: [image("a.gif", png(10, 10))],
+          requestInterfaceApproval: {
+            version: 1,
+            repository: "owner/repo",
+            baseBranch: "main",
+            surfaces: [
+              {
+                kind: "CLI",
+                id: "run",
+                before: ["old"],
+                after: ["--dry-run"],
+                constraints: ["no process created"],
+              },
+            ],
+          },
+        }),
+      ).rejects.toThrow("must end in .png");
+      expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+      expect(writeInterfaceConsentMock).not.toHaveBeenCalled();
+      expect(writeTelegramOfferMock).not.toHaveBeenCalled();
+    });
+
+    it("passes valid images as typed photos and reports their count", async () => {
+      const service = await replyService();
+      const bytes = [
+        png(1280, 720),
+        jpeg(800, 600),
+        webp("VP8L", 640, 480),
+        webp("VP8X", 400, 300),
+      ];
+
+      const result = await service.replyToSource("api-1", {
+        message: "look",
+        images: [
+          image("a.PNG", bytes[0] as Buffer),
+          image("b.jpeg", bytes[1] as Buffer),
+          image("c.webp", bytes[2] as Buffer),
+          image("d.webp", bytes[3] as Buffer),
+        ],
+      });
+
+      expect(result.images).toBe(4);
+      const options = sendTelegramReplyMock.mock.calls[0]?.[3] as { images: TelegramPhoto[] };
+      expect(
+        options.images.map(({ name, contentType, data }) => ({
+          name,
+          contentType,
+          data: Buffer.from(data),
+        })),
+      ).toEqual([
+        { name: "a.PNG", contentType: "image/png", data: bytes[0] },
+        { name: "b.jpeg", contentType: "image/jpeg", data: bytes[1] },
+        { name: "c.webp", contentType: "image/webp", data: bytes[2] },
+        { name: "d.webp", contentType: "image/webp", data: bytes[3] },
+      ]);
+    });
+
+    it("accepts a lossy WebP and sends no images key without images", async () => {
+      const service = await replyService();
+
+      await service.replyToSource("api-1", {
+        message: "look",
+        images: [image("a.jpg", jpeg(100, 100)), image("b.webp", webp("VP8 ", 300, 200))],
+      });
+      const plain = await service.replyToSource("api-1", { message: "plain" });
+
+      expect(sendTelegramReplyMock.mock.calls[0]?.[3]).toHaveProperty("images");
+      expect(sendTelegramReplyMock.mock.calls[1]?.[3]).not.toHaveProperty("images");
+      expect(plain).not.toHaveProperty("images");
+    });
+
+    it.each(["sent", "failed"])(
+      "keeps the approval text and marks consent %s when images ride along",
+      async (outcome) => {
+        const service = await replyService();
+        let current: InterfaceConsent | null = null;
+        readInterfaceConsentMock.mockImplementation(() => current);
+        writeInterfaceConsentMock.mockImplementation((_dir, record: InterfaceConsent) => {
+          current = record;
+        });
+        consentPolicyMock.mockResolvedValue({ repositories: ["owner/repo"], approverUserId: 123 });
+        consentRepositoryMock.mockResolvedValue("owner/repo");
+        readCurrentBranchMock.mockResolvedValue("api-1");
+        if (outcome === "failed") {
+          sendTelegramReplyMock.mockRejectedValueOnce(
+            new Error("Telegram reply failed after 1 photo(s) were sent; resend the text"),
+          );
+        }
+
+        const reply = service.replyToSource("api-1", {
+          message: "approve?",
+          images: [image("a.png", png(10, 10))],
+          requestInterfaceApproval: {
+            version: 1,
+            repository: "owner/repo",
+            baseBranch: "main",
+            surfaces: [
+              {
+                kind: "CLI",
+                id: "run",
+                before: ["old"],
+                after: ["--dry-run"],
+                constraints: ["no process created"],
+              },
+            ],
+          },
+        });
+
+        if (outcome === "failed") {
+          await expect(reply).rejects.toThrow("after 1 photo(s) were sent");
+        } else {
+          await expect(reply).resolves.toMatchObject({ buttons: 3, images: 1 });
+        }
+        const [, , text, options] = sendTelegramReplyMock.mock.calls[0] as [
+          unknown,
+          unknown,
+          string,
+          { images: TelegramPhoto[] },
+        ];
+        expect(text).toMatch(/^approve\?\n\n/);
+        expect(text).toContain("--dry-run");
+        expect(options.images).toHaveLength(1);
+        expect(writeInterfaceConsentMock).toHaveBeenLastCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ delivery: outcome }),
+        );
+      },
+    );
   });
 
   it("allocates in the configured Telegram forum when session has no assignment", async () => {

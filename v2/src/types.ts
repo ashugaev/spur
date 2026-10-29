@@ -1679,6 +1679,7 @@ export interface SourceReplyRequest {
   message: string;
   buttons?: SourceReplyButton[];
   requestInterfaceApproval?: unknown;
+  images?: SendMessageAttachment[];
 }
 
 export interface SourceReplyResponse {
@@ -1690,6 +1691,7 @@ export interface SourceReplyResponse {
   chatId: number;
   messageThreadId?: number;
   buttons?: number;
+  images?: number;
 }
 
 export interface SourcePollEnableResponse {

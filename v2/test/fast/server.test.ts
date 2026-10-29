@@ -87,6 +87,43 @@ describe("startServer", () => {
     }
   });
 
+  it("accepts a source-reply body over 1 MB for images", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-source-reply-server-"));
+    const port = await findFreePort();
+    const configPath = join(root, "config.yaml");
+    await writeFile(
+      configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`,
+    );
+    const reply = vi.spyOn(SessionService.prototype, "replyToSource").mockResolvedValue({
+      ok: true,
+      source: "telegram",
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "chat",
+      chatId: -1001,
+      images: 1,
+    });
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const data = "A".repeat(2_000_000);
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/api-1/source-reply`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "look", images: [{ name: "a.png", data }] }),
+      });
+      expect(response.status).toBe(200);
+      expect(reply).toHaveBeenCalledWith("api-1", {
+        message: "look",
+        images: [{ name: "a.png", data }],
+      });
+    } finally {
+      await server.stop();
+      reply.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(["spawn", "respawn", "handoff"] as const)(
     "returns a client error for rejected %s reasoning effort",
     async (operation) => {

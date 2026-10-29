@@ -137,7 +137,7 @@ function retryDelay(error: unknown, attempt: number): number | null {
 async function callTelegram<T>(
   config: Pick<TelegramSourceConfig, "token">,
   method: string,
-  body: Record<string, unknown>,
+  body: Record<string, unknown> | FormData,
   options: { retry?: false; transport?: TelegramTransport | undefined; create?: true } = {},
 ): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
@@ -148,12 +148,21 @@ async function callTelegram<T>(
         ? AbortSignal.any([controller.signal, options.transport.signal])
         : undefined;
     try {
-      const request = fetch(`https://api.telegram.org/bot${config.token}/${method}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-        ...(signal ? { signal } : {}),
-      });
+      const request = fetch(
+        `https://api.telegram.org/bot${config.token}/${method}`,
+        body instanceof FormData
+          ? {
+              method: "POST",
+              body,
+              ...(signal ? { signal } : {}),
+            }
+          : {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(body),
+              ...(signal ? { signal } : {}),
+            },
+      );
       const response = await (signal ? abortable(request, signal) : request);
       let payload: TelegramApiResponse<T> | null = null;
       try {
@@ -298,6 +307,58 @@ export async function deleteTelegramTopic(
   });
 }
 
+/** One validated image to upload as a Telegram photo. */
+export interface TelegramPhoto {
+  name: string;
+  contentType: "image/png" | "image/jpeg" | "image/webp";
+  data: Uint8Array;
+}
+
+/** One photo goes as sendPhoto, two or more as one sendMediaGroup album. */
+async function sendTelegramPhotos(
+  config: Pick<TelegramSourceConfig, "token">,
+  chatId: number,
+  messageThreadId: number | undefined,
+  photos: TelegramPhoto[],
+): Promise<number[]> {
+  const form = new FormData();
+  form.set("chat_id", String(chatId));
+  if (messageThreadId !== undefined) form.set("message_thread_id", String(messageThreadId));
+  const file = (photo: TelegramPhoto): File =>
+    new File([Buffer.from(photo.data)], photo.name, { type: photo.contentType });
+  const messageId = (sent: { message_id?: unknown } | undefined): number[] =>
+    Number.isInteger(sent?.message_id) ? [sent?.message_id as number] : [];
+  const [only] = photos;
+  if (only && photos.length === 1) {
+    form.set("photo", file(only));
+    return messageId(await callTelegram<{ message_id?: unknown }>(config, "sendPhoto", form));
+  }
+  form.set(
+    "media",
+    JSON.stringify(photos.map((_, index) => ({ type: "photo", media: `attach://p${index}` }))),
+  );
+  for (const [index, photo] of photos.entries()) form.set(`p${index}`, file(photo));
+  const sent = await callTelegram<{ message_id?: unknown }[]>(config, "sendMediaGroup", form);
+  return Array.isArray(sent) ? sent.flatMap(messageId) : [];
+}
+
+async function deleteTelegramMessage(
+  config: Pick<TelegramSourceConfig, "token">,
+  chatId: number,
+  messageId: number,
+): Promise<void> {
+  try {
+    await callTelegram(
+      config,
+      "deleteMessage",
+      { chat_id: chatId, message_id: messageId },
+      { retry: false },
+    );
+  } catch {
+    // Cleanup only; a leftover placeholder never fails a delivered reply.
+  }
+}
+
 /**
  * Splits at the last newline inside the limit, else at the limit, moved back
  * one unit when it would cut a surrogate pair.
@@ -437,6 +498,7 @@ interface TelegramReplyOptions {
   preformatted?: string;
   sessionLabel?: string;
   lifecycle?: boolean;
+  images?: TelegramPhoto[];
 }
 
 export async function sendTelegramReply(
@@ -498,7 +560,8 @@ async function sendTelegramReplyWithTransport(
   const collect = (id: number | undefined): void => {
     if (id !== undefined) messageIds.push(id);
   };
-  if (target.statusMessageId !== undefined) {
+  const images = options.images ?? [];
+  if (target.statusMessageId !== undefined && images.length === 0) {
     try {
       await editTelegramMessage(
         config,
@@ -542,17 +605,35 @@ async function sendTelegramReplyWithTransport(
     return { statusMessageIdConsumed: true, messageIds };
   }
 
-  for (const [index, chunk] of chunks.entries()) {
-    collect(
-      await sendTelegramMessage(
-        config,
-        target.chatId,
-        chunk,
-        messageThreadId,
-        chunkMarkup(index),
-        transport,
-      ),
+  // Photos go first, the text below them in the same thread. A placeholder
+  // would stay above the photos, so it is deleted after the text, not edited.
+  if (images.length > 0) {
+    messageIds.push(...(await sendTelegramPhotos(config, target.chatId, messageThreadId, images)));
+  }
+  try {
+    for (const [index, chunk] of chunks.entries()) {
+      collect(
+        await sendTelegramMessage(
+          config,
+          target.chatId,
+          chunk,
+          messageThreadId,
+          chunkMarkup(index),
+          transport,
+        ),
+      );
+    }
+  } catch (error) {
+    if (images.length === 0) throw error;
+    const cause = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Telegram reply failed after ${images.length} photo(s) were sent; resend the text only: ${cause}`,
+      { cause: error },
     );
+  }
+  if (target.statusMessageId !== undefined) {
+    await deleteTelegramMessage(config, target.chatId, target.statusMessageId);
+    return { statusMessageIdConsumed: true, messageIds };
   }
   return messageThreadId !== undefined ? { messageThreadId, messageIds } : { messageIds };
 }

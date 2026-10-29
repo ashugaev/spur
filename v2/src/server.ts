@@ -2064,7 +2064,7 @@ export async function startServer(
 
       const sourceReplySessionId = path.match(/^\/sessions\/([^/]+)\/source-reply$/)?.[1];
       if (method === "POST" && sourceReplySessionId) {
-        const body = await readJsonBody<SourceReplyRequest>(request);
+        const body = await readJsonBody<SourceReplyRequest>(request, 15_000_000);
         sendJson(response, 200, await service.replyToSource(sourceReplySessionId, body));
         return;
       }
