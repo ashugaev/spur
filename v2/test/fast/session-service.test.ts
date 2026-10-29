@@ -6649,7 +6649,7 @@ describe("SessionService", () => {
         readTelegramReplyTargetMock.mockReturnValue({
           sessionId: "api-1",
           projectId: "api",
-          sourceId: "agentChat",
+          sourceId: kind === "invalid" ? "removed" : "chat",
           chatId: -1001,
           messageThreadId: 22,
           updatedAt: "2026-03-18T10:02:00.000Z",
@@ -6660,7 +6660,7 @@ describe("SessionService", () => {
         messageThreadId: 22,
         sessionId: "api-1",
         projectId: "api",
-        sourceId: "agentChat",
+        sourceId: kind === "invalid" ? "removed" : "chat",
       });
       readTelegramBindingsMock.mockReturnValue(bindings);
       const { SessionService } = await loadSessionServiceModule();
