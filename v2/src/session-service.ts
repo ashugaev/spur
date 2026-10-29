@@ -494,6 +494,7 @@ import {
   type ServiceInstanceView,
   type SelfDestructConfig,
   type SendMessageAttachment,
+  MAX_ATTACHMENT_BYTES,
   type SendMessageRequest,
   type SidecarConfig,
   type SidecarMcpBinding,
@@ -710,7 +711,6 @@ export function getIdleWaitBeforeFlushMs(): number {
 }
 
 const NAME_RE = /^[\w.-]+$/;
-const MAX_DECODED_SIZE = 5 * 1024 * 1024;
 const MAX_ATTACHMENTS = 10;
 const STATE_HISTORY_LIMIT = 100;
 const RESTORE_PLAN_WAIT_MS = 5_000;
@@ -17121,7 +17121,7 @@ export class SessionService {
         throw new Error("Attachment data must be a non-empty base64 string");
       }
       const buf = Buffer.from(att.data, "base64");
-      if (buf.length > MAX_DECODED_SIZE) {
+      if (buf.length > MAX_ATTACHMENT_BYTES) {
         throw new Error(`Attachment ${att.name} exceeds 5MB`);
       }
       let filename = `${Date.now()}-${att.name}`;

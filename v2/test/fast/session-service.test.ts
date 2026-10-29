@@ -69,6 +69,7 @@ import {
   type SessionListItemView,
   type ScheduleSessionWakeRequest,
   type SendMessageRequest,
+  MAX_ATTACHMENT_BYTES,
   type ServiceInstanceRecord,
   type SessionMemoryRecord,
   type SessionRecord,
@@ -8828,6 +8829,21 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")?.status).toBe(action === "respawn" ? "completed" : "running");
     },
   );
+
+  it("rejects a startup attachment above the shared byte limit", async () => {
+    const service = await createDisposedSessionService();
+    await expect(
+      service.spawn({
+        project: "api",
+        agent: "codex",
+        prompt: "inspect this",
+        attachments: [
+          { name: "photo.jpg", data: Buffer.alloc(MAX_ATTACHMENT_BYTES + 1).toString("base64") },
+        ],
+      }),
+    ).rejects.toThrow("exceeds 5MB");
+    expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
+  });
 
   it("passes startup image paths into codex launch planning and skips tmux prompt send", async () => {
     buildAgentLaunchPlanMock.mockImplementationOnce(

@@ -3,6 +3,7 @@ import {
   isStaleParked,
   type AgentName,
   type SelfDestructConfig,
+  type SendMessageAttachment,
   type SessionRecord,
   type SessionLaunchOptions,
   type SessionState,
@@ -40,6 +41,7 @@ export interface SourceSessionListItem {
 export interface SourceSpawnSessionRequest {
   project: string;
   prompt?: string;
+  attachments?: SendMessageAttachment[];
   agent?: AgentName;
   model?: string;
   mode?: string;

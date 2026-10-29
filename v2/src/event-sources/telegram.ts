@@ -19,6 +19,8 @@ import {
 import {
   TELEGRAM_CHOICE_CALLBACK_PREFIX,
   TELEGRAM_MESSAGE_EVENT,
+  MAX_ATTACHMENT_BYTES,
+  type SendMessageAttachment,
   type TelegramAutoSpawnConfig,
   type TelegramBinding,
   type TelegramBotIdentity,
@@ -90,6 +92,8 @@ interface TelegramTextMessage {
   message_thread_id?: number | undefined;
   is_topic_message?: true;
   text?: string;
+  caption?: string;
+  photo?: { file_id: string; file_unique_id: string; width: number; height: number }[];
   chat: {
     id: number;
   };
@@ -914,6 +918,7 @@ async function runAutoSpawn(
   text: string,
   key: string,
   autoSpawn: TelegramAutoSpawnConfig,
+  attachments?: SendMessageAttachment[],
 ): Promise<void> {
   try {
     await bindSpawnedSession(runtime, ctx, chatId, messageThreadId, {
@@ -922,6 +927,7 @@ async function runAutoSpawn(
       ...(autoSpawn.model !== undefined ? { model: autoSpawn.model } : {}),
       ...(autoSpawn.selfDestruct !== undefined ? { selfDestruct: autoSpawn.selfDestruct } : {}),
       prompt: text,
+      ...(attachments ? { attachments } : {}),
     });
   } finally {
     runtime.autoSpawnInFlight.delete(key);
@@ -1990,6 +1996,7 @@ async function routeTelegramPrompt(
   message: TelegramTextMessage,
   from: { id: number; username?: string },
   text: string,
+  attachments?: SendMessageAttachment[],
 ): Promise<void> {
   const deps = runtime.deps;
   const key = telegramBindingKey(message.chat.id, message.message_thread_id);
@@ -2011,6 +2018,7 @@ async function routeTelegramPrompt(
       agent: peekedSpawn.agent,
       project: peekedSpawn.project,
       prompt: text,
+      ...(attachments ? { attachments } : {}),
     });
     return;
   }
@@ -2057,6 +2065,7 @@ async function routeTelegramPrompt(
           text,
           key,
           acquireResult.autoSpawn,
+          attachments,
         );
         return;
       case "off":
@@ -2086,6 +2095,7 @@ async function routeTelegramPrompt(
           text,
           key,
           acquireResult.autoSpawn,
+          attachments,
         );
         return;
       case "off":
@@ -2327,7 +2337,7 @@ async function transcribeAndRoute(
   message: TelegramTextMessage,
   from: { id: number; username?: string },
   statusMessageId: number | undefined,
-  intake: VoiceIntake,
+  intake: TelegramIntake,
 ): Promise<void> {
   const deps = runtime.deps;
   const webBaseUrl = await deps.resolveWebBaseUrl();
@@ -2377,7 +2387,7 @@ async function transcribeAndRoute(
     return;
   }
 
-  if (!voiceIntakeIsCurrent(runtime, message, from.id, intake)) {
+  if (!telegramIntakeIsCurrent(runtime, message, from.id, intake)) {
     await editOrReply(
       ctx,
       message.chat.id,
@@ -2398,7 +2408,7 @@ async function transcribeAndRoute(
       `[source:${deps.projectId}/${deps.sourceId}] telegram voice echo failed: ${redactedErrorText(deps, error)}`,
     );
   }
-  if (isAborted(deps) || !voiceIntakeIsCurrent(runtime, message, from.id, intake)) return;
+  if (isAborted(deps) || !telegramIntakeIsCurrent(runtime, message, from.id, intake)) return;
 
   if (intake.kind === "agent") {
     if (!conversationIsCurrent(deps, intake.sessionId, intake.conversation)) return;
@@ -2410,7 +2420,7 @@ async function transcribeAndRoute(
   }
 }
 
-type VoiceIntake =
+type TelegramIntake =
   | { kind: "agent"; sessionId: string; conversation: TelegramConversation }
   | { kind: "spawn"; binding: string | undefined; pending: TelegramPendingSpawn; autoSpawn?: never }
   | {
@@ -2420,11 +2430,11 @@ type VoiceIntake =
       autoSpawn: TelegramAutoSpawnConfig;
     };
 
-function voiceIntakeIsCurrent(
+function telegramIntakeIsCurrent(
   runtime: TelegramRuntime,
   message: TelegramTextMessage,
   userId: number,
-  intake: VoiceIntake,
+  intake: TelegramIntake,
 ): boolean {
   const deps = runtime.deps;
   if (intake.kind === "agent")
@@ -2468,7 +2478,7 @@ async function handleTelegramVoice(
   )?.sessionId;
   const replyOwner = telegramReplyOwner(deps, message);
   const pending = peekPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
-  let intake: VoiceIntake;
+  let intake: TelegramIntake;
   if (
     replyOwner !== null ||
     (binding !== undefined && !(pending && pending !== "expired" && pending.project !== undefined))
@@ -2506,6 +2516,117 @@ async function handleTelegramVoice(
   void transcribeAndRoute(runtime, ctx, message, from, statusMessageId, intake).catch(
     (error: unknown) => reportVoiceFailure(deps, ctx, error),
   );
+}
+
+async function handleTelegramPhoto(
+  ctx: TelegramTextContext,
+  runtime: TelegramRuntime,
+): Promise<void> {
+  const deps = runtime.deps;
+  if (!(await rememberUpdate(runtime, ctx.update))) return;
+  const message = ctx.message
+    ? { ...ctx.message, message_thread_id: telegramMessageThreadId(ctx.message) }
+    : undefined;
+  if (!message?.photo?.length || !message.from) return;
+  const from = message.from;
+  if (!isAllowed(deps.config, message.chat.id, from)) return;
+
+  const binding = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId).get(
+    telegramBindingKey(message.chat.id, message.message_thread_id),
+  )?.sessionId;
+  const pending = peekPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
+  if (pending === "expired") {
+    clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
+    await ctx.reply(SPAWN_EXPIRED_TEXT);
+    return;
+  }
+  let intake: Extract<TelegramIntake, { kind: "spawn" }>;
+  if (pending?.project !== undefined) {
+    intake = { kind: "spawn", binding, pending };
+  } else {
+    const sessionId = telegramReplyOwner(deps, message) ?? binding;
+    if (sessionId !== undefined) {
+      const conversation = await guardAgentInput(runtime, ctx, message, sessionId);
+      if (!conversation) return;
+      const session = await findSession(deps, sessionId);
+      await ctx.reply(
+        !session || session.inactive
+          ? "Agent is not active. Message not delivered."
+          : "Photos are supported for new tasks only. Use /spawn to send an image task.",
+      );
+      return;
+    }
+    if (pending) {
+      await ctx.reply("Pick a project for the pending /spawn, or run /spawn again.");
+      return;
+    }
+    if (deps.config.autoSpawn?.enabled !== true) {
+      await ctx.reply("Use /spawn to send an image task.");
+      return;
+    }
+    intake = { kind: "spawn", binding, pending: null, autoSpawn: { ...deps.config.autoSpawn } };
+  }
+  const autoSpawnSnapshot = JSON.stringify(deps.config.autoSpawn);
+  void (async () => {
+    try {
+      if (!ctx.getFile) throw new Error("Telegram file API unavailable");
+      const signal = AbortSignal.any([deps.signal, AbortSignal.timeout(60_000)]);
+      const file = await ctx.getFile(signal);
+      if (!file.file_path) throw new Error("Telegram returned no file path for this photo");
+      const response = await fetch(
+        `https://api.telegram.org/file/bot${deps.config.token}/${file.file_path}`,
+        { signal },
+      );
+      if (!response.ok)
+        throw new Error(`Telegram photo download failed with status ${response.status}`);
+      if (!response.body) throw new Error("Telegram returned an empty photo");
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let byteLength = 0;
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          byteLength += chunk.value.byteLength;
+          if (byteLength > MAX_ATTACHMENT_BYTES) {
+            await reader.cancel();
+            throw new Error("Photo exceeds 5MB");
+          }
+          chunks.push(chunk.value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      if (byteLength === 0) throw new Error("Telegram returned an empty photo");
+      const bytes = Buffer.concat(chunks, byteLength);
+      if (isAborted(deps)) return;
+      if (
+        !telegramIntakeIsCurrent(runtime, message, from.id, intake) ||
+        (intake.pending === null && JSON.stringify(deps.config.autoSpawn) !== autoSpawnSnapshot)
+      ) {
+        await ctx.reply("Image context changed. Send the message again.");
+        return;
+      }
+      await routeTelegramPrompt(
+        runtime,
+        ctx,
+        message,
+        from,
+        message.caption?.trim() || "Inspect the attached image.",
+        [{ name: `telegram-${message.message_id}.jpg`, data: bytes.toString("base64") }],
+      );
+    } catch (error) {
+      deps.logger.warn?.(
+        `[source:${deps.projectId}/${deps.sourceId}] telegram photo failed: ${redactedErrorText(deps, error)}`,
+      );
+      if (!isAborted(deps))
+        await ctx.reply(`Image task failed: ${redactedErrorText(deps, error)}`);
+    }
+  })().catch((error: unknown) => {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram photo notice failed: ${redactedErrorText(deps, error)}`,
+    );
+  });
 }
 
 async function reportVoiceFailure(
@@ -2605,6 +2726,9 @@ async function startTelegramSource(
     } catch (error) {
       await reportVoiceFailure(deps, ctx as TelegramTextContext, error);
     }
+  });
+  bot.on("message:photo", async (ctx: Context) => {
+    await handleTelegramPhoto(ctx as TelegramTextContext, runtime);
   });
   bot.on("callback_query:data", async (ctx: Context) => {
     await handleTelegramCallback(ctx as TelegramCallbackContext, runtime);

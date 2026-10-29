@@ -13,7 +13,7 @@ import { flushEventLogCollapse, readEventLog, resetEventLogCollapse } from "../.
 import * as metadataModule from "../../src/metadata.js";
 import * as consentModule from "../../src/review-interface-consent.js";
 import * as workspaceModule from "../../src/workspace.js";
-import type { SessionRecord } from "../../src/types.js";
+import { MAX_ATTACHMENT_BYTES, type SessionRecord } from "../../src/types.js";
 import {
   findTelegramChoice,
   findTelegramMessageSession,
@@ -63,6 +63,12 @@ class FakeBot {
   async emitVoice(ctx: unknown): Promise<void> {
     const handler = this.handlers.get("message:voice");
     if (!handler) throw new Error("missing message:voice handler");
+    await handler(ctx);
+  }
+
+  async emitPhoto(ctx: unknown): Promise<void> {
+    const handler = this.handlers.get("message:photo");
+    if (!handler) throw new Error("missing message:photo handler");
     await handler(ctx);
   }
 }
@@ -161,6 +167,17 @@ function telegramVoiceContext(overrides: Record<string, unknown> = {}) {
     reply: vi.fn().mockResolvedValue({ message_id: 55 }),
     api: { editMessageText: vi.fn().mockResolvedValue(undefined) },
     getFile: getFile ?? vi.fn().mockResolvedValue({ file_path: "voice/file_1.oga" }),
+  };
+}
+
+function telegramPhotoContext(overrides: Record<string, unknown> = {}) {
+  return {
+    ...telegramContext({
+      text: undefined,
+      photo: [{ file_id: "photo-1", file_unique_id: "unique-photo", width: 100, height: 100 }],
+      ...overrides,
+    }),
+    getFile: vi.fn().mockResolvedValue({ file_path: "photos/file_1.jpg" }),
   };
 }
 
@@ -5457,6 +5474,174 @@ function mockTranscribeFetch(text: string): ReturnType<typeof vi.fn> {
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ text }) });
   });
 }
+
+describe("telegramSourceModule photo tasks", () => {
+  beforeEach(() => {
+    botInstances.splice(0);
+    runMock.mockReset();
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  async function beginWizard(bot: FakeBot, agent = "codex", pickProject = true) {
+    const wizard = telegramContext({ text: `/spawn ${agent}` });
+    await bot.emitText(wizard);
+    if (pickProject)
+      await bot.emitCallback({
+        callbackQuery: {
+          data: spawnProjectCallbackData(wizard.reply, 0),
+          message: wizard.message,
+          from: wizard.message.from,
+        },
+        answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+        reply: vi.fn().mockResolvedValue({}),
+      });
+  }
+
+  it.each([
+    { mode: "wizard", caption: "  /inspect this photo  " },
+    { mode: "wizard", caption: undefined },
+    { mode: "auto", caption: undefined },
+  ])("spawns a $mode photo task with caption $caption once", async ({ mode, caption }) => {
+    const dataDir = await createTempDir("spur-telegram-photo-");
+    tempDirs.push(dataDir);
+    const spawn = vi.fn().mockResolvedValue({
+      id: "photo-agent", project: "api", agent: "codex", state: "working",
+    });
+    const { bot, emit } = await startSource(dataDir, vi.fn(), spawn, {
+      config: mode === "auto"
+        ? { autoSpawn: { enabled: true, project: "api", agent: "codex", model: "auto" } }
+        : {},
+    });
+    if (mode === "wizard") await beginWizard(required(bot));
+    const fetchMock = vi.fn().mockResolvedValue(new Response("photo-bytes"));
+    vi.stubGlobal("fetch", fetchMock);
+    const photo = telegramPhotoContext({ caption, updateId: 500 });
+    await required(bot).emitPhoto(photo);
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(1));
+    expect(spawn).toHaveBeenCalledWith(expect.objectContaining({
+      project: "api",
+      agent: "codex",
+      prompt: wrapTelegramSpawnPrompt(caption?.trim() || "Inspect the attached image."),
+      attachments: [{ name: "telegram-10.jpg", data: Buffer.from("photo-bytes").toString("base64") }],
+      ...(mode === "auto" ? { model: "auto" } : {}),
+    }));
+    await required(bot).emitPhoto(photo);
+    expect(photo.getFile).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it.each(["unauthorized", "awaiting-project", "expired", "bound", "inactive", "legacy", "off"])(
+    "rejects %s photo intake before download",
+    async (scenario) => {
+      const dataDir = await createTempDir("spur-telegram-photo-guard-");
+      tempDirs.push(dataDir);
+      if (["bound", "inactive", "legacy"].includes(scenario)) {
+        if (scenario === "legacy")
+          writeTelegramBindings(dataDir, "api", "telegram", [
+            { chatId: -1001, sessionId: "api-1" },
+          ]);
+        else assignTopic(dataDir);
+      }
+      const { bot, emit, spawnSession } = await startSource(dataDir, vi.fn(), vi.fn(), {
+        ...(scenario === "inactive" ? {
+          getSession: vi.fn().mockResolvedValue({
+            id: "api-1", project: "api", agent: "codex", state: "waiting", inactive: true,
+          }),
+        } : {}),
+      });
+      if (scenario === "awaiting-project") await beginWizard(required(bot), "codex", false);
+      if (scenario === "expired") {
+        vi.useFakeTimers();
+        await beginWizard(required(bot));
+        vi.setSystemTime(Date.now() + 11 * 60_000);
+      }
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const photo = telegramPhotoContext({
+        ...(scenario === "unauthorized" ? { from: { id: 999 } } : {}),
+        ...(scenario === "legacy" ? { message_thread_id: undefined, is_topic_message: false } : {}),
+      });
+      await required(bot).emitPhoto(photo);
+      expect(photo.getFile).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(spawnSession).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+      if (scenario !== "unauthorized") expect(photo.reply).toHaveBeenCalled();
+    },
+  );
+
+  it.each(["missing-path", "http", "empty", "oversize", "network"])(
+    "rejects %s photo downloads without submitting the caption",
+    async (failure) => {
+      const dataDir = await createTempDir("spur-telegram-photo-failure-");
+      tempDirs.push(dataDir);
+      const { bot, emit, spawnSession, logger } = await startSource(dataDir);
+      await beginWizard(required(bot));
+      const photo = telegramPhotoContext({ caption: "do not submit alone" });
+      if (failure === "missing-path") photo.getFile.mockResolvedValue({ file_path: "" });
+      const fetchMock = vi.fn().mockImplementation(async () => {
+        if (failure === "network")
+          throw new Error("failed https://api.telegram.org/file/bottoken-123/photo.jpg");
+        return new Response(
+          failure === "oversize" ? new Uint8Array(MAX_ATTACHMENT_BYTES + 1)
+            : failure === "empty" ? "" : "photo",
+          { status: failure === "http" ? 403 : 200 },
+        );
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await required(bot).emitPhoto(photo);
+      await vi.waitFor(() => expect(photo.reply).toHaveBeenCalledWith(
+        expect.stringContaining("Image task failed:"),
+      ));
+      expect(spawnSession).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+      expect(JSON.stringify(photo.reply.mock.calls)).not.toContain("token-123");
+      expect(JSON.stringify(logger.warn.mock.calls)).not.toContain("token-123");
+    },
+  );
+
+  it.each(["wizard", "binding", "config", "abort"])(
+    "rejects a stale photo after %s changes during download",
+    async (change) => {
+      const dataDir = await createTempDir("spur-telegram-photo-stale-");
+      tempDirs.push(dataDir);
+      const controller = new AbortController();
+      const autoSpawn = { enabled: true, project: "api", agent: "codex", model: "auto" };
+      const { bot, emit, spawnSession } = await startSource(dataDir, vi.fn(), vi.fn(), {
+        signal: controller.signal,
+        config: { autoSpawn },
+      });
+      if (change === "wizard") await beginWizard(required(bot));
+      let finish!: (response: Response) => void;
+      const fetchMock = vi.fn().mockImplementation(() => new Promise<Response>((resolve) => {
+        finish = resolve;
+      }));
+      vi.stubGlobal("fetch", fetchMock);
+      const photo = telegramPhotoContext();
+      await required(bot).emitPhoto(photo);
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      if (change === "wizard") await beginWizard(required(bot), "claude");
+      if (change === "binding") assignTopic(dataDir);
+      if (change === "config") autoSpawn.model = "other";
+      if (change === "abort") controller.abort();
+      finish(new Response("photo"));
+      if (change !== "abort")
+        await vi.waitFor(() => expect(photo.reply).toHaveBeenCalledWith(
+          "Image context changed. Send the message again.",
+        ));
+      else await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(spawnSession).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+      if (change === "abort") expect(photo.reply).not.toHaveBeenCalled();
+    },
+  );
+});
 
 describe("telegramSourceModule voice notes", () => {
   beforeEach(() => {
