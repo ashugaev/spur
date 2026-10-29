@@ -174,24 +174,27 @@ describe("startConfiguredSources", () => {
     await controller.stop();
   });
 
-  it.each([true, false])("forwards source attachment preparation only when present: %s", async (present) => {
-    const { startConfiguredSources } = await loadStartConfiguredSources();
-    const prepareSessionMessage = vi.fn().mockResolvedValue("prepared text");
-    const controller = await startConfiguredSources({
-      config: buildConfig(tmpDir, {
-        api: { path: tmpDir, sources: { nightly: { type: "cron" } } },
-      }) as never,
-      bus: new EventBus(),
-      listSessions: vi.fn().mockResolvedValue([]),
-      getSession: vi.fn().mockResolvedValue(null),
-      ...(present ? { prepareSessionMessage } : {}),
-    });
-    const deps = cronStartMock.mock.calls[0]?.[0] as {
-      prepareSessionMessage?: typeof prepareSessionMessage;
-    };
-    expect(deps.prepareSessionMessage).toBe(present ? prepareSessionMessage : undefined);
-    await controller.stop();
-  });
+  it.each([true, false])(
+    "forwards source attachment preparation only when present: %s",
+    async (present) => {
+      const { startConfiguredSources } = await loadStartConfiguredSources();
+      const prepareSessionMessage = vi.fn().mockResolvedValue("prepared text");
+      const controller = await startConfiguredSources({
+        config: buildConfig(tmpDir, {
+          api: { path: tmpDir, sources: { nightly: { type: "cron" } } },
+        }) as never,
+        bus: new EventBus(),
+        listSessions: vi.fn().mockResolvedValue([]),
+        getSession: vi.fn().mockResolvedValue(null),
+        ...(present ? { prepareSessionMessage } : {}),
+      });
+      const deps = cronStartMock.mock.calls[0]?.[0] as {
+        prepareSessionMessage?: typeof prepareSessionMessage;
+      };
+      expect(deps.prepareSessionMessage).toBe(present ? prepareSessionMessage : undefined);
+      await controller.stop();
+    },
+  );
 
   it("adds a unique occurrence id to each emitted source event", async () => {
     const { startConfiguredSources } = await loadStartConfiguredSources();

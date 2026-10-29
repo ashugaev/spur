@@ -42,12 +42,18 @@ describe("startServer", () => {
     const root = await mkdtemp(join(tmpdir(), "spur-source-preparation-"));
     const port = await findFreePort();
     const configPath = join(root, "config.yaml");
-    await writeFile(configPath,
-      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`);
+    await writeFile(
+      configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`,
+    );
     const sources = vi.spyOn(configuredSources, "startConfiguredSources").mockResolvedValue({
-      stop: vi.fn(), telegramBotIdentity: () => null, clearPollDisabledOverride: () => null,
+      stop: vi.fn(),
+      telegramBotIdentity: () => null,
+      clearPollDisabledOverride: () => null,
     });
-    const prepare = vi.spyOn(SessionService.prototype, "prepareSourceMessage").mockReturnValue("saved refs");
+    const prepare = vi
+      .spyOn(SessionService.prototype, "prepareSourceMessage")
+      .mockReturnValue("saved refs");
     const send = vi.spyOn(SessionService.prototype, "send");
     const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
     try {

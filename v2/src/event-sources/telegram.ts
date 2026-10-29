@@ -120,13 +120,7 @@ interface TelegramTextMessage {
   reply_to_message?: {
     message_id: number;
   };
-  voice?: {
-    file_id: string;
-    file_unique_id: string;
-    duration: number;
-    mime_type?: string;
-    file_size?: number;
-  };
+  voice?: TelegramFile & { duration: number };
 }
 
 interface TelegramTextContext {
@@ -943,14 +937,22 @@ async function runAutoSpawn(
   stillCurrent?: () => boolean,
 ): Promise<void> {
   try {
-    await bindSpawnedSession(runtime, ctx, chatId, messageThreadId, {
-      project: autoSpawn.project,
-      agent: autoSpawn.agent,
-      ...(autoSpawn.model !== undefined ? { model: autoSpawn.model } : {}),
-      ...(autoSpawn.selfDestruct !== undefined ? { selfDestruct: autoSpawn.selfDestruct } : {}),
-      prompt: text,
-      ...(attachments ? { attachments } : {}),
-    }, undefined, stillCurrent);
+    await bindSpawnedSession(
+      runtime,
+      ctx,
+      chatId,
+      messageThreadId,
+      {
+        project: autoSpawn.project,
+        agent: autoSpawn.agent,
+        ...(autoSpawn.model !== undefined ? { model: autoSpawn.model } : {}),
+        ...(autoSpawn.selfDestruct !== undefined ? { selfDestruct: autoSpawn.selfDestruct } : {}),
+        prompt: text,
+        ...(attachments ? { attachments } : {}),
+      },
+      undefined,
+      stillCurrent,
+    );
   } finally {
     runtime.autoSpawnInFlight.delete(key);
   }
@@ -2199,7 +2201,8 @@ async function deliverRoutedPrompt(
     try {
       text = await deps.prepareSessionMessage(session.id, { message: text, attachments });
     } catch (error) {
-      if (current()) await ctx.reply(`Attachment delivery failed: ${redactedErrorText(deps, error)}`);
+      if (current())
+        await ctx.reply(`Attachment delivery failed: ${redactedErrorText(deps, error)}`);
       return;
     }
     if (!current() || !conversationIsCurrent(deps, session.id, conversation)) return;
@@ -2338,7 +2341,9 @@ async function transcribeTelegramVoice(
   stopSignal: AbortSignal,
 ): Promise<string> {
   const signal = AbortSignal.any([
-    deps.signal, stopSignal, AbortSignal.timeout(VOICE_TRANSCRIBE_TIMEOUT_MS),
+    deps.signal,
+    stopSignal,
+    AbortSignal.timeout(VOICE_TRANSCRIBE_TIMEOUT_MS),
   ]);
   const form = new FormData();
   form.set("audio", new File([audio], "voice.ogg", { type: "audio/ogg" }));
@@ -2416,10 +2421,7 @@ async function captureMediaIntake(
     return null;
   }
   if (pending?.project !== undefined) return { kind: "spawn", binding, pending };
-  if (
-    replyOwner !== null ||
-    binding !== undefined
-  ) {
+  if (replyOwner !== null || binding !== undefined) {
     const sessionId = replyOwner ?? binding;
     if (sessionId === undefined) return null;
     const conversation = await guardAgentInput(runtime, ctx, message, sessionId);
@@ -2438,13 +2440,25 @@ async function captureMediaIntake(
     return null;
   }
   if (deps.config.autoSpawn?.enabled === true)
-    return { kind: "spawn", binding, pending: null, autoSpawn: structuredClone(deps.config.autoSpawn) };
+    return {
+      kind: "spawn",
+      binding,
+      pending: null,
+      autoSpawn: structuredClone(deps.config.autoSpawn),
+    };
   await ctx.reply("Use /spawn to send an attachment task.");
   return null;
 }
 
-type TelegramMediaKind = "photo" | "animation" | "audio" | "document" | "video" |
-  "video_note" | "voice" | "sticker";
+type TelegramMediaKind =
+  | "photo"
+  | "animation"
+  | "audio"
+  | "document"
+  | "video"
+  | "video_note"
+  | "voice"
+  | "sticker";
 
 interface TelegramMediaMember {
   ctx: TelegramTextContext;
@@ -2464,9 +2478,18 @@ interface TelegramMediaGroup {
 }
 
 const TELEGRAM_MIME_EXTENSIONS = new Map([
-  ["image/jpeg", "jpg"], ["image/png", "png"], ["image/gif", "gif"], ["image/webp", "webp"],
-  ["audio/ogg", "ogg"], ["audio/mpeg", "mp3"], ["audio/mp4", "m4a"], ["audio/wav", "wav"],
-  ["video/mp4", "mp4"], ["video/webm", "webm"], ["application/pdf", "pdf"], ["application/zip", "zip"],
+  ["image/jpeg", "jpg"],
+  ["image/png", "png"],
+  ["image/gif", "gif"],
+  ["image/webp", "webp"],
+  ["audio/ogg", "ogg"],
+  ["audio/mpeg", "mp3"],
+  ["audio/mp4", "m4a"],
+  ["audio/wav", "wav"],
+  ["video/mp4", "mp4"],
+  ["video/webm", "webm"],
+  ["application/pdf", "pdf"],
+  ["application/zip", "zip"],
 ]);
 
 function telegramMediaMember(
@@ -2475,18 +2498,37 @@ function telegramMediaMember(
 ): TelegramMediaMember | null {
   // Match Grammy's getFile priority; animation also has a document alias.
   const kinds: TelegramMediaKind[] = [
-    "photo", "animation", "audio", "document", "video", "video_note", "voice", "sticker",
+    "photo",
+    "animation",
+    "audio",
+    "document",
+    "video",
+    "video_note",
+    "voice",
+    "sticker",
   ];
   for (const kind of kinds) {
     const file = kind === "photo" ? message.photo?.at(-1) : message[kind];
     if (!file) continue;
-    const extension = kind === "photo" ? "jpg" : kind === "voice" ? "ogg"
-      : kind === "sticker" ? message.sticker?.is_video ? "webm"
-        : message.sticker?.is_animated ? "tgs" : "webp"
-      : TELEGRAM_MIME_EXTENSIONS.get(file.mime_type ?? "") ??
-        (kind === "audio" ? "mp3" : kind === "document" ? "bin" : "mp4");
+    const extension =
+      kind === "photo"
+        ? "jpg"
+        : kind === "voice"
+          ? "ogg"
+          : kind === "sticker"
+            ? message.sticker?.is_video
+              ? "webm"
+              : message.sticker?.is_animated
+                ? "tgs"
+                : "webp"
+            : (TELEGRAM_MIME_EXTENSIONS.get(file.mime_type ?? "") ??
+              (kind === "audio" ? "mp3" : kind === "document" ? "bin" : "mp4"));
     const fallback = `telegram-${message.message_id}.${extension}`;
-    let name = file.file_name?.split(/[\\/]/).at(-1)?.replace(/[^\w.-]/g, "_") || fallback;
+    let name =
+      file.file_name
+        ?.split(/[\\/]/)
+        .at(-1)
+        ?.replace(/[^\w.-]/g, "_") || fallback;
     if (/^\.+$/.test(name)) name = fallback;
     if (name.length > 160) {
       const dot = name.lastIndexOf(".");
@@ -2502,10 +2544,13 @@ async function downloadTelegramMedia(
   runtime: TelegramRuntime,
   member: TelegramMediaMember,
 ): Promise<Uint8Array<ArrayBuffer>> {
-  if ((member.file.file_size ?? 0) > MAX_ATTACHMENT_BYTES) throw new Error("Attachment exceeds 5MB");
+  if ((member.file.file_size ?? 0) > MAX_ATTACHMENT_BYTES)
+    throw new Error("Attachment exceeds 5MB");
   if (!member.ctx.getFile) throw new Error("Telegram file API unavailable");
   const signal = AbortSignal.any([
-    runtime.deps.signal, runtime.mediaAbort.signal, AbortSignal.timeout(60_000),
+    runtime.deps.signal,
+    runtime.mediaAbort.signal,
+    AbortSignal.timeout(60_000),
   ]);
   const file = await member.ctx.getFile(signal);
   if (!file.file_path) throw new Error("Telegram returned no file path for this attachment");
@@ -2582,14 +2627,17 @@ async function runMediaTask(
           const webBaseUrl = await deps.resolveWebBaseUrl();
           await requireCurrent();
           if (webBaseUrl === null) {
-            notice = "Voice transcription is disabled for this Spur instance. Sending original file.";
+            notice =
+              "Voice transcription is disabled for this Spur instance. Sending original file.";
           } else {
-            transcript = (await transcribeTelegramVoice(
-              bytes, deps, webBaseUrl, runtime.mediaAbort.signal,
-            )).trim();
+            transcript = (
+              await transcribeTelegramVoice(bytes, deps, webBaseUrl, runtime.mediaAbort.signal)
+            ).trim();
             await requireCurrent();
             notice = transcript
-              ? intake.kind === "agent" ? `Heard: "${transcript}"` : "Voice task received."
+              ? intake.kind === "agent"
+                ? `Heard: "${transcript}"`
+                : "Voice task received."
               : "Empty voice transcript. Sending original file.";
           }
         } catch (error) {
@@ -2615,28 +2663,50 @@ async function runMediaTask(
     if (intake.kind === "agent") {
       const session = await findSession(deps, intake.sessionId);
       await requireCurrent();
-      if (session) await deliverRoutedPrompt(runtime, ctx, message, session, text, attachments, current);
+      if (session)
+        await deliverRoutedPrompt(runtime, ctx, message, session, text, attachments, current);
       return;
     }
     if (intake.pending !== null) {
       const project = intake.pending.project;
       if (project === undefined) throw new Error("Pick a project for the pending /spawn.");
       clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
-      const consumedCurrent = (): boolean => !isAborted(deps) && !runtime.mediaAbort.signal.aborted &&
+      const consumedCurrent = (): boolean =>
+        !isAborted(deps) &&
+        !runtime.mediaAbort.signal.aborted &&
         peekPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id) === null &&
         readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId).get(
           telegramBindingKey(message.chat.id, message.message_thread_id),
         )?.sessionId === intake.binding;
-      await bindSpawnedSession(runtime, ctx, message.chat.id, message.message_thread_id, {
-        agent: intake.pending.agent, project,
-        prompt: text, attachments,
-      }, undefined, consumedCurrent);
+      await bindSpawnedSession(
+        runtime,
+        ctx,
+        message.chat.id,
+        message.message_thread_id,
+        {
+          agent: intake.pending.agent,
+          project,
+          prompt: text,
+          attachments,
+        },
+        undefined,
+        consumedCurrent,
+      );
     } else {
       const key = telegramBindingKey(message.chat.id, message.message_thread_id);
       const acquired = tryAcquireAutoSpawn(runtime, key);
       if (acquired.status !== "acquired") throw new Error("Spawn already in progress here.");
-      await runAutoSpawn(runtime, ctx, message.chat.id, message.message_thread_id,
-        text, key, acquired.autoSpawn, attachments, current);
+      await runAutoSpawn(
+        runtime,
+        ctx,
+        message.chat.id,
+        message.message_thread_id,
+        text,
+        key,
+        acquired.autoSpawn,
+        attachments,
+        current,
+      );
     }
   } catch (error) {
     deps.logger.warn?.(
@@ -2665,7 +2735,10 @@ function closeMediaGroup(runtime: TelegramRuntime, key: string, group: TelegramM
   });
 }
 
-async function handleTelegramMedia(ctx: TelegramTextContext, runtime: TelegramRuntime): Promise<void> {
+async function handleTelegramMedia(
+  ctx: TelegramTextContext,
+  runtime: TelegramRuntime,
+): Promise<void> {
   const deps = runtime.deps;
   if (isAborted(deps) || runtime.mediaAbort.signal.aborted) return;
   if (!(await rememberUpdate(runtime, ctx.update))) return;
@@ -2694,7 +2767,10 @@ async function handleTelegramMedia(ctx: TelegramTextContext, runtime: TelegramRu
   }
   let group = runtime.mediaGroups.get(key);
   if (!group) {
-    if (runtime.mediaGroups.size >= 10 || runtime.closedMediaGroups.size + runtime.mediaGroups.size >= 1000) {
+    if (
+      runtime.mediaGroups.size >= 10 ||
+      runtime.closedMediaGroups.size + runtime.mediaGroups.size >= 1000
+    ) {
       await ctx.reply("Attachment intake is busy. Resend the album later.");
       return;
     }
@@ -2710,10 +2786,16 @@ async function handleTelegramMedia(ctx: TelegramTextContext, runtime: TelegramRu
       }
       closeMediaGroup(runtime, key, collecting);
       runtime.mediaGroups.delete(key);
-      detachMediaTask(runtime, ctx.reply("Album collection timed out. Resend all files.").then(() => undefined));
+      detachMediaTask(
+        runtime,
+        ctx.reply("Album collection timed out. Resend all files.").then(() => undefined),
+      );
     }, 5_000);
     group = {
-      members: [], intake, from, processing: false,
+      members: [],
+      intake,
+      from,
+      processing: false,
       deadlineTimer,
     };
     runtime.mediaGroups.set(key, group);
@@ -2730,10 +2812,15 @@ async function handleTelegramMedia(ctx: TelegramTextContext, runtime: TelegramRu
   const collected = group;
   group.quietTimer = setTimeout(() => {
     closeMediaGroup(runtime, key, collected);
-    detachMediaTask(runtime, runMediaTask(
-      runtime, collected.members.sort((a, b) => a.message.message_id - b.message.message_id),
-      collected.from, collected.intake,
-    ).finally(() => runtime.mediaGroups.delete(key)));
+    detachMediaTask(
+      runtime,
+      runMediaTask(
+        runtime,
+        collected.members.sort((a, b) => a.message.message_id - b.message.message_id),
+        collected.from,
+        collected.intake,
+      ).finally(() => runtime.mediaGroups.delete(key)),
+    );
   }, 750);
 }
 
@@ -2820,20 +2907,29 @@ async function startTelegramSource(
   bot.on("message:text", async (ctx: Context) => {
     await handleTelegramText(ctx as TelegramTextContext, runtime);
   });
-  bot.on([
-    "message:photo", "message:animation", "message:audio", "message:document",
-    "message:video", "message:video_note", "message:voice", "message:sticker",
-  ], async (ctx: Context) => {
-    try {
-      await handleTelegramMedia(ctx as TelegramTextContext, runtime);
-    } catch (error) {
-      deps.logger.warn?.(
-        `[source:${deps.projectId}/${deps.sourceId}] telegram attachment failed: ${redactedErrorText(deps, error)}`,
-      );
-      if (!isAborted(deps) && !runtime.mediaAbort.signal.aborted)
-        await noticeUndelivered(deps, ctx as TelegramTextContext);
-    }
-  });
+  bot.on(
+    [
+      "message:photo",
+      "message:animation",
+      "message:audio",
+      "message:document",
+      "message:video",
+      "message:video_note",
+      "message:voice",
+      "message:sticker",
+    ],
+    async (ctx: Context) => {
+      try {
+        await handleTelegramMedia(ctx as TelegramTextContext, runtime);
+      } catch (error) {
+        deps.logger.warn?.(
+          `[source:${deps.projectId}/${deps.sourceId}] telegram attachment failed: ${redactedErrorText(deps, error)}`,
+        );
+        if (!isAborted(deps) && !runtime.mediaAbort.signal.aborted)
+          await noticeUndelivered(deps, ctx as TelegramTextContext);
+      }
+    },
+  );
   bot.on("callback_query:data", async (ctx: Context) => {
     await handleTelegramCallback(ctx as TelegramCallbackContext, runtime);
   });

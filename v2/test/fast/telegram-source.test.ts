@@ -182,15 +182,28 @@ function telegramPhotoContext(overrides: Record<string, unknown> = {}) {
   };
 }
 
-const mediaKinds = ["photo", "document", "audio", "video", "animation", "voice", "video_note", "sticker"] as const;
+const mediaKinds = [
+  "photo",
+  "document",
+  "audio",
+  "video",
+  "animation",
+  "voice",
+  "video_note",
+  "sticker",
+] as const;
 
-function telegramAttachmentContext(kind: typeof mediaKinds[number], overrides: Record<string, unknown> = {}) {
+function telegramAttachmentContext(
+  kind: (typeof mediaKinds)[number],
+  overrides: Record<string, unknown> = {},
+) {
   return {
     ...telegramContext({
       text: undefined,
-      [kind]: kind === "photo"
-        ? [{ file_id: "file", file_unique_id: "unique", width: 50, height: 50 }]
-        : { file_id: "file", file_unique_id: "unique" },
+      [kind]:
+        kind === "photo"
+          ? [{ file_id: "file", file_unique_id: "unique", width: 50, height: 50 }]
+          : { file_id: "file", file_unique_id: "unique" },
       ...overrides,
     }),
     getFile: vi.fn().mockResolvedValue({ file_path: `files/${kind}` }),
@@ -350,10 +363,16 @@ async function startSource(
       : { telegramConversations: overrides.telegramConversations ?? telegramConversations }),
     ...(listProjects ? { listProjects } : {}),
     ...(overrides.spawnSession === null ? {} : { spawnSession }),
-    ...(overrides.prepareSessionMessage === null ? {} : {
-      prepareSessionMessage: overrides.prepareSessionMessage ?? vi.fn<NonNullable<SourceStartDeps["prepareSessionMessage"]>>(async (_sessionId, request) =>
-        `[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/voice.ogg]\n${request.message}`),
-    }),
+    ...(overrides.prepareSessionMessage === null
+      ? {}
+      : {
+          prepareSessionMessage:
+            overrides.prepareSessionMessage ??
+            vi.fn<NonNullable<SourceStartDeps["prepareSessionMessage"]>>(
+              async (_sessionId, request) =>
+                `[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/voice.ogg]\n${request.message}`,
+            ),
+        }),
     ...(overrides.workbench ? { workbench: overrides.workbench } : {}),
     resolveWebBaseUrl:
       overrides.resolveWebBaseUrl ??
@@ -5531,12 +5550,16 @@ describe("telegramSourceModule photo tasks", () => {
     const dataDir = await createTempDir("spur-telegram-photo-");
     tempDirs.push(dataDir);
     const spawn = vi.fn().mockResolvedValue({
-      id: "photo-agent", project: "api", agent: "codex", state: "working",
+      id: "photo-agent",
+      project: "api",
+      agent: "codex",
+      state: "working",
     });
     const { bot, emit } = await startSource(dataDir, vi.fn(), spawn, {
-      config: mode === "auto"
-        ? { autoSpawn: { enabled: true, project: "api", agent: "codex", model: "auto" } }
-        : {},
+      config:
+        mode === "auto"
+          ? { autoSpawn: { enabled: true, project: "api", agent: "codex", model: "auto" } }
+          : {},
     });
     if (mode === "wizard") await beginWizard(required(bot));
     const fetchMock = vi.fn().mockResolvedValue(new Response("photo-bytes"));
@@ -5544,13 +5567,17 @@ describe("telegramSourceModule photo tasks", () => {
     const photo = telegramPhotoContext({ caption, updateId: 500 });
     await required(bot).emitPhoto(photo);
     await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(1));
-    expect(spawn).toHaveBeenCalledWith(expect.objectContaining({
-      project: "api",
-      agent: "codex",
-      prompt: wrapTelegramSpawnPrompt(caption?.trim() || "Inspect the attached files."),
-      attachments: [{ name: "telegram-10.jpg", data: Buffer.from("photo-bytes").toString("base64") }],
-      ...(mode === "auto" ? { model: "auto" } : {}),
-    }));
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        project: "api",
+        agent: "codex",
+        prompt: wrapTelegramSpawnPrompt(caption?.trim() || "Inspect the attached files."),
+        attachments: [
+          { name: "telegram-10.jpg", data: Buffer.from("photo-bytes").toString("base64") },
+        ],
+        ...(mode === "auto" ? { model: "auto" } : {}),
+      }),
+    );
     await required(bot).emitPhoto(photo);
     expect(photo.getFile).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -5570,11 +5597,17 @@ describe("telegramSourceModule photo tasks", () => {
         else assignTopic(dataDir);
       }
       const { bot, emit, spawnSession } = await startSource(dataDir, vi.fn(), vi.fn(), {
-        ...(scenario === "inactive" ? {
-          getSession: vi.fn().mockResolvedValue({
-            id: "api-1", project: "api", agent: "codex", state: "waiting", inactive: true,
-          }),
-        } : {}),
+        ...(scenario === "inactive"
+          ? {
+              getSession: vi.fn().mockResolvedValue({
+                id: "api-1",
+                project: "api",
+                agent: "codex",
+                state: "waiting",
+                inactive: true,
+              }),
+            }
+          : {}),
       });
       if (scenario === "awaiting-project") await beginWizard(required(bot), "codex", false);
       if (scenario === "expired") {
@@ -5610,16 +5643,21 @@ describe("telegramSourceModule photo tasks", () => {
         if (failure === "network")
           throw new Error("failed https://api.telegram.org/file/bottoken-123/photo.jpg");
         return new Response(
-          failure === "oversize" ? new Uint8Array(MAX_ATTACHMENT_BYTES + 1)
-            : failure === "empty" ? "" : "photo",
+          failure === "oversize"
+            ? new Uint8Array(MAX_ATTACHMENT_BYTES + 1)
+            : failure === "empty"
+              ? ""
+              : "photo",
           { status: failure === "http" ? 403 : 200 },
         );
       });
       vi.stubGlobal("fetch", fetchMock);
       await required(bot).emitPhoto(photo);
-      await vi.waitFor(() => expect(photo.reply).toHaveBeenCalledWith(
-        expect.stringContaining("Attachment task failed:"),
-      ));
+      await vi.waitFor(() =>
+        expect(photo.reply).toHaveBeenCalledWith(
+          expect.stringContaining("Attachment task failed:"),
+        ),
+      );
       expect(spawnSession).not.toHaveBeenCalled();
       expect(emit).not.toHaveBeenCalled();
       expect(JSON.stringify(photo.reply.mock.calls)).not.toContain("token-123");
@@ -5627,50 +5665,68 @@ describe("telegramSourceModule photo tasks", () => {
     },
   );
 
-  it.each(mediaKinds.flatMap((kind) => ["wizard", "auto", "followup"].map((mode) => ({ kind, mode }))))(
-    "delivers $kind attachment bytes through $mode",
-    async ({ kind, mode }) => {
-      const dataDir = await createTempDir("spur-telegram-media-");
-      tempDirs.push(dataDir);
-      if (mode === "followup") assignTopic(dataDir);
-      const prepare = vi.fn<NonNullable<SourceStartDeps["prepareSessionMessage"]>>(
-        async (_sessionId, request) => `[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/saved]\n${request.message}`,
-      );
-      const spawn = vi.fn().mockResolvedValue({
-        id: "media-agent", project: "api", agent: "codex", state: "working",
-      });
-      const { bot, emit } = await startSource(dataDir, vi.fn(), spawn, {
-        prepareSessionMessage: prepare,
-        config: { autoSpawn: { enabled: true, project: "api", agent: "codex" } },
-      });
-      if (mode === "wizard") await beginWizard(required(bot));
-      const fetchMock = vi.fn(async (url: string) => url.includes("api.telegram.org")
-        ? new Response("file-bytes") : Response.json({ text: "voice transcript" }));
-      vi.stubGlobal("fetch", fetchMock);
-      const attachment = telegramAttachmentContext(kind, { caption: " file task " });
-      await required(bot).emitPhoto(attachment);
-      if (mode === "followup") {
-        await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(1));
-        expect(prepare).toHaveBeenCalledWith("api-1", expect.objectContaining({
+  it.each(
+    mediaKinds.flatMap((kind) => ["wizard", "auto", "followup"].map((mode) => ({ kind, mode }))),
+  )("delivers $kind attachment bytes through $mode", async ({ kind, mode }) => {
+    const dataDir = await createTempDir("spur-telegram-media-");
+    tempDirs.push(dataDir);
+    if (mode === "followup") assignTopic(dataDir);
+    const prepare = vi.fn<NonNullable<SourceStartDeps["prepareSessionMessage"]>>(
+      async (_sessionId, request) =>
+        `[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/saved]\n${request.message}`,
+    );
+    const spawn = vi.fn().mockResolvedValue({
+      id: "media-agent",
+      project: "api",
+      agent: "codex",
+      state: "working",
+    });
+    const { bot, emit } = await startSource(dataDir, vi.fn(), spawn, {
+      prepareSessionMessage: prepare,
+      config: { autoSpawn: { enabled: true, project: "api", agent: "codex" } },
+    });
+    if (mode === "wizard") await beginWizard(required(bot));
+    const fetchMock = vi.fn(async (url: string) =>
+      url.includes("api.telegram.org")
+        ? new Response("file-bytes")
+        : Response.json({ text: "voice transcript" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const attachment = telegramAttachmentContext(kind, { caption: " file task " });
+    await required(bot).emitPhoto(attachment);
+    if (mode === "followup") {
+      await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(1));
+      expect(prepare).toHaveBeenCalledWith(
+        "api-1",
+        expect.objectContaining({
           message: kind === "voice" ? "file task\nvoice transcript" : "file task",
-          attachments: [{ name: expect.any(String), data: Buffer.from("file-bytes").toString("base64") }],
-        }));
-        expect(emit).toHaveBeenCalledWith("telegram:message", expect.objectContaining({
+          attachments: [
+            { name: expect.any(String), data: Buffer.from("file-bytes").toString("base64") },
+          ],
+        }),
+      );
+      expect(emit).toHaveBeenCalledWith(
+        "telegram:message",
+        expect.objectContaining({
           text: expect.stringContaining("$SPUR_SESSION_ARTIFACTS_DIR/saved"),
-        }));
-        expect(spawn).not.toHaveBeenCalled();
-      } else {
-        await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(1));
-        expect(spawn).toHaveBeenCalledWith(expect.objectContaining({
+        }),
+      );
+      expect(spawn).not.toHaveBeenCalled();
+    } else {
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(1));
+      expect(spawn).toHaveBeenCalledWith(
+        expect.objectContaining({
           prompt: expect.stringContaining("file task"),
-          attachments: [{ name: expect.any(String), data: Buffer.from("file-bytes").toString("base64") }],
-        }));
-        expect(prepare).not.toHaveBeenCalled();
-      }
-      expect(attachment.getFile).toHaveBeenCalledTimes(1);
-      expect(fetchMock).toHaveBeenCalledTimes(kind === "voice" ? 2 : 1);
-    },
-  );
+          attachments: [
+            { name: expect.any(String), data: Buffer.from("file-bytes").toString("base64") },
+          ],
+        }),
+      );
+      expect(prepare).not.toHaveBeenCalled();
+    }
+    expect(attachment.getFile).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(kind === "voice" ? 2 : 1);
+  });
 
   it.each([
     { input: "../../bad name.txt", expected: "bad_name.txt" },
@@ -5681,17 +5737,32 @@ describe("telegramSourceModule photo tasks", () => {
   ])("normalizes attachment filename $input", async ({ input, expected }) => {
     const dataDir = await createTempDir("spur-telegram-media-name-");
     tempDirs.push(dataDir);
-    const { bot, spawnSession } = await startSource(dataDir, vi.fn(), vi.fn().mockResolvedValue({
-      id: "media", project: "api", agent: "codex", state: "working",
-    }), { config: { autoSpawn: { enabled: true, project: "api", agent: "codex" } } });
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("bytes")));
-    await required(bot).emitPhoto(telegramAttachmentContext("document", {
-      document: { file_id: "doc", file_name: input },
-    }));
+    const { bot, spawnSession } = await startSource(
+      dataDir,
+      vi.fn(),
+      vi.fn().mockResolvedValue({
+        id: "media",
+        project: "api",
+        agent: "codex",
+        state: "working",
+      }),
+      { config: { autoSpawn: { enabled: true, project: "api", agent: "codex" } } },
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("bytes")),
+    );
+    await required(bot).emitPhoto(
+      telegramAttachmentContext("document", {
+        document: { file_id: "doc", file_name: input },
+      }),
+    );
     await vi.waitFor(() => expect(spawnSession).toHaveBeenCalledTimes(1));
-    expect(spawnSession).toHaveBeenCalledWith(expect.objectContaining({
-      attachments: [{ name: expected, data: Buffer.from("bytes").toString("base64") }],
-    }));
+    expect(spawnSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachments: [{ name: expected, data: Buffer.from("bytes").toString("base64") }],
+      }),
+    );
   });
 
   it("selects animation alias once and retains native animated sticker formats", async () => {
@@ -5701,7 +5772,9 @@ describe("telegramSourceModule photo tasks", () => {
     const prepare = vi.fn<NonNullable<SourceStartDeps["prepareSessionMessage"]>>(
       async (_id, request) => request.message,
     );
-    const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), { prepareSessionMessage: prepare });
+    const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), {
+      prepareSessionMessage: prepare,
+    });
     const fetchMock = vi.fn(async () => new Response("bytes"));
     vi.stubGlobal("fetch", fetchMock);
     const contexts = [
@@ -5717,7 +5790,9 @@ describe("telegramSourceModule photo tasks", () => {
       await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(contexts.indexOf(context) + 1));
     }
     expect(prepare.mock.calls.map((call) => call[1].attachments?.[0]?.name)).toEqual([
-      "motion.gif", "telegram-10.tgs", "telegram-10.webm",
+      "motion.gif",
+      "telegram-10.tgs",
+      "telegram-10.webm",
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
@@ -5730,31 +5805,50 @@ describe("telegramSourceModule photo tasks", () => {
       assignTopic(dataDir);
       let finish!: (text: string) => void;
       const prepare = vi.fn<NonNullable<SourceStartDeps["prepareSessionMessage"]>>(() =>
-        scenario === "reject" ? Promise.reject(new Error("disk failed"))
-          : new Promise((resolve) => { finish = resolve; }));
+        scenario === "reject"
+          ? Promise.reject(new Error("disk failed"))
+          : new Promise((resolve) => {
+              finish = resolve;
+            }),
+      );
       const getSession = vi.fn().mockResolvedValue({
-        id: "api-1", project: "api", agent: "codex", state: "waiting",
+        id: "api-1",
+        project: "api",
+        agent: "codex",
+        state: "waiting",
       });
       const { bot, emit, handle } = await startSource(dataDir, vi.fn(), vi.fn(), {
-        prepareSessionMessage: scenario === "missing" ? null : prepare, getSession,
+        prepareSessionMessage: scenario === "missing" ? null : prepare,
+        getSession,
       });
-      vi.stubGlobal("fetch", vi.fn(async () => new Response("bytes")));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response("bytes")),
+      );
       const context = telegramAttachmentContext("document");
-      if (scenario === "placeholder") context.reply.mockImplementation(async () => {
-        assignTopic(dataDir, "api-2");
-        return {};
-      });
+      if (scenario === "placeholder")
+        context.reply.mockImplementation(async () => {
+          assignTopic(dataDir, "api-2");
+          return {};
+        });
       await required(bot).emitPhoto(context);
       if (scenario === "missing" || scenario === "reject") {
-        await vi.waitFor(() => expect(context.reply).toHaveBeenCalledWith(
-          expect.stringContaining(scenario === "missing" ? "unavailable" : "disk failed"),
-        ));
+        await vi.waitFor(() =>
+          expect(context.reply).toHaveBeenCalledWith(
+            expect.stringContaining(scenario === "missing" ? "unavailable" : "disk failed"),
+          ),
+        );
       } else {
         await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
         if (scenario === "retarget") assignTopic(dataDir, "api-2");
-        if (scenario === "inactive") getSession.mockResolvedValue({
-          id: "api-1", project: "api", agent: "codex", state: "waiting", inactive: true,
-        });
+        if (scenario === "inactive")
+          getSession.mockResolvedValue({
+            id: "api-1",
+            project: "api",
+            agent: "codex",
+            state: "waiting",
+            inactive: true,
+          });
         if (scenario === "stop") await handle.stop();
         finish("[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/saved]");
         await new Promise((resolve) => setImmediate(resolve));
@@ -5772,9 +5866,12 @@ describe("telegramSourceModule photo tasks", () => {
       tempDirs.push(dataDir);
       if (scenario === "followup") assignTopic(dataDir);
       const prepare = vi.fn<NonNullable<SourceStartDeps["prepareSessionMessage"]>>(
-        async (_id, request) => `[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/album]\n${request.message}`,
+        async (_id, request) =>
+          `[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/album]\n${request.message}`,
       );
-      const spawn = vi.fn().mockResolvedValue({ id: "album", project: "api", agent: "codex", state: "working" });
+      const spawn = vi
+        .fn()
+        .mockResolvedValue({ id: "album", project: "api", agent: "codex", state: "working" });
       const { bot, emit, handle } = await startSource(dataDir, vi.fn(), spawn, {
         config: { autoSpawn: { enabled: true, project: "api", agent: "codex" } },
         prepareSessionMessage: prepare,
@@ -5782,15 +5879,20 @@ describe("telegramSourceModule photo tasks", () => {
       let downloadCount = 0;
       const fetchMock = vi.fn(async () => {
         downloadCount++;
-        if (scenario === "failure" && downloadCount === 2) return new Response("bad", { status: 403 });
+        if (scenario === "failure" && downloadCount === 2)
+          return new Response("bad", { status: 403 });
         return new Response("album-bytes");
       });
       vi.stubGlobal("fetch", fetchMock);
       const first = telegramAttachmentContext("photo", {
-        media_group_id: "album", message_id: 20, caption: "second caption",
+        media_group_id: "album",
+        message_id: 20,
+        caption: "second caption",
       });
       const second = telegramAttachmentContext("photo", {
-        media_group_id: "album", message_id: 10, caption: "first caption",
+        media_group_id: "album",
+        message_id: 10,
+        caption: "first caption",
       });
       await required(bot).emitPhoto(first);
       await required(bot).emitPhoto(first); // Same member without update_id must not reset collection.
@@ -5798,23 +5900,35 @@ describe("telegramSourceModule photo tasks", () => {
       expect(fetchMock).not.toHaveBeenCalled();
       if (scenario === "overflow") {
         for (let index = 0; index < 9; index++)
-          await required(bot).emitPhoto(telegramAttachmentContext("photo", {
-            media_group_id: "album", message_id: 30 + index,
-          }));
+          await required(bot).emitPhoto(
+            telegramAttachmentContext("photo", {
+              media_group_id: "album",
+              message_id: 30 + index,
+            }),
+          );
       } else if (scenario === "deadline") {
         for (let index = 0; index < 7; index++) {
           await vi.advanceTimersByTimeAsync(700);
-          await required(bot).emitPhoto(telegramAttachmentContext("photo", {
-            media_group_id: "album", message_id: 30 + index,
-          }));
+          await required(bot).emitPhoto(
+            telegramAttachmentContext("photo", {
+              media_group_id: "album",
+              message_id: 30 + index,
+            }),
+          );
         }
         await vi.advanceTimersByTimeAsync(100);
       } else if (scenario === "capacity") {
         for (let index = 0; index < 9; index++)
-          await required(bot).emitPhoto(telegramAttachmentContext("photo", {
-            media_group_id: `other-${index}`, message_id: 100 + index,
-          }));
-        const excess = telegramAttachmentContext("photo", { media_group_id: "excess", message_id: 200 });
+          await required(bot).emitPhoto(
+            telegramAttachmentContext("photo", {
+              media_group_id: `other-${index}`,
+              message_id: 100 + index,
+            }),
+          );
+        const excess = telegramAttachmentContext("photo", {
+          media_group_id: "excess",
+          message_id: 200,
+        });
         await required(bot).emitPhoto(excess);
         expect(excess.reply).toHaveBeenCalledWith(expect.stringContaining("busy"));
         await handle.stop();
@@ -5833,19 +5947,27 @@ describe("telegramSourceModule photo tasks", () => {
           });
           expect(emit).toHaveBeenCalledTimes(1);
         } else {
-          expect(spawn).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-            prompt: wrapTelegramSpawnPrompt("first caption\nsecond caption"),
-            attachments: [
-              { name: "telegram-10.jpg", data: Buffer.from("album-bytes").toString("base64") },
-              { name: "telegram-20.jpg", data: Buffer.from("album-bytes").toString("base64") },
-            ],
-          }));
+          expect(spawn).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({
+              prompt: wrapTelegramSpawnPrompt("first caption\nsecond caption"),
+              attachments: [
+                { name: "telegram-10.jpg", data: Buffer.from("album-bytes").toString("base64") },
+                { name: "telegram-20.jpg", data: Buffer.from("album-bytes").toString("base64") },
+              ],
+            }),
+          );
         }
         if (scenario === "late") {
-          const repeat = telegramAttachmentContext("photo", { media_group_id: "album", message_id: 20 });
+          const repeat = telegramAttachmentContext("photo", {
+            media_group_id: "album",
+            message_id: 20,
+          });
           await required(bot).emitPhoto(repeat);
           expect(repeat.reply).not.toHaveBeenCalled();
-          const late = telegramAttachmentContext("photo", { media_group_id: "album", message_id: 50 });
+          const late = telegramAttachmentContext("photo", {
+            media_group_id: "album",
+            message_id: 50,
+          });
           await required(bot).emitPhoto(late);
           expect(late.reply).toHaveBeenCalledWith(expect.stringContaining("Album already closed"));
           expect(late.getFile).not.toHaveBeenCalled();
@@ -5857,7 +5979,8 @@ describe("telegramSourceModule photo tasks", () => {
         expect(prepare).not.toHaveBeenCalled();
         expect(emit).not.toHaveBeenCalled();
         if (scenario !== "failure") expect(fetchMock).not.toHaveBeenCalled();
-        if (scenario === "failure") expect(second.reply).toHaveBeenCalledWith(expect.stringContaining("403"));
+        if (scenario === "failure")
+          expect(second.reply).toHaveBeenCalledWith(expect.stringContaining("403"));
       }
       await handle.stop();
       expect(vi.getTimerCount()).toBe(0);
@@ -5870,7 +5993,12 @@ describe("telegramSourceModule photo tasks", () => {
     tempDirs.push(dataDir);
     assignTopic(dataDir);
     let finish!: (session: SourceSessionListItem) => void;
-    const getSession = vi.fn(() => new Promise<SourceSessionListItem>((resolve) => { finish = resolve; }));
+    const getSession = vi.fn(
+      () =>
+        new Promise<SourceSessionListItem>((resolve) => {
+          finish = resolve;
+        }),
+    );
     const { bot, handle, emit } = await startSource(dataDir, vi.fn(), vi.fn(), { getSession });
     const context = telegramAttachmentContext("photo", { media_group_id: "album" });
     const receiving = required(bot).emitPhoto(context);
@@ -5911,10 +6039,12 @@ describe("telegramSourceModule photo tasks", () => {
     vi.stubGlobal("fetch", fetchMock);
     for (let batch = 0; batch < 100; batch++) {
       for (let index = 0; index < 10; index++) {
-        await required(bot).emitPhoto(telegramAttachmentContext("document", {
-          media_group_id: `closed-${batch * 10 + index}`,
-          document: { file_id: "large", file_size: MAX_ATTACHMENT_BYTES + 1 },
-        }));
+        await required(bot).emitPhoto(
+          telegramAttachmentContext("document", {
+            media_group_id: `closed-${batch * 10 + index}`,
+            document: { file_id: "large", file_size: MAX_ATTACHMENT_BYTES + 1 },
+          }),
+        );
       }
       await vi.advanceTimersByTimeAsync(750);
     }
@@ -5947,9 +6077,12 @@ describe("telegramSourceModule photo tasks", () => {
       });
       if (change === "wizard") await beginWizard(required(bot));
       let finish!: (response: Response) => void;
-      const fetchMock = vi.fn().mockImplementation(() => new Promise<Response>((resolve) => {
-        finish = resolve;
-      }));
+      const fetchMock = vi.fn().mockImplementation(
+        () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve;
+          }),
+      );
       vi.stubGlobal("fetch", fetchMock);
       const photo = telegramPhotoContext();
       await required(bot).emitPhoto(photo);
@@ -5960,9 +6093,11 @@ describe("telegramSourceModule photo tasks", () => {
       if (change === "abort") controller.abort();
       finish(new Response("photo"));
       if (change !== "abort")
-        await vi.waitFor(() => expect(photo.reply).toHaveBeenCalledWith(
-          expect.stringContaining("Attachment context changed. Send the message again."),
-        ));
+        await vi.waitFor(() =>
+          expect(photo.reply).toHaveBeenCalledWith(
+            expect.stringContaining("Attachment context changed. Send the message again."),
+          ),
+        );
       else await new Promise((resolve) => setTimeout(resolve, 10));
       expect(spawnSession).not.toHaveBeenCalled();
       expect(emit).not.toHaveBeenCalled();
@@ -6345,8 +6480,14 @@ describe("telegramSourceModule voice notes", () => {
         expect.stringContaining("Voice transcription failed"),
       ),
     );
-    await vi.waitFor(() => expect(emit).toHaveBeenCalledWith("telegram:message",
-      expect.objectContaining({ text: expect.stringContaining("$SPUR_SESSION_ARTIFACTS_DIR/voice.ogg") })));
+    await vi.waitFor(() =>
+      expect(emit).toHaveBeenCalledWith(
+        "telegram:message",
+        expect.objectContaining({
+          text: expect.stringContaining("$SPUR_SESSION_ARTIFACTS_DIR/voice.ogg"),
+        }),
+      ),
+    );
     expect(spawnSession).not.toHaveBeenCalled();
   });
 
@@ -6516,8 +6657,14 @@ describe("telegramSourceModule voice notes", () => {
         expect.stringContaining("Empty voice transcript"),
       ),
     );
-    await vi.waitFor(() => expect(emit).toHaveBeenCalledWith("telegram:message",
-      expect.objectContaining({ text: expect.stringContaining("$SPUR_SESSION_ARTIFACTS_DIR/voice.ogg") })));
+    await vi.waitFor(() =>
+      expect(emit).toHaveBeenCalledWith(
+        "telegram:message",
+        expect.objectContaining({
+          text: expect.stringContaining("$SPUR_SESSION_ARTIFACTS_DIR/voice.ogg"),
+        }),
+      ),
+    );
   });
 
   it("A8: a null webBaseUrl delivers the original without transcription", async () => {
@@ -6540,8 +6687,14 @@ describe("telegramSourceModule voice notes", () => {
       ),
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    await vi.waitFor(() => expect(emit).toHaveBeenCalledWith("telegram:message",
-      expect.objectContaining({ text: expect.stringContaining("$SPUR_SESSION_ARTIFACTS_DIR/voice.ogg") })));
+    await vi.waitFor(() =>
+      expect(emit).toHaveBeenCalledWith(
+        "telegram:message",
+        expect.objectContaining({
+          text: expect.stringContaining("$SPUR_SESSION_ARTIFACTS_DIR/voice.ogg"),
+        }),
+      ),
+    );
   });
 
   it("A9: posts multipart form with an audio File named voice.ogg", async () => {
@@ -6725,12 +6878,8 @@ describe("telegramSourceModule voice notes", () => {
       );
       await new Promise((resolve) => setImmediate(resolve));
       expect(logger.warn.mock.calls).toEqual([
-        [
-          "[source:api/telegram] telegram attachment failed: network down <telegram-token>",
-        ],
-        [
-          "[source:api/telegram] telegram attachment notice failed: reply failed <telegram-token>",
-        ],
+        ["[source:api/telegram] telegram attachment failed: network down <telegram-token>"],
+        ["[source:api/telegram] telegram attachment notice failed: reply failed <telegram-token>"],
       ]);
       expect(logger.warn.mock.calls.flat().join("\n")).not.toContain("token-123");
       expect(emit).not.toHaveBeenCalled();
@@ -7054,7 +7203,9 @@ describe("telegramSourceModule inbound delivery under lookup failure", () => {
     await bot.emitVoice(ctx);
 
     await vi.waitFor(() =>
-      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("telegram attachment failed")),
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("telegram attachment failed"),
+      ),
     );
     expect(ctx.reply).not.toHaveBeenCalledWith(UNDELIVERED);
   });
