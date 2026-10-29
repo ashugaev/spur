@@ -437,7 +437,9 @@ async function assertStructuredMainUsage(
     source = "cursor-stop-hook";
   } else {
     if (!session.agentSessionId) throw new Error("OpenCode session id unavailable");
-    sample = parseOpenCodeTokenUsage(await exportOpenCodeSession(session.agentSessionId));
+    sample = parseOpenCodeTokenUsage(
+      await exportOpenCodeSession(session.agentSessionId, session.worktreePath),
+    );
     source = "opencode-export";
   }
   expect(sample?.provider).toBe(agent);
