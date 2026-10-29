@@ -105,6 +105,7 @@ import { POST as switchAuth } from "@/app/api/sessions/[id]/switch-auth/route";
 import { GET as listClaudeAccounts } from "@/app/api/claude-accounts/route";
 import { GET as getSpawnDefaults } from "@/app/api/projects/[id]/spawn-defaults/route";
 import { GET as getCronJobs } from "@/app/api/cron/route";
+import { GET as getCronDraft, PATCH as patchCronDraft } from "@/app/api/cron/edit/route";
 import { POST as postAutoUpdate } from "@/app/api/runtime/auto-update/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
@@ -4037,6 +4038,58 @@ describe("Spur web API routes", () => {
 
       expect(response.status).toBe(404);
       expect(payload.error).toBe("Unknown project: api");
+    });
+
+    it("GET/PATCH /api/cron/edit preserves encoded identity and scoped body", async () => {
+      const url =
+        "http://localhost:3000/api/cron/edit?project=%20api%20&source=nightly&trigger=audit%2Fdetail";
+      const body = { revision: "revision", schedule: "0 4 * * *", blocks: [] };
+      mockedSpurRequestJson.mockResolvedValue({ saved: true });
+      await getCronDraft(new NextRequest(url));
+      const result = await patchCronDraft(
+        new NextRequest(url, { method: "PATCH", body: JSON.stringify(body) }),
+      );
+      expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(
+        1,
+        "/projects/cron/edit?project=api&source=nightly&trigger=audit%2Fdetail",
+        { timeoutMs: 10_000 },
+      );
+      expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(
+        2,
+        "/projects/cron/edit?project=api&source=nightly&trigger=audit%2Fdetail",
+        expect.objectContaining({ method: "PATCH", body: JSON.stringify(body) }),
+      );
+      expect(await result.json()).toEqual({ saved: true });
+    });
+
+    it.each([409, 422])(
+      "PATCH /api/cron/edit preserves %s and validation fields",
+      async (status) => {
+        mockedSpurRequestJson.mockRejectedValue(
+          new SpurDaemonError("invalid schedule", status, {
+            code: "invalid_schedule",
+            field: "schedule",
+            secret: "excluded",
+          }),
+        );
+        const response = await patchCronDraft(
+          new NextRequest("http://localhost:3000/api/cron/edit", { method: "PATCH", body: "{}" }),
+        );
+        expect(response.status).toBe(status);
+        expect(await response.json()).toEqual({
+          error: "invalid schedule",
+          code: "invalid_schedule",
+          field: "schedule",
+        });
+      },
+    );
+
+    it("PATCH /api/cron/edit rejects malformed JSON without contacting daemon", async () => {
+      const response = await patchCronDraft(
+        new NextRequest("http://localhost:3000/api/cron/edit", { method: "PATCH", body: "{" }),
+      );
+      expect(response.status).toBe(400);
+      expect(mockedSpurRequestJson).not.toHaveBeenCalled();
     });
   });
 

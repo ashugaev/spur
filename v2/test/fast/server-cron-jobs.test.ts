@@ -1,13 +1,17 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { startServer } from "../../src/server.js";
-import type { CronJobsResponse } from "../../src/types.js";
+import type { CronJobEditDraft, CronJobsResponse } from "../../src/types.js";
 import { cleanupTrackedTempDirs, createTempDir, findFreePort } from "../helpers/common.js";
 
 afterEach(cleanupTrackedTempDirs);
 
-async function bootServer(): Promise<{ port: number; stop: () => Promise<void> }> {
+async function bootServer(): Promise<{
+  port: number;
+  configPath: string;
+  stop: () => Promise<void>;
+}> {
   const root = await createTempDir("spur-cron-jobs-server-");
   const repoDir = join(root, "repo");
   const dataDir = join(root, "data");
@@ -75,7 +79,7 @@ async function bootServer(): Promise<{ port: number; stop: () => Promise<void> }
     "utf8",
   );
   const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
-  return { port, stop: () => server.stop() };
+  return { port, configPath, stop: () => server.stop() };
 }
 
 describe("GET /projects/cron", () => {
@@ -186,6 +190,63 @@ describe("GET /projects/cron", () => {
       const unknown = await fetch(`http://127.0.0.1:${port}/projects/cron?project=nope`);
       expect(unknown.status).toBe(404);
       expect(await unknown.json()).toEqual({ error: "Unknown project: nope" });
+    } finally {
+      await stop();
+    }
+  });
+});
+
+describe("GET/PATCH /projects/cron/edit", () => {
+  it("saves only YAML, keeps runtime values, rejects stale revisions and validates narrow payloads", async () => {
+    const { port, configPath, stop } = await bootServer();
+    const url = `http://127.0.0.1:${port}/projects/cron/edit?project=demo&source=nightly&trigger=audit`;
+    const patch = (body: unknown) =>
+      fetch(url, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    try {
+      const response = await fetch(url);
+      expect(response.status).toBe(200);
+      const draft = (await response.json()) as CronJobEditDraft;
+      expect(JSON.stringify(draft)).not.toContain("webhook-secret-x");
+      expect(JSON.stringify(draft)).not.toContain("overrides");
+      const body = {
+        revision: draft.revision,
+        schedule: "0 4 * * *",
+        blocks: [{ ...draft.blocks[0], prompt: "new disk prompt" }],
+      };
+      const saved = await patch(body);
+      expect(saved.status).toBe(200);
+      expect(await saved.json()).toMatchObject({ saved: true, activation: "pending" });
+      expect(await readFile(configPath, "utf8")).toContain("new disk prompt");
+      const running = (await (
+        await fetch(`http://127.0.0.1:${port}/projects/cron`)
+      ).json()) as CronJobsResponse;
+      expect(running.projects[0]!.owner).toMatchObject({ state: "loaded", changed: true });
+      expect(running.projects[0]!.sources[0]).toMatchObject({
+        schedule: "0 3 * * *",
+        triggers: [{ action: { blocks: [{ prompt: "audit sessions" }] } }],
+      });
+      expect((await patch(body)).status).toBe(409);
+      const latest = (await (await fetch(url)).json()) as CronJobEditDraft;
+      expect(latest.blocks[0]!.prompt).toBe("new disk prompt");
+      const invalid = await patch({ ...body, revision: latest.revision, schedule: "invalid" });
+      expect(invalid.status).toBe(422);
+      expect(await invalid.json()).toEqual({
+        error: "Invalid cron schedule.",
+        code: "invalid_schedule",
+        field: "schedule",
+      });
+      expect((await patch({ ...body, configPath: "other.yaml" })).status).toBe(400);
+      expect((await fetch(`${url}&ignored=value`, { method: "PATCH", body: "{" })).status).toBe(
+        400,
+      );
+      expect((await fetch(`http://127.0.0.1:${port}/projects/cron/edit?project=demo`)).status).toBe(
+        400,
+      );
+      expect((await fetch(url.replace("trigger=audit", "trigger=removed"))).status).toBe(404);
     } finally {
       await stop();
     }
