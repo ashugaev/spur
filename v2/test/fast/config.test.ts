@@ -15,6 +15,7 @@ import {
   loadConfig,
   loadInstanceConfigReadOnly,
   loadProjectConfig,
+  parseConfigText,
   resolveConfigPath,
   writeProjectConfigScaffold,
 } from "../../src/config.js";
@@ -6253,6 +6254,23 @@ describe("isSameInstanceConfigPath", () => {
     await writeFile(b, "server:\n  port: 5556\n", "utf8");
 
     expect(isSameInstanceConfigPath(a, b)).toBe(false);
+  });
+});
+
+describe("captured config text", () => {
+  it("matches instance and project file loading with logical paths and running defaults", async () => {
+    const instancePath = await writeConfig("server: {port: 44557}\nprojects: {}\n");
+    const instance = loadConfig(instancePath);
+    expect(parseConfigText(instancePath, await readFile(instancePath, "utf8"))).toEqual(instance);
+    const projectPath = await writeConfig(
+      "server: {port: 44558}\nprojects:\n  sample:\n    path: ./repo\n",
+    );
+    const text = await readFile(projectPath, "utf8");
+    const fromFile = loadProjectConfig(projectPath, instance);
+    expect(parseConfigText(projectPath, text, instance)).toEqual(fromFile);
+    expect(fromFile.server.port).toBe(instance.server.port);
+    await writeFile(projectPath, "invalid YAML: [");
+    expect(parseConfigText(projectPath, text, instance)).toEqual(fromFile);
   });
 });
 
