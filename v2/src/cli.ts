@@ -50,6 +50,8 @@ import {
   ensureInstanceConfig,
   findProjectConfigPath,
   findProjectConfigPathInDirectory,
+  isDefaultInstanceConfigPath,
+  isSameInstanceConfigPath,
   loadConfig,
   loadInstanceConfigReadOnly,
   loadProjectConfig,
@@ -4827,19 +4829,21 @@ export function createProgram(cliEntrypoint: string): Command {
       const configPath = instance.configPath;
       // Detached update helpers inherit the CLI selection over daemon.env.
       process.env["SPUR_CONFIG"] = configPath;
-      // MUST FIX 1: a source-install / main-deploy host that never runs
-      // `spur init`/`update`/`reinit` (`runNpmInit`) never gets the pin file
-      // every agent session's `NPM_CONFIG_GLOBALCONFIG` points at, and npm
-      // silently ignores a missing globalconfig file. Every real daemon boot
-      // writes it instead (see npm-prefix.ts). A read-only filesystem or a
-      // permissions error writing into `<home>/.spur/` must never abort
-      // daemon boot, so failures are reported and swallowed, not thrown.
-      try {
-        ensureNpmPinFile();
-      } catch (error) {
-        writeStderr(
-          `spur: failed to write npm global-prefix pin file: ${error instanceof Error ? error.message : String(error)}`,
-        );
+      // Ordinary boots refresh the host session npm pin. An identified
+      // non-default isolated instance must not mutate that host file.
+      const isolatedConfig = process.env["SPUR_ISOLATED_CONFIG"];
+      if (
+        !isolatedConfig ||
+        isDefaultInstanceConfigPath(configPath) ||
+        !isSameInstanceConfigPath(configPath, isolatedConfig)
+      ) {
+        try {
+          ensureNpmPinFile();
+        } catch (error) {
+          writeStderr(
+            `spur: failed to write npm global-prefix pin file: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
       // Own try/catch, kept separate from the pin-file one above: a skill
       // failure must stay distinguishable in stderr from a pin-file failure,

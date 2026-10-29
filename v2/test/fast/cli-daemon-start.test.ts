@@ -1,9 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
+import type * as NodeOs from "node:os";
+import type * as Config from "../../src/config.js";
 
-// Ordering is the property under test: a session must not be able to spawn
-// before the npm global-prefix pin file exists, so `ensureNpmPinFile` must
-// run before `startServer` resolves the daemon's HTTP listener.
+// Ordinary boots materialize the host pin before serving sessions.
+// Matching isolated instances leave the host pin alone.
 const callOrder: string[] = [];
+const fixtureHome = mkdtempSync(join(tmpdir(), "spur-daemon-pin-"));
+
+vi.mock("node:os", async (importOriginal) => ({
+  ...(await importOriginal<typeof NodeOs>()),
+  homedir: () => fixtureHome,
+}));
 
 const ensureNpmPinFileMock = vi.fn(() => {
   callOrder.push("ensureNpmPinFile");
@@ -31,6 +41,7 @@ const assertConfigMayUseProdSlotMock = vi.fn();
 const restartDaemonIfRunningMock = vi.fn();
 const stopDaemonIfRunningMock = vi.fn();
 const installHostSkillsForDaemonStartMock = vi.fn(() => []);
+const setTmuxSocketNameMock = vi.fn();
 
 vi.mock("../../src/npm-prefix.js", () => ({
   ensureNpmPinFile: ensureNpmPinFileMock,
@@ -51,7 +62,8 @@ vi.mock("../../src/client.js", () => ({
   stopDaemonIfRunning: stopDaemonIfRunningMock,
 }));
 
-vi.mock("../../src/config.js", () => ({
+vi.mock("../../src/config.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof Config>()),
   defaultVoiceModelPath: vi.fn(),
   assertConfigMayUseProdSlot: assertConfigMayUseProdSlotMock,
   createProjectConfigScaffold: vi.fn(),
@@ -79,7 +91,7 @@ vi.mock("../../src/host-skills.js", () => ({
 }));
 
 vi.mock("../../src/runtime-tmux.js", () => ({
-  setTmuxSocketName: vi.fn(),
+  setTmuxSocketName: setTmuxSocketNameMock,
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   withTmuxSocketArgs: vi.fn((args: string[]) => args),
 }));
@@ -92,6 +104,9 @@ async function parseCli(args: string[]): Promise<void> {
 describe("spur daemon CLI", () => {
   beforeEach(() => {
     vi.resetModules();
+    mkdirSync(join(fixtureHome, ".spur"), { recursive: true });
+    writeFileSync(join(fixtureHome, ".spur", "config.yaml"), "{}");
+    vi.stubEnv("SPUR_ISOLATED_CONFIG", "");
     callOrder.length = 0;
     ensureNpmPinFileMock.mockClear();
     ensureNpmPinFileMock.mockImplementation(() => {
@@ -100,16 +115,134 @@ describe("spur daemon CLI", () => {
     startServerMock.mockClear();
     writeStderrMock.mockClear();
     ensureInstanceConfigMock.mockClear();
+    ensureInstanceConfigMock.mockReturnValue({
+      configPath: "/tmp/spur.yaml",
+      initialized: false,
+    });
     restartDaemonIfRunningMock.mockClear();
     stopDaemonIfRunningMock.mockClear();
     assertConfigMayUseProdSlotMock.mockClear();
     assertConfigMayUseProdSlotMock.mockImplementation(() => {});
     installHostSkillsForDaemonStartMock.mockClear();
     installHostSkillsForDaemonStartMock.mockImplementation(() => []);
+    setTmuxSocketNameMock.mockClear();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    rmSync(fixtureHome, { recursive: true, force: true });
+  });
+
+  it("skips the host npm pin for a matching non-default isolated config", async () => {
+    const configPath = join(fixtureHome, "isolated.yaml");
+    writeFileSync(configPath, "{}");
+    ensureInstanceConfigMock.mockReturnValue({ configPath, initialized: false });
+    vi.stubEnv("SPUR_ISOLATED_CONFIG", configPath);
+
+    await parseCli(["daemon", "start", "--config", configPath, "--json"]);
+
+    expect(assertConfigMayUseProdSlotMock).toHaveBeenCalledWith(configPath);
+    expect(ensureInstanceConfigMock).toHaveBeenCalledTimes(1);
+    expect(setTmuxSocketNameMock).toHaveBeenCalledExactlyOnceWith("spur-test");
+    expect(ensureNpmPinFileMock).not.toHaveBeenCalled();
+    expect(installHostSkillsForDaemonStartMock).toHaveBeenCalledOnce();
+    expect(startServerMock).toHaveBeenCalledExactlyOnceWith(configPath, expect.any(Object));
+    expect(callOrder).toEqual(["startServer"]);
+    expect(assertConfigMayUseProdSlotMock.mock.invocationCallOrder[0]).toBeLessThan(
+      ensureInstanceConfigMock.mock.invocationCallOrder[0] ?? 0,
+    );
+  });
+
+  it.each(["relative", "symlink"])(
+    "recognizes a matching isolated config through a %s marker",
+    async (kind) => {
+      const configPath = join(fixtureHome, "isolated.yaml");
+      writeFileSync(configPath, "{}");
+      const alias = join(fixtureHome, "isolated-link.yaml");
+      symlinkSync(configPath, alias);
+      ensureInstanceConfigMock.mockReturnValue({ configPath, initialized: false });
+      vi.stubEnv(
+        "SPUR_ISOLATED_CONFIG",
+        kind === "relative" ? relative(process.cwd(), configPath) : alias,
+      );
+
+      await parseCli(["daemon", "start", "--config", configPath, "--json"]);
+
+      expect(ensureNpmPinFileMock).not.toHaveBeenCalled();
+      expect(startServerMock).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["absent", "empty", "mismatched"])(
+    "refreshes the host pin for an ordinary non-default config with an %s marker",
+    async (kind) => {
+      const configPath = join(fixtureHome, "isolated.yaml");
+      writeFileSync(configPath, "{}");
+      ensureInstanceConfigMock.mockReturnValue({ configPath, initialized: false });
+      vi.stubEnv(
+        "SPUR_ISOLATED_CONFIG",
+        kind === "absent" ? undefined : kind === "empty" ? "" : join(fixtureHome, "other.yaml"),
+      );
+
+      await parseCli(["daemon", "start", "--config", configPath, "--json"]);
+
+      expect(callOrder).toEqual(["ensureNpmPinFile", "startServer"]);
+    },
+  );
+
+  it.each(["exact", "normalized", "symlink"])(
+    "refreshes the default host pin despite a matching %s isolated marker",
+    async (kind) => {
+      const defaultPath = join(fixtureHome, ".spur", "config.yaml");
+      const alias = join(fixtureHome, "default-link.yaml");
+      symlinkSync(defaultPath, alias);
+      const configPath =
+        kind === "exact"
+          ? defaultPath
+          : kind === "symlink"
+            ? alias
+            : `${fixtureHome}/.spur/../.spur/config.yaml`;
+      ensureInstanceConfigMock.mockReturnValue({ configPath, initialized: false });
+      vi.stubEnv("SPUR_ISOLATED_CONFIG", configPath);
+
+      await parseCli(["daemon", "start", "--config", configPath, "--json"]);
+
+      expect(callOrder).toEqual(["ensureNpmPinFile", "startServer"]);
+    },
+  );
+
+  it("rejects a matching isolated marker that claims the production slot before bootstrap", async () => {
+    const configPath = join(fixtureHome, "rogue.yaml");
+    vi.stubEnv("SPUR_ISOLATED_CONFIG", configPath);
+    assertConfigMayUseProdSlotMock.mockImplementation(() => {
+      throw new Error("may not bind the production slot");
+    });
+
+    await expect(parseCli(["daemon", "start", "--config", configPath, "--json"])).rejects.toThrow(
+      "may not bind the production slot",
+    );
+
+    expect(ensureInstanceConfigMock).not.toHaveBeenCalled();
+    expect(ensureNpmPinFileMock).not.toHaveBeenCalled();
+    expect(installHostSkillsForDaemonStartMock).not.toHaveBeenCalled();
+    expect(setTmuxSocketNameMock).not.toHaveBeenCalled();
+    expect(startServerMock).not.toHaveBeenCalled();
+  });
+
+  it("reports pin and host-skill failures independently and still starts once", async () => {
+    ensureNpmPinFileMock.mockImplementation(() => {
+      throw new Error("pin denied");
+    });
+    installHostSkillsForDaemonStartMock.mockImplementation(() => {
+      throw new Error("skills denied");
+    });
+
+    await parseCli(["daemon", "start", "--json"]);
+
+    expect(writeStderrMock).toHaveBeenCalledWith(expect.stringContaining("pin denied"));
+    expect(writeStderrMock).toHaveBeenCalledWith(expect.stringContaining("skills denied"));
+    expect(startServerMock).toHaveBeenCalledOnce();
   });
 
   it("writes the npm pin file before starting the HTTP server", async () => {
