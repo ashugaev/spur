@@ -943,16 +943,28 @@ async function endDeskRetryWithoutLiveAnchor(
     }
   }
   for (const entry of retrying) {
-    patchWorkItemMember(ctx, entry.blockIndex, (member) => {
-      const { nextRetryAt: _nextRetryAt, replacesSessionId: _replaces, ...rest } = member;
-      return {
-        ...rest,
-        state: "failed",
-        attempts: entry.attemptsBefore,
-        endedReason: "anchor_not_live",
-        error: "desk anchor is not live",
-      };
-    });
+    const current = readWorkItemLifecycles(ctx.dataDir, ctx.projectId, ctx.sourceId)
+      .get(ctx.workItem.externalId)
+      ?.members.find(
+        (member) => member.triggerId === ctx.triggerId && member.blockIndex === entry.blockIndex,
+      );
+    if (entry.claimedAt === undefined || current?.claimedAt !== entry.claimedAt) continue;
+    const patched = patchWorkItemMember(
+      ctx,
+      entry.blockIndex,
+      (member) => {
+        const { nextRetryAt: _nextRetryAt, replacesSessionId: _replaces, ...rest } = member;
+        return {
+          ...rest,
+          state: "failed",
+          attempts: entry.attemptsBefore,
+          endedReason: "anchor_not_live",
+          error: "desk anchor is not live",
+        };
+      },
+      entry.claimedAt,
+    );
+    if (!patched) continue;
     logTriggerEvent(ctx.dataDir, "trigger.spawn.retry_ended", {
       level: "info",
       sessionId: anchor.sessionId,
@@ -1084,8 +1096,18 @@ async function reconcileLegacyWorkItemJournal(
     const previous = desired.find(
       (member) => member.triggerId === triggerId && member.blockIndex === index,
     );
+    const pendingRecord =
+      previous?.state === "spawning" && previous.sessionId !== undefined
+        ? readSession(config.dataDir, previous.sessionId)
+        : null;
+    const revalidateBoundPending =
+      previous?.state === "spawning" &&
+      previous.sessionId !== undefined &&
+      !pendingRecord?.spawnReceipt &&
+      !pendingRecord?.spawnIntent;
     if (
       previous &&
+      !revalidateBoundPending &&
       (previous.sessionId !== undefined ||
         previous.state === "running" ||
         previous.state === "completed" ||
@@ -1104,7 +1126,7 @@ async function reconcileLegacyWorkItemJournal(
       deferrals: 0,
     };
     let next: WorkItemMember;
-    if (block.state === "pending" && index > work.nextBlockIndex) {
+    if (block.state === "pending" && index > work.nextBlockIndex && !revalidateBoundPending) {
       next = { ...base, state: "spawning" };
     } else {
       const spawnBlock = trigger.spawn.blocks[index];
@@ -1121,6 +1143,8 @@ async function reconcileLegacyWorkItemJournal(
       );
       try {
         const birth = service.getTriggerBirth(projectId, block.birthKey, request);
+        if (revalidateBoundPending && birth?.id !== previous.sessionId)
+          throw new Error("Legacy pending birth is unresolved");
         if (block.state === "succeeded" && birth?.id !== block.sessionId)
           throw new Error("Legacy accepted birth is unresolved");
         if (
@@ -1140,6 +1164,8 @@ async function reconcileLegacyWorkItemJournal(
           const tagged = current.triggerOrigin ? current : { ...current, triggerOrigin: origin };
           if (!current.triggerOrigin) writeSession(config.dataDir, tagged);
           const outcome = classifyWorkItemOwner(view, tagged);
+          if (outcome === "pending" && !tagged.spawnReceipt && !tagged.spawnIntent)
+            fenced.add(index);
           next =
             outcome === "replace"
               ? {

@@ -6228,6 +6228,148 @@ describe("startConfiguredTriggers", () => {
       };
     }
 
+    it.each([false, true])(
+      "retains a legacy journal after a successful birth before its result save (prebound=%s)",
+      async (prebound) => {
+        const f = await legacyJournalFixture();
+        const work = f.actual.readPendingSpawnWork(f.dataDir).get(f.workId);
+        const current = f.actual
+          .readWorkItemLifecycles(f.dataDir, "api", "pr-watch")
+          .get(WORK_ITEM_BASE.externalId);
+        const accepted = f.actual.readSession(f.dataDir, "api-9");
+        if (!work || !current || !accepted) throw new Error("Missing legacy fixture");
+        const { anchorSessionId: _anchor, lastSessionId: _last, ...journal } = work;
+        f.actual.writePendingSpawnWork(
+          f.dataDir,
+          {
+            ...journal,
+            revision: work.revision + 1,
+            nextBlockIndex: 0,
+            blocks: work.blocks.map((block) => ({ birthKey: block.birthKey, state: "pending" })),
+          },
+          work.revision,
+        );
+        f.actual.updateWorkItemMembers(f.dataDir, "api", "pr-watch", current, () =>
+          prebound
+            ? [
+                workItemMember({
+                  state: "spawning",
+                  sessionId: accepted.id,
+                  claimedAt: f.createdAt,
+                  attempts: 0,
+                  deferrals: 0,
+                  startedAt: undefined,
+                }),
+              ]
+            : [
+                workItemMember({
+                  state: "spawning",
+                  sessionId: undefined,
+                  claimedAt: f.createdAt,
+                  attempts: 0,
+                  deferrals: 0,
+                  startedAt: undefined,
+                }),
+              ],
+        );
+        const request = {
+          project: "api",
+          prompt: "anchor",
+          slots: { links: [{ label: "pr", url: WORK_ITEM_BASE.url }] },
+        };
+        f.actual.writeSession(f.dataDir, {
+          ...accepted,
+          triggerBirthKey: `${f.workId}:0`,
+          triggerBirthRequest: request,
+          agentSessionId: "00000000-0000-4000-8000-000000000001",
+          agentLaunchId: "11111111111111111111111111111111",
+        });
+        expect(f.actual.readSession(f.dataDir, accepted.id)?.triggerBirthKey).toBe(`${f.workId}:0`);
+        expect(f.actual.readSession(f.dataDir, accepted.id)?.triggerBirthRequest).toEqual(request);
+        expect(
+          f.actual
+            .readWorkItemLifecycles(f.dataDir, "api", "pr-watch")
+            .get(WORK_ITEM_BASE.externalId),
+        ).toMatchObject({ state: "pending", spawnWorkId: f.workId });
+        f.birth.mockImplementation((_project, birthKey) =>
+          birthKey === `${f.workId}:0` ? f.actual.readSession(f.dataDir, accepted.id) : undefined,
+        );
+        let controller: TriggerGroupController | undefined;
+        try {
+          for (let pass = 0; pass < 2; pass += 1) {
+            const started = await startTriggers(f.config, f.service);
+            controller = started.controller;
+            started.bus.emit(workItemEvent());
+            await vi.advanceTimersByTimeAsync(10);
+            await controller.stop();
+            const retained = f.actual.readPendingSpawnWork(f.dataDir).get(f.workId);
+            expect(retained).toBeDefined();
+            expect(retained).toMatchObject({
+              nextBlockIndex: 0,
+              blocks: [
+                { birthKey: `${f.workId}:0`, state: "pending" },
+                { state: "pending" },
+                { state: "pending" },
+              ],
+            });
+            expect(
+              f.actual
+                .readWorkItemLifecycles(f.dataDir, "api", "pr-watch")
+                .get(WORK_ITEM_BASE.externalId)?.spawnWorkId,
+            ).toBe(f.workId);
+            expect(f.members()[0]).toMatchObject({
+              state: "spawning",
+              sessionId: accepted.id,
+              claimedAt: f.createdAt,
+              attempts: 0,
+              deferrals: 0,
+            });
+            expect(f.members()[0]).not.toHaveProperty("startedAt");
+            expect(f.actual.readSession(f.dataDir, accepted.id)).not.toHaveProperty("spawnReceipt");
+            expect(f.actual.readSession(f.dataDir, accepted.id)).not.toHaveProperty("spawnIntent");
+            expect(f.spawn).not.toHaveBeenCalled();
+          }
+        } finally {
+          await controller?.stop();
+          rmSync(f.dataDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it("transfers a legacy journal with a receipt-backed pending owner", async () => {
+      const f = await legacyJournalFixture();
+      const current = f.actual
+        .readWorkItemLifecycles(f.dataDir, "api", "pr-watch")
+        .get(WORK_ITEM_BASE.externalId);
+      const accepted = f.actual.readSession(f.dataDir, "api-9");
+      if (!current || !accepted) throw new Error("Missing legacy fixture");
+      f.actual.writeSession(f.dataDir, {
+        ...accepted,
+        spawnReceipt: { version: 1, acceptedAt: f.createdAt },
+        triggerOrigin: {
+          triggerId: "pick-up",
+          sourceId: "pr-watch",
+          externalId: WORK_ITEM_BASE.externalId,
+          blockIndex: 0,
+        },
+      });
+      f.actual.updateWorkItemMembers(f.dataDir, "api", "pr-watch", current, () => [
+        workItemMember({ ...f.anchor, state: "spawning", startedAt: undefined }),
+      ]);
+      const { bus, controller } = await startTriggers(f.config, f.service);
+      try {
+        bus.emit(workItemEvent());
+        await vi.advanceTimersByTimeAsync(10);
+        await controller.stop();
+        expect(f.actual.readPendingSpawnWork(f.dataDir).has(f.workId)).toBe(false);
+        expect(f.members()[0]).toMatchObject({ state: "spawning", sessionId: accepted.id });
+        expect(f.spawn).not.toHaveBeenCalled();
+      } finally {
+        await controller.stop();
+        rmSync(f.dataDir, { recursive: true, force: true });
+      }
+    });
+
     it("fences only the unknown legacy frontier while the never-entered tail progresses", async () => {
       const f = await legacyJournalFixture();
       f.birth.mockImplementation(() => {
@@ -6690,6 +6832,139 @@ describe("startConfiguredTriggers", () => {
         expect(records.get("acme/api#42")).toMatchObject({ state: "running", sessionId: "api-1" });
       } finally {
         await controller.stop();
+      }
+    });
+
+    it("does not end a newer follower claim after an abandoned anchor lookup", async () => {
+      const f = await legacyJournalFixture();
+      const journal = f.actual.readPendingSpawnWork(f.dataDir).get(f.workId);
+      const current = f.actual
+        .readWorkItemLifecycles(f.dataDir, "api", "pr-watch")
+        .get(WORK_ITEM_BASE.externalId);
+      if (!journal || !current) throw new Error("Missing desk fixture");
+      f.actual.deletePendingSpawnWork(f.dataDir, f.workId, journal.revision);
+      f.actual.updateWorkItemMembers(
+        f.dataDir,
+        "api",
+        "pr-watch",
+        { ...current, spawnWorkId: null },
+        () => [f.anchor, failedMember({ blockIndex: 1 })],
+      );
+      const config = {
+        ...f.config,
+        projects: {
+          api: {
+            ...f.config.projects.api,
+            triggers: {
+              "pick-up": {
+                ...f.config.projects.api.triggers["pick-up"],
+                spawn: {
+                  blocks: [{ prompt: "anchor" }, { prompt: "follower" }],
+                  autoComplete: false,
+                },
+              },
+            },
+          },
+        },
+      };
+      let resolveAnchor!: (view: {
+        id: string;
+        status: string;
+        state: string;
+        workspaceExists: boolean;
+      }) => void;
+      const anchor = new Promise<{
+        id: string;
+        status: string;
+        state: string;
+        workspaceExists: boolean;
+      }>((resolve) => {
+        resolveAnchor = resolve;
+      });
+      const getA = vi.fn().mockImplementation(() => anchor);
+      const a = await startTriggers(config, { ...f.service, get: getA });
+      let b: Awaited<ReturnType<typeof startTriggers>> | undefined;
+      let stoppedA: Promise<void> | undefined;
+      const terminal = {
+        id: "api-9",
+        status: "completed",
+        state: "waiting",
+        workspaceExists: true,
+      };
+      try {
+        a.bus.emit(workItemEvent());
+        await vi.waitFor(() => expect(getA).toHaveBeenCalledWith("api-9"));
+        const claimA = f.members().find((member) => member.blockIndex === 1)?.claimedAt;
+        stoppedA = a.controller.stop();
+        vi.setSystemTime(Date.now() + WORK_ITEM_RETRY_INTERVAL_MS + 1);
+        const newerConfig = {
+          ...config,
+          projects: {
+            api: {
+              ...config.projects.api,
+              triggers: {
+                "pick-up": {
+                  ...config.projects.api.triggers["pick-up"],
+                  spawn: { ...config.projects.api.triggers["pick-up"].spawn, autoComplete: true },
+                },
+              },
+            },
+          },
+        };
+        b = await startTriggers(newerConfig, f.service);
+        const newerEvent = workItemEvent();
+        newerEvent.data.title = "New controller title";
+        b.bus.emit(newerEvent);
+        await vi.waitFor(() =>
+          expect(f.members().find((member) => member.blockIndex === 1)).toMatchObject({
+            state: "running",
+            sessionId: "api-born-1",
+          }),
+        );
+        await b.controller.stop();
+        const settled = f.actual
+          .readWorkItemLifecycles(f.dataDir, "api", "pr-watch")
+          .get(WORK_ITEM_BASE.externalId);
+        if (!settled) throw new Error("Missing settled newer claim");
+        f.actual.updateWorkItemMembers(f.dataDir, "api", "pr-watch", settled, (members) =>
+          members.map((member) =>
+            member.blockIndex === 0 ? { ...member, state: "completed" } : member,
+          ),
+        );
+        const before = f.actual
+          .readWorkItemLifecycles(f.dataDir, "api", "pr-watch")
+          .get(WORK_ITEM_BASE.externalId);
+        expect(before).toMatchObject({ title: "New controller title", autoComplete: true });
+        expect(before?.members.find((member) => member.blockIndex === 1)?.claimedAt).not.toBe(
+          claimA,
+        );
+        const lifecyclePath = join(
+          f.dataDir,
+          "source-state",
+          "work-item-lifecycle",
+          "api",
+          "pr-watch.json",
+        );
+        const disk = readFileSync(lifecyclePath, "utf8");
+        updateWorkItemMembersMock.mockClear();
+        logSpurEventMock.mockClear();
+        resolveAnchor(terminal);
+        await stoppedA;
+        expect(
+          f.actual
+            .readWorkItemLifecycles(f.dataDir, "api", "pr-watch")
+            .get(WORK_ITEM_BASE.externalId),
+        ).toEqual(before);
+        expect(readFileSync(lifecyclePath, "utf8")).toBe(disk);
+        expect(updateWorkItemMembersMock).not.toHaveBeenCalled();
+        expect(eventsOf("trigger.spawn.retry_ended")).toHaveLength(0);
+        expect(f.spawn).toHaveBeenCalledTimes(1);
+      } finally {
+        resolveAnchor(terminal);
+        await stoppedA;
+        await a.controller.stop();
+        await b?.controller.stop();
+        rmSync(f.dataDir, { recursive: true, force: true });
       }
     });
 
