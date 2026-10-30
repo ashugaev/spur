@@ -93,6 +93,27 @@ test("hero routes supported events through one accessible visual", () => {
   );
 });
 
+test("hero face keeps eyes and mouth visible without frame-swapping animation", () => {
+  const user = html.slice(html.indexOf('<g class="fo-user">'), html.indexOf('<g class="fo-hub">'));
+  assert.equal((user.match(/class="fo-face"/g) ?? []).length, 1);
+  assert.equal((user.match(/class="fo-eye"/g) ?? []).length, 2);
+  assert.equal((user.match(/class="fo-mouth"/g) ?? []).length, 1);
+  assert.match(user, /class="fo-you-frame"/);
+  assert.match(user, />you<\/text>/);
+  assert.doesNotMatch(user, /tabindex|aria-label/);
+  assert.doesNotMatch(html, /chomp|\.fo-you g(?:\s|[{:])/);
+  for (const gesture of ["face-blink", "face-mouth"]) {
+    assert.match(html, new RegExp(`animation: ${gesture} `));
+    assert.match(html, new RegExp(`@keyframes ${gesture}`));
+  }
+  const reduced = html.slice(
+    html.indexOf("@media (prefers-reduced-motion: reduce)"),
+    html.indexOf("</style>", html.indexOf("@media (prefers-reduced-motion: reduce)")),
+  );
+  assert.match(reduced, /\*\s*{[^}]*animation: none !important/);
+  assert.doesNotMatch(reduced, /\.fo-(?:you|face|eye|mouth)/);
+});
+
 test("architecture owns one description and two hidden responsive drawings", () => {
   const architecture = section("architecture");
   const heading = architecture.slice(0, architecture.indexOf('<figure class="arch'));

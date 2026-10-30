@@ -839,27 +839,53 @@
         fill: var(--t1);
         stroke: none;
       }
-      .fo-you g {
-        opacity: 0;
-        animation: chomp 0.52s steps(1) infinite;
+      .fo-face {
+        animation: face-idle 7.8s ease-in-out infinite;
       }
-      .fo-you g:nth-child(2) {
-        animation-delay: 0.13s;
+      .fo-face-dark {
+        fill: #111;
       }
-      .fo-you g:nth-child(3) {
-        animation-delay: 0.26s;
+      .fo-eye,
+      .fo-mouth {
+        transform-box: fill-box;
+        transform-origin: center;
       }
-      .fo-you g:nth-child(4) {
-        animation-delay: 0.39s;
+      .fo-eye {
+        animation: face-blink 6.4s ease-in-out infinite;
       }
-      @keyframes chomp {
+      .fo-mouth {
+        animation: face-mouth 9.8s ease-in-out infinite;
+      }
+      @keyframes face-idle {
         0%,
-        25% {
-          opacity: 1;
-        }
-        25.01%,
         100% {
-          opacity: 0;
+          transform: translateY(0);
+        }
+        50% {
+          transform: translateY(-0.6px);
+        }
+      }
+      @keyframes face-blink {
+        0%,
+        44%,
+        48%,
+        100% {
+          transform: scaleY(1);
+        }
+        46% {
+          transform: scaleY(0.08);
+        }
+      }
+      @keyframes face-mouth {
+        0%,
+        86%,
+        94%,
+        100% {
+          transform: scale(1);
+        }
+        89%,
+        91% {
+          transform: scale(0.75, 3.5);
         }
       }
       .fo-you-frame,
@@ -1462,12 +1488,6 @@
         .fo-pkt {
           display: none;
         }
-        .fo-you g {
-          opacity: 1;
-        }
-        .fo-you g + g {
-          display: none;
-        }
         .agent-state {
           opacity: 1;
           color: var(--t1);
@@ -1564,10 +1584,15 @@
               <g class="fo-user">
                 <rect class="fo-you-frame" x="194" y="16" width="52" height="52" />
                 <g class="fo-you" transform="translate(202.6 24.6) scale(1.45)">
-                  <g><path d="M12 12 L18.89 6.21 A9 9 0 1 0 18.89 17.79 Z" /></g>
-                  <g><path d="M12 12 L20.16 8.20 A9 9 0 1 0 20.16 15.80 Z" /></g>
-                  <g><path d="M12 12 L20.80 10.13 A9 9 0 1 0 20.80 13.87 Z" /></g>
-                  <g><path d="M12 12 L20.16 8.20 A9 9 0 1 0 20.16 15.80 Z" /></g>
+                  <g class="fo-face">
+                    <rect class="fo-face-dark" x="1" y="0" width="22" height="24" />
+                    <path d="M2.1 9H18.25V5.33H21.9V22.9H2.1Z" />
+                    <g class="fo-face-dark">
+                      <rect class="fo-eye" x="6.5" y="13.5" width="4.1" height="2.6" />
+                      <rect class="fo-eye" x="14.6" y="13.5" width="4.1" height="2.6" />
+                      <rect class="fo-mouth" x="10.33" y="18.83" width="4" height="0.75" />
+                    </g>
+                  </g>
                 </g>
                 <text class="fo-cap" x="220" y="88">you</text>
               </g>
