@@ -10361,8 +10361,8 @@ describe("SessionService", () => {
       },
     );
 
-    it.each(["Task title", "x".repeat(123) + "😀tail"])(
-      "bounds titled topics when session identity exceeds 128 units: %s",
+    it.each([undefined, "Task title", "x".repeat(123) + "😀tail"])(
+      "bounds topics when session identity exceeds 128 units: %s",
       async (title) => {
         const id = "x".repeat(120) + "-abcd";
         const { service, sessions } = await serviceWithTelegramSession(title);
