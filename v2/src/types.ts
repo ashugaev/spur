@@ -1357,6 +1357,8 @@ export interface SidecarPortView {
   id: string;
   env: string;
   port: number;
+  /** Host TCP listener presence; null when observation is unavailable or invalidated. */
+  listening: boolean | null;
 }
 
 // A desk-shared (non-mcp) project sidecar's `tmuxSession` is
