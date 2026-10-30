@@ -2004,6 +2004,10 @@ function withAgentModeOptions(
   };
 }
 
+class AgentProcessProbeUnknownError extends TmuxProbeUnknownError {
+  retentionAttempted = false;
+}
+
 function sessionProcessMatchers(session: Pick<SessionRecord, "agent" | "launchCommand">): string[] {
   return agentProcessMatchers(session.agent, session.launchCommand);
 }
@@ -2023,7 +2027,7 @@ async function agentProcessAlive(
     ...(options?.fresh ? { fresh: true } : {}),
     ...(foreign ? { paneChildFallback: true } : {}),
   });
-  if (result.diagnostic) throw new TmuxProbeUnknownError(result.diagnostic);
+  if (result.diagnostic) throw new AgentProcessProbeUnknownError(result.diagnostic);
   return result.alive;
 }
 
@@ -2457,7 +2461,7 @@ function buildInitialMessage(
   }
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
-  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Read a running sidecar's reserved port with \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports\` (tab-separated: sidecar, port id, env name, port, alive|dead; add \`--json\` for JSON). Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies when the main session spawns, restores, or recovers. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`docs/commands.md\` for sidecar usage. Available: ${names}.`;
+  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Read a running sidecar's reserved port with \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports\` (tab-separated: sidecar, port id, env name, port, alive|dead, listening|not-listening|unknown; add \`--json\` for JSON). Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies when the main session spawns, restores, or recovers. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`docs/commands.md\` for sidecar usage. Available: ${names}.`;
 }
 
 function buildAttachmentReferenceLines(attachmentIds: string[]): string[] {
@@ -2764,13 +2768,14 @@ function sidecarViewPorts(
   session: Pick<SessionRecord, "sidecarPorts">,
   sidecarName: string,
   sidecar?: ProjectConfig["sidecars"][string],
+  listeners?: ListenerSnapshot,
 ): SidecarPortView[] {
   const entries = Object.entries(session.sidecarPorts?.[sidecarName] ?? {});
   return entries.map(([env, port]) => {
     const id =
       Object.entries(sidecar?.ports ?? {}).find(([, portConfig]) => portConfig.env === env)?.[0] ??
       env;
-    return { id, env, port };
+    return { id, env, port, listening: listeners?.ok ? listeners.byPort.has(port) : null };
   });
 }
 
@@ -3890,6 +3895,7 @@ export class SessionService {
     SessionSidecarView,
     { ownerId: string; generation: number; signature: string }
   >();
+  private readonly sidecarViewObservationRevisions = new WeakMap<SessionSidecarView, number>();
   private sidecarObservation: { value: SidecarObservation; completedAt: number } | undefined;
   private sidecarObservationRun: Promise<SidecarObservation> | undefined;
   private sidecarObservationRevision = 0;
@@ -10757,7 +10763,10 @@ export class SessionService {
       if (this.sidecarOwnerIdForName(record, project, name) !== ownerId) continue;
       const cached = this.dashboardCache.get(record.id);
       for (const view of cached?.sidecars ?? []) {
-        if (view.name === name) delete view.url;
+        if (view.name === name) {
+          delete view.url;
+          for (const port of view.ports) port.listening = null;
+        }
       }
     }
   }
@@ -10784,14 +10793,12 @@ export class SessionService {
         this.sidecarEndpoints.delete(key);
     }
     const rootPids = new Set<number>();
-    const urlPorts = new Set<number>();
+    let hasReservedPorts = false;
     for (const session of listSessions(this.config.dataDir)) {
-      const project = this.resolveProjectForSession(session);
-      for (const [name, identity] of Object.entries(session.sidecarProcs ?? {})) {
-        const sidecar = project?.sidecars[name];
-        const link = sidecar ? this.resolveSidecarUrlLink(session, name, sidecar) : undefined;
+      if (Object.values(session.sidecarPorts ?? {}).some((ports) => Object.keys(ports).length > 0))
+        hasReservedPorts = true;
+      for (const identity of Object.values(session.sidecarProcs ?? {})) {
         rootPids.add(identity.pid);
-        if (link) urlPorts.add(link.reservedPort);
       }
     }
     const run = Promise.all(
@@ -10799,7 +10806,7 @@ export class SessionService {
     ).then(async (roots) => {
       const starttimes = new Map(roots);
       const [listeners, processes] = await Promise.all([
-        urlPorts.size ? snapshotListeners() : Promise.resolve({ ok: false as const }),
+        hasReservedPorts ? snapshotListeners() : Promise.resolve({ ok: false as const }),
         snapshotProcesses(),
       ]);
       const value = { listeners, processes, starttimes, revision };
@@ -10855,10 +10862,13 @@ export class SessionService {
   ): Promise<SessionSidecarView[]> {
     const names = sessionSidecarNames(session, project);
     if (names.length === 0) return [];
-    const hasIdentity = names.some((name) => {
+    const needsObservation = names.some((name) => {
       const sidecar = project?.sidecars[name];
       const owner = sidecar ? this.findSidecarOwnerRecord(session, sidecar) : session;
-      return owner?.sidecarProcs?.[name] !== undefined;
+      return (
+        owner?.sidecarProcs?.[name] !== undefined ||
+        Object.keys(owner?.sidecarPorts?.[name] ?? {}).length > 0
+      );
     });
     const claims = new Map(
       await Promise.all(
@@ -10877,7 +10887,7 @@ export class SessionService {
         }),
       ),
     );
-    const observation: SidecarObservation = hasIdentity
+    const observation: SidecarObservation = needsObservation
       ? await this.observeSidecars()
       : {
           listeners: { ok: false },
@@ -10899,7 +10909,14 @@ export class SessionService {
       const view: SessionSidecarView = {
         name,
         alive: exists && !paneDead,
-        ports: sidecarViewPorts(owner, name, sidecar),
+        ports: sidecarViewPorts(
+          owner,
+          name,
+          sidecar,
+          observation.revision === this.sidecarObservationRevision
+            ? observation.listeners
+            : { ok: false },
+        ),
         tmuxSession: sidecarTmuxSession(owner.id, name),
         ...(ageSeconds !== undefined ? { ageSeconds } : {}),
         ...(ageSeconds !== undefined && ageSeconds >= this.config.sidecarGc.maxAgeWarnMinutes * 60
@@ -10907,6 +10924,7 @@ export class SessionService {
           : {}),
         ...(paneDead ? { deadPane: true } : {}),
       };
+      this.sidecarViewObservationRevisions.set(view, observation.revision);
       views.push(view);
       if (
         this.deliveryStopped ||
@@ -10976,6 +10994,9 @@ export class SessionService {
     const session = readSession(this.config.dataDir, sessionId);
     const project = session ? this.resolveProjectForSession(session) : undefined;
     for (const view of views ?? []) {
+      if (this.sidecarViewObservationRevisions.get(view) !== this.sidecarObservationRevision) {
+        for (const port of view.ports) port.listening = null;
+      }
       if (!view.url) continue;
       const claim = this.sidecarViewClaims.get(view);
       const sidecar = project?.sidecars[view.name];
@@ -24227,10 +24248,39 @@ export class SessionService {
     operation?: RestoreOperationContext,
   ): Promise<SessionRecord> {
     operation?.assertActive();
-    const message = error instanceof Error ? error.message : String(error);
+    const processProbe = error instanceof AgentProcessProbeUnknownError;
+    const current = processProbe ? readSession(this.config.dataDir, session.id) : null;
+    const probeRevision = this.lifecycle.snapshot(session.id).revision;
+    // An outer launch catch must not recapture a replacement rejected by the first attempt.
+    if (processProbe && error.retentionAttempted) return current ?? session;
+    if (processProbe) error.retentionAttempted = true;
+    if (
+      processProbe &&
+      (!current ||
+        (current.status !== "running" && current.status !== "spawning") ||
+        !sameSessionRuntimeOwner(current, session) ||
+        current.agentLaunchId !== session.agentLaunchId ||
+        current.serverErrorAt ||
+        (hasSessionErrorEvidence(current) && !recoverableRuntimeError(current)))
+    )
+      return current ?? session;
+    const diagnostic = error instanceof Error ? error.message : String(error);
+    const message = processProbe ? STATUS_DETECTION_ERROR_PREFIX + diagnostic : diagnostic;
     const runtime = await this.readRuntimeSnapshot(session).catch(() => null);
     operation?.assertActive();
     const latest = readSession(this.config.dataDir, session.id);
+    if (
+      current &&
+      (!latest ||
+        !sameSessionRuntimeOwner(latest, current) ||
+        latest.agentLaunchId !== current.agentLaunchId ||
+        latest.error !== current.error ||
+        latest.errorSource !== current.errorSource ||
+        latest.serverErrorAt !== current.serverErrorAt ||
+        !this.lifecycleStateMatches(latest, this.lifecycleStamp(current)) ||
+        this.lifecycle.snapshot(session.id).revision !== probeRevision)
+    )
+      return latest ?? current;
     if (latest && isTerminalSessionStatus(latest.status)) return latest;
     const retained: SessionRecord = {
       ...withQueuedMessages(
@@ -24241,7 +24291,7 @@ export class SessionService {
       status:
         runtime && !runtime.probeUnresponsive && !runtime.processAlive ? "errored" : "running",
       error: message,
-      errorSource: "other",
+      errorSource: processProbe ? "runtime_probe" : "other",
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, retained);

@@ -211,6 +211,7 @@ export interface SpurSidecarPort {
   id: string;
   env: string;
   port: number;
+  listening: boolean | null;
 }
 
 // `tmuxSession` is the daemon's own name for the sidecar's pane — for a
