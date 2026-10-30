@@ -1,6 +1,7 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -33,9 +34,41 @@ import {
   waitForOpenCodeLaunchMessage,
   parseOpenCodeLatestUserMessage,
   withOpenCodeLaunchIdentityLock,
+  assertOpenCodeCompatibility,
 } from "../../src/agents/opencode.js";
 
 describe("OpenCode adapter", () => {
+  it("kills and reaps a TERM-resistant compatibility probe within the restore drain budget", async ({
+    onTestFinished,
+  }) => {
+    const directory = await mkdtemp(join(tmpdir(), "spur-opencode-version-"));
+    const executable = fileURLToPath(
+      new URL("./fixtures/term-resistant-opencode.mjs", import.meta.url),
+    );
+    const pidFile = join(directory, "pid");
+    onTestFinished(async () => {
+      const pid = Number(await readFile(pidFile, "utf8").catch(() => "0"));
+      if (pid > 0) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Already reaped.
+        }
+      }
+      vi.unstubAllEnvs();
+      await rm(directory, { recursive: true, force: true });
+    });
+    vi.stubEnv("SPUR_OPENCODE_BIN", executable);
+    vi.stubEnv("SPUR_TEST_OPENCODE_PID", pidFile);
+    const startedAt = Date.now();
+    await expect(assertOpenCodeCompatibility()).rejects.toMatchObject({
+      cause: { killed: true, signal: "SIGKILL" },
+    });
+    expect(Date.now() - startedAt).toBeLessThan(15_000);
+    const pid = Number(await readFile(pidFile, "utf8"));
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 10_000);
+
   it("combines selected variant with MCP and permissions without replacing native selected options", () => {
     const config = JSON.parse(
       buildOpenCodeConfig([{ server: "tools", url: "http://localhost/mcp" }], true, {

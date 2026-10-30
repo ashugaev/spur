@@ -1,7 +1,11 @@
 import { ESLint } from "eslint";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-const eslint = new ESLint({ overrideConfigFile: resolve(process.cwd(), "../../eslint.config.js") });
+const eslint = new ESLint({
+  cwd: resolve(process.cwd(), "../.."),
+  overrideConfigFile: resolve(process.cwd(), "../../eslint.config.js"),
+});
 
 async function lint(source: string, filePath: string) {
   const [result] = await eslint.lintText(source, { filePath });
@@ -18,6 +22,12 @@ describe("visible wait text lint rule", () => {
   beforeAll(async () => {
     await lint("export function Warm() { return null; }", "packages/web/src/probe.tsx");
   }, 20000);
+
+  it("allows the CronJob editor's motion-only loading and saving states", async () => {
+    const path = resolve(process.cwd(), "src/components/CronJobEditor.tsx");
+    const [result] = await eslint.lintText(await readFile(path, "utf8"), { filePath: path });
+    expect(result?.messages).toEqual([]);
+  });
 
   it.each([
     "Loading",
