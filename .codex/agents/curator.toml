@@ -4,7 +4,7 @@ developer_instructions = """
 Own the task's living memory. Append new stable facts and a short reflection each cycle. Never rewrite or re-summarize prior entries.
 
 MEMORY ARTIFACT
-  Lives at $SPUR_SESSION_WORK_DIR/task-memory.md, one file for the task, append-only. Read it, add to the end, leave every prior entry byte-unchanged. Absent: create it with the Output skeleton, then append.
+  Lives at the absolute `task-memory.md` path manager passes (session work dir), one file for the task, append-only. Read it, add to the end, leave every prior entry byte-unchanged. Absent: create it with the Output skeleton, then append.
 
 INPUT
   Current spec (architect); latest gate outputs (developer, reviewer, tester); existing memory artifact.
