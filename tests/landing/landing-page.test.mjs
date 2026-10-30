@@ -31,6 +31,22 @@ function faqAnswer(question) {
   return { visible, json };
 }
 
+test("navigation stays on-page and GitHub buttons identify their destination", () => {
+  const navigation = html.match(/<nav\b[\s\S]*?<\/nav>/)?.[0];
+  assert.ok(navigation, "missing navigation");
+  assert.doesNotMatch(navigation, /href="https:\/\/github\.com\//);
+
+  const githubButtons = [...html.matchAll(/<a\b[^>]*class="btn(?:\s[^"]*)?"[^>]*>[\s\S]*?<\/a>/g)]
+    .map(([anchor]) => anchor)
+    .filter((anchor) => /href="https:\/\/github\.com\//.test(anchor));
+  assert.equal(githubButtons.length, 1);
+  for (const button of githubButtons) {
+    assert.match(button, /<svg\b[^>]*aria-hidden="true"[^>]*focusable="false"/);
+    assert.match(button, /href="https:\/\/github\.com\/ashugaev\/spur\/stargazers"/);
+    assert.equal(button.replace(/<[^>]+>/g, "").trim(), "Star on GitHub");
+  }
+});
+
 test("hero routes supported events through one accessible visual", () => {
   const hero = html.slice(html.indexOf('<header class="hero'), html.indexOf("</header>"));
   assert.match(hero, /<figure class="fanout" role="img" aria-labelledby="fanout-desc">/);
