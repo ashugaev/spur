@@ -38,7 +38,7 @@ SAFETY
   Token budgets, Codex recovery, session overrides, installed Cursor hook: docs/configuration.md. Unknown usage never blocks execution.
   Treat `spur.yaml` as code: `script` runs as daemon user.
   Start dev servers with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, never a bare dev-server command.
-  Isolated TEST seed/attachment constraints: docs/configuration.md; stand/current-generation UI readiness: docs/commands.md Sidecars and Session tools.
+  Isolated TEST constraints: docs/configuration.md; managed project input and stand readiness: docs/commands.md Sidecars and Session tools.
   Read ports with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`; Open contract: docs/commands.md#sidecars. Never grep `/proc` or session state for ports.
   Use per-port `listening` for a TCP listener; `alive` describes the pane. Contract: docs/commands.md#sidecars.
 

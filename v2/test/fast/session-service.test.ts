@@ -2883,6 +2883,7 @@ describe("SessionService", () => {
     rmSync(TEST_DATA_DIR, { recursive: true, force: true });
     vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   describe("config registry lifecycle", () => {
@@ -8127,7 +8128,53 @@ describe("SessionService", () => {
     );
   });
 
-  it("starts autoStart non-MCP sidecars when restoring", async () => {
+  it.each([
+    { ownerPath: "/tmp/connected-desk.yaml", override: undefined },
+    { ownerPath: undefined, override: undefined },
+    { ownerPath: "/tmp/connected-desk.yaml", override: "/tmp/explicit.yaml" },
+  ])("sets sidecar owner input: %j", async ({ ownerPath, override }) => {
+    const config = {
+      ...baseConfig(),
+      projects: {
+        "review-project": {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: {
+              command: "pnpm dev",
+              autoStart: false,
+              ...(override ? { env: { SPUR_PROJECT_CONFIG_PATH: override } } : {}),
+            },
+          },
+        },
+      },
+    };
+    loadConfigMock.mockReturnValue(config);
+    loadProjectConfigMock.mockImplementation((path: string) => ({
+      projects: path === ownerPath ? config.projects : {},
+    }));
+    agentSessionConfigMock.mockReturnValue({
+      env: { SPUR_PROJECT_CONFIG_PATH: "/tmp/stale-agent.yaml" },
+    });
+    vi.stubEnv("SPUR_PROJECT_CONFIG_PATH", "/tmp/stale-daemon.yaml");
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.applyConfig(config as unknown as AppConfig, ownerPath ? [ownerPath] : []);
+    const session = await service.spawn({ project: "review-project", prompt: "hello" });
+
+    await service.startSidecar(session.id, "dev");
+
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        env: expect.objectContaining({
+          SPUR_PROJECT: "review-project",
+          SPUR_PROJECT_CONFIG_PATH: override ?? ownerPath ?? "",
+        }),
+      }),
+    );
+  });
+
+  it("starts autoStart non-MCP sidecars when restoring with the updated project owner", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -8165,11 +8212,23 @@ describe("SessionService", () => {
       );
     });
 
+    loadProjectConfigMock.mockImplementation((path: string) => ({
+      projects: path === "/tmp/old-owner.yaml" ? baseConfig().projects : {},
+    }));
     const service = await createDisposedSessionService();
+    service.applyConfig(loadConfigMock() as AppConfig, ["/tmp/old-owner.yaml"]);
+    expect(service.resolveConfiguredProjectConfigPath("api")).toBe("/tmp/old-owner.yaml");
+    loadProjectConfigMock.mockImplementation((path: string) => ({
+      projects: path === "/tmp/new-owner.yaml" ? baseConfig().projects : {},
+    }));
+    service.applyConfig(loadConfigMock() as AppConfig, ["/tmp/new-owner.yaml"]);
     await service.restore("api-1");
 
     expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
-      expect.objectContaining({ sidecarName: "dev" }),
+      expect.objectContaining({
+        sidecarName: "dev",
+        env: expect.objectContaining({ SPUR_PROJECT_CONFIG_PATH: "/tmp/new-owner.yaml" }),
+      }),
     );
     expect(runningPersistedBeforeSidecar).toBe(true);
   });

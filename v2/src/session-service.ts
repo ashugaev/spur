@@ -10600,6 +10600,9 @@ export class SessionService {
       ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
     });
 
+    sessionEnv.SPUR_PROJECT_CONFIG_PATH =
+      this.resolveConfiguredProjectConfigPath(reservedSession.project) ?? "";
+
     // Ownership of the tmux name for the catch below: set the instant
     // `new-session` creates the session, so a failure in any later step is
     // still a failure on a pane that is ours to reap. Held on an object, not
