@@ -6228,6 +6228,304 @@ describe("startConfiguredTriggers", () => {
       };
     }
 
+    async function nonDeskContinuationFixture() {
+      const f = await legacyJournalFixture();
+      const journal = f.actual.readPendingSpawnWork(f.dataDir).get(f.workId);
+      const current = f.actual
+        .readWorkItemLifecycles(f.dataDir, "api", "pr-watch")
+        .get(WORK_ITEM_BASE.externalId);
+      if (!journal || !current) throw new Error("Missing non-desk fixture");
+      f.actual.deletePendingSpawnWork(f.dataDir, f.workId, journal.revision);
+      f.actual.updateWorkItemMembers(
+        f.dataDir,
+        "api",
+        "pr-watch",
+        { ...current, spawnWorkId: null },
+        () => [f.anchor],
+      );
+      const config = {
+        ...f.config,
+        projects: {
+          api: {
+            ...f.config.projects.api,
+            triggers: {
+              "pick-up": {
+                ...f.config.projects.api.triggers["pick-up"],
+                spawnDeskGroup: false,
+                spawn: { blocks: [{ prompt: "review" }] },
+              },
+            },
+          },
+        },
+      };
+      const snapshot = () => ({
+        value: f.actual
+          .readWorkItemLifecycles(f.dataDir, "api", "pr-watch")
+          .get(WORK_ITEM_BASE.externalId),
+        raw: readFileSync(
+          join(f.dataDir, "source-state/work-item-lifecycle/api/pr-watch.json"),
+          "utf8",
+        ),
+      });
+      return { ...f, config, snapshot };
+    }
+
+    it.each(["replace", "not found", "completed", "pending", "error", "current"])(
+      "fences obsolete non-desk lookup after bounded reload (%s)",
+      async (outcome) => {
+        const f = await nonDeskContinuationFixture();
+        const { stopTriggersBounded } = await import("../../src/server.js");
+        let resolve!: (value: {
+          id: string;
+          status: string;
+          state: string;
+          workspaceExists: boolean;
+        }) => void;
+        let reject!: (error: Error) => void;
+        const lookup = new Promise<{
+          id: string;
+          status: string;
+          state: string;
+          workspaceExists: boolean;
+        }>((yes, no) => {
+          resolve = yes;
+          reject = no;
+        });
+        f.service.get.mockImplementationOnce(() => lookup);
+        const a = await startTriggers(f.config, f.service);
+        let b: Awaited<ReturnType<typeof startTriggers>> | undefined;
+        let stopping: Promise<void> | undefined;
+        const settle = () => {
+          if (outcome === "not found") reject(new Error("Session not found: api-9"));
+          else if (outcome === "error") reject(new Error("owner lookup unavailable"));
+          else
+            resolve({
+              id: "api-9",
+              status:
+                outcome === "completed"
+                  ? "completed"
+                  : outcome === "pending"
+                    ? "spawning"
+                    : "errored",
+              state: "error",
+              workspaceExists: true,
+            });
+        };
+        try {
+          a.bus.emit(workItemEvent());
+          await vi.waitFor(() => expect(f.service.get).toHaveBeenCalledWith("api-9"));
+          expect(f.members()[0]).toMatchObject({ state: "spawning", replacesSessionId: "api-9" });
+          if (outcome === "pending") {
+            const record = f.actual.readSession(f.dataDir, "api-9");
+            if (!record) throw new Error("Missing pending owner");
+            f.actual.writeSession(f.dataDir, {
+              ...record,
+              status: "spawning",
+              triggerOrigin: {
+                triggerId: "pick-up",
+                sourceId: "pr-watch",
+                externalId: WORK_ITEM_BASE.externalId,
+                blockIndex: 0,
+              },
+              spawnReceipt: { version: 1, acceptedAt: record.createdAt },
+            });
+            expect(f.actual.readSession(f.dataDir, record.id)?.spawnReceipt?.version).toBe(1);
+          }
+          if (outcome !== "current") {
+            const report = vi.fn();
+            stopping = stopTriggersBounded(a.controller, 20, report);
+            await vi.advanceTimersByTimeAsync(20);
+            await stopping;
+            expect(report).toHaveBeenCalledWith("triggers.stop timeout");
+            const config = {
+              ...f.config,
+              projects: { api: { ...f.config.projects.api, triggers: {} } },
+            };
+            b = await startTriggers(config, f.service);
+            b.bus.emit(workItemEvent());
+            await vi.advanceTimersByTimeAsync(0);
+          }
+          const before = f.snapshot();
+          updateWorkItemMembersMock.mockClear();
+          logSpurEventMock.mockClear();
+          settle();
+          await vi.advanceTimersByTimeAsync(0);
+          if (outcome === "current") {
+            expect(f.spawn).toHaveBeenCalledTimes(1);
+            expect(f.members()[0]).toMatchObject({ state: "running", sessionId: "api-born-0" });
+          } else {
+            expect(f.spawn).not.toHaveBeenCalled();
+            expect(f.snapshot()).toEqual(before);
+            expect(updateWorkItemMembersMock).not.toHaveBeenCalled();
+            expect(logSpurEventMock).not.toHaveBeenCalled();
+          }
+        } finally {
+          settle();
+          await stopping;
+          await a.controller.stop();
+          await b?.controller.stop();
+          rmSync(f.dataDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.each([
+      { path: "tagged", stopped: true },
+      { path: "legacy", stopped: true },
+      { path: "tagged", stopped: false },
+      { path: "legacy", stopped: false },
+    ])(
+      "fences stopped non-desk discovery continuations ($path, stopped=$stopped)",
+      async ({ path, stopped }) => {
+        const f = await nonDeskContinuationFixture();
+        const current = f.snapshot().value;
+        const record = f.actual.readSession(f.dataDir, "api-9");
+        if (!current || !record) throw new Error("Missing discovery fixture");
+        const member = failedMember();
+        if (path === "legacy") delete member.triggerId;
+        expect(member).not.toHaveProperty("sessionId");
+        f.actual.updateWorkItemMembers(f.dataDir, "api", "pr-watch", current, () => [member]);
+        f.actual.writeSession(f.dataDir, {
+          ...record,
+          slots: { links: [{ label: "pr", url: WORK_ITEM_BASE.url }] },
+          ...(path === "tagged"
+            ? {
+                triggerOrigin: {
+                  triggerId: "pick-up",
+                  sourceId: "pr-watch",
+                  externalId: WORK_ITEM_BASE.externalId,
+                  blockIndex: 0,
+                },
+              }
+            : {}),
+        });
+        const stored = f.actual.readSession(f.dataDir, record.id);
+        expect(stored?.pr?.url).toBe(WORK_ITEM_BASE.url);
+        expect(stored?.triggerOrigin !== undefined).toBe(path === "tagged");
+        let resolve!: (view: {
+          id: string;
+          agent: string;
+          status: string;
+          state: string;
+          workspaceExists: boolean;
+        }) => void;
+        const lookup = new Promise<{
+          id: string;
+          agent: string;
+          status: string;
+          state: string;
+          workspaceExists: boolean;
+        }>((done) => {
+          resolve = done;
+        });
+        const view = { id: record.id, agent: "claude", ...WORKING };
+        f.service.get.mockImplementationOnce(() => lookup);
+        const a = await startTriggers(f.config, f.service);
+        let stopping: Promise<void> | undefined;
+        try {
+          a.bus.emit(workItemEvent());
+          await vi.waitFor(() => expect(f.service.get).toHaveBeenCalledWith(record.id));
+          if (stopped) stopping = a.controller.stop();
+          const before = f.snapshot();
+          updateWorkItemMembersMock.mockClear();
+          logSpurEventMock.mockClear();
+          resolve(view);
+          await vi.advanceTimersByTimeAsync(0);
+          await stopping;
+          expect(f.spawn).not.toHaveBeenCalled();
+          if (stopped) {
+            expect(f.snapshot()).toEqual(before);
+            expect(updateWorkItemMembersMock).not.toHaveBeenCalled();
+            expect(logSpurEventMock).not.toHaveBeenCalled();
+          } else {
+            expect(f.members()[0]).toMatchObject({ state: "running", sessionId: record.id });
+            expect(eventsOf("trigger.spawn.adopted")).toHaveLength(1);
+          }
+        } finally {
+          resolve(view);
+          await stopping;
+          await a.controller.stop();
+          rmSync(f.dataDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.each([
+      { reject: false, stopped: true },
+      { reject: true, stopped: true },
+      { reject: false, stopped: false },
+      { reject: true, stopped: false },
+    ])(
+      "fences stopped non-desk pending discard (reject=$reject, stopped=$stopped)",
+      async ({ reject: fails, stopped }) => {
+        const f = await nonDeskContinuationFixture();
+        const current = f.snapshot().value;
+        const record = f.actual.readSession(f.dataDir, "api-9");
+        if (!current || !record) throw new Error("Missing discard fixture");
+        f.actual.updateWorkItemMembers(f.dataDir, "api", "pr-watch", current, () => [
+          failedMember(),
+        ]);
+        for (const id of ["api-9", "api-10"])
+          f.actual.writeSession(f.dataDir, {
+            ...record,
+            id,
+            status: "errored",
+            triggerOrigin: {
+              triggerId: "pick-up",
+              sourceId: "pr-watch",
+              externalId: WORK_ITEM_BASE.externalId,
+              blockIndex: 0,
+            },
+          });
+        f.service.get.mockImplementation(async (id) => ({
+          id,
+          status: "errored",
+          state: "error",
+          workspaceExists: false,
+        }));
+        let resolve!: () => void;
+        let reject!: (error: Error) => void;
+        const discard = new Promise<void>((yes, no) => {
+          resolve = yes;
+          reject = no;
+        });
+        const discardFailedSpawn = vi
+          .fn()
+          .mockImplementationOnce(() => discard)
+          .mockResolvedValue(undefined);
+        const a = await startTriggers(f.config, { ...f.service, discardFailedSpawn });
+        let stopping: Promise<void> | undefined;
+        const settle = () => (fails ? reject(new Error("discard unavailable")) : resolve());
+        try {
+          a.bus.emit(workItemEvent());
+          await vi.waitFor(() => expect(discardFailedSpawn).toHaveBeenCalledTimes(1));
+          expect(f.service.get.mock.calls.map(([id]) => id).sort()).toEqual(["api-10", "api-9"]);
+          if (stopped) stopping = a.controller.stop();
+          const before = f.snapshot();
+          updateWorkItemMembersMock.mockClear();
+          logSpurEventMock.mockClear();
+          settle();
+          await vi.advanceTimersByTimeAsync(0);
+          await stopping;
+          if (stopped) {
+            expect(discardFailedSpawn).toHaveBeenCalledTimes(1);
+            expect(f.spawn).not.toHaveBeenCalled();
+            expect(f.snapshot()).toEqual(before);
+            expect(updateWorkItemMembersMock).not.toHaveBeenCalled();
+            expect(logSpurEventMock).not.toHaveBeenCalled();
+          } else {
+            expect(discardFailedSpawn).toHaveBeenCalledTimes(2);
+            expect(f.spawn).toHaveBeenCalledTimes(1);
+          }
+        } finally {
+          settle();
+          await stopping;
+          await a.controller.stop();
+          rmSync(f.dataDir, { recursive: true, force: true });
+        }
+      },
+    );
+
     it.each([false, true])(
       "retains a legacy journal after a successful birth before its result save (prebound=%s)",
       async (prebound) => {

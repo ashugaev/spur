@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventBus } from "../../src/event-bus.js";
 import { AutoPingService } from "../../src/auto-ping.js";
+import { resetEventLogCollapse } from "../../src/event-log.js";
 import {
   readPendingSpawnWork,
   writePendingSpawnWork,
@@ -19,6 +20,7 @@ import type { SessionRecord, SpawnSessionRequest, WorkItemTriggerOrigin } from "
 
 const dirs: string[] = [];
 afterEach(() => {
+  resetEventLogCollapse();
   vi.useRealTimers();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -143,6 +145,173 @@ function queuedWorkItemFixture(
 }
 
 describe("work-item queued acceptance", () => {
+  it.each([
+    { reject: false, stopped: true },
+    { reject: true, stopped: true },
+    { reject: false, stopped: false },
+    { reject: true, stopped: false },
+  ])(
+    "preserves late accepted non-desk birth after controller stop (reject=$reject, stopped=$stopped)",
+    async ({ reject: fails, stopped }) => {
+      const f = queuedWorkItemFixture(false);
+      const original = f.spawn.getMockImplementation();
+      if (!original) throw new Error("Missing queued producer");
+      let resolve!: () => void;
+      let reject!: (error: Error) => void;
+      const returned = new Promise<void>((yes, no) => {
+        resolve = yes;
+        reject = no;
+      });
+      f.spawn.mockImplementationOnce(async (...args) => {
+        const accepted = await original(...args);
+        await returned;
+        return accepted;
+      });
+      const controller = startConfiguredTriggers(f.deps);
+      let stopping: Promise<void> | undefined;
+      let current: ReturnType<typeof startConfiguredTriggers> | undefined;
+      const settle = () => (fails ? reject(new Error("accepted return lost")) : resolve());
+      const snapshot = () => ({
+        lifecycle: readFileSync(
+          join(f.dataDir, "source-state/work-item-lifecycle/test/tick.json"),
+          "utf8",
+        ),
+        events: readFileSync(join(f.dataDir, "events.jsonl"), "utf8"),
+      });
+      try {
+        f.emit();
+        await vi.waitFor(() => expect(f.accepted).toHaveLength(1));
+        const accepted = f.accepted[0];
+        if (!accepted) throw new Error("Missing accepted birth");
+        const path = join(f.dataDir, "sessions/test", accepted.id + ".json");
+        const raw = readFileSync(path, "utf8");
+        expect(readSession(f.dataDir, accepted.id)).toMatchObject({
+          spawnReceipt: { version: 1 },
+          spawnIntent: { phase: "queued" },
+          triggerOrigin: { blockIndex: 0 },
+        });
+        expect(readSession(f.dataDir, accepted.id)).not.toHaveProperty("triggerBirthKey");
+        if (stopped) stopping = controller.stop();
+        const before = snapshot();
+        const members = f.members();
+        settle();
+        await vi.advanceTimersByTimeAsync(0);
+        await stopping;
+        expect(readFileSync(path, "utf8")).toBe(raw);
+        if (stopped) {
+          expect(f.spawn).toHaveBeenCalledTimes(1);
+          expect(snapshot()).toEqual(before);
+          current = startConfiguredTriggers(f.deps);
+          vi.setSystemTime(Date.now() + 45 * 60_000);
+          f.emit();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(f.members()[0]).toMatchObject({
+            sessionId: accepted.id,
+            state: "spawning",
+            attempts: members[0]?.attempts,
+            deferrals: members[0]?.deferrals,
+          });
+          expect(
+            f.spawn.mock.calls.filter(([, options]) => options?.triggerOrigin?.blockIndex === 0),
+          ).toHaveLength(1);
+          expect(readFileSync(path, "utf8")).toBe(raw);
+        } else {
+          expect(f.spawn).toHaveBeenCalledTimes(2);
+          expect(f.members()[0]?.sessionId).toBe(accepted.id);
+        }
+      } finally {
+        settle();
+        f.finish();
+        await stopping;
+        await controller.stop();
+        await current?.stop();
+      }
+    },
+  );
+
+  it.each([
+    { reject: false, stopped: true },
+    { reject: true, stopped: true },
+    { reject: false, stopped: false },
+    { reject: true, stopped: false },
+  ])(
+    "fences stopped non-desk catch survivor lookup (reject=$reject, stopped=$stopped)",
+    async ({ reject: fails, stopped }) => {
+      const f = queuedWorkItemFixture(false);
+      const original = f.spawn.getMockImplementation();
+      if (!original) throw new Error("Missing queued producer");
+      f.spawn.mockImplementationOnce(async (...args) => {
+        await original(...args);
+        throw new Error("return lost while current");
+      });
+      let resolve!: (view: SessionRecord & { state: string; workspaceExists: boolean }) => void;
+      let reject!: (error: Error) => void;
+      const lookup = new Promise<SessionRecord & { state: string; workspaceExists: boolean }>(
+        (yes, no) => {
+          resolve = yes;
+          reject = no;
+        },
+      );
+      f.get.mockImplementationOnce(() => lookup);
+      const controller = startConfiguredTriggers(f.deps);
+      let stopping: Promise<void> | undefined;
+      const settle = () => {
+        const accepted = f.accepted[0];
+        if (!accepted) {
+          reject(new Error("fixture cleanup"));
+          return;
+        }
+        if (fails) reject(new Error("survivor unavailable"));
+        else resolve({ ...accepted, state: "stopped", workspaceExists: true });
+      };
+      try {
+        f.emit();
+        await vi.waitFor(() => expect(f.get).toHaveBeenCalledTimes(1));
+        expect(f.accepted).toHaveLength(1);
+        expect(f.spawn).toHaveBeenCalledTimes(1);
+        const accepted = f.accepted[0];
+        if (!accepted) throw new Error("Missing catch survivor");
+        expect(f.get).toHaveBeenCalledWith(accepted.id);
+        const path = join(f.dataDir, "sessions/test", accepted.id + ".json");
+        const raw = readFileSync(path, "utf8");
+        expect(readSession(f.dataDir, accepted.id)).toMatchObject({
+          spawnIntent: { phase: "queued" },
+          spawnReceipt: { version: 1 },
+        });
+        if (stopped) stopping = controller.stop();
+        const before = {
+          lifecycle: readFileSync(
+            join(f.dataDir, "source-state/work-item-lifecycle/test/tick.json"),
+            "utf8",
+          ),
+          events: readFileSync(join(f.dataDir, "events.jsonl"), "utf8"),
+        };
+        settle();
+        await vi.advanceTimersByTimeAsync(0);
+        await stopping;
+        expect(readFileSync(path, "utf8")).toBe(raw);
+        if (stopped) {
+          expect(f.spawn).toHaveBeenCalledTimes(1);
+          expect(
+            readFileSync(
+              join(f.dataDir, "source-state/work-item-lifecycle/test/tick.json"),
+              "utf8",
+            ),
+          ).toBe(before.lifecycle);
+          expect(readFileSync(join(f.dataDir, "events.jsonl"), "utf8")).toBe(before.events);
+        } else {
+          expect(readFileSync(join(f.dataDir, "events.jsonl"), "utf8")).not.toBe(before.events);
+          expect(f.spawn).toHaveBeenCalledTimes(fails ? 1 : 2);
+        }
+      } finally {
+        settle();
+        f.finish();
+        await stopping;
+        await controller.stop();
+      }
+    },
+  );
+
   it.each([false, true])(
     "binds accepted IDs and drains while native completion stays held (desk=%s)",
     async (desk) => {

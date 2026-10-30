@@ -615,6 +615,7 @@ async function resolveClaimedOwners(
     let suppressed: WorkItemSuppressed | undefined;
     try {
       const owner = await service.get(ownerId);
+      if (!ctx.controllerCurrent()) return [];
       const record = readSession(ctx.dataDir, ownerId);
       const outcome = classifyWorkItemOwner(
         owner,
@@ -671,6 +672,7 @@ async function resolveClaimedOwners(
         suppressed = { reason: "owner_active", ownerSessionId: ownerId };
       }
     } catch (error) {
+      if (!ctx.controllerCurrent()) return [];
       const message = error instanceof Error ? error.message : String(error);
       if (!isSessionNotFoundError(message)) {
         releaseWorkItemClaim(ctx, entries);
@@ -729,6 +731,7 @@ async function findTaggedWorkItemSession(
   const candidates: FoundWorkItemSession[] = [];
   for (const session of tagged) {
     const view = await getWorkItemSessionIfPresent(service, session.id);
+    if (!ctx.controllerCurrent()) return undefined;
     if (!view) continue;
     const record = readSession(ctx.dataDir, session.id);
     const outcome = classifyWorkItemOwner(view, record);
@@ -748,9 +751,12 @@ async function findTaggedWorkItemSession(
   if (candidates.length === 1) return candidates[0];
   if (discardErrored) {
     for (const sessionId of erroredIds) {
+      if (!ctx.controllerCurrent()) return undefined;
       try {
         await service.discardFailedSpawn(sessionId);
+        if (!ctx.controllerCurrent()) return undefined;
       } catch (error) {
+        if (!ctx.controllerCurrent()) return undefined;
         const message = error instanceof Error ? error.message : String(error);
         logTriggerEvent(ctx.dataDir, "trigger.spawn.discard_failed", {
           level: "warn",
@@ -785,6 +791,7 @@ async function fillLegacyWorkItemBlocks(
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   for (const match of matches) {
     const session = await getWorkItemSessionIfPresent(service, match.id);
+    if (!ctx.controllerCurrent()) return new Map();
     if (!session) continue;
     const outcome = classifyWorkItemOwner(session, readSession(ctx.dataDir, session.id));
     if (outcome !== "replace") {
@@ -860,14 +867,13 @@ async function adoptExistingWorkItemSessions(
       triggerIds,
       true,
     );
+    if (!ctx.controllerCurrent()) return [];
     if (tagged) found.set(entry.blockIndex, tagged);
   }
   if (legacyBlocks.length > 0) {
-    for (const [blockIndex, session] of await fillLegacyWorkItemBlocks(
-      ctx,
-      service,
-      legacyBlocks,
-    )) {
+    const legacy = await fillLegacyWorkItemBlocks(ctx, service, legacyBlocks);
+    if (!ctx.controllerCurrent()) return [];
+    for (const [blockIndex, session] of legacy) {
       found.set(blockIndex, session);
     }
   }
@@ -1300,6 +1306,8 @@ async function runSpawnTrigger(
   queue?: { work: PersistedSpawnWork; current(): boolean; save(): boolean },
   fencedBlocks: ReadonlySet<number> = new Set(),
 ): Promise<void> {
+  const current = (): boolean => controllerCurrent() && (!queue || queue.current());
+  if (!current()) return;
   const work = queue?.work;
   logTriggerEvent(dataDir, "trigger.spawn.matched", {
     level: "info",
@@ -1355,8 +1363,10 @@ async function runSpawnTrigger(
       }
       claimedAt = claim.claimedAt;
       planned = await resolveClaimedOwners(ctx, service, eventName, claim.planned, logger);
+      if (!current()) return;
       try {
         planned = await adoptExistingWorkItemSessions(ctx, service, eventName, planned);
+        if (!current()) return;
         if (deskGroup === true) {
           const members =
             readWorkItemLifecycles(ctx.dataDir, ctx.projectId, ctx.sourceId).get(
@@ -1375,10 +1385,12 @@ async function runSpawnTrigger(
             return;
           }
           planned = await endDeskRetryWithoutLiveAnchor(ctx, service, planned);
+          if (!current()) return;
         }
       } catch (error) {
         // Nothing settled yet: free the claim now instead of leaving it
         // spawning until it goes stale.
+        if (!current()) return;
         releaseWorkItemClaim(ctx, planned);
         throw error;
       }
@@ -1388,10 +1400,10 @@ async function runSpawnTrigger(
     let anchorSessionId = ctx ? workItemAnchorSessionId(ctx) : work?.anchorSessionId;
     for (const entry of planned) {
       const { block, blockIndex } = entry;
-      if (queue && !queue.current()) return;
+      if (!current()) return;
       if (queue && anchorSessionId !== undefined) {
         const anchor = await service.get(anchorSessionId);
-        if (!queue.current()) return;
+        if (!current()) return;
         if (anchor.status !== "running" || !anchor.workspaceExists)
           throw new Error(`Desk anchor unavailable: ${anchorSessionId}`);
       }
@@ -1412,6 +1424,7 @@ async function runSpawnTrigger(
           deskGroup,
           anchorSessionId,
         );
+        if (!current()) return;
         let spawning: Promise<SessionView>;
         if (ctx) {
           // Refresh this block's claim only while it is still this run's: an
@@ -1439,6 +1452,7 @@ async function runSpawnTrigger(
           spawning = service
             .spawn(spawnRequest, { triggerBirthKey: birthKey })
             .catch(async (error: unknown) => {
+              if (!current()) throw error;
               const birth = service.getTriggerBirth(projectId, birthKey, spawnRequest);
               if (!birth) throw error;
               return service.get(birth.id);
@@ -1447,7 +1461,7 @@ async function runSpawnTrigger(
           spawning = service.spawn(spawnRequest);
         }
         const session = await spawning;
-        if (queue && !queue.current()) return;
+        if (!current()) return;
         const outcome = ctx
           ? classifyWorkItemOwner(session, readSession(ctx.dataDir, session.id))
           : "adopt";
@@ -1522,7 +1536,7 @@ async function runSpawnTrigger(
         });
         if (work && work.admissionDenials > 0) return;
       } catch (error) {
-        if (queue && !queue.current()) return;
+        if (!current()) return;
         if (queue && work && error instanceof SessionAdmissionDeniedError) {
           work.admissionDenials = Math.min(work.admissionDenials + 1, DELIVERY_MAX_ATTEMPTS - 1);
           work.notBeforeAt =
@@ -1540,6 +1554,7 @@ async function runSpawnTrigger(
             error instanceof SessionAdmissionDeniedError
               ? undefined
               : await findTaggedWorkItemSession(ctx, service, blockIndex, [ctx.triggerId]);
+          if (!current()) return;
           if (survivor) {
             patchWorkItemMember(
               ctx,
@@ -1589,7 +1604,7 @@ async function runSpawnTrigger(
       }
     }
   } catch (error) {
-    if (queue && !queue.current()) return;
+    if (!current()) return;
     const message = error instanceof Error ? error.message : String(error);
     if (queue && work) {
       for (let index = work.nextBlockIndex; index < work.blocks.length; index += 1)
