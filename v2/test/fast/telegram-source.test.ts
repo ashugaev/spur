@@ -2268,6 +2268,59 @@ describe("telegramSourceModule", () => {
     });
   });
 
+  it("redacts the bot token from rejected choice ack and edit warnings", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit, logger } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          messageThreadId: 22,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+      keepInterfaceConsent: false,
+    });
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: {
+          message_id: 90,
+          message_thread_id: 22,
+          text: "Deploy now?",
+          chat: { id: -1001 },
+          is_topic_message: true,
+          reply_markup: { inline_keyboard: [[{ text: "Yes", callback_data: "spur_choice:tok0" }]] },
+        },
+        from: { id: 123 },
+      },
+      answerCallbackQuery: vi.fn().mockRejectedValue(new Error("ack rejected token-123")),
+      editMessageReplyMarkup: vi.fn().mockRejectedValue(new Error("edit rejected token-123")),
+    });
+
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-1", text: "yes" }),
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      "[source:api/telegram] telegram choice ack failed: ack rejected <telegram-token>",
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      "[source:api/telegram] telegram choice keyboard edit failed: edit rejected <telegram-token>",
+    );
+    expect(logger.warn.mock.calls.flat().join("\n")).not.toContain("token-123");
+  });
+
   it("delivers an agent button click to the offering session and kills the offer", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -5006,7 +5059,7 @@ describe("telegramSourceModule", () => {
 
     await bot.emitText(telegramContext({ text: "/watch api-1" }));
     const textCtx = telegramContext();
-    textCtx.reply.mockRejectedValueOnce(new Error("rate limited"));
+    textCtx.reply.mockRejectedValueOnce(new Error("rate limited token-123"));
 
     await bot.emitText(textCtx);
 
@@ -5015,8 +5068,9 @@ describe("telegramSourceModule", () => {
       expect.objectContaining({ sessionId: "api-1", text: "hello agent" }),
     );
     expect(logger.warn).toHaveBeenCalledWith(
-      "[source:api/telegram] telegram ack failed: rate limited",
+      "[source:api/telegram] telegram ack failed: rate limited <telegram-token>",
     );
+    expect(logger.warn.mock.calls.flat().join("\n")).not.toContain("token-123");
   });
 
   it("ignores replayed Telegram updates", async () => {
@@ -6727,7 +6781,7 @@ describe("telegramSourceModule voice notes", () => {
 
     vi.stubGlobal("fetch", mockTranscribeFetch("fix the sidecar"));
     const voiceCtx = telegramVoiceContext();
-    voiceCtx.reply.mockRejectedValueOnce(new Error("429 Too Many Requests"));
+    voiceCtx.reply.mockRejectedValueOnce(new Error("429 Too Many Requests token-123"));
 
     await bot.emitVoice(voiceCtx);
 
@@ -6737,8 +6791,9 @@ describe("telegramSourceModule voice notes", () => {
       expect.objectContaining({ text: expect.stringContaining("\nfix the sidecar") }),
     );
     expect(logger.warn).toHaveBeenCalledWith(
-      "[source:api/telegram] telegram voice ack failed: 429 Too Many Requests",
+      "[source:api/telegram] telegram voice ack failed: 429 Too Many Requests <telegram-token>",
     );
+    expect(logger.warn.mock.calls.flat().join("\n")).not.toContain("token-123");
     // No statusMessageId to edit: the echo and the routing ack both fall
     // back to a fresh ctx.reply call.
     expect(voiceCtx.api.editMessageText).not.toHaveBeenCalled();

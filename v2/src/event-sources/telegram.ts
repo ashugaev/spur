@@ -1670,7 +1670,7 @@ async function handleAgentChoiceCallback(
     if (sending) {
       await editChoiceMarkup(ctx, deps, message.reply_markup ?? { inline_keyboard: [] });
     }
-    await ctx.answerCallbackQuery("Continue in the assigned topic.");
+    await answerChoice(ctx, deps, "Continue in the assigned topic.");
     await ctx.reply?.(conversationText(conversation));
     return;
   }
@@ -2217,7 +2217,7 @@ async function deliverRoutedPrompt(
     statusMessageId = extractMessageId(await ctx.reply(placeholderText(label, session.state)));
   } catch (error) {
     deps.logger.warn?.(
-      `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${errorText(error)}`,
+      `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${redactedErrorText(deps, error)}`,
     );
   }
   const currentSession = await findSession(deps, session.id);
