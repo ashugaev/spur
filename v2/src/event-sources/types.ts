@@ -3,6 +3,8 @@ import {
   isStaleParked,
   type AgentName,
   type SelfDestructConfig,
+  type SendMessageAttachment,
+  type SendMessageRequest,
   type SessionRecord,
   type SessionLaunchOptions,
   type SessionState,
@@ -40,6 +42,7 @@ export interface SourceSessionListItem {
 export interface SourceSpawnSessionRequest {
   project: string;
   prompt?: string;
+  attachments?: SendMessageAttachment[];
   agent?: AgentName;
   model?: string;
   mode?: string;
@@ -102,6 +105,10 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   signal: AbortSignal;
   logger: SourceLogger;
   spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
+  prepareSessionMessage?(
+    sessionId: string,
+    request: Pick<SendMessageRequest, "message" | "attachments">,
+  ): Promise<string>;
   /**
    * Every configured, non-shepherd project this daemon knows about — the
    * spawnable-project list for a source's own project picker. Filtered at

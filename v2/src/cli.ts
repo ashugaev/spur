@@ -1280,6 +1280,7 @@ interface SidecarPortRow {
   env: string;
   port: number;
   alive: boolean;
+  listening: boolean | null;
 }
 
 // Flattens a session's per-sidecar reserved ports into rows for the `sidecar
@@ -1298,6 +1299,7 @@ function sidecarPortRows(view: SessionView, name?: string): SidecarPortRow[] {
       env: port.env,
       port: port.port,
       alive: sidecar.alive,
+      listening: port.listening ?? null,
     })),
   );
   // Plain string comparison, not localeCompare: this output is machine-read
@@ -4646,7 +4648,7 @@ export function createProgram(cliEntrypoint: string): Command {
       );
       for (const row of rows) {
         writeStdout(
-          `${row.sidecar}\t${row.id}\t${row.env}\t${row.port}\t${row.alive ? "alive" : "dead"}`,
+          `${row.sidecar}\t${row.id}\t${row.env}\t${row.port}\t${row.alive ? "alive" : "dead"}\t${row.listening === null ? "unknown" : row.listening ? "listening" : "not-listening"}`,
         );
       }
     });

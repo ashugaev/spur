@@ -442,6 +442,7 @@ import {
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
 import { reconcileTokenUsage, type ProviderTokenUsageSample } from "./token-usage.js";
 import {
+  PreflightBatchClaimedError,
   PreflightUsageStore,
   aggregatePreflightAttempts,
   preflightUsageView,
@@ -477,6 +478,8 @@ import {
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
+  type PreflightTokenUsageRecord,
+  type SpawnBatchConflictPayload,
   type SessionPrBinding,
   type ProjectListEntry,
   type SpawnDefaultsResponse,
@@ -499,6 +502,8 @@ import {
   type ServiceInstanceView,
   type SelfDestructConfig,
   type SendMessageAttachment,
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS,
   type SendMessageRequest,
   type SidecarConfig,
   type SidecarMcpBinding,
@@ -720,8 +725,6 @@ export function getIdleWaitBeforeFlushMs(): number {
 }
 
 const NAME_RE = /^[\w.-]+$/;
-const MAX_DECODED_SIZE = 5 * 1024 * 1024;
-const MAX_ATTACHMENTS = 10;
 const STATE_HISTORY_LIMIT = 100;
 const RESTORE_PLAN_WAIT_MS = 5_000;
 const RESTORE_PLAN_POLL_MS = 250;
@@ -1065,6 +1068,25 @@ export class SessionNotRestorableError extends Error {
       reason,
       availableActions,
     };
+  }
+}
+
+const SPAWN_BATCH_CONFLICT_MESSAGES: Record<SpawnBatchConflictPayload["code"], string> = {
+  spawn_in_progress:
+    "is still being created from this submission; wait, then check the session list",
+  spawn_committed:
+    "was already created from this submission; submit again to start another session",
+  spawn_failed: "from this submission did not start; submit again to start a new session",
+};
+
+export class SpawnBatchConflictError extends Error {
+  readonly statusCode = 409;
+  readonly payload: SpawnBatchConflictPayload;
+
+  constructor(code: SpawnBatchConflictPayload["code"], sessionId: string) {
+    const message = `Session ${sessionId} ${SPAWN_BATCH_CONFLICT_MESSAGES[code]}`;
+    super(message);
+    this.payload = { code, sessionId, error: message };
   }
 }
 
@@ -2484,7 +2506,7 @@ function buildInitialMessage(
   }
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
-  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Read a running sidecar's reserved port with \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports\` (tab-separated: sidecar, port id, env name, port, alive|dead; add \`--json\` for JSON). Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies when the main session spawns, restores, or recovers. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`docs/commands.md\` for sidecar usage. Available: ${names}.`;
+  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Read a running sidecar's reserved port with \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports\` (tab-separated: sidecar, port id, env name, port, alive|dead, listening|not-listening|unknown; add \`--json\` for JSON). Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies when the main session spawns, restores, or recovers. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`docs/commands.md\` for sidecar usage. Available: ${names}.`;
 }
 
 function buildAttachmentReferenceLines(attachmentIds: string[]): string[] {
@@ -2791,13 +2813,14 @@ function sidecarViewPorts(
   session: Pick<SessionRecord, "sidecarPorts">,
   sidecarName: string,
   sidecar?: ProjectConfig["sidecars"][string],
+  listeners?: ListenerSnapshot,
 ): SidecarPortView[] {
   const entries = Object.entries(session.sidecarPorts?.[sidecarName] ?? {});
   return entries.map(([env, port]) => {
     const id =
       Object.entries(sidecar?.ports ?? {}).find(([, portConfig]) => portConfig.env === env)?.[0] ??
       env;
-    return { id, env, port };
+    return { id, env, port, listening: listeners?.ok ? listeners.byPort.has(port) : null };
   });
 }
 
@@ -3867,6 +3890,7 @@ export class SessionService {
   // here still has its spawn pipeline running (worktree/tools/tmux setup), so
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
+  private readonly spawnsPreparing = new Set<string>();
   // Session ids this process is launching in place: dead-agent recovery
   // (relaunchSessionInPlace) and restore()/reopen(). Each writes `running`
   // before the agent reaches its prompt and settles the record itself, so a
@@ -3966,6 +3990,7 @@ export class SessionService {
     SessionSidecarView,
     { ownerId: string; generation: number; signature: string }
   >();
+  private readonly sidecarViewObservationRevisions = new WeakMap<SessionSidecarView, number>();
   private sidecarObservation: { value: SidecarObservation; completedAt: number } | undefined;
   private sidecarObservationRun: Promise<SidecarObservation> | undefined;
   private sidecarObservationRevision = 0;
@@ -10879,7 +10904,10 @@ export class SessionService {
       if (this.sidecarOwnerIdForName(record, project, name) !== ownerId) continue;
       const cached = this.dashboardCache.get(record.id);
       for (const view of cached?.sidecars ?? []) {
-        if (view.name === name) delete view.url;
+        if (view.name === name) {
+          delete view.url;
+          for (const port of view.ports) port.listening = null;
+        }
       }
     }
   }
@@ -10906,14 +10934,12 @@ export class SessionService {
         this.sidecarEndpoints.delete(key);
     }
     const rootPids = new Set<number>();
-    const urlPorts = new Set<number>();
+    let hasReservedPorts = false;
     for (const session of listSessions(this.config.dataDir)) {
-      const project = this.resolveProjectForSession(session);
-      for (const [name, identity] of Object.entries(session.sidecarProcs ?? {})) {
-        const sidecar = project?.sidecars[name];
-        const link = sidecar ? this.resolveSidecarUrlLink(session, name, sidecar) : undefined;
+      if (Object.values(session.sidecarPorts ?? {}).some((ports) => Object.keys(ports).length > 0))
+        hasReservedPorts = true;
+      for (const identity of Object.values(session.sidecarProcs ?? {})) {
         rootPids.add(identity.pid);
-        if (link) urlPorts.add(link.reservedPort);
       }
     }
     const run = Promise.all(
@@ -10921,7 +10947,7 @@ export class SessionService {
     ).then(async (roots) => {
       const starttimes = new Map(roots);
       const [listeners, processes] = await Promise.all([
-        urlPorts.size ? snapshotListeners() : Promise.resolve({ ok: false as const }),
+        hasReservedPorts ? snapshotListeners() : Promise.resolve({ ok: false as const }),
         snapshotProcesses(),
       ]);
       const value = { listeners, processes, starttimes, revision };
@@ -10978,10 +11004,13 @@ export class SessionService {
   ): Promise<SessionSidecarView[]> {
     const names = sessionSidecarNames(session, project);
     if (names.length === 0) return [];
-    const hasIdentity = names.some((name) => {
+    const needsObservation = names.some((name) => {
       const sidecar = project?.sidecars[name];
       const owner = sidecar ? this.findSidecarOwnerRecord(session, sidecar) : session;
-      return owner?.sidecarProcs?.[name] !== undefined;
+      return (
+        owner?.sidecarProcs?.[name] !== undefined ||
+        Object.keys(owner?.sidecarPorts?.[name] ?? {}).length > 0
+      );
     });
     const claims = new Map(
       await Promise.all(
@@ -11000,7 +11029,7 @@ export class SessionService {
         }),
       ),
     );
-    const observation: SidecarObservation = hasIdentity
+    const observation: SidecarObservation = needsObservation
       ? await this.observeSidecars()
       : {
           listeners: { ok: false },
@@ -11027,7 +11056,14 @@ export class SessionService {
       const view: SessionSidecarView = {
         name,
         alive: exists && !paneDead,
-        ports: sidecarViewPorts(owner, name, sidecar),
+        ports: sidecarViewPorts(
+          owner,
+          name,
+          sidecar,
+          observation.revision === this.sidecarObservationRevision
+            ? observation.listeners
+            : { ok: false },
+        ),
         tmuxSession: sidecarTmuxSession(owner.id, name),
         ...(ageSeconds !== undefined ? { ageSeconds } : {}),
         ...(ageSeconds !== undefined && ageSeconds >= this.config.sidecarGc.maxAgeWarnMinutes * 60
@@ -11035,6 +11071,7 @@ export class SessionService {
           : {}),
         ...(paneDead ? { deadPane: true } : {}),
       };
+      this.sidecarViewObservationRevisions.set(view, observation.revision);
       views.push(view);
       if (
         this.deliveryStopped ||
@@ -11104,6 +11141,9 @@ export class SessionService {
     const session = readSession(this.config.dataDir, sessionId);
     const project = session ? this.resolveProjectForSession(session) : undefined;
     for (const view of views ?? []) {
+      if (this.sidecarViewObservationRevisions.get(view) !== this.sidecarObservationRevision) {
+        for (const port of view.ports) port.listening = null;
+      }
       if (!view.url) continue;
       const claim = this.sidecarViewClaims.get(view);
       const sidecar = project?.sidecars[view.name];
@@ -12524,6 +12564,8 @@ export class SessionService {
         ),
       };
     } catch (error) {
+      if (error instanceof PreflightBatchClaimedError)
+        throw this.spawnBatchConflict(error.claimedBy);
       throw new PreflightPreviewError(
         error,
         preflightBatchId,
@@ -14246,6 +14288,29 @@ export class SessionService {
     );
   }
 
+  private async claimSpawnPreflightBatch(
+    batchId: string,
+    projectId: string,
+    sessionId: string,
+  ): Promise<PreflightTokenUsageRecord> {
+    try {
+      return await this.preflightUsageStore.claim(batchId, projectId, sessionId);
+    } catch (error) {
+      if (!(error instanceof PreflightBatchClaimedError)) throw error;
+      throw this.spawnBatchConflict(error.claimedBy);
+    }
+  }
+
+  private spawnBatchConflict(owner: string): SpawnBatchConflictError {
+    if (this.spawnsPreparing.has(owner))
+      return new SpawnBatchConflictError("spawn_in_progress", owner);
+    const ownerRecord = readSession(this.config.dataDir, owner);
+    return new SpawnBatchConflictError(
+      ownerRecord && ownerRecord.status !== "errored" ? "spawn_committed" : "spawn_failed",
+      owner,
+    );
+  }
+
   private async prepareBackgroundSpawn(
     request: SpawnSessionRequest,
     options: BackgroundSpawnOptions = {},
@@ -14255,10 +14320,11 @@ export class SessionService {
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
     let agent: SessionRecord["agent"] | undefined;
-    let worktree = false;
+    let worktree: boolean;
     let createdAt: string | undefined;
     let placeholderWritten = false;
-    let prompt = "";
+    let ownedClaimBatchId: string | undefined;
+    let prompt: string;
     let steps: string[] | undefined;
     let mode: ResolvedSessionMode | undefined;
     let planMode: boolean;
@@ -14315,14 +14381,10 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      this.spawnsPreparing.add(sessionId);
       const preflightBatchId = await this.preflightUsageStore.resolve(
         request.project,
         request.preflightBatchId,
-      );
-      const preflightTokenUsage = await this.preflightUsageStore.claim(
-        preflightBatchId,
-        request.project,
-        sessionId,
       );
       if (reuseCtx) {
         resolvedBranch = reuseCtx.resolvedBranch;
@@ -14355,6 +14417,12 @@ export class SessionService {
           ? { transferredOwner: options.closeoutOwnerTransfer }
           : {}),
       });
+      const preflightTokenUsage = await this.claimSpawnPreflightBatch(
+        preflightBatchId,
+        request.project,
+        sessionId,
+      );
+      ownedClaimBatchId = preflightBatchId;
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
@@ -14427,12 +14495,13 @@ export class SessionService {
         placeholder.startupAttachmentIds = startupAttachments.map(({ id }) => id);
       }
       this.assertReuseAnchorPresent(reuseCtx);
-      ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
+      ensureTodoLedger(this.config.dataDir, placeholder);
       if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
       this.pendingSpawnIds.add(sessionId);
       this.spawnsInFlight.add(sessionId);
       writeSession(this.config.dataDir, placeholder);
+      ownedClaimBatchId = undefined;
       placeholderWritten = true;
       if (options.telegramOrigin) {
         writeTelegramReplyTarget(this.config.dataDir, {
@@ -14488,48 +14557,49 @@ export class SessionService {
       };
     } catch (error) {
       if (sessionId) {
+        let current: SessionRecord | null;
+        try {
+          current = readSession(this.config.dataDir, sessionId);
+        } catch {
+          // Unknown durability must retain the record, dependencies and batch claim.
+          throw error;
+        }
+        if (current !== null) {
+          this.pendingSpawnIds.delete(sessionId);
+          this.spawnsInFlight.delete(sessionId);
+          if (
+            current.id === sessionId &&
+            current.project === request.project &&
+            !this.admissionStopped
+          ) {
+            this.registerDurableSpawn(current);
+          }
+          throw error;
+        }
+        if (placeholderWritten) throw error;
         this.pendingSpawnIds.delete(sessionId);
         this.spawnsInFlight.delete(sessionId);
+        if (project) {
+          try {
+            this.removeSessionArtifacts({
+              id: sessionId,
+              project: request.project,
+              workspaceId: reuseCtx?.workspaceId ?? sessionId,
+            });
+          } catch {
+            // Preserve the preparation error even if uncommitted cleanup fails.
+          }
+        }
+        if (ownedClaimBatchId !== undefined) {
+          try {
+            await this.preflightUsageStore.release(ownedClaimBatchId, request.project, sessionId);
+          } catch {
+            // Cleanup must not mask the original spawn failure.
+          }
+        }
       }
       if (error instanceof SpawnAdmissionCancelledError) throw error;
       const message = error instanceof Error ? error.message : String(error);
-      if (sessionId && project && placeholderWritten) {
-        const erroredWorkspaceId = reuseCtx?.workspaceId ?? sessionId;
-        const claimedPreflightUsage = readSession(
-          this.config.dataDir,
-          sessionId,
-        )?.preflightTokenUsage;
-        this.removeSessionArtifacts({
-          id: sessionId,
-          project: request.project,
-          workspaceId: erroredWorkspaceId,
-        });
-        const erroredBranchSource =
-          resolvedBranch?.branchSource ?? (worktree && explicitBranch ? "explicit" : undefined);
-        writeSession(this.config.dataDir, {
-          id: sessionId,
-          project: request.project,
-          workspaceId: erroredWorkspaceId,
-          agent: agent ?? resolveSpawnAgent(request.agent, project, this.config),
-          prompt,
-          branch: resolvedBranch?.branch ?? explicitBranch ?? sessionId,
-          ...(erroredBranchSource ? { branchSource: erroredBranchSource } : {}),
-          worktree,
-          worktreePath: reuseCtx
-            ? reuseCtx.workspacePath
-            : worktree
-              ? join(this.config.worktreeDir, request.project, sessionId)
-              : project.path,
-          tmuxSession: sessionId,
-          launchCommand: "",
-          status: "errored",
-          ...(claimedPreflightUsage ? { preflightTokenUsage: claimedPreflightUsage } : {}),
-          createdAt: createdAt ?? nowIso(),
-          updatedAt: nowIso(),
-          error: message,
-          errorSource: "other",
-        });
-      }
       this.logEvent("session.spawn.failed", {
         level: "error",
         ...(sessionId ? { sessionId } : {}),
@@ -14543,6 +14613,8 @@ export class SessionService {
         },
       });
       throw error;
+    } finally {
+      if (sessionId) this.spawnsPreparing.delete(sessionId);
     }
   }
 
@@ -18520,9 +18592,7 @@ export class SessionService {
       throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
     }
 
-    const attachDir = ensureSessionArtifactsDir(this.config.dataDir, sessionId);
-    const stored: StoredImageAttachment[] = [];
-    for (const [index, att] of attachments.entries()) {
+    const decoded = attachments.map((att) => {
       if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
         throw new Error(`Invalid attachment name: ${String(att.name)}`);
       }
@@ -18530,16 +18600,24 @@ export class SessionService {
         throw new Error("Attachment data must be a non-empty base64 string");
       }
       const buf = Buffer.from(att.data, "base64");
-      if (buf.length > MAX_DECODED_SIZE) {
+      if (buf.length === 0 || buf.toString("base64") !== att.data) {
+        throw new Error("Attachment data must be non-empty valid base64");
+      }
+      if (buf.length > MAX_ATTACHMENT_BYTES) {
         throw new Error(`Attachment ${att.name} exceeds 5MB`);
       }
+      return { name: att.name, buf };
+    });
+    const attachDir = ensureSessionArtifactsDir(this.config.dataDir, sessionId);
+    const stored: StoredImageAttachment[] = [];
+    for (const [index, att] of decoded.entries()) {
       let filename = `${Date.now()}-${att.name}`;
       const initialPath = join(attachDir, filename);
       if (existsSync(initialPath)) {
         filename = `${Date.now()}-${index}-${att.name}`;
       }
       const filePath = join(attachDir, filename);
-      writeFileSync(filePath, buf, { mode: 0o644 });
+      writeFileSync(filePath, att.buf, { mode: 0o644 });
       setSessionArtifactOrigin(this.config.dataDir, sessionId, filename, "intentional");
       setSessionArtifactUserAdded(this.config.dataDir, sessionId, filename, true);
       stored.push({ id: filename, path: filePath, name: att.name });
@@ -18666,6 +18744,19 @@ export class SessionService {
         ...(historyArtifactId ? { historyArtifactId } : {}),
       },
     });
+  }
+
+  prepareSourceMessage(
+    sessionId: string,
+    request: Pick<SendMessageRequest, "message" | "attachments">,
+  ): string {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    assertSendableStatus(session);
+    if (!session.worktreePath || !existsSync(session.worktreePath)) {
+      throw new Error(`Session workspace missing: ${sessionId}`);
+    }
+    return this.prepareSendMessage(session, request);
   }
 
   private prepareSendMessage(

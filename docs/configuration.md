@@ -57,6 +57,7 @@ Task launch, attention cards, topic lifecycle: [`/new`, `/work`, `/complete`, `/
 [`source reply`](commands.md#source-reply), questions, attention and typing use assigned topic; Telegram spawn assigns before launch; legacy destinations migrate on input/output — `v2/src/session-service.ts`.
 Queued topics: accepted ID/intent retained; launch and competing requests hold until acknowledged assignment; uncertain creation is not retried automatically — `v2/src/session-service.ts`.
 DMs support commands/spawn tasks; existing-agent text, buttons and voice outside assigned topic redirect without delivery — `v2/src/event-sources/telegram.ts`.
+Telegram attachments (photo/document/audio/video/animation/voice/video_note/sticker): spawn/followup artifact references, optional captions, 10 files × 5 MiB; grouped albums reject late members — `v2/src/event-sources/telegram.ts`, `v2/src/types.ts`.
 Failed inbound update from an allowed user answers `Message not delivered. Send it again.` once in the same chat/topic; taps on buttons older than 48h answer in the group main — `v2/src/event-sources/telegram.ts`.
 `/spawn` creates its own canonical topic; `/watch` and `/work` Continue return topic links; `/unwatch` removes selected binding and retains topic — `v2/src/event-sources/telegram.ts`, `v2/src/session-service.ts`.
 Recorded bot-message owners: 1000 per source, oldest evicted first — `v2/src/metadata.ts`.

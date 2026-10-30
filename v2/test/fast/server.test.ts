@@ -27,6 +27,7 @@ import {
   SessionStartingError,
   SidecarPortConflictError,
   SidecarProbeUnresponsiveError,
+  SpawnBatchConflictError,
   SessionService,
 } from "../../src/session-service.js";
 import type { SessionRecord, SessionView, SidecarStopView } from "../../src/types.js";
@@ -77,6 +78,40 @@ describe("startServer", () => {
       await server?.stop();
       spawn.mockRestore();
       sources.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("wires source attachment preparation to the requested session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-source-preparation-"));
+    const port = await findFreePort();
+    const configPath = join(root, "config.yaml");
+    await writeFile(
+      configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`,
+    );
+    const sources = vi.spyOn(configuredSources, "startConfiguredSources").mockResolvedValue({
+      stop: vi.fn(),
+      telegramBotIdentity: () => null,
+      clearPollDisabledOverride: () => null,
+    });
+    const prepare = vi
+      .spyOn(SessionService.prototype, "prepareSourceMessage")
+      .mockReturnValue("saved refs");
+    const send = vi.spyOn(SessionService.prototype, "send");
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const callback = sources.mock.calls[0]?.[0].prepareSessionMessage;
+      expect(callback).toBeDefined();
+      const request = { message: "inspect", attachments: [{ name: "file.bin", data: "eA==" }] };
+      expect(await callback?.("target-session", request)).toBe("saved refs");
+      expect(prepare).toHaveBeenCalledExactlyOnceWith("target-session", request);
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      await server.stop();
+      sources.mockRestore();
+      prepare.mockRestore();
+      send.mockRestore();
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -2377,6 +2412,58 @@ describe("startServer", () => {
       await expect(response.json()).resolves.toMatchObject({
         id: "demo-1",
         status: "spawning",
+      });
+    } finally {
+      SessionService.prototype.spawnInBackground = spawnInBackground;
+      await server.stop();
+    }
+  });
+
+  it("maps a background spawn batch conflict to 409 with code and sessionId", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const spawnInBackground = SessionService.prototype.spawnInBackground;
+    SessionService.prototype.spawnInBackground = async function mockSpawnInBackground() {
+      throw new SpawnBatchConflictError("spawn_committed", "demo-3");
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/background`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ project: "demo", prompt: "ship it" }),
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        code: "spawn_committed",
+        sessionId: "demo-3",
+        error:
+          "Session demo-3 was already created from this submission; submit again to start another session",
       });
     } finally {
       SessionService.prototype.spawnInBackground = spawnInBackground;

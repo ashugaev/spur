@@ -54,6 +54,7 @@ import type * as registryModule from "../../src/registry.js";
 import type * as sessionPrModule from "../../src/session-pr.js";
 import type * as releasesCacheModule from "../../src/releases-cache.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
+import type * as sessionArtifactsModule from "../../src/session-artifacts.js";
 import type * as sharedMemoryModule from "../../src/shared-memory.js";
 import type * as todoModule from "../../src/todo.js";
 import type * as reapModule from "../../src/sidecars/reap.js";
@@ -70,6 +71,8 @@ import {
   type SessionListItemView,
   type ScheduleSessionWakeRequest,
   type SendMessageRequest,
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS,
   type ServiceInstanceRecord,
   type SessionMemoryRecord,
   type SessionRecord,
@@ -945,7 +948,8 @@ vi.mock("../../src/session-slots.js", async (importOriginal) => ({
   normalizeSlotLinks: normalizeSlotLinksMock,
 }));
 
-vi.mock("../../src/session-artifacts.js", () => ({
+vi.mock("../../src/session-artifacts.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof sessionArtifactsModule>()),
   ensureSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
     const dir = artifactDirForSession(sessionId);
     mkdirSync(dir, { recursive: true });
@@ -1653,11 +1657,7 @@ async function useRealTodoLedger(): Promise<void> {
 describe("SessionService", () => {
   describe("sidecar endpoint readiness", () => {
     async function setup() {
-      const config = {
-        ...baseConfig(),
-        projects: { api: { ...baseConfig().projects.api, restoreAfterReboot: false } },
-      };
-      config.projects.api.sidecars = {
+      const sidecars: Record<"dev" | "daemon", ProjectConfig["sidecars"][string]> = {
         dev: {
           command: "node app.js",
           autoStart: false,
@@ -1676,6 +1676,12 @@ describe("SessionService", () => {
           ports: {
             tcp: { env: "DAEMON_PORT", start: 4000, end: 4000 },
           },
+        },
+      };
+      const config = {
+        ...baseConfig(),
+        projects: {
+          api: { ...baseConfig().projects.api, restoreAfterReboot: false, sidecars },
         },
       };
       loadConfigMock.mockReturnValue(config);
@@ -1750,6 +1756,54 @@ describe("SessionService", () => {
       });
       return { promise, resolve };
     }
+
+    it("reports listener presence per reserved port without a URL or launcher identity", async () => {
+      const { service, sessions, owner, config, internals } = await setup();
+      config.projects.api.sidecars.daemon.ports = {
+        bound: { env: "BOUND_PORT", start: 4000, end: 4000 },
+        unbound: { env: "UNBOUND_PORT", start: 4001, end: 4001 },
+      };
+      sessions.set(owner.id, {
+        ...owner,
+        sidecarNames: ["daemon"],
+        sidecarPorts: { daemon: { BOUND_PORT: 4000, UNBOUND_PORT: 4001 } },
+        sidecarProcs: {},
+      });
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      snapshotListenersMock.mockResolvedValue({
+        ok: true,
+        byPort: new Map([[4000, new Set<number>()]]),
+      });
+
+      const detail = await service.get(owner.id);
+      const daemon = detail.sidecars.find((view) => view.name === "daemon");
+      expect(daemon?.alive).toBe(true);
+      expect(daemon?.ports).toMatchObject([
+        { port: 4000, listening: true },
+        { port: 4001, listening: false },
+      ]);
+      expect(snapshotListenersMock).toHaveBeenCalledTimes(1);
+      internals.dashboardCache.set(
+        owner.id,
+        await internals.enrichDashboard(sessions.get(owner.id) ?? owner),
+      );
+      const list = await service.list({ view: "dashboard" });
+      expect(
+        list.find((view) => view.id === owner.id)?.sidecars?.find((view) => view.name === "daemon")
+          ?.ports,
+      ).toMatchObject([
+        { port: 4000, listening: true },
+        { port: 4001, listening: false },
+      ]);
+      expect(snapshotListenersMock).toHaveBeenCalledTimes(1);
+
+      nextObservation();
+      snapshotListenersMock.mockResolvedValue({ ok: false });
+      expect(
+        (await service.get(owner.id)).sidecars.find((view) => view.name === "daemon")?.ports,
+      ).toMatchObject([{ listening: null }, { listening: null }]);
+      service.dispose();
+    });
 
     it("restores a linkless setsid listener without tmux and preserves manual slots", async () => {
       const { service, views, owner, sessions } = await setup();
@@ -2107,6 +2161,9 @@ describe("SessionService", () => {
       async (boundary) => {
         const { service, owner, internals } = await setup();
         internals.dashboardCache.set(owner.id, await internals.enrichDashboard(owner));
+        expect(internals.dashboardCache.get(owner.id)?.sidecars?.[0]?.ports[0]?.listening).toBe(
+          true,
+        );
         const entered = signal();
         const release = signal();
         if (boundary === "history") {
@@ -2134,9 +2191,25 @@ describe("SessionService", () => {
         const views = Array.isArray(result) ? result[0]?.sidecars : result.sidecars;
         expect(views?.[0]).not.toHaveProperty("url");
         expect(internals.dashboardCache.get(owner.id)?.sidecars?.[0]?.url).toBeUndefined();
+        expect(views?.[0]?.ports[0]?.listening).toBeNull();
+        expect(
+          internals.dashboardCache.get(owner.id)?.sidecars?.[0]?.ports[0]?.listening,
+        ).toBeNull();
         service.dispose();
       },
     );
+
+    it("retires a cached dashboard port status before the next observation", async () => {
+      const { service, owner, internals } = await setup();
+      internals.dashboardCache.set(owner.id, await internals.enrichDashboard(owner));
+      expect(internals.dashboardCache.get(owner.id)?.sidecars?.[0]?.ports[0]?.listening).toBe(true);
+      internals.invalidateSidecarEndpoint(owner.id, "dev");
+      const list = await service.list({ view: "dashboard" });
+      expect(
+        list.find((view) => view.id === owner.id)?.sidecars?.[0]?.ports[0]?.listening,
+      ).toBeNull();
+      service.dispose();
+    });
 
     it.each(["stop", "reap", "teardown", "replace", "dispose"])(
       "rejects in-flight observation after %s",
@@ -2160,7 +2233,9 @@ describe("SessionService", () => {
           });
         if (action === "dispose") service.dispose();
         pending.resolve({ ok: true, byPort: new Map([[3000, new Set([101])]]) });
-        expect((await request)[0]).not.toHaveProperty("url");
+        const result = await request;
+        expect(result[0]).not.toHaveProperty("url");
+        if (action === "stop") expect(result[0]?.ports[0]?.listening).toBeNull();
         await service.settleBackgroundSpawns();
         expect(internals.sidecarObservationRun).toBeUndefined();
         service.dispose();
@@ -9315,6 +9390,131 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")?.status).toBe(action === "respawn" ? "completed" : "running");
     },
   );
+
+  it("source attachment preparation stores files at workspace anchor without sending", async () => {
+    mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+    const sessions = createSessionStore(
+      runningSession({
+        id: "api-sibling",
+        workspaceId: "api-anchor",
+        worktreePath: TEST_ARTIFACTS_ROOT,
+      }),
+    );
+    const service = await createDisposedSessionService();
+    const text = service.prepareSourceMessage("api-sibling", {
+      message: " inspect file ",
+      attachments: [{ name: "data.csv", data: Buffer.from("csv-bytes").toString("base64") }],
+    });
+    expect(text).toBe(
+      "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-data.csv]\ninspect file",
+    );
+    expect(
+      readFileSync(join(artifactDirForSession("api-anchor"), "1773828300000-data.csv"), "utf8"),
+    ).toBe("csv-bytes");
+    expect(setSessionArtifactOriginMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      "api-anchor",
+      "1773828300000-data.csv",
+      "intentional",
+    );
+    expect(setSessionArtifactUserAddedMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      "api-anchor",
+      "1773828300000-data.csv",
+      true,
+    );
+    expect(inputLogEntries("api-sibling")).toEqual([
+      expect.objectContaining({
+        details: expect.objectContaining({
+          attachments: [{ id: "1773828300000-data.csv", name: "data.csv" }],
+        }),
+      }),
+    ]);
+    expect(sessions.get("api-sibling")?.queuedMessages).toBeUndefined();
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "completed", "killed", "errored", "spawning", "workspace"] as const)(
+    "source attachment preparation rejects %s target before effects",
+    async (scenario) => {
+      mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+      createSessionStore(
+        ...(scenario === "missing"
+          ? []
+          : [
+              runningSession({
+                worktreePath:
+                  scenario === "workspace"
+                    ? join(TEST_ARTIFACTS_ROOT, "absent-worktree")
+                    : TEST_ARTIFACTS_ROOT,
+                status: scenario === "workspace" ? "running" : scenario,
+              }),
+            ]),
+      );
+      const service = await createDisposedSessionService();
+      expect(() =>
+        service.prepareSourceMessage("api-1", {
+          message: "inspect",
+          attachments: [{ name: "file.bin", data: "eA==" }],
+        }),
+      ).toThrow();
+      expect(existsSync(artifactDirForSession("api-1"))).toBe(false);
+      expect(setSessionArtifactOriginMock).not.toHaveBeenCalled();
+      expect(inputLogEntries("api-1")).toEqual([]);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["name", "empty", "base64", "oversize", "count"])(
+    "source attachment preparation validates complete %s list before writing",
+    async (invalid) => {
+      mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+      createSessionStore(runningSession({ worktreePath: TEST_ARTIFACTS_ROOT }));
+      const service = await createDisposedSessionService();
+      const second = {
+        name: invalid === "name" ? "../bad" : "second.bin",
+        data:
+          invalid === "empty"
+            ? ""
+            : invalid === "base64"
+              ? "%%%"
+              : invalid === "oversize"
+                ? Buffer.alloc(MAX_ATTACHMENT_BYTES + 1).toString("base64")
+                : "eQ==",
+      };
+      expect(() =>
+        service.prepareSourceMessage("api-1", {
+          message: "inspect",
+          attachments:
+            invalid === "count"
+              ? Array.from({ length: MAX_ATTACHMENTS + 1 }, () => ({
+                  name: "file.bin",
+                  data: "eA==",
+                }))
+              : [{ name: "first.bin", data: "eA==" }, second],
+        }),
+      ).toThrow();
+      expect(existsSync(artifactDirForSession("api-1"))).toBe(false);
+      expect(setSessionArtifactOriginMock).not.toHaveBeenCalled();
+      expect(inputLogEntries("api-1")).toEqual([]);
+    },
+  );
+
+  it("rejects a startup attachment above the shared byte limit", async () => {
+    const service = await createDisposedSessionService();
+    await expect(
+      service.spawn({
+        project: "api",
+        agent: "codex",
+        prompt: "inspect this",
+        attachments: [
+          { name: "photo.jpg", data: Buffer.alloc(MAX_ATTACHMENT_BYTES + 1).toString("base64") },
+        ],
+      }),
+    ).rejects.toThrow("exceeds 5MB");
+    expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
+  });
 
   it("passes startup image paths into codex launch planning and skips tmux prompt send", async () => {
     buildAgentLaunchPlanMock.mockImplementationOnce(
@@ -38575,7 +38775,7 @@ describe("SessionService", () => {
             name: "daemon",
             alive: true,
             tmuxSession: "api-1--daemon",
-            ports: [{ id: "http", env: "SPUR_RESERVED_PORT_DAEMON", port: 4100 }],
+            ports: [{ id: "http", env: "SPUR_RESERVED_PORT_DAEMON", port: 4100, listening: null }],
           }),
           expect.objectContaining({
             name: "playwright",
@@ -52800,7 +53000,7 @@ describe("SessionService", () => {
       {
         name: "ui",
         alive: false,
-        ports: [{ id: "http", env: "SPUR_RESERVED_PORT_UI", port: 3010 }],
+        ports: [{ id: "http", env: "SPUR_RESERVED_PORT_UI", port: 3010, listening: null }],
         tmuxSession: "api-1--ui",
       },
     ]);
@@ -73700,6 +73900,141 @@ describe("SessionService", () => {
       },
     );
 
+    it("queued Telegram topic gate preserves a committed birth after reply-target disk failure", async () => {
+      const f = await queuedTopicFixture();
+      let candidate = 1;
+      reserveNextSessionIdMock.mockReset().mockImplementation(async () => `api-${candidate++}`);
+      const metadata = await vi.importActual<typeof metadataModule>("../../src/metadata.js");
+      const todo = await vi.importActual<typeof todoModule>("../../src/todo.js");
+      await useRealTodoLedger();
+      readSessionMock.mockImplementation(metadata.readSession);
+      listSessionsMock.mockImplementation(metadata.listSessions);
+      writeSessionMock.mockImplementation(metadata.writeSession);
+      readTelegramReplyTargetMock.mockImplementation(metadata.readTelegramReplyTarget);
+      const blocked = join(TEST_DATA_DIR, "source-state", "telegram", "reply-targets");
+      mkdirSync(dirname(blocked), { recursive: true });
+      writeFileSync(blocked, "blocked reply-target directory");
+      const { preflightBatchId } = await f.service.createPreflightBatch("api");
+      const request = {
+        ...f.request,
+        preflightBatchId,
+        attachments: [
+          { name: "brief.txt", data: Buffer.from("owned startup artifact").toString("base64") },
+        ],
+      };
+      const triggerOrigin = {
+        triggerId: "review",
+        sourceId: "pr-watch",
+        externalId: "acme/api#7",
+        blockIndex: 0,
+      };
+      const path = join(TEST_DATA_DIR, "sessions", "api", "api-1.json");
+      const batchPath = join(TEST_DATA_DIR, "preflight-batches", `${preflightBatchId}.json`);
+      let committedRaw = "";
+      let batchRaw = "";
+      let artifactFiles: string[] = [];
+      const todoPath = join(TEST_DATA_DIR, "sessions", "api-1", "todo.jsonl");
+      let todoRaw = "";
+      writeTelegramReplyTargetMock.mockImplementation((dir, target) => {
+        committedRaw = readFileSync(path, "utf8");
+        batchRaw = readFileSync(batchPath, "utf8");
+        artifactFiles = readdirSync(artifactDirForSession("api-1"));
+        expect(JSON.parse(committedRaw)).toMatchObject({
+          id: "api-1",
+          triggerOrigin,
+          triggerBirthKey: "post-commit-topic",
+          triggerBirthRequest: request,
+          todoLedgerVersion: 1,
+          spawnReceipt: { version: 1 },
+          spawnIntent: { phase: "queued", startupAttachments: [{ name: "brief.txt" }] },
+        });
+        expect(artifactFiles).toHaveLength(1);
+        const committed = metadata.readSession(TEST_DATA_DIR, "api-1");
+        if (!committed) throw new Error("Missing committed record");
+        todo.mutateTodo(
+          TEST_DATA_DIR,
+          committed,
+          { action: "add", text: "retain startup dependency", reason: "accepted fixture" },
+          { kind: "system", source: "spawn" },
+        );
+        todoRaw = readFileSync(todoPath, "utf8");
+        return metadata.writeTelegramReplyTarget(dir, target);
+      });
+      let replacement: InstanceType<typeof f.SessionService> | undefined;
+      const topic = deferred<number>();
+      try {
+        await expect(
+          f.service.spawn(request, {
+            telegramOrigin: f.origin,
+            triggerOrigin,
+            triggerBirthKey: "post-commit-topic",
+          }),
+        ).rejects.toThrow(/EEXIST|ENOTDIR/);
+        expect(committedRaw).not.toBe("");
+        expect.soft(readFileSync(path, "utf8")).toBe(committedRaw);
+        expect.soft(readFileSync(batchPath, "utf8")).toBe(batchRaw);
+        expect.soft(readFileSync(todoPath, "utf8")).toBe(todoRaw);
+        expect.soft(writeSessionMock).toHaveBeenCalledTimes(1);
+        expect.soft(readdirSync(artifactDirForSession("api-1"))).toEqual(artifactFiles);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        await expect(f.service.spawnInBackground(request)).rejects.toMatchObject({
+          payload: { code: "spawn_committed", sessionId: "api-1" },
+        });
+        expect(metadata.listSessions(TEST_DATA_DIR).map((record) => record.id)).toEqual(["api-1"]);
+        f.service.dispose();
+        await f.service.settleBackgroundSpawns();
+        expect(readFileSync(path, "utf8")).toBe(committedRaw);
+        rmSync(blocked);
+        writeTelegramReplyTargetMock.mockImplementation(metadata.writeTelegramReplyTarget);
+        createTelegramTopicMock.mockReturnValue(topic.promise);
+        readSessionArtifactMock.mockImplementation((_dir, _id, id) => {
+          const file = join(artifactDirForSession("api-1"), id);
+          return {
+            id,
+            name: "brief.txt",
+            path: file,
+            kind: "text",
+            size: statSync(file).size,
+            mimeType: "text/plain",
+            createdAt: "2026-03-18T10:05:00.000Z",
+            updatedAt: "2026-03-18T10:05:00.000Z",
+            origin: "intentional",
+            addedByUser: true,
+          };
+        });
+        f.memory(20_000_000_000);
+        replacement = new f.SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        vi.spyOn(sessionServiceInternals(replacement), "waitForSubmitAck").mockResolvedValue({
+          found: true,
+          lastScannedFile: null,
+        });
+        expect(replacement.getTriggerBirth("api", "post-commit-topic", request)?.id).toBe("api-1");
+        expect(readFileSync(todoPath, "utf8")).toBe(todoRaw);
+        const recovery = replacement as unknown as { recoverDurableSpawns(): Promise<void> };
+        await recovery.recoverDurableSpawns();
+        await vi.waitFor(() => expect(createTelegramTopicMock).toHaveBeenCalledTimes(1));
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        topic.resolve(55);
+        await vi.waitFor(() =>
+          expect(metadata.readSession(TEST_DATA_DIR, "api-1")?.status).toBe("running"),
+        );
+        expect(metadata.readTelegramReplyTarget(TEST_DATA_DIR, "api-1")).toMatchObject({
+          sessionId: "api-1",
+          messageThreadId: 55,
+        });
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(metadata.listSessions(TEST_DATA_DIR).map((record) => record.id)).toEqual(["api-1"]);
+      } finally {
+        topic.resolve(55);
+        f.service.dispose();
+        replacement?.dispose();
+        await f.service.settleBackgroundSpawns();
+        await replacement?.settleBackgroundSpawns();
+      }
+    });
+
     it("queued Telegram topic gate holds images and consent until the same canonical ACK", async () => {
       const f = await queuedTopicFixture();
       const topic = deferred<number>();
@@ -77650,5 +77985,351 @@ describe("SessionService", () => {
         service.dispose();
       },
     );
+  });
+
+  describe("background spawn preflight batch conflicts", () => {
+    async function setupBatchService() {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      let nextId = 1;
+      reserveNextSessionIdMock.mockReset().mockImplementation(async () => `api-${nextId++}`);
+      const { SessionService, SpawnBatchConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const store = (
+        service as unknown as {
+          preflightUsageStore: {
+            claim(id: string, project: string, sessionId: string): Promise<unknown>;
+            runAttempt(
+              id: string,
+              project: string,
+              provider: "claude",
+              execute: () => Promise<{ usage: Record<string, number> }>,
+            ): Promise<unknown>;
+          };
+        }
+      ).preflightUsageStore;
+      const { preflightBatchId } = await service.createPreflightBatch("api");
+      return { sessions, service, store, preflightBatchId, SpawnBatchConflictError };
+    }
+
+    function failPlaceholderWrite(mode: "before" | "after") {
+      const original = writeSessionMock.getMockImplementation();
+      let failed = false;
+      writeSessionMock.mockImplementation((dataDir: string, session: SessionRecord) => {
+        if (!failed && session.status === "spawning") {
+          failed = true;
+          if (mode === "after") original?.(dataDir, session);
+          throw new Error("disk full");
+        }
+        original?.(dataDir, session);
+      });
+    }
+
+    it("releases an uncommitted owned batch after disposal during its claim", async () => {
+      const { sessions, service, store, preflightBatchId } = await setupBatchService();
+      const claim = store.claim.bind(store);
+      vi.spyOn(store, "claim").mockImplementationOnce(async (...args) => {
+        const usage = await claim(...args);
+        service.dispose();
+        return usage;
+      });
+      await expect(
+        service.spawnInBackground({
+          project: "api",
+          prompt: "cancel before commit",
+          preflightBatchId,
+        }),
+      ).rejects.toThrow(/disposed/);
+      expect(sessions.size).toBe(0);
+      await expect(store.claim(preflightBatchId, "api", "api-9")).resolves.toBeDefined();
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["stopped", "completed"] as const)(
+      "preserves the complete current %s record after accepted ancillary failure",
+      async (status) => {
+        const { sessions, service, preflightBatchId } = await setupBatchService();
+        readHostMemoryMock.mockReturnValue({
+          totalBytes: 65_000_000 * 1024,
+          availableBytes: 7_000_000_000,
+          swapTotalBytes: 0,
+          swapFreeBytes: 0,
+        });
+        let current: SessionRecord | undefined;
+        writeTelegramReplyTargetMock.mockImplementationOnce(() => {
+          const accepted = sessions.get("api-1");
+          if (!accepted?.spawnReceipt || !accepted.spawnIntent)
+            throw new Error("Missing accepted fixture");
+          current = {
+            ...accepted,
+            status,
+            error: "peer closeout",
+            updatedAt: "2026-03-18T10:06:00.000Z",
+          };
+          delete current.spawnIntent;
+          sessions.set(current.id, clone(current));
+          throw new Error("reply target failed");
+        });
+        try {
+          await expect(
+            service.spawn(
+              { project: "api", prompt: "current peer", preflightBatchId },
+              {
+                acceptQueued: true,
+                telegramOrigin: { projectId: "api", sourceId: "chat", chatId: 123 },
+              },
+            ),
+          ).rejects.toThrow("reply target failed");
+          expect(current).toBeDefined();
+          expect(sessions.get("api-1")).toEqual(current);
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          await expect(
+            service.spawnInBackground({ project: "api", prompt: "duplicate", preflightBatchId }),
+          ).rejects.toMatchObject({ payload: { code: "spawn_committed", sessionId: "api-1" } });
+        } finally {
+          service.dispose();
+          await service.settleBackgroundSpawns();
+        }
+      },
+    );
+
+    it("preserves the committed claim and dependencies when canonical lookup is unreadable", async () => {
+      const { sessions, service, preflightBatchId } = await setupBatchService();
+      readHostMemoryMock.mockReturnValue({
+        totalBytes: 65_000_000 * 1024,
+        availableBytes: 7_000_000_000,
+        swapTotalBytes: 0,
+        swapFreeBytes: 0,
+      });
+      let current: SessionRecord | undefined;
+      const read = readSessionMock.getMockImplementation();
+      writeTelegramReplyTargetMock.mockImplementationOnce(() => {
+        current = clone(sessions.get("api-1"));
+        if (!current?.spawnReceipt || !current.spawnIntent)
+          throw new Error("Missing accepted fixture");
+        readSessionMock.mockImplementation(() => {
+          throw new Error("unreadable canonical record");
+        });
+        throw new Error("original ancillary failure");
+      });
+      try {
+        await expect(
+          service.spawn(
+            { project: "api", prompt: "unknown record", preflightBatchId },
+            {
+              acceptQueued: true,
+              telegramOrigin: { projectId: "api", sourceId: "chat", chatId: 123 },
+            },
+          ),
+        ).rejects.toThrow("original ancillary failure");
+        expect(sessions.get("api-1")).toEqual(current);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      } finally {
+        if (read) readSessionMock.mockImplementation(read);
+        service.dispose();
+        await service.settleBackgroundSpawns();
+      }
+    });
+
+    it("rejects a retry of a committed batch with spawn_committed and the owner id", async () => {
+      const { sessions, service, preflightBatchId, SpawnBatchConflictError } =
+        await setupBatchService();
+      const request = { project: "api", prompt: "hello", preflightBatchId };
+      const first = await service.spawnInBackground(request);
+
+      const retry = service.spawnInBackground(request);
+      await expect(retry).rejects.toBeInstanceOf(SpawnBatchConflictError);
+      await expect(retry).rejects.toMatchObject({
+        statusCode: 409,
+        payload: {
+          code: "spawn_committed",
+          sessionId: first.id,
+          error: `Session ${first.id} was already created from this submission; submit again to start another session`,
+        },
+      });
+      expect([...sessions.keys()]).toEqual([first.id]);
+    });
+
+    it("rejects a retry of an errored batch owner with spawn_failed", async () => {
+      const { sessions, service, store, preflightBatchId } = await setupBatchService();
+      await store.claim(preflightBatchId, "api", "api-9");
+      sessions.set("api-9", {
+        id: "api-9",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-9",
+        worktree: false,
+        worktreePath: "/repo/api",
+        tmuxSession: "api-9",
+        launchCommand: "",
+        status: "errored",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+
+      await expect(
+        service.spawnInBackground({ project: "api", prompt: "hello", preflightBatchId }),
+      ).rejects.toMatchObject({ payload: { code: "spawn_failed", sessionId: "api-9" } });
+    });
+
+    it("rejects a batch claimed by a missing session with spawn_failed and keeps the claim", async () => {
+      const { service, store, preflightBatchId } = await setupBatchService();
+      await store.claim(preflightBatchId, "api", "api-9");
+      const request = { project: "api", prompt: "hello", preflightBatchId };
+
+      await expect(service.spawnInBackground(request)).rejects.toMatchObject({
+        payload: { code: "spawn_failed", sessionId: "api-9" },
+      });
+      await expect(service.spawnInBackground(request)).rejects.toMatchObject({
+        payload: { code: "spawn_failed", sessionId: "api-9" },
+      });
+    });
+
+    it("reports spawn_in_progress while the owner is still preparing", async () => {
+      const { service, store, preflightBatchId } = await setupBatchService();
+      const request = { project: "api", prompt: "hello", preflightBatchId };
+      const realClaim = store.claim.bind(store);
+      let concurrent: Promise<unknown> | undefined;
+      vi.spyOn(store, "claim").mockImplementationOnce(async (id, project, sessionId) => {
+        const usage = await realClaim(id, project, sessionId);
+        concurrent = service.spawnInBackground(request).then(
+          () => null,
+          (error: unknown) => error,
+        );
+        await concurrent;
+        return usage;
+      });
+
+      const first = await service.spawnInBackground(request);
+
+      expect(await concurrent).toMatchObject({
+        payload: { code: "spawn_in_progress", sessionId: first.id },
+      });
+    });
+
+    it("creates one placeholder for two concurrent background spawns of one batch", async () => {
+      const { sessions, service, preflightBatchId, SpawnBatchConflictError } =
+        await setupBatchService();
+      const request = { project: "api", prompt: "hello", preflightBatchId };
+
+      const results = await Promise.allSettled([
+        service.spawnInBackground(request),
+        service.spawnInBackground(request),
+      ]);
+
+      const fulfilled = results.flatMap((result) =>
+        result.status === "fulfilled" ? [result] : [],
+      );
+      const rejected = results.flatMap((result) => (result.status === "rejected" ? [result] : []));
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      const winnerId = fulfilled[0]?.value.id;
+      expect(rejected[0]?.reason).toBeInstanceOf(SpawnBatchConflictError);
+      expect(rejected[0]?.reason).toMatchObject({ payload: { sessionId: winnerId } });
+      expect(
+        (rejected[0]?.reason as InstanceType<typeof SpawnBatchConflictError>).payload.code,
+      ).not.toBe("spawn_failed");
+      expect([...sessions.keys()]).toEqual([winnerId]);
+    });
+
+    it("keeps the original failure and releases an uncommitted batch when cleanup throws", async () => {
+      const { sessions, service, store, preflightBatchId } = await setupBatchService();
+      failPlaceholderWrite("before");
+      deleteAgentHookStateMock.mockImplementationOnce(() => {
+        throw new Error("cleanup failed");
+      });
+      try {
+        await expect(
+          service.spawnInBackground({
+            project: "api",
+            prompt: "failed preparation",
+            preflightBatchId,
+          }),
+        ).rejects.toThrow("disk full");
+        expect(sessions.size).toBe(0);
+        await expect(store.claim(preflightBatchId, "api", "api-9")).resolves.toBeDefined();
+      } finally {
+        service.dispose();
+        await service.settleBackgroundSpawns();
+      }
+    });
+
+    it("releases the claim when the placeholder write fails", async () => {
+      const { sessions, service, store, preflightBatchId } = await setupBatchService();
+      await store.runAttempt(preflightBatchId, "api", "claude", async () => ({
+        usage: { inputTokens: 4, outputTokens: 1, totalTokens: 5 },
+      }));
+      const request = { project: "api", prompt: "hello", preflightBatchId };
+      failPlaceholderWrite("before");
+
+      await expect(service.spawnInBackground(request)).rejects.toThrow("disk full");
+      const retry = await service.spawnInBackground(request);
+
+      expect(retry.id).toBe("api-2");
+      expect(sessions.get("api-2")?.preflightTokenUsage).toMatchObject({
+        status: "measured",
+        totalTokens: 5,
+      });
+    });
+
+    it("keeps the claim when writeSession persists the placeholder then throws", async () => {
+      const { sessions, service, preflightBatchId, SpawnBatchConflictError } =
+        await setupBatchService();
+      const request = { project: "api", prompt: "hello", preflightBatchId };
+      failPlaceholderWrite("after");
+
+      await expect(service.spawnInBackground(request)).rejects.toThrow("disk full");
+      const retry = service.spawnInBackground(request);
+
+      await expect(retry).rejects.toBeInstanceOf(SpawnBatchConflictError);
+      await expect(retry).rejects.toMatchObject({
+        payload: { code: "spawn_committed", sessionId: "api-1" },
+      });
+      expect([...sessions.keys()]).toEqual(["api-1"]);
+    });
+
+    it("rejects a branch preview on a committed batch with spawn_committed", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            preflight: { prompt: "Suggest a branch name from the task context." },
+          },
+        },
+      });
+      runSpawnPreflightMock.mockResolvedValue({ branch: "feature/suggested" });
+      const { service, preflightBatchId, SpawnBatchConflictError } = await setupBatchService();
+      const first = await service.spawnInBackground({
+        project: "api",
+        prompt: "hello",
+        preflightBatchId,
+      });
+
+      const preview = service.preflight({ project: "api", prompt: "hello", preflightBatchId });
+
+      await expect(preview).rejects.toBeInstanceOf(SpawnBatchConflictError);
+      await expect(preview).rejects.toMatchObject({
+        statusCode: 409,
+        payload: { code: "spawn_committed", sessionId: first.id },
+      });
+    });
+
+    it("releases the claim of a replaced batch under the resolved id", async () => {
+      const { sessions, service } = await setupBatchService();
+      const requested = "00000000-0000-4000-8000-0000000000aa";
+      mkdirSync(join(TEST_DATA_DIR, "preflight-batches"), { recursive: true });
+      writeFileSync(join(TEST_DATA_DIR, "preflight-batches", `${requested}.json`), "{corrupt");
+      const request = { project: "api", prompt: "hello", preflightBatchId: requested };
+      failPlaceholderWrite("before");
+
+      await expect(service.spawnInBackground(request)).rejects.toThrow("disk full");
+      const retry = await service.spawnInBackground(request);
+
+      expect(retry.id).toBe("api-2");
+      expect([...sessions.keys()]).toEqual(["api-2"]);
+    });
   });
 });

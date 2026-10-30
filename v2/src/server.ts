@@ -82,6 +82,7 @@ import {
   SessionStartingError,
   SidecarPortConflictError,
   SidecarProbeUnresponsiveError,
+  SpawnBatchConflictError,
   WakeDispatchConflictError,
   WakeTargetMissingError,
 } from "./session-service.js";
@@ -914,6 +915,8 @@ export async function startServer(
         listSessions: async () =>
           (await service.list({ view: "dashboard" })).map(projectSourceSession),
         getSession: (sessionId) => sourceSessionById(service, sessionId),
+        prepareSessionMessage: async (sessionId, request) =>
+          service.prepareSourceMessage(sessionId, request),
         workbench: createSourceWorkbench(service),
         telegramConversations: {
           ensureTopic: (sessionId, origin) => service.ensureTelegramTopic(sessionId, origin),
@@ -2462,7 +2465,8 @@ export async function startServer(
         error instanceof SidecarPortConflictError ||
         error instanceof OpenPrActionRequiredError ||
         error instanceof GithubPrCheckUnavailableError ||
-        error instanceof SessionNotRestorableError
+        error instanceof SessionNotRestorableError ||
+        error instanceof SpawnBatchConflictError
       ) {
         failRequest(response, error.statusCode, message, {
           method,

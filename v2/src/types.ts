@@ -1398,6 +1398,8 @@ export interface SidecarPortView {
   id: string;
   env: string;
   port: number;
+  /** Host TCP listener presence; null when observation is unavailable or invalidated. */
+  listening: boolean | null;
 }
 
 // A desk-shared (non-mcp) project sidecar's `tmuxSession` is
@@ -1640,6 +1642,9 @@ export type TelegramSpawnOrigin = Pick<
   TelegramReplyTarget,
   "projectId" | "sourceId" | "chatId" | "messageThreadId"
 >;
+
+export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+export const MAX_ATTACHMENTS = 10;
 
 export interface SendMessageAttachment {
   name: string;
@@ -1885,6 +1890,12 @@ export interface SessionNotRestorablePayload {
   sessionId: string;
   reason: string;
   availableActions: ("force_kill" | "respawn")[];
+}
+
+export interface SpawnBatchConflictPayload {
+  code: "spawn_in_progress" | "spawn_committed" | "spawn_failed";
+  sessionId: string;
+  error: string;
 }
 
 export interface RespawnSessionRequest {
