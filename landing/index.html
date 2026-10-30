@@ -124,7 +124,7 @@
                 "name": "Which operating systems work?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "Ubuntu is the tested target, bare metal or a VM; verified on 24.04 down to a ~1 GB box, 2 GB recommended. macOS and Windows are partial — expect to sort out host differences yourself."
+                  "text": "Ubuntu is the tested platform, on a physical computer or virtual machine. Verified on Ubuntu 24.04 with about 1 GB of RAM; 2 GB is recommended. macOS and Windows have partial support and may need manual setup."
                 }
               },
               {
@@ -153,10 +153,10 @@
               },
               {
                 "@type": "Question",
-                "name": "Does my code leave the box?",
+                "name": "Where does my data go?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "Spur stores its state on your machine and has no Spur cloud. Agent CLIs and configured integrations still send data to their own providers. The web UI binds to loopback; the default Tailscale setup adds your tailnet IP, and public exposure is an explicit override."
+                  "text": "Spur stores its state on the computer or server where you install it. There is no Spur cloud. Agent CLIs and configured integrations still send data to their own providers. The web UI listens on localhost. Once Tailscale is connected, the default setup also makes it available at your private Tailscale address. Public exposure requires the explicit --expose-web flag."
                 }
               }
             ]
@@ -1509,7 +1509,7 @@
       <main id="main">
         <header class="hero shell" id="top">
           <div class="eyebrow">
-            <span class="pill"><i class="dot"></i> Runs on your machine</span>
+            <span class="pill"><i class="dot"></i> Runs on your computer or server</span>
             <span class="pill">Open source</span>
           </div>
 
@@ -1529,7 +1529,21 @@
           </p>
 
           <div class="hero-cta">
-            <a class="btn primary" href="#install">Get Spur &rarr;</a>
+            <a class="btn primary" href="https://github.com/ashugaev/spur" rel="noopener">
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 16 16"
+                fill="currentColor"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <path
+                  d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"
+                />
+              </svg>
+              Get Spur &rarr;
+            </a>
             <a class="btn" href="#dashboard">See it running</a>
           </div>
 
@@ -1650,14 +1664,15 @@
         <section id="architecture" class="shell" aria-labelledby="architecture-h">
           <div class="sec-head rv" data-n="01">
             <span class="mono-label">How you reach them</span>
-            <h2 id="architecture-h">Your box holds the agents. Your tailnet is the door.</h2>
+            <h2 id="architecture-h">Your agents run on your computer or server.</h2>
             <p>
-              Agents live in tmux on a machine you own. Every device attaches to the same running
-              session.
+              Install Spur on a computer, a dedicated server or a virtual machine. Your agents run
+              there; connect to the same sessions from your other devices.
             </p>
             <p>
-              The web UI binds to loopback; the default Tailscale setup adds your tailnet IP. Public
-              exposure requires the explicit <code>--expose-web</code> flag.
+              The web UI listens on localhost. Once Tailscale is connected, the default setup also
+              makes it available at your private Tailscale address. Public exposure requires the
+              explicit <code>--expose-web</code> flag.
             </p>
           </div>
 
@@ -1999,8 +2014,8 @@
               </svg>
               <h3>Spur has no cloud relay.</h3>
               <p>
-                Spur stores its state on your machine. Agent CLIs and configured integrations still
-                send data to their own providers.
+                Spur stores its state on the computer or server where you install it. Agent CLIs and
+                configured integrations still send data to their own providers.
               </p>
             </article>
             <article class="cell">
@@ -2101,10 +2116,10 @@
             <div class="install-body">
               <div class="cmd">
                 <code id="installcmd"
-                  >Read
-                  https://raw.githubusercontent.com/ashugaev/spur/main/docs/install-from-npm.md and
-                  install and run Spur on this machine end to end, following the guide. Do the steps
-                  yourself; don't ask me to run what you can run.</code
+                  >Follow
+                  https://raw.githubusercontent.com/ashugaev/spur/main/docs/install-from-npm.md to
+                  install and start Spur in this environment. Run the steps yourself where possible,
+                  then confirm Spur is running.</code
                 >
               </div>
               <button class="copy" data-copy="#installcmd" aria-label="Copy the install prompt">
@@ -2137,7 +2152,8 @@
                   </li>
                   <li><i class="c-ready"></i>Register daemon, web and MCP systemd user services</li>
                   <li>
-                    <i class="c-attention"></i>Put the UI on your tailnet, not a public interface
+                    <i class="c-attention"></i>Make the UI available through your private Tailscale
+                    network
                   </li>
                 </ul>
               </div>
@@ -2146,14 +2162,16 @@
                 <span class="mono-label">Before you start</span>
                 <ul class="reach">
                   <li>
-                    <i class="c-ready"></i>Ubuntu, bare metal or a VM. This is the tested target
+                    <i class="c-ready"></i>Ubuntu on a physical computer or virtual machine. This is
+                    the tested platform
                   </li>
                   <li>
                     <i class="c-attention"></i>macOS and Windows: partial, expect to sort out host
                     differences
                   </li>
                   <li>
-                    <i class="c-working"></i>Node 22.13+ (22.x) or 24+, plus tmux and git on the box
+                    <i class="c-working"></i>Node 22.13+ (22.x), or Node 24 and later, plus tmux and
+                    git on the same computer or server
                   </li>
                   <li><i class="c-brand"></i>Your agent CLIs installed and already logged in</li>
                 </ul>
@@ -2200,9 +2218,9 @@
                 Which operating systems work?<span class="pm" aria-hidden="true">+</span>
               </summary>
               <div class="ans">
-                Ubuntu is the tested target, bare metal or a VM; verified on 24.04 down to a ~1 GB
-                box, 2 GB recommended. macOS and Windows are partial — expect to sort out host
-                differences yourself.
+                Ubuntu is the tested platform, on a physical computer or virtual machine. Verified
+                on Ubuntu 24.04 with about 1 GB of RAM; 2 GB is recommended. macOS and Windows have
+                partial support and may need manual setup.
               </div>
             </details>
             <details>
@@ -2234,14 +2252,13 @@
               </div>
             </details>
             <details>
-              <summary>
-                Does my code leave the box?<span class="pm" aria-hidden="true">+</span>
-              </summary>
+              <summary>Where does my data go?<span class="pm" aria-hidden="true">+</span></summary>
               <div class="ans">
-                Spur stores its state on your machine and has no Spur cloud. Agent CLIs and
-                configured integrations still send data to their own providers. The web UI binds to
-                loopback; the default Tailscale setup adds your tailnet IP, and public exposure is
-                an explicit override.
+                Spur stores its state on the computer or server where you install it. There is no
+                Spur cloud. Agent CLIs and configured integrations still send data to their own
+                providers. The web UI listens on localhost. Once Tailscale is connected, the default
+                setup also makes it available at your private Tailscale address. Public exposure
+                requires the explicit <code>--expose-web</code> flag.
               </div>
             </details>
           </div>

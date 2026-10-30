@@ -39,12 +39,31 @@ test("navigation stays on-page and GitHub buttons identify their destination", (
   const githubButtons = [...html.matchAll(/<a\b[^>]*class="btn(?:\s[^"]*)?"[^>]*>[\s\S]*?<\/a>/g)]
     .map(([anchor]) => anchor)
     .filter((anchor) => /href="https:\/\/github\.com\//.test(anchor));
-  assert.equal(githubButtons.length, 1);
+  assert.equal(githubButtons.length, 2);
   for (const button of githubButtons) {
     assert.match(button, /<svg\b[^>]*aria-hidden="true"[^>]*focusable="false"/);
-    assert.match(button, /href="https:\/\/github\.com\/ashugaev\/spur\/stargazers"/);
-    assert.equal(button.replace(/<[^>]+>/g, "").trim(), "Star on GitHub");
   }
+  const heroButtons = html.match(/<div class="hero-cta">[\s\S]*?<\/div>/)?.[0];
+  assert.ok(heroButtons, "missing hero buttons");
+  assert.match(heroButtons, /href="https:\/\/github\.com\/ashugaev\/spur"/);
+  assert.match(heroButtons, /Get Spur &rarr;/);
+  assert.match(heroButtons, /href="#dashboard">See it running<\/a>/);
+  const starButton = githubButtons.find((button) => /\/stargazers"/.test(button));
+  assert.ok(starButton, "missing GitHub star button");
+  assert.equal(starButton.replace(/<[^>]+>/g, "").trim(), "Star on GitHub");
+});
+
+test("hosting copy names physical and virtual computers without box metaphors", () => {
+  const architecture = section("architecture");
+  assert.match(architecture, /computer, a dedicated server or a virtual machine/);
+  assert.match(architecture, /connect to the same sessions from your other devices/);
+  const visibleBody = html
+    .slice(html.indexOf("<body>"))
+    .replace(/<script\b[\s\S]*?<\/script>/g, "")
+    .replace(/<[^>]+>/g, "");
+  assert.doesNotMatch(visibleBody, /\bbox\b|machine you own/i);
+  const { visible } = faqAnswer("Which operating systems work?");
+  assert.match(visible, /about 1 GB of RAM; 2 GB is recommended/);
 });
 
 test("hero routes supported events through one accessible visual", () => {
@@ -79,7 +98,7 @@ test("architecture owns one description and two hidden responsive drawings", () 
   const heading = architecture.slice(0, architecture.indexOf('<figure class="arch'));
   assert.match(
     heading,
-    /The web UI binds to loopback; the default Tailscale setup adds your tailnet IP\. Public\s+exposure requires the explicit <code>--expose-web<\/code> flag\./,
+    /The web UI listens on localhost\. Once Tailscale is connected,[\s\S]*?your private Tailscale address\. Public exposure requires the\s+explicit <code>--expose-web<\/code> flag\./,
   );
   assert.match(architecture, /<figure class="arch rv" role="img" aria-labelledby="arch-desc">/);
   assert.equal((architecture.match(/id="arch-desc"/g) ?? []).length, 1);
@@ -130,11 +149,11 @@ test("truth copy and FAQ structured data stay aligned", () => {
   assert.match(html, /<h3>Spur has no cloud relay\.<\/h3>/);
   assert.match(
     html,
-    /Spur stores its state on your machine\. Agent CLIs and configured integrations still\s+send data to their own providers\./,
+    /Spur stores its state on the computer or server where you install it\. Agent CLIs and\s+configured integrations still send data to their own providers\./,
   );
   const answer =
-    "Spur stores its state on your machine and has no Spur cloud. Agent CLIs and configured integrations still send data to their own providers. The web UI binds to loopback; the default Tailscale setup adds your tailnet IP, and public exposure is an explicit override.";
-  const { visible, json } = faqAnswer("Does my code leave the box?");
+    "Spur stores its state on the computer or server where you install it. There is no Spur cloud. Agent CLIs and configured integrations still send data to their own providers. The web UI listens on localhost. Once Tailscale is connected, the default setup also makes it available at your private Tailscale address. Public exposure requires the explicit --expose-web flag.";
+  const { visible, json } = faqAnswer("Where does my data go?");
   assert.equal(visible, answer);
   assert.equal(json, answer);
   assert.equal((html.match(/class="pm" aria-hidden="true"/g) ?? []).length, 7);
@@ -194,7 +213,7 @@ test("installation requirements match supported Node engines and installed servi
     await readFile(new URL("../../package.json", import.meta.url), "utf8"),
   );
   assert.equal(manifest.engines.node, "^22.13.0 || >=24");
-  assert.match(install, /Node 22\.13\+ \(22\.x\) or 24\+/);
+  assert.match(install, /Node 22\.13\+ \(22\.x\), or Node 24 and later/);
   assert.doesNotMatch(install, /Node 20|both as systemd/);
   assert.match(install, /daemon, web and MCP systemd user services/);
 });
