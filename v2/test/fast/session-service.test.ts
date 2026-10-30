@@ -1485,6 +1485,7 @@ type SessionServiceInternals = {
     options: { entryPoint: "send" | "deliver" | "flush" },
   ): Promise<unknown>;
   maybeNudgeTodo(session: SessionRecord): Promise<void>;
+  requeueTypedMessageAtHead(sessionId: string, message: string): void;
   enrichWithClassified(
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
@@ -4428,6 +4429,69 @@ describe("SessionService", () => {
       expect(send).toHaveBeenCalledTimes(3);
       expect(send.mock.calls.at(-1)?.[1]).toContain("Choose the release window");
       service.dispose();
+    });
+
+    it("skips every refused ToDo reminder resend before authorizing it, and pastes once per nudge", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      listSessionsMock.mockReturnValue([]);
+      await useRealTodoLedger();
+      agentEarlySubmitResendAllowedMock.mockResolvedValue(false);
+      createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+        agent === "claude" ? { scan: vi.fn() } : null,
+      );
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      try {
+        await service.mutateTodo(
+          session.id,
+          { action: "add", text: "Ship it", reason: "Session objective" },
+          { kind: "agent", agent: "claude", sessionId: session.id },
+        );
+        const internals = sessionServiceInternals(service);
+        const windows: unknown[] = [];
+        vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async (_binding, _text, ms) => {
+          windows.push(ms);
+          return { found: false, lastScannedFile: "/x.jsonl" };
+        });
+        const authorized = vi.fn();
+        const completeAgentMessage = (
+          service as unknown as {
+            completeAgentMessage: (
+              started: unknown,
+              options?: { authorizeResend?: (send: () => Promise<void>) => Promise<boolean> },
+            ) => Promise<unknown>;
+          }
+        ).completeAgentMessage.bind(service);
+        vi.spyOn(
+          service as unknown as { completeAgentMessage: typeof completeAgentMessage },
+          "completeAgentMessage",
+        ).mockImplementation((started, options) =>
+          completeAgentMessage(started, {
+            ...options,
+            authorizeResend: (send) => {
+              authorized();
+              return options?.authorizeResend?.(send) ?? Promise.resolve(false);
+            },
+          }),
+        );
+        sendMessageToTmuxMock.mockClear();
+        agentEarlySubmitResendAllowedMock.mockClear();
+        sendSubmitKeyToTmuxMock.mockClear();
+
+        await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+
+        expect(windows).toEqual([5_000, 5_000, 5_000, 5_000]);
+        expect(agentEarlySubmitResendAllowedMock).toHaveBeenCalledTimes(3);
+        expect(authorized).not.toHaveBeenCalled();
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      } finally {
+        service.dispose();
+      }
     });
 
     function openLedgerProjection(): TodoProjection {
@@ -11605,6 +11669,76 @@ describe("SessionService", () => {
 
       expect(windowsOf(waitForAckMock)).toEqual([300_000]);
     });
+
+    describe("interactive send", () => {
+      const notFound = { found: false, lastScannedFile: null };
+
+      it("sends no Enter and re-checks the gate every window while claude is gated", async () => {
+        agentEarlySubmitResendAllowedMock.mockResolvedValue(false);
+        const service = await claudeService();
+        const waitForAckMock = vi
+          .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+          .mockResolvedValue(notFound);
+
+        await expect(
+          sessionServiceInternals(service).sendAgentMessage(claudeSession, "follow up", {
+            interactive: true,
+          }),
+        ).rejects.toMatchObject({ name: "SubmitAckTimeoutError", agent: "claude" });
+
+        expect(windowsOf(waitForAckMock)).toEqual([5_000, 5_000, 5_000, 5_000]);
+        expect(agentEarlySubmitResendAllowedMock).toHaveBeenCalledTimes(3);
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      });
+
+      it("sends Enter once the gate opens", async () => {
+        agentEarlySubmitResendAllowedMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+        const service = await claudeService();
+        vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+          .mockResolvedValueOnce(notFound)
+          .mockResolvedValueOnce(notFound)
+          .mockResolvedValue({ found: true, lastScannedFile: "/some/file.jsonl" });
+
+        await sessionServiceInternals(service).sendAgentMessage(claudeSession, "follow up", {
+          interactive: true,
+        });
+
+        expect(agentEarlySubmitResendAllowedMock).toHaveBeenCalledTimes(2);
+        expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
+      });
+
+      it("passes slashCommand to the gate", async () => {
+        const service = await claudeService();
+        vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+          .mockResolvedValueOnce(notFound)
+          .mockResolvedValue({ found: true, lastScannedFile: "/some/file.jsonl" });
+
+        await sessionServiceInternals(service).sendAgentMessage(claudeSession, " /model", {
+          interactive: true,
+        });
+
+        expect(agentEarlySubmitResendAllowedMock).toHaveBeenCalledWith(
+          "claude",
+          expect.objectContaining({ slashCommand: true }),
+        );
+      });
+
+      it("never consults the gate on a launch send", async () => {
+        agentEarlySubmitResendAllowedMock.mockResolvedValue(false);
+        const service = await claudeService();
+        vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue(notFound);
+
+        await expect(
+          sessionServiceInternals(service).sendAgentMessage(claudeSession, "launch text", {
+            freshLaunch: true,
+            interactive: true,
+          }),
+        ).resolves.toBe("submit_unconfirmed");
+
+        expect(agentEarlySubmitResendAllowedMock).not.toHaveBeenCalled();
+        expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
+      });
+    });
   });
 
   it("retries codex submit with a bare Enter when the first rollout ack does not arrive", async () => {
@@ -18529,6 +18663,102 @@ describe("SessionService", () => {
         now += 30_000;
         vi.setSystemTime(new Date(now));
         expect(typedMessages()).toEqual(["first", "second"]);
+      });
+    });
+
+    describe("claude gate refuses every interactive resend", () => {
+      beforeEach(() => {
+        agentEarlySubmitResendAllowedMock.mockResolvedValue(false);
+      });
+
+      async function gatedService() {
+        mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:04:00.000Z") });
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession());
+        const service = await liveService();
+        const waitForAck = vi
+          .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+          .mockResolvedValue({ found: false, lastScannedFile: "/x.jsonl" });
+        return { sessions, service, waitForAck };
+      }
+
+      it("writes the submit_unconfirmed hold and sends no resend Enter on a recovered direct send", async () => {
+        const { sessions, service, waitForAck } = await gatedService();
+
+        const sent = await service.send("api-1", { message: "now", queue: false });
+
+        expect(sent.submitUnconfirmedAt).toEqual(expect.any(String));
+        expect(sessions.get("api-1")?.submitUnconfirmedAt).toEqual(expect.any(String));
+        expect(waitForAck.mock.calls.map(([, , windowMs]) => windowMs)).toEqual([
+          5_000, 5_000, 5_000, 5_000,
+        ]);
+        expect(agentEarlySubmitResendAllowedMock).toHaveBeenCalledTimes(3);
+        expect(typedMessages()).toEqual(["now"]);
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      });
+
+      it("holds and keeps the queue head consumed on a recovered flush, with no resend Enter", async () => {
+        const { sessions, service } = await gatedService();
+        sessions.set(
+          "api-1",
+          runningSession({ queuedMessages: { messages: ["first"], awaitingPrompt: false } }),
+        );
+
+        await service.flushQueuedMessage("api-1", "first");
+
+        expect(sessions.get("api-1")?.submitUnconfirmedAt).toEqual(expect.any(String));
+        expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+        expect(typedMessages()).toEqual(["first"]);
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      });
+
+      it("holds without requeueing the head on a recovered queued drain, with no resend Enter", async () => {
+        const { sessions, service } = await gatedService();
+        const requeue = vi.spyOn(sessionServiceInternals(service), "requeueTypedMessageAtHead");
+
+        await service.send("api-1", { message: "first", queue: true });
+        await waitForRealTime(() => {
+          expect(sessions.get("api-1")?.submitUnconfirmedAt).toEqual(expect.any(String));
+        });
+
+        expect(requeue).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+        expect(sessions.get("api-1")?.queuedMessageTyped).toEqual(
+          expect.objectContaining({ message: "first" }),
+        );
+        expect(typedMessages()).toEqual(["first"]);
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      });
+
+      it("writes no hold and sends no resend Enter for a slash send", async () => {
+        const { sessions, service } = await gatedService();
+
+        const sent = await service.send("api-1", { message: "/model", queue: false });
+
+        expect(sent.submitUnconfirmedAt).toBeUndefined();
+        expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+        expect(agentEarlySubmitResendAllowedMock).toHaveBeenCalledWith(
+          "claude",
+          expect.objectContaining({ slashCommand: true }),
+        );
+        expect(typedMessages()).toEqual(["/model"]);
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      });
+
+      it("never consults the gate once the agent probe reads dead", async () => {
+        const { service, waitForAck } = await gatedService();
+        // Alive for the pre-send checks, dead from the first ack miss on.
+        waitForAck.mockImplementation(async () => {
+          isProcessRunningInTmuxMock.mockResolvedValue(false);
+          return { found: false, lastScannedFile: "/x.jsonl" };
+        });
+
+        await expect(service.send("api-1", { message: "now", queue: false })).rejects.toThrow();
+
+        expect(typedMessages()).toEqual(["now"]);
+        expect(waitForAck).toHaveBeenCalledTimes(1);
+        expect(agentEarlySubmitResendAllowedMock).not.toHaveBeenCalled();
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
       });
     });
 
