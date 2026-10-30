@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
 
 // Ordering is the property under test: a session must not be able to spawn
 // before the npm global-prefix pin file exists, so `ensureNpmPinFile` must
@@ -78,7 +79,8 @@ vi.mock("../../src/host-skills.js", () => ({
   renderHostSkillWarnings: vi.fn(() => []),
 }));
 
-vi.mock("../../src/runtime-tmux.js", () => ({
+vi.mock("../../src/runtime-tmux.js", async (importOriginal) => ({
+  TmuxProbeUnknownError: (await importOriginal<typeof RuntimeTmuxModule>()).TmuxProbeUnknownError,
   setTmuxSocketName: vi.fn(),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   withTmuxSocketArgs: vi.fn((args: string[]) => args),

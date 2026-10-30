@@ -1982,6 +1982,10 @@ function withAgentModeOptions(
   };
 }
 
+class AgentProcessProbeUnknownError extends TmuxProbeUnknownError {
+  retentionAttempted = false;
+}
+
 function sessionProcessMatchers(session: Pick<SessionRecord, "agent" | "launchCommand">): string[] {
   return agentProcessMatchers(session.agent, session.launchCommand);
 }
@@ -2001,7 +2005,7 @@ async function agentProcessAlive(
     ...(options?.fresh ? { fresh: true } : {}),
     ...(foreign ? { paneChildFallback: true } : {}),
   });
-  if (result.diagnostic) throw new TmuxProbeUnknownError(result.diagnostic);
+  if (result.diagnostic) throw new AgentProcessProbeUnknownError(result.diagnostic);
   return result.alive;
 }
 
@@ -24184,10 +24188,39 @@ export class SessionService {
     operation?: RestoreOperationContext,
   ): Promise<SessionRecord> {
     operation?.assertActive();
-    const message = error instanceof Error ? error.message : String(error);
+    const processProbe = error instanceof AgentProcessProbeUnknownError;
+    const current = processProbe ? readSession(this.config.dataDir, session.id) : null;
+    const probeRevision = this.lifecycle.snapshot(session.id).revision;
+    // An outer launch catch must not recapture a replacement rejected by the first attempt.
+    if (processProbe && error.retentionAttempted) return current ?? session;
+    if (processProbe) error.retentionAttempted = true;
+    if (
+      processProbe &&
+      (!current ||
+        (current.status !== "running" && current.status !== "spawning") ||
+        !sameSessionRuntimeOwner(current, session) ||
+        current.agentLaunchId !== session.agentLaunchId ||
+        current.serverErrorAt ||
+        (hasSessionErrorEvidence(current) && !recoverableRuntimeError(current)))
+    )
+      return current ?? session;
+    const diagnostic = error instanceof Error ? error.message : String(error);
+    const message = processProbe ? STATUS_DETECTION_ERROR_PREFIX + diagnostic : diagnostic;
     const runtime = await this.readRuntimeSnapshot(session).catch(() => null);
     operation?.assertActive();
     const latest = readSession(this.config.dataDir, session.id);
+    if (
+      current &&
+      (!latest ||
+        !sameSessionRuntimeOwner(latest, current) ||
+        latest.agentLaunchId !== current.agentLaunchId ||
+        latest.error !== current.error ||
+        latest.errorSource !== current.errorSource ||
+        latest.serverErrorAt !== current.serverErrorAt ||
+        !this.lifecycleStateMatches(latest, this.lifecycleStamp(current)) ||
+        this.lifecycle.snapshot(session.id).revision !== probeRevision)
+    )
+      return latest ?? current;
     if (latest && isTerminalSessionStatus(latest.status)) return latest;
     const retained: SessionRecord = {
       ...withQueuedMessages(
@@ -24198,7 +24231,7 @@ export class SessionService {
       status:
         runtime && !runtime.probeUnresponsive && !runtime.processAlive ? "errored" : "running",
       error: message,
-      errorSource: "other",
+      errorSource: processProbe ? "runtime_probe" : "other",
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, retained);
