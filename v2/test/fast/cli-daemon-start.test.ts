@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import type * as NodeOs from "node:os";
 import type * as Config from "../../src/config.js";
+import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
 
 // Ordinary boots materialize the host pin before serving sessions.
 // Matching isolated instances leave the host pin alone.
@@ -90,7 +91,8 @@ vi.mock("../../src/host-skills.js", () => ({
   renderHostSkillWarnings: vi.fn(() => []),
 }));
 
-vi.mock("../../src/runtime-tmux.js", () => ({
+vi.mock("../../src/runtime-tmux.js", async (importOriginal) => ({
+  TmuxProbeUnknownError: (await importOriginal<typeof RuntimeTmuxModule>()).TmuxProbeUnknownError,
   setTmuxSocketName: setTmuxSocketNameMock,
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   withTmuxSocketArgs: vi.fn((args: string[]) => args),
