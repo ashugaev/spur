@@ -2,6 +2,7 @@ import { beforeAll, afterEach, beforeEach, describe, expect, it, vi } from "vite
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
 
 const postJsonMock = vi.fn();
 const getExistingJsonMock = vi.fn();
@@ -40,7 +41,8 @@ vi.mock("../../src/io.js", () => ({
   writeStdout: writeStdoutMock,
 }));
 
-vi.mock("../../src/runtime-tmux.js", () => ({
+vi.mock("../../src/runtime-tmux.js", async (importOriginal) => ({
+  TmuxProbeUnknownError: (await importOriginal<typeof RuntimeTmuxModule>()).TmuxProbeUnknownError,
   setTmuxSocketName: vi.fn(),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   withTmuxSocketArgs: vi.fn((args: string[]) => args),
