@@ -62,8 +62,9 @@ test("navigation stays on-page and GitHub buttons identify their destination", (
 
 test("hosting copy names physical and virtual computers without box metaphors", () => {
   const architecture = section("architecture");
-  assert.match(architecture, /computer, a dedicated server or a virtual machine/);
-  assert.match(architecture, /connect to the same sessions from your other devices/);
+  assert.match(architecture, /computer, server or VM/);
+  assert.match(architecture, /Use the same sessions locally/);
+  assert.match(architecture, /connect\s+from another device after setting up Tailscale/);
   const visibleBody = html
     .slice(html.indexOf("<body>"))
     .replace(/<script\b[\s\S]*?<\/script>/g, "")
@@ -152,26 +153,31 @@ test("hero face keeps eyes and mouth visible without frame-swapping animation", 
   assert.doesNotMatch(reduced, /\.fo-(?:you|face|eye|mouth)/);
 });
 
-test("architecture owns one description and two hidden responsive drawings", () => {
+test("architecture owns one compact diagram with a clipped connection track", () => {
   const architecture = section("architecture");
   const heading = architecture.slice(0, architecture.indexOf('<figure class="arch'));
-  assert.match(
-    heading,
-    /The web UI listens on localhost\. Once Tailscale is connected,[\s\S]*?your private Tailscale address\. Public exposure requires the\s+explicit <code>--expose-web<\/code> flag\./,
-  );
+  assert.match(heading, /<h2 id="architecture-h">Run agents on your computer or server\.<\/h2>/);
+  assert.equal((heading.match(/<p>/g) ?? []).length, 1);
+  assert.match(heading, /install-from-npm\.md#private-access-tailscale-default-on/);
   assert.match(architecture, /<figure class="arch rv" role="img" aria-labelledby="arch-desc">/);
   assert.equal((architecture.match(/id="arch-desc"/g) ?? []).length, 1);
-  assert.equal((architecture.match(/aria-hidden="true"\s+focusable="false"/g) ?? []).length, 2);
-  assert.equal((architecture.match(/class="arch-route--desktop"/g) ?? []).length, 1);
-  assert.equal((architecture.match(/class="arch-route--mobile"/g) ?? []).length, 1);
-  assert.equal((architecture.match(/class="a-pkt"/g) ?? []).length, 2);
-  assert.equal((architecture.match(/class="a-stage"/g) ?? []).length, 6);
-  for (const label of ["YOUR DEVICES", "TAILSCALE", "YOUR MACHINE"]) {
-    assert.equal((architecture.match(new RegExp(`>${label}<`, "g")) ?? []).length, 2);
+  assert.equal((architecture.match(/class="a-diagram" aria-hidden="true"/g) ?? []).length, 1);
+  assert.equal((architecture.match(/class="a-card"/g) ?? []).length, 2);
+  assert.equal((architecture.match(/class="a-connection"/g) ?? []).length, 1);
+  assert.equal((architecture.match(/class="a-track"/g) ?? []).length, 1);
+  assert.equal((architecture.match(/class="a-pkt"/g) ?? []).length, 1);
+  for (const label of ["Your device", "Spur + agents", "Tailscale"]) {
+    assert.equal(architecture.split(`>${label}<`).length - 1, 1);
   }
+  const track = architecture.match(/<div class="a-track">([\s\S]*?)<\/div>/)?.[1];
+  assert.ok(track, "missing packet track");
+  assert.match(track, /class="a-pkt"/);
+  assert.doesNotMatch(track, /a-link-label|Tailscale/);
+  assert.match(html, /\.a-track\s*{[^}]*height: 6px;[^}]*overflow: hidden/);
+  assert.doesNotMatch(html, /arch-route--desktop|arch-route--mobile|offset-path/);
   assert.match(
     architecture.replace(/\s+/g, " "),
-    /Your devices reach the Spur daemon and its agent sessions through Tailscale; responses return over the same private route\. The web UI remains on loopback, and public exposure is an explicit override\./,
+    /Use a local browser on that computer, or connect from another device after setting up Tailscale\. Requests and responses use the same connection\./,
   );
 });
 

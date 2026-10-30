@@ -941,72 +941,148 @@
       }
 
       /* ── architecture diagram ──────────────────────────────────────── */
+      #architecture {
+        padding-block: clamp(56px, 8vh, 88px);
+      }
+      #architecture .sec-head {
+        gap: 12px;
+        margin-bottom: 24px;
+      }
+      #architecture h2 {
+        font-size: clamp(24px, 3vw, 34px);
+      }
+      #architecture .sec-head a {
+        align-self: flex-start;
+      }
       .arch {
+        width: 100%;
+        max-width: 680px;
         border: 1px solid var(--b);
         background: var(--term);
-        padding: clamp(18px, 3vw, 34px);
+        padding: 16px;
         margin: 0;
       }
-      .arch svg {
-        display: block;
-        width: 100%;
-        height: auto;
-        overflow: visible;
+      .a-diagram {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 96px minmax(0, 1fr);
       }
-      .arch text {
-        font-family: var(--mono);
-        font-size: 13px;
-        fill: var(--t2);
+      .a-card {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 8px;
+        min-width: 0;
+        min-height: 84px;
+        padding: 12px;
+        border: 1px solid var(--b-strong);
+        text-align: center;
       }
-      .arch-route--mobile {
-        display: none !important;
+      .a-card strong {
+        font-size: 14px;
+        font-weight: 500;
       }
-      .a-stage > rect {
-        fill: none;
-        stroke: var(--b-strong);
-        stroke-width: 1.5;
-      }
-      .a-route {
-        fill: none;
-        stroke: var(--b-strong);
-        stroke-width: 1.5;
-      }
-      .a-stage-label {
-        text-anchor: middle;
-        fill: var(--t1) !important;
-        font-size: 14px !important;
-        font-weight: 700;
-        letter-spacing: 0.14em;
-      }
-      .a-stage-sub {
-        text-anchor: middle;
-        fill: var(--t3);
+      .a-card span {
+        color: var(--t3);
         font-size: 12px;
       }
+      .a-connection {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .a-track {
+        --a-start-x: 0%;
+        --a-start-y: 50%;
+        --a-end-x: 100%;
+        --a-end-y: 50%;
+        position: relative;
+        width: 100%;
+        height: 6px;
+        overflow: hidden;
+      }
+      .a-track::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 2px;
+        height: 2px;
+        background: var(--b-strong);
+      }
+      .a-link-label {
+        position: absolute;
+        left: 50%;
+        bottom: calc(50% + 10px);
+        transform: translateX(-50%);
+        color: var(--t3);
+        font-family: var(--mono);
+        font-size: 12px;
+        white-space: nowrap;
+      }
       .a-pkt {
-        fill: var(--brand);
-        offset-rotate: 0deg;
-        animation: arch-route 5.8s ease-in-out infinite;
-      }
-      .arch-route--desktop .a-pkt {
-        offset-path: path("M110 200 H390 H550 H890");
-      }
-      .arch-route--mobile .a-pkt {
-        offset-path: path("M170 64 V145 V242");
+        position: absolute;
+        left: var(--a-start-x);
+        top: var(--a-start-y);
+        width: 6px;
+        height: 6px;
+        background: var(--brand);
+        opacity: 0;
+        transform: translate(-50%, -50%);
+        animation: arch-route 6s ease-in-out infinite;
       }
       @keyframes arch-route {
         0%,
-        100% {
-          offset-distance: 0%;
+        8% {
+          left: var(--a-start-x);
+          top: var(--a-start-y);
           opacity: 0;
+          background: var(--brand);
         }
-        8%,
-        92% {
+        12% {
+          left: var(--a-start-x);
+          top: var(--a-start-y);
           opacity: 1;
+          background: var(--brand);
         }
-        44%,
+        40%,
+        44% {
+          left: var(--a-end-x);
+          top: var(--a-end-y);
+          opacity: 1;
+          background: var(--brand);
+        }
+        48%,
+        55% {
+          left: var(--a-end-x);
+          top: var(--a-end-y);
+          opacity: 0;
+          background: var(--brand);
+        }
         56% {
-          offset-distance: 100%;
+          left: var(--a-end-x);
+          top: var(--a-end-y);
+          opacity: 0;
+          background: var(--ready);
+        }
+        60% {
+          left: var(--a-end-x);
+          top: var(--a-end-y);
+          opacity: 1;
+          background: var(--ready);
+        }
+        88% {
+          left: var(--a-start-x);
+          top: var(--a-start-y);
+          opacity: 1;
+          background: var(--ready);
+        }
+        92%,
+        100% {
+          left: var(--a-start-x);
+          top: var(--a-start-y);
+          opacity: 0;
+          background: var(--ready);
         }
       }
       @media (max-width: 900px) {
@@ -1014,15 +1090,35 @@
           white-space: pre-wrap;
         }
       }
-      @media (max-width: 720px) {
+      @media (max-width: 600px) {
         .arch {
-          padding: 14px 10px;
+          padding: 14px;
         }
-        .arch-route--desktop {
-          display: none !important;
+        .a-diagram {
+          grid-template-columns: minmax(0, 1fr);
+          grid-template-rows: auto 48px auto;
         }
-        .arch-route--mobile {
-          display: block !important;
+        .a-track {
+          --a-start-x: 50%;
+          --a-start-y: 0%;
+          --a-end-x: 50%;
+          --a-end-y: 100%;
+          width: 6px;
+          height: 100%;
+        }
+        .a-track::before {
+          left: 2px;
+          right: auto;
+          top: 0;
+          bottom: 0;
+          width: 2px;
+          height: auto;
+        }
+        .a-link-label {
+          left: calc(50% + 12px);
+          top: 50%;
+          bottom: auto;
+          transform: translateY(-50%);
         }
       }
 
@@ -1767,77 +1863,38 @@
 
         <section id="architecture" class="shell" aria-labelledby="architecture-h">
           <div class="sec-head rv" data-n="01">
-            <span class="mono-label">How you reach them</span>
-            <h2 id="architecture-h">Your agents run on your computer or server.</h2>
+            <span class="mono-label">Where it runs</span>
+            <h2 id="architecture-h">Run agents on your computer or server.</h2>
             <p>
-              Install Spur on a computer, a dedicated server or a virtual machine. Your agents run
-              there; connect to the same sessions from your other devices.
+              Install Spur on a computer, server or VM. Use the same sessions locally, or connect
+              from another device after setting up Tailscale.
             </p>
-            <p>
-              The web UI listens on localhost. Once Tailscale is connected, the default setup also
-              makes it available at your private Tailscale address. Public exposure requires the
-              explicit <code>--expose-web</code> flag.
-            </p>
+            <a
+              href="https://github.com/ashugaev/spur/blob/main/docs/install-from-npm.md#private-access-tailscale-default-on"
+              rel="noopener"
+              >Private access setup</a
+            >
           </div>
 
           <figure class="arch rv" role="img" aria-labelledby="arch-desc">
-            <svg
-              class="arch-route--desktop"
-              viewBox="0 0 960 400"
-              aria-hidden="true"
-              focusable="false"
-            >
-              <path class="a-route" d="M110 200 H390 H550 H890" />
-              <g class="a-stage">
-                <rect x="20" y="120" width="180" height="160" />
-                <text class="a-stage-label" x="110" y="154">YOUR DEVICES</text>
-                <text class="a-stage-sub" x="110" y="190">phone · tablet</text>
-                <text class="a-stage-sub" x="110" y="214">laptop · browser</text>
-              </g>
-              <g class="a-stage">
-                <rect x="300" y="150" width="180" height="100" />
-                <text class="a-stage-label" x="390" y="188">TAILSCALE</text>
-                <text class="a-stage-sub" x="390" y="216">private network</text>
-              </g>
-              <g class="a-stage">
-                <rect x="550" y="88" width="390" height="224" />
-                <text class="a-stage-label" x="745" y="124">YOUR MACHINE</text>
-                <text class="a-stage-sub" x="745" y="174">Spur daemon</text>
-                <text class="a-stage-sub" x="745" y="210">agent sessions</text>
-                <text class="a-stage-sub" x="745" y="246">tmux · one worktree each</text>
-              </g>
-              <rect class="a-pkt" x="-5" y="-5" width="10" height="10" />
-            </svg>
-
-            <svg
-              class="arch-route--mobile"
-              viewBox="0 0 340 340"
-              aria-hidden="true"
-              focusable="false"
-            >
-              <path class="a-route" d="M170 64 V145 V242" />
-              <g class="a-stage">
-                <rect x="40" y="14" width="260" height="76" />
-                <text class="a-stage-label" x="170" y="44">YOUR DEVICES</text>
-                <text class="a-stage-sub" x="170" y="68">phone · tablet · laptop</text>
-              </g>
-              <g class="a-stage">
-                <rect x="70" y="112" width="200" height="68" />
-                <text class="a-stage-label" x="170" y="140">TAILSCALE</text>
-                <text class="a-stage-sub" x="170" y="162">private network</text>
-              </g>
-              <g class="a-stage">
-                <rect x="40" y="206" width="260" height="120" />
-                <text class="a-stage-label" x="170" y="234">YOUR MACHINE</text>
-                <text class="a-stage-sub" x="170" y="260">Spur daemon · agent sessions</text>
-                <text class="a-stage-sub" x="170" y="286">tmux · one worktree each</text>
-              </g>
-              <rect class="a-pkt" x="-5" y="-5" width="10" height="10" />
-            </svg>
+            <div class="a-diagram" aria-hidden="true">
+              <div class="a-card">
+                <strong>Your device</strong>
+                <span>Browser</span>
+              </div>
+              <div class="a-connection">
+                <span class="a-link-label">Tailscale</span>
+                <div class="a-track"><i class="a-pkt"></i></div>
+              </div>
+              <div class="a-card">
+                <strong>Spur + agents</strong>
+                <span>Computer · server · VM</span>
+              </div>
+            </div>
             <figcaption id="arch-desc" class="sr-only">
-              Your devices reach the Spur daemon and its agent sessions through Tailscale; responses
-              return over the same private route. The web UI remains on loopback, and public
-              exposure is an explicit override.
+              Spur and its agents run on the computer, server or virtual machine where you install
+              it. Use a local browser on that computer, or connect from another device after setting
+              up Tailscale. Requests and responses use the same connection.
             </figcaption>
           </figure>
         </section>
