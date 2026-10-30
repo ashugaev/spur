@@ -105,7 +105,7 @@ function materializeProjectDefaults(config: AppConfig): AppConfig {
   };
 }
 
-function mergeProjects(base: AppConfig, configs: AppConfig[]): AppConfig {
+export function mergeProjects(base: AppConfig, configs: AppConfig[]): AppConfig {
   const projects: Record<string, ProjectConfig> = {};
   const projectOwners = new Map<string, string>();
   const prefixOwners = new Map<string, string>();

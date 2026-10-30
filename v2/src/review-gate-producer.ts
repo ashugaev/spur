@@ -3,10 +3,12 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { parse } from "yaml";
 import { integer, object, string, ReviewAppError } from "./github-app.js";
+import { requiredCiJobNames } from "./ci-job-definitions.js";
 import {
   GateGitHub,
   readGateSnapshot,
   evaluateSnapshot,
+  changedEvidenceCategories,
   workflowPath,
   type GatePolicy,
 } from "./review-gate.js";
@@ -143,7 +145,8 @@ export async function produceGates(
         const result = evaluateSnapshot(policy, number, before);
         phase = "snapshot-after";
         progress();
-        const after = evaluateSnapshot(policy, number, await readGateSnapshot(api, policy, number));
+        const finalSnapshot = await readGateSnapshot(api, policy, number);
+        const after = evaluateSnapshot(policy, number, finalSnapshot);
         active();
         const fresh =
           result.fingerprint === after.fingerprint &&
@@ -152,7 +155,9 @@ export async function produceGates(
           result.H === after.H &&
           result.B === after.B;
         approved = fresh && result.status === "APPROVED" && after.status === "APPROVED";
-        summary = fresh ? after.reason : "Evidence changed during evaluation";
+        summary = fresh
+          ? after.reason
+          : `Evidence changed during evaluation: ${changedEvidenceCategories(before, finalSnapshot)}`;
       }
       phase = "completion-write";
       progress();
@@ -214,7 +219,7 @@ export async function runProducer(env: NodeJS.ProcessEnv): Promise<void> {
   const target = await verifyWake(api, repo, string(env.GITHUB_EVENT_NAME), payload);
   const ciPath = resolve(fileURLToPath(new URL("../../.github/workflows/ci.yml", import.meta.url)));
   const definition = object(parse(await readFile(ciPath, "utf8")));
-  const jobs = Object.values(object(definition.jobs)).map((value) => string(object(value).name));
+  const jobs = requiredCiJobNames(definition);
   const workflow = object(await api.request(`/repos/${repo}/actions/workflows/ci.yml`));
   if (workflow.path !== ".github/workflows/ci.yml")
     throw new ReviewAppError("ci-workflow-mismatch");

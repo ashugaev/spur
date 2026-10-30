@@ -63,11 +63,9 @@ Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` and uses `int8` by d
 
 ## Telegram voice notes
 
-A voice note in a [Telegram source](configuration.md#events) chat becomes text. Chat bound with `/watch`: transcript goes to the agent as typed text. After `/spawn` picks agent and project, no binding yet: transcript becomes the spawn prompt. A transcript never answers a pending project pick — only a keyboard tap does (see [Telegram binding](configuration.md#telegram-binding)). Transcript is never parsed as a command, even one starting with `/`.
+Telegram voice notes deliver original file with transcript. Disabled, failed or empty transcription delivers original with a chat notice. Transcripts never parse as commands. Attachment limits and routing: [Telegram binding](configuration.md#telegram-binding).
 
-The daemon posts the voice note to the web UI transcribe route. Requires `spur-web` up on the resolved [`ui.port`](configuration.md#field-reference). `voice.provider: openai_realtime` always fails that route with 502. Failure replies in the chat; nothing reaches the agent.
-
-Voice notes only: no `message:audio` files, video notes, or captions.
+Transcription requires `spur-web` on resolved [`ui.port`](configuration.md#field-reference). `voice.provider: openai_realtime` returns 502 from the transcribe route.
 
 ## HTTPS
 
