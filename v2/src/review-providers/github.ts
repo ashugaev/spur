@@ -7,6 +7,8 @@ import {
   withGhPollBudget,
 } from "../gh.js";
 import {
+  readIgnoredGitHubFeedback,
+  recordIgnoredGitHubFeedback,
   readCommentSeenRegistry,
   readGitHubReviewPagination,
   writeGitHubReviewPagination,
@@ -443,10 +445,13 @@ function latestChecksByName(checks: GitHubRunCheck[]): GitHubRunCheck[] {
     .map(({ check }) => check);
 }
 
-export function summarizeFailingCi(checks: GitHubRunCheck[]): string | null {
+export function summarizeFailingCi(
+  checks: GitHubRunCheck[],
+  ignoreChecks: readonly string[] = [],
+): string | null {
   const failing = latestChecksByName(checks).filter((check) => {
     const state = normalizeReviewState(check.conclusion ?? check.state);
-    return FAILING_GITHUB_CI_STATES.has(state);
+    return FAILING_GITHUB_CI_STATES.has(state) && !ignoreChecks.includes(check.name);
   });
   return failing.length > 0
     ? `CI is failing: ${failing.map((check) => check.name).join(", ")}.`
@@ -786,12 +791,13 @@ function reviewSignalsFromComments(
   dataDir: string,
   projectId: string,
   sourceId: string,
-  viewerLogin: string | null,
+  isOwnFeedback: (key: string, body: string, login: string | null | undefined) => boolean,
 ): ReviewSignal[] {
   const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
   const signals: ReviewSignal[] = [];
   for (const comment of comments) {
-    if (isViewerAuthor(comment.user?.login, viewerLogin)) continue;
+    if (isOwnFeedback(reviewCommentSeenKey(comment.id), comment.body, comment.user?.login))
+      continue;
     if (seen.has(reviewCommentSeenKey(comment.id))) continue;
     const author = comment.user?.login ?? "unknown";
     const location = comment.path
@@ -824,13 +830,13 @@ function isViewerAuthor(
 
 function reviewSummarySignalsFromReviews(
   reviews: ReviewEntry[],
-  viewerLogin: string | null,
+  isOwnFeedback: (key: string, body: string, login: string | null | undefined) => boolean,
 ): ReviewSignal[] {
   const approvedIdentities = new Set<string>();
   const signals: ReviewSignal[] = [];
   for (const review of reviews) {
     const login = review.user?.login ?? null;
-    if (isViewerAuthor(login, viewerLogin)) continue;
+    if (isOwnFeedback(`review:${String(review.id ?? "")}`, review.body ?? "", login)) continue;
     // A review submitted as COMMENTED/CHANGES_REQUESTED with substance only in the
     // body (no inline comments) is otherwise invisible: it is not an issue comment,
     // not an inline review comment, and COMMENTED does not move reviewDecision. Surface
@@ -867,14 +873,17 @@ function reviewSummarySignalsFromReviews(
 
 function issueCommentSignalsFromComments(
   comments: IssueComment[],
-  viewerLogin: string | null,
+  isOwnFeedback: (key: string, body: string, login: string | null | undefined) => boolean,
 ): ReviewSignal[] {
   // Dedup is handled by the persisted snapshot diff, not by marking comments seen
   // here. Recording seen at generation time dropped the comment from the next poll's
   // snapshot, so the trigger's retry prune() discarded it whenever the worker was busy
   // at first delivery — silently losing the comment. Mirror the inline-comment path.
   return comments
-    .filter((comment) => !isViewerAuthor(comment.user?.login, viewerLogin))
+    .filter(
+      (comment) =>
+        !isOwnFeedback(`comment:${String(comment.id)}`, comment.body, comment.user?.login),
+    )
     .map((comment) => {
       const author = comment.user?.login ?? "unknown";
       return {
@@ -1035,6 +1044,34 @@ async function refreshSignals(
   );
 }
 
+/** Renders a source `selfMarker` template for one session; `{session}` is the only placeholder. */
+export function renderSelfMarker(template: string, sessionId: string): string {
+  return template.replaceAll("{session}", sessionId);
+}
+
+function hasUnquotedMarker(body: string, marker: string): boolean {
+  let spanStart = 0;
+  let lineStart = 0;
+  while (lineStart < body.length) {
+    let lineEnd = lineStart;
+    while (lineEnd < body.length && body[lineEnd] !== "\r" && body[lineEnd] !== "\n") {
+      lineEnd += 1;
+    }
+    const nextLine =
+      body[lineEnd] === "\r" && body[lineEnd + 1] === "\n"
+        ? lineEnd + 2
+        : lineEnd < body.length
+          ? lineEnd + 1
+          : lineEnd;
+    if (/^\s*>/.test(body.slice(lineStart, lineEnd))) {
+      if (body.slice(spanStart, lineStart).includes(marker)) return true;
+      spanStart = nextLine;
+    }
+    lineStart = nextLine;
+  }
+  return body.slice(spanStart).includes(marker);
+}
+
 function collectSignalsFromNode(
   session: SessionRecord,
   pr: GitHubPrStatusSummary,
@@ -1045,7 +1082,25 @@ function collectSignalsFromNode(
   projectId: string,
   sourceId: string,
   viewerLogin: string | null,
+  selfMarker?: string,
+  ignoreChecks?: readonly string[],
 ): GitHubCollectedSignals {
+  const ignored = readIgnoredGitHubFeedback(dataDir, projectId, sourceId, session.id, pr.number);
+  const newlyIgnored: string[] = [];
+  const renderedMarker =
+    selfMarker !== undefined ? renderSelfMarker(selfMarker, session.id) : undefined;
+  const isOwnFeedback = (key: string, body: string, login: string | null | undefined): boolean => {
+    if (ignored.has(key)) return true;
+    const own =
+      renderedMarker !== undefined
+        ? hasUnquotedMarker(body, renderedMarker)
+        : isViewerAuthor(login, viewerLogin);
+    if (own) {
+      ignored.add(key);
+      newlyIgnored.push(key);
+    }
+    return own;
+  };
   const checks = checksFromPrNode(node);
   const reviews = reviewsFromPrNode(node);
   const currentReviewConnection = isRecord(node.latestOpinionatedReviews)
@@ -1063,20 +1118,21 @@ function collectSignalsFromNode(
     dataDir,
     projectId,
     sourceId,
-    viewerLogin,
+    isOwnFeedback,
   );
   const commentSignals = issueCommentSignalsFromComments(
     issueCommentsFromPrNode(node),
-    viewerLogin,
+    isOwnFeedback,
   );
   const approvalSignals =
     pr.state === "MERGED" || pr.state === "CLOSED"
       ? []
-      : reviewSummarySignalsFromReviews(reviews, viewerLogin);
+      : reviewSummarySignalsFromReviews(reviews, isOwnFeedback);
+  recordIgnoredGitHubFeedback(dataDir, projectId, sourceId, session.id, pr.number, newlyIgnored);
   const ciText =
     normalizeReviewState(pr.statusCheckRollupState) === "SUCCESS"
       ? null
-      : summarizeFailingCi(checks);
+      : summarizeFailingCi(checks, ignoreChecks);
   const headRepository = isRecord(node.headRepository)
     ? readString(node.headRepository.nameWithOwner)
     : null;
@@ -1722,6 +1778,8 @@ async function runReviewRepoBatch(
   sourceId: string,
   maxTargets: number,
   expectedHeads: Map<string, Promise<PrRepoSlug | null>>,
+  selfMarker?: string,
+  ignoreChecks?: readonly string[],
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
   const slug = targets[0]?.slug;
@@ -1960,20 +2018,26 @@ async function runReviewRepoBatch(
         }
         expectedHead = await pending;
       }
-      results.set(matching.session.id, {
-        status: "ok",
-        collected: collectSignalsFromNode(
-          session,
-          selected.summary,
-          selected.node,
-          expectedHead,
-          matching.slug.host,
-          dataDir,
-          projectId,
-          sourceId,
-          viewerLogin,
-        ),
-      });
+      try {
+        results.set(matching.session.id, {
+          status: "ok",
+          collected: collectSignalsFromNode(
+            session,
+            selected.summary,
+            selected.node,
+            expectedHead,
+            matching.slug.host,
+            dataDir,
+            projectId,
+            sourceId,
+            viewerLogin,
+            selfMarker,
+            ignoreChecks,
+          ),
+        });
+      } catch (error) {
+        results.set(matching.session.id, { status: "error", error });
+      }
     }
   }
   return results;
@@ -1985,6 +2049,8 @@ export async function collectGitHubSignalsBatch(
   projectId: string,
   sourceId: string,
   maxTargets?: number,
+  selfMarker?: string,
+  ignoreChecks?: readonly string[],
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
   const expectedHeads = new Map<string, Promise<PrRepoSlug | null>>();
@@ -2076,7 +2142,16 @@ export async function collectGitHubSignalsBatch(
       if (selected.length === 0) continue;
       try {
         const admission = await withGhPollBudget(() =>
-          runReviewRepoBatch(selected, dataDir, projectId, sourceId, limit, expectedHeads),
+          runReviewRepoBatch(
+            selected,
+            dataDir,
+            projectId,
+            sourceId,
+            limit,
+            expectedHeads,
+            selfMarker,
+            ignoreChecks,
+          ),
         );
         if (admission.status === "blocked") {
           for (const target of selected) {

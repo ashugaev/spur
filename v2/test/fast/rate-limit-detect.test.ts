@@ -97,6 +97,54 @@ afterEach(async () => {
 });
 
 describe("detectCodexRateLimit", () => {
+  it.each([
+    { primary: { used_percent: 100, window_minutes: 10080 }, secondary: null },
+    { primary: { used_percent: 100, window_minutes: 300 }, secondary: null },
+    { primary: null, secondary: { used_percent: 100, window_minutes: 10080 } },
+    {
+      primary: { used_percent: 100, window_minutes: 300 },
+      secondary: { used_percent: 100, window_minutes: 10080 },
+    },
+  ])("permits paid-credit continuation despite exhausted windows: %j", (windows) => {
+    expect(detectCodexRateLimit({ ...CODEX_HEALTHY, ...windows })).toEqual({
+      limited: false,
+      reason: "",
+    });
+  });
+
+  it("preserves explicit provider refusal despite available paid credits", () => {
+    expect(
+      detectCodexRateLimit({
+        ...CODEX_HEALTHY,
+        primary: { used_percent: 100, window_minutes: 10080 },
+        rate_limit_reached_type: "workspace_owner_credits_depleted",
+      }),
+    ).toEqual({ limited: true, reason: "codex workspace_owner_credits_depleted" });
+  });
+
+  it.each([false, undefined, null, "true", 1])(
+    "preserves exhausted-window limits without explicit paid credits: %j",
+    (hasCredits) => {
+      expect(
+        detectCodexRateLimit({
+          primary: { used_percent: 100, window_minutes: 10080 },
+          credits: { has_credits: hasCredits },
+          rate_limit_reached_type: null,
+        }),
+      ).toEqual({ limited: true, reason: "codex 5h window exhausted" });
+    },
+  );
+
+  it.each([undefined, null, [], true, "true"])(
+    "preserves exhausted-window limits with malformed or missing credits: %j",
+    (credits) => {
+      expect(detectCodexRateLimit({ primary: { used_percent: 100 }, credits })).toEqual({
+        limited: true,
+        reason: "codex 5h window exhausted",
+      });
+    },
+  );
+
   it("flags out-of-credits via credits.has_credits=false", () => {
     expect(detectCodexRateLimit(CODEX_OUT_OF_CREDITS)).toEqual({
       limited: true,

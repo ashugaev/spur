@@ -1,17 +1,19 @@
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
+import type * as Grammy from "grammy";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type {
   SourceProjectListItem,
   SourceSessionListItem,
   SourceWorkbench,
   SourceWorkSessionItem,
+  SourceStartDeps,
 } from "../../src/event-sources/types.js";
-import { readEventLog } from "../../src/event-log.js";
+import { flushEventLogCollapse, readEventLog, resetEventLogCollapse } from "../../src/event-log.js";
 import * as metadataModule from "../../src/metadata.js";
 import * as consentModule from "../../src/review-interface-consent.js";
 import * as workspaceModule from "../../src/workspace.js";
-import type { SessionRecord } from "../../src/types.js";
+import { MAX_ATTACHMENT_BYTES, type SessionRecord } from "../../src/types.js";
 import {
   findTelegramChoice,
   findTelegramMessageSession,
@@ -27,7 +29,7 @@ import { createTempDir } from "../helpers/common.js";
 
 const botInstances: FakeBot[] = [];
 const runMock = vi.fn();
-const getMeMock = vi.fn().mockResolvedValue({ username: "SpurProjectsBot" });
+const getMeMock = vi.fn().mockResolvedValue({ id: 44, username: "SpurProjectsBot" });
 
 class FakeBot {
   readonly handlers = new Map<string, (ctx: unknown) => Promise<void>>();
@@ -42,8 +44,9 @@ class FakeBot {
     botInstances.push(this);
   }
 
-  on(event: string, handler: (ctx: unknown) => Promise<void>): void {
-    this.handlers.set(event, handler);
+  on(event: string | string[], handler: (ctx: unknown) => Promise<void>): void {
+    for (const filter of typeof event === "string" ? [event] : event)
+      this.handlers.set(filter, handler);
   }
 
   async emitText(ctx: unknown): Promise<void> {
@@ -63,6 +66,12 @@ class FakeBot {
     if (!handler) throw new Error("missing message:voice handler");
     await handler(ctx);
   }
+
+  async emitPhoto(ctx: unknown): Promise<void> {
+    const handler = this.handlers.get("message:photo");
+    if (!handler) throw new Error("missing message:photo handler");
+    await handler(ctx);
+  }
 }
 
 vi.mock("grammy", () => ({
@@ -75,8 +84,23 @@ vi.mock("@grammyjs/runner", () => ({
 
 const { parseTelegramCommand, telegramSourceModule, wrapTelegramSpawnPrompt } =
   await import("../../src/event-sources/telegram.js");
+const { Api, Context } = await vi.importActual<typeof Grammy>("grammy");
 
 const tempDirs: string[] = [];
+const topicLink = "Continue in [agent topic](https://t.me/c/1/22).";
+
+function assignTopic(dataDir: string, sessionId = "api-1", messageThreadId = 22): void {
+  const bindings = readTelegramBindings(dataDir, "api", "telegram");
+  bindings.set(`-1001:${messageThreadId}`, { chatId: -1001, messageThreadId, sessionId });
+  writeTelegramBindings(dataDir, "api", "telegram", bindings.values());
+  writeTelegramReplyTarget(dataDir, {
+    sessionId,
+    projectId: "api",
+    sourceId: "telegram",
+    chatId: -1001,
+    messageThreadId,
+  });
+}
 
 function required<T>(value: T | undefined | null): T {
   if (value === undefined || value === null) throw new Error("Missing test fixture");
@@ -86,6 +110,7 @@ function required<T>(value: T | undefined | null): T {
 function telegramContext(overrides: Record<string, unknown> = {}) {
   const { updateId, ...messageOverrides } = overrides;
   return {
+    me: { username: "SpurProjectsBot" },
     ...(typeof updateId === "number" ? { update: { update_id: updateId } } : {}),
     message: {
       message_id: 10,
@@ -146,6 +171,45 @@ function telegramVoiceContext(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function telegramPhotoContext(overrides: Record<string, unknown> = {}) {
+  return {
+    ...telegramContext({
+      text: undefined,
+      photo: [{ file_id: "photo-1", file_unique_id: "unique-photo", width: 100, height: 100 }],
+      ...overrides,
+    }),
+    getFile: vi.fn().mockResolvedValue({ file_path: "photos/file_1.jpg" }),
+  };
+}
+
+const mediaKinds = [
+  "photo",
+  "document",
+  "audio",
+  "video",
+  "animation",
+  "voice",
+  "video_note",
+  "sticker",
+] as const;
+
+function telegramAttachmentContext(
+  kind: (typeof mediaKinds)[number],
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    ...telegramContext({
+      text: undefined,
+      [kind]:
+        kind === "photo"
+          ? [{ file_id: "file", file_unique_id: "unique", width: 50, height: 50 }]
+          : { file_id: "file", file_unique_id: "unique" },
+      ...overrides,
+    }),
+    getFile: vi.fn().mockResolvedValue({ file_path: `files/${kind}` }),
+  };
+}
+
 async function startSource(
   dataDir: string,
   emit = vi.fn(),
@@ -165,6 +229,8 @@ async function startSource(
     workbench?: SourceWorkbench;
     signal?: AbortSignal;
     spawnSession?: null;
+    telegramConversations?: SourceStartDeps["telegramConversations"] | null;
+    prepareSessionMessage?: SourceStartDeps["prepareSessionMessage"] | null;
   } = {},
 ) {
   const listSessions =
@@ -193,6 +259,81 @@ async function startSource(
   const stop = overrides.stop ?? vi.fn().mockResolvedValue(undefined);
   const task = overrides.task ?? vi.fn().mockReturnValue(Promise.resolve());
   const logger = { info: vi.fn(), warn: vi.fn() };
+  let nextTopic = 22;
+  type EnsureTopic = NonNullable<SourceStartDeps["telegramConversations"]>["ensureTopic"];
+  const telegramConversations: NonNullable<SourceStartDeps["telegramConversations"]> = {
+    ensureTopic: vi.fn<EnsureTopic>(async (sessionId, origin) => {
+      const canonicalChatId =
+        overrides.config && "chatId" in overrides.config ? overrides.config["chatId"] : -1001;
+      if (typeof canonicalChatId !== "number" || canonicalChatId >= 0) {
+        metadataModule.retireTelegramLegacyState(dataDir, "api", "telegram", sessionId);
+        return { kind: "disabled" };
+      }
+      const bindings = readTelegramBindings(dataDir, "api", "telegram");
+      const existing = [...bindings.values()].find(
+        (binding) =>
+          binding.sessionId === sessionId &&
+          binding.chatId === canonicalChatId &&
+          (binding.messageThreadId ?? 1) > 1,
+      );
+      let topicId = existing?.messageThreadId;
+      if (topicId === undefined) {
+        while (bindings.has(`${canonicalChatId}:${nextTopic}`)) nextTopic += 1;
+        topicId = nextTopic++;
+      }
+      const { telegramTopicIsDeleting } = await import("../../src/telegram-source-state.js");
+      if (telegramTopicIsDeleting(dataDir, canonicalChatId, topicId))
+        throw new Error("Topic is being deleted with its agent");
+      bindings.set(`${canonicalChatId}:${topicId}`, {
+        chatId: canonicalChatId,
+        messageThreadId: topicId,
+        sessionId,
+      });
+      metadataModule.writeTelegramBindings(dataDir, "api", "telegram", bindings.values());
+      const old = readTelegramReplyTarget(dataDir, sessionId);
+      const same = old?.chatId === canonicalChatId && old.messageThreadId === topicId;
+      writeTelegramReplyTarget(dataDir, {
+        ...(same ? old : {}),
+        sessionId,
+        projectId: origin.projectId,
+        sourceId: origin.sourceId,
+        chatId: canonicalChatId,
+        messageThreadId: topicId,
+      });
+      metadataModule.retireTelegramLegacyState(dataDir, "api", "telegram", sessionId, {
+        chatId: canonicalChatId,
+        messageThreadId: topicId,
+      });
+      return {
+        kind: "topic",
+        projectId: "api",
+        sourceId: "telegram",
+        chatId: canonicalChatId,
+        messageThreadId: topicId,
+      };
+    }),
+    unwatch: vi.fn(async (sessionId, origin) => {
+      const bindings = readTelegramBindings(dataDir, "api", "telegram");
+      const key = `${origin.chatId}:${origin.messageThreadId ?? 0}`;
+      if (bindings.get(key)?.sessionId !== sessionId) return false;
+      bindings.delete(key);
+      metadataModule.writeTelegramBindings(dataDir, "api", "telegram", bindings.values());
+      const target = readTelegramReplyTarget(dataDir, sessionId);
+      if (
+        target &&
+        target.chatId === origin.chatId &&
+        target.messageThreadId === origin.messageThreadId
+      ) {
+        writeTelegramReplyTarget(dataDir, {
+          sessionId,
+          projectId: origin.projectId,
+          sourceId: origin.sourceId,
+          chatId: origin.chatId,
+        });
+      }
+      return true;
+    }),
+  };
   runMock.mockReturnValue({
     stop,
     start: vi.fn(),
@@ -208,6 +349,7 @@ async function startSource(
       type: "telegram",
       runOnStart: false,
       token: "token-123",
+      chatId: -1001,
       allowedUsers: [123],
       ...overrides.config,
     },
@@ -216,8 +358,21 @@ async function startSource(
     logger,
     listSessions,
     getSession,
+    ...(overrides.telegramConversations === null
+      ? {}
+      : { telegramConversations: overrides.telegramConversations ?? telegramConversations }),
     ...(listProjects ? { listProjects } : {}),
     ...(overrides.spawnSession === null ? {} : { spawnSession }),
+    ...(overrides.prepareSessionMessage === null
+      ? {}
+      : {
+          prepareSessionMessage:
+            overrides.prepareSessionMessage ??
+            vi.fn<NonNullable<SourceStartDeps["prepareSessionMessage"]>>(
+              async (_sessionId, request) =>
+                `[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/voice.ogg]\n${request.message}`,
+            ),
+        }),
     ...(overrides.workbench ? { workbench: overrides.workbench } : {}),
     resolveWebBaseUrl:
       overrides.resolveWebBaseUrl ??
@@ -240,6 +395,27 @@ async function startSource(
 }
 
 describe("parseTelegramCommand", () => {
+  it.each(["complete", "kill"])("parses %s without accepting arguments", (command) => {
+    expect(parseTelegramCommand(`/${command}`)).toEqual({ kind: command, invalidArgs: false });
+    expect(parseTelegramCommand(`/${command}@SPURBOT`, "spurbot")).toEqual({
+      kind: command,
+      invalidArgs: false,
+    });
+    expect(parseTelegramCommand(`/${command} force`)).toEqual({ kind: command, invalidArgs: true });
+    expect(parseTelegramCommand(`/${command}@otherbot`, "spurbot")).toBeNull();
+    for (const username of [undefined, ""]) {
+      expect(parseTelegramCommand(`/${command}@spurbot`, username)).toBeNull();
+      expect(parseTelegramCommand(`/${command}@otherbot force`, username)).toBeNull();
+      expect(parseTelegramCommand(`/${command}`, username)).toEqual({
+        kind: command,
+        invalidArgs: false,
+      });
+    }
+    expect(parseTelegramCommand(`/${command}@SPURBOT force`, "spurbot")).toEqual({
+      kind: command,
+      invalidArgs: true,
+    });
+  });
   it("parses watch commands with optional bot mention", () => {
     expect(parseTelegramCommand("/watch api-1")).toEqual({ kind: "watch", sessionId: "api-1" });
     expect(parseTelegramCommand("/watch@SpurProjectsBot api-2")).toEqual({
@@ -326,6 +502,8 @@ describe("telegramSourceModule", () => {
       },
     ];
     const capability = {
+      completeSession: vi.fn<(id: string) => Promise<void>>().mockResolvedValue(undefined),
+      killSession: vi.fn<(id: string) => Promise<void>>().mockResolvedValue(undefined),
       launchOptions: vi.fn(
         async ({
           project,
@@ -360,6 +538,405 @@ describe("telegramSourceModule", () => {
     return { sessions, capability };
   }
 
+  describe("topic lifecycle commands", () => {
+    it.each(["completed", "killed"] as const)(
+      "does not resurrect externally %s Telegram bindings on unrelated updates",
+      async (status) => {
+        const dataDir = await createTempDir("spur-telegram-terminal-");
+        tempDirs.push(dataDir);
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        ]);
+        const { bot } = await startSource(dataDir);
+        metadataModule.writeSession(dataDir, {
+          id: "api-1",
+          project: "api",
+          agent: "codex",
+          prompt: "task",
+          branch: "feature/test",
+          worktree: false,
+          worktreePath: dataDir,
+          tmuxSession: "test",
+          launchCommand: "codex",
+          status,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+        metadataModule.deleteTelegramSourceStateForSession(dataDir, "api", "api-1");
+        await required(bot).emitText(telegramContext({ text: "/help", updateId: 22 }));
+        expect(readTelegramBindings(dataDir, "api", "telegram").size).toBe(0);
+      },
+    );
+
+    it("keeps a persisted replacement over the source's cached binding", async () => {
+      const dataDir = await createTempDir("spur-telegram-replacement-");
+      tempDirs.push(dataDir);
+      writeTelegramBindings(dataDir, "api", "telegram", [
+        { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+      ]);
+      const { bot } = await startSource(dataDir);
+      writeTelegramBindings(dataDir, "api", "telegram", [
+        { chatId: -1001, messageThreadId: 22, sessionId: "api-2" },
+      ]);
+      await required(bot).emitText(telegramContext({ text: "/help", updateId: 22 }));
+      expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
+        "api-2",
+      );
+    });
+
+    it("refuses a watch binding while its topic deletion is pending", async () => {
+      const { claimTelegramTopicDeletion } = await import("../../src/telegram-source-state.js");
+      const dataDir = await createTempDir("spur-telegram-deleting-");
+      tempDirs.push(dataDir);
+      const { bot } = await startSource(dataDir);
+      const release = claimTelegramTopicDeletion(dataDir, -1001, 22);
+      try {
+        const ctx = telegramContext({ text: "/watch api-2", updateId: 22 });
+        await required(bot).emitText(ctx);
+        expect(readTelegramBindings(dataDir, "api", "telegram").size).toBe(0);
+        expect(ctx.reply).toHaveBeenCalledWith(
+          expect.stringContaining("Failed to bind Spur session api-2"),
+        );
+        expect(readTelegramReplyTarget(dataDir, "api-2")).toBeNull();
+      } finally {
+        release?.();
+      }
+    });
+
+    it.each(["complete", "kill"] as const)(
+      "lifecycle identity recovery: %s uses recovered Context identity after startup getMe fails",
+      async (action) => {
+        const dataDir = await createTempDir("spur-telegram-lifecycle-");
+        tempDirs.push(dataDir);
+        const { capability } = workbenchFixture();
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        ]);
+        getMeMock.mockRejectedValueOnce(new Error("temporary getMe failure"));
+        const { bot, emit, spawnSession } = await startSource(dataDir, undefined, undefined, {
+          workbench: capability,
+        });
+        expect(
+          readEventLog(dataDir).some((entry) => entry.event === "source.telegram.auth_failed"),
+        ).toBe(true);
+        // Model the initialized Context supplied by runner recovery, not recovery timing.
+        const recoveredContext = (text: string, updateId: number) => {
+          const ctx = new Context(
+            {
+              update_id: updateId,
+              message: {
+                message_id: updateId,
+                date: 0,
+                message_thread_id: 22,
+                is_topic_message: true,
+                chat: { id: -1001, type: "supergroup", title: "Test" },
+                from: { id: 123, is_bot: false, first_name: "User" },
+                text,
+              },
+            },
+            new Api("test-token"),
+            {
+              id: 999,
+              is_bot: true,
+              first_name: "Spur",
+              username: "SpurProjectsBot",
+              can_join_groups: true,
+              can_read_all_group_messages: true,
+              supports_inline_queries: false,
+              can_connect_to_business: false,
+              has_main_web_app: false,
+              has_topics_enabled: false,
+              allows_users_to_create_topics: false,
+              can_manage_bots: false,
+              supports_join_request_queries: false,
+            },
+          );
+          vi.spyOn(ctx, "reply").mockImplementation(telegramContext().reply);
+          return ctx;
+        };
+        const foreign = recoveredContext(`/${action}@otherbot`, 10);
+        await required(bot).emitText(foreign);
+        expect(capability.completeSession).not.toHaveBeenCalled();
+        expect(capability.killSession).not.toHaveBeenCalled();
+        expect(emit).not.toHaveBeenCalled();
+        expect(spawnSession).not.toHaveBeenCalled();
+        expect(foreign.reply).not.toHaveBeenCalled();
+        const own = recoveredContext(`/${action}@sPuRpRoJeCtSbOt`, 11);
+        await required(bot).emitText(own);
+        const operation =
+          action === "complete" ? capability.completeSession : capability.killSession;
+        expect(operation).toHaveBeenCalledExactlyOnceWith("api-1");
+        expect(own.reply).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["complete", "kill"] as const)(
+      "lifecycle identity recovery: %s rejects mentions without identity and accepts bare commands",
+      async (action) => {
+        const dataDir = await createTempDir("spur-telegram-lifecycle-");
+        tempDirs.push(dataDir);
+        const { capability } = workbenchFixture();
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        ]);
+        const { bot, emit, spawnSession } = await startSource(dataDir, undefined, undefined, {
+          workbench: capability,
+        });
+        const addressed = {
+          ...telegramContext({ text: `/${action}@SpurProjectsBot` }),
+          me: undefined,
+        };
+        await required(bot).emitText(addressed);
+        expect(capability.completeSession).not.toHaveBeenCalled();
+        expect(capability.killSession).not.toHaveBeenCalled();
+        expect(emit).not.toHaveBeenCalled();
+        expect(spawnSession).not.toHaveBeenCalled();
+        expect(addressed.reply).not.toHaveBeenCalled();
+        await required(bot).emitText({ ...telegramContext({ text: `/${action}` }), me: undefined });
+        const operation =
+          action === "complete" ? capability.completeSession : capability.killSession;
+        expect(operation).toHaveBeenCalledExactlyOnceWith("api-1");
+      },
+    );
+
+    it.each(["complete", "kill"] as const)(
+      "%s uses durable topic target, clears cache, and sends no extra notice",
+      async (action) => {
+        const dataDir = await createTempDir("spur-telegram-lifecycle-");
+        tempDirs.push(dataDir);
+        const { capability } = workbenchFixture();
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+          { chatId: -1001, messageThreadId: 44, sessionId: "api-2" },
+        ]);
+        const { bot, emit, spawnSession } = await startSource(dataDir, undefined, undefined, {
+          workbench: capability,
+        });
+        const operation =
+          action === "complete" ? capability.completeSession : capability.killSession;
+        operation.mockImplementation(async (id) => {
+          metadataModule.deleteTelegramSourceStateForSession(dataDir, "api", id);
+        });
+        recordTelegramMessages(
+          dataDir,
+          "api",
+          "telegram",
+          { sessionId: "api-2", chatId: -1001 },
+          [99],
+        );
+        const ctx = telegramContext({
+          text: `/${action}@SpurProjectsBot`,
+          updateId: 10,
+          reply_to_message: { message_id: 99 },
+        });
+        await required(bot).emitText(ctx);
+        expect(operation).toHaveBeenCalledExactlyOnceWith("api-1");
+        expect(ctx.reply).not.toHaveBeenCalled();
+        await required(bot).emitText(telegramContext({ text: "/help", updateId: 11 }));
+        expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
+          { chatId: -1001, messageThreadId: 44, sessionId: "api-2" },
+        ]);
+        expect(emit).not.toHaveBeenCalled();
+        expect(spawnSession).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["api-2", undefined])(
+      "reconciles cached A against durable %s before numbered update persistence",
+      async (owner) => {
+        const dataDir = await createTempDir("spur-telegram-lifecycle-");
+        tempDirs.push(dataDir);
+        const { capability } = workbenchFixture();
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        ]);
+        const { bot } = await startSource(dataDir, undefined, undefined, { workbench: capability });
+        writeTelegramBindings(
+          dataDir,
+          "api",
+          "telegram",
+          owner ? [{ chatId: -1001, messageThreadId: 22, sessionId: owner }] : [],
+        );
+        const ctx = telegramContext({ text: "/kill", updateId: 10 });
+        await required(bot).emitText(ctx);
+        if (owner) expect(capability.killSession).toHaveBeenCalledExactlyOnceWith(owner);
+        else {
+          expect(capability.killSession).not.toHaveBeenCalled();
+          expect(ctx.reply).toHaveBeenCalledWith("No Spur session bound here.");
+        }
+        await required(bot).emitText(telegramContext({ text: "/help", updateId: 11 }));
+        expect(
+          [...readTelegramBindings(dataDir, "api", "telegram").values()].map(
+            (entry) => entry.sessionId,
+          ),
+        ).toEqual(owner ? [owner] : []);
+      },
+    );
+
+    it("loads late binding without update id and deduplicates numbered commands", async () => {
+      const dataDir = await createTempDir("spur-telegram-lifecycle-");
+      tempDirs.push(dataDir);
+      const { capability } = workbenchFixture();
+      const { bot } = await startSource(dataDir, undefined, undefined, { workbench: capability });
+      writeTelegramBindings(dataDir, "api", "telegram", [
+        { chatId: -1001, messageThreadId: 22, sessionId: "web-1" },
+      ]);
+      await required(bot).emitText(telegramContext({ text: "/complete" }));
+      await required(bot).emitText(telegramContext({ text: "/complete", updateId: 10 }));
+      await required(bot).emitText(telegramContext({ text: "/complete", updateId: 10 }));
+      expect(capability.completeSession).toHaveBeenCalledTimes(2);
+      expect(capability.completeSession).toHaveBeenLastCalledWith("web-1");
+    });
+
+    it.each([
+      { text: "/kill force", expected: "Usage: /kill" },
+      {
+        text: "/complete",
+        chat: { id: 123 },
+        expected: "Use /complete inside a bound forum topic.",
+      },
+      {
+        text: "/kill",
+        is_topic_message: undefined,
+        expected: "Use /kill inside a bound forum topic.",
+      },
+      { text: "/complete", from: { id: 999 }, expected: undefined },
+      { text: "/complete@otherbot", expected: undefined },
+    ])("rejects unsupported or unauthorized input %o", async ({ expected, ...message }) => {
+      const dataDir = await createTempDir("spur-telegram-lifecycle-");
+      tempDirs.push(dataDir);
+      const { capability } = workbenchFixture();
+      const { bot, emit, spawnSession } = await startSource(dataDir, undefined, undefined, {
+        workbench: capability,
+      });
+      const ctx = telegramContext({ ...message, updateId: 10 });
+      await required(bot).emitText(ctx);
+      if (expected) expect(ctx.reply).toHaveBeenCalledWith(expected);
+      expect(capability.completeSession).not.toHaveBeenCalled();
+      expect(capability.killSession).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+      expect(spawnSession).not.toHaveBeenCalled();
+    });
+
+    it("reports unavailable adapter without routing command", async () => {
+      const dataDir = await createTempDir("spur-telegram-lifecycle-");
+      tempDirs.push(dataDir);
+      writeTelegramBindings(dataDir, "api", "telegram", [
+        { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+      ]);
+      const { bot, emit } = await startSource(dataDir);
+      const ctx = telegramContext({ text: "/kill" });
+      await required(bot).emitText(ctx);
+      expect(ctx.reply).toHaveBeenCalledWith("Session operation unavailable.");
+      expect(emit).not.toHaveBeenCalled();
+    });
+
+    it.each(["user", "chat"])(
+      "rejects unauthorized %s before persisting stale cached binding",
+      async (gate) => {
+        const dataDir = await createTempDir("spur-telegram-lifecycle-");
+        tempDirs.push(dataDir);
+        const { capability } = workbenchFixture();
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        ]);
+        const { bot, emit, spawnSession } = await startSource(dataDir, undefined, undefined, {
+          workbench: capability,
+          config: gate === "chat" ? { allowedChats: [-2002] } : {},
+        });
+        writeTelegramBindings(dataDir, "api", "telegram", []);
+        const ctx = telegramContext({
+          text: "/kill",
+          updateId: 10,
+          ...(gate === "user" ? { from: { id: 999 } } : {}),
+        });
+        await required(bot).emitText(ctx);
+        expect(readTelegramBindings(dataDir, "api", "telegram").size).toBe(0);
+        expect(capability.killSession).not.toHaveBeenCalled();
+        expect(ctx.reply).not.toHaveBeenCalled();
+        expect(emit).not.toHaveBeenCalled();
+        expect(spawnSession).not.toHaveBeenCalled();
+      },
+    );
+
+    it("preserves binding on dirty rejection and redacts bot token", async () => {
+      const dataDir = await createTempDir("spur-telegram-lifecycle-");
+      tempDirs.push(dataDir);
+      const { capability } = workbenchFixture();
+      capability.killSession.mockRejectedValue(new Error("Dirty workspace token-123"));
+      writeTelegramBindings(dataDir, "api", "telegram", [
+        { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+      ]);
+      const { bot } = await startSource(dataDir, undefined, undefined, { workbench: capability });
+      const ctx = telegramContext({ text: "/kill", updateId: 10 });
+      await required(bot).emitText(ctx);
+      expect(ctx.reply).toHaveBeenCalledWith(
+        expect.stringContaining("Failed to kill session: Dirty workspace"),
+      );
+      expect(JSON.stringify(ctx.reply.mock.calls)).not.toContain("token-123");
+      expect([...readTelegramBindings(dataDir, "api", "telegram").values()][0]?.sessionId).toBe(
+        "api-1",
+      );
+    });
+
+    it.each(["api-2", undefined])(
+      "refuses a binding changed to %s during persistence",
+      async (owner) => {
+        const dataDir = await createTempDir("spur-telegram-lifecycle-");
+        tempDirs.push(dataDir);
+        const { capability } = workbenchFixture();
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        ]);
+        const { bot } = await startSource(dataDir, undefined, undefined, { workbench: capability });
+        const write = metadataModule.writeTelegramBindings;
+        const spy = vi
+          .spyOn(metadataModule, "writeTelegramBindings")
+          .mockImplementationOnce((...args) => {
+            write(...args);
+            write(
+              dataDir,
+              "api",
+              "telegram",
+              owner ? [{ chatId: -1001, messageThreadId: 22, sessionId: owner }] : [],
+            );
+          });
+        const ctx = telegramContext({ text: "/complete", updateId: 10 });
+        try {
+          await required(bot).emitText(ctx);
+          expect(capability.completeSession).not.toHaveBeenCalled();
+          expect(ctx.reply).toHaveBeenCalledWith(
+            owner
+              ? "Topic binding changed. Send the command again."
+              : "No Spur session bound here.",
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
+
+    it("keeps a replacement binding created during successful lifecycle cleanup", async () => {
+      const dataDir = await createTempDir("spur-telegram-lifecycle-");
+      tempDirs.push(dataDir);
+      const { capability } = workbenchFixture();
+      writeTelegramBindings(dataDir, "api", "telegram", [
+        { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+      ]);
+      const { bot } = await startSource(dataDir, undefined, undefined, { workbench: capability });
+      capability.completeSession.mockImplementation(async () => {
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-2" },
+        ]);
+      });
+      await required(bot).emitText(telegramContext({ text: "/complete", updateId: 10 }));
+      await required(bot).emitText(telegramContext({ text: "/help", updateId: 11 }));
+      expect([...readTelegramBindings(dataDir, "api", "telegram").values()][0]?.sessionId).toBe(
+        "api-2",
+      );
+    });
+  });
+
   function cardButton(mock: { mock: { calls: unknown[][] } }, text: string): string {
     for (const call of [...mock.mock.calls].reverse()) {
       const options = call[1] as ReplyMarkupOptions | undefined;
@@ -386,6 +963,7 @@ describe("telegramSourceModule", () => {
       },
       answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
       editMessageText: vi.fn().mockResolvedValue(undefined),
+      editMessageReplyMarkup: vi.fn().mockResolvedValue(undefined),
       reply: vi.fn().mockResolvedValue({ message_id: 701 }),
     };
   }
@@ -397,6 +975,7 @@ describe("telegramSourceModule", () => {
     return ctx;
   }
   beforeEach(() => {
+    resetEventLogCollapse();
     botInstances.splice(0);
     runMock.mockReset();
   });
@@ -464,6 +1043,7 @@ describe("telegramSourceModule", () => {
         offerId: "old",
         sessionId: "api-1",
         chatId: -1001,
+        messageThreadId: 22,
         text: "Approve",
         value: "approved",
         expiresAt: new Date(Date.now() + 60000).toISOString(),
@@ -473,7 +1053,9 @@ describe("telegramSourceModule", () => {
         sessionId: "api-1",
         chatId: -1001,
         choices: [choice],
+        keepInterfaceConsent: false,
       });
+      assignTopic(dataDir);
       vi.spyOn(consentModule, "consentPolicy").mockResolvedValue({
         repositories: ["owner/repo"],
         approverUserId: 123,
@@ -514,6 +1096,7 @@ describe("telegramSourceModule", () => {
           sessionId: "api-1",
           chatId: -1001,
           choices: [ordinary],
+          keepInterfaceConsent: true,
         });
         await bot.emitCallback(cardCallback("spur_choice:ordinary"));
         expect(metadataModule.readInterfaceConsent(dataDir, "api-1")).toEqual(record);
@@ -523,6 +1106,7 @@ describe("telegramSourceModule", () => {
           sessionId: "api-1",
           chatId: -1001,
           choices: [choice],
+          keepInterfaceConsent: false,
         });
         const inbox = await openWorkbench(bot, "/work");
         const detail = cardCallback(cardButton(inbox.reply, "api · api-1 · needs_input"));
@@ -532,14 +1116,29 @@ describe("telegramSourceModule", () => {
         expect(findTelegramChoice(dataDir, "api", "telegram", "old", -1001)).not.toBeNull();
         expect(metadataModule.readInterfaceConsent(dataDir, "api-1")).toEqual(record);
         expect(reconcile).not.toHaveBeenCalled();
-        const callback = bot.emitCallback({
+        const consentMarkup = {
+          inline_keyboard: [
+            [{ text: "Approve", callback_data: "spur_choice:old" }],
+            [{ text: "Reject", callback_data: "spur_choice:old-reject" }],
+            [{ text: "Revoke", callback_data: "spur_choice:old-revoke" }],
+          ],
+        };
+        const consentClick = {
           callbackQuery: {
             data: "spur_choice:old",
             from: { id: 123 },
-            message: { message_id: 7, chat: { id: -1001 } },
+            message: {
+              message_id: 7,
+              message_thread_id: 22,
+              is_topic_message: true,
+              chat: { id: -1001 },
+              reply_markup: consentMarkup,
+            },
           },
           answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
-        });
+          editMessageReplyMarkup: vi.fn().mockResolvedValue(undefined),
+        };
+        const callback = bot.emitCallback(consentClick);
         await waiting;
         if (
           [
@@ -594,14 +1193,23 @@ describe("telegramSourceModule", () => {
               : replacement === "buttonless"
                 ? []
                 : [choice],
+          // A buttonless reply models replyToSource, which spares the approval.
+          keepInterfaceConsent: replacement === "buttonless",
         });
         release("feature/example");
         await callback;
-        if (replacement === "compatible-relocation") {
+        expect(consentClick.editMessageReplyMarkup.mock.calls[0]?.[0]).toEqual({
+          reply_markup: {
+            inline_keyboard: [[{ text: "Sending: Approve…", callback_data: "spur_choice:old" }]],
+          },
+        });
+        expect(consentClick.answerCallbackQuery).toHaveBeenCalledOnce();
+        if (["compatible-relocation", "buttonless"].includes(replacement)) {
           expect(metadataModule.readInterfaceConsent(dataDir, "api-1")?.decision).toBe("approved");
           expect(reconcile).toHaveBeenCalledOnce();
           expect(emit).toHaveBeenCalledOnce();
           expect(findTelegramChoice(dataDir, "api", "telegram", "old", -1001)).toBeNull();
+          expect(consentClick.answerCallbackQuery).toHaveBeenCalledWith("Sent: Approve");
           return;
         }
         if (replacement === "workspace-changed")
@@ -609,11 +1217,345 @@ describe("telegramSourceModule", () => {
         else expect(metadataModule.readInterfaceConsent(dataDir, "api-1")).toEqual(renewed);
         expect(reconcile).not.toHaveBeenCalled();
         expect(emit).not.toHaveBeenCalled();
+        // A superseded offer is gone, so its keyboard goes; a live one comes back.
+        expect(consentClick.editMessageReplyMarkup).toHaveBeenLastCalledWith({
+          reply_markup: replacement === "renewal" ? { inline_keyboard: [] } : consentMarkup,
+        });
+        expect(consentClick.answerCallbackQuery).toHaveBeenCalledWith({
+          text: ["renewal", "second-relocation"].includes(replacement)
+            ? "A newer interface approval replaced this one."
+            : replacement === "revocation"
+              ? "This interface approval is already decided."
+              : "The session branch or workspace changed since approval was requested.",
+          show_alert: true,
+        });
       } finally {
         vi.restoreAllMocks();
       }
     },
   );
+
+  describe("interface approval clicks", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    const sendingRow = (text: string, token: string) => ({
+      reply_markup: { inline_keyboard: [[{ text, callback_data: `spur_choice:${token}` }]] },
+    });
+
+    async function approvalFixture(allowedUsers = [123]) {
+      const dataDir = await createTempDir("spur-consent-click-");
+      tempDirs.push(dataDir);
+      const record = {
+        ...consentModule.proposeConsent(
+          {
+            session: "api-1",
+            repository: "owner/repo",
+            branch: "feature/example",
+            baseBranch: "main",
+            projectId: "api",
+            sourceId: "telegram",
+            chatId: -1001,
+            approverUserId: 123,
+            manifest: {
+              version: 1,
+              repository: "owner/repo",
+              baseBranch: "main",
+              surfaces: [
+                { kind: "CLI", id: "run", before: ["old"], after: ["new"], constraints: [] },
+              ],
+            },
+          },
+          null,
+        ),
+        delivery: "sent" as const,
+      };
+      metadataModule.writeInterfaceConsent(dataDir, record);
+      metadataModule.writeSession(dataDir, {
+        id: "api-1",
+        project: "api",
+        branch: "feature/example",
+        worktreePath: "/fixture",
+        agent: "codex",
+        prompt: "fixture",
+        worktree: true,
+        tmuxSession: "fixture",
+        launchCommand: "fixture",
+        status: "running",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      } satisfies SessionRecord);
+      const labels = {
+        approved: "Approve interface",
+        rejected: "Reject interface",
+        revoked: "Revoke interface approval",
+      };
+      const choices = (["approved", "rejected", "revoked"] as const).map((decision) => ({
+        token: `tok-${decision}`,
+        offerId: "consent",
+        sessionId: "api-1",
+        chatId: -1001,
+        messageThreadId: 370,
+        text: labels[decision],
+        value: decision,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        interfaceConsent: { challenge: record.challenge, decision },
+      }));
+      writeTelegramBindings(dataDir, "api", "telegram", [
+        { chatId: -1001, messageThreadId: 370, sessionId: "api-1" },
+      ]);
+      writeTelegramOffer(dataDir, "api", "telegram", {
+        sessionId: "api-1",
+        chatId: -1001,
+        choices,
+        keepInterfaceConsent: false,
+      });
+      const policy = vi
+        .spyOn(consentModule, "consentPolicy")
+        .mockResolvedValue({ repositories: ["owner/repo"], approverUserId: 123 });
+      const branch = vi
+        .spyOn(workspaceModule, "readCurrentBranch")
+        .mockResolvedValue("feature/example");
+      const reconcile = vi
+        .spyOn(consentModule, "reconcileInterfaceConsent")
+        .mockResolvedValue(undefined);
+      const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), {
+        config: { allowedUsers },
+      });
+      const markup = {
+        inline_keyboard: choices.map((choice) => [
+          { text: choice.text, callback_data: `spur_choice:${choice.token}` },
+        ]),
+      };
+      const click = (userId: number) => ({
+        callbackQuery: {
+          data: "spur_choice:tok-approved",
+          from: { id: userId },
+          message: {
+            message_id: 90,
+            message_thread_id: 370,
+            is_topic_message: true as const,
+            text: "Approve?\n\nInterface approval · owner/repo",
+            chat: { id: -1001 },
+            reply_markup: markup,
+          },
+        },
+        answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+        editMessageText: vi.fn().mockResolvedValue(undefined),
+        editMessageReplyMarkup: vi.fn().mockResolvedValue(undefined),
+      });
+      const rejections = () =>
+        readEventLog(dataDir).filter((entry) => entry.event === "source.telegram.choice_rejected");
+      return {
+        dataDir,
+        record,
+        bot: required(bot),
+        emit,
+        policy,
+        branch,
+        reconcile,
+        markup,
+        click,
+        rejections,
+      };
+    }
+
+    it("approves a forum-topic click with Sending before any lookup, then Selected", async () => {
+      const { dataDir, bot, emit, policy, branch, reconcile, click } = await approvalFixture();
+      const ctx = click(123);
+
+      await bot.emitCallback(ctx);
+
+      expect(ctx.editMessageReplyMarkup.mock.calls).toEqual([
+        [sendingRow("Sending: Approve interface…", "tok-approved")],
+        [sendingRow("Selected: Approve interface", "tok-approved")],
+      ]);
+      expect(ctx.editMessageText).not.toHaveBeenCalled();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledOnce();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith("Sent: Approve interface");
+      const sendingAt = ctx.editMessageReplyMarkup.mock.invocationCallOrder[0] ?? Infinity;
+      expect(sendingAt).toBeLessThan(policy.mock.invocationCallOrder[0] ?? 0);
+      expect(sendingAt).toBeLessThan(branch.mock.invocationCallOrder[0] ?? 0);
+      expect(ctx.answerCallbackQuery.mock.invocationCallOrder[0]).toBeLessThan(
+        reconcile.mock.invocationCallOrder[0] ?? 0,
+      );
+      expect(metadataModule.readInterfaceConsent(dataDir, "api-1")?.decision).toBe("approved");
+      expect(emit).toHaveBeenCalledOnce();
+      expect(emit).toHaveBeenCalledWith(
+        "telegram:message",
+        expect.objectContaining({ sessionId: "api-1", messageThreadId: 370, text: "approved" }),
+      );
+      expect(findTelegramChoice(dataDir, "api", "telegram", "tok-approved", -1001)).toBeNull();
+
+      // Replaying the spent button changes nothing.
+      const replay = click(123);
+      await bot.emitCallback(replay);
+      expect(replay.answerCallbackQuery).toHaveBeenCalledWith({
+        text: "This choice is no longer active.",
+        show_alert: true,
+      });
+      expect(replay.editMessageReplyMarkup).not.toHaveBeenCalled();
+      expect(emit).toHaveBeenCalledOnce();
+      expect(reconcile).toHaveBeenCalledOnce();
+      expect(metadataModule.readInterfaceConsent(dataDir, "api-1")?.decision).toBe("approved");
+    });
+
+    it("restores the keyboard and names the approver for a non-approver click", async () => {
+      const { dataDir, record, bot, emit, markup, click, rejections } = await approvalFixture([
+        123, 456,
+      ]);
+      const ctx = click(456);
+
+      await bot.emitCallback(ctx);
+
+      expect(ctx.editMessageReplyMarkup.mock.calls).toEqual([
+        [sendingRow("Sending: Approve interface…", "tok-approved")],
+        [{ reply_markup: markup }],
+      ]);
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledOnce();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+        text: "Only the designated approver can decide this interface approval.",
+        show_alert: true,
+      });
+      expect(metadataModule.readInterfaceConsent(dataDir, "api-1")?.decision).toBe("pending");
+      expect(findTelegramChoice(dataDir, "api", "telegram", "tok-approved", -1001)).not.toBeNull();
+      expect(emit).not.toHaveBeenCalled();
+      const logged = rejections();
+      expect(logged.map((entry) => entry.details)).toEqual([
+        { reason: "not-approver", chatId: -1001, userId: 456, consent: true },
+      ]);
+      const serialized = JSON.stringify(logged);
+      for (const secret of ["Approve", "tok-approved", record.challenge])
+        expect(serialized).not.toContain(secret);
+    });
+
+    it("approves after a buttonless follow-up reply of the same session", async () => {
+      const { dataDir, bot, emit, click } = await approvalFixture();
+      writeTelegramOffer(dataDir, "api", "telegram", {
+        sessionId: "api-1",
+        chatId: -1001,
+        choices: [],
+        keepInterfaceConsent: true,
+      });
+
+      await bot.emitCallback(click(123));
+
+      expect(metadataModule.readInterfaceConsent(dataDir, "api-1")?.decision).toBe("approved");
+      expect(emit).toHaveBeenCalledOnce();
+    });
+
+    it("empties the spent keyboard when recording the decision fails after the take", async () => {
+      const { dataDir, bot, emit, markup, click, rejections } = await approvalFixture();
+      vi.spyOn(metadataModule, "writeInterfaceConsent").mockImplementationOnce(() => {
+        throw new Error("disk full");
+      });
+      const ctx = click(123);
+
+      await bot.emitCallback(ctx);
+
+      expect(ctx.editMessageReplyMarkup).toHaveBeenLastCalledWith({
+        reply_markup: { inline_keyboard: [] },
+      });
+      expect(ctx.editMessageReplyMarkup).not.toHaveBeenCalledWith({ reply_markup: markup });
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledOnce();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+        text: "Choice failed. Try again.",
+        show_alert: true,
+      });
+      expect(emit).not.toHaveBeenCalled();
+      expect(findTelegramChoice(dataDir, "api", "telegram", "tok-approved", -1001)).toBeNull();
+      expect(rejections().map((entry) => entry.details?.reason)).toEqual(["internal"]);
+    });
+
+    it("leaves the keyboard alone on rejection when the Sending edit failed", async () => {
+      const { bot, click, rejections } = await approvalFixture([123, 456]);
+      const ctx = click(456);
+      ctx.editMessageReplyMarkup.mockRejectedValueOnce(new Error("message is not modified"));
+
+      await bot.emitCallback(ctx);
+
+      expect(ctx.editMessageReplyMarkup).toHaveBeenCalledOnce();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+        text: "Only the designated approver can decide this interface approval.",
+        show_alert: true,
+      });
+      expect(rejections().map((entry) => entry.details?.reason)).toEqual(["not-approver"]);
+    });
+
+    it("aborts consent approval if the session becomes terminal while reading current branch", async () => {
+      const { dataDir, bot, emit, reconcile, click } = await approvalFixture();
+      vi.spyOn(workspaceModule, "readCurrentBranch").mockImplementation(async () => {
+        writeTelegramBindings(dataDir, "api", "telegram", []);
+        return "feature/example";
+      });
+      const ctx = click(123);
+
+      await bot.emitCallback(ctx);
+
+      expect(metadataModule.readInterfaceConsent(dataDir, "api-1")?.decision).toBe("pending");
+      expect(reconcile).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+      expect(findTelegramChoice(dataDir, "api", "telegram", "tok-approved", -1001)).not.toBeNull();
+    });
+  });
+
+  describe("dropped callbacks", () => {
+    const drops = (dataDir: string) =>
+      readEventLog(dataDir).filter((entry) => entry.event === "source.telegram.callback_dropped");
+
+    it.each([
+      ["duplicate", { data: "spur_choice:none", from: { id: 123 } }],
+      ["no-data", { from: { id: 123 } }],
+      ["not-allowed", { data: "spur_choice:none", from: { id: 999 } }],
+      ["no-sender", { data: "spur_choice:none" }],
+    ] as const)("logs a %s drop without answering", async (reason, query) => {
+      const dataDir = await createTempDir("spur-telegram-drop-");
+      tempDirs.push(dataDir);
+      const { bot } = await startSource(dataDir);
+      const ctx = {
+        update: { update_id: 5 },
+        callbackQuery: { ...query, message: { message_id: 90, chat: { id: -1001 } } },
+        answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      };
+      if (reason === "duplicate") {
+        await required(bot).emitCallback(ctx);
+        ctx.answerCallbackQuery.mockClear();
+      }
+
+      await required(bot).emitCallback(ctx);
+
+      expect(ctx.answerCallbackQuery).not.toHaveBeenCalled();
+      expect(drops(dataDir).map((entry) => entry.details)).toEqual([
+        {
+          reason,
+          updateId: 5,
+          chatId: -1001,
+          ...("from" in query ? { userId: query.from.id } : {}),
+        },
+      ]);
+    });
+
+    it("counts repeated drops in one collapse window", async () => {
+      const dataDir = await createTempDir("spur-telegram-drop-");
+      tempDirs.push(dataDir);
+      const { bot } = await startSource(dataDir);
+      const stranger = () => ({
+        callbackQuery: {
+          data: "spur_choice:none",
+          from: { id: 999 },
+          message: { message_id: 90, chat: { id: -1001 } },
+        },
+        answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      });
+
+      await required(bot).emitCallback(stranger());
+      await required(bot).emitCallback(stranger());
+      flushEventLogCollapse(dataDir);
+
+      expect(drops(dataDir).map((entry) => entry.details?.suppressedCount)).toEqual([undefined, 1]);
+    });
+  });
 
   it("workbench /new task plus project tap submits displayed defaults once with multiline task and origin", async () => {
     const dataDir = await createTempDir("spur-telegram-workbench-");
@@ -645,7 +1587,7 @@ describe("telegramSourceModule", () => {
       },
     });
     expect(callback.editMessageText).toHaveBeenCalledWith(
-      "Created. Bound here.",
+      `Created api-new. ${topicLink}`,
       expect.anything(),
     );
     expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
@@ -691,9 +1633,9 @@ describe("telegramSourceModule", () => {
       });
       const write =
         outcome === "binding_failure"
-          ? vi
-              .spyOn(metadataModule, "writeTelegramBindings")
-              .mockRejectedValueOnce(new Error("Write failed"))
+          ? vi.spyOn(metadataModule, "writeTelegramBindings").mockImplementationOnce(() => {
+              throw new Error("Write failed");
+            })
           : undefined;
       const ctx = telegramContext({ text: "/spawn codex task" });
       ctx.reply.mockResolvedValue({ message_id: 900 });
@@ -701,7 +1643,7 @@ describe("telegramSourceModule", () => {
       expect(ctx.reply).toHaveBeenCalledWith("Spawning codex agent...");
       const expected =
         outcome === "success"
-          ? "Spawned and bound."
+          ? `Spawned created. ${topicLink}`
           : outcome === "binding_failure"
             ? "Created created. Binding failed. Use /work to inspect."
             : "Spawn failed: boom <telegram-token>";
@@ -865,10 +1807,7 @@ describe("telegramSourceModule", () => {
         ),
       );
       await required(bot).emitCallback(action);
-      expect(action.editMessageText).toHaveBeenCalledWith(
-        "Bound. Plain messages here go to this task.",
-        expect.anything(),
-      );
+      expect(action.editMessageText).toHaveBeenCalledWith(topicLink, expect.anything());
       expect(emit).not.toHaveBeenCalled();
       await required(bot).emitText(telegramContext({ text: "next instruction" }));
       expect(emit).toHaveBeenCalledWith(
@@ -968,14 +1907,14 @@ describe("telegramSourceModule", () => {
     const { bot } = await startSource(dataDir, vi.fn(), spawn, { workbench: capability });
     await required(bot).emitText(telegramContext({ text: "/watch api-1" }));
     const oldTarget = readTelegramReplyTarget(dataDir, "api-1");
-    const write = vi
-      .spyOn(metadataModule, "writeTelegramBindings")
-      .mockRejectedValueOnce(new Error("Write failed"));
+    const write = vi.spyOn(metadataModule, "writeTelegramBindings").mockImplementationOnce(() => {
+      throw new Error("Write failed");
+    });
     const ctx = await openWorkbench(required(bot), "/new task");
     const action = cardCallback(cardButton(ctx.reply, "Launch api"));
     await required(bot).emitCallback(action);
     expect(action.editMessageText).toHaveBeenCalledWith(
-      expect.stringContaining("Created api-new. Not bound"),
+      expect.stringContaining("Created api-new. No Telegram conversation"),
       expect.anything(),
     );
     expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
@@ -987,8 +1926,11 @@ describe("telegramSourceModule", () => {
       cardCallback(cardButton(action.editMessageText, "Continue here")),
     );
     expect(spawn).toHaveBeenCalledTimes(1);
-    expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
-      "api-new",
+    expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual(
+      expect.arrayContaining([
+        { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        { chatId: -1001, messageThreadId: expect.any(Number), sessionId: "api-new" },
+      ]),
     );
   });
 
@@ -1244,7 +2186,7 @@ describe("telegramSourceModule", () => {
 
     const watchCtx = telegramContext({ text: "/watch api-1" });
     await bot.emitText(watchCtx);
-    expect(watchCtx.reply).toHaveBeenCalledWith("Bound this Telegram thread.");
+    expect(watchCtx.reply).toHaveBeenCalledWith(topicLink);
 
     await bot.emitText(telegramContext());
 
@@ -1269,7 +2211,7 @@ describe("telegramSourceModule", () => {
     await expect(readFile(replyTargetPath, "utf8")).resolves.toContain('"sourceId": "telegram"');
   });
 
-  it("omits messageThreadId for bound main-chat messages", async () => {
+  it("redirects main-chat continuation to the assigned forum topic", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     await mkdir(dataDir, { recursive: true });
@@ -1279,14 +2221,20 @@ describe("telegramSourceModule", () => {
     await bot.emitText(
       telegramContext({ text: "/watch api-1", chat: { id: 123 }, message_thread_id: undefined }),
     );
-    await bot.emitText(
-      telegramContext({ chat: { id: 123 }, message_thread_id: undefined, text: "hello main" }),
-    );
-
-    expect(emit).toHaveBeenCalledWith(
-      "telegram:message",
-      expect.not.objectContaining({ messageThreadId: expect.any(Number) }),
-    );
+    recordTelegramMessages(dataDir, "api", "telegram", { sessionId: "api-1", chatId: 123 }, [500]);
+    const continuation = telegramContext({
+      chat: { id: 123 },
+      message_thread_id: undefined,
+      text: "hello main",
+      reply_to_message: { message_id: 500 },
+    });
+    await bot.emitText(continuation);
+    expect(emit).not.toHaveBeenCalled();
+    expect(continuation.reply).toHaveBeenCalledWith(topicLink);
+    expect(readTelegramReplyTarget(dataDir, "api-1")).toMatchObject({
+      chatId: -1001,
+      messageThreadId: 22,
+    });
   });
 
   it("shows project selection when /watch or /agents has no session id", async () => {
@@ -1350,9 +2298,17 @@ describe("telegramSourceModule", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
     const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
     const editMessageText = vi.fn().mockResolvedValue(undefined);
+    const editMessageReplyMarkup = vi.fn().mockResolvedValue(undefined);
+    const offerMarkup = {
+      inline_keyboard: [
+        [{ text: "Yes", callback_data: "spur_choice:tok0" }],
+        [{ text: "Later", callback_data: "spur_choice:tok1" }],
+      ],
+    };
 
     await bot.emitCallback({
       callbackQuery: {
@@ -1363,15 +2319,35 @@ describe("telegramSourceModule", () => {
           text: "Deploy now?",
           is_topic_message: true,
           chat: { id: -1001 },
+          reply_markup: offerMarkup,
         },
         from: { id: 123, username: "alek" },
       },
       answerCallbackQuery,
       editMessageText,
+      editMessageReplyMarkup,
     });
 
+    expect(answerCallbackQuery).toHaveBeenCalledOnce();
     expect(answerCallbackQuery).toHaveBeenCalledWith("Sent: Yes");
-    expect(editMessageText).toHaveBeenCalledWith("Deploy now?\n\nSelected: Yes");
+    // The keyboard reports progress; the message text and formatting stay.
+    expect(editMessageReplyMarkup.mock.calls).toEqual([
+      [
+        {
+          reply_markup: {
+            inline_keyboard: [[{ text: "Sending: Yes…", callback_data: "spur_choice:tok0" }]],
+          },
+        },
+      ],
+      [
+        {
+          reply_markup: {
+            inline_keyboard: [[{ text: "Selected: Yes", callback_data: "spur_choice:tok0" }]],
+          },
+        },
+      ],
+    ]);
+    expect(editMessageText).not.toHaveBeenCalled();
     expect(emit).toHaveBeenCalledWith("telegram:message", {
       sessionId: "api-1",
       chatId: -1001,
@@ -1392,67 +2368,71 @@ describe("telegramSourceModule", () => {
     // The sibling button is dead: the click consumed the whole offer.
     emit.mockClear();
     answerCallbackQuery.mockClear();
+    editMessageReplyMarkup.mockClear();
     await bot.emitCallback({
       callbackQuery: {
         data: "spur_choice:tok1",
-        message: { message_id: 90, chat: { id: -1001 } },
+        message: { message_id: 90, chat: { id: -1001 }, reply_markup: offerMarkup },
         from: { id: 123, username: "alek" },
       },
       answerCallbackQuery,
       editMessageText,
+      editMessageReplyMarkup,
     });
-    expect(answerCallbackQuery).toHaveBeenCalledWith("This choice is no longer active.");
+    expect(answerCallbackQuery).toHaveBeenCalledWith({
+      text: "This choice is no longer active.",
+      show_alert: true,
+    });
+    expect(editMessageReplyMarkup).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalled();
   });
 
-  it.each([true, false])("filters callback thread ids; topic: %s", async (isTopic) => {
-    const dataDir = await createTempDir("spur-telegram-source-");
-    tempDirs.push(dataDir);
-    const { bot, emit } = await startSource(dataDir);
-    if (!bot) throw new Error("missing bot");
-    // A stale thread on the stored choice must lose to the clicked message's own.
-    writeTelegramOffer(dataDir, "api", "telegram", {
-      sessionId: "api-1",
-      chatId: -1001,
-      choices: [
-        {
-          token: "tok0",
-          offerId: "offer-1",
-          sessionId: "api-1",
-          chatId: -1001,
-          messageThreadId: 11,
-          text: "Yes",
-          value: "yes",
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        },
-      ],
-    });
-    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+  it.each([true, false])(
+    "rejects a callback outside its assigned topic; topic: %s",
+    async (isTopic) => {
+      const dataDir = await createTempDir("spur-telegram-source-");
+      tempDirs.push(dataDir);
+      const { bot, emit } = await startSource(dataDir);
+      if (!bot) throw new Error("missing bot");
+      // A stale thread on the stored choice must lose to the clicked message's own.
+      writeTelegramOffer(dataDir, "api", "telegram", {
+        sessionId: "api-1",
+        chatId: -1001,
+        choices: [
+          {
+            token: "tok0",
+            offerId: "offer-1",
+            sessionId: "api-1",
+            chatId: -1001,
+            messageThreadId: 11,
+            text: "Yes",
+            value: "yes",
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          },
+        ],
+        keepInterfaceConsent: false,
+      });
+      const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
 
-    await bot.emitCallback({
-      callbackQuery: {
-        data: "spur_choice:tok0",
-        message: {
-          message_id: 90,
-          message_thread_id: 5678,
-          is_topic_message: isTopic,
-          chat: { id: -1001 },
+      await bot.emitCallback({
+        callbackQuery: {
+          data: "spur_choice:tok0",
+          message: {
+            message_id: 90,
+            message_thread_id: 5678,
+            is_topic_message: isTopic,
+            chat: { id: -1001 },
+          },
+          from: { id: 123, username: "alek" },
         },
-        from: { id: 123, username: "alek" },
-      },
-      answerCallbackQuery,
-    });
+        answerCallbackQuery,
+      });
 
-    const target = readTelegramReplyTarget(dataDir, "api-1");
-    if (isTopic) expect(target).toMatchObject({ messageThreadId: 5678 });
-    else expect(target).not.toHaveProperty("messageThreadId");
-    expect(emit).toHaveBeenCalledWith(
-      "telegram:message",
-      expect.objectContaining({ sessionId: "api-1" }),
-    );
-    if (isTopic) expect(emit.mock.calls[0]?.[1]).toHaveProperty("messageThreadId", 5678);
-    else expect(emit.mock.calls[0]?.[1]).not.toHaveProperty("messageThreadId");
-  });
+      expect(readTelegramReplyTarget(dataDir, "api-1")).toMatchObject({ messageThreadId: 22 });
+      expect(emit).not.toHaveBeenCalled();
+      expect(answerCallbackQuery).not.toHaveBeenCalledWith("Sent: Yes");
+    },
+  );
 
   it.each([22, undefined])("keeps inaccessible click thread: %s", async (threadId) => {
     const dataDir = await createTempDir("spur-telegram-source-");
@@ -1474,6 +2454,7 @@ describe("telegramSourceModule", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
     await bot.emitCallback({
       callbackQuery: {
@@ -1483,18 +2464,13 @@ describe("telegramSourceModule", () => {
       },
       answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
     });
-    expect(emit).toHaveBeenCalledTimes(1);
-    expect(emit).toHaveBeenCalledWith(
-      "telegram:message",
-      expect.objectContaining({ sessionId: "api-1", text: "yes" }),
-    );
+    expect(emit).toHaveBeenCalledTimes(threadId === undefined ? 0 : 1);
     const target = readTelegramReplyTarget(dataDir, "api-1");
     if (threadId !== undefined) {
       expect(target).toHaveProperty("messageThreadId", threadId);
       expect(emit.mock.calls[0]?.[1]).toHaveProperty("messageThreadId", threadId);
     } else {
-      expect(target).not.toHaveProperty("messageThreadId");
-      expect(emit.mock.calls[0]?.[1]).not.toHaveProperty("messageThreadId");
+      expect(target).toHaveProperty("messageThreadId", 22);
     }
     expect(readTelegramChoices(dataDir, "api", "telegram")).toEqual([]);
   });
@@ -1504,34 +2480,43 @@ describe("telegramSourceModule", () => {
     tempDirs.push(dataDir);
     const { bot } = await startSource(dataDir);
     if (!bot) throw new Error("missing bot");
+    assignTopic(dataDir);
     writeTelegramReplyTarget(dataDir, {
       sessionId: "api-1",
       projectId: "api",
       sourceId: "telegram",
-      chatId: 123,
+      chatId: -1001,
+      messageThreadId: 22,
       statusMessageId: 77,
       lastReplyAt: "2026-03-18T10:02:00.000Z",
     });
     writeTelegramOffer(dataDir, "api", "telegram", {
       sessionId: "api-1",
-      chatId: 123,
+      chatId: -1001,
       choices: [
         {
           token: "tok0",
           offerId: "offer-1",
           sessionId: "api-1",
-          chatId: 123,
+          chatId: -1001,
+          messageThreadId: 22,
           text: "Yes",
           value: "yes",
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
 
     await bot.emitCallback({
       callbackQuery: {
         data: "spur_choice:tok0",
-        message: { message_id: 90, chat: { id: 123 } },
+        message: {
+          message_id: 90,
+          message_thread_id: 22,
+          is_topic_message: true,
+          chat: { id: -1001 },
+        },
         from: { id: 123, username: "alek" },
       },
       answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
@@ -1554,6 +2539,7 @@ describe("telegramSourceModule", () => {
         sessionId: "api-1",
         chatId: -1001,
         choices: [],
+        keepInterfaceConsent: true,
       });
       return Promise.resolve([{ id: "api-1", project: "api", agent: "codex", state: "waiting" }]);
     });
@@ -1568,25 +2554,41 @@ describe("telegramSourceModule", () => {
           offerId: "offer-1",
           sessionId: "api-1",
           chatId: -1001,
+          messageThreadId: 22,
           text: "Yes",
           value: "yes",
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
     const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const editMessageReplyMarkup = vi.fn().mockResolvedValue(undefined);
 
     await bot.emitCallback({
       callbackQuery: {
         data: "spur_choice:tok0",
-        message: { message_id: 90, chat: { id: -1001 } },
+        message: {
+          message_id: 90,
+          message_thread_id: 22,
+          is_topic_message: true,
+          chat: { id: -1001 },
+          reply_markup: { inline_keyboard: [[{ text: "Yes", callback_data: "spur_choice:tok0" }]] },
+        },
         from: { id: 123, username: "alek" },
       },
       answerCallbackQuery,
+      editMessageReplyMarkup,
     });
 
-    // Never "Sent" for a click that delivered nothing.
-    expect(answerCallbackQuery).toHaveBeenCalledWith("This choice is no longer active.");
+    // Never "Sent" for a click that delivered nothing; the spent keyboard goes.
+    expect(answerCallbackQuery).toHaveBeenCalledWith({
+      text: "This choice is no longer active.",
+      show_alert: true,
+    });
+    expect(editMessageReplyMarkup).toHaveBeenLastCalledWith({
+      reply_markup: { inline_keyboard: [] },
+    });
     expect(answerCallbackQuery).not.toHaveBeenCalledWith("Sent: Yes");
     expect(emit).not.toHaveBeenCalled();
   });
@@ -1605,17 +2607,24 @@ describe("telegramSourceModule", () => {
           offerId: "offer-1",
           sessionId: "api-1",
           chatId: -1001,
+          messageThreadId: 22,
           text: "Yes",
           value: "yes",
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
 
     await bot.emitCallback({
       callbackQuery: {
         data: "spur_choice:tok0",
-        message: { message_id: 90, chat: { id: -1001 } },
+        message: {
+          message_id: 90,
+          message_thread_id: 22,
+          is_topic_message: true,
+          chat: { id: -1001 },
+        },
         from: { id: 123, username: "alek" },
       },
       // Telegram expires callback queries; a rejected ack must not eat the click.
@@ -1628,6 +2637,94 @@ describe("telegramSourceModule", () => {
     );
     expect(readTelegramChoices(dataDir, "api", "telegram")).toHaveLength(0);
   });
+
+  it.each(["ordinary", "consent"])(
+    "redirects legacy DM %s buttons before taking or deciding",
+    async (kind) => {
+      const dataDir = await createTempDir("spur-telegram-legacy-choice-");
+      tempDirs.push(dataDir);
+      const { bot, emit } = await startSource(dataDir);
+      writeTelegramOffer(dataDir, "api", "telegram", {
+        sessionId: "api-1",
+        chatId: 123,
+        choices: [
+          {
+            token: "legacy",
+            offerId: "legacy",
+            sessionId: "api-1",
+            chatId: 123,
+            text: "Approve",
+            value: "approved",
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            ...(kind === "consent"
+              ? { interfaceConsent: { challenge: "legacy", decision: "approved" as const } }
+              : {}),
+          },
+        ],
+        keepInterfaceConsent: false,
+      });
+      const take = vi.spyOn(metadataModule, "takeTelegramChoice");
+      const decide = vi.spyOn(consentModule, "decideConsent");
+      const policy = vi.spyOn(consentModule, "consentPolicy");
+      const publish = vi.spyOn(consentModule, "reconcileInterfaceConsent");
+      try {
+        const callback = cardCallback("spur_choice:legacy", {
+          message: { message_id: 90, chat: { id: 123 } },
+        });
+        await required(bot).emitCallback(callback);
+        expect(callback.answerCallbackQuery).toHaveBeenCalledWith(
+          "Continue in the assigned topic.",
+        );
+        expect(callback.reply).toHaveBeenCalledWith(topicLink);
+        expect(callback.editMessageText).not.toHaveBeenCalled();
+        expect(take).not.toHaveBeenCalled();
+        expect(decide).not.toHaveBeenCalled();
+        expect(policy).not.toHaveBeenCalled();
+        expect(publish).not.toHaveBeenCalled();
+        expect(emit).not.toHaveBeenCalled();
+        expect(readTelegramReplyTarget(dataDir, "api-1")).toMatchObject({
+          chatId: -1001,
+          messageThreadId: 22,
+        });
+      } finally {
+        take.mockRestore();
+        decide.mockRestore();
+        policy.mockRestore();
+        publish.mockRestore();
+      }
+    },
+  );
+
+  it.each(["unwatch", "replace"])(
+    "does not restore routing after %s while the placeholder awaits",
+    async (change) => {
+      const dataDir = await createTempDir("spur-telegram-placeholder-race-");
+      tempDirs.push(dataDir);
+      const { bot, emit } = await startSource(dataDir);
+      await required(bot).emitText(telegramContext({ text: "/watch api-1" }));
+      let acknowledge!: (message: { message_id: number }) => void;
+      const ctx = telegramContext();
+      ctx.reply.mockReturnValueOnce(
+        new Promise((resolve) => {
+          acknowledge = resolve;
+        }),
+      );
+      const delivering = required(bot).emitText(ctx);
+      await vi.waitFor(() =>
+        expect(ctx.reply).toHaveBeenCalledWith("Received. api-1 is thinking..."),
+      );
+      if (change === "unwatch") await required(bot).emitText(telegramContext({ text: "/unwatch" }));
+      else assignTopic(dataDir, "api-2");
+      acknowledge({ message_id: 77 });
+      await delivering;
+      expect(ctx.reply).toHaveBeenCalledWith("Agent conversation changed. Message not delivered.");
+      expect(emit).not.toHaveBeenCalled();
+      expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
+        change === "unwatch" ? undefined : "api-2",
+      );
+      expect(readTelegramReplyTarget(dataDir, "api-1")?.statusMessageId).toBeUndefined();
+    },
+  );
 
   it("drops an agent button click for an unknown token, a foreign chat, or a dead session", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
@@ -1649,8 +2746,10 @@ describe("telegramSourceModule", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
     const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const inactive = { text: "This choice is no longer active.", show_alert: true };
 
     await bot.emitCallback({
       callbackQuery: {
@@ -1660,7 +2759,7 @@ describe("telegramSourceModule", () => {
       },
       answerCallbackQuery,
     });
-    expect(answerCallbackQuery).toHaveBeenLastCalledWith("This choice is no longer active.");
+    expect(answerCallbackQuery).toHaveBeenLastCalledWith(inactive);
 
     // A token from another chat must not fire, and stays unconsumed.
     await bot.emitCallback({
@@ -1671,7 +2770,7 @@ describe("telegramSourceModule", () => {
       },
       answerCallbackQuery,
     });
-    expect(answerCallbackQuery).toHaveBeenLastCalledWith("This choice is no longer active.");
+    expect(answerCallbackQuery).toHaveBeenLastCalledWith(inactive);
 
     // Right chat, but the offering session is gone.
     await bot.emitCallback({
@@ -1682,7 +2781,10 @@ describe("telegramSourceModule", () => {
       },
       answerCallbackQuery,
     });
-    expect(answerCallbackQuery).toHaveBeenLastCalledWith("Session is no longer active.");
+    expect(answerCallbackQuery).toHaveBeenLastCalledWith({
+      text: "Session is no longer active.",
+      show_alert: true,
+    });
     expect(emit).not.toHaveBeenCalled();
     expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
     // The offer survives a dead lookup: consuming it would strand the question.
@@ -1913,8 +3015,8 @@ describe("telegramSourceModule", () => {
       editMessageText,
     });
 
-    expect(answerCallbackQuery).toHaveBeenCalledWith("Bound.");
-    expect(editMessageText).toHaveBeenCalledWith("Bound this Telegram thread.");
+    expect(answerCallbackQuery).toHaveBeenCalledWith("Conversation selected.");
+    expect(editMessageText).toHaveBeenCalledWith(topicLink);
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "api-2"');
   });
@@ -1932,7 +3034,7 @@ describe("telegramSourceModule", () => {
       }),
     );
     expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
-      { chatId: -1001, sessionId: "api-1" },
+      { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
     ]);
     await bot.emitText(
       telegramContext({
@@ -1941,7 +3043,9 @@ describe("telegramSourceModule", () => {
         is_topic_message: false,
       }),
     );
-    expect(readTelegramBindings(dataDir, "api", "telegram").size).toBe(0);
+    expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
+      "api-1",
+    );
     await bot.emitCallback({
       callbackQuery: {
         data: "spur_watch:api-2",
@@ -1952,9 +3056,10 @@ describe("telegramSourceModule", () => {
       editMessageText: vi.fn().mockResolvedValue(undefined),
     });
     expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
-      { chatId: -1001, sessionId: "api-2" },
+      { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+      { chatId: -1001, messageThreadId: 23, sessionId: "api-2" },
     ]);
-    expect(readTelegramReplyTarget(dataDir, "api-2")).not.toHaveProperty("messageThreadId");
+    expect(readTelegramReplyTarget(dataDir, "api-2")).toHaveProperty("messageThreadId", 23);
   });
 
   it.each([123, -1001])(
@@ -1969,14 +3074,14 @@ describe("telegramSourceModule", () => {
         is_topic_message: false,
       });
       await required(bot).emitText(ctx);
-      expect(ctx.reply).toHaveBeenCalledWith("Bound this Telegram thread to Spur session api-1.");
+      expect(ctx.reply).toHaveBeenCalledWith(topicLink);
       const callback = cardCallback("spur_watch:api-2", {
         message: { message_id: 700, chat: { id: chatId }, message_thread_id: 400 },
       });
       await required(bot).emitCallback(callback);
-      expect(callback.answerCallbackQuery).toHaveBeenCalledWith("Bound api-2.");
+      expect(callback.answerCallbackQuery).toHaveBeenCalledWith("Conversation selected.");
       expect(callback.editMessageText).toHaveBeenCalledWith(
-        "Bound this Telegram thread to Spur session api-2.",
+        "Continue in [agent topic](https://t.me/c/1/23).",
       );
     },
   );
@@ -2017,12 +3122,12 @@ describe("telegramSourceModule", () => {
     expect(state.bindings).toEqual(
       expect.arrayContaining([
         { chatId: -1001, messageThreadId: 44, sessionId: "api-1" },
-        { chatId: 123, sessionId: "api-2" },
+        { chatId: -1001, messageThreadId: 22, sessionId: "api-2" },
       ]),
     );
   });
 
-  it("rejects binding the same session to another Telegram target", async () => {
+  it("reuses the canonical topic when watched from another Telegram target", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const { bot } = await startSource(dataDir);
@@ -2032,12 +3137,10 @@ describe("telegramSourceModule", () => {
     const secondWatchCtx = telegramContext({ text: "/watch api-1", chat: { id: 456 } });
     await bot.emitText(secondWatchCtx);
 
-    expect(secondWatchCtx.reply).toHaveBeenCalledWith(
-      "Spur session api-1 is already bound elsewhere.",
-    );
+    expect(secondWatchCtx.reply).toHaveBeenCalledWith(topicLink);
   });
 
-  it("rejects watch callback binding when the session is bound elsewhere", async () => {
+  it("watch callback selects the existing canonical topic", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const { bot } = await startSource(dataDir);
@@ -2060,8 +3163,8 @@ describe("telegramSourceModule", () => {
       editMessageText,
     });
 
-    expect(answerCallbackQuery).toHaveBeenCalledWith("Session is already bound elsewhere.");
-    expect(editMessageText).not.toHaveBeenCalled();
+    expect(answerCallbackQuery).toHaveBeenCalledWith("Conversation selected.");
+    expect(editMessageText).toHaveBeenCalledWith(topicLink);
   });
 
   it.each([true, false])("keeps pending spawn across reply chains; topic: %s", async (isTopic) => {
@@ -2119,15 +3222,13 @@ describe("telegramSourceModule", () => {
     if (isTopic) expect(origin).toHaveProperty("messageThreadId", 22);
     else expect(origin).not.toHaveProperty("messageThreadId");
     expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
-      { chatId: -1001, sessionId: "api-3", ...(isTopic ? { messageThreadId: 22 } : {}) },
+      { chatId: -1001, sessionId: "api-3", messageThreadId: 22 },
     ]);
     expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain(
       '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
     );
     expect(promptCtx.reply).toHaveBeenCalledWith("Spawning codex agent...");
-    expect(promptCtx.reply).toHaveBeenCalledWith(
-      isTopic ? "Spawned and bound." : "Spawned and bound: api-3.",
-    );
+    expect(promptCtx.reply).toHaveBeenCalledWith(`Spawned api-3. ${topicLink}`);
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "api-3"');
   });
@@ -2160,9 +3261,9 @@ describe("telegramSourceModule", () => {
       });
       const write =
         outcome === "binding_failure"
-          ? vi
-              .spyOn(metadataModule, "writeTelegramBindings")
-              .mockRejectedValueOnce(new Error("Write failed"))
+          ? vi.spyOn(metadataModule, "writeTelegramBindings").mockImplementationOnce(() => {
+              throw new Error("Write failed");
+            })
           : undefined;
       const taskCtx = telegramContext({ text: "deliver task" });
       taskCtx.reply.mockRejectedValueOnce(new Error("progress failed token-123"));
@@ -2200,7 +3301,7 @@ describe("telegramSourceModule", () => {
             ? "Spawn failed: spawn failed <telegram-token>"
             : outcome === "binding_failure"
               ? "Created api-new. Binding failed. Use /work to inspect."
-              : "Spawned and bound.";
+              : `Spawned api-new. ${topicLink}`;
         expect(taskCtx.reply).toHaveBeenCalledWith(terminal);
         if (outcome === "terminal_failure") {
           expect(taskCtx.reply).toHaveBeenLastCalledWith(
@@ -2312,7 +3413,7 @@ describe("telegramSourceModule", () => {
     ]);
     await required(bot).emitText(telegramContext({ text: "followup" }));
     expect(spawn).toHaveBeenCalledTimes(2);
-    expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
+    expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:23")?.sessionId).toBe(
       "api-new",
     );
   });
@@ -2432,8 +3533,8 @@ describe("telegramSourceModule", () => {
     // callback ctx's `api`, not re-sent as a second `reply` — proves the
     // project-pick path's `replyShim` now forwards `api` like the direct
     // `/spawn <agent> <task>` path does.
-    expect(editMessageText).toHaveBeenCalledWith(-1001, 77, "Spawned and bound.");
-    expect(reply).not.toHaveBeenCalledWith("Spawned and bound.");
+    expect(editMessageText).toHaveBeenCalledWith(-1001, 77, `Spawned api-3. ${topicLink}`);
+    expect(reply).not.toHaveBeenCalledWith(`Spawned api-3. ${topicLink}`);
   });
 
   it("asks for a prompt after a spawn callback", async () => {
@@ -2502,7 +3603,7 @@ describe("telegramSourceModule", () => {
       '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
     );
     expect(promptCtx.reply).toHaveBeenCalledWith("Spawning claude agent...");
-    expect(promptCtx.reply).toHaveBeenCalledWith("Spawned and bound.");
+    expect(promptCtx.reply).toHaveBeenCalledWith(`Spawned api-3. ${topicLink}`);
   });
 
   it("surfaces spawn progress and result", async () => {
@@ -2537,7 +3638,7 @@ describe("telegramSourceModule", () => {
     });
 
     expect(reply).toHaveBeenNthCalledWith(1, "Spawning codex agent...");
-    expect(reply).toHaveBeenNthCalledWith(2, "Spawned and bound.");
+    expect(reply).toHaveBeenNthCalledWith(2, `Spawned api-3. ${topicLink}`);
     expect(reply).toHaveBeenCalledTimes(2);
   });
 
@@ -3078,8 +4179,8 @@ describe("telegramSourceModule", () => {
     const { bot, emit } = await startSource(dataDir);
     if (!bot) throw new Error("missing bot");
 
-    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
-    const textCtx = telegramContext({ chat: { id: 123 } });
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    const textCtx = telegramContext();
     textCtx.reply.mockResolvedValueOnce({ message_id: 77 });
 
     await bot.emitText(textCtx);
@@ -3097,7 +4198,7 @@ describe("telegramSourceModule", () => {
       "api-1.json",
     );
     await expect(readFile(replyTargetPath, "utf8")).resolves.toContain('"statusMessageId": 77');
-    expect(findTelegramMessageSession(dataDir, "api", "telegram", 123, 77)).toBe("api-1");
+    expect(findTelegramMessageSession(dataDir, "api", "telegram", -1001, 77)).toBe("api-1");
   });
 
   it("marks a superseded placeholder as received", async () => {
@@ -3105,16 +4206,16 @@ describe("telegramSourceModule", () => {
     tempDirs.push(dataDir);
     const { bot } = await startSource(dataDir);
     if (!bot) throw new Error("missing bot");
-    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
-    const first = telegramContext({ chat: { id: 123 } });
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    const first = telegramContext();
     first.reply.mockResolvedValueOnce({ message_id: 77 });
     await bot.emitText(first);
-    const second = telegramContext({ chat: { id: 123 } });
+    const second = telegramContext();
     second.reply.mockResolvedValueOnce({ message_id: 78 });
 
     await bot.emitText(second);
 
-    expect(second.api.editMessageText).toHaveBeenCalledWith(123, 77, "Received.");
+    expect(second.api.editMessageText).toHaveBeenCalledWith(-1001, 77, "Received.");
     expect(readTelegramReplyTarget(dataDir, "api-1")?.statusMessageId).toBe(78);
   });
 
@@ -3123,11 +4224,11 @@ describe("telegramSourceModule", () => {
     tempDirs.push(dataDir);
     const { bot } = await startSource(dataDir);
     if (!bot) throw new Error("missing bot");
-    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
-    const first = telegramContext({ chat: { id: 123 } });
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    const first = telegramContext();
     first.reply.mockResolvedValueOnce({ message_id: 77 });
     await bot.emitText(first);
-    const second = telegramContext({ chat: { id: 123 } });
+    const second = telegramContext();
     second.reply.mockResolvedValueOnce({ message_id: 78 });
     const recordedDuringEdit: (number | undefined)[] = [];
     second.api.editMessageText.mockImplementation(async () => {
@@ -3136,7 +4237,7 @@ describe("telegramSourceModule", () => {
 
     await bot.emitText(second);
 
-    expect(second.api.editMessageText).toHaveBeenCalledWith(123, 77, "Received.");
+    expect(second.api.editMessageText).toHaveBeenCalledWith(-1001, 77, "Received.");
     expect(recordedDuringEdit).toEqual([78]);
   });
 
@@ -3145,8 +4246,8 @@ describe("telegramSourceModule", () => {
     tempDirs.push(dataDir);
     const { bot } = await startSource(dataDir);
     if (!bot) throw new Error("missing bot");
-    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
-    const first = telegramContext({ chat: { id: 123 } });
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    const first = telegramContext();
     first.reply.mockResolvedValueOnce({ message_id: 77 });
     await bot.emitText(first);
     // The agent claims the placeholder (clears it) before it starts editing it.
@@ -3154,7 +4255,7 @@ describe("telegramSourceModule", () => {
     if (!claimed) throw new Error("missing reply target");
     const { statusMessageId: _claimed, updatedAt: _updatedAt, ...withoutStatus } = claimed;
     writeTelegramReplyTarget(dataDir, withoutStatus);
-    const second = telegramContext({ chat: { id: 123 } });
+    const second = telegramContext();
     second.reply.mockResolvedValueOnce({ message_id: 78 });
 
     await bot.emitText(second);
@@ -3183,10 +4284,11 @@ describe("telegramSourceModule", () => {
 
     await bot.emitText(textCtx);
 
-    expect(textCtx.reply).toHaveBeenCalledWith("api-2 is not active. Message not delivered.");
+    expect(textCtx.reply).toHaveBeenCalledWith("Continue in [agent topic](https://t.me/c/1/23).");
     expect(emit).not.toHaveBeenCalled();
     expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
-      { chatId: 123, sessionId: "api-1" },
+      { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+      { chatId: -1001, messageThreadId: 23, sessionId: "api-2" },
     ]);
   });
 
@@ -3213,13 +4315,13 @@ describe("telegramSourceModule", () => {
     expect(textCtx.reply).toHaveBeenCalledWith(expected);
   });
 
-  it("leaves a placeholder in another chat untouched when the session is reached elsewhere", async () => {
+  it("keeps the canonical placeholder when a foreign-chat reply is redirected", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const { bot } = await startSource(dataDir);
     if (!bot) throw new Error("missing bot");
-    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
-    const dm = telegramContext({ chat: { id: 123 } });
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    const dm = telegramContext();
     dm.reply.mockResolvedValueOnce({ message_id: 77 });
     await bot.emitText(dm);
     recordTelegramMessages(dataDir, "api", "telegram", { sessionId: "api-1", chatId: 456 }, [500]);
@@ -3233,10 +4335,11 @@ describe("telegramSourceModule", () => {
     await bot.emitText(group);
 
     expect(group.api.editMessageText).not.toHaveBeenCalled();
-    expect(readTelegramReplyTarget(dataDir, "api-1")?.statusMessageId).toBe(601);
+    expect(group.reply).toHaveBeenCalledWith(topicLink);
+    expect(readTelegramReplyTarget(dataDir, "api-1")?.statusMessageId).toBe(77);
   });
 
-  it("keeps the Selected edit plain for an offer containing < and &", async () => {
+  it("marks the pick on the keyboard and never rewrites the offer text", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const { bot } = await startSource(dataDir);
@@ -3250,37 +4353,61 @@ describe("telegramSourceModule", () => {
           offerId: "offer-1",
           sessionId: "api-1",
           chatId: -1001,
+          messageThreadId: 22,
           text: "Yes",
           value: "yes",
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
     const editMessageText = vi.fn().mockResolvedValue(undefined);
+    const editMessageReplyMarkup = vi.fn().mockResolvedValue(undefined);
 
+    // No keyboard on the callback: nothing to roll back, so no "Sending" step.
     await bot.emitCallback({
       callbackQuery: {
         data: "spur_choice:tok0",
-        message: { message_id: 90, text: "a < b & c", chat: { id: -1001 } },
+        message: {
+          message_id: 90,
+          message_thread_id: 22,
+          is_topic_message: true,
+          text: "a < b & c",
+          chat: { id: -1001 },
+        },
         from: { id: 123, username: "alek" },
       },
       answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
       editMessageText,
+      editMessageReplyMarkup,
     });
 
-    expect(editMessageText).toHaveBeenCalledTimes(1);
-    expect(editMessageText.mock.calls[0]).toEqual(["a < b & c\n\nSelected: Yes"]);
+    expect(editMessageText).not.toHaveBeenCalled();
+    expect(editMessageReplyMarkup.mock.calls).toEqual([
+      [
+        {
+          reply_markup: {
+            inline_keyboard: [[{ text: "Selected: Yes", callback_data: "spur_choice:tok0" }]],
+          },
+        },
+      ],
+    ]);
   });
 
-  it("drops a DM placeholder when a click moves the session to a group", async () => {
+  it("drops a legacy DM placeholder when a canonical-topic choice migrates the session", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const { bot } = await startSource(dataDir);
     if (!bot) throw new Error("missing bot");
-    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
+    writeTelegramBindings(dataDir, "api", "telegram", [{ chatId: 123, sessionId: "api-1" }]);
+    writeTelegramReplyTarget(dataDir, {
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "telegram",
+      chatId: 123,
+      statusMessageId: 77,
+    });
     const dm = telegramContext({ chat: { id: 123 } });
-    dm.reply.mockResolvedValueOnce({ message_id: 77 });
-    await bot.emitText(dm);
     expect(readTelegramReplyTarget(dataDir, "api-1")?.statusMessageId).toBe(77);
     writeTelegramOffer(dataDir, "api", "telegram", {
       sessionId: "api-1",
@@ -3291,17 +4418,24 @@ describe("telegramSourceModule", () => {
           offerId: "offer-1",
           sessionId: "api-1",
           chatId: -1001,
+          messageThreadId: 22,
           text: "Yes",
           value: "yes",
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
 
     await bot.emitCallback({
       callbackQuery: {
         data: "spur_choice:tok0",
-        message: { message_id: 90, chat: { id: -1001 } },
+        message: {
+          message_id: 90,
+          message_thread_id: 22,
+          is_topic_message: true,
+          chat: { id: -1001 },
+        },
         from: { id: 123, username: "alek" },
       },
       answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
@@ -3313,66 +4447,58 @@ describe("telegramSourceModule", () => {
     expect(dm.api.editMessageText).not.toHaveBeenCalled();
   });
 
-  it.each([123, -1001])("routes a recorded reply ahead of chat %s binding", async (chatId) => {
-    const dataDir = await createTempDir("spur-telegram-source-");
-    tempDirs.push(dataDir);
-    const { bot, emit, spawnSession } = await startSource(dataDir, vi.fn(), vi.fn(), {
-      config: { autoSpawn: { enabled: true, project: "api", agent: "claude" } },
-    });
-    if (!bot) throw new Error("missing bot");
-    await bot.emitText(
-      telegramContext({ text: "/watch api-1", chat: { id: chatId }, message_thread_id: undefined }),
-    );
-    recordTelegramMessages(dataDir, "api", "telegram", { sessionId: "api-2", chatId }, [500]);
-    const textCtx = telegramContext({
-      chat: { id: chatId },
-      message_thread_id: chatId < 0 ? 500 : undefined,
-      is_topic_message: undefined,
-      reply_to_message: { message_id: 500 },
-    });
-    textCtx.reply.mockResolvedValueOnce({ message_id: 601 });
-
-    await bot.emitText(textCtx);
-
-    expect(textCtx.reply).toHaveBeenCalledWith("Received. api-2 is busy; your message is queued.");
-    expect(emit).toHaveBeenCalledWith(
-      "telegram:message",
-      expect.objectContaining({ sessionId: "api-2", text: "hello agent" }),
-    );
-    expect(emit).toHaveBeenCalledTimes(1);
-    expect(readTelegramReplyTarget(dataDir, "api-2")?.statusMessageId).toBe(
-      chatId > 0 ? 601 : undefined,
-    );
-    expect(emit.mock.calls[0]?.[1]).not.toHaveProperty("messageThreadId");
-    expect(readTelegramReplyTarget(dataDir, "api-2")).not.toHaveProperty("messageThreadId");
-    expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
-      { chatId, sessionId: "api-1" },
-    ]);
-    emit.mockClear();
-    await bot.emitText(telegramContext({ chat: { id: chatId }, message_thread_id: undefined }));
-    expect(emit).toHaveBeenCalledWith(
-      "telegram:message",
-      expect.objectContaining({ sessionId: "api-1" }),
-    );
-    emit.mockClear();
-    await bot.emitText(
-      telegramContext({
+  it.each([123, -1001])(
+    "redirects a recorded legacy reply without delivering or auto-spawning: %s",
+    async (chatId) => {
+      const dataDir = await createTempDir("spur-telegram-source-");
+      tempDirs.push(dataDir);
+      const { bot, emit, spawnSession } = await startSource(dataDir, vi.fn(), vi.fn(), {
+        config: { autoSpawn: { enabled: true, project: "api", agent: "claude" } },
+      });
+      if (!bot) throw new Error("missing bot");
+      await bot.emitText(
+        telegramContext({
+          text: "/watch api-1",
+          chat: { id: chatId },
+          message_thread_id: undefined,
+        }),
+      );
+      recordTelegramMessages(dataDir, "api", "telegram", { sessionId: "api-2", chatId }, [500]);
+      const textCtx = telegramContext({
         chat: { id: chatId },
-        message_thread_id: chatId < 0 ? 900 : undefined,
-        is_topic_message: false,
-        reply_to_message: { message_id: 900 },
-      }),
-    );
-    expect(emit).toHaveBeenCalledWith(
-      "telegram:message",
-      expect.objectContaining({ sessionId: "api-1" }),
-    );
-    expect(emit.mock.calls[0]?.[1]).not.toHaveProperty("messageThreadId");
-    expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
-      { chatId, sessionId: "api-1" },
-    ]);
-    expect(spawnSession).not.toHaveBeenCalled();
-  });
+        message_thread_id: chatId < 0 ? 500 : undefined,
+        is_topic_message: undefined,
+        reply_to_message: { message_id: 500 },
+      });
+      textCtx.reply.mockResolvedValueOnce({ message_id: 601 });
+
+      await bot.emitText(textCtx);
+
+      expect(textCtx.reply).toHaveBeenCalledWith("Continue in [agent topic](https://t.me/c/1/23).");
+      expect(emit).not.toHaveBeenCalled();
+      expect(readTelegramReplyTarget(dataDir, "api-2")).toMatchObject({
+        chatId: -1001,
+        messageThreadId: 23,
+      });
+      expect(readTelegramReplyTarget(dataDir, "api-2")?.statusMessageId).toBeUndefined();
+      expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
+        { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        { chatId: -1001, messageThreadId: 23, sessionId: "api-2" },
+      ]);
+      await bot.emitText(telegramContext({ text: "to first" }));
+      expect(emit).toHaveBeenCalledWith(
+        "telegram:message",
+        expect.objectContaining({ sessionId: "api-1" }),
+      );
+      emit.mockClear();
+      await bot.emitText(telegramContext({ text: "to second", message_thread_id: 23 }));
+      expect(emit).toHaveBeenCalledWith(
+        "telegram:message",
+        expect.objectContaining({ sessionId: "api-2", messageThreadId: 23 }),
+      );
+      expect(spawnSession).not.toHaveBeenCalled();
+    },
+  );
 
   it("routes a group reply to an old agent's message by the thread binding, not the message owner", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
@@ -3397,89 +4523,95 @@ describe("telegramSourceModule", () => {
     expect(readTelegramReplyTarget(dataDir, "api-2")).toBeNull();
   });
 
-  it.each([true, false])("scopes group takeover; topic: %s", async (isTopic) => {
-    const dataDir = await createTempDir("spur-telegram-source-");
-    tempDirs.push(dataDir);
-    const spawnSession = vi
-      .fn()
-      .mockResolvedValue({ id: "api-3", project: "api", agent: "claude", state: "working" });
-    const listProjects = vi.fn().mockResolvedValue([{ id: "api", name: "api" }]);
-    const listSessions = vi.fn().mockResolvedValue([
-      { id: "api-1", project: "api", agent: "codex", state: "waiting" },
-      { id: "api-3", project: "api", agent: "claude", state: "working" },
-    ]);
-    const { bot, emit } = await startSource(dataDir, vi.fn(), spawnSession, {
-      listProjects,
-      listSessions,
-    });
-    if (!bot) throw new Error("missing bot");
-    await bot.emitText(telegramContext({ text: "/watch api-1", is_topic_message: isTopic }));
-    writeTelegramReplyTarget(dataDir, {
-      sessionId: "api-1",
-      projectId: "api",
-      sourceId: "telegram",
-      chatId: -1001,
-      ...(isTopic ? { messageThreadId: 22 } : {}),
-    });
-    writeTelegramOffer(dataDir, "api", "telegram", {
-      sessionId: "api-1",
-      chatId: -1001,
-      choices: [
-        {
-          token: "tok0",
-          offerId: "offer-1",
-          sessionId: "api-1",
-          chatId: -1001,
-          text: "Yes",
-          value: "yes",
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        },
-      ],
-    });
-    recordTelegramMessages(
-      dataDir,
-      "api",
-      "telegram",
-      { sessionId: "api-1", chatId: -1001 },
-      [500],
-    );
-    const spawnCtx = telegramContext({ text: "/spawn claude do X", is_topic_message: isTopic });
+  it.each([true, false])(
+    "spawn preserves an existing topic owner; origin topic: %s",
+    async (isTopic) => {
+      const dataDir = await createTempDir("spur-telegram-source-");
+      tempDirs.push(dataDir);
+      const spawnSession = vi
+        .fn()
+        .mockResolvedValue({ id: "api-3", project: "api", agent: "claude", state: "working" });
+      const listProjects = vi.fn().mockResolvedValue([{ id: "api", name: "api" }]);
+      const listSessions = vi.fn().mockResolvedValue([
+        { id: "api-1", project: "api", agent: "codex", state: "waiting" },
+        { id: "api-3", project: "api", agent: "claude", state: "working" },
+      ]);
+      const { bot, emit } = await startSource(dataDir, vi.fn(), spawnSession, {
+        listProjects,
+        listSessions,
+      });
+      if (!bot) throw new Error("missing bot");
+      await bot.emitText(telegramContext({ text: "/watch api-1", is_topic_message: isTopic }));
+      writeTelegramReplyTarget(dataDir, {
+        sessionId: "api-1",
+        projectId: "api",
+        sourceId: "telegram",
+        chatId: -1001,
+        ...(isTopic ? { messageThreadId: 22 } : {}),
+      });
+      writeTelegramOffer(dataDir, "api", "telegram", {
+        sessionId: "api-1",
+        chatId: -1001,
+        choices: [
+          {
+            token: "tok0",
+            offerId: "offer-1",
+            sessionId: "api-1",
+            chatId: -1001,
+            text: "Yes",
+            value: "yes",
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            interfaceConsent: { challenge: "c1", decision: "approved" },
+          },
+        ],
+        keepInterfaceConsent: false,
+      });
+      recordTelegramMessages(
+        dataDir,
+        "api",
+        "telegram",
+        { sessionId: "api-1", chatId: -1001 },
+        [500],
+      );
+      const spawnCtx = telegramContext({ text: "/spawn claude do X", is_topic_message: isTopic });
 
-    await bot.emitText(spawnCtx);
+      await bot.emitText(spawnCtx);
 
-    expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
-      { chatId: -1001, ...(isTopic ? { messageThreadId: 22 } : {}), sessionId: "api-3" },
-    ]);
-    expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
-    expect(readTelegramReplyTarget(dataDir, "api-3")?.chatId).toBe(-1001);
-    expect(readTelegramChoices(dataDir, "api", "telegram")).toEqual([]);
-    expect(spawnCtx.reply).toHaveBeenCalledWith(
-      isTopic
-        ? "api-3 took over this thread from api-1."
-        : "api-3 receives plain messages in this chat. Reply to an agent's message to reach that agent.",
-    );
-    await bot.emitText(
-      telegramContext({
-        reply_to_message: { message_id: 500 },
-        message_thread_id: isTopic ? 22 : 500,
-        is_topic_message: isTopic,
-      }),
-    );
-    expect(emit).toHaveBeenCalledWith(
-      "telegram:message",
-      expect.objectContaining({ sessionId: isTopic ? "api-3" : "api-1" }),
-    );
-    if (isTopic) expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
-    else expect(readTelegramReplyTarget(dataDir, "api-1")).not.toHaveProperty("messageThreadId");
-    emit.mockClear();
-    await bot.emitText(telegramContext({ is_topic_message: isTopic }));
-    expect(emit).toHaveBeenCalledWith(
-      "telegram:message",
-      expect.objectContaining({ sessionId: "api-3" }),
-    );
-  });
+      expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
+        { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        { chatId: -1001, messageThreadId: 23, sessionId: "api-3" },
+      ]);
+      expect(readTelegramReplyTarget(dataDir, "api-1")).not.toBeNull();
+      expect(readTelegramReplyTarget(dataDir, "api-3")?.chatId).toBe(-1001);
+      expect(readTelegramChoices(dataDir, "api", "telegram").map((choice) => choice.token)).toEqual(
+        ["tok0"],
+      );
+      expect(spawnCtx.reply).toHaveBeenCalledWith(
+        "Spawned api-3. Continue in [agent topic](https://t.me/c/1/23).",
+      );
+      await bot.emitText(
+        telegramContext({
+          reply_to_message: { message_id: 500 },
+          message_thread_id: isTopic ? 22 : 500,
+          is_topic_message: isTopic,
+        }),
+      );
+      if (isTopic)
+        expect(emit).toHaveBeenCalledWith(
+          "telegram:message",
+          expect.objectContaining({ sessionId: "api-1" }),
+        );
+      else expect(emit).not.toHaveBeenCalled();
+      emit.mockClear();
+      await bot.emitText(telegramContext({ message_thread_id: 23 }));
+      expect(emit).toHaveBeenCalledWith(
+        "telegram:message",
+        expect.objectContaining({ sessionId: "api-3" }),
+      );
+    },
+  );
 
-  it("detaches a displaced agent from the taken thread only, not from other threads or chats", async () => {
+  it("does not detach an existing agent or its offers when another agent spawns", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const spawnSession = vi
@@ -3510,17 +4642,20 @@ describe("telegramSourceModule", () => {
       sessionId: "api-1",
       chatId: -1001,
       choices: [offer(-1001, "here")],
+      keepInterfaceConsent: false,
     });
     writeTelegramOffer(dataDir, "api", "telegram", {
       sessionId: "api-1",
       chatId: -2002,
       choices: [offer(-2002, "elsewhere")],
+      keepInterfaceConsent: false,
     });
 
     await bot.emitText(telegramContext({ text: "/spawn claude do X" }));
 
     expect(readTelegramReplyTarget(dataDir, "api-1")?.messageThreadId).toBe(99);
     expect(readTelegramChoices(dataDir, "api", "telegram").map((choice) => choice.token)).toEqual([
+      "here",
       "elsewhere",
     ]);
   });
@@ -3574,14 +4709,19 @@ describe("telegramSourceModule", () => {
       expect(textCtx.reply).toHaveBeenCalledWith(
         state === "gone"
           ? "Spur session api-9 is gone. Message not delivered."
-          : "api-9 is not active. Message not delivered.",
+          : "Continue in [agent topic](https://t.me/c/1/23).",
       );
       expect(emit).not.toHaveBeenCalled();
       expect(spawnSession).not.toHaveBeenCalled();
-      expect(readTelegramReplyTarget(dataDir, "api-9")).toBeNull();
-      expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
-        { chatId: -1001, sessionId: "api-1" },
-      ]);
+      if (state === "gone") expect(readTelegramReplyTarget(dataDir, "api-9")).toBeNull();
+      else
+        expect(readTelegramReplyTarget(dataDir, "api-9")).toMatchObject({
+          chatId: -1001,
+          messageThreadId: 23,
+        });
+      expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
+        "api-1",
+      );
     },
   );
 
@@ -3607,7 +4747,7 @@ describe("telegramSourceModule", () => {
     );
     expect(emit).not.toHaveBeenCalled();
     expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
-      { chatId: 123, sessionId: "api-1" },
+      { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
     ]);
   });
 
@@ -3631,7 +4771,7 @@ describe("telegramSourceModule", () => {
     expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toHaveLength(1);
   });
 
-  it("keeps two agents in one DM: /spawn rebinds plain text, reply-to reaches the first", async () => {
+  it("DM spawns receive separate topics and DM replies cannot deliver to either agent", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const spawnSession = vi
@@ -3658,18 +4798,27 @@ describe("telegramSourceModule", () => {
       telegramContext({ text: "to A", chat: { id: 123 }, reply_to_message: { message_id: 40 } }),
     );
 
+    expect(emit).not.toHaveBeenCalled();
+    expect(readTelegramReplyTarget(dataDir, "api-3")).toMatchObject({
+      chatId: -1001,
+      messageThreadId: 22,
+    });
+    expect(readTelegramReplyTarget(dataDir, "api-4")).toMatchObject({
+      chatId: -1001,
+      messageThreadId: 23,
+    });
+    await bot.emitText(telegramContext({ text: "to A", message_thread_id: 22 }));
+    await bot.emitText(telegramContext({ text: "to B", message_thread_id: 23 }));
     expect(emit).toHaveBeenNthCalledWith(
       1,
       "telegram:message",
-      expect.objectContaining({ sessionId: "api-4", text: "plain" }),
+      expect.objectContaining({ sessionId: "api-3", text: "to A" }),
     );
     expect(emit).toHaveBeenNthCalledWith(
       2,
       "telegram:message",
-      expect.objectContaining({ sessionId: "api-3", text: "to A" }),
+      expect.objectContaining({ sessionId: "api-4", text: "to B" }),
     );
-    // A private chat holds many agents: the first keeps its target, nobody is told they were displaced.
-    expect(readTelegramReplyTarget(dataDir, "api-3")).not.toBeNull();
     expect(spawnB.reply).not.toHaveBeenCalledWith(expect.stringContaining("took over"));
   });
 
@@ -3692,26 +4841,51 @@ describe("telegramSourceModule", () => {
           offerId: "offer-1",
           sessionId: "api-1",
           chatId: -1001,
+          messageThreadId: 22,
           text: "Yes",
           value: "yes",
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
     const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const editMessageReplyMarkup = vi.fn().mockResolvedValue(undefined);
+    const offerMarkup = {
+      inline_keyboard: [[{ text: "Yes", callback_data: "spur_choice:tok0" }]],
+    };
 
     await bot.emitCallback({
       callbackQuery: {
         data: "spur_choice:tok0",
-        message: { message_id: 90, chat: { id: -1001 } },
+        message: {
+          message_id: 90,
+          message_thread_id: 22,
+          is_topic_message: true,
+          chat: { id: -1001 },
+          reply_markup: offerMarkup,
+        },
         from: { id: 123, username: "alek" },
       },
       answerCallbackQuery,
+      editMessageReplyMarkup,
     });
 
-    expect(answerCallbackQuery).toHaveBeenCalledWith("api-1 is not active.");
+    expect(answerCallbackQuery).toHaveBeenCalledOnce();
+    expect(answerCallbackQuery).toHaveBeenCalledWith({
+      text: "api-1 is not active.",
+      show_alert: true,
+    });
+    // "Sending" first, then the untouched keyboard back.
+    expect(editMessageReplyMarkup).toHaveBeenCalledTimes(2);
+    expect(editMessageReplyMarkup).toHaveBeenLastCalledWith({ reply_markup: offerMarkup });
     expect(emit).not.toHaveBeenCalled();
     expect(findTelegramChoice(dataDir, "api", "telegram", "tok0", -1001)).not.toBeNull();
+    expect(
+      readEventLog(dataDir)
+        .filter((entry) => entry.event === "source.telegram.choice_rejected")
+        .map((entry) => [entry.sessionId, entry.details?.reason]),
+    ).toEqual([["api-1", "session-inactive"]]);
   });
 
   it("keeps lastInboundAt behind an agent reply when the spawn bind runs, and a real inbound re-arms it", async () => {
@@ -3719,11 +4893,13 @@ describe("telegramSourceModule", () => {
     tempDirs.push(dataDir);
     const spawnSession = vi.fn().mockImplementation(async () => {
       // What the daemon does mid-spawn: pre-write the target, then the agent replies.
+      assignTopic(dataDir, "api-3");
       writeTelegramReplyTarget(dataDir, {
         sessionId: "api-3",
         projectId: "api",
         sourceId: "telegram",
-        chatId: 123,
+        chatId: -1001,
+        messageThreadId: 22,
         lastInboundAt: "2000-01-01T00:00:00.000Z",
         lastReplyAt: "2000-01-02T00:00:00.000Z",
       });
@@ -3752,9 +4928,7 @@ describe("telegramSourceModule", () => {
       lastReplyAt: "2000-01-02T00:00:00.000Z",
     });
 
-    await bot.emitText(
-      telegramContext({ text: "next", chat: { id: 123 }, message_thread_id: undefined }),
-    );
+    await bot.emitText(telegramContext({ text: "next" }));
 
     const afterInbound = readTelegramReplyTarget(dataDir, "api-3");
     expect((afterInbound?.lastInboundAt ?? "") > (afterInbound?.lastReplyAt ?? "")).toBe(true);
@@ -3767,8 +4941,8 @@ describe("telegramSourceModule", () => {
     const { bot, emit } = await startSource(dataDir);
     if (!bot) throw new Error("missing bot");
 
-    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
-    const textCtx = telegramContext({ chat: { id: 123 } });
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    const textCtx = telegramContext();
     textCtx.reply.mockResolvedValueOnce({ message_id: 77 });
 
     await bot.emitText(textCtx);
@@ -3791,7 +4965,7 @@ describe("telegramSourceModule", () => {
     expect(new Date(persisted.lastInboundAt ?? "").toString()).not.toBe("Invalid Date");
   });
 
-  it("stores the placeholder for a forum topic and a DM but not for a group main chat", async () => {
+  it("stores placeholders only for the assigned forum topic", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const { bot, emit } = await startSource(dataDir);
@@ -3809,16 +4983,17 @@ describe("telegramSourceModule", () => {
     const dm = telegramContext({ chat: { id: 123 }, message_thread_id: undefined });
     dm.reply.mockResolvedValueOnce({ message_id: 78 });
     await bot.emitText(dm);
-    expect(readTelegramReplyTarget(dataDir, "api-2")?.statusMessageId).toBe(78);
+    expect(readTelegramReplyTarget(dataDir, "api-2")?.statusMessageId).toBeUndefined();
 
     await bot.emitText(telegramContext({ text: "/watch web-1", message_thread_id: undefined }));
     const groupMain = telegramContext({ message_thread_id: undefined });
     groupMain.reply.mockResolvedValueOnce({ message_id: 79 });
     await bot.emitText(groupMain);
 
+    expect(emit).toHaveBeenCalledTimes(1);
     expect(emit).toHaveBeenCalledWith(
       "telegram:message",
-      expect.objectContaining({ sessionId: "web-1" }),
+      expect.objectContaining({ sessionId: "api-1" }),
     );
     expect(readTelegramReplyTarget(dataDir, "web-1")?.statusMessageId).toBeUndefined();
   });
@@ -3892,14 +5067,12 @@ describe("telegramSourceModule", () => {
     expect(emit).not.toHaveBeenCalled();
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.not.toContain('"sessionId": "api-1"');
-    const replyTargetPath = join(
-      dataDir,
-      "source-state",
-      "telegram",
-      "reply-targets",
-      "api-1.json",
-    );
-    await expect(readFile(replyTargetPath, "utf8")).rejects.toThrow();
+    expect(readTelegramReplyTarget(dataDir, "api-1")).toMatchObject({
+      projectId: "api",
+      sourceId: "telegram",
+      chatId: -1001,
+    });
+    expect(readTelegramReplyTarget(dataDir, "api-1")).not.toHaveProperty("messageThreadId");
   });
 
   const autoSpawnConfig = {
@@ -3947,7 +5120,7 @@ describe("telegramSourceModule", () => {
     expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain(
       '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
     );
-    expect(ctx.reply).toHaveBeenCalledWith("Spawned and bound.");
+    expect(ctx.reply).toHaveBeenCalledWith(`Spawned shp-1. ${topicLink}`);
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "shp-1"');
   });
@@ -4037,7 +5210,9 @@ describe("telegramSourceModule", () => {
 
     expect(spawnSession).toHaveBeenCalledTimes(1);
     expect(textCtx.reply).not.toHaveBeenCalledWith(expect.stringContaining("is gone. Unbound."));
-    expect(textCtx.reply).toHaveBeenCalledWith("Spawned and bound.");
+    expect(textCtx.reply).toHaveBeenCalledWith(
+      "Spawned shp-3. Continue in [agent topic](https://t.me/c/1/23).",
+    );
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "shp-3"');
     await expect(readFile(statePath, "utf8")).resolves.not.toContain('"sessionId": "api-1"');
@@ -4063,9 +5238,6 @@ describe("telegramSourceModule", () => {
     await bot.emitText(telegramContext({ text: "/watch api-1" }));
     listSessions.mockResolvedValue([]);
 
-    const persistSpy = vi.spyOn(metadataModule, "writeTelegramBindings");
-    persistSpy.mockClear();
-
     const ctx1 = telegramContext({ text: "still there?" });
     const ctx2 = telegramContext({ text: "still there? (again)" });
     const a = bot.emitText(ctx1);
@@ -4078,11 +5250,9 @@ describe("telegramSourceModule", () => {
       ctx.reply.mock.calls.some((call: unknown[]) => call[0] === "Spawn already in progress here."),
     );
     expect(busyReplies).toHaveLength(1);
-    const removeKeyCalls = persistSpy.mock.calls.filter((call) => {
-      const options = call[4] as { removeKeys?: Iterable<string> } | undefined;
-      return options?.removeKeys !== undefined;
-    });
-    expect(removeKeyCalls).toHaveLength(1);
+    expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:23")?.sessionId).toBe(
+      "shp-5",
+    );
   });
 
   it("reports the spawn failure and retries on the next message", async () => {
@@ -4115,7 +5285,7 @@ describe("telegramSourceModule", () => {
     await bot.emitText(ctx2);
 
     expect(spawnSession).toHaveBeenCalledTimes(2);
-    expect(ctx2.reply).toHaveBeenCalledWith("Spawned and bound.");
+    expect(ctx2.reply).toHaveBeenCalledWith(`Spawned shp-4. ${topicLink}`);
   });
 
   it("keeps command and pending-spawn paths ahead of autoSpawn", async () => {
@@ -4172,6 +5342,8 @@ describe("telegramSourceModule", () => {
       { command: "new", description: "Launch a task with project defaults" },
       { command: "work", description: "Inspect tasks needing attention" },
       { command: "unwatch", description: "Unbind this chat" },
+      { command: "complete", description: "Complete this topic's Spur session" },
+      { command: "kill", description: "Kill this topic's Spur session" },
     ]);
     expect(bot.api.setChatMenuButton).toHaveBeenCalledWith({
       menu_button: { type: "commands" },
@@ -4239,6 +5411,8 @@ describe("telegramSourceModule", () => {
       const help = telegramContext({ text: "/help" });
       await startedBot.emitText(help);
       expect(help.reply).toHaveBeenCalledWith(expect.stringContaining("/new"));
+      expect(help.reply).toHaveBeenCalledWith(expect.stringContaining("/complete"));
+      expect(help.reply).toHaveBeenCalledWith(expect.stringContaining("/kill"));
       await handle.stop();
       expect(stop).toHaveBeenCalledTimes(1);
     },
@@ -4303,6 +5477,17 @@ describe("telegramSourceModule", () => {
     expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("telegram runner failed"));
   });
 
+  it("exposes cached bot identity without another getMe", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const calls = getMeMock.mock.calls.length;
+    const { handle } = await startSource(dataDir, vi.fn(), vi.fn());
+    expect(handle.telegramBotIdentity).toEqual({ id: 44, username: "SpurProjectsBot" });
+    expect(handle.telegramBotIdentity).toEqual({ id: 44, username: "SpurProjectsBot" });
+    expect(getMeMock.mock.calls.length).toBe(calls + 1);
+    expect(JSON.stringify(handle.telegramBotIdentity)).not.toContain("token");
+  });
+
   it("logs auth_failed and still starts when getMe fails", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -4312,6 +5497,7 @@ describe("telegramSourceModule", () => {
     });
 
     expect(handle).toBeDefined();
+    expect(handle.telegramBotIdentity).toBeUndefined();
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining("telegram commands setup failed"),
     );
@@ -4323,11 +5509,602 @@ describe("telegramSourceModule", () => {
 function mockTranscribeFetch(text: string): ReturnType<typeof vi.fn> {
   return vi.fn().mockImplementation((url: unknown) => {
     if (typeof url === "string" && url.includes("api.telegram.org")) {
-      return Promise.resolve({ ok: true, arrayBuffer: () => Promise.resolve(new ArrayBuffer(4)) });
+      return Promise.resolve(new Response(new Uint8Array(4)));
     }
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ text }) });
   });
 }
+
+describe("telegramSourceModule photo tasks", () => {
+  beforeEach(() => {
+    botInstances.splice(0);
+    runMock.mockReset();
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  async function beginWizard(bot: FakeBot, agent = "codex", pickProject = true) {
+    const wizard = telegramContext({ text: `/spawn ${agent}` });
+    await bot.emitText(wizard);
+    if (pickProject)
+      await bot.emitCallback({
+        callbackQuery: {
+          data: spawnProjectCallbackData(wizard.reply, 0),
+          message: wizard.message,
+          from: wizard.message.from,
+        },
+        answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+        reply: vi.fn().mockResolvedValue({}),
+      });
+  }
+
+  it.each([
+    { mode: "wizard", caption: "  /inspect this photo  " },
+    { mode: "wizard", caption: undefined },
+    { mode: "auto", caption: undefined },
+  ])("spawns a $mode photo task with caption $caption once", async ({ mode, caption }) => {
+    const dataDir = await createTempDir("spur-telegram-photo-");
+    tempDirs.push(dataDir);
+    const spawn = vi.fn().mockResolvedValue({
+      id: "photo-agent",
+      project: "api",
+      agent: "codex",
+      state: "working",
+    });
+    const { bot, emit } = await startSource(dataDir, vi.fn(), spawn, {
+      config:
+        mode === "auto"
+          ? { autoSpawn: { enabled: true, project: "api", agent: "codex", model: "auto" } }
+          : {},
+    });
+    if (mode === "wizard") await beginWizard(required(bot));
+    const fetchMock = vi.fn().mockResolvedValue(new Response("photo-bytes"));
+    vi.stubGlobal("fetch", fetchMock);
+    const photo = telegramPhotoContext({ caption, updateId: 500 });
+    await required(bot).emitPhoto(photo);
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(1));
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        project: "api",
+        agent: "codex",
+        prompt: wrapTelegramSpawnPrompt(caption?.trim() || "Inspect the attached files."),
+        attachments: [
+          { name: "telegram-10.jpg", data: Buffer.from("photo-bytes").toString("base64") },
+        ],
+        ...(mode === "auto" ? { model: "auto" } : {}),
+      }),
+    );
+    await required(bot).emitPhoto(photo);
+    expect(photo.getFile).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it.each(["unauthorized", "awaiting-project", "expired", "inactive", "legacy", "off"])(
+    "rejects %s photo intake before download",
+    async (scenario) => {
+      const dataDir = await createTempDir("spur-telegram-photo-guard-");
+      tempDirs.push(dataDir);
+      if (["bound", "inactive", "legacy"].includes(scenario)) {
+        if (scenario === "legacy")
+          writeTelegramBindings(dataDir, "api", "telegram", [
+            { chatId: -1001, sessionId: "api-1" },
+          ]);
+        else assignTopic(dataDir);
+      }
+      const { bot, emit, spawnSession } = await startSource(dataDir, vi.fn(), vi.fn(), {
+        ...(scenario === "inactive"
+          ? {
+              getSession: vi.fn().mockResolvedValue({
+                id: "api-1",
+                project: "api",
+                agent: "codex",
+                state: "waiting",
+                inactive: true,
+              }),
+            }
+          : {}),
+      });
+      if (scenario === "awaiting-project") await beginWizard(required(bot), "codex", false);
+      if (scenario === "expired") {
+        vi.useFakeTimers();
+        await beginWizard(required(bot));
+        vi.setSystemTime(Date.now() + 11 * 60_000);
+      }
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const photo = telegramPhotoContext({
+        ...(scenario === "unauthorized" ? { from: { id: 999 } } : {}),
+        ...(scenario === "legacy" ? { message_thread_id: undefined, is_topic_message: false } : {}),
+      });
+      await required(bot).emitPhoto(photo);
+      expect(photo.getFile).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(spawnSession).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+      if (scenario !== "unauthorized") expect(photo.reply).toHaveBeenCalled();
+    },
+  );
+
+  it.each(["missing-path", "http", "empty", "oversize", "network"])(
+    "rejects %s photo downloads without submitting the caption",
+    async (failure) => {
+      const dataDir = await createTempDir("spur-telegram-photo-failure-");
+      tempDirs.push(dataDir);
+      const { bot, emit, spawnSession, logger } = await startSource(dataDir);
+      await beginWizard(required(bot));
+      const photo = telegramPhotoContext({ caption: "do not submit alone" });
+      if (failure === "missing-path") photo.getFile.mockResolvedValue({ file_path: "" });
+      const fetchMock = vi.fn().mockImplementation(async () => {
+        if (failure === "network")
+          throw new Error("failed https://api.telegram.org/file/bottoken-123/photo.jpg");
+        return new Response(
+          failure === "oversize"
+            ? new Uint8Array(MAX_ATTACHMENT_BYTES + 1)
+            : failure === "empty"
+              ? ""
+              : "photo",
+          { status: failure === "http" ? 403 : 200 },
+        );
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await required(bot).emitPhoto(photo);
+      await vi.waitFor(() =>
+        expect(photo.reply).toHaveBeenCalledWith(
+          expect.stringContaining("Attachment task failed:"),
+        ),
+      );
+      expect(spawnSession).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+      expect(JSON.stringify(photo.reply.mock.calls)).not.toContain("token-123");
+      expect(JSON.stringify(logger.warn.mock.calls)).not.toContain("token-123");
+    },
+  );
+
+  it.each(
+    mediaKinds.flatMap((kind) => ["wizard", "auto", "followup"].map((mode) => ({ kind, mode }))),
+  )("delivers $kind attachment bytes through $mode", async ({ kind, mode }) => {
+    const dataDir = await createTempDir("spur-telegram-media-");
+    tempDirs.push(dataDir);
+    if (mode === "followup") assignTopic(dataDir);
+    const prepare = vi.fn<NonNullable<SourceStartDeps["prepareSessionMessage"]>>(
+      async (_sessionId, request) =>
+        `[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/saved]\n${request.message}`,
+    );
+    const spawn = vi.fn().mockResolvedValue({
+      id: "media-agent",
+      project: "api",
+      agent: "codex",
+      state: "working",
+    });
+    const { bot, emit } = await startSource(dataDir, vi.fn(), spawn, {
+      prepareSessionMessage: prepare,
+      config: { autoSpawn: { enabled: true, project: "api", agent: "codex" } },
+    });
+    if (mode === "wizard") await beginWizard(required(bot));
+    const fetchMock = vi.fn(async (url: string) =>
+      url.includes("api.telegram.org")
+        ? new Response("file-bytes")
+        : Response.json({ text: "voice transcript" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const attachment = telegramAttachmentContext(kind, { caption: " file task " });
+    await required(bot).emitPhoto(attachment);
+    if (mode === "followup") {
+      await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(1));
+      expect(prepare).toHaveBeenCalledWith(
+        "api-1",
+        expect.objectContaining({
+          message: kind === "voice" ? "file task\nvoice transcript" : "file task",
+          attachments: [
+            { name: expect.any(String), data: Buffer.from("file-bytes").toString("base64") },
+          ],
+        }),
+      );
+      expect(emit).toHaveBeenCalledWith(
+        "telegram:message",
+        expect.objectContaining({
+          text: expect.stringContaining("$SPUR_SESSION_ARTIFACTS_DIR/saved"),
+        }),
+      );
+      expect(spawn).not.toHaveBeenCalled();
+    } else {
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(1));
+      expect(spawn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: expect.stringContaining("file task"),
+          attachments: [
+            { name: expect.any(String), data: Buffer.from("file-bytes").toString("base64") },
+          ],
+        }),
+      );
+      expect(prepare).not.toHaveBeenCalled();
+    }
+    expect(attachment.getFile).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(kind === "voice" ? 2 : 1);
+  });
+
+  it.each([
+    { input: "../../bad name.txt", expected: "bad_name.txt" },
+    { input: "C:\\folder\\音声.wav", expected: "__.wav" },
+    { input: "...", expected: "telegram-10.bin" },
+    { input: "", expected: "telegram-10.bin" },
+    { input: `${"a".repeat(200)}.csv`, expected: `${"a".repeat(156)}.csv` },
+  ])("normalizes attachment filename $input", async ({ input, expected }) => {
+    const dataDir = await createTempDir("spur-telegram-media-name-");
+    tempDirs.push(dataDir);
+    const { bot, spawnSession } = await startSource(
+      dataDir,
+      vi.fn(),
+      vi.fn().mockResolvedValue({
+        id: "media",
+        project: "api",
+        agent: "codex",
+        state: "working",
+      }),
+      { config: { autoSpawn: { enabled: true, project: "api", agent: "codex" } } },
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("bytes")),
+    );
+    await required(bot).emitPhoto(
+      telegramAttachmentContext("document", {
+        document: { file_id: "doc", file_name: input },
+      }),
+    );
+    await vi.waitFor(() => expect(spawnSession).toHaveBeenCalledTimes(1));
+    expect(spawnSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachments: [{ name: expected, data: Buffer.from("bytes").toString("base64") }],
+      }),
+    );
+  });
+
+  it("selects animation alias once and retains native animated sticker formats", async () => {
+    const dataDir = await createTempDir("spur-telegram-media-alias-");
+    tempDirs.push(dataDir);
+    assignTopic(dataDir);
+    const prepare = vi.fn<NonNullable<SourceStartDeps["prepareSessionMessage"]>>(
+      async (_id, request) => request.message,
+    );
+    const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), {
+      prepareSessionMessage: prepare,
+    });
+    const fetchMock = vi.fn(async () => new Response("bytes"));
+    vi.stubGlobal("fetch", fetchMock);
+    const contexts = [
+      telegramAttachmentContext("animation", {
+        animation: { file_id: "gif", file_name: "motion.gif" },
+        document: { file_id: "gif", file_name: "alias.gif" },
+      }),
+      telegramAttachmentContext("sticker", { sticker: { file_id: "tgs", is_animated: true } }),
+      telegramAttachmentContext("sticker", { sticker: { file_id: "webm", is_video: true } }),
+    ];
+    for (const context of contexts) {
+      await required(bot).emitPhoto(context);
+      await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(contexts.indexOf(context) + 1));
+    }
+    expect(prepare.mock.calls.map((call) => call[1].attachments?.[0]?.name)).toEqual([
+      "motion.gif",
+      "telegram-10.tgs",
+      "telegram-10.webm",
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["missing", "reject", "retarget", "inactive", "placeholder", "stop"])(
+    "blocks followup emission when attachment preparation is $s",
+    async (scenario) => {
+      const dataDir = await createTempDir("spur-telegram-media-prepare-");
+      tempDirs.push(dataDir);
+      assignTopic(dataDir);
+      let finish!: (text: string) => void;
+      const prepare = vi.fn<NonNullable<SourceStartDeps["prepareSessionMessage"]>>(() =>
+        scenario === "reject"
+          ? Promise.reject(new Error("disk failed"))
+          : new Promise((resolve) => {
+              finish = resolve;
+            }),
+      );
+      const getSession = vi.fn().mockResolvedValue({
+        id: "api-1",
+        project: "api",
+        agent: "codex",
+        state: "waiting",
+      });
+      const { bot, emit, handle } = await startSource(dataDir, vi.fn(), vi.fn(), {
+        prepareSessionMessage: scenario === "missing" ? null : prepare,
+        getSession,
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response("bytes")),
+      );
+      const context = telegramAttachmentContext("document");
+      if (scenario === "placeholder")
+        context.reply.mockImplementation(async () => {
+          assignTopic(dataDir, "api-2");
+          return {};
+        });
+      await required(bot).emitPhoto(context);
+      if (scenario === "missing" || scenario === "reject") {
+        await vi.waitFor(() =>
+          expect(context.reply).toHaveBeenCalledWith(
+            expect.stringContaining(scenario === "missing" ? "unavailable" : "disk failed"),
+          ),
+        );
+      } else {
+        await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
+        if (scenario === "retarget") assignTopic(dataDir, "api-2");
+        if (scenario === "inactive")
+          getSession.mockResolvedValue({
+            id: "api-1",
+            project: "api",
+            agent: "codex",
+            state: "waiting",
+            inactive: true,
+          });
+        if (scenario === "stop") await handle.stop();
+        finish("[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/saved]");
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      expect(emit).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["spawn", "followup", "failure", "overflow", "deadline", "late", "capacity", "stop"])(
+    "assembles albums without partial delivery: %s",
+    async (scenario) => {
+      vi.useFakeTimers();
+      const dataDir = await createTempDir("spur-telegram-media-album-");
+      tempDirs.push(dataDir);
+      if (scenario === "followup") assignTopic(dataDir);
+      const prepare = vi.fn<NonNullable<SourceStartDeps["prepareSessionMessage"]>>(
+        async (_id, request) =>
+          `[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/album]\n${request.message}`,
+      );
+      const spawn = vi
+        .fn()
+        .mockResolvedValue({ id: "album", project: "api", agent: "codex", state: "working" });
+      const { bot, emit, handle } = await startSource(dataDir, vi.fn(), spawn, {
+        config: { autoSpawn: { enabled: true, project: "api", agent: "codex" } },
+        prepareSessionMessage: prepare,
+      });
+      let downloadCount = 0;
+      const fetchMock = vi.fn(async () => {
+        downloadCount++;
+        if (scenario === "failure" && downloadCount === 2)
+          return new Response("bad", { status: 403 });
+        return new Response("album-bytes");
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const first = telegramAttachmentContext("photo", {
+        media_group_id: "album",
+        message_id: 20,
+        caption: "second caption",
+      });
+      const second = telegramAttachmentContext("photo", {
+        media_group_id: "album",
+        message_id: 10,
+        caption: "first caption",
+      });
+      await required(bot).emitPhoto(first);
+      await required(bot).emitPhoto(first); // Same member without update_id must not reset collection.
+      await required(bot).emitPhoto(second);
+      expect(fetchMock).not.toHaveBeenCalled();
+      if (scenario === "overflow") {
+        for (let index = 0; index < 9; index++)
+          await required(bot).emitPhoto(
+            telegramAttachmentContext("photo", {
+              media_group_id: "album",
+              message_id: 30 + index,
+            }),
+          );
+      } else if (scenario === "deadline") {
+        for (let index = 0; index < 7; index++) {
+          await vi.advanceTimersByTimeAsync(700);
+          await required(bot).emitPhoto(
+            telegramAttachmentContext("photo", {
+              media_group_id: "album",
+              message_id: 30 + index,
+            }),
+          );
+        }
+        await vi.advanceTimersByTimeAsync(100);
+      } else if (scenario === "capacity") {
+        for (let index = 0; index < 9; index++)
+          await required(bot).emitPhoto(
+            telegramAttachmentContext("photo", {
+              media_group_id: `other-${index}`,
+              message_id: 100 + index,
+            }),
+          );
+        const excess = telegramAttachmentContext("photo", {
+          media_group_id: "excess",
+          message_id: 200,
+        });
+        await required(bot).emitPhoto(excess);
+        expect(excess.reply).toHaveBeenCalledWith(expect.stringContaining("busy"));
+        await handle.stop();
+      } else if (scenario === "stop") {
+        await handle.stop();
+      }
+      await vi.advanceTimersByTimeAsync(750);
+      if (["spawn", "followup", "late"].includes(scenario)) {
+        if (scenario === "followup") {
+          expect(prepare).toHaveBeenCalledExactlyOnceWith("api-1", {
+            message: "first caption\nsecond caption",
+            attachments: [
+              { name: "telegram-10.jpg", data: Buffer.from("album-bytes").toString("base64") },
+              { name: "telegram-20.jpg", data: Buffer.from("album-bytes").toString("base64") },
+            ],
+          });
+          expect(emit).toHaveBeenCalledTimes(1);
+        } else {
+          expect(spawn).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({
+              prompt: wrapTelegramSpawnPrompt("first caption\nsecond caption"),
+              attachments: [
+                { name: "telegram-10.jpg", data: Buffer.from("album-bytes").toString("base64") },
+                { name: "telegram-20.jpg", data: Buffer.from("album-bytes").toString("base64") },
+              ],
+            }),
+          );
+        }
+        if (scenario === "late") {
+          const repeat = telegramAttachmentContext("photo", {
+            media_group_id: "album",
+            message_id: 20,
+          });
+          await required(bot).emitPhoto(repeat);
+          expect(repeat.reply).not.toHaveBeenCalled();
+          const late = telegramAttachmentContext("photo", {
+            media_group_id: "album",
+            message_id: 50,
+          });
+          await required(bot).emitPhoto(late);
+          expect(late.reply).toHaveBeenCalledWith(expect.stringContaining("Album already closed"));
+          expect(late.getFile).not.toHaveBeenCalled();
+          expect(spawn).toHaveBeenCalledTimes(1);
+        }
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      } else {
+        expect(spawn).not.toHaveBeenCalled();
+        expect(prepare).not.toHaveBeenCalled();
+        expect(emit).not.toHaveBeenCalled();
+        if (scenario !== "failure") expect(fetchMock).not.toHaveBeenCalled();
+        if (scenario === "failure")
+          expect(second.reply).toHaveBeenCalledWith(expect.stringContaining("403"));
+      }
+      await handle.stop();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("does not install album timers after a delayed intake lookup is stopped", async () => {
+    vi.useFakeTimers();
+    const dataDir = await createTempDir("spur-telegram-media-stop-intake-");
+    tempDirs.push(dataDir);
+    assignTopic(dataDir);
+    let finish!: (session: SourceSessionListItem) => void;
+    const getSession = vi.fn(
+      () =>
+        new Promise<SourceSessionListItem>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const { bot, handle, emit } = await startSource(dataDir, vi.fn(), vi.fn(), { getSession });
+    const context = telegramAttachmentContext("photo", { media_group_id: "album" });
+    const receiving = required(bot).emitPhoto(context);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getSession).toHaveBeenCalled();
+    await handle.stop();
+    finish({ id: "api-1", project: "api", agent: "codex", state: "working" });
+    await receiving;
+    expect(vi.getTimerCount()).toBe(0);
+    expect(context.getFile).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("does not install album timers after update persistence is stopped", async () => {
+    vi.useFakeTimers();
+    const dataDir = await createTempDir("spur-telegram-media-stop-update-");
+    tempDirs.push(dataDir);
+    const { bot, handle, emit } = await startSource(dataDir, vi.fn(), vi.fn(), {
+      config: { autoSpawn: { enabled: true, project: "api", agent: "codex" } },
+    });
+    const context = telegramAttachmentContext("photo", { media_group_id: "album", updateId: 500 });
+    const receiving = required(bot).emitPhoto(context);
+    await handle.stop();
+    await receiving;
+    expect(vi.getTimerCount()).toBe(0);
+    expect(context.getFile).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("retains 1000 closed album keys without eviction and admits groups after expiry", async () => {
+    vi.useFakeTimers();
+    const dataDir = await createTempDir("spur-telegram-media-closed-");
+    tempDirs.push(dataDir);
+    const { bot, handle, spawnSession } = await startSource(dataDir, vi.fn(), vi.fn(), {
+      config: { autoSpawn: { enabled: true, project: "api", agent: "codex" } },
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    for (let batch = 0; batch < 100; batch++) {
+      for (let index = 0; index < 10; index++) {
+        await required(bot).emitPhoto(
+          telegramAttachmentContext("document", {
+            media_group_id: `closed-${batch * 10 + index}`,
+            document: { file_id: "large", file_size: MAX_ATTACHMENT_BYTES + 1 },
+          }),
+        );
+      }
+      await vi.advanceTimersByTimeAsync(750);
+    }
+    const excess = telegramAttachmentContext("photo", { media_group_id: "excess" });
+    await required(bot).emitPhoto(excess);
+    expect(excess.reply).toHaveBeenCalledWith(expect.stringContaining("busy"));
+    const late = telegramAttachmentContext("photo", { media_group_id: "closed-0", message_id: 11 });
+    await required(bot).emitPhoto(late);
+    expect(late.reply).toHaveBeenCalledWith(expect.stringContaining("Album already closed"));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(spawnSession).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    const retry = telegramAttachmentContext("photo", { media_group_id: "excess" });
+    await required(bot).emitPhoto(retry);
+    expect(retry.reply).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(2);
+    await handle.stop();
+  });
+
+  it.each(["wizard", "binding", "config", "abort"])(
+    "rejects a stale photo after %s changes during download",
+    async (change) => {
+      const dataDir = await createTempDir("spur-telegram-photo-stale-");
+      tempDirs.push(dataDir);
+      const controller = new AbortController();
+      const autoSpawn = { enabled: true, project: "api", agent: "codex", model: "auto" };
+      const { bot, emit, spawnSession } = await startSource(dataDir, vi.fn(), vi.fn(), {
+        signal: controller.signal,
+        config: { autoSpawn },
+      });
+      if (change === "wizard") await beginWizard(required(bot));
+      let finish!: (response: Response) => void;
+      const fetchMock = vi.fn().mockImplementation(
+        () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const photo = telegramPhotoContext();
+      await required(bot).emitPhoto(photo);
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      if (change === "wizard") await beginWizard(required(bot), "claude");
+      if (change === "binding") assignTopic(dataDir);
+      if (change === "config") autoSpawn.model = "other";
+      if (change === "abort") controller.abort();
+      finish(new Response("photo"));
+      if (change !== "abort")
+        await vi.waitFor(() =>
+          expect(photo.reply).toHaveBeenCalledWith(
+            expect.stringContaining("Attachment context changed. Send the message again."),
+          ),
+        );
+      else await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(spawnSession).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+      if (change === "abort") expect(photo.reply).not.toHaveBeenCalled();
+    },
+  );
+});
 
 describe("telegramSourceModule voice notes", () => {
   beforeEach(() => {
@@ -4339,6 +6116,133 @@ describe("telegramSourceModule voice notes", () => {
     vi.unstubAllGlobals();
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
+
+  it.each([
+    { mode: "wizard", forum: true },
+    { mode: "wizard", forum: false },
+    { mode: "auto", forum: true },
+    { mode: "auto", forum: false },
+  ])(
+    "keeps DM $mode voice spawn intake without transcript echo; forum:$forum",
+    async ({ mode, forum }) => {
+      const dataDir = await createTempDir("spur-telegram-voice-spawn-");
+      tempDirs.push(dataDir);
+      const spawn = vi
+        .fn()
+        .mockResolvedValue({ id: "voice-agent", project: "api", agent: "codex", state: "working" });
+      const { bot, emit } = await startSource(dataDir, vi.fn(), spawn, {
+        config: {
+          chatId: forum ? -1001 : undefined,
+          ...(mode === "auto"
+            ? { autoSpawn: { enabled: true, project: "api", agent: "codex" } }
+            : {}),
+        },
+      });
+      if (mode === "wizard") {
+        const wizard = telegramContext({
+          text: "/spawn codex",
+          chat: { id: 123 },
+          message_thread_id: undefined,
+          is_topic_message: false,
+        });
+        await required(bot).emitText(wizard);
+        await required(bot).emitCallback({
+          callbackQuery: {
+            data: spawnProjectCallbackData(wizard.reply, 0),
+            message: wizard.message,
+            from: wizard.message.from,
+          },
+          answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+          reply: vi.fn().mockResolvedValue({}),
+        });
+      }
+      vi.stubGlobal("fetch", mockTranscribeFetch("  voice task  "));
+      const voice = telegramVoiceContext({
+        chat: { id: 123 },
+        message_thread_id: undefined,
+        is_topic_message: false,
+      });
+      await required(bot).emitVoice(voice);
+      await vi.waitFor(() =>
+        expect(voice.api.editMessageText).toHaveBeenCalledWith(
+          123,
+          55,
+          expect.stringContaining("Spawned voice-agent."),
+        ),
+      );
+      expect(spawn).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          prompt: forum ? wrapTelegramSpawnPrompt("voice task") : "voice task",
+          telegramOrigin: { projectId: "api", sourceId: "telegram", chatId: 123 },
+        }),
+      );
+      expect(voice.reply.mock.calls.some((call) => String(call[0]).includes("Heard:"))).toBe(false);
+      expect(
+        voice.api.editMessageText.mock.calls.some((call) => String(call[2]).includes("Heard:")),
+      ).toBe(false);
+      expect(emit).not.toHaveBeenCalled();
+      if (forum)
+        expect(readTelegramReplyTarget(dataDir, "voice-agent")).toMatchObject({
+          chatId: -1001,
+          messageThreadId: 22,
+        });
+      else expect(readTelegramBindings(dataDir, "api", "telegram").size).toBe(0);
+    },
+  );
+
+  it.each(["wizard", "binding"])(
+    "rejects stale voice spawn intake when %s changes during transcription",
+    async (change) => {
+      const dataDir = await createTempDir("spur-telegram-voice-intent-");
+      tempDirs.push(dataDir);
+      const { bot, emit, spawnSession } = await startSource(dataDir, vi.fn(), vi.fn(), {
+        config:
+          change === "binding"
+            ? { autoSpawn: { enabled: true, project: "api", agent: "codex" } }
+            : {},
+      });
+      const beginWizard = async (agent: string) => {
+        const wizard = telegramContext({ text: `/spawn ${agent}` });
+        await required(bot).emitText(wizard);
+        await required(bot).emitCallback({
+          callbackQuery: {
+            data: spawnProjectCallbackData(wizard.reply, 0),
+            message: wizard.message,
+            from: wizard.message.from,
+          },
+          answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+          reply: vi.fn().mockResolvedValue({}),
+        });
+      };
+      if (change === "wizard") await beginWizard("codex");
+      let finish!: (response: {
+        ok: boolean;
+        status: number;
+        json(): Promise<{ text: string }>;
+      }) => void;
+      const fetchMock = vi.fn().mockImplementation((url: unknown) =>
+        typeof url === "string" && url.includes("api.telegram.org")
+          ? Promise.resolve(new Response(new Uint8Array(4)))
+          : new Promise((resolve) => {
+              finish = resolve;
+            }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const voice = telegramVoiceContext();
+      await required(bot).emitVoice(voice);
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      if (change === "wizard") await beginWizard("claude");
+      else await required(bot).emitText(telegramContext({ text: "/watch api-1" }));
+      finish({ ok: true, status: 200, json: async () => ({ text: "old task" }) });
+      await vi.waitFor(() =>
+        expect(voice.reply).toHaveBeenCalledWith(
+          expect.stringContaining("Attachment context changed. Send the message again."),
+        ),
+      );
+      expect(emit).not.toHaveBeenCalled();
+      expect(spawnSession).not.toHaveBeenCalled();
+    },
+  );
 
   it("A1: emits telegram:message with the transcript as text in a bound chat", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
@@ -4358,16 +6262,16 @@ describe("telegramSourceModule voice notes", () => {
       userId: 123,
       username: "alek",
       messageId: 10,
-      text: "fix the sidecar",
+      text: "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/voice.ogg]\nfix the sidecar",
     });
   });
 
   it.each([123, -1001])(
-    "routes a recorded voice reply ahead of chat %s binding",
+    "redirects a recorded legacy voice reply before download/transcription: %s",
     async (chatId) => {
       const dataDir = await createTempDir("spur-telegram-source-");
       tempDirs.push(dataDir);
-      const { bot, emit } = await startSource(dataDir);
+      const { bot, emit, spawnSession } = await startSource(dataDir);
       if (!bot) throw new Error("missing bot");
       await bot.emitText(
         telegramContext({
@@ -4378,7 +6282,8 @@ describe("telegramSourceModule voice notes", () => {
       );
       recordTelegramMessages(dataDir, "api", "telegram", { sessionId: "api-2", chatId }, [500]);
 
-      vi.stubGlobal("fetch", mockTranscribeFetch("fix the sidecar"));
+      const fetchMock = mockTranscribeFetch("fix the sidecar");
+      vi.stubGlobal("fetch", fetchMock);
       const voiceCtx = telegramVoiceContext({
         chat: { id: chatId },
         message_thread_id: chatId < 0 ? 500 : undefined,
@@ -4387,23 +6292,18 @@ describe("telegramSourceModule voice notes", () => {
       });
       await bot.emitVoice(voiceCtx);
 
-      await vi.waitFor(() => expect(emit).toHaveBeenCalled());
-      expect(emit).toHaveBeenCalledWith(
-        "telegram:message",
-        expect.objectContaining({ sessionId: "api-2", text: "fix the sidecar" }),
+      expect(voiceCtx.reply).toHaveBeenCalledWith(
+        "Continue in [agent topic](https://t.me/c/1/23).",
       );
-      expect(emit).toHaveBeenCalledTimes(1);
-      expect(voiceCtx.reply).toHaveBeenCalledWith("Transcribing voice message...");
-      expect(emit.mock.calls[0]?.[1]).not.toHaveProperty("messageThreadId");
-      expect(readTelegramReplyTarget(dataDir, "api-2")).not.toHaveProperty("messageThreadId");
-      expect(voiceCtx.api.editMessageText).toHaveBeenCalledWith(
-        chatId,
-        55,
-        'Heard: "fix the sidecar"',
-      );
-      expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
-        { chatId, sessionId: "api-1" },
-      ]);
+      expect(voiceCtx.getFile).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(voiceCtx.api.editMessageText).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+      expect(spawnSession).not.toHaveBeenCalled();
+      expect(readTelegramReplyTarget(dataDir, "api-2")).toMatchObject({
+        chatId: -1001,
+        messageThreadId: 23,
+      });
     },
   );
 
@@ -4500,6 +6400,7 @@ describe("telegramSourceModule voice notes", () => {
       project: "api",
       agent: "codex",
       prompt: wrapTelegramSpawnPrompt("fix the sidecar"),
+      attachments: [{ name: "telegram-10.ogg", data: Buffer.alloc(4).toString("base64") }],
       telegramOrigin: {
         projectId: "api",
         sourceId: "telegram",
@@ -4540,6 +6441,7 @@ describe("telegramSourceModule voice notes", () => {
       agent: "opencode",
       selfDestruct: { enabled: true },
       prompt: expect.stringContaining("fix the sidecar"),
+      attachments: [{ name: "telegram-10.ogg", data: Buffer.alloc(4).toString("base64") }],
       telegramOrigin: {
         projectId: "api",
         sourceId: "telegram",
@@ -4552,7 +6454,7 @@ describe("telegramSourceModule voice notes", () => {
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "shp-1"');
   });
 
-  it("A3: a non-2xx transcribe response replies with failure and emits nothing", async () => {
+  it("A3: a non-2xx transcribe response retains the original voice attachment", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const { bot, emit, spawnSession } = await startSource(dataDir);
@@ -4563,10 +6465,7 @@ describe("telegramSourceModule voice notes", () => {
       "fetch",
       vi.fn().mockImplementation((url: unknown) => {
         if (typeof url === "string" && url.includes("api.telegram.org")) {
-          return Promise.resolve({
-            ok: true,
-            arrayBuffer: () => Promise.resolve(new ArrayBuffer(4)),
-          });
+          return Promise.resolve(new Response(new Uint8Array(4)));
         }
         return Promise.resolve({ ok: false, status: 502 });
       }),
@@ -4581,7 +6480,14 @@ describe("telegramSourceModule voice notes", () => {
         expect.stringContaining("Voice transcription failed"),
       ),
     );
-    expect(emit).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(emit).toHaveBeenCalledWith(
+        "telegram:message",
+        expect.objectContaining({
+          text: expect.stringContaining("$SPUR_SESSION_ARTIFACTS_DIR/voice.ogg"),
+        }),
+      ),
+    );
     expect(spawnSession).not.toHaveBeenCalled();
   });
 
@@ -4597,10 +6503,8 @@ describe("telegramSourceModule voice notes", () => {
     await bot.emitVoice(voiceCtx);
 
     await vi.waitFor(() =>
-      expect(voiceCtx.api.editMessageText).toHaveBeenCalledWith(
-        -1001,
-        55,
-        expect.stringContaining("Voice transcription failed: network down"),
+      expect(voiceCtx.reply).toHaveBeenCalledWith(
+        expect.stringContaining("Attachment task failed: network down"),
       ),
     );
     expect(emit).not.toHaveBeenCalled();
@@ -4615,25 +6519,11 @@ describe("telegramSourceModule voice notes", () => {
     const listSessions = vi
       .fn()
       .mockResolvedValue([{ id: "api-1", project: "api", agent: "codex", state: "waiting" }]);
-    const stop = vi.fn().mockResolvedValue(undefined);
-    const task = vi.fn().mockReturnValue(Promise.resolve());
-    runMock.mockReturnValue({ stop, start: vi.fn(), size: vi.fn(), task, isRunning: vi.fn() });
     const controller = new AbortController();
-    const logger = { info: vi.fn(), warn: vi.fn() };
-    await telegramSourceModule.start({
-      sourceId: "telegram",
-      projectId: "api",
-      dataDir,
-      config: { type: "telegram", runOnStart: false, token: "token-123", allowedUsers: [123] },
-      emit,
-      signal: controller.signal,
-      logger,
+    const { bot, logger } = await startSource(dataDir, emit, spawnSession, {
       listSessions,
-      getSession: async () => (await listSessions())[0],
-      spawnSession,
-      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      signal: controller.signal,
     });
-    const bot = botInstances[0];
     if (!bot) throw new Error("missing bot");
     await bot.emitText(telegramContext({ text: "/watch api-1" }));
 
@@ -4645,10 +6535,7 @@ describe("telegramSourceModule voice notes", () => {
       "fetch",
       vi.fn().mockImplementation((url: unknown) => {
         if (typeof url === "string" && url.includes("api.telegram.org")) {
-          return Promise.resolve({
-            ok: true,
-            arrayBuffer: () => Promise.resolve(new ArrayBuffer(4)),
-          });
+          return Promise.resolve(new Response(new Uint8Array(4)));
         }
         return pending;
       }),
@@ -4711,10 +6598,7 @@ describe("telegramSourceModule voice notes", () => {
       "fetch",
       vi.fn().mockImplementation((url: unknown) => {
         if (typeof url === "string" && url.includes("api.telegram.org")) {
-          return Promise.resolve({
-            ok: true,
-            arrayBuffer: () => Promise.resolve(new ArrayBuffer(4)),
-          });
+          return Promise.resolve(new Response(new Uint8Array(4)));
         }
         return pending.then(() => ({
           ok: true,
@@ -4745,7 +6629,7 @@ describe("telegramSourceModule voice notes", () => {
     await vi.waitFor(() => expect(emit).toHaveBeenCalled());
     expect(emit).toHaveBeenCalledWith(
       "telegram:message",
-      expect.objectContaining({ text: "/help" }),
+      expect.objectContaining({ text: expect.stringContaining("\n/help") }),
     );
     expect(voiceCtx.reply).not.toHaveBeenCalledWith(expect.stringContaining("Spur Telegram bot"));
     expect(voiceCtx.api.editMessageText).not.toHaveBeenCalledWith(
@@ -4755,7 +6639,7 @@ describe("telegramSourceModule voice notes", () => {
     );
   });
 
-  it("A7: an empty transcript replies with failure and emits nothing", async () => {
+  it("A7: an empty transcript delivers the original voice attachment", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const { bot, emit } = await startSource(dataDir);
@@ -4770,16 +6654,23 @@ describe("telegramSourceModule voice notes", () => {
       expect(voiceCtx.api.editMessageText).toHaveBeenCalledWith(
         -1001,
         55,
-        expect.stringContaining("empty transcript"),
+        expect.stringContaining("Empty voice transcript"),
       ),
     );
-    expect(emit).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(emit).toHaveBeenCalledWith(
+        "telegram:message",
+        expect.objectContaining({
+          text: expect.stringContaining("$SPUR_SESSION_ARTIFACTS_DIR/voice.ogg"),
+        }),
+      ),
+    );
   });
 
-  it("A8: a null webBaseUrl (no ui.port known for this instance) replies unavailable and never fetches", async () => {
+  it("A8: a null webBaseUrl delivers the original without transcription", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
-    const fetchMock = vi.fn();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(new Uint8Array(4)));
     vi.stubGlobal("fetch", fetchMock);
 
     const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), { webBaseUrl: null });
@@ -4792,11 +6683,18 @@ describe("telegramSourceModule voice notes", () => {
       expect(voiceCtx.api.editMessageText).toHaveBeenCalledWith(
         -1001,
         55,
-        "Voice transcription is disabled for this Spur instance.",
+        "Voice transcription is disabled for this Spur instance. Sending original file.",
       ),
     );
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(emit).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() =>
+      expect(emit).toHaveBeenCalledWith(
+        "telegram:message",
+        expect.objectContaining({
+          text: expect.stringContaining("$SPUR_SESSION_ARTIFACTS_DIR/voice.ogg"),
+        }),
+      ),
+    );
   });
 
   it("A9: posts multipart form with an audio File named voice.ogg", async () => {
@@ -4836,7 +6734,7 @@ describe("telegramSourceModule voice notes", () => {
     await vi.waitFor(() => expect(emit).toHaveBeenCalled());
     expect(emit).toHaveBeenCalledWith(
       "telegram:message",
-      expect.objectContaining({ text: "fix the sidecar" }),
+      expect.objectContaining({ text: expect.stringContaining("\nfix the sidecar") }),
     );
     expect(logger.warn).toHaveBeenCalledWith(
       "[source:api/telegram] telegram voice ack failed: 429 Too Many Requests",
@@ -4874,12 +6772,15 @@ describe("telegramSourceModule voice notes", () => {
     voice.reply.mockRejectedValueOnce(new Error("echo failed token-123"));
     voice.reply.mockRejectedValueOnce(new Error("progress failed token-123"));
     await required(bot).emitVoice(voice);
-    await vi.waitFor(() => expect(voice.reply).toHaveBeenCalledWith("Spawned and bound."));
+    await vi.waitFor(() =>
+      expect(voice.reply).toHaveBeenCalledWith(`Spawned api-new. ${topicLink}`),
+    );
     expect(spawn).toHaveBeenCalledTimes(1);
     expect(spawn).toHaveBeenCalledWith({
       project: "api",
       agent: "codex",
       prompt: wrapTelegramSpawnPrompt("delivery"),
+      attachments: [{ name: "telegram-10.ogg", data: Buffer.alloc(4).toString("base64") }],
       telegramOrigin: {
         projectId: "api",
         sourceId: "telegram",
@@ -4933,7 +6834,7 @@ describe("telegramSourceModule voice notes", () => {
       userId: 123,
       username: "alek",
       messageId: 10,
-      text: "fix the sidecar",
+      text: "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/voice.ogg]\nfix the sidecar",
     });
     expect(spawnSession).not.toHaveBeenCalled();
     expect(voiceCtx.api.editMessageText).toHaveBeenCalledWith(
@@ -4948,7 +6849,7 @@ describe("telegramSourceModule voice notes", () => {
     expect(logger.warn.mock.calls.flat().join("\n")).not.toContain("token-123");
   });
 
-  it("A10: logs the redacted transcription error before a rejected failure notice without unhandled rejection", async () => {
+  it("A10: logs a redacted download error before a rejected failure notice without unhandled rejection", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const { bot, logger, emit, spawnSession } = await startSource(dataDir);
@@ -4972,17 +6873,13 @@ describe("telegramSourceModule voice notes", () => {
       await bot.emitVoice(voiceCtx);
       await vi.waitFor(() =>
         expect(logger.warn).toHaveBeenCalledWith(
-          "[source:api/telegram] telegram voice failure notice failed: reply failed <telegram-token>",
+          "[source:api/telegram] telegram attachment notice failed: reply failed <telegram-token>",
         ),
       );
       await new Promise((resolve) => setImmediate(resolve));
       expect(logger.warn.mock.calls).toEqual([
-        [
-          "[source:api/telegram] telegram voice transcription failed: network down <telegram-token>",
-        ],
-        [
-          "[source:api/telegram] telegram voice failure notice failed: reply failed <telegram-token>",
-        ],
+        ["[source:api/telegram] telegram attachment failed: network down <telegram-token>"],
+        ["[source:api/telegram] telegram attachment notice failed: reply failed <telegram-token>"],
       ]);
       expect(logger.warn.mock.calls.flat().join("\n")).not.toContain("token-123");
       expect(emit).not.toHaveBeenCalled();
@@ -5030,10 +6927,7 @@ describe("telegramSourceModule voice notes", () => {
       "fetch",
       vi.fn().mockImplementation((url: unknown) => {
         if (typeof url === "string" && url.includes("api.telegram.org")) {
-          return Promise.resolve({
-            ok: true,
-            arrayBuffer: () => Promise.resolve(new ArrayBuffer(4)),
-          });
+          return Promise.resolve(new Response(new Uint8Array(4)));
         }
         return pending.then(() => ({
           ok: true,
@@ -5068,24 +6962,11 @@ describe("telegramSourceModule voice notes", () => {
     const listSessions = vi
       .fn()
       .mockResolvedValue([{ id: "api-1", project: "api", agent: "codex", state: "waiting" }]);
-    const stop = vi.fn().mockResolvedValue(undefined);
-    const task = vi.fn().mockReturnValue(Promise.resolve());
-    runMock.mockReturnValue({ stop, start: vi.fn(), size: vi.fn(), task, isRunning: vi.fn() });
     const controller = new AbortController();
-    await telegramSourceModule.start({
-      sourceId: "telegram",
-      projectId: "api",
-      dataDir,
-      config: { type: "telegram", runOnStart: false, token: "token-123", allowedUsers: [123] },
-      emit,
-      signal: controller.signal,
-      logger: { info: vi.fn(), warn: vi.fn() },
+    const { bot } = await startSource(dataDir, emit, spawnSession, {
       listSessions,
-      getSession: async () => (await listSessions())[0],
-      spawnSession,
-      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      signal: controller.signal,
     });
-    const bot = botInstances[0];
     if (!bot) throw new Error("missing bot");
     await bot.emitText(telegramContext({ text: "/watch api-1" }));
 
@@ -5227,9 +7108,9 @@ describe("telegramSourceModule inbound delivery under lookup failure", () => {
     expect(ctx.reply).not.toHaveBeenCalled();
   });
 
-  it("replies once and keeps the offer clickable when a choice callback fails", async () => {
+  it("alerts once and keeps the offer clickable when a choice callback fails", async () => {
     const error = new Error("lookup failed");
-    const { bot, catchHandler, dataDir } = await startBound(vi.fn().mockRejectedValue(error));
+    const { bot, dataDir } = await startBound(vi.fn().mockRejectedValue(error));
     writeTelegramOffer(dataDir, "api", "telegram", {
       sessionId: "api-1",
       chatId: -1001,
@@ -5245,7 +7126,11 @@ describe("telegramSourceModule inbound delivery under lookup failure", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
       ],
+      keepInterfaceConsent: false,
     });
+    const offerMarkup = {
+      inline_keyboard: [[{ text: "Yes", callback_data: "spur_choice:tok0" }]],
+    };
     const ctx = {
       callbackQuery: {
         data: "spur_choice:tok0",
@@ -5255,20 +7140,39 @@ describe("telegramSourceModule inbound delivery under lookup failure", () => {
           text: "Deploy?",
           is_topic_message: true,
           chat: { id: -1001 },
+          reply_markup: offerMarkup,
         },
         from: { id: 123, username: "alek" },
       },
       answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
       editMessageText: vi.fn().mockResolvedValue(undefined),
+      editMessageReplyMarkup: vi.fn().mockResolvedValue(undefined),
       reply: vi.fn().mockResolvedValue({}),
     };
 
-    await expect(bot.emitCallback(ctx)).rejects.toBe(error);
-    await catchHandler({ error, ctx });
+    await bot.emitCallback(ctx);
 
-    expect(ctx.reply).toHaveBeenCalledTimes(1);
-    expect(ctx.reply).toHaveBeenCalledWith(UNDELIVERED);
+    expect(ctx.answerCallbackQuery).toHaveBeenCalledOnce();
+    expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+      text: "Choice failed. Try again.",
+      show_alert: true,
+    });
+    expect(ctx.reply).not.toHaveBeenCalled();
+    expect(ctx.editMessageReplyMarkup).toHaveBeenLastCalledWith({ reply_markup: offerMarkup });
     expect(findTelegramChoice(dataDir, "api", "telegram", "tok0", -1001)).not.toBeNull();
+    expect(
+      readEventLog(dataDir)
+        .filter((entry) => entry.event === "source.telegram.choice_rejected")
+        .map((entry) => entry.details),
+    ).toEqual([
+      {
+        reason: "internal",
+        chatId: -1001,
+        userId: 123,
+        consent: false,
+        error: "lookup failed",
+      },
+    ]);
   });
 
   it("replies once when a detached voice route fails", async () => {
@@ -5299,7 +7203,9 @@ describe("telegramSourceModule inbound delivery under lookup failure", () => {
     await bot.emitVoice(ctx);
 
     await vi.waitFor(() =>
-      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("telegram voice failed")),
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("telegram attachment failed"),
+      ),
     );
     expect(ctx.reply).not.toHaveBeenCalledWith(UNDELIVERED);
   });
