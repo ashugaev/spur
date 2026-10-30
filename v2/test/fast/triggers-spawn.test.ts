@@ -474,7 +474,7 @@ describe("durable spawn admission", () => {
       await controller.stop();
     }
   });
-  it("repairs an owned work-item claim after final birth checkpoint survives a crash", async () => {
+  it("retains an unresolved receiptless accepted work-item journal across controller restarts", async () => {
     const f = fixture();
     f.config.projects.test.triggers.review.event = "github:work_item.new";
     const workId = JSON.stringify(["test", "tick", "review", "event"]);
@@ -545,6 +545,56 @@ describe("durable spawn admission", () => {
       state: "error",
       workspaceExists: true,
     });
+    const initialJournal = readPendingSpawnWork(f.dataDir).get(workId);
+    if (!initialJournal) throw new Error("Missing original accepted journal");
+    const { revision: originalRevision, ...originalJournal } = initialJournal;
+    expect(readSession(f.dataDir, "test-1")).toMatchObject({
+      status: "spawning",
+      launchCommand: "",
+      triggerBirthKey: `${workId}:0`,
+      triggerBirthRequest: request,
+    });
+    const expectRetainedBirth = () => {
+      const journal = readPendingSpawnWork(f.dataDir).get(workId);
+      if (!journal) throw new Error("Unresolved accepted journal was retired");
+      const { revision, ...retained } = journal;
+      expect(retained).toEqual(originalJournal);
+      expect(revision).toBeGreaterThanOrEqual(originalRevision);
+      expect(readPendingSpawnWork(f.dataDir).size).toBe(1);
+      const lifecycle = readWorkItemLifecycles(f.dataDir, "test", "tick").get(data.externalId);
+      expect(lifecycle).toMatchObject({
+        state: "pending",
+        spawnWorkId: workId,
+        members: [
+          expect.objectContaining({
+            state: "spawning",
+            sessionId: "test-1",
+            claimedAt: createdAt,
+            attempts: 0,
+            deferrals: 0,
+          }),
+        ],
+      });
+      expect(lifecycle?.members[0]).not.toHaveProperty("startedAt");
+      const accepted = readSession(f.dataDir, "test-1");
+      expect(accepted).toMatchObject({
+        id: "test-1",
+        status: "spawning",
+        launchCommand: "",
+        triggerBirthKey: `${workId}:0`,
+        triggerBirthRequest: request,
+        triggerOrigin: {
+          triggerId: "review",
+          sourceId: "tick",
+          externalId: data.externalId,
+          blockIndex: 0,
+        },
+      });
+      for (const field of ["spawnIntent", "spawnReceipt", "agentSessionId", "agentLaunchId"])
+        expect(accepted).not.toHaveProperty(field);
+      expect(f.spawn).not.toHaveBeenCalled();
+      return { accepted, members: lifecycle?.members };
+    };
     const emit = () =>
       f.deps.bus.emit({
         projectId: "test",
@@ -561,45 +611,13 @@ describe("durable spawn admission", () => {
       await vi.advanceTimersByTimeAsync(45 * 60_000);
       emit();
       await vi.advanceTimersByTimeAsync(0);
-      expect(readWorkItemLifecycles(f.dataDir, "test", "tick").get(data.externalId)).toMatchObject({
-        state: "pending",
-        members: [
-          expect.objectContaining({
-            state: "spawning",
-            sessionId: "test-1",
-            attempts: 0,
-            deferrals: 0,
-          }),
-        ],
-      });
-      expect(readPendingSpawnWork(f.dataDir).size).toBe(0);
-      expect(readSession(f.dataDir, "test-1")).toMatchObject({
-        triggerOrigin: {
-          triggerId: "review",
-          sourceId: "tick",
-          externalId: data.externalId,
-          blockIndex: 0,
-        },
-      });
-      expect(readSession(f.dataDir, "test-1")).not.toHaveProperty("spawnIntent");
-      expect(readSession(f.dataDir, "test-1")).not.toHaveProperty("spawnReceipt");
+      const retained = expectRetainedBirth();
       await controller.stop();
       controller = startConfiguredTriggers(f.deps);
       await vi.advanceTimersByTimeAsync(45 * 60_000);
       emit();
       await vi.advanceTimersByTimeAsync(0);
-      expect(
-        readWorkItemLifecycles(f.dataDir, "test", "tick").get(data.externalId)?.members,
-      ).toEqual([
-        expect.objectContaining({
-          state: "spawning",
-          sessionId: "test-1",
-          attempts: 0,
-          deferrals: 0,
-        }),
-      ]);
-      expect(f.spawn).not.toHaveBeenCalled();
-      expect(readPendingSpawnWork(f.dataDir).size).toBe(0);
+      expect(expectRetainedBirth()).toEqual(retained);
     } finally {
       await controller.stop();
     }
