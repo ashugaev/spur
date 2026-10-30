@@ -445,10 +445,13 @@ function latestChecksByName(checks: GitHubRunCheck[]): GitHubRunCheck[] {
     .map(({ check }) => check);
 }
 
-export function summarizeFailingCi(checks: GitHubRunCheck[]): string | null {
+export function summarizeFailingCi(
+  checks: GitHubRunCheck[],
+  ignoreChecks: readonly string[] = [],
+): string | null {
   const failing = latestChecksByName(checks).filter((check) => {
     const state = normalizeReviewState(check.conclusion ?? check.state);
-    return FAILING_GITHUB_CI_STATES.has(state);
+    return FAILING_GITHUB_CI_STATES.has(state) && !ignoreChecks.includes(check.name);
   });
   return failing.length > 0
     ? `CI is failing: ${failing.map((check) => check.name).join(", ")}.`
@@ -1041,6 +1044,11 @@ async function refreshSignals(
   );
 }
 
+/** Renders a source `selfMarker` template for one session; `{session}` is the only placeholder. */
+export function renderSelfMarker(template: string, sessionId: string): string {
+  return template.replaceAll("{session}", sessionId);
+}
+
 function hasUnquotedMarker(body: string, marker: string): boolean {
   let spanStart = 0;
   let lineStart = 0;
@@ -1075,10 +1083,12 @@ function collectSignalsFromNode(
   sourceId: string,
   viewerLogin: string | null,
   selfMarker?: string,
+  ignoreChecks?: readonly string[],
 ): GitHubCollectedSignals {
   const ignored = readIgnoredGitHubFeedback(dataDir, projectId, sourceId, session.id, pr.number);
   const newlyIgnored: string[] = [];
-  const renderedMarker = selfMarker?.replaceAll("{session}", session.id);
+  const renderedMarker =
+    selfMarker !== undefined ? renderSelfMarker(selfMarker, session.id) : undefined;
   const isOwnFeedback = (key: string, body: string, login: string | null | undefined): boolean => {
     if (ignored.has(key)) return true;
     const own =
@@ -1122,7 +1132,7 @@ function collectSignalsFromNode(
   const ciText =
     normalizeReviewState(pr.statusCheckRollupState) === "SUCCESS"
       ? null
-      : summarizeFailingCi(checks);
+      : summarizeFailingCi(checks, ignoreChecks);
   const headRepository = isRecord(node.headRepository)
     ? readString(node.headRepository.nameWithOwner)
     : null;
@@ -1769,6 +1779,7 @@ async function runReviewRepoBatch(
   maxTargets: number,
   expectedHeads: Map<string, Promise<PrRepoSlug | null>>,
   selfMarker?: string,
+  ignoreChecks?: readonly string[],
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
   const slug = targets[0]?.slug;
@@ -2021,6 +2032,7 @@ async function runReviewRepoBatch(
             sourceId,
             viewerLogin,
             selfMarker,
+            ignoreChecks,
           ),
         });
       } catch (error) {
@@ -2038,6 +2050,7 @@ export async function collectGitHubSignalsBatch(
   sourceId: string,
   maxTargets?: number,
   selfMarker?: string,
+  ignoreChecks?: readonly string[],
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
   const expectedHeads = new Map<string, Promise<PrRepoSlug | null>>();
@@ -2137,6 +2150,7 @@ export async function collectGitHubSignalsBatch(
             limit,
             expectedHeads,
             selfMarker,
+            ignoreChecks,
           ),
         );
         if (admission.status === "blocked") {

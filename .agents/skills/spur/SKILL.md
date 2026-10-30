@@ -20,8 +20,10 @@ INTERFACES
   Session variables: `env | grep '^SPUR_'`.
   Agent launch identity contract: `docs/commands.md#session-tools-and-environment`.
   Automatic reminder limits: `docs/configuration.md#automatic-reminders`.
+  Edit scheduled jobs through footer Cron viewer or MCP; config behavior: docs/configuration.md; operations: docs/daemon-api.md.
   Spur ToDo: ledger starts empty, no code path seeds an item; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses an agent's own completion, self-destruct, and handoff — `todo_ledger_empty`/`todo_open_work` (409); a human `complete`/`handoff` from the CLI or UI is never blocked. Contract: `docs/commands.md#todo`.
-  Telegram: agents send with `"$SPUR_SESSION_TOOL_DIR/spur" source reply`; users launch tasks and inspect attention cards. Binding, topic identity: `docs/configuration.md#telegram-binding`; replies: `docs/commands.md#source-reply`.
+  Telegram: bot DM for commands/spawn; agent communication in assigned forum topics; completion deletes owned topics. Source identity: `docs/commands.md#source`; attachments/binding: `docs/configuration.md#telegram-binding`; sends: `docs/commands.md#source-reply`.
+  Native Telegram calls to sandbox Shepherd: docs/telegram-calls.md.
   Stop unwanted auto-pings with `spur auto-ping unsubscribe`. A thread that keeps coming back takes `--thread`; `--event` binds to one emitted occurrence only. Scopes and resume: `docs/commands.md#auto-ping`; API: `docs/daemon-api.md`.
 
 SAFETY
@@ -34,20 +36,24 @@ SAFETY
   `--expose-web` binds `0.0.0.0`, public.
   Agents run full-access — any untrusted prompt from Telegram, GitHub, Jira, or webhook runs arbitrary commands as the daemon user.
   Token budgets, session overrides, and installed Cursor hook: docs/configuration.md. Unknown usage never blocks execution.
+  Treat project `spur.yaml` as code: `script` commands run as daemon user.
   Start dev servers with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, never a bare dev-server command.
   Isolated TEST constraints: docs/configuration.md; managed project input and stand readiness: docs/commands.md Sidecars and Session tools.
   Read ports with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`; Open contract: docs/commands.md#sidecars. Never grep `/proc` or session state for ports.
+  Use per-port `listening` for a TCP listener; `alive` describes the pane. Contract: docs/commands.md#sidecars.
 
 DOCS
 
   Doc index: https://raw.githubusercontent.com/ashugaev/spur/main/README.md
   Any path under `docs/` resolves as https://raw.githubusercontent.com/ashugaev/spur/main/<path>
   Commands, session tools and variables: docs/commands.md
-  Daemon HTTP routes, pre-flight batches and session lifecycle receipts: docs/daemon-api.md
-  Config, reviewer App and consent policy: docs/configuration.md; events: docs/configuration.md#events
-  GitHub PR feedback ownership and quotes: docs/configuration.md#field-reference
+  Reviewer publication evidence and trusted legacy receipt recovery: docs/commands.md
+  Routes, bounded conversation pages, pre-flight batches, lifecycle receipts, restore cancellation: docs/daemon-api.md
+  Config, admission, trigger-spawn retry, reviewer App/consent: docs/configuration.md; events: docs/configuration.md#events
+  GitHub PR feedback ownership, quotes and post marker: docs/configuration.md#field-reference
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
+  Full-access daemon MCP over stdio, SSH or installed loopback HTTP; optional OpenAI tunnel: docs/mcp.md
 
 EDITING THIS FILE
 

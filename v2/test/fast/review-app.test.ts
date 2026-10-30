@@ -1,6 +1,7 @@
-import { generateKeyPairSync } from "node:crypto";
-import { mkdtemp, writeFile, rm, readFile, symlink, link, stat } from "node:fs/promises";
+import { createHash, generateKeyPairSync } from "node:crypto";
+import { chmod, mkdtemp, writeFile, rm, readFile, symlink, link, stat } from "node:fs/promises";
 import type * as FileSystem from "node:fs/promises";
+import type * as ReviewState from "../../src/review-state.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
@@ -10,16 +11,28 @@ import {
   prepareReview,
   blockReview,
   publishReview,
+  recoverReview,
 } from "../../src/review-app.js";
+import { publishLaneState } from "../../src/review-state.js";
+import { execFileAsync } from "../helpers/common.js";
+import { readJson } from "../../src/github-app.js";
 
 const dirs: string[] = [];
-const faults = vi.hoisted(() => ({ approvedWrite: false }));
+const faults = vi.hoisted(() => ({ approvedWrite: false, recovery: "", writes: 0 }));
 vi.mock("../../src/review-state.js", () => ({ publishLaneState: vi.fn(async () => undefined) }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof FileSystem>();
   return {
     ...actual,
     writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
+      faults.writes++;
+      if (
+        (faults.recovery === "archive-write" && String(args[0]).endsWith("legacy.json")) ||
+        (faults.recovery === "canonical-write" && String(args[0]).endsWith("receipt.json"))
+      ) {
+        faults.recovery = "";
+        throw new Error("fixture recovery write denied");
+      }
       if (
         faults.approvedWrite &&
         typeof args[1] === "string" &&
@@ -28,10 +41,33 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         throw new Error("fixture final save denied");
       return actual.writeFile(...args);
     },
+    link: async (...args: Parameters<typeof actual.link>) => {
+      if (faults.recovery === "archive-link") {
+        faults.recovery = "";
+        throw new Error("fixture archive link denied");
+      }
+      return actual.link(...args);
+    },
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const file = await actual.open(...args);
+      if (faults.recovery === "canonical-sync" && String(args[0]).endsWith("/4")) {
+        faults.recovery = "canonical-sync-ready";
+      } else if (
+        ["directory-sync", "canonical-sync-ready"].includes(faults.recovery) &&
+        String(args[0]).endsWith("/4")
+      ) {
+        faults.recovery = "";
+        vi.spyOn(file, "sync").mockRejectedValueOnce(new Error("fixture directory sync denied"));
+      }
+      return file;
+    },
   };
 });
 afterEach(async () => {
   faults.approvedWrite = false;
+  faults.recovery = "";
+  faults.writes = 0;
+  vi.mocked(publishLaneState).mockReset().mockResolvedValue(undefined);
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 const draft = {
@@ -53,7 +89,14 @@ const draft = {
     dispositions: [],
   },
 };
-test("blocks absent independent challenge and failed approval rows", () => {
+test("accepts optional legacy coverage and blocks malformed coverage or failed rows", () => {
+  const { coverage, ...withoutCoverage } = draft;
+  expect(parseRequest({ ...withoutCoverage, receipt: "r" }).coverage).toBeNull();
+  expect(parseRequest({ ...draft, receipt: "r", coverage: null }).coverage).toBeNull();
+  expect(parseRequest({ ...draft, receipt: "r" }).coverage).toEqual(coverage);
+  for (const invalid of [false, [], {}, { ...coverage, output: "" }]) {
+    expect(() => parseRequest({ ...draft, receipt: "r", coverage: invalid })).toThrow();
+  }
   expect(() =>
     parseRequest({
       ...draft,
@@ -72,6 +115,23 @@ test("blocks absent independent challenge and failed approval rows", () => {
       browser: { appId: 1, keyPath: "k" },
     }),
   ).toThrow("duplicate-apps");
+});
+test("publishes and reconciles completed approval without a challenger", async () => {
+  const f = await lifecycleFixture();
+  const { coverage: _coverage, ...input } = f.request;
+  const request = parseRequest(input);
+  expect(await publishReview(f.config, request, draft.session, f.transport)).toMatchObject({
+    status: "APPROVED",
+    coverage: null,
+  });
+  expect(JSON.parse(await readFile(request.receipt, "utf8"))).toMatchObject({
+    status: "APPROVED",
+    coverage: null,
+  });
+  expect((await publishReview(f.config, request, draft.session, f.transport)).status).toBe(
+    "APPROVED",
+  );
+  expect(f.posts()).toBe(1);
 });
 test.each(["clean", "race", "denial", "ambiguous", "wrong-actor"])(
   "pinned publication %s",
@@ -511,6 +571,67 @@ test.each(["network", "http-403", "http-404"])(
   },
 );
 
+test.skipIf(process.platform === "win32").each(["legacy", "pending"])(
+  "legacy recovery rejects FIFO archive during %s without hanging the canonical lock",
+  async (mode) => {
+    const f = await legacyRecoveryFixture();
+    if (mode === "pending") {
+      await f.recover();
+      await rm(f.archive);
+    }
+    await execFileAsync("mkfifo", ["-m", "600", f.archive], { timeout: 2_000 });
+    const child = `
+      import { readFile, lstat, access } from "node:fs/promises";
+      try {
+      const [moduleUrl, configuration, attempt, sha256, archive] = process.argv.slice(1);
+      let network = 0;
+      globalThis.fetch = async () => { network++; throw new Error("unexpected fixture network"); };
+      const { recoverReview } = await import(moduleUrl);
+      const request = JSON.parse(attempt);
+      const before = await readFile(request.receipt);
+      const original = await lstat(archive);
+      let rejected = false;
+      try { await recoverReview(JSON.parse(configuration), request, request.session, sha256); }
+      catch (error) { rejected = error?.category === "legacy-archive-invalid"; }
+      const after = await lstat(archive);
+      let locked = true;
+      try { await access(request.receipt + ".lock"); } catch { locked = false; }
+      console.log(JSON.stringify({ rejected, network, locked,
+        unchanged: before.equals(await readFile(request.receipt)),
+        fifo: after.isFIFO(), sameArchive: original.ino === after.ino && original.dev === after.dev }));
+      } catch (error) {
+        console.error(error);
+        process.exitCode = 1;
+      }
+    `;
+    const result = await execFileAsync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        child,
+        new URL("../../dist/review-app.js", import.meta.url).href,
+        JSON.stringify(f.config),
+        JSON.stringify(f.request),
+        f.sha256,
+        f.archive,
+      ],
+      { timeout: 2_000, killSignal: "SIGKILL" },
+    );
+    expect(result.stdout.trim()).toBe(
+      JSON.stringify({
+        rejected: true,
+        network: 0,
+        locked: false,
+        unchanged: true,
+        fifo: true,
+        sameArchive: true,
+      }),
+    );
+    expect(f.posts()).toBe(0);
+  },
+);
+
 test("lost readback retains known review ID and never repeats POST against empty history", async () => {
   const f = await lifecycleFixture();
   let failReadback = true,
@@ -702,4 +823,427 @@ test("readback token refresh cannot rotate App identity and persist approval", a
     mutationStarted: true,
   });
   expect(f.posts()).toBe(1);
+});
+
+async function legacyRecoveryFixture() {
+  const f = await lifecycleFixture();
+  const legacy = {
+    repository: "owner/repo",
+    pr: 4,
+    lane: "code",
+    session: "old-reviewer",
+    attempt: "old-attempt",
+    previousAttempt: "older-attempt",
+    H: draft.H,
+    B: draft.B,
+    contractDigest: draft.contractDigest,
+    status: "BLOCKED",
+    localVerdict: "FAIL",
+    publicationVerdict: "BLOCKED",
+    reviewId: null,
+    evidence: [{ scenario: "historical failure", status: "BLOCKED" }],
+    publication: { submitted: false, reason: "historical diagnostic" },
+    wakeReconciliation: { newAttempt: false },
+  };
+  const raw = Buffer.from(JSON.stringify(legacy, null, 2) + "\n");
+  await writeFile(f.request.receipt, raw);
+  const sha256 = createHash("sha256").update(raw).digest("hex");
+  const request = { ...f.request, session: "replacement-reviewer", attempt: "replacement-attempt" };
+  const archive = `${request.receipt}.legacy-${sha256}`;
+  const calls: string[] = [];
+  const comments: { id: number; body: string; user: { login: string } }[] = [];
+  let failReadback = false;
+  const transport: typeof fetch = async (url, options) => {
+    const path = new URL(String(url)).pathname;
+    calls.push(`${options?.method ?? "GET"} ${path}`);
+    if (path === "/repos/owner/repo/issues/4/comments") {
+      if (options?.method !== "POST") return Response.json(comments);
+      let payload: { body: string };
+      try {
+        payload = JSON.parse(String(options.body)) as { body: string };
+      } catch (error) {
+        throw new Error("Invalid recovery fixture comment payload", { cause: error });
+      }
+      const row = { id: comments.length + 1, body: payload.body, user: { login: "code[bot]" } };
+      comments.push(row);
+      return Response.json(row);
+    }
+    if (path.startsWith("/repos/owner/repo/issues/comments/"))
+      return failReadback ? Response.json({}) : Response.json(comments.at(-1));
+    return f.transport(url, options);
+  };
+  const actual = await vi.importActual<typeof ReviewState>("../../src/review-state.js");
+  vi.mocked(publishLaneState).mockImplementation(actual.publishLaneState);
+  return {
+    ...f,
+    legacy,
+    raw,
+    sha256,
+    request,
+    archive,
+    calls,
+    comments,
+    transport,
+    failReadback: () => {
+      failReadback = true;
+    },
+    recover: () => recoverReview(f.config, request, request.session, sha256, transport),
+  };
+}
+
+test("legacy recovery archives exact bytes and retires both attempts without a native review", async () => {
+  const f = await legacyRecoveryFixture();
+  const result = await f.recover();
+  expect(result).toMatchObject({
+    status: "PENDING",
+    localVerdict: null,
+    evidence: [],
+    coverage: null,
+    reviewId: null,
+    inputDigest: null,
+    mutationStarted: false,
+    reviewBlocked: false,
+    supersededAttempts: ["old-attempt", "older-attempt"],
+    legacyRecovery: {
+      version: 1,
+      digest: f.sha256,
+      session: "old-reviewer",
+      publication: "unknown",
+      attempts: ["old-attempt", "older-attempt"],
+    },
+  });
+  expect(await readFile(f.archive)).toEqual(f.raw);
+  expect((await stat(f.archive)).mode & 0o077).toBe(0);
+  expect(f.comments).toHaveLength(1);
+  expect(f.comments[0]?.body).toContain('"status":"PENDING"');
+  expect(f.posts()).toBe(0);
+  expect(f.calls.some((call) => call.includes("/reviews"))).toBe(false);
+  const next = { ...f.request, attempt: "next-attempt" };
+  expect(await prepareReview(f.config, next, next.session, f.transport)).toMatchObject({
+    status: "PENDING",
+    supersededAttempts: ["old-attempt", "older-attempt", f.request.attempt],
+    legacyRecovery: result.legacyRecovery,
+  });
+  for (const attempt of ["old-attempt", "older-attempt"]) {
+    await expect(
+      prepareReview(f.config, { ...next, attempt }, next.session, f.transport),
+    ).rejects.toThrow("attempt-superseded");
+    await expect(
+      publishReview(f.config, { ...next, attempt }, next.session, f.transport),
+    ).rejects.toThrow("attempt-superseded");
+  }
+  expect(await readFile(f.archive)).toEqual(f.raw);
+});
+
+test.each(["success", "announcement-failure"])(
+  "legacy recovery G1 %s preserves converted PENDING bytes",
+  async (mode) => {
+    const f = await legacyRecoveryFixture();
+    await f.recover();
+    const current = await readFile(f.request.receipt);
+    expect(createHash("sha256").update(current).digest("hex")).not.toBe(f.sha256);
+    const writes = faults.writes;
+    if (mode === "announcement-failure") {
+      f.comments.splice(0);
+      f.failReadback();
+      await expect(f.recover()).rejects.toThrow("state-publication-mismatch");
+    } else expect(await f.recover()).toMatchObject({ status: "PENDING" });
+    expect(faults.writes).toBe(writes);
+    expect(await readFile(f.request.receipt)).toEqual(current);
+    expect(await readFile(f.archive)).toEqual(f.raw);
+    expect(f.posts()).toBe(0);
+  },
+);
+
+test.each([
+  "unknown-key",
+  "authority-key",
+  "bad-previous",
+  "wrong-repo",
+  "wrong-pr",
+  "wrong-lane",
+  "wrong-status",
+  "wrong-verdict",
+  "review-id",
+  "malformed",
+  "digest",
+  "session",
+  "path",
+  "retired",
+  "wake-lineage",
+])("legacy recovery rejects %s before receipt writes or network", async (mode) => {
+  const f = await legacyRecoveryFixture();
+  const invalid: Record<string, unknown> = { ...f.legacy };
+  if (mode === "unknown-key") invalid.retiredAttempts = ["hidden-attempt"];
+  if (mode === "authority-key") invalid.PR = 4;
+  if (mode === "bad-previous") invalid.previousAttempt = [];
+  if (mode === "wrong-repo") invalid.repository = "other/repo";
+  if (mode === "wrong-pr") invalid.pr = 5;
+  if (mode === "wrong-lane") invalid.lane = "browser";
+  if (mode === "wrong-status") invalid.status = "PENDING";
+  if (mode === "wrong-verdict") invalid.localVerdict = "APPROVED";
+  if (mode === "review-id") invalid.reviewId = 1;
+  if (mode === "wake-lineage") invalid.wakeReconciliation = { newAttempt: "undeclared-attempt" };
+  const raw = mode === "malformed" ? Buffer.from("{") : Buffer.from(JSON.stringify(invalid));
+  await writeFile(f.request.receipt, raw);
+  const sha256 =
+    mode === "digest" ? "0".repeat(64) : createHash("sha256").update(raw).digest("hex");
+  const request = {
+    ...f.request,
+    ...(mode === "path" ? { receipt: join(f.dir, "other.json") } : {}),
+    ...(mode === "retired" ? { attempt: "older-attempt" } : {}),
+  };
+  const writes = faults.writes;
+  await expect(
+    recoverReview(
+      f.config,
+      request,
+      mode === "session" ? "wrong-session" : request.session,
+      sha256,
+      f.transport,
+    ),
+  ).rejects.toThrow();
+  expect(await readFile(f.request.receipt)).toEqual(raw);
+  expect(faults.writes).toBe(writes);
+  expect(f.calls).toEqual([]);
+});
+
+test.each(["archive-write", "archive-link", "directory-sync", "canonical-write"])(
+  "legacy recovery %s fault preserves original and retries exact archive",
+  async (mode) => {
+    const f = await legacyRecoveryFixture();
+    faults.recovery = mode;
+    await expect(f.recover()).rejects.toThrow();
+    expect(await readFile(f.request.receipt)).toEqual(f.raw);
+    expect(f.calls).toEqual([]);
+    expect(await f.recover()).toMatchObject({ status: "PENDING" });
+    expect(await readFile(f.archive)).toEqual(f.raw);
+  },
+);
+
+test.each(["wrong-bytes", "public-mode", "symlink"])(
+  "legacy recovery refuses %s archive without overwrite",
+  async (mode) => {
+    const f = await legacyRecoveryFixture();
+    if (mode === "symlink") await symlink(f.request.receipt, f.archive);
+    else {
+      await writeFile(f.archive, mode === "wrong-bytes" ? "wrong" : f.raw, { mode: 0o600 });
+      if (mode === "public-mode") await chmod(f.archive, 0o644);
+    }
+    const original = await readFile(f.archive);
+    const writes = faults.writes;
+    await expect(f.recover()).rejects.toThrow("legacy-archive-invalid");
+    expect(await readFile(f.request.receipt)).toEqual(f.raw);
+    expect(await readFile(f.archive)).toEqual(original);
+    expect(faults.writes).toBe(writes);
+    expect(f.calls).toEqual([]);
+  },
+);
+
+test.each([
+  "session",
+  "attempt",
+  "H",
+  "B",
+  "contract",
+  "app",
+  "digest",
+  "archive",
+  "lineage",
+  "malformed",
+  "BLOCKED",
+  "APPROVED",
+  "CHANGES_REQUESTED",
+])("legacy recovery rejects changed current %s without reset", async (mode) => {
+  const f = await legacyRecoveryFixture();
+  await f.recover();
+  const request = { ...f.request };
+  const config = { ...f.config, code: { ...f.config.code } };
+  const current = (await readJson(request.receipt)) as Record<string, unknown>;
+  if (mode === "session") request.session = "other-reviewer";
+  if (mode === "attempt") request.attempt = "other-attempt";
+  if (mode === "H") request.H = "d".repeat(40);
+  if (mode === "B") request.B = "d".repeat(40);
+  if (mode === "contract") request.contractDigest = "d".repeat(64);
+  if (mode === "app") config.code.appId = 3;
+  if (mode === "lineage") current.supersededAttempts = ["old-attempt"];
+  if (mode === "malformed") delete current.mutationStarted;
+  if (["BLOCKED", "APPROVED", "CHANGES_REQUESTED"].includes(mode)) current.status = mode;
+  await writeFile(request.receipt, JSON.stringify(current));
+  if (mode === "archive") await writeFile(f.archive, "wrong archive");
+  const raw = await readFile(request.receipt);
+  const archived = await readFile(f.archive);
+  f.calls.splice(0);
+  const writes = faults.writes;
+  await expect(
+    recoverReview(
+      config,
+      request,
+      request.session,
+      mode === "digest" ? "0".repeat(64) : f.sha256,
+      f.transport,
+    ),
+  ).rejects.toThrow();
+  expect(faults.writes).toBe(writes);
+  expect(f.calls).toEqual([]);
+  expect(await readFile(request.receipt)).toEqual(raw);
+  expect(await readFile(f.archive)).toEqual(archived);
+});
+
+test("legacy recovery failed initial announcement stays BLOCKED until ordinary fresh prepare", async () => {
+  const f = await legacyRecoveryFixture();
+  f.failReadback();
+  expect(await f.recover()).toMatchObject({ status: "BLOCKED", reviewBlocked: true });
+  const current = await readFile(f.request.receipt);
+  await expect(f.recover()).rejects.toThrow();
+  expect(await readFile(f.request.receipt)).toEqual(current);
+  vi.mocked(publishLaneState).mockResolvedValue(undefined);
+  expect(
+    await prepareReview(
+      f.config,
+      { ...f.request, attempt: "fresh-after-block" },
+      f.request.session,
+      f.transport,
+    ),
+  ).toMatchObject({
+    status: "PENDING",
+    legacyRecovery: { publication: "unknown" },
+    supersededAttempts: ["old-attempt", "older-attempt", f.request.attempt],
+  });
+  expect(await readFile(f.archive)).toEqual(f.raw);
+  expect(f.posts()).toBe(0);
+});
+
+test("legacy recovery canonical directory-sync fault retains owned BLOCKED and exact archive", async () => {
+  const f = await legacyRecoveryFixture();
+  faults.recovery = "canonical-sync";
+  expect(await f.recover()).toMatchObject({
+    status: "BLOCKED",
+    reviewBlocked: true,
+    legacyRecovery: { publication: "unknown" },
+  });
+  expect(await readFile(f.archive)).toEqual(f.raw);
+  await expect(f.recover()).rejects.toThrow();
+  expect(f.posts()).toBe(0);
+});
+
+test("legacy recovery matching a current receipt raw SHA never grants legacy authority", async () => {
+  const f = await legacyRecoveryFixture();
+  await f.recover();
+  const current = await readFile(f.request.receipt);
+  const writes = faults.writes;
+  f.calls.splice(0);
+  await expect(
+    recoverReview(
+      f.config,
+      f.request,
+      f.request.session,
+      createHash("sha256").update(current).digest("hex"),
+      f.transport,
+    ),
+  ).rejects.toThrow("legacy-receipt-invalid");
+  expect(await readFile(f.request.receipt)).toEqual(current);
+  expect(faults.writes).toBe(writes);
+  expect(f.calls).toEqual([]);
+});
+
+test("legacy recovery realpath aliases share canonical lock and stale recovery cannot replace newer", async () => {
+  const f = await legacyRecoveryFixture();
+  const alias = `${f.dir}-alias`;
+  await symlink(f.dir, alias);
+  dirs.push(alias);
+  let entered!: () => void;
+  let release!: () => void;
+  const paused = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.pause(async () => {
+    entered();
+    await held;
+  });
+  const first = f.recover();
+  await paused;
+  try {
+    const request = { ...f.request, receipt: join(alias, "owner", "repo", "4", "code.json") };
+    await expect(
+      recoverReview(
+        { ...f.config, receiptRoot: alias },
+        request,
+        request.session,
+        f.sha256,
+        f.transport,
+      ),
+    ).rejects.toThrow("attempt-locked");
+  } finally {
+    release();
+  }
+  await first;
+  await prepareReview(
+    f.config,
+    { ...f.request, attempt: "newer-attempt" },
+    f.request.session,
+    f.transport,
+  );
+  const newer = await readFile(f.request.receipt);
+  await expect(f.recover()).rejects.toThrow();
+  expect(await readFile(f.request.receipt)).toEqual(newer);
+  expect(f.posts()).toBe(0);
+});
+
+test.each(["APPROVED", "CHANGES_REQUESTED"] as const)(
+  "legacy recovery cannot reset genuinely published %s",
+  async (verdict) => {
+    const f = await legacyRecoveryFixture();
+    await f.recover();
+    expect(
+      await publishReview(f.config, { ...f.request, verdict }, f.request.session, f.transport),
+    ).toMatchObject({ status: verdict });
+    const current = await readFile(f.request.receipt);
+    const posts = f.posts();
+    f.calls.splice(0);
+    await expect(f.recover()).rejects.toThrow();
+    expect(await readFile(f.request.receipt)).toEqual(current);
+    expect(f.calls).toEqual([]);
+    expect(f.posts()).toBe(posts);
+  },
+);
+
+test.each([
+  "evidence",
+  "localVerdict",
+  "coverage",
+  "mutation",
+  "recovery-metadata",
+  "archive-missing",
+])("legacy recovery rejects touched PENDING %s before save or network", async (mode) => {
+  const f = await legacyRecoveryFixture();
+  await f.recover();
+  const current = (await readJson(f.request.receipt)) as Record<string, unknown>;
+  if (mode === "evidence") current.evidence = [{ status: "passed", evidence: "already assessed" }];
+  if (mode === "localVerdict") current.localVerdict = "APPROVED";
+  if (mode === "coverage") current.coverage = draft.coverage;
+  if (mode === "mutation") {
+    current.mutationStarted = true;
+    current.inputDigest = "a".repeat(64);
+  }
+  if (mode === "recovery-metadata")
+    current.legacyRecovery = {
+      version: 1,
+      digest: f.sha256,
+      attempts: ["old-attempt"],
+      session: "old-reviewer",
+      publication: "absent",
+    };
+  if (mode === "archive-missing") await rm(f.archive);
+  await writeFile(f.request.receipt, JSON.stringify(current));
+  const raw = await readFile(f.request.receipt);
+  f.calls.splice(0);
+  const writes = faults.writes;
+  await expect(f.recover()).rejects.toThrow();
+  expect(faults.writes).toBe(writes);
+  expect(f.calls).toEqual([]);
+  expect(await readFile(f.request.receipt)).toEqual(raw);
 });
