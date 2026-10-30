@@ -82,6 +82,7 @@ import {
   SessionStartingError,
   SidecarPortConflictError,
   SidecarProbeUnresponsiveError,
+  SpawnBatchConflictError,
   WakeDispatchConflictError,
   WakeTargetMissingError,
 } from "./session-service.js";
@@ -2460,7 +2461,8 @@ export async function startServer(
         error instanceof SidecarPortConflictError ||
         error instanceof OpenPrActionRequiredError ||
         error instanceof GithubPrCheckUnavailableError ||
-        error instanceof SessionNotRestorableError
+        error instanceof SessionNotRestorableError ||
+        error instanceof SpawnBatchConflictError
       ) {
         failRequest(response, error.statusCode, message, {
           method,
