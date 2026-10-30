@@ -2627,6 +2627,7 @@ describe("startServer", () => {
           intervalMs: 600_000,
           stopCondition: "CI is green",
           message: "Check CI",
+          dispatchClaimId: "echoed-read-only-claim",
         }),
       });
       expect(scheduleResponse.status).toBe(200);
@@ -2813,7 +2814,11 @@ describe("startServer", () => {
       const updateResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ target: "interval", message: "Updated CI" }),
+        body: JSON.stringify({
+          target: "interval",
+          message: "Updated CI",
+          dispatchClaimId: "echoed-read-only-claim",
+        }),
       });
       expect(updateResponse.status).toBe(200);
       await expect(updateResponse.json()).resolves.toMatchObject({
@@ -2912,7 +2917,11 @@ describe("startServer", () => {
       const dispatchResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ target: "interval", dispatch: true }),
+        body: JSON.stringify({
+          target: "interval",
+          dispatch: true,
+          dispatchClaimId: "echoed-read-only-claim",
+        }),
       });
       expect(dispatchResponse.status).toBe(200);
       expect(dispatchRequests).toEqual([{ target: "interval", dispatch: true }]);
