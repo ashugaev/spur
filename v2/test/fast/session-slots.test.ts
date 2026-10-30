@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -12,6 +12,7 @@ import {
   applyNormalizedSlotsUpdate,
   MANUAL_TITLE_LOCK_MESSAGE,
   normalizeSlotsUpdate,
+  removeSessionSlotTool,
   withSessionSlotInstructions,
   TODO_TOOL_NAME,
 } from "../../src/session-slots.js";
@@ -518,5 +519,56 @@ printf '%s\n' "$@" > ${JSON.stringify(captureFile)}
       hookEvent: "UserPromptSubmit",
       turnId: "api-4-7",
     });
+  });
+});
+
+describe("removeSessionSlotTool", () => {
+  function seedToolDir(dataDir: string, withCodexHome: boolean): string {
+    const toolDir = join(dataDir, "session-tools", "api-1");
+    mkdirSync(toolDir, { recursive: true });
+    writeFileSync(join(toolDir, "spur"), "#!/bin/sh\n", "utf8");
+    if (withCodexHome) {
+      mkdirSync(join(toolDir, "codex-home", "sessions"), { recursive: true });
+      writeFileSync(join(toolDir, "codex-home", "sessions", "rollout.jsonl"), "{}\n", "utf8");
+    }
+    return toolDir;
+  }
+
+  it("keeps a listed entry and removes everything else", async () => {
+    const dataDir = await createTempDir("spur-remove-tool-");
+    tempDirs.push(dataDir);
+    const toolDir = seedToolDir(dataDir, true);
+
+    removeSessionSlotTool(dataDir, "api-1", ["codex-home"]);
+
+    expect(existsSync(join(toolDir, "codex-home", "sessions", "rollout.jsonl"))).toBe(true);
+    expect(existsSync(join(toolDir, "spur"))).toBe(false);
+  });
+
+  it("removes the whole dir when no listed entry exists", async () => {
+    const dataDir = await createTempDir("spur-remove-tool-");
+    tempDirs.push(dataDir);
+    const toolDir = seedToolDir(dataDir, false);
+
+    removeSessionSlotTool(dataDir, "api-1", ["codex-home"]);
+
+    expect(existsSync(toolDir)).toBe(false);
+  });
+
+  it("removes the whole dir when nothing is kept", async () => {
+    const dataDir = await createTempDir("spur-remove-tool-");
+    tempDirs.push(dataDir);
+    const toolDir = seedToolDir(dataDir, true);
+
+    removeSessionSlotTool(dataDir, "api-1", []);
+
+    expect(existsSync(toolDir)).toBe(false);
+  });
+
+  it("does not throw for a missing dir", async () => {
+    const dataDir = await createTempDir("spur-remove-tool-");
+    tempDirs.push(dataDir);
+
+    expect(() => removeSessionSlotTool(dataDir, "api-1", ["codex-home"])).not.toThrow();
   });
 });
