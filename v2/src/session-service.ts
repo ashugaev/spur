@@ -6416,9 +6416,13 @@ export class SessionService {
   }
 
   resolveConfiguredProjectConfigPath(projectId: string): string | undefined {
-    const project = this.config.projects[projectId];
+    const project = this.config?.projects?.[projectId];
     if (!project) return undefined;
-    for (const configPath of [this.bootstrapConfigPath, ...this.registryPaths]) {
+    const candidates = [
+      ...(this.bootstrapConfigPath ? [this.bootstrapConfigPath] : []),
+      ...(this.registryPaths ?? []),
+    ];
+    for (const configPath of candidates) {
       try {
         const candidate = loadProjectConfig(configPath);
         if (Object.prototype.hasOwnProperty.call(candidate.projects, projectId)) {
