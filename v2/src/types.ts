@@ -1113,6 +1113,7 @@ export interface SessionIntervalWakeState {
   intervalMs: number;
   message: string;
   stopCondition: string;
+  dispatchClaimId?: string;
 }
 
 export interface SessionDailyWakeState {
