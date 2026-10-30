@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -9,12 +9,39 @@ import {
   type ParsedRecord,
 } from "../../src/claude-jsonl-state.js";
 import { readAgentHookState } from "../../src/agent-hook-state.js";
+import { createTempDir } from "../helpers/common.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = resolve(__dirname, "../fixtures/agent-history");
 const CLAUDE_DIR = join(FIXTURES_DIR, "claude");
 const CODEX_DIR = join(FIXTURES_DIR, "codex");
 const MANIFEST_PATH = join(FIXTURES_DIR, "MANIFEST.sha256");
+
+it.each([undefined, null, 7, [], {}, "", " ", "current-launch"])(
+  "reads optional launch-stamped hook evidence without trusting invalid stamp %j",
+  async (agentLaunchId) => {
+    const dir = await createTempDir("hook-launch-state-");
+    try {
+      await mkdir(join(dir, "session-agent-state"));
+      await writeFile(
+        join(dir, "session-agent-state", "session.json"),
+        JSON.stringify({
+          state: "waiting",
+          updatedAt: "2026-06-28T08:00:00.000Z",
+          turnId: "turn-current",
+          agentLaunchId,
+        }),
+      );
+      const state = readAgentHookState(dir, "session");
+      expect(state).toMatchObject({ state: "waiting", turnId: "turn-current" });
+      expect(state?.agentLaunchId).toBe(
+        agentLaunchId === "current-launch" ? agentLaunchId : undefined,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 

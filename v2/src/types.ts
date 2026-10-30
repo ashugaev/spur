@@ -223,16 +223,51 @@ export interface AvailableBacklogItem {
 
 export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
 
+/** Internal spawn option and persisted session tag: which trigger block spawned a work-item session. */
+export interface WorkItemTriggerOrigin {
+  triggerId: string;
+  sourceId: string;
+  externalId: string;
+  blockIndex: number;
+}
+
+export type WorkItemMemberState = "spawning" | "running" | "failed" | "completed";
+
+/** One spawn-block outcome for a work item. A member without `triggerId` is a migrated pre-upgrade record. */
+export interface WorkItemMember {
+  triggerId?: string;
+  blockIndex: number;
+  state: WorkItemMemberState;
+  sessionId?: string;
+  claimedAt: string;
+  attempts: number;
+  deferrals: number;
+  nextRetryAt?: string;
+  error?: string;
+  /** Running owner a claimed member would replace; restored when the owner is still live. */
+  replacesSessionId?: string;
+  /** Unresolved retired trigger namespaces; cleared once the member settles. */
+  previousTriggerIds?: string[];
+  /** Set once the member reached running or completed; auto-complete ages from it. */
+  startedAt?: string;
+  /** Terminal stop: the member is never retried again. */
+  endedReason?: "anchor_not_live";
+}
+
 interface WorkItemLifecycleBase extends WorkItemEventData {
   autoComplete: boolean;
   createdAt: string;
+  members: WorkItemMember[];
+  /** Legacy work-item journal retained until every desired member transfers. */
+  spawnWorkId?: string;
+  /** Last time the source re-emitted this item for a retry. */
+  lastRetryEmitAt?: string;
 }
 
 export type WorkItemLifecycleRecord = WorkItemLifecycleBase &
   (
     | {
         state: "pending";
-        spawnWorkId?: string;
       }
     | {
         state: "running";
@@ -1198,11 +1233,15 @@ export interface SessionRecord {
   agentSessionId?: string;
   /** Cursor transcript position before the latest restore; excludes earlier activity from state. */
   cursorRestoreBoundary?: CursorRestoreBoundary;
-  /** Start of the latest Codex restore generation for rollout state classification. */
+  /** Start of the Codex launch attempt owned by codexRestoreLaunchId. */
   codexRestoreStartedAt?: string;
+  /** Internal owner of codexRestoreStartedAt; legacy timestamps have no inferred owner. */
+  codexRestoreLaunchId?: string;
   prompt: string;
   originalTaskPrompt?: string;
   startupAttachmentIds?: string[];
+  spawnIntent?: DurableSpawnIntent;
+  spawnReceipt?: DurableSpawnReceipt;
   branch: string;
   branchSource?: BranchSource;
   pr?: SessionPrBinding;
@@ -1225,6 +1264,8 @@ export interface SessionRecord {
   lastOpenedAt?: string;
   retainInList?: boolean;
   slots?: SessionSlots;
+  /** Set when a work-item spawn trigger created this session; lets a retry find it after a lost spawn. */
+  triggerOrigin?: WorkItemTriggerOrigin;
   selfDestruct?: SelfDestructConfig;
   sidecarNames?: string[];
   // Sidecar names that were tmux-alive at park time (stale_timeout), replayed
@@ -1393,6 +1434,9 @@ export interface SessionView extends Omit<
   | "preflightTokenUsage"
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
+  | "codexRestoreLaunchId"
+  | "spawnIntent"
+  | "spawnReceipt"
   | "restoredAt"
   | "errorSource"
 > {
@@ -1434,6 +1478,9 @@ export type DashboardOmittedField =
   | "queuedMessages"
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
+  | "codexRestoreLaunchId"
+  | "spawnIntent"
+  | "spawnReceipt"
   | "restoredAt"
   | "pipeline"
   | "sidecarNames"
@@ -1558,6 +1605,34 @@ export interface SpawnSessionRequest {
   // falling back to the (still-rate-limited) default.
   claudeAccountId?: string;
   subscriptions?: SubscribeSessionStatesRequest[];
+}
+
+export interface DurableSpawnReceipt {
+  version: 1;
+  acceptedAt: string;
+}
+
+export interface DurableSpawnIntent {
+  version: 1;
+  phase: "queued" | "workspace_ready" | "launching" | "submitted";
+  request: Omit<SpawnSessionRequest, "attachments" | "configPath">;
+  mode?: { name: string; skill: string };
+  defaultBranch: string;
+  preflightBatchId: string;
+  startupAttachments: { id: string; name: string }[];
+  launchSelection: {
+    model?: string;
+    reasoningEffort?: ProviderReasoningEffort;
+    reasoningVariantNames?: string[];
+  };
+  submission: {
+    state: "pending" | "uncertain" | "confirmed";
+    uncertainAt?: string;
+    message?: string;
+    ackBaseline?: SubmitAckBaseline;
+  };
+  pane?: { pid: number; starttime: number };
+  telegramOrigin?: TelegramSpawnOrigin;
 }
 
 /**

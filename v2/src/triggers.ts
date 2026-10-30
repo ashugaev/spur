@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { autoPingRouteFingerprint, type AutoPingService } from "./auto-ping.js";
 import { writeStderr } from "./io.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
+import { deriveSessionSlots } from "./session-pr.js";
 import { logSpurEvent, logUserInputEvent, type SpurLogEntry } from "./event-log.js";
 import {
   createSendBatchParser,
@@ -21,7 +23,10 @@ import {
   readWorkItemLifecycles,
   recordPendingSendBatch,
   updatePendingSendBatchConditional,
-  recordWorkItemLifecycle,
+  updateWorkItemMembers,
+  listSessions,
+  readSession,
+  writeSession,
 } from "./metadata.js";
 import {
   isStaleParked,
@@ -35,12 +40,23 @@ import {
   type SendTriggerConfig,
   type SendBatchRetryEntry,
   type SessionView,
+  type SessionRecord,
+  type SpawnSessionRequest,
   type TriggerSpawnBlockConfig,
   type SpawnTriggerConfig,
   type WorkItemEventData,
+  type WorkItemLifecycleRecord,
+  type WorkItemMember,
   type PersistedSpawnWork,
 } from "./types.js";
+import {
+  isWorkItemClaimStale,
+  isWorkItemMemberDue,
+  WORK_ITEM_RETRY_INTERVAL_MS,
+  type WorkItemRecordBase,
+} from "./work-item-retry.js";
 import type { EventBus } from "./event-bus.js";
+import { SessionLifecycleError } from "./session-lifecycle.js";
 import {
   getIdleWaitBeforeFlushMs,
   isIdleEnoughToReceive,
@@ -106,11 +122,6 @@ type DeliveryOutcome =
   | { status: "suppressed" }
   | { status: "failed"; error: string };
 
-type WorkItemLifecycleBaseDraft = WorkItemEventData & {
-  autoComplete: boolean;
-  createdAt: string;
-};
-
 const DEFAULT_TRIGGER_LOGGER: TriggerLogger = {
   warn: writeStderr,
 };
@@ -169,17 +180,6 @@ function isSendTriggerAllowed(session: SessionView, triggerId: string): boolean 
   return session.allowedTriggers.includes(triggerId);
 }
 
-function createWorkItemLifecycleBase(
-  workItemData: WorkItemEventData,
-  autoComplete: boolean,
-): WorkItemLifecycleBaseDraft {
-  return {
-    ...workItemData,
-    autoComplete,
-    createdAt: new Date().toISOString(),
-  };
-}
-
 function isSessionNotFoundError(message: string): boolean {
   return message.startsWith("Session not found:");
 }
@@ -206,9 +206,10 @@ function sessionAllowsWorkItemReplacement(session: SessionView): boolean {
 type WorkItemSuppressReason =
   | "work_item_pending"
   | "work_item_completed"
+  | "work_item_retry_not_due"
+  | "not_claimed_by_trigger"
   | "owner_completed"
   | "owner_active"
-  | "owner_not_replaceable"
   | "owner_load_failed";
 
 interface WorkItemSuppressed {
@@ -217,64 +218,1073 @@ interface WorkItemSuppressed {
   error?: string;
 }
 
-async function shouldClaimWorkItemSpawn(
-  dataDir: string,
+type WorkItemOwnerClass = "completed" | "adopt" | "pending" | "replace";
+
+function isAcceptedWorkItemRecord(record: SessionRecord | null | undefined): boolean {
+  return (
+    record?.spawnReceipt !== undefined ||
+    (record?.triggerBirthKey !== undefined && record.triggerOrigin !== undefined)
+  );
+}
+
+// The one predicate for every path that finds a session standing for a work
+// item: the running-owner check, the pre-retry and post-throw tag scans, and
+// the legacy url match. A spawning record can carry a stopped or error state,
+// which sessionAllowsWorkItemReplacement alone would call replaceable.
+export function classifyWorkItemOwner(
+  session: SessionView,
+  record?: SessionRecord | null,
+  knownRunning = false,
+): WorkItemOwnerClass {
+  if (record?.spawnIntent) return "pending";
+  if (
+    isAcceptedWorkItemRecord(record) &&
+    record &&
+    record.triggerOrigin &&
+    (session.status === "spawning" ||
+      (session.status === "running" &&
+        (!record.agentSessionId ||
+          !record.agentLaunchId ||
+          (!record.spawnReceipt && !knownRunning))))
+  )
+    return "pending";
+  if (session.status === "completed") return "completed";
+  if (session.status === "spawning") return "adopt";
+  if (
+    session.status === "running" &&
+    (ACTIVE_WORK_ITEM_STATES.has(session.state) || isLiveServerErrorWedge(session))
+  ) {
+    return "adopt";
+  }
+  return sessionAllowsWorkItemReplacement(session) ? "replace" : "adopt";
+}
+
+interface WorkItemClaimContext {
+  dataDir: string;
+  projectId: string;
+  sourceId: string;
+  triggerId: string;
+  workItem: WorkItemEventData;
+  autoComplete: boolean;
+  // Every spawn trigger configured for this source; a member whose trigger is
+  // not among them belongs to a renamed or removed trigger.
+  sourceSpawnTriggerIds: ReadonlySet<string>;
+  fencedBlocks: ReadonlySet<number>;
+  controllerCurrent(): boolean;
+}
+
+interface PlannedSpawnBlock {
+  block: TriggerSpawnBlockConfig;
+  blockIndex: number;
+  // Exact pre-claim members this block's claim replaced, restored on release.
+  previous: WorkItemMember[];
+  attemptsBefore: number;
+  deferralsBefore: number;
+  replacesSessionId?: string;
+  claimedAt?: string;
+}
+
+interface WorkItemClaim {
+  planned: PlannedSpawnBlock[];
+  claimedAt: string;
+  suppressed?: WorkItemSuppressed;
+}
+
+function workItemRecordBase(ctx: WorkItemClaimContext): WorkItemRecordBase {
+  return { ...ctx.workItem, autoComplete: ctx.autoComplete, createdAt: new Date().toISOString() };
+}
+
+function isOwnMember(ctx: WorkItemClaimContext, member: WorkItemMember, blockIndex: number) {
+  return member.triggerId === ctx.triggerId && member.blockIndex === blockIndex;
+}
+
+// Applies `patch` to this trigger's member for one block in one synchronous
+// read-modify-write and returns the resulting member.
+function patchWorkItemMember(
+  ctx: WorkItemClaimContext,
+  blockIndex: number,
+  patch: (member: WorkItemMember) => WorkItemMember,
+  claimedAt?: string,
+): WorkItemMember | undefined {
+  let result: WorkItemMember | undefined;
+  updateWorkItemMembers(
+    ctx.dataDir,
+    ctx.projectId,
+    ctx.sourceId,
+    workItemRecordBase(ctx),
+    (members) =>
+      members.map((member) => {
+        if (!isOwnMember(ctx, member, blockIndex)) return member;
+        if (claimedAt !== undefined && member.claimedAt !== claimedAt) return member;
+        result = patch(member);
+        return result;
+      }),
+  );
+  return result;
+}
+
+function settledMember(
+  member: WorkItemMember,
+  state: "running" | "completed",
+  sessionId: string,
+): WorkItemMember {
+  const {
+    nextRetryAt: _nextRetryAt,
+    error: _error,
+    replacesSessionId: _replaces,
+    previousTriggerIds: _previousTriggerIds,
+    ...rest
+  } = member;
+  return { ...rest, state, sessionId, startedAt: new Date().toISOString() };
+}
+
+function bindWorkItemSession(
+  member: WorkItemMember,
+  session: FoundWorkItemSession,
+  attempts = member.attempts,
+): WorkItemMember {
+  const boundAttempts =
+    session.outcome === "pending" || session.accepted ? attempts : member.attempts;
+  if (session.outcome === "pending") {
+    return { ...member, state: "spawning", sessionId: session.sessionId, attempts: boundAttempts };
+  }
+  return settledMember(
+    { ...member, attempts: boundAttempts },
+    session.outcome === "completed" ? "completed" : "running",
+    session.sessionId,
+  );
+}
+
+// Reads the record, decides which blocks to spawn, and writes every planned
+// block as spawning in one call. No await between the read and the write: a
+// second controller or an overlapping event sees the claim, never the gap.
+function claimWorkItemBlocks(
+  ctx: WorkItemClaimContext,
+  blocks: TriggerSpawnBlockConfig[],
+): WorkItemClaim {
+  const nowMs = Date.now();
+  const claimedAt = new Date(nowMs).toISOString();
+  const record = readWorkItemLifecycles(ctx.dataDir, ctx.projectId, ctx.sourceId).get(
+    ctx.workItem.externalId,
+  );
+  const members = record?.members ?? [];
+  const isOrphan = (member: WorkItemMember): boolean =>
+    member.triggerId !== undefined &&
+    member.triggerId !== ctx.triggerId &&
+    !ctx.sourceSpawnTriggerIds.has(member.triggerId);
+  const ownMembers = members.filter((member) => member.triggerId === ctx.triggerId);
+  // Members of a renamed or removed trigger pass to the trigger that claims
+  // next, like a pre-upgrade member.
+  const adoptsOrphans = ownMembers.length === 0 && members.some(isOrphan);
+  const own = adoptsOrphans ? members.filter(isOrphan) : ownMembers;
+  // Preserve every unresolved namespace through takeovers and reclaims.
+  const previousTriggerIdsOf = (previous: WorkItemMember[]): { previousTriggerIds?: string[] } => {
+    const previousTriggerIds = [
+      ...new Set(
+        previous.flatMap((member) => [
+          ...(member.previousTriggerIds ?? []),
+          ...(adoptsOrphans && isOrphan(member) && member.triggerId !== undefined
+            ? [member.triggerId]
+            : []),
+        ]),
+      ),
+    ].filter((id) => id !== ctx.triggerId);
+    return previousTriggerIds.length > 0 ? { previousTriggerIds } : {};
+  };
+  const legacy = members.find((member) => member.triggerId === undefined);
+  if (record && own.length === 0 && !legacy) {
+    return { planned: [], claimedAt, suppressed: { reason: "not_claimed_by_trigger" } };
+  }
+  // A pre-upgrade member stands for every block of the first trigger to claim.
+  const consumesLegacy = own.length === 0 && legacy !== undefined;
+  const planned: PlannedSpawnBlock[] = [];
+  const skips: WorkItemSuppressed[] = [];
+  const isRetryable = (member: WorkItemMember | undefined): boolean =>
+    member === undefined ||
+    (member.state !== "running" &&
+      member.state !== "completed" &&
+      isWorkItemMemberDue(member, nowMs));
+  // A retry spawns only the missing or due blocks; a block that reached
+  // running is never re-claimed alongside them. While any member of the item is
+  // failed or spawning, a trigger with nothing missing or due of its own leaves
+  // its running members alone too: no cross-trigger replacement of an owner.
+  const retryOnly =
+    !consumesLegacy &&
+    own.length > 0 &&
+    (own.some((member) => member.endedReason !== undefined) ||
+      members.some((member) => member.state === "spawning" || member.state === "failed") ||
+      blocks.some((_, blockIndex) => isRetryable(own.find((m) => m.blockIndex === blockIndex))));
+  for (const [blockIndex, block] of blocks.entries()) {
+    if (ctx.fencedBlocks.has(blockIndex)) {
+      skips.push({ reason: "work_item_pending" });
+      continue;
+    }
+    const existing = consumesLegacy
+      ? legacy
+      : own.find((member) => member.blockIndex === blockIndex);
+    if (existing === undefined) {
+      planned.push({ block, blockIndex, previous: [], attemptsBefore: 0, deferralsBefore: 0 });
+      continue;
+    }
+    if (existing.state === "completed") {
+      skips.push({
+        reason: "work_item_completed",
+        ...(existing.sessionId !== undefined ? { ownerSessionId: existing.sessionId } : {}),
+      });
+      continue;
+    }
+    if (existing.state === "running" && retryOnly) {
+      skips.push({ reason: "work_item_pending" });
+      continue;
+    }
+    const replacesSessionId = existing.sessionId ?? existing.replacesSessionId;
+    if (existing.state !== "running" && !isWorkItemMemberDue(existing, nowMs)) {
+      skips.push({
+        reason:
+          existing.state === "spawning" && !isWorkItemClaimStale(existing, nowMs)
+            ? "work_item_pending"
+            : "work_item_retry_not_due",
+      });
+      continue;
+    }
+    planned.push({
+      block,
+      blockIndex,
+      previous: [existing],
+      attemptsBefore: existing.attempts,
+      deferralsBefore: existing.deferrals,
+      ...(replacesSessionId !== undefined ? { replacesSessionId } : {}),
+    });
+  }
+  const plannedIndexes = new Set(planned.map((entry) => entry.blockIndex));
+  if (planned.length === 0) {
+    return { planned, claimedAt, ...(skips[0] ? { suppressed: skips[0] } : {}) };
+  }
+  for (const entry of planned) entry.claimedAt = claimedAt;
+  updateWorkItemMembers(
+    ctx.dataDir,
+    ctx.projectId,
+    ctx.sourceId,
+    workItemRecordBase(ctx),
+    (current) => [
+      ...current
+        .map((member) => {
+          if (!adoptsOrphans || !isOrphan(member)) return member;
+          const { previousTriggerIds: _previousTriggerIds, ...rest } = member;
+          return {
+            ...rest,
+            triggerId: ctx.triggerId,
+            ...(member.state === "spawning" || member.state === "failed"
+              ? previousTriggerIdsOf([member])
+              : {}),
+          };
+        })
+        .filter(
+          (member) =>
+            !(consumesLegacy && member.triggerId === undefined) &&
+            !(member.triggerId === ctx.triggerId && plannedIndexes.has(member.blockIndex)),
+        ),
+      ...planned.map(
+        (entry): WorkItemMember => ({
+          triggerId: ctx.triggerId,
+          blockIndex: entry.blockIndex,
+          state: "spawning",
+          claimedAt,
+          attempts: entry.attemptsBefore + 1,
+          deferrals: entry.deferralsBefore,
+          ...(entry.previous[0]?.sessionId !== undefined
+            ? { sessionId: entry.previous[0].sessionId }
+            : {}),
+          ...(entry.replacesSessionId !== undefined
+            ? { replacesSessionId: entry.replacesSessionId }
+            : {}),
+          ...previousTriggerIdsOf(entry.previous),
+        }),
+      ),
+    ],
+  );
+  return { planned, claimedAt };
+}
+
+// Restores pre-claim state and budget without undoing a rename takeover.
+function releaseWorkItemClaim(ctx: WorkItemClaimContext, entries: PlannedSpawnBlock[]): void {
+  updateWorkItemMembers(
+    ctx.dataDir,
+    ctx.projectId,
+    ctx.sourceId,
+    workItemRecordBase(ctx),
+    (current) => {
+      const owned = entries.filter((entry) =>
+        current.some(
+          (member) =>
+            isOwnMember(ctx, member, entry.blockIndex) && member.claimedAt === entry.claimedAt,
+        ),
+      );
+      const indexes = new Set(owned.map((entry) => entry.blockIndex));
+      const restored = new Set(owned.flatMap((entry) => entry.previous));
+      return [
+        ...current.filter(
+          (member) => !(member.triggerId === ctx.triggerId && indexes.has(member.blockIndex)),
+        ),
+        ...[...restored].map((member) => {
+          const { previousTriggerIds: _previousTriggerIds, ...settled } = member;
+          const previousState = member.state === "running" ? settled : member;
+          if (member.triggerId === undefined || member.triggerId === ctx.triggerId)
+            return previousState;
+          const claimed = current.find(
+            (candidate) =>
+              candidate.triggerId === ctx.triggerId && candidate.blockIndex === member.blockIndex,
+          );
+          return claimed === undefined
+            ? previousState
+            : {
+                ...previousState,
+                triggerId: ctx.triggerId,
+                ...(member.state !== "running" && claimed.previousTriggerIds !== undefined
+                  ? { previousTriggerIds: claimed.previousTriggerIds }
+                  : {}),
+              };
+        }),
+      ];
+    },
+  );
+}
+
+function logWorkItemSuppressed(
+  ctx: WorkItemClaimContext,
+  eventName: string,
+  suppressed: WorkItemSuppressed,
+  logger: TriggerLogger,
+): void {
+  logTriggerEvent(ctx.dataDir, "trigger.spawn.suppressed", {
+    level: suppressed.reason === "owner_load_failed" ? "warn" : "info",
+    ...(suppressed.ownerSessionId !== undefined ? { sessionId: suppressed.ownerSessionId } : {}),
+    projectId: ctx.projectId,
+    sourceId: ctx.sourceId,
+    triggerId: ctx.triggerId,
+    message: `Suppressed work item ${ctx.workItem.externalId}: ${suppressed.reason}`,
+    details: {
+      eventName,
+      externalId: ctx.workItem.externalId,
+      reason: suppressed.reason,
+      ...(suppressed.error !== undefined ? { error: suppressed.error } : {}),
+    },
+  });
+  if (suppressed.reason === "owner_load_failed") {
+    logger.warn(
+      `[trigger:${ctx.projectId}/${ctx.triggerId}] suppressed work item ${ctx.workItem.externalId}: ${suppressed.error}`,
+    );
+  }
+}
+
+function logWorkItemAdopted(
+  ctx: WorkItemClaimContext,
+  eventName: string,
+  blockIndex: number,
+  sessionId: string,
+  outcome: "adopt" | "completed" | "pending",
+): void {
+  logTriggerEvent(ctx.dataDir, "trigger.spawn.adopted", {
+    level: "info",
+    sessionId,
+    projectId: ctx.projectId,
+    sourceId: ctx.sourceId,
+    triggerId: ctx.triggerId,
+    message: `Adopted ${sessionId} for work item ${ctx.workItem.externalId} block ${blockIndex}`,
+    details: { eventName, externalId: ctx.workItem.externalId, blockIndex, outcome },
+  });
+}
+
+// Checks the running owners a claim would replace. Completed owners settle
+// their blocks, live owners get their blocks released, replaceable or missing
+// owners stay planned. Returns the blocks still to spawn.
+async function resolveClaimedOwners(
+  ctx: WorkItemClaimContext,
+  service: SessionService,
+  eventName: string,
+  planned: PlannedSpawnBlock[],
+  logger: TriggerLogger,
+): Promise<PlannedSpawnBlock[]> {
+  const ownerIds = new Set<string>();
+  for (const entry of planned) {
+    if (entry.replacesSessionId !== undefined) ownerIds.add(entry.replacesSessionId);
+  }
+  const remaining = new Set(planned);
+  for (const ownerId of ownerIds) {
+    const entries = planned.filter((entry) => entry.replacesSessionId === ownerId);
+    let suppressed: WorkItemSuppressed | undefined;
+    try {
+      const owner = await service.get(ownerId);
+      if (!ctx.controllerCurrent()) return [];
+      const record = readSession(ctx.dataDir, ownerId);
+      const outcome = classifyWorkItemOwner(
+        owner,
+        record,
+        entries.some((entry) =>
+          entry.previous.some(
+            (member) => member.state === "running" && member.sessionId === ownerId,
+          ),
+        ),
+      );
+      if (outcome === "completed") {
+        for (const entry of entries) {
+          patchWorkItemMember(
+            ctx,
+            entry.blockIndex,
+            (member) => settledMember(member, "completed", ownerId),
+            entry.claimedAt,
+          );
+        }
+        suppressed = { reason: "owner_completed", ownerSessionId: ownerId };
+      } else if (outcome === "pending") {
+        for (const entry of entries) {
+          patchWorkItemMember(
+            ctx,
+            entry.blockIndex,
+            (member) =>
+              bindWorkItemSession(
+                member,
+                { sessionId: ownerId, outcome, accepted: isAcceptedWorkItemRecord(record) },
+                entry.attemptsBefore,
+              ),
+            entry.claimedAt,
+          );
+        }
+        suppressed = { reason: "work_item_pending", ownerSessionId: ownerId };
+      } else if (outcome === "adopt") {
+        const previousRunning = entries.filter((entry) =>
+          entry.previous.some((member) => member.state === "running"),
+        );
+        releaseWorkItemClaim(ctx, previousRunning);
+        for (const entry of entries.filter((entry) => !previousRunning.includes(entry))) {
+          patchWorkItemMember(
+            ctx,
+            entry.blockIndex,
+            (member) =>
+              bindWorkItemSession(
+                member,
+                { sessionId: ownerId, outcome, accepted: isAcceptedWorkItemRecord(record) },
+                entry.attemptsBefore,
+              ),
+            entry.claimedAt,
+          );
+        }
+        suppressed = { reason: "owner_active", ownerSessionId: ownerId };
+      }
+    } catch (error) {
+      if (!ctx.controllerCurrent()) return [];
+      const message = error instanceof Error ? error.message : String(error);
+      if (!isSessionNotFoundError(message)) {
+        releaseWorkItemClaim(ctx, entries);
+        suppressed = { reason: "owner_load_failed", ownerSessionId: ownerId, error: message };
+      }
+    }
+    if (suppressed) {
+      for (const entry of entries) remaining.delete(entry);
+      logWorkItemSuppressed(ctx, eventName, suppressed, logger);
+    }
+  }
+  return planned.filter((entry) => remaining.has(entry));
+}
+
+// A session record that vanished is absent, not an error; any other load
+// failure propagates so the caller can release its claim.
+async function getWorkItemSessionIfPresent(
+  service: SessionService,
+  sessionId: string,
+): Promise<SessionView | undefined> {
+  try {
+    return await service.get(sessionId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (isSessionNotFoundError(message)) return undefined;
+    throw error;
+  }
+}
+
+interface FoundWorkItemSession {
+  sessionId: string;
+  outcome: "adopt" | "completed" | "pending";
+  accepted?: boolean;
+}
+
+// A session tagged with this exact block of the item by one of `triggerIds`
+// that still stands for it. With `discardErrored`, errored records of the block are discarded when none
+// stands (the pre-spawn scan: they are about to be replaced).
+async function findTaggedWorkItemSession(
+  ctx: WorkItemClaimContext,
+  service: SessionService,
+  blockIndex: number,
+  triggerIds: readonly string[],
+  discardErrored = false,
+): Promise<FoundWorkItemSession | undefined> {
+  const tagged = listSessions(ctx.dataDir).filter(
+    (session) =>
+      session.project === ctx.projectId &&
+      session.triggerOrigin !== undefined &&
+      triggerIds.includes(session.triggerOrigin.triggerId) &&
+      session.triggerOrigin.sourceId === ctx.sourceId &&
+      session.triggerOrigin.externalId === ctx.workItem.externalId &&
+      session.triggerOrigin.blockIndex === blockIndex,
+  );
+  const erroredIds: string[] = [];
+  const candidates: FoundWorkItemSession[] = [];
+  for (const session of tagged) {
+    const view = await getWorkItemSessionIfPresent(service, session.id);
+    if (!ctx.controllerCurrent()) return undefined;
+    if (!view) continue;
+    const record = readSession(ctx.dataDir, session.id);
+    const outcome = classifyWorkItemOwner(view, record);
+    if (outcome !== "replace")
+      candidates.push({
+        sessionId: session.id,
+        outcome,
+        accepted: isAcceptedWorkItemRecord(record),
+      });
+    if (view.status === "errored") erroredIds.push(session.id);
+  }
+  if (candidates.length > 1) {
+    throw new Error(
+      `Ambiguous accepted sessions for work item ${ctx.workItem.externalId} block ${blockIndex}`,
+    );
+  }
+  if (candidates.length === 1) return candidates[0];
+  if (discardErrored) {
+    for (const sessionId of erroredIds) {
+      if (!ctx.controllerCurrent()) return undefined;
+      try {
+        await service.discardFailedSpawn(sessionId);
+        if (!ctx.controllerCurrent()) return undefined;
+      } catch (error) {
+        if (!ctx.controllerCurrent()) return undefined;
+        const message = error instanceof Error ? error.message : String(error);
+        logTriggerEvent(ctx.dataDir, "trigger.spawn.discard_failed", {
+          level: "warn",
+          sessionId,
+          projectId: ctx.projectId,
+          sourceId: ctx.sourceId,
+          triggerId: ctx.triggerId,
+          message: `Could not discard failed spawn ${sessionId}: ${message}`,
+        });
+      }
+    }
+  }
+  return undefined;
+}
+
+// Pre-upgrade sessions carry no tag: match them by the item url and fill the
+// blocks one to one, explicit-agent blocks first, so a legacy partial desk
+// spawns only the blocks nobody holds.
+async function fillLegacyWorkItemBlocks(
+  ctx: WorkItemClaimContext,
+  service: SessionService,
+  planned: PlannedSpawnBlock[],
+): Promise<Map<number, FoundWorkItemSession>> {
+  const candidates: Array<FoundWorkItemSession & { agent: string; model: string | undefined }> = [];
+  const matches = listSessions(ctx.dataDir)
+    .filter(
+      (session) =>
+        session.project === ctx.projectId &&
+        session.triggerOrigin === undefined &&
+        deriveSessionSlots(session)?.links.some((link) => link.url === ctx.workItem.url),
+    )
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  for (const match of matches) {
+    const session = await getWorkItemSessionIfPresent(service, match.id);
+    if (!ctx.controllerCurrent()) return new Map();
+    if (!session) continue;
+    const outcome = classifyWorkItemOwner(session, readSession(ctx.dataDir, session.id));
+    if (outcome !== "replace") {
+      candidates.push({
+        sessionId: session.id,
+        outcome,
+        agent: session.agent,
+        model: session.model,
+      });
+    }
+  }
+  const filled = new Map<number, FoundWorkItemSession>();
+  const used = new Set<string>();
+  const take = (entry: PlannedSpawnBlock, accepts: (c: (typeof candidates)[number]) => boolean) => {
+    const found = candidates.find(
+      (candidate) => !used.has(candidate.sessionId) && accepts(candidate),
+    );
+    if (!found) return;
+    used.add(found.sessionId);
+    filled.set(entry.blockIndex, { sessionId: found.sessionId, outcome: found.outcome });
+  };
+  for (const entry of planned) {
+    const { agent, model } = entry.block;
+    if (agent === undefined) continue;
+    take(
+      entry,
+      (candidate) =>
+        candidate.agent === agent && (model === undefined || candidate.model === model),
+    );
+  }
+  for (const entry of planned) {
+    if (entry.block.agent === undefined) take(entry, () => true);
+  }
+  return filled;
+}
+
+// Looks for sessions a lost or failed earlier spawn left behind, records them
+// on their members, and returns the blocks that still need a spawn.
+async function adoptExistingWorkItemSessions(
+  ctx: WorkItemClaimContext,
+  service: SessionService,
+  eventName: string,
+  planned: PlannedSpawnBlock[],
+): Promise<PlannedSpawnBlock[]> {
+  const scanned = planned.filter((entry) =>
+    entry.previous.some((member) => member.state !== "running"),
+  );
+  if (scanned.length === 0) return planned;
+  const found = new Map<number, FoundWorkItemSession>();
+  const legacyBlocks: PlannedSpawnBlock[] = [];
+  for (const entry of scanned) {
+    if (entry.previous.some((member) => member.triggerId === undefined)) {
+      legacyBlocks.push(entry);
+      continue;
+    }
+    // A takeover rewrote orphan members to this trigger; a session they
+    // launched still carries the orphaned trigger id.
+    const triggerIds = [
+      ...new Set([
+        ctx.triggerId,
+        ...entry.previous
+          .flatMap((member) => [member.triggerId, ...(member.previousTriggerIds ?? [])])
+          .filter(
+            (id): id is string =>
+              id !== undefined && id !== ctx.triggerId && !ctx.sourceSpawnTriggerIds.has(id),
+          ),
+      ]),
+    ];
+    const tagged = await findTaggedWorkItemSession(
+      ctx,
+      service,
+      entry.blockIndex,
+      triggerIds,
+      true,
+    );
+    if (!ctx.controllerCurrent()) return [];
+    if (tagged) found.set(entry.blockIndex, tagged);
+  }
+  if (legacyBlocks.length > 0) {
+    const legacy = await fillLegacyWorkItemBlocks(ctx, service, legacyBlocks);
+    if (!ctx.controllerCurrent()) return [];
+    for (const [blockIndex, session] of legacy) {
+      found.set(blockIndex, session);
+    }
+  }
+  for (const [blockIndex, session] of found) {
+    patchWorkItemMember(
+      ctx,
+      blockIndex,
+      (member) =>
+        bindWorkItemSession(
+          member,
+          session,
+          planned.find((entry) => entry.blockIndex === blockIndex)?.attemptsBefore,
+        ),
+      planned.find((entry) => entry.blockIndex === blockIndex)?.claimedAt,
+    );
+    logWorkItemAdopted(ctx, eventName, blockIndex, session.sessionId, session.outcome);
+  }
+  return planned.filter((entry) => !found.has(entry.blockIndex));
+}
+
+// The desk anchor is this trigger's lowest-index running member.
+function workItemAnchorSessionId(ctx: WorkItemClaimContext): string | undefined {
+  const members =
+    readWorkItemLifecycles(ctx.dataDir, ctx.projectId, ctx.sourceId).get(ctx.workItem.externalId)
+      ?.members ?? [];
+  return members
+    .filter((member) => member.triggerId === ctx.triggerId && member.state === "running")
+    .sort((left, right) => left.blockIndex - right.blockIndex)[0]?.sessionId;
+}
+
+// A desk retry joins the live anchor. When the anchor completed or its
+// session is no longer live, the retried members end as exhausted (never due
+// again) and nothing spawns: only a failed or never-spawned anchor is retried.
+async function endDeskRetryWithoutLiveAnchor(
+  ctx: WorkItemClaimContext,
+  service: SessionService,
+  planned: PlannedSpawnBlock[],
+): Promise<PlannedSpawnBlock[]> {
+  const retrying = planned.filter((entry) =>
+    entry.previous.some((member) => member.state !== "running"),
+  );
+  if (retrying.length === 0) return planned;
+  const plannedIndexes = new Set(planned.map((entry) => entry.blockIndex));
+  const anchor = (
+    readWorkItemLifecycles(ctx.dataDir, ctx.projectId, ctx.sourceId).get(ctx.workItem.externalId)
+      ?.members ?? []
+  )
+    .filter(
+      (member) =>
+        member.triggerId === ctx.triggerId &&
+        !plannedIndexes.has(member.blockIndex) &&
+        (member.state === "running" || member.state === "completed"),
+    )
+    .sort((left, right) => left.blockIndex - right.blockIndex)[0];
+  if (anchor?.sessionId === undefined) return planned;
+  const session =
+    anchor.state === "running"
+      ? await getWorkItemSessionIfPresent(service, anchor.sessionId)
+      : null;
+  if (!ctx.controllerCurrent()) return [];
+  const current = readWorkItemLifecycles(ctx.dataDir, ctx.projectId, ctx.sourceId).get(
+    ctx.workItem.externalId,
+  )?.members;
+  if (
+    !planned.every(
+      (entry) =>
+        entry.claimedAt !== undefined &&
+        current?.some(
+          (member) =>
+            isOwnMember(ctx, member, entry.blockIndex) && member.claimedAt === entry.claimedAt,
+        ),
+    ) ||
+    !current?.some(
+      (member) =>
+        isOwnMember(ctx, member, anchor.blockIndex) &&
+        member.claimedAt === anchor.claimedAt &&
+        member.sessionId === anchor.sessionId &&
+        member.state === anchor.state,
+    )
+  )
+    return [];
+  if (session) {
+    const outcome = classifyWorkItemOwner(session, readSession(ctx.dataDir, session.id), true);
+    if (outcome === "adopt") return planned;
+    if (outcome === "pending") {
+      patchWorkItemMember(
+        ctx,
+        anchor.blockIndex,
+        (member) =>
+          member.state === "running" && member.sessionId === session.id
+            ? bindWorkItemSession(member, { sessionId: session.id, outcome })
+            : member,
+        anchor.claimedAt,
+      );
+      releaseWorkItemClaim(ctx, planned);
+      return [];
+    }
+  }
+  for (const entry of retrying) {
+    const patched = patchWorkItemMember(
+      ctx,
+      entry.blockIndex,
+      (member) => {
+        const { nextRetryAt: _nextRetryAt, replacesSessionId: _replaces, ...rest } = member;
+        return {
+          ...rest,
+          state: "failed",
+          attempts: entry.attemptsBefore,
+          endedReason: "anchor_not_live",
+          error: "desk anchor is not live",
+        };
+      },
+      entry.claimedAt,
+    );
+    if (!patched) continue;
+    logTriggerEvent(ctx.dataDir, "trigger.spawn.retry_ended", {
+      level: "info",
+      sessionId: anchor.sessionId,
+      projectId: ctx.projectId,
+      sourceId: ctx.sourceId,
+      triggerId: ctx.triggerId,
+      message: `trigger.spawn.retry_ended for work item ${ctx.workItem.externalId} block ${entry.blockIndex}`,
+      details: {
+        externalId: ctx.workItem.externalId,
+        blockIndex: entry.blockIndex,
+        cause: "anchor_not_live",
+      },
+    });
+  }
+  return planned.filter((entry) => !retrying.includes(entry));
+}
+
+// Records a failed block and logs how it will be retried. An admission denial
+// is a deferral: the attempt counted at claim is refunded.
+function recordWorkItemSpawnFailure(
+  ctx: WorkItemClaimContext,
+  entry: PlannedSpawnBlock,
+  error: unknown,
+  message: string,
+): void {
+  const denied = error instanceof SessionAdmissionDeniedError;
+  const nextRetryAt = new Date(Date.now() + WORK_ITEM_RETRY_INTERVAL_MS).toISOString();
+  const member = patchWorkItemMember(
+    ctx,
+    entry.blockIndex,
+    (current) => {
+      const { replacesSessionId: _replaces, ...rest } = current;
+      return {
+        ...rest,
+        state: "failed",
+        attempts: denied ? entry.attemptsBefore : current.attempts,
+        deferrals: denied ? entry.deferralsBefore + 1 : current.deferrals,
+        nextRetryAt,
+        error: message,
+      };
+    },
+    entry.claimedAt,
+  );
+  if (!member) return;
+  const event = denied ? "trigger.spawn.retry_deferred" : "trigger.spawn.retry_scheduled";
+  logTriggerEvent(ctx.dataDir, event, {
+    level: "info",
+    projectId: ctx.projectId,
+    sourceId: ctx.sourceId,
+    triggerId: ctx.triggerId,
+    message: `${event} for work item ${ctx.workItem.externalId} block ${entry.blockIndex}`,
+    details: {
+      externalId: ctx.workItem.externalId,
+      blockIndex: entry.blockIndex,
+      attempts: member.attempts,
+      deferrals: member.deferrals,
+      nextRetryAt,
+      ...(denied ? { reason: error.reason } : {}),
+    },
+  });
+}
+
+async function reconcileLegacyWorkItemJournal(
+  config: AppConfig,
   service: SessionService,
   projectId: string,
   triggerId: string,
   sourceId: string,
-  workItemData: WorkItemEventData,
-  autoComplete: boolean,
-  spawnWorkId?: string,
-): Promise<WorkItemSuppressed | null> {
-  const existing = readWorkItemLifecycles(dataDir, projectId, sourceId).get(
-    workItemData.externalId,
+  trigger: SpawnTriggerConfig,
+  item: WorkItemEventData,
+  controllerCurrent: () => boolean,
+): Promise<ReadonlySet<number> | null> {
+  if (!controllerCurrent()) return null;
+  const original = readWorkItemLifecycles(config.dataDir, projectId, sourceId).get(item.externalId);
+  if (!original?.spawnWorkId) return new Set();
+  const all = new Set(trigger.spawn.blocks.map((_, index) => index));
+  const snapshot = structuredClone(original);
+  const existingWork = readPendingSpawnWork(config.dataDir).get(original.spawnWorkId);
+  if (!existingWork) {
+    if (
+      !trigger.spawn.blocks.every((_, index) =>
+        snapshot.members.some(
+          (member) => member.triggerId === triggerId && member.blockIndex === index,
+        ),
+      )
+    )
+      return all;
+    updateWorkItemMembers(
+      config.dataDir,
+      projectId,
+      sourceId,
+      { ...snapshot, spawnWorkId: null },
+      (members) => members,
+    );
+    return new Set();
+  }
+  const time = Date.parse(snapshot.createdAt);
+  if (
+    !Number.isFinite(time) ||
+    existingWork.projectId !== projectId ||
+    existingWork.sourceId !== sourceId ||
+    existingWork.triggerId !== triggerId ||
+    existingWork.eventName !== trigger.event ||
+    existingWork.workId !==
+      JSON.stringify([projectId, sourceId, triggerId, existingWork.occurrenceId]) ||
+    existingWork.routeFingerprint !==
+      spawnRouteFingerprint(config, projectId, triggerId, trigger) ||
+    existingWork.blocks.length !== trigger.spawn.blocks.length ||
+    !isWorkItemEventData(existingWork.eventData) ||
+    existingWork.eventData.externalId !== item.externalId
+  )
+    return all;
+  const work = { ...existingWork, revision: existingWork.revision + 1 };
+  if (!writePendingSpawnWork(config.dataDir, work, existingWork.revision)) return null;
+  const owns = (): boolean =>
+    controllerCurrent() &&
+    readPendingSpawnWork(config.dataDir).get(work.workId)?.revision === work.revision &&
+    isDeepStrictEqual(
+      readWorkItemLifecycles(config.dataDir, projectId, sourceId).get(item.externalId),
+      snapshot,
+    );
+  const desired: WorkItemMember[] = snapshot.members.filter(
+    (member) => member.triggerId !== undefined,
   );
-  if (existing?.state === "pending") {
-    if (spawnWorkId !== undefined && existing.spawnWorkId === spawnWorkId) return null;
-    return { reason: "work_item_pending" };
-  }
-  if (existing?.state === "completed") {
-    return { reason: "work_item_completed", ownerSessionId: existing.sessionId };
-  }
-  if (existing?.state === "running") {
-    try {
-      const session = await service.get(existing.sessionId);
-      if (session.status === "completed") {
-        recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-          ...existing,
-          state: "completed",
-          completedAt: new Date().toISOString(),
-        });
-        return { reason: "owner_completed", ownerSessionId: existing.sessionId };
-      }
-      if (
-        session.status === "running" &&
-        (ACTIVE_WORK_ITEM_STATES.has(session.state) || isLiveServerErrorWedge(session))
-      ) {
-        return { reason: "owner_active", ownerSessionId: existing.sessionId };
-      }
-      if (!sessionAllowsWorkItemReplacement(session)) {
-        return { reason: "owner_not_replaceable", ownerSessionId: existing.sessionId };
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!isSessionNotFoundError(message)) {
-        return {
-          reason: "owner_load_failed",
-          ownerSessionId: existing.sessionId,
-          error: message,
-        };
+  const fenced = new Set<number>();
+  const retryAt = new Date(time + WORK_ITEM_RETRY_INTERVAL_MS).toISOString();
+  for (const [index, block] of work.blocks.entries()) {
+    if (!owns()) return null;
+    const previous = desired.find(
+      (member) => member.triggerId === triggerId && member.blockIndex === index,
+    );
+    const pendingRecord =
+      previous?.state === "spawning" && previous.sessionId !== undefined
+        ? readSession(config.dataDir, previous.sessionId)
+        : null;
+    const revalidateBoundPending =
+      previous?.state === "spawning" &&
+      previous.sessionId !== undefined &&
+      !pendingRecord?.spawnReceipt &&
+      !pendingRecord?.spawnIntent;
+    if (
+      previous &&
+      !revalidateBoundPending &&
+      (previous.sessionId !== undefined ||
+        previous.state === "running" ||
+        previous.state === "completed" ||
+        previous.claimedAt !== snapshot.createdAt ||
+        previous.attempts !== 0 ||
+        previous.deferrals !== 0 ||
+        previous.startedAt !== undefined)
+    )
+      continue;
+    const base: WorkItemMember = previous ?? {
+      triggerId,
+      blockIndex: index,
+      state: "spawning",
+      claimedAt: snapshot.createdAt,
+      attempts: 0,
+      deferrals: 0,
+    };
+    let next: WorkItemMember;
+    if (block.state === "pending" && index > work.nextBlockIndex && !revalidateBoundPending) {
+      next = { ...base, state: "spawning" };
+    } else {
+      const spawnBlock = trigger.spawn.blocks[index];
+      if (!spawnBlock) throw new Error("Legacy spawn route block is missing");
+      const request = triggerSpawnRequest(
+        projectId,
+        spawnBlock,
+        work.eventName,
+        work.eventData,
+        trigger.spawn.restrictWrites,
+        trigger.spawn.allowedTriggers,
+        trigger.spawnDeskGroup,
+        work.anchorSessionId,
+      );
+      try {
+        const birth = service.getTriggerBirth(projectId, block.birthKey, request);
+        if (revalidateBoundPending && birth?.id !== previous.sessionId)
+          throw new Error("Legacy pending birth is unresolved");
+        if (block.state === "succeeded" && birth?.id !== block.sessionId)
+          throw new Error("Legacy accepted birth is unresolved");
+        if (
+          block.state === "failed" &&
+          block.sessionId !== undefined &&
+          birth?.id !== block.sessionId
+        )
+          throw new Error("Legacy failed birth is unresolved");
+        if (birth) {
+          const view = await service.get(birth.id);
+          if (!owns()) return null;
+          const current = service.getTriggerBirth(projectId, block.birthKey, request);
+          if (!current || current.id !== birth.id) throw new Error("Legacy accepted birth changed");
+          const origin = { triggerId, sourceId, externalId: item.externalId, blockIndex: index };
+          if (current.triggerOrigin && !isDeepStrictEqual(current.triggerOrigin, origin))
+            throw new Error("Legacy accepted origin is ambiguous");
+          const tagged = current.triggerOrigin ? current : { ...current, triggerOrigin: origin };
+          if (!current.triggerOrigin) writeSession(config.dataDir, tagged);
+          const outcome = classifyWorkItemOwner(view, tagged);
+          if (outcome === "pending" && !tagged.spawnReceipt && !tagged.spawnIntent)
+            fenced.add(index);
+          next =
+            outcome === "replace"
+              ? {
+                  ...base,
+                  state: "failed",
+                  sessionId: birth.id,
+                  nextRetryAt: retryAt,
+                  error:
+                    current.error ??
+                    (block.state === "failed" ? block.error : "Accepted launch is no longer live"),
+                }
+              : {
+                  ...base,
+                  state:
+                    outcome === "pending"
+                      ? "spawning"
+                      : outcome === "completed"
+                        ? "completed"
+                        : "running",
+                  sessionId: birth.id,
+                };
+        } else if (block.state === "failed") {
+          next = { ...base, state: "failed", error: block.error, nextRetryAt: retryAt };
+        } else {
+          next = { ...base, state: "spawning" };
+        }
+      } catch {
+        if (!owns()) return null;
+        fenced.add(index);
+        next = { ...base, state: "spawning" };
       }
     }
+    const position = desired.findIndex(
+      (member) => member.triggerId === triggerId && member.blockIndex === index,
+    );
+    if (position < 0) desired.push(next);
+    else desired[position] = next;
   }
+  if (!owns()) return null;
+  updateWorkItemMembers(
+    config.dataDir,
+    projectId,
+    sourceId,
+    { ...snapshot, spawnWorkId: work.workId },
+    () => desired,
+  );
+  if (fenced.size === 0 && deletePendingSpawnWork(config.dataDir, work.workId, work.revision)) {
+    const transferred = readWorkItemLifecycles(config.dataDir, projectId, sourceId).get(
+      item.externalId,
+    );
+    if (transferred?.spawnWorkId === work.workId)
+      updateWorkItemMembers(
+        config.dataDir,
+        projectId,
+        sourceId,
+        { ...transferred, spawnWorkId: null },
+        (members) => members,
+      );
+  }
+  return fenced;
+}
 
-  recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-    ...createWorkItemLifecycleBase(workItemData, autoComplete),
-    state: "pending",
-    ...(spawnWorkId !== undefined ? { spawnWorkId } : {}),
-  });
-  return null;
+function triggerSpawnRequest(
+  projectId: string,
+  block: TriggerSpawnBlockConfig,
+  eventName: string,
+  eventData: unknown,
+  restrictWrites: boolean | undefined,
+  allowedTriggers: string[] | undefined,
+  deskGroup: boolean | undefined,
+  anchorSessionId: string | undefined,
+): SpawnSessionRequest {
+  const item =
+    WORK_ITEM_NEW_EVENT_NAMES.has(eventName) && isWorkItemEventData(eventData) ? eventData : null;
+  const blockRestrictWrites = block.restrictWrites ?? restrictWrites;
+  return {
+    project: projectId,
+    prompt: renderSpawnPrompt(block.prompt, eventData),
+    ...(block.steps !== undefined ? { steps: block.steps } : {}),
+    ...(block.agent !== undefined ? { agent: block.agent } : {}),
+    ...(block.model !== undefined ? { model: block.model } : {}),
+    ...(block.reasoningEffort !== undefined ? { reasoningEffort: block.reasoningEffort } : {}),
+    ...(block.mode !== undefined ? { mode: block.mode } : {}),
+    ...(block.branch !== undefined ? { branch: block.branch } : {}),
+    ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
+    ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),
+    ...(blockRestrictWrites === true ? { restrictWrites: true } : {}),
+    ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
+    ...(item && (eventName !== SCRIPT_ITEM_NEW_EVENT || item.url !== "")
+      ? { slots: { links: [{ label: "pr", url: item.url }] } }
+      : {}),
+    ...(deskGroup === true && anchorSessionId !== undefined
+      ? { reuseWorkspaceSessionId: anchorSessionId }
+      : {}),
+  };
 }
 
 async function runSpawnTrigger(
@@ -290,10 +1300,15 @@ async function runSpawnTrigger(
   allowedTriggers: string[] | undefined,
   deskGroup: boolean | undefined,
   eventData: unknown,
+  sourceSpawnTriggerIds: ReadonlySet<string>,
+  controllerCurrent: () => boolean,
   logger: TriggerLogger,
-  queue: { work: PersistedSpawnWork; current(): boolean; save(): boolean },
+  queue?: { work: PersistedSpawnWork; current(): boolean; save(): boolean },
+  fencedBlocks: ReadonlySet<number> = new Set(),
 ): Promise<void> {
-  const { work } = queue;
+  const current = (): boolean => controllerCurrent() && (!queue || queue.current());
+  if (!current()) return;
+  const work = queue?.work;
   logTriggerEvent(dataDir, "trigger.spawn.matched", {
     level: "info",
     projectId,
@@ -314,127 +1329,196 @@ async function runSpawnTrigger(
 
   const workItemData =
     WORK_ITEM_NEW_EVENT_NAMES.has(eventName) && isWorkItemEventData(eventData) ? eventData : null;
+  const ctx: WorkItemClaimContext | null = workItemData
+    ? {
+        dataDir,
+        projectId,
+        sourceId,
+        triggerId,
+        workItem: workItemData,
+        autoComplete: autoComplete === true,
+        sourceSpawnTriggerIds,
+        fencedBlocks,
+        controllerCurrent,
+      }
+    : null;
 
   try {
     if (autoComplete && !workItemData) {
       throw new Error(`Cannot auto-complete ${eventName}: incompatible work-item payload`);
     }
-    if (workItemData && work.nextBlockIndex > 0) {
-      const claim = readWorkItemLifecycles(dataDir, projectId, sourceId).get(
-        workItemData.externalId,
-      );
-      if (claim?.state === "pending" && claim.spawnWorkId !== work.workId)
-        throw new Error("Work item claimed by another spawn intention");
-    }
-    if (workItemData && work.nextBlockIndex === 0) {
-      const suppressed = await shouldClaimWorkItemSpawn(
-        dataDir,
-        service,
-        projectId,
-        triggerId,
-        sourceId,
-        workItemData,
-        autoComplete === true,
-        work.workId,
-      );
-      if (suppressed) {
-        logTriggerEvent(dataDir, "trigger.spawn.suppressed", {
-          level: suppressed.reason === "owner_load_failed" ? "warn" : "info",
-          ...(suppressed.ownerSessionId !== undefined
-            ? { sessionId: suppressed.ownerSessionId }
-            : {}),
-          projectId,
-          sourceId,
-          triggerId,
-          message: `Suppressed work item ${workItemData.externalId}: ${suppressed.reason}`,
-          details: {
-            eventName,
-            externalId: workItemData.externalId,
-            reason: suppressed.reason,
-            ...(suppressed.error !== undefined ? { error: suppressed.error } : {}),
-          },
-        });
-        if (suppressed.reason === "owner_load_failed") {
-          logger.warn(
-            `[trigger:${projectId}/${triggerId}] suppressed work item ${workItemData.externalId}: ${suppressed.error}`,
-          );
-        }
-        work.nextBlockIndex = work.blocks.length;
-        for (const block of work.blocks)
-          if (block.state === "pending")
-            Object.assign(block, { state: "failed", error: suppressed.reason });
-        queue.save();
+    let planned: PlannedSpawnBlock[] = blocks.map((block, blockIndex) => ({
+      block,
+      blockIndex,
+      previous: [],
+      attemptsBefore: 0,
+      deferralsBefore: 0,
+    }));
+    let claimedAt = "";
+    if (ctx) {
+      const claim = claimWorkItemBlocks(ctx, blocks);
+      if (claim.planned.length === 0) {
+        if (claim.suppressed) logWorkItemSuppressed(ctx, eventName, claim.suppressed, logger);
         return;
+      }
+      claimedAt = claim.claimedAt;
+      planned = await resolveClaimedOwners(ctx, service, eventName, claim.planned, logger);
+      if (!current()) return;
+      try {
+        planned = await adoptExistingWorkItemSessions(ctx, service, eventName, planned);
+        if (!current()) return;
+        if (deskGroup === true) {
+          const members =
+            readWorkItemLifecycles(ctx.dataDir, ctx.projectId, ctx.sourceId).get(
+              ctx.workItem.externalId,
+            )?.members ?? [];
+          if (
+            workItemAnchorSessionId(ctx) === undefined &&
+            members.some(
+              (member) =>
+                member.triggerId === ctx.triggerId &&
+                member.state === "spawning" &&
+                member.sessionId !== undefined,
+            )
+          ) {
+            releaseWorkItemClaim(ctx, planned);
+            return;
+          }
+          planned = await endDeskRetryWithoutLiveAnchor(ctx, service, planned);
+          if (!current()) return;
+        }
+      } catch (error) {
+        // Nothing settled yet: free the claim now instead of leaving it
+        // spawning until it goes stale.
+        if (!current()) return;
+        releaseWorkItemClaim(ctx, planned);
+        throw error;
       }
     }
 
-    let anchorSessionId = work.anchorSessionId;
-    for (const [blockIndex, block] of blocks.entries()) {
-      if (blockIndex < work.nextBlockIndex) continue;
-      if (!queue.current()) return;
-      if (anchorSessionId !== undefined) {
+    if (work) planned = planned.filter((entry) => entry.blockIndex >= work.nextBlockIndex);
+    let anchorSessionId = ctx ? workItemAnchorSessionId(ctx) : work?.anchorSessionId;
+    for (const entry of planned) {
+      const { block, blockIndex } = entry;
+      if (!current()) return;
+      if (queue && anchorSessionId !== undefined) {
         const anchor = await service.get(anchorSessionId);
-        if (!queue.current()) return;
+        if (!current()) return;
         if (anchor.status !== "running" || !anchor.workspaceExists)
           throw new Error(`Desk anchor unavailable: ${anchorSessionId}`);
       }
       const isAnchorBlock = deskGroup === true && anchorSessionId === undefined;
       if (isAnchorBlock && blockIndex > 0) {
         logger.warn(
-          `[trigger:${projectId}/${triggerId}] promoting spawn block ${blockIndex} to desk anchor: earlier anchor spawn failed`,
+          `[trigger:${projectId}/${triggerId}] promoting spawn block ${blockIndex} to desk anchor: no earlier block holds a running desk anchor`,
         );
       }
       try {
-        const renderedPrompt = renderSpawnPrompt(block.prompt, eventData);
-        const blockRestrictWrites = block.restrictWrites ?? restrictWrites;
-        const spawnRequest = {
-          project: projectId,
-          prompt: renderedPrompt,
-          ...(block.steps !== undefined ? { steps: block.steps } : {}),
-          ...(block.agent !== undefined ? { agent: block.agent } : {}),
-          ...(block.model !== undefined ? { model: block.model } : {}),
-          ...(block.reasoningEffort !== undefined
-            ? { reasoningEffort: block.reasoningEffort }
-            : {}),
-          ...(block.mode !== undefined ? { mode: block.mode } : {}),
-          ...(block.branch !== undefined ? { branch: block.branch } : {}),
-          ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
-          ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),
-          ...(blockRestrictWrites === true ? { restrictWrites: true } : {}),
-          ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
-          ...(workItemData && (eventName !== SCRIPT_ITEM_NEW_EVENT || workItemData.url !== "")
-            ? { slots: { links: [{ label: "pr", url: workItemData.url }] } }
-            : {}),
-          ...(deskGroup === true && anchorSessionId !== undefined
-            ? { reuseWorkspaceSessionId: anchorSessionId }
-            : {}),
-        };
-        if (!queue.current()) return;
-        const birthKey = `${work.workId}:${blockIndex}`;
-        let session: SessionView;
-        try {
-          session = await service.spawn(spawnRequest, { triggerBirthKey: birthKey });
-        } catch (error) {
-          const birth = service.getTriggerBirth(projectId, birthKey, spawnRequest);
-          if (!birth) throw error;
-          session = await service.get(birth.id);
+        const spawnRequest = triggerSpawnRequest(
+          projectId,
+          block,
+          eventName,
+          eventData,
+          restrictWrites,
+          allowedTriggers,
+          deskGroup,
+          anchorSessionId,
+        );
+        if (!current()) return;
+        let spawning: Promise<SessionView>;
+        if (ctx) {
+          // Refresh this block's claim only while it is still this run's: an
+          // earlier slow block must not make it look stale, and a member
+          // another controller took is not spawned twice. No await between
+          // the refresh and the spawn call.
+          const refreshedAt = new Date().toISOString();
+          const refreshed = patchWorkItemMember(
+            ctx,
+            blockIndex,
+            (member) =>
+              member.state === "spawning" && member.claimedAt === claimedAt
+                ? { ...member, claimedAt: refreshedAt }
+                : member,
+            entry.claimedAt,
+          );
+          if (refreshed?.state !== "spawning" || refreshed.claimedAt !== refreshedAt) continue;
+          entry.claimedAt = refreshedAt;
+          spawning = service.spawn(spawnRequest, {
+            acceptQueued: true,
+            triggerOrigin: { triggerId, sourceId, externalId: ctx.workItem.externalId, blockIndex },
+          });
+        } else if (queue && work) {
+          const birthKey = `${work.workId}:${blockIndex}`;
+          spawning = service
+            .spawn(spawnRequest, { triggerBirthKey: birthKey })
+            .catch(async (error: unknown) => {
+              if (!current()) throw error;
+              const birth = service.getTriggerBirth(projectId, birthKey, spawnRequest);
+              if (!birth) throw error;
+              return service.get(birth.id);
+            });
+        } else {
+          spawning = service.spawn(spawnRequest);
         }
-        if (!queue.current()) return;
-        work.blocks[blockIndex] = { birthKey, state: "succeeded", sessionId: session.id };
-        work.nextBlockIndex = blockIndex + 1;
-        work.lastSessionId = session.id;
+        const session = await spawning;
+        if (!current()) return;
+        const outcome = ctx
+          ? classifyWorkItemOwner(session, readSession(ctx.dataDir, session.id))
+          : "adopt";
+        if (ctx && outcome === "pending") {
+          const bound = patchWorkItemMember(
+            ctx,
+            blockIndex,
+            (member) => bindWorkItemSession(member, { sessionId: session.id, outcome }),
+            entry.claimedAt,
+          );
+          if (!bound) {
+            releaseWorkItemClaim(
+              ctx,
+              planned.filter((candidate) => candidate.blockIndex > blockIndex),
+            );
+            return;
+          }
+          logWorkItemAdopted(ctx, eventName, blockIndex, session.id, outcome);
+          if (deskGroup === true && isAnchorBlock) {
+            releaseWorkItemClaim(
+              ctx,
+              planned.filter((candidate) => candidate.blockIndex > blockIndex),
+            );
+            return;
+          }
+          continue;
+        }
+        if (ctx) {
+          if (outcome === "replace") throw new Error(`Spawn ${session.id} did not launch`);
+          const bound = patchWorkItemMember(
+            ctx,
+            blockIndex,
+            (member) => bindWorkItemSession(member, { sessionId: session.id, outcome }),
+            entry.claimedAt,
+          );
+          if (!bound) {
+            releaseWorkItemClaim(
+              ctx,
+              planned.filter((candidate) => candidate.blockIndex > blockIndex),
+            );
+            return;
+          }
+        }
+        if (work) {
+          work.blocks[blockIndex] = {
+            birthKey: `${work.workId}:${blockIndex}`,
+            state: "succeeded",
+            sessionId: session.id,
+          };
+          work.nextBlockIndex = blockIndex + 1;
+          work.lastSessionId = session.id;
+        }
         if (isAnchorBlock) {
           anchorSessionId = session.id;
-          work.anchorSessionId = session.id;
+          if (work) work.anchorSessionId = session.id;
         }
-        if (!queue.save()) return;
-        if (workItemData) {
-          recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-            ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
-            state: "running",
-            sessionId: session.id,
-          });
-        }
+        if (queue && !queue.save()) return;
         logTriggerEvent(dataDir, "trigger.spawn.completed", {
           level: "info",
           sessionId: session.id,
@@ -450,10 +1534,10 @@ async function runSpawnTrigger(
             ...(isAnchorBlock ? { deskGroup: true } : {}),
           },
         });
-        if (work.admissionDenials > 0) return;
+        if (work && work.admissionDenials > 0) return;
       } catch (error) {
-        if (!queue.current()) return;
-        if (error instanceof SessionAdmissionDeniedError) {
+        if (!current()) return;
+        if (queue && work && error instanceof SessionAdmissionDeniedError) {
           work.admissionDenials = Math.min(work.admissionDenials + 1, DELIVERY_MAX_ATTEMPTS - 1);
           work.notBeforeAt =
             Date.now() +
@@ -463,20 +1547,43 @@ async function runSpawnTrigger(
           return;
         }
         const message = error instanceof Error ? error.message : String(error);
-        work.blocks[blockIndex] = {
-          birthKey: `${work.workId}:${blockIndex}`,
-          state: "failed",
-          error: message,
-        };
-        work.nextBlockIndex = blockIndex + 1;
-        work.failures.push(message);
-        if (!queue.save()) return;
-        if (workItemData && work.lastSessionId === undefined) {
-          recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-            ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
+        if (ctx) {
+          // The spawn can throw after the session exists (a launched agent
+          // retained with its error): adopt it instead of scheduling a retry.
+          const survivor =
+            error instanceof SessionAdmissionDeniedError
+              ? undefined
+              : await findTaggedWorkItemSession(ctx, service, blockIndex, [ctx.triggerId]);
+          if (!current()) return;
+          if (survivor) {
+            patchWorkItemMember(
+              ctx,
+              blockIndex,
+              (member) => bindWorkItemSession(member, survivor),
+              entry.claimedAt,
+            );
+            logWorkItemAdopted(ctx, eventName, blockIndex, survivor.sessionId, survivor.outcome);
+            if (isAnchorBlock && survivor.outcome === "adopt") anchorSessionId = survivor.sessionId;
+            if (isAnchorBlock && survivor.outcome === "pending") {
+              releaseWorkItemClaim(
+                ctx,
+                planned.filter((candidate) => candidate.blockIndex > blockIndex),
+              );
+              return;
+            }
+          } else {
+            recordWorkItemSpawnFailure(ctx, entry, error, message);
+          }
+        }
+        if (queue && work) {
+          work.blocks[blockIndex] = {
+            birthKey: `${work.workId}:${blockIndex}`,
             state: "failed",
             error: message,
-          });
+          };
+          work.nextBlockIndex = blockIndex + 1;
+          work.failures.push(message);
+          if (!queue.save()) return;
         }
         logTriggerEvent(dataDir, "trigger.spawn.failed", {
           level: "error",
@@ -497,30 +1604,18 @@ async function runSpawnTrigger(
       }
     }
   } catch (error) {
-    if (!queue.current()) return;
+    if (!current()) return;
     const message = error instanceof Error ? error.message : String(error);
-    for (let index = work.nextBlockIndex; index < work.blocks.length; index += 1)
-      work.blocks[index] = {
-        birthKey: `${work.workId}:${index}`,
-        state: "failed",
-        error: message,
-      };
-    work.nextBlockIndex = work.blocks.length;
-    work.failures.push(message);
-    if (!queue.save()) return;
-    const claim = workItemData
-      ? readWorkItemLifecycles(dataDir, projectId, sourceId).get(workItemData.externalId)
-      : undefined;
-    if (
-      workItemData &&
-      work.lastSessionId === undefined &&
-      (claim === undefined || (claim.state === "pending" && claim.spawnWorkId === work.workId))
-    ) {
-      recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-        ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
-        state: "failed",
-        error: message,
-      });
+    if (queue && work) {
+      for (let index = work.nextBlockIndex; index < work.blocks.length; index += 1)
+        work.blocks[index] = {
+          birthKey: `${work.workId}:${index}`,
+          state: "failed",
+          error: message,
+        };
+      work.nextBlockIndex = work.blocks.length;
+      work.failures.push(message);
+      if (!queue.save()) return;
     }
     logTriggerEvent(dataDir, "trigger.spawn.failed", {
       level: "error",
@@ -534,6 +1629,23 @@ async function runSpawnTrigger(
     });
     logger.warn(`[trigger:${projectId}/${triggerId}] failed to spawn: ${message}`);
   }
+}
+
+// Completes the members that hold the record's owner session; sibling members
+// keep their own state, so the record turns completed only when all are.
+function markWorkItemOwnerCompleted(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  lifecycle: Extract<WorkItemLifecycleRecord, { state: "running" }>,
+): void {
+  updateWorkItemMembers(dataDir, projectId, sourceId, lifecycle, (members) =>
+    members.map((member) =>
+      member.state === "running" && member.sessionId === lifecycle.sessionId
+        ? { ...member, state: "completed" }
+        : member,
+    ),
+  );
 }
 
 async function runWorkItemAutoCompleteTrigger(
@@ -551,8 +1663,12 @@ async function runWorkItemAutoCompleteTrigger(
     if (lifecycle.state !== "running" || !lifecycle.autoComplete) {
       continue;
     }
-    const createdAt = Date.parse(lifecycle.createdAt);
-    if (!Number.isFinite(createdAt)) {
+    // Age counts from the owner's spawn result; legacy members have none.
+    const owner = lifecycle.members.find(
+      (member) => member.state === "running" && member.sessionId === lifecycle.sessionId,
+    );
+    const startedAt = Date.parse(owner?.startedAt ?? lifecycle.createdAt);
+    if (!Number.isFinite(startedAt)) {
       deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
       logTriggerEvent(dataDir, "trigger.work_item_auto_complete.noop", {
         level: "info",
@@ -568,18 +1684,14 @@ async function runWorkItemAutoCompleteTrigger(
       continue;
     }
 
-    if (now - createdAt < WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS) {
+    if (now - startedAt < WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS) {
       continue;
     }
 
     try {
       const session = await service.get(lifecycle.sessionId);
       if (session.status === "completed") {
-        recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-          ...lifecycle,
-          state: "completed",
-          completedAt: new Date().toISOString(),
-        });
+        markWorkItemOwnerCompleted(dataDir, projectId, sourceId, lifecycle);
         logTriggerEvent(dataDir, "trigger.work_item_auto_complete.noop", {
           level: "info",
           sessionId: lifecycle.sessionId,
@@ -598,11 +1710,7 @@ async function runWorkItemAutoCompleteTrigger(
       }
 
       await service.complete(lifecycle.sessionId, { prAction: "leave_open" });
-      recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-        ...lifecycle,
-        state: "completed",
-        completedAt: new Date().toISOString(),
-      });
+      markWorkItemOwnerCompleted(dataDir, projectId, sourceId, lifecycle);
       logTriggerEvent(dataDir, "trigger.work_item_auto_complete.completed", {
         level: "info",
         sessionId: lifecycle.sessionId,
@@ -617,7 +1725,19 @@ async function runWorkItemAutoCompleteTrigger(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (isSessionNotFoundError(message)) {
-        deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
+        const remaining = updateWorkItemMembers(
+          dataDir,
+          projectId,
+          sourceId,
+          lifecycle,
+          (members) =>
+            members.filter(
+              (member) => !(member.state === "running" && member.sessionId === lifecycle.sessionId),
+            ),
+        );
+        if (remaining.members.length === 0) {
+          deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
+        }
         logTriggerEvent(dataDir, "trigger.work_item_auto_complete.noop", {
           level: "info",
           sessionId: lifecycle.sessionId,
@@ -837,7 +1957,12 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const unsubscribers: Array<() => void> = [];
   const inFlight = new Set<Promise<void>>();
   const pendingBatches = new Map<string, PendingBatch>();
-  const pendingSpawns = readPendingSpawnWork(deps.config.dataDir);
+  const pendingSpawns = new Map(
+    [...readPendingSpawnWork(deps.config.dataDir)].filter(
+      ([, work]) =>
+        !(WORK_ITEM_NEW_EVENT_NAMES.has(work.eventName) && isWorkItemEventData(work.eventData)),
+    ),
+  );
   const interruptedKeys = new Map<string, number>();
   const serialByKey = new Map<string, Promise<void>>();
   const tickFlushQueued = new Set<string>();
@@ -1307,7 +2432,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         logger.warn(
           `[trigger:${batch.projectId}/${batch.triggerId}] failed to deliver queued updates: ${message}`,
         );
-        const current = await loadSessionOrClear(queueKey, batch);
+        const current = await loadSessionOrClear(queueKey, batch, "after_delivery_failure");
         if (current && isClosedState(current.state)) {
           for (const entry of batch.retryAccounting) {
             if (submitted.has(entry.itemKey)) entry.nextAttemptAt = 0;
@@ -1366,6 +2491,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       : `spawn:${work.workId}`;
   };
   const flushSpawn = async (work: PersistedSpawnWork): Promise<void> => {
+    if (WORK_ITEM_NEW_EVENT_NAMES.has(work.eventName) && isWorkItemEventData(work.eventData))
+      return;
     const current = (): boolean =>
       !stopped &&
       pendingSpawns.get(work.workId) === work &&
@@ -1381,20 +2508,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         work.routeFingerprint ||
       trigger.spawn.blocks.length !== work.blocks.length
     ) {
-      const data = work.eventData;
-      if (isWorkItemEventData(data)) {
-        const claim = readWorkItemLifecycles(
-          deps.config.dataDir,
-          work.projectId,
-          work.sourceId,
-        ).get(data.externalId);
-        if (claim?.state === "pending" && claim.spawnWorkId === work.workId)
-          recordWorkItemLifecycle(deps.config.dataDir, work.projectId, work.sourceId, {
-            ...claim,
-            state: "failed",
-            error: "Spawn route changed or removed",
-          });
-      }
       deletePendingSpawnWork(deps.config.dataDir, work.workId, work.revision);
       pendingSpawns.delete(work.workId);
       return;
@@ -1418,38 +2531,12 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       trigger.spawn.allowedTriggers,
       trigger.spawnDeskGroup,
       work.eventData,
+      new Set(),
+      current,
       logger,
       { work, current, save },
     );
     if (current() && work.nextBlockIndex === work.blocks.length) {
-      const data = work.eventData;
-      if (WORK_ITEM_NEW_EVENT_NAMES.has(work.eventName) && isWorkItemEventData(data)) {
-        const claim = readWorkItemLifecycles(
-          deps.config.dataDir,
-          work.projectId,
-          work.sourceId,
-        ).get(data.externalId);
-        const ownsClaim =
-          claim?.state === "pending"
-            ? claim.spawnWorkId === work.workId
-            : claim?.state === "running" &&
-              work.blocks.some(
-                (block) => block.state === "succeeded" && block.sessionId === claim.sessionId,
-              );
-        if (claim && ownsClaim)
-          recordWorkItemLifecycle(
-            deps.config.dataDir,
-            work.projectId,
-            work.sourceId,
-            work.lastSessionId !== undefined
-              ? { ...claim, state: "running", sessionId: work.lastSessionId }
-              : {
-                  ...claim,
-                  state: "failed",
-                  error: work.failures.at(-1) ?? "Spawn intention completed without a session",
-                },
-          );
-      }
       deletePendingSpawnWork(deps.config.dataDir, work.workId, work.revision);
       pendingSpawns.delete(work.workId);
     }
@@ -1486,10 +2573,18 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const loadSessionOrClear = async (
     queueKey: string,
     batch: PendingBatch,
+    purpose: "before_delivery" | "after_delivery_failure",
   ): Promise<SessionView | null> => {
     try {
       return await deps.sessionService.get(batch.batch.sessionId);
     } catch (error) {
+      if (
+        purpose === "before_delivery" &&
+        error instanceof SessionLifecycleError &&
+        error.statusCode === 503 &&
+        error.payload.code === "session_lifecycle_snapshot_changed"
+      )
+        return null;
       clearBatch(queueKey, batch);
       const message = error instanceof Error ? error.message : String(error);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
@@ -1513,7 +2608,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const flushPending = async (queueKey: string, batch: PendingBatch): Promise<void> => {
     if (!pendingBatches.has(queueKey)) return;
 
-    const session = await loadSessionOrClear(queueKey, batch);
+    const session = await loadSessionOrClear(queueKey, batch, "before_delivery");
     if (!session) return;
 
     // The memory shed pauses a session by writing status "stopped" with
@@ -1705,7 +2800,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     });
     scheduleFlushLoop();
 
-    const session = await loadSessionOrClear(queueKey, batch);
+    const session = await loadSessionOrClear(queueKey, batch, "before_delivery");
     if (!session) return;
     // Revision 1 is a new batch; a merge bumps it, and adds no second timer.
     if (batch.revision === 1 && sendBatch.interactive) {
@@ -1944,6 +3039,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         trigger.source,
         "send" in trigger ? trigger.send.prompt : undefined,
       );
+      const sourceSpawnTriggerIds = new Set(
+        Object.entries(project.triggers)
+          .filter(([, other]) => !isSendTrigger(other) && other.source === trigger.source)
+          .map(([otherId]) => otherId),
+      );
       const unsubscribe = deps.bus.subscribe((event) => {
         if (stopped) return;
         if (event.projectId !== projectId) return;
@@ -1981,6 +3081,46 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           return;
         }
 
+        const workItemData =
+          WORK_ITEM_NEW_EVENT_NAMES.has(event.name) && isWorkItemEventData(event.data)
+            ? event.data
+            : null;
+        if (workItemData) {
+          const queueKey = `${projectId}:${triggerId}:${event.sourceId}:work-item:${workItemData.externalId}`;
+          enqueue(queueKey, async () => {
+            const fenced = await reconcileLegacyWorkItemJournal(
+              deps.config,
+              deps.sessionService,
+              projectId,
+              triggerId,
+              event.sourceId,
+              trigger,
+              workItemData,
+              () => !stopped,
+            );
+            if (fenced === null || stopped) return;
+            await runSpawnTrigger(
+              deps.config.dataDir,
+              deps.sessionService,
+              projectId,
+              triggerId,
+              event.sourceId,
+              event.name,
+              trigger.spawn.blocks,
+              trigger.spawn.autoComplete,
+              trigger.spawn.restrictWrites,
+              trigger.spawn.allowedTriggers,
+              trigger.spawnDeskGroup,
+              event.data,
+              sourceSpawnTriggerIds,
+              () => !stopped,
+              logger,
+              undefined,
+              fenced,
+            );
+          });
+          return;
+        }
         const workId = JSON.stringify([projectId, event.sourceId, triggerId, event.occurrenceId]);
         if (pendingSpawns.has(workId)) return;
         const work: PersistedSpawnWork = {

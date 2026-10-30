@@ -97,6 +97,91 @@ afterEach(async () => {
 });
 
 describe("detectCodexRateLimit", () => {
+  it("distinguishes colliding soft meters and explicit hard authority without changing denial values", () => {
+    const meter = detectCodexRateLimit({ primary: { used_percent: 100 } });
+    expect(meter).toEqual({
+      limited: true,
+      reason: "codex 5h window exhausted",
+      codexAuthority: "soft",
+    });
+    expect(detectCodexRateLimit({ rate_limit_reached_type: "5h window exhausted" })).toEqual({
+      ...meter,
+      codexAuthority: "hard",
+    });
+    expect(detectCodexRateLimit({ rate_limit_reached_type: "out of credits" })).toEqual({
+      limited: true,
+      reason: "codex out of credits",
+      codexAuthority: "hard",
+    });
+    expect(detectCodexRateLimit(CODEX_OUT_OF_CREDITS)).toEqual({
+      limited: true,
+      reason: "codex out of credits",
+      codexAuthority: "unknown",
+    });
+    const completeDenial = {
+      ...CODEX_OUT_OF_CREDITS,
+      individual_limit: null,
+      spend_control_reached: null,
+    };
+    expect(detectCodexRateLimit(completeDenial)).toEqual({
+      limited: true,
+      reason: "codex out of credits",
+      codexAuthority: "hard",
+    });
+    for (const key of [
+      "primary",
+      "secondary",
+      "individual_limit",
+      "spend_control_reached",
+      "rate_limit_reached_type",
+    ]) {
+      const incomplete = { ...completeDenial, [key]: undefined };
+      expect(detectCodexRateLimit(incomplete)).toEqual({
+        limited: true,
+        reason: "codex out of credits",
+        codexAuthority: "unknown",
+      });
+    }
+  });
+
+  it("tags malformed and ambiguous meter records unknown without changing legacy inference", () => {
+    for (const window of [{ used_percent: Infinity }, { used_percent: -1 }, {}, [], "100"]) {
+      const detection = detectCodexRateLimit({ primary: window });
+      expect(detection?.codexAuthority).toBe("unknown");
+      expect(detection?.limited).toBe(
+        window !== null &&
+          typeof window === "object" &&
+          "used_percent" in window &&
+          window.used_percent === Infinity,
+      );
+    }
+    for (const credits of [
+      null,
+      [],
+      {},
+      { balance: "10" },
+      { has_credits: null },
+      { unlimited: "true" },
+    ]) {
+      for (const used of [0, 100]) {
+        expect(detectCodexRateLimit({ primary: { used_percent: used }, credits })).toEqual({
+          limited: used === 100,
+          reason: used === 100 ? "codex 5h window exhausted" : "",
+          codexAuthority: "unknown",
+        });
+      }
+    }
+    expect(detectCodexRateLimit({})).toEqual({
+      limited: false,
+      reason: "",
+      codexAuthority: "unknown",
+    });
+    expect(detectCodexRateLimit({ credits: { has_credits: false, unlimited: true } })).toEqual({
+      limited: false,
+      reason: "",
+      codexAuthority: "soft",
+    });
+  });
   it.each([
     { primary: { used_percent: 100, window_minutes: 10080 }, secondary: null },
     { primary: { used_percent: 100, window_minutes: 300 }, secondary: null },
@@ -109,6 +194,7 @@ describe("detectCodexRateLimit", () => {
     expect(detectCodexRateLimit({ ...CODEX_HEALTHY, ...windows })).toEqual({
       limited: false,
       reason: "",
+      codexAuthority: "soft",
     });
   });
 
@@ -119,7 +205,11 @@ describe("detectCodexRateLimit", () => {
         primary: { used_percent: 100, window_minutes: 10080 },
         rate_limit_reached_type: "workspace_owner_credits_depleted",
       }),
-    ).toEqual({ limited: true, reason: "codex workspace_owner_credits_depleted" });
+    ).toEqual({
+      limited: true,
+      reason: "codex workspace_owner_credits_depleted",
+      codexAuthority: "hard",
+    });
   });
 
   it.each([false, undefined, null, "true", 1])(
@@ -131,7 +221,11 @@ describe("detectCodexRateLimit", () => {
           credits: { has_credits: hasCredits },
           rate_limit_reached_type: null,
         }),
-      ).toEqual({ limited: true, reason: "codex 5h window exhausted" });
+      ).toEqual({
+        limited: true,
+        reason: "codex 5h window exhausted",
+        codexAuthority: hasCredits === false ? "soft" : "unknown",
+      });
     },
   );
 
@@ -141,6 +235,7 @@ describe("detectCodexRateLimit", () => {
       expect(detectCodexRateLimit({ primary: { used_percent: 100 }, credits })).toEqual({
         limited: true,
         reason: "codex 5h window exhausted",
+        codexAuthority: credits === undefined ? "soft" : "unknown",
       });
     },
   );
@@ -149,28 +244,102 @@ describe("detectCodexRateLimit", () => {
     expect(detectCodexRateLimit(CODEX_OUT_OF_CREDITS)).toEqual({
       limited: true,
       reason: "codex out of credits",
+      codexAuthority: "unknown",
     });
   });
 
   it("flags a non-null rate_limit_reached_type", () => {
     expect(
       detectCodexRateLimit({ rate_limit_reached_type: "workspace_owner_credits_depleted" }),
-    ).toEqual({ limited: true, reason: "codex workspace_owner_credits_depleted" });
+    ).toEqual({
+      limited: true,
+      reason: "codex workspace_owner_credits_depleted",
+      codexAuthority: "hard",
+    });
   });
 
   it("flags an exhausted 5h window", () => {
     expect(detectCodexRateLimit({ primary: { used_percent: 100 } })).toEqual({
       limited: true,
       reason: "codex 5h window exhausted",
+      codexAuthority: "soft",
     });
   });
 
   it("returns not-limited when usable data shows headroom", () => {
-    expect(detectCodexRateLimit(CODEX_HEALTHY)).toEqual({ limited: false, reason: "" });
+    expect(detectCodexRateLimit(CODEX_HEALTHY)).toEqual({
+      limited: false,
+      reason: "",
+      codexAuthority: "soft",
+    });
+  });
+
+  it.each(["primary", "secondary"] as const)(
+    "ignores saturated %s meters with strict usable or unlimited credits and absent/null caps",
+    (window) => {
+      for (const credits of [
+        { has_credits: true },
+        { unlimited: true },
+        { has_credits: true, unlimited: false },
+        { has_credits: false, unlimited: true },
+        { has_credits: true, unlimited: true },
+      ]) {
+        for (const companions of [
+          {},
+          { rate_limit_reached_type: null, individual_limit: null, spend_control_reached: null },
+        ]) {
+          expect(
+            detectCodexRateLimit({
+              [window]: { used_percent: 100, window_minutes: 10080 },
+              credits,
+              ...companions,
+            }),
+          ).toEqual({ limited: false, reason: "", codexAuthority: "soft" });
+        }
+      }
+    },
+  );
+
+  it("keeps explicit hard reached types ahead of usable credits", () => {
+    for (const reached of ["workspace_owner_credits_depleted", "unknown_hard_cap", " "]) {
+      expect(
+        detectCodexRateLimit({ credits: { has_credits: true }, rate_limit_reached_type: reached }),
+      ).toEqual({ limited: true, reason: `codex ${reached}`, codexAuthority: "hard" });
+    }
+  });
+
+  it("keeps legacy saturation inference for unknown caps and malformed credit flags", () => {
+    const exhausted = { primary: { used_percent: 100 }, credits: { has_credits: true } };
+    for (const key of ["rate_limit_reached_type", "individual_limit", "spend_control_reached"]) {
+      for (const value of ["", false, 0, [], {}]) {
+        expect(detectCodexRateLimit({ ...exhausted, [key]: value })?.limited).toBe(true);
+      }
+    }
+    for (const credits of [
+      null,
+      [],
+      "true",
+      {},
+      { balance: "10" },
+      { has_credits: false, unlimited: false },
+      { has_credits: "true", unlimited: true },
+      { has_credits: true, unlimited: null },
+      { has_credits: null, unlimited: true },
+      { has_credits: true, unlimited: 1 },
+      { has_credits: [], unlimited: true },
+      { has_credits: true, unlimited: {} },
+    ]) {
+      expect(detectCodexRateLimit({ ...exhausted, credits })?.limited).toBe(true);
+      expect(detectCodexRateLimit({ primary: { used_percent: 0 }, credits })?.limited).toBe(false);
+    }
   });
 
   it("does not flag has_credits:false when a live usage window is present (team/enterprise soft signal)", () => {
-    expect(detectCodexRateLimit(CODEX_TEAM_SOFT_CREDITS)).toEqual({ limited: false, reason: "" });
+    expect(detectCodexRateLimit(CODEX_TEAM_SOFT_CREDITS)).toEqual({
+      limited: false,
+      reason: "",
+      codexAuthority: "soft",
+    });
   });
 
   it("does not flag has_credits:false when only the secondary window is live (primary null)", () => {
@@ -183,7 +352,7 @@ describe("detectCodexRateLimit", () => {
         plan_type: "team",
         rate_limit_reached_type: null,
       }),
-    ).toEqual({ limited: false, reason: "" });
+    ).toEqual({ limited: false, reason: "", codexAuthority: "soft" });
   });
 
   it("still flags an exhausted window even when has_credits is false (guard doesn't mask genuine exhaustion)", () => {
@@ -196,7 +365,7 @@ describe("detectCodexRateLimit", () => {
         plan_type: "team",
         rate_limit_reached_type: null,
       }),
-    ).toEqual({ limited: true, reason: "codex 5h window exhausted" });
+    ).toEqual({ limited: true, reason: "codex 5h window exhausted", codexAuthority: "soft" });
   });
 
   it("returns null when no usable rate_limits data is present", () => {
@@ -1317,6 +1486,7 @@ describe("readCodexRolloutState rate limits", () => {
     expect((await readCodexRolloutState(dir)).rateLimit).toEqual({
       limited: true,
       reason: "codex out of credits",
+      codexAuthority: "unknown",
     });
   });
 

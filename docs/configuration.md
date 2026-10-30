@@ -55,6 +55,7 @@ A mode is a prompt suffix naming a skill, set via `projects.<id>.modes.<name>.{s
 `chatId<0` selects canonical agent forum; missing/positive `chatId` disables agent communication; `allowedUsers`/`allowedChats` gates manual access — `v2/src/session-service.ts`, `v2/src/event-sources/telegram.ts`.
 Task launch, attention cards, topic lifecycle: [`/new`, `/work`, `/complete`, `/kill`](commands.md#source-reply); complete/kill topic deletion requires bot administrator `can_delete_messages`.
 [`source reply`](commands.md#source-reply), questions, attention and typing use assigned topic; Telegram spawn assigns before launch; legacy destinations migrate on input/output — `v2/src/session-service.ts`.
+Queued topics: accepted ID/intent retained; launch and competing requests hold until acknowledged assignment; uncertain creation is not retried automatically — `v2/src/session-service.ts`.
 DMs support commands/spawn tasks; existing-agent text, buttons and voice outside assigned topic redirect without delivery — `v2/src/event-sources/telegram.ts`.
 Telegram attachments (photo/document/audio/video/animation/voice/video_note/sticker): spawn/followup artifact references, optional captions, 10 files × 5 MiB; grouped albums reject late members — `v2/src/event-sources/telegram.ts`, `v2/src/types.ts`.
 Failed inbound update from an allowed user answers `Message not delivered. Send it again.` once in the same chat/topic; taps on buttons older than 48h answer in the group main — `v2/src/event-sources/telegram.ts`.
@@ -86,6 +87,7 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `authRotation.{autoRotateOnRateLimit false, cooldownMinutes 60, maxRotationsPerEpisode 2, switchAuth false}`: instance only. `switchAuth` gates per-session [Switch auth](claude-accounts.md#per-session-switch); off hides it in web and `POST /sessions/:id/switch-auth` returns 404.
 - `diskRetention.warnFreeGb` (`10`, instance only, drives `doctor`'s `home-disk-headroom`).
 - `rateLimitReactivation.afterHours` (`0`, instance only).
+- Codex limit authority, MCP precedence and current-launch episode recovery: `v2/src/rate-limit-detect.ts`, `v2/src/session-service.ts`, `v2/src/metadata.ts`.
 - `staleAfterMinutes` (`720`, instance/per-project). See [Stale mode](#stale-mode).
 - `autoUpdate` (`false`, instance only). See [Auto update](#auto-update).
 - `sessionGc.{enabled false, olderThanDays 30, intervalMinutes 360, maxGroupsPerSweep 20, statuses [completed,killed,stopped]}`: [`spur gc`](commands.md#gc).
@@ -117,19 +119,27 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - Webhook `.host` (IP literal, `127.0.0.1`; no hostname or zone id), `.port` (required integer `1..65535`; same-port bind cannot overlap another webhook, server, or UI bind; a server hostname overlaps every webhook host), `.path` (required exact path, 1..2048 visible ASCII bytes; one leading `/`; no query, fragment, whitespace, or control byte), `.secret` (required 16..512 visible ASCII bytes; `${VAR}`-resolvable).
 - `projects.<id>.triggers.<triggerId>.{source,event,spawn|send}`.
 - `spawn[].{prompt,steps,agent,model,reasoningEffort,mode,selfDestruct,branch,overrides.worktree,overrides.defaultBranch,restrictWrites,autoComplete}`, `spawnDeskGroup`: effort overrides project default; `v2/src/config.ts`; see [Desk groups](#desk-groups), [selfDestruct](#selfdestruct-steps).
+- Work-item retries: `v2/src/work-item-retry.ts`; accepted pending members: `v2/src/triggers.ts`; tagged cleanup: `v2/src/session-service.ts`; branch guards: `v2/src/workspace.ts`.
+- Work-item trigger renames: unresolved tagged-session adoption and guarded cleanup; v2/src/triggers.ts.
 - `send.{interrupt false, prompt}`. `false` opens a send window (default 30s, `SPUR_IDLE_WAIT_BEFORE_FLUSH_MS`; `telegram:message` batches use 2s, never above the env value), counted from the agent's last activity.
 - `projects.<id>.backlog.<backlogId>.{source,query,intervalMs 60000,runOnStart false}` (`.spawn` parsed, ignored — wire a `jira:work_item.new` trigger instead).
 - Launch UI (spawn, respawn, handoff, desk spawn): agent/model-supported Reasoning choices; Default inherits live project effort; same-agent respawn/handoff carries current effort until Default clears it; [API](daemon-api.md).
 
 ## Admission control
 
-Cap limits concurrent live sessions at spawn, restore, and the wake of a stale-parked or memory-shed session. Over cap: `429` naming stop candidates. Reporting route: [`GET /headroom`](daemon-api.md). CLI: [`spur doctor`](commands.md#doctor). Schema `v2/src/config.ts`, enforcement `v2/src/session-service.ts`.
+Spawn waits automatically for memory-guard or live-session-cap recovery; `v2/src/session-service.ts`.
+Accepted background and resource-queued HTTP spawns retain session id, launch intent, messages, attachments, and selected account across daemon restart; `v2/src/session-service.ts`, `v2/src/metadata.ts`.
+Recovery adopts confirmed existing runtime; uncertain runtime or startup delivery holds and rechecks automatically; [queued topic creation](#telegram-binding) retains its separate hold policy — `v2/src/session-service.ts`.
+OpenCode recovery without a persisted native session id stays `session.spawn.recovery_held`; history and prompt acknowledgment cannot supply ownership; `v2/src/session-service.ts`.
+
+Restore and wake reject memory-guard or cap denial (`429`); `v2/src/session-service.ts`.
+Limits: `v2/src/config.ts`; reports: [`GET /headroom`](daemon-api.md), [`spur doctor`](commands.md#doctor).
 
 `stopReason: "runtime_lost"`: confirmed runtime loss becomes restorable `stopped`, retains error evidence, releases capacity; unknown probes retain capacity (`v2/src/session-service.ts`).
 
 The shed's session stop writes `status: "stopped"`, `stopReason: "memory_shed"`. Queued trigger batches for such a session are held, not dropped, and its wake passes the admission gate.
 
-Events: `daemon.memory.shed`(`.failed`), `session.admission.denied`, `session.admission.memory_guard`, `daemon.memory.unbounded`, `daemon.memory.hold.engaged`(`.cleared`/`.failed`), `trigger.send.suppressed_memory_guard`.
+Events: `daemon.memory.shed`(`.failed`), `session.admission.denied`, `session.admission.memory_guard`, `session.spawn.recovery_held`, `daemon.memory.unbounded`, `daemon.memory.hold.engaged`(`.cleared`/`.failed`), `trigger.send.suppressed_memory_guard`.
 
 ## Artifact retention
 
@@ -177,7 +187,7 @@ Event names by source:
 
 - Webhook request: `POST <path>` with `Authorization: Bearer <secret>` and `Content-Type: application/json`; runtime behavior and limits: `v2/src/event-sources/webhook.ts`.
 
-Other event names (see source file for trigger conditions): `trigger.spawn.suppressed`, `source.poll.disabled`, `source.poll.enabled`, `source.poll_cycle.error`, `source.telegram.{callback_dropped,choice_rejected}`, `gh.poll_cycle`, `gh.usage`, `gh.poll_budget_paused`, `session.message.{sent,delivery_recovered,delivery_failed,requeued,submit_unconfirmed,queued_ahead,queue_removed,stalled}`, `session.spawn.{orphan_stopped,launch_unconfirmed,launch_submitted}`, `session.controls.delivery_recovered`, `session.todo.{nudge_failed,nudge_disabled,nudge_exhausted}`, `session.{complete,pause,self_destruct,desk_complete,handoff}.{completed,failed}`, `session.wake.{failed,daily_failed,interval_failed,sent,daily_sent,interval_sent,interval_cancelled,daily_cancelled,suppressed}`, `session.wake.token_budget_blocked`, `session.token_budget.exhausted`, `session.token_budget.unenforced`, `session.token_budget.teardown_failed`, `session.attention_monitor.{failed,session_failed,slow}`, `session.runtime.{probe_unresponsive,pane_child_fallback}`, `session.agent_process.{pane_pid_unreadable,capture_unavailable,capture_blind,survivors}`, `session.{handoff,respawn}.startup_attachment_missing`, `session.server_error.reactivation_exhausted`, `session.sidecar.{start_noop,start_rejected,launch_reap_skipped,owner_missing}`, `session.list.enrich_failed`, `session.submit.{timeout,confirmed,released,failure_dismissed}`, `session.subscription.{delivery_failed,spawn_failed}`, `session.recover.context_unconfirmed`, `session.record.invalid`, `trigger.send.{failed,suppressed_admission,suppressed_launch_pending}`, `host.disk.low`, `daemon.admission.startup`, `daemon.registry.{count,warning}`, `daemon.auto_update.{started,failed,retry,skipped,suppressed,paused,config_invalid,disarm_failed}`, `daemon.deploy_switch.{started,rejected}`, `cli.update.{started,rolled_back,abandoned}`.
+Other event names (see source file for trigger conditions): `trigger.spawn.suppressed`, `trigger.spawn.{retry_scheduled,retry_deferred,retry_ended,adopted,discard_failed}`, `source.poll.disabled`, `source.poll.enabled`, `source.poll_cycle.error`, `source.telegram.{callback_dropped,choice_rejected}`, `gh.poll_cycle`, `gh.usage`, `gh.poll_budget_paused`, `session.message.{sent,delivery_recovered,delivery_failed,requeued,submit_unconfirmed,queued_ahead,queue_removed,stalled}`, `session.spawn.{orphan_stopped,launch_unconfirmed,launch_submitted}`, `session.controls.delivery_recovered`, `session.todo.{nudge_failed,nudge_disabled,nudge_exhausted}`, `session.{complete,pause,self_destruct,desk_complete,handoff}.{completed,failed}`, `session.wake.{failed,daily_failed,interval_failed,sent,daily_sent,interval_sent,interval_cancelled,daily_cancelled,suppressed}`, `session.wake.token_budget_blocked`, `session.token_budget.exhausted`, `session.token_budget.unenforced`, `session.token_budget.teardown_failed`, `session.attention_monitor.{failed,session_failed,slow}`, `session.runtime.{probe_unresponsive,pane_child_fallback}`, `session.agent_process.{pane_pid_unreadable,capture_unavailable,capture_blind,survivors}`, `session.{handoff,respawn}.startup_attachment_missing`, `session.server_error.reactivation_exhausted`, `session.sidecar.{start_noop,start_rejected,launch_reap_skipped,owner_missing}`, `session.list.enrich_failed`, `session.submit.{timeout,confirmed,released,failure_dismissed}`, `session.subscription.{delivery_failed,spawn_failed}`, `session.recover.context_unconfirmed`, `session.record.invalid`, `trigger.send.{failed,suppressed_admission,suppressed_launch_pending}`, `host.disk.low`, `daemon.admission.startup`, `daemon.registry.{count,warning}`, `daemon.auto_update.{started,failed,retry,skipped,suppressed,paused,config_invalid,disarm_failed}`, `daemon.deploy_switch.{started,rejected}`, `cli.update.{started,rolled_back,abandoned}`.
 
 ## Auto update
 

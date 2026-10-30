@@ -2656,9 +2656,33 @@ describe("SessionDetail voice input", () => {
 
   it("fetches an older page with ?from= on scroll-to-top and shows the loading row until it resolves", async () => {
     const fetchedUrls: string[] = [];
+    const tail = conversationFixture({
+      messages: [{ role: "assistant", text: "Focused current tail", timestampMs: 200 }],
+      startIndex: 200,
+      totalEntries: 500,
+      hasMore: true,
+    });
+    const older = conversationFixture({
+      messages: [
+        { role: "assistant", text: "Focused older page", timestampMs: 100 },
+        ...tail.messages,
+      ],
+      startIndex: 100,
+      totalEntries: 500,
+      hasMore: true,
+    });
+    let tailCalls = 0;
+    let resolveHeldTail: ((value: Response) => void) | undefined;
+    const heldTail = new Promise<Response>((resolve) => {
+      resolveHeldTail = resolve;
+    });
     let resolveOlderPage: ((value: Response) => void) | undefined;
+    let olderPageSettled = false;
     const olderPagePromise = new Promise<Response>((resolve) => {
       resolveOlderPage = resolve;
+    }).then((response) => {
+      olderPageSettled = true;
+      return response;
     });
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
@@ -2669,13 +2693,10 @@ describe("SessionDetail voice input", () => {
       if (url === "/api/sessions/api-a1/conversation?from=100") {
         return olderPagePromise;
       }
-      if (url.startsWith("/api/sessions/api-a1/conversation")) {
-        return new Response(
-          JSON.stringify(
-            conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true }),
-          ),
-          { status: 200 },
-        );
+      if (url === "/api/sessions/api-a1/conversation") {
+        tailCalls += 1;
+        if (tailCalls > 1) return heldTail;
+        return new Response(JSON.stringify(tail), { status: 200 });
       }
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
@@ -2683,40 +2704,44 @@ describe("SessionDetail voice input", () => {
       throw new Error(`Unexpected fetch: ${url}`);
     });
 
-    render(<SessionDetail sessionId="api-a1" />);
+    const { unmount } = render(<SessionDetail sessionId="api-a1" />);
+    try {
+      expect(await screen.findByText("Focused current tail")).toBeInTheDocument();
+      const scrollEl = screen.getByTestId("conversation-scroll");
+      Object.defineProperty(scrollEl, "scrollTop", {
+        configurable: true,
+        writable: true,
+        value: 0,
+      });
+      Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
+      Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
+      await act(async () => {
+        fireEvent.scroll(scrollEl);
+      });
 
-    // Wait for the conversation fetch (hasMore: true) to land, not just the
-    // static heading — the scroll handler's guard needs hasMore already set.
-    await waitFor(() => {
-      expect(screen.getByText("Original prompt")).toBeInTheDocument();
-    });
-
-    const scrollEl = screen.getByTestId("conversation-scroll");
-    Object.defineProperty(scrollEl, "scrollTop", { configurable: true, writable: true, value: 0 });
-    Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
-    Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
-    fireEvent.scroll(scrollEl);
-
-    await waitFor(() => {
-      expect(fetchedUrls.some((url) => url === "/api/sessions/api-a1/conversation?from=100")).toBe(
-        true,
-      );
-    });
-
-    // The loading row must still be visible while the older-page fetch is
-    // in flight — it must not be cleared before the fetch resolves.
-    expect(await screen.findByLabelText("Loading older messages")).toBeInTheDocument();
-
-    resolveOlderPage?.(
-      new Response(
-        JSON.stringify(conversationFixture({ startIndex: 100, totalEntries: 500, hasMore: true })),
-        { status: 200 },
-      ),
-    );
-
-    await waitFor(() => {
+      expect(
+        fetchedUrls.filter((url) => url === "/api/sessions/api-a1/conversation?from=100"),
+      ).toHaveLength(1);
+      expect(olderPageSettled).toBe(false);
+      expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+      await act(async () => {
+        resolveOlderPage?.(new Response(JSON.stringify(older), { status: 200 }));
+        await olderPagePromise;
+      });
+      expect(screen.getAllByText("Focused older page")).toHaveLength(1);
+      expect(olderPageSettled).toBe(true);
+      expect(
+        fetchedUrls.filter((url) => url === "/api/sessions/api-a1/conversation?from=100"),
+      ).toHaveLength(1);
       expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
-    });
+    } finally {
+      unmount();
+      await act(async () => {
+        resolveOlderPage?.(new Response(JSON.stringify(older), { status: 200 }));
+        resolveHeldTail?.(new Response(JSON.stringify(tail), { status: 200 }));
+        await Promise.all([olderPagePromise, heldTail]);
+      });
+    }
   });
 
   it("keeps the loading row when a tail poll issued before the scroll resolves mid-flight", async () => {

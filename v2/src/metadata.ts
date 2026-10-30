@@ -10,10 +10,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { appendEventLog } from "./event-log.js";
 import { parseConsent, type InterfaceConsent } from "./review-interface-consent.js";
 import {
   isSessionState,
+  isTerminalSessionStatus,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   DELIVERY_MAX_ATTEMPTS,
   CI_FAILED_MAX_ATTEMPTS,
@@ -40,11 +42,17 @@ import {
   type TokenUsageTotals,
   type WorkItemLifecycleRecord,
   type WorkItemLifecycleState,
+  type WorkItemMember,
+  type WorkItemTriggerOrigin,
+  type WorkItemMemberState,
 } from "./types.js";
+import { buildWorkItemRecord, type WorkItemRecordBase } from "./work-item-retry.js";
 import { normalizeSessionPrBinding, parseSessionPrBinding } from "./session-pr.js";
 import { workspaceIdOf } from "./session-desk.js";
 import { aggregateTokenUsage } from "./token-usage.js";
 import { normalizePreflightTotals } from "./preflight-usage-store.js";
+import { parseArtifactRelativePath } from "./session-artifacts.js";
+import { parseSpawnOverrides } from "./spawn-overrides.js";
 
 function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
@@ -708,6 +716,96 @@ function deleteSessionIndexEntry(dataDir: string, sessionId: string): void {
   writeSessionIndexFile(dataDir, nextIndex);
 }
 
+const WORK_ITEM_MEMBER_STATES: ReadonlySet<unknown> = new Set([
+  "spawning",
+  "running",
+  "failed",
+  "completed",
+]);
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function isWorkItemTriggerOrigin(value: unknown): value is WorkItemTriggerOrigin {
+  return (
+    isRecord(value) &&
+    typeof value.triggerId === "string" &&
+    typeof value.sourceId === "string" &&
+    typeof value.externalId === "string" &&
+    typeof value.blockIndex === "number"
+  );
+}
+
+function parseWorkItemMember(raw: unknown): WorkItemMember | null {
+  if (!isRecord(raw)) return null;
+  const { blockIndex, state, claimedAt, attempts, sessionId } = raw;
+  if (
+    typeof blockIndex !== "number" ||
+    !Number.isInteger(blockIndex) ||
+    blockIndex < 0 ||
+    !WORK_ITEM_MEMBER_STATES.has(state) ||
+    typeof claimedAt !== "string" ||
+    typeof attempts !== "number"
+  ) {
+    return null;
+  }
+  const memberState = state as WorkItemMemberState;
+  if ((memberState === "running" || memberState === "completed") && typeof sessionId !== "string") {
+    return null;
+  }
+  const triggerId = optionalString(raw.triggerId);
+  const nextRetryAt = optionalString(raw.nextRetryAt);
+  const error = optionalString(raw.error);
+  const replacesSessionId = optionalString(raw.replacesSessionId);
+  if (
+    raw.previousTriggerIds !== undefined &&
+    (!Array.isArray(raw.previousTriggerIds) ||
+      !raw.previousTriggerIds.every((id: unknown) => typeof id === "string"))
+  ) {
+    return null;
+  }
+  const previousTriggerId = optionalString(raw.previousTriggerId);
+  const previousTriggerIds = [
+    ...new Set<string>(
+      raw.previousTriggerIds ?? (previousTriggerId !== undefined ? [previousTriggerId] : []),
+    ),
+  ].filter((id) => id !== triggerId);
+  const startedAt = optionalString(raw.startedAt);
+  return {
+    ...(triggerId !== undefined ? { triggerId } : {}),
+    blockIndex,
+    state: memberState,
+    ...(typeof sessionId === "string" ? { sessionId } : {}),
+    claimedAt,
+    attempts,
+    deferrals: typeof raw.deferrals === "number" ? raw.deferrals : 0,
+    ...(nextRetryAt !== undefined ? { nextRetryAt } : {}),
+    ...(error !== undefined ? { error } : {}),
+    ...(replacesSessionId !== undefined ? { replacesSessionId } : {}),
+    ...(previousTriggerIds.length > 0 ? { previousTriggerIds } : {}),
+    ...(startedAt !== undefined ? { startedAt } : {}),
+    ...(raw.endedReason === "anchor_not_live" ? { endedReason: raw.endedReason } : {}),
+  };
+}
+
+// A pre-upgrade record has one record-level state and no members: it becomes
+// one untriggered member that stands for every block of the next claiming trigger.
+function legacyWorkItemMember(
+  raw: Record<string, unknown>,
+  createdAt: string,
+): WorkItemMember | null {
+  const state = isWorkItemLifecycleState(raw.state) ? raw.state : "running";
+  const sessionId = optionalString(raw.sessionId);
+  const common = { blockIndex: 0, claimedAt: createdAt, attempts: 0, deferrals: 0 };
+  if (state === "pending") return { ...common, state: "spawning" };
+  if (state === "failed") {
+    const error = optionalString(raw.error);
+    return error === undefined ? null : { ...common, state, error };
+  }
+  return sessionId === undefined ? null : { ...common, state, sessionId };
+}
+
 function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleRecord> {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
@@ -728,6 +826,7 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
       ) {
         continue;
       }
+      const lastRetryEmitAt = optionalString(raw.lastRetryEmitAt);
       const base = {
         externalId: raw.externalId,
         url: raw.url,
@@ -736,40 +835,17 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
         repo: raw.repo,
         createdAt: raw.createdAt,
         autoComplete: typeof raw.autoComplete === "boolean" ? raw.autoComplete : true,
+        ...(lastRetryEmitAt !== undefined ? { lastRetryEmitAt } : {}),
+        ...(typeof raw.spawnWorkId === "string" ? { spawnWorkId: raw.spawnWorkId } : {}),
       };
-      const state = isWorkItemLifecycleState(raw.state) ? raw.state : "running";
-      if (state === "pending") {
-        result.set(raw.externalId, {
-          ...base,
-          state,
-          ...(typeof raw.spawnWorkId === "string" ? { spawnWorkId: raw.spawnWorkId } : {}),
-        });
-        continue;
-      }
-      if (state === "failed") {
-        if (typeof raw.error !== "string") continue;
-        result.set(raw.externalId, {
-          ...base,
-          state,
-          error: raw.error,
-        });
-        continue;
-      }
-      if (typeof raw.sessionId !== "string") continue;
-      if (state === "completed") {
-        result.set(raw.externalId, {
-          ...base,
-          state,
-          sessionId: raw.sessionId,
-          completedAt: typeof raw.completedAt === "string" ? raw.completedAt : raw.createdAt,
-        });
-        continue;
-      }
-      result.set(raw.externalId, {
-        ...base,
-        state: "running",
-        sessionId: raw.sessionId,
-      });
+      const members = Array.isArray(raw.members)
+        ? raw.members.flatMap((member) => parseWorkItemMember(member) ?? [])
+        : [legacyWorkItemMember(raw, raw.createdAt)].flatMap((member) => member ?? []);
+      if (members.length === 0) continue;
+      result.set(
+        raw.externalId,
+        buildWorkItemRecord(base, members, optionalString(raw.completedAt) ?? raw.createdAt),
+      );
     }
     return result;
   } catch {
@@ -1169,7 +1245,300 @@ function normalizePreflightTokenUsage(value: unknown): SessionRecord["preflightT
   };
 }
 
+function durableObject(
+  value: unknown,
+  keys: readonly string[],
+  label: string,
+): Record<string, unknown> {
+  if (
+    !isRecord(value) ||
+    Array.isArray(value) ||
+    Object.keys(value).some((key) => !keys.includes(key))
+  ) {
+    throw new Error(`Invalid durable spawn metadata: ${label}`);
+  }
+  return value;
+}
+
+function durableCheck(valid: boolean, label: string): asserts valid {
+  if (!valid) throw new Error(`Invalid durable spawn metadata: ${label}`);
+}
+
+function durableString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function durableStrings(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(durableString);
+}
+
+function durableEffort(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(value)
+  );
+}
+
+function validateDurableSpawnFields(session: SessionRecord): void {
+  if (session.spawnReceipt !== undefined) {
+    const receipt = durableObject(session.spawnReceipt, ["version", "acceptedAt"], "receipt");
+    durableCheck(
+      receipt["version"] === 1 &&
+        durableString(receipt["acceptedAt"]) &&
+        Number.isFinite(Date.parse(receipt["acceptedAt"])),
+      "receipt version/time",
+    );
+  }
+  if (session.spawnIntent === undefined) return;
+  durableCheck(
+    session.spawnReceipt !== undefined && !isTerminalSessionStatus(session.status),
+    "intent ownership",
+  );
+  durableCheck(["claude", "codex", "cursor", "opencode"].includes(session.agent), "intent agent");
+  durableCheck(
+    ["spawning", "running", "stopped", "paused", "budget_limited", "errored"].includes(
+      session.status,
+    ),
+    "intent status",
+  );
+  const intent = durableObject(
+    session.spawnIntent,
+    [
+      "version",
+      "phase",
+      "request",
+      "mode",
+      "defaultBranch",
+      "preflightBatchId",
+      "startupAttachments",
+      "launchSelection",
+      "submission",
+      "pane",
+      "telegramOrigin",
+    ],
+    "intent",
+  );
+  durableCheck(
+    intent["version"] === 1 &&
+      typeof intent["phase"] === "string" &&
+      ["queued", "workspace_ready", "launching", "submitted"].includes(intent["phase"]),
+    "intent version/phase",
+  );
+  durableCheck(
+    durableString(intent["defaultBranch"]) && durableString(intent["preflightBatchId"]),
+    "intent branch/preflight",
+  );
+  const request = durableObject(
+    intent["request"],
+    [
+      "project",
+      "prompt",
+      "steps",
+      "agent",
+      "model",
+      "reasoningEffort",
+      "mode",
+      "planMode",
+      "restrictWrites",
+      "allowedTriggers",
+      "branch",
+      "overrides",
+      "reuseWorkspaceSessionId",
+      "originalTaskPrompt",
+      "bareSpawnMessage",
+      "preflightBatchId",
+      "slots",
+      "selfDestruct",
+      "bootstrap",
+      "claudeAccountId",
+      "subscriptions",
+    ],
+    "request",
+  );
+  durableCheck(request["project"] === session.project, "request project");
+  for (const key of [
+    "model",
+    "mode",
+    "branch",
+    "reuseWorkspaceSessionId",
+    "preflightBatchId",
+    "claudeAccountId",
+  ]) {
+    durableCheck(request[key] === undefined || durableString(request[key]), `request ${key}`);
+  }
+  for (const key of ["prompt", "originalTaskPrompt"]) {
+    durableCheck(request[key] === undefined || typeof request[key] === "string", `request ${key}`);
+  }
+  for (const key of ["planMode", "restrictWrites", "bareSpawnMessage", "bootstrap"]) {
+    durableCheck(request[key] === undefined || typeof request[key] === "boolean", `request ${key}`);
+  }
+  for (const key of ["steps", "allowedTriggers"]) {
+    durableCheck(request[key] === undefined || durableStrings(request[key]), `request ${key}`);
+  }
+  durableCheck(
+    request["agent"] === undefined || request["agent"] === session.agent,
+    "request agent",
+  );
+  durableCheck(
+    request["reasoningEffort"] === undefined || durableEffort(request["reasoningEffort"]),
+    "request effort",
+  );
+  if (request["overrides"] !== undefined)
+    parseSpawnOverrides(request["overrides"], "durable spawn request overrides");
+  if (request["selfDestruct"] !== undefined) {
+    const value = durableObject(request["selfDestruct"], ["enabled", "conditions"], "selfDestruct");
+    durableCheck(
+      typeof value["enabled"] === "boolean" &&
+        (value["conditions"] === undefined || typeof value["conditions"] === "string"),
+      "selfDestruct values",
+    );
+  }
+  if (request["slots"] !== undefined) {
+    const slots = durableObject(request["slots"], ["links"], "slots");
+    if (slots["links"] !== undefined) {
+      durableCheck(Array.isArray(slots["links"]), "links");
+      for (const raw of slots["links"]) {
+        const link = durableObject(raw, ["label", "url"], "link");
+        durableCheck(durableString(link["label"]) && durableString(link["url"]), "link values");
+      }
+    }
+  }
+  if (request["subscriptions"] !== undefined) {
+    durableCheck(Array.isArray(request["subscriptions"]), "subscriptions");
+    for (const raw of request["subscriptions"]) {
+      const subscription = durableObject(
+        raw,
+        ["targetSessionId", "states", "message"],
+        "subscription",
+      );
+      durableCheck(
+        durableString(subscription["targetSessionId"]) &&
+          Array.isArray(subscription["states"]) &&
+          subscription["states"].length > 0 &&
+          subscription["states"].every(isSessionState) &&
+          (subscription["message"] === undefined || typeof subscription["message"] === "string"),
+        "subscription values",
+      );
+    }
+  }
+  if (intent["mode"] !== undefined) {
+    const mode = durableObject(intent["mode"], ["name", "skill"], "mode");
+    durableCheck(durableString(mode["name"]) && durableString(mode["skill"]), "mode values");
+  }
+  durableCheck(Array.isArray(intent["startupAttachments"]), "attachments");
+  for (const raw of intent["startupAttachments"]) {
+    const attachment = durableObject(raw, ["id", "name"], "attachment");
+    durableCheck(
+      durableString(attachment["id"]) &&
+        parseArtifactRelativePath(attachment["id"]) === attachment["id"] &&
+        durableString(attachment["name"]),
+      "attachment ref",
+    );
+  }
+  const selection = durableObject(
+    intent["launchSelection"],
+    ["model", "reasoningEffort", "reasoningVariantNames"],
+    "launch selection",
+  );
+  durableCheck(
+    (selection["model"] === undefined || durableString(selection["model"])) &&
+      (selection["reasoningEffort"] === undefined || durableEffort(selection["reasoningEffort"])) &&
+      (selection["reasoningVariantNames"] === undefined ||
+        durableStrings(selection["reasoningVariantNames"])),
+    "launch selection values",
+  );
+  const submission = durableObject(
+    intent["submission"],
+    ["state", "uncertainAt", "message", "ackBaseline"],
+    "submission",
+  );
+  durableCheck(
+    typeof submission["state"] === "string" &&
+      ["pending", "uncertain", "confirmed"].includes(submission["state"]),
+    "submission state",
+  );
+  durableCheck(
+    submission["uncertainAt"] === undefined ||
+      (durableString(submission["uncertainAt"]) &&
+        Number.isFinite(Date.parse(submission["uncertainAt"]))),
+    "submission uncertainty time",
+  );
+  durableCheck(
+    submission["state"] !== "uncertain" || submission["uncertainAt"] !== undefined,
+    "submission uncertainty",
+  );
+  durableCheck(
+    submission["message"] === undefined || typeof submission["message"] === "string",
+    "submission message",
+  );
+  if (submission["ackBaseline"] !== undefined) {
+    const normalized = normalizeSubmitAckBaseline(submission["ackBaseline"]);
+    durableCheck(
+      normalized !== undefined && isDeepStrictEqual(normalized, submission["ackBaseline"]),
+      "submission ack baseline",
+    );
+    const validOffset = (value: number): boolean => Number.isSafeInteger(value) && value >= 0;
+    if (normalized.agent === "claude" || normalized.agent === "cursor") {
+      durableCheck(
+        durableString(normalized.file) && validOffset(normalized.size),
+        "submission transcript offset",
+      );
+      if (normalized.agent === "cursor" && normalized.rotated) {
+        durableCheck(
+          durableString(normalized.rotated.file) && validOffset(normalized.rotated.size),
+          "submission rotated offset",
+        );
+      }
+    } else if (normalized.agent === "codex") {
+      durableCheck(
+        Object.entries(normalized.offsets).every(
+          ([file, offset]) => durableString(file) && validOffset(offset),
+        ),
+        "submission rollout offsets",
+      );
+    } else {
+      durableCheck(
+        durableString(normalized.sessionId) &&
+          (normalized.after === null ||
+            (validOffset(normalized.after.createdMs) && durableString(normalized.after.id))),
+        "submission message baseline",
+      );
+    }
+  }
+  if (intent["pane"] !== undefined) {
+    const pane = durableObject(intent["pane"], ["pid", "starttime"], "pane");
+    durableCheck(
+      typeof pane["pid"] === "number" &&
+        Number.isSafeInteger(pane["pid"]) &&
+        pane["pid"] > 0 &&
+        typeof pane["starttime"] === "number" &&
+        Number.isSafeInteger(pane["starttime"]) &&
+        pane["starttime"] >= 0,
+      "pane identity",
+    );
+  }
+  if (intent["telegramOrigin"] !== undefined) {
+    const origin = durableObject(
+      intent["telegramOrigin"],
+      ["projectId", "sourceId", "chatId", "messageThreadId"],
+      "Telegram origin",
+    );
+    durableCheck(
+      durableString(origin["projectId"]) &&
+        durableString(origin["sourceId"]) &&
+        typeof origin["chatId"] === "number" &&
+        Number.isSafeInteger(origin["chatId"]) &&
+        (origin["messageThreadId"] === undefined ||
+          (typeof origin["messageThreadId"] === "number" &&
+            Number.isSafeInteger(origin["messageThreadId"]) &&
+            origin["messageThreadId"] > 0)),
+      "Telegram origin values",
+    );
+  }
+}
+
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
+  validateDurableSpawnFields(session);
   const normalizedSession = normalizeSessionPrBinding(session);
   // The request is an equality fingerprint, never replayed as executable input.
   const birthRequest = normalizedSession.triggerBirthRequest;
@@ -1245,11 +1614,21 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     Number.isFinite(Date.parse(normalizedSession.codexRestoreStartedAt))
       ? { codexRestoreStartedAt: normalizedSession.codexRestoreStartedAt }
       : {}),
+    ...(typeof normalizedSession.codexRestoreLaunchId === "string" &&
+    normalizedSession.codexRestoreLaunchId.trim().length > 0
+      ? { codexRestoreLaunchId: normalizedSession.codexRestoreLaunchId }
+      : {}),
     ...(typeof normalizedSession.restoredAt === "string" &&
     Number.isFinite(Date.parse(normalizedSession.restoredAt))
       ? { restoredAt: normalizedSession.restoredAt }
       : {}),
     prompt: normalizedSession.prompt,
+    ...(normalizedSession.spawnIntent !== undefined
+      ? { spawnIntent: normalizedSession.spawnIntent }
+      : {}),
+    ...(normalizedSession.spawnReceipt !== undefined
+      ? { spawnReceipt: normalizedSession.spawnReceipt }
+      : {}),
     ...(normalizedSession.originalTaskPrompt
       ? { originalTaskPrompt: normalizedSession.originalTaskPrompt }
       : {}),
@@ -1280,6 +1659,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     // stay legible, but nothing writes a fresh one.
     ...(normalizedSession.deskId ? { deskId: normalizedSession.deskId } : {}),
     ...(normalizedSession.slots ? { slots: normalizedSession.slots } : {}),
+    ...(isWorkItemTriggerOrigin(normalizedSession.triggerOrigin)
+      ? { triggerOrigin: normalizedSession.triggerOrigin }
+      : {}),
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
     ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
     ...(sidecarProcs ? { sidecarProcs } : {}),
@@ -2194,19 +2576,91 @@ export function readWorkItemLifecycles(
   return existsSync(path) ? readWorkItemLifecycleFile(path) : new Map();
 }
 
-export function recordWorkItemLifecycle(
+function writeWorkItemLifecycles(
   dataDir: string,
   projectId: string,
   sourceId: string,
-  record: WorkItemLifecycleRecord,
+  records: Map<string, WorkItemLifecycleRecord>,
 ): void {
-  const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
-  records.set(record.externalId, record);
   writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
     records: [...records.values()].sort((left, right) =>
       left.externalId.localeCompare(right.externalId),
     ),
   });
+}
+
+export function recordWorkItemLifecycle(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  record: WorkItemRecordBase & {
+    state: WorkItemLifecycleState;
+    sessionId?: string;
+    error?: string;
+    completedAt?: string;
+  },
+): void {
+  const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
+  if (records.get(record.externalId)?.members.some((member) => member.triggerId !== undefined))
+    return;
+  const member = legacyWorkItemMember({ ...record }, record.createdAt);
+  if (!member) throw new Error("Invalid legacy work-item lifecycle");
+  records.set(
+    record.externalId,
+    buildWorkItemRecord(record, [member], record.completedAt ?? record.createdAt),
+  );
+  writeWorkItemLifecycles(dataDir, projectId, sourceId, records);
+}
+
+// One synchronous read-modify-write: concurrent callers (two triggers, a
+// source stamp) never clobber each other's members because nothing awaits
+// between the read and the write. `base` overwrites the record's item fields
+// except createdAt;
+// record-level state is derived from the mutated members.
+export function updateWorkItemMembers(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  base: WorkItemRecordBase,
+  mutate: (members: WorkItemMember[]) => WorkItemMember[],
+): WorkItemLifecycleRecord {
+  const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
+  const existing = records.get(base.externalId);
+  const lastRetryEmitAt = base.lastRetryEmitAt ?? existing?.lastRetryEmitAt;
+  // Timestamps are stamped once: a later write never resets createdAt (the
+  // auto-complete age) or completedAt.
+  const next = buildWorkItemRecord(
+    {
+      ...base,
+      createdAt: existing?.createdAt ?? base.createdAt,
+      ...(lastRetryEmitAt !== undefined ? { lastRetryEmitAt } : {}),
+      ...(base.spawnWorkId === undefined && existing?.spawnWorkId !== undefined
+        ? { spawnWorkId: existing.spawnWorkId }
+        : {}),
+    },
+    mutate(existing?.members ?? []),
+    existing?.state === "completed" ? existing.completedAt : new Date().toISOString(),
+  );
+  records.set(next.externalId, next);
+  writeWorkItemLifecycles(dataDir, projectId, sourceId, records);
+  return next;
+}
+
+// Stamps the re-emit time for exactly the given items in one write, before the
+// source emits them.
+export function markWorkItemRetriesEmitted(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  externalIds: readonly string[],
+  nowIso: string,
+): void {
+  const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
+  for (const externalId of externalIds) {
+    const record = records.get(externalId);
+    if (record) records.set(externalId, { ...record, lastRetryEmitAt: nowIso });
+  }
+  writeWorkItemLifecycles(dataDir, projectId, sourceId, records);
 }
 
 export function deleteWorkItemLifecycle(
@@ -2217,11 +2671,7 @@ export function deleteWorkItemLifecycle(
 ): void {
   const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
   if (!records.delete(externalId)) return;
-  writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
-    records: [...records.values()].sort((left, right) =>
-      left.externalId.localeCompare(right.externalId),
-    ),
-  });
+  writeWorkItemLifecycles(dataDir, projectId, sourceId, records);
 }
 
 export function readPendingSendBatches(dataDir: string): Map<string, PersistedPendingBatch> {

@@ -572,6 +572,9 @@ const turnId = isRecord(hookPayload) && typeof hookPayload.turn_id === "string"
 const nextRecord = {
   state,
   updatedAt: now,
+  ...(process.env.SPUR_AGENT_LAUNCH_ID?.trim()
+    ? { agentLaunchId: process.env.SPUR_AGENT_LAUNCH_ID }
+    : {}),
   ...(eventName ? { hookEvent: eventName } : {}),
   ...(turnId ? { turnId } : {}),
 };

@@ -1,6 +1,7 @@
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   statSync,
@@ -47,6 +48,7 @@ import {
   DEFERRED_CONTROLS_ACK_WINDOW_MS,
   DEFERRED_CONTROLS_MAX_RESENDS,
   findAgentSessionId,
+  extractCommandBinary,
   invalidateAgentState,
   parseAgentName,
   readAgentConversation,
@@ -127,6 +129,8 @@ import {
   type CodexConversationReaderState,
   type CodexRolloutReaderState,
   type CodexRolloutStateRecord,
+  type CodexLaunchProofContext,
+  type CodexLaunchProof,
 } from "./agents/codex.js";
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
 import {
@@ -266,6 +270,7 @@ import {
   retireTelegramLegacyState,
   readServiceInstance,
   readSession,
+  archiveSessions,
   readInterfaceConsent,
   writeInterfaceConsent,
   recordTelegramMessages,
@@ -522,6 +527,7 @@ import {
   type TelegramReplyTarget,
   type TelegramSourceConfig,
   type TelegramSpawnOrigin,
+  type WorkItemTriggerOrigin,
   TELEGRAM_CHOICE_CALLBACK_PREFIX,
   TELEGRAM_MESSAGE_EVENT,
   type SharedMemoryEntryResponse,
@@ -531,6 +537,7 @@ import {
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
+  type DurableSpawnIntent,
   type CursorRestoreBoundary,
   type SessionSlots,
   type SessionStatus,
@@ -597,6 +604,7 @@ import {
   branchRefsExist,
   branchStatus,
   createWorktree,
+  deleteLocalBranch,
   findWorktreePathForBranch,
   hasUncommittedChanges,
   hasUnpushedCommits,
@@ -695,6 +703,8 @@ const PANE_WRITE_FENCE_MS = 30_000;
 // any realistic single inference. 300s makes a false flip on a live inference highly unlikely while
 // still clearing an indefinite-"working" hang.
 const CODEX_HUNG_AFTER_TOOLS_MS = 300_000;
+const TAGGED_NATIVE_LAUNCH_UNCERTAIN = "Tagged native launch remains uncertain";
+const QUEUED_TELEGRAM_TOPIC_UNRESOLVED = "Queued Telegram topic creation remains unresolved";
 const RESTORE_WARMUP_MS = 30_000;
 const RESTORE_SETTLE_MS = 2_000;
 const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
@@ -1311,7 +1321,15 @@ type ReadySessionForSend = {
 type PreparedSessionObservation = {
   session: SessionRecord;
   revision: number;
+  codex?: {
+    restoreLaunchId: string | undefined;
+    restoreStartedAt: string | undefined;
+    episode: string | undefined;
+    pane: CodexPaneOverride | undefined;
+  };
 };
+
+class CodexEvidenceInvalidatedError extends Error {}
 
 type SessionPreparationOptions = {
   operation?: RestoreOperationContext;
@@ -1408,6 +1426,7 @@ type MemberRuntimeSample = "live" | "dead" | "dead_looking" | "unknown";
 
 interface SessionStateResult {
   session: SessionRecord;
+  observation?: PreparedSessionObservation;
   runtime: SessionRuntimeSnapshot;
   state: SessionState;
   source: StateSource;
@@ -1703,6 +1722,32 @@ type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
 function nowIso(): string {
   return new Date().toISOString();
 }
+
+function codexLaunchAttempt(
+  agent: AgentName,
+  agentLaunchId: string,
+): Pick<SessionRecord, "codexRestoreStartedAt" | "codexRestoreLaunchId"> {
+  return agent === "codex"
+    ? { codexRestoreStartedAt: nowIso(), codexRestoreLaunchId: agentLaunchId }
+    : {};
+}
+
+function codexLaunchStartedAt(
+  session: Pick<SessionRecord, "agentLaunchId" | "codexRestoreLaunchId" | "codexRestoreStartedAt">,
+): number | null {
+  if (!session.agentLaunchId || session.codexRestoreLaunchId !== session.agentLaunchId) return null;
+  const at = session.codexRestoreStartedAt ? Date.parse(session.codexRestoreStartedAt) : NaN;
+  return Number.isFinite(at) && at <= Date.now() ? at : null;
+}
+
+type CodexPaneOverride = {
+  nativeId: string | undefined;
+  launchId: string | undefined;
+  startedAt: number | null;
+} & (
+  | { kind: "mcp"; expiresAt: number }
+  | { kind: "hard"; observedAt: number; detection: RateLimitDetection }
+);
 
 function canonicalSubscriptionStates(states: SessionState[]): SessionState[] {
   const requested = new Set(states);
@@ -3254,6 +3299,8 @@ interface SessionSpawnOptions {
   receiptToken?: symbol;
   /** Set by source adapters, never from the HTTP body. */
   telegramOrigin?: TelegramSpawnOrigin;
+  triggerOrigin?: WorkItemTriggerOrigin;
+  acceptQueued?: boolean;
   triggerBirthKey?: string;
 }
 
@@ -3275,9 +3322,34 @@ interface PreparedSpawn {
   resolvedBranch?: ResolvedSpawnBranch;
   reuseWorkspacePath?: string;
   placeholder: SessionRecord;
-  sessionToolDir: string;
   startupAttachments: StoredImageAttachment[];
   preflightBatchId: string;
+}
+
+class SpawnAdmissionCancelledError extends Error {
+  constructor(readonly reason: "disposed" | "killed") {
+    super(`Spawn admission cancelled: ${reason}`);
+  }
+}
+
+interface SpawnAdmissionWaiter {
+  projectId: string;
+  sessionId?: string;
+  replacingSessionId?: string;
+  reservation?: symbol;
+  resolve: (reservation: symbol) => void;
+  reject: (error: SpawnAdmissionCancelledError) => void;
+}
+
+interface BackgroundSpawnOptions {
+  modeResolution?: "strict" | "carried";
+  telegramOrigin?: TelegramSpawnOrigin;
+  triggerOrigin?: WorkItemTriggerOrigin;
+  triggerBirthKey?: string;
+  triggerBirthRequest?: SpawnSessionRequest;
+  promptKind?: UserInputKind;
+  validatedLaunchSelection?: AgentLaunchSelection;
+  closeoutOwnerTransfer?: boolean;
 }
 
 function resolveCarriedSpawnModel(
@@ -3559,6 +3631,17 @@ interface ResolvedTelegramNotice {
   source: TelegramSourceConfig;
 }
 
+interface PreparedTelegramTopicCreation {
+  kind: "create";
+  session: SessionRecord;
+  source: TelegramSourceConfig;
+  token: string;
+  target: TelegramReplyTarget;
+  stored: TelegramReplyTarget | null;
+  queued: boolean;
+  revision: number;
+}
+
 function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" | "slots">): string {
   const emoji = telegramStatusEmoji(session.state);
   const identity = `${session.id} ${session.agent}`;
@@ -3653,11 +3736,8 @@ export class SessionService {
   >();
   private readonly attentionStates = new Map<string, AttentionState>();
   private readonly lastObservedRunStates = new Map<string, SessionState>();
-  // Last live (scanPane:true) pane-scan confirmation of an active codex MCP
-  // permission dialog, keyed by session id, value = expiry epoch ms. Lets the
-  // scanPane:false dashboard tick apply the same needs_input demotion without
-  // forking a capture-pane (the tick's whole reason for existing).
-  private readonly codexMcpDialogOverrides = new Map<string, number>();
+  // Current Codex pane evidence; hard hits survive unavailable/background reads.
+  private readonly codexMcpDialogOverrides = new Map<string, CodexPaneOverride>();
   // Same pattern for an active claude compaction spinner. Compaction never
   // reaches the persisted claude status (it stays idle throughout, which the
   // scanPane:false dashboard tick maps to waiting), so without this the tick's
@@ -3819,6 +3899,18 @@ export class SessionService {
     { request: SpawnSessionRequest; result: Promise<SessionView> }
   >();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
+  private readonly durableSpawnRuns = new Set<string>();
+  private readonly durableSpawnIds = new Set<string>();
+  private durableRecoveryBusy = false;
+  private readonly spawnCompletions = new Map<
+    string,
+    {
+      promise: Promise<SessionView>;
+      resolve: (session: SessionView) => void;
+      reject: (error: Error) => void;
+    }
+  >();
+  private durableRecoveryCursor = 0;
   private readonly backgroundLoopRuns = new Set<Promise<void>>();
   // startQueuedDeliveryAttempt runs, drained by settleBackgroundSpawns.
   private readonly queuedDeliveryAttempts = new Set<Promise<boolean>>();
@@ -3826,6 +3918,9 @@ export class SessionService {
   // admission check until its spawning record is written. Other admissions
   // count the slot; a handoff passes its existing reservation to its successor.
   private readonly admissionReservations = new Map<symbol, string>();
+  private readonly spawnAdmissionWaiters = new Set<SpawnAdmissionWaiter>();
+  private readonly pendingSpawnIds = new Set<string>();
+  private admissionStopped = false;
   private readonly foregroundSpawnReceipts = new Map<symbol, ForegroundSpawnReceipt>();
   private readonly handoffsInFlight = new Map<
     string,
@@ -4090,6 +4185,14 @@ export class SessionService {
   }
 
   dispose(): void {
+    this.admissionStopped = true;
+    for (const waiter of this.spawnAdmissionWaiters) {
+      this.cancelSpawnAdmission(waiter, "disposed");
+    }
+    for (const completion of this.spawnCompletions.values()) {
+      completion.reject(new SpawnAdmissionCancelledError("disposed"));
+    }
+    this.spawnCompletions.clear();
     // Settles every queued lookup as skipped:cancelled so a prCheckRuns drain
     // cannot hang on a batch that will never flush.
     cancelPendingPrLookups();
@@ -4145,6 +4248,8 @@ export class SessionService {
   }
 
   private async runMemoryShedTick(): Promise<void> {
+    await this.recoverDurableSpawns();
+    this.drainSpawnAdmissions();
     // One host-memory read shared by both calls below: updateMemoryHold's
     // wake-context check and runMemoryShed's opening pressure sample would
     // otherwise each take their own /proc read microseconds apart for the
@@ -6159,6 +6264,10 @@ export class SessionService {
         (entry) => !removeIds.has(entry.id),
       ),
     }));
+    this.protectDurableSpawns();
+    queueMicrotask(() => {
+      if (!this.admissionStopped) void this.trackBackgroundLoop(this.recoverDurableSpawns());
+    });
     this.resumeSessionDelivery();
   }
 
@@ -6540,11 +6649,15 @@ export class SessionService {
       source: SessionRecord | null;
       receipt: SessionLifecycleSnapshot;
       identity?: boolean;
+      observation?: PreparedSessionObservation;
     }[],
     rebuild: (
       record: SessionRecord,
       listing: SessionRecord[] | undefined,
-    ) => Promise<{ view: T; source: SessionRecord | null } | undefined>,
+    ) => Promise<
+      | { view: T; source: SessionRecord | null; observation?: PreparedSessionObservation }
+      | undefined
+    >,
     // "refuse" throws 503 once the rebuild budget is spent; "lastBuild" returns
     // each still-moving row as last built with the receipt captured at that
     // build, and omits a pending session first seen on the final pass.
@@ -6554,6 +6667,17 @@ export class SessionService {
       signal?: AbortSignal | undefined;
     },
   ): Promise<(T & { lifecycle: SessionLifecycleSnapshot })[]> {
+    const publishable = (row: (typeof rows)[number]): boolean => {
+      try {
+        this.assertCodexObservation(row.observation);
+        return true;
+      } catch (error) {
+        if (options.onExhausted === "refuse" || !(error instanceof CodexEvidenceInvalidatedError))
+          throw error;
+        this.logListEnrichFailed(row.view.id, error);
+        return false;
+      }
+    };
     const rebuildExisting = async (record: SessionRecord, listing: SessionRecord[] | undefined) => {
       try {
         const rebuilt = await rebuild(record, listing);
@@ -6613,7 +6737,7 @@ export class SessionService {
           if (record) current.set(record.id, record);
         }
       }
-      live = live.filter((row) => current.has(row.view.id));
+      live = live.filter((row) => current.has(row.view.id) && publishable(row));
       const liveIds = new Set(live.map((row) => row.view.id));
       const pickup = listing
         ? [...current.values()].filter((record) => {
@@ -6662,6 +6786,8 @@ export class SessionService {
             }
             row.view = rebuilt.view;
             row.source = rebuilt.source;
+            if (rebuilt.observation) row.observation = rebuilt.observation;
+            else delete row.observation;
             row.receipt = receipts.get(id) as SessionLifecycleSnapshot;
             row.identity = false;
           }),
@@ -7614,8 +7740,13 @@ export class SessionService {
       const sessionId = key.split("\0")[0] ?? key;
       if (!liveIds.has(sessionId)) this.sidecarStartNoopIdentity.delete(key);
     }
-    for (const sessionId of this.codexMcpDialogOverrides.keys()) {
-      if (!liveIds.has(sessionId)) {
+    for (const [sessionId, entry] of this.codexMcpDialogOverrides) {
+      const current = readSession(this.config.dataDir, sessionId);
+      if (
+        !liveIds.has(sessionId) &&
+        (!current || isTerminalSessionStatus(current.status)) &&
+        this.codexMcpDialogOverrides.get(sessionId) === entry
+      ) {
         this.codexMcpDialogOverrides.delete(sessionId);
       }
     }
@@ -7819,10 +7950,11 @@ export class SessionService {
         nextDashboardIdleCursor = (this.dashboardIdleCursor + quota) % idle.length;
       }
 
+      const observations = due.map((session) => this.prepareSessionObservation(session));
       const enriched = await Promise.all(
-        due.map(async (session) => {
+        due.map(async (session, index) => {
           try {
-            return await this.enrichDashboard(session);
+            return await this.enrichDashboard(session, observations[index]);
           } catch (error) {
             if (
               error instanceof SessionResourceNotFoundError &&
@@ -7847,6 +7979,13 @@ export class SessionService {
         if (refreshedDuringTick(session.id)) continue;
         const view = enriched[index];
         if (view === "failed") continue;
+        try {
+          this.assertCodexObservation(observations[index]);
+        } catch (error) {
+          if (!(error instanceof CodexEvidenceInvalidatedError)) throw error;
+          this.logListEnrichFailed(session.id, error);
+          continue;
+        }
         if (!view) {
           this.dashboardCache.delete(session.id);
           this.dashboardEnrichedRecords.delete(session.id);
@@ -8364,7 +8503,9 @@ export class SessionService {
         this.dashboardCache.delete(record.id);
         return;
       }
-      const enriched = await this.enrichDashboard(record);
+      const observation = this.prepareSessionObservation(record);
+      const enriched = await this.enrichDashboard(record, observation);
+      this.assertCodexObservation(observation);
       if (this.dashboardRefreshVersions.get(record.id) !== version) return;
       if (!enriched) {
         this.dashboardCache.delete(record.id);
@@ -10860,6 +11001,7 @@ export class SessionService {
   private async sidecarViews(
     session: SessionRecord,
     project: ProjectConfig | undefined,
+    preparedObservation?: PreparedSessionObservation,
   ): Promise<SessionSidecarView[]> {
     const names = sessionSidecarNames(session, project);
     if (names.length === 0) return [];
@@ -10906,7 +11048,12 @@ export class SessionService {
       const ageSeconds = identity
         ? observation.processes.byPid.get(identity.pid)?.etimes
         : undefined;
-      const { exists, paneDead } = await this.sidecarPaneState(owner.id, name, session);
+      const { exists, paneDead } = await this.sidecarPaneState(
+        owner.id,
+        name,
+        session,
+        preparedObservation,
+      );
       const view: SessionSidecarView = {
         name,
         alive: exists && !paneDead,
@@ -11309,12 +11456,17 @@ export class SessionService {
       sessions.map(async (session) => {
         const receipt = this.lifecycle.snapshot(session.id);
         try {
-          const { view, source } = await this.enrichWithClassified(
+          const { view, source, classified } = await this.enrichWithClassified(
             session,
             claudeAccounts,
             allSessions,
           );
-          return { view, source, receipt };
+          return {
+            view,
+            source,
+            receipt,
+            ...(classified.observation ? { observation: classified.observation } : {}),
+          };
         } catch (error) {
           if (
             error instanceof SessionResourceNotFoundError &&
@@ -11760,6 +11912,34 @@ export class SessionService {
     const project = this.getProject(projectId);
     const agent = resolveSpawnAgent(requestedAgent, project, this.config);
     return loadProjectSuggestions(agent, project.path);
+  }
+
+  // Cleans up what a hard spawn failure of a work-item trigger block left
+  // behind before a replacement spawns: the session's own local branch (named
+  // after its id, never reused) and the errored record. Untagged or non-errored
+  // records are not touched. The record is archived whatever the delete does.
+  async discardFailedSpawn(sessionId: string): Promise<void> {
+    const record = readSession(this.config.dataDir, sessionId);
+    // launchCommand stays empty until the agent launches: a launched session
+    // is not a never-started spawn leftover.
+    if (!record || record.status !== "errored" || !record.triggerOrigin) return;
+    if (record.spawnIntent) return;
+    if (record.launchCommand !== "") return;
+    if (record.branch === record.id) {
+      try {
+        await deleteLocalBranch(this.getProject(record.project).path, record.branch);
+      } catch (error) {
+        this.logEvent("trigger.spawn.discard_failed", {
+          level: "warn",
+          sessionId,
+          projectId: record.project,
+          message: `Could not delete branch ${record.branch}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        });
+      }
+    }
+    archiveSessions(this.config.dataDir, [record]);
   }
 
   async branchStatus(projectId: string, name: string): Promise<BranchExistsResponse> {
@@ -12527,6 +12707,17 @@ export class SessionService {
   }
 
   private assertSpawnNotKilled(sessionId: string): void {
+    const current = readSession(this.config.dataDir, sessionId);
+    if (this.admissionStopped && current?.spawnIntent) {
+      throw new SpawnAdmissionCancelledError("disposed");
+    }
+    if (
+      current?.spawnReceipt &&
+      (isTerminalSessionStatus(current.status) ||
+        (!current.spawnIntent && current.status !== "running"))
+    ) {
+      throw new SpawnAdmissionCancelledError("killed");
+    }
     if (this.spawnWasKilled(sessionId)) {
       throw new Error(
         `Session ${sessionId} was ${readSession(this.config.dataDir, sessionId)?.status} while spawning`,
@@ -12773,18 +12964,49 @@ export class SessionService {
   // messages carry over. Check, read, and write run in one synchronous span.
   private writeSpawnRecord(record: SessionRecord): SessionRecord {
     this.assertSpawnNotKilled(record.id);
-    const carried = this.carrySpawnQueue(record);
+    const persisted = readSession(this.config.dataDir, record.id);
+    if (
+      record.spawnIntent &&
+      persisted?.spawnIntent?.telegramOrigin &&
+      (persisted.status !== "spawning" ||
+        persisted.error !== undefined ||
+        persisted.errorSource !== undefined ||
+        !isDeepStrictEqual(persisted.spawnReceipt, record.spawnReceipt) ||
+        !isDeepStrictEqual(
+          persisted.spawnIntent.telegramOrigin,
+          record.spawnIntent.telegramOrigin,
+        ) ||
+        !isDeepStrictEqual(persisted.spawnIntent.request, record.spawnIntent.request))
+    )
+      throw new InvalidSourceReplyInputError(persisted.error ?? QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
+    if (
+      record.spawnIntent &&
+      persisted?.spawnReceipt &&
+      (!persisted.spawnIntent ||
+        ((persisted.spawnIntent.phase === "launching" ||
+          persisted.spawnIntent.phase === "submitted") &&
+          record.agentLaunchId !== persisted.agentLaunchId))
+    ) {
+      throw new SpawnAdmissionCancelledError("killed");
+    }
+    const carried = this.carrySpawnQueue({ ...persisted, ...record });
     writeSession(this.config.dataDir, carried);
     return carried;
+  }
+
+  private assertSpawnAccountReady(accountId?: string): void {
+    if (!accountId) return;
+    const account = findAccount(this.config.dataDir, accountId);
+    if (!account || !isAccountReady(account)) {
+      throw new Error(
+        `Claude account ${accountId} is not ready (credentials or onboarding incomplete)`,
+      );
+    }
   }
 
   async spawn(request: SpawnSessionRequest, options?: SessionSpawnOptions): Promise<SessionView> {
     if (options?.triggerBirthKey) {
       const key = options.triggerBirthKey;
-      const existing = this.getTriggerBirth(request.project, key, request);
-      if (existing) {
-        return this.get(existing.id);
-      }
       const pending = this.triggerBirthsInFlight.get(key);
       if (pending) {
         if (!isDeepStrictEqual(pending.request, request)) {
@@ -12792,6 +13014,8 @@ export class SessionService {
         }
         return pending.result;
       }
+      const existing = this.findPersistedTriggerBirth(request.project, key, request);
+      if (existing) return this.get(existing.id);
       const original = structuredClone(request);
       // Defer execution until the identity is registered, before the first await.
       const result = Promise.resolve().then(() =>
@@ -12814,14 +13038,49 @@ export class SessionService {
     key: string,
     request?: SpawnSessionRequest,
   ): SessionRecord | undefined {
-    const existing = listSessions(this.config.dataDir).find(
+    const existing = this.findPersistedTriggerBirth(projectId, key, request);
+    if (!existing && this.triggerBirthsInFlight.has(key))
+      throw new Error("Trigger birth acceptance remains in flight");
+    return existing;
+  }
+
+  private findPersistedTriggerBirth(
+    projectId: string,
+    key: string,
+    request?: SpawnSessionRequest,
+  ): SessionRecord | undefined {
+    const candidates = listSessions(this.config.dataDir).filter(
       (session) => session.triggerBirthKey === key,
     );
+    if (candidates.length > 1) throw new Error("Trigger birth identity is ambiguous");
+    const existing = candidates[0];
     if (existing && existing.project !== projectId) {
       throw new Error("Trigger birth key already belongs to a different project");
     }
     if (existing && request && !isDeepStrictEqual(existing.triggerBirthRequest, request)) {
       throw new Error("Trigger birth key already belongs to a different spawn request");
+    }
+    for (const store of ["sessions", "sessions-archive"]) {
+      const root = join(this.config.dataDir, store);
+      if (!existsSync(root)) continue;
+      for (const project of readdirSync(root, { withFileTypes: true })) {
+        if (!project.isDirectory()) continue;
+        const directory = join(root, project.name);
+        for (const file of readdirSync(directory, { withFileTypes: true })) {
+          if (!file.isFile() || !file.name.endsWith(".json") || file.name.startsWith(".")) continue;
+          let raw: unknown;
+          try {
+            raw = JSON.parse(readFileSync(join(directory, file.name), "utf8")) as unknown;
+          } catch (error) {
+            throw new Error("Trigger birth inventory is unreadable", { cause: error });
+          }
+          if (!isRecord(raw) || typeof raw.id !== "string" || typeof raw.project !== "string")
+            throw new Error("Trigger birth inventory is incomplete");
+          if (raw.triggerBirthKey !== key) continue;
+          if (store === "sessions-archive" || raw.id !== existing?.id)
+            throw new Error("Trigger birth persisted binding remains uncertain");
+        }
+      }
     }
     return existing;
   }
@@ -12832,12 +13091,8 @@ export class SessionService {
   ): Promise<SessionView> {
     const triggerBirthRequest = options?.triggerBirthKey ? structuredClone(request) : undefined;
     request = normalizeShepherdSpawnRequest(request);
-    const admissionReservation =
-      options?.admissionReservation ??
-      this.reserveAdmission(request.project, "spawn", {
-        ...(options?.replacingSessionId ? { replacingSessionId: options.replacingSessionId } : {}),
-      });
-    let admissionReserved = true;
+    let admissionReservation = options?.admissionReservation;
+    let admissionReserved = admissionReservation !== undefined;
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -12896,6 +13151,34 @@ export class SessionService {
           this.config.models.codexHome,
         ));
       resolvedModel = launchSelection.model;
+      this.assertSpawnAccountReady(request.claudeAccountId);
+      if (request.branch && !reuseCtx) {
+        await resolveSpawnBranch({
+          repoPath: project.path,
+          requestBranch: request.branch,
+          requestBranchSource: "explicit",
+          worktree,
+          fallbackBranch: "",
+          project,
+        });
+      }
+      if (admissionReservation === undefined) {
+        this.drainSpawnAdmissions();
+        admissionReservation =
+          this.tryReserveSpawnAdmission(request.project, options?.replacingSessionId, false) ??
+          undefined;
+        if (admissionReservation === undefined) {
+          const accepted = await this.acceptBackgroundSpawn(request, {
+            ...options,
+            ...(triggerBirthRequest ? { triggerBirthRequest } : {}),
+            validatedLaunchSelection: launchSelection,
+          });
+          if (options?.acceptQueued) return accepted.session;
+          return await accepted.completion;
+        }
+        admissionReserved = true;
+      }
+      this.consumeSpawnAdmission(admissionReservation);
       if (
         request.preflightBatchId ||
         (!reuseCtx && !request.branch && worktree && project.preflight && prompt)
@@ -13070,6 +13353,7 @@ export class SessionService {
         ...(request.slots?.links?.length
           ? { slots: { links: normalizeSlotLinks(request.slots.links) } }
           : {}),
+        ...(options?.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
@@ -13232,14 +13516,7 @@ export class SessionService {
       // sharing one worktree bind to their own transcript instead of guessing
       // by newest mtime.
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
-      if (request.claudeAccountId) {
-        const account = findAccount(this.config.dataDir, request.claudeAccountId);
-        if (!account || !isAccountReady(account)) {
-          throw new Error(
-            `Claude account ${request.claudeAccountId} is not ready (credentials or onboarding incomplete)`,
-          );
-        }
-      }
+      this.assertSpawnAccountReady(request.claudeAccountId);
       const launchOptions = {
         ...planOptions,
         ...this.resolveClaudeAuthPlanOptions({
@@ -13310,9 +13587,16 @@ export class SessionService {
             : undefined;
 
         stage = "tmux.create";
-        await this.withWorkspaceLifecycleLocks(launchSessionId, async () =>
-          this.assertSpawnNotKilled(launchSessionId),
-        );
+        await this.withWorkspaceLifecycleLocks(launchSessionId, async () => {
+          this.assertSpawnNotKilled(launchSessionId);
+          runningRecord = { ...runningRecord, ...codexLaunchAttempt(launchAgent, agentLaunchId) };
+          if (launchAgent === "codex") {
+            const latest = readSession(this.config.dataDir, launchSessionId);
+            if (latest)
+              runningRecord = withQueuedMessages(runningRecord, queuedMessages(latest), true);
+            writeSession(this.config.dataDir, { ...runningRecord, status: "spawning" });
+          }
+        });
         launchCandidate = runningRecord;
         await createTmuxSession({
           sessionName: tmuxSession,
@@ -13478,6 +13762,7 @@ export class SessionService {
 
       return await this.enrich(updatedRecord);
     } catch (error) {
+      if (error instanceof SpawnAdmissionCancelledError) throw error;
       const failureReceipt = options?.receiptToken
         ? this.foregroundSpawnReceipts.get(options.receiptToken)
         : undefined;
@@ -13581,12 +13866,20 @@ export class SessionService {
             worktreePath: workspacePath,
             tmuxSession: sessionId,
             launchCommand: "",
+            ...(launchCandidate?.agent === "codex"
+              ? {
+                  agentLaunchId: launchCandidate.agentLaunchId,
+                  codexRestoreLaunchId: launchCandidate.codexRestoreLaunchId,
+                  codexRestoreStartedAt: launchCandidate.codexRestoreStartedAt,
+                }
+              : {}),
             status: "errored",
             preflightTokenUsage,
             createdAt: createdAt ?? nowIso(),
             updatedAt: nowIso(),
             error: message,
             errorSource: "other",
+            ...(options?.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
           };
           const killed = this.spawnWasKilled(sessionId);
           const persistedFailure = killed ? null : this.carrySpawnQueue(erroredRecord);
@@ -13659,7 +13952,7 @@ export class SessionService {
       });
       throw error;
     } finally {
-      if (admissionReserved) {
+      if (admissionReserved && admissionReservation !== undefined) {
         this.admissionReservations.delete(admissionReservation);
       }
       if (sessionId) {
@@ -13845,6 +14138,7 @@ export class SessionService {
         continue;
       }
       const classified = await this.classifySessionRecord(member, { scanPane: false });
+      this.assertCodexObservation(classified.observation);
       members.push({
         id: classified.session.id,
         agent: classified.session.agent,
@@ -14018,19 +14312,20 @@ export class SessionService {
     );
   }
 
-  private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
+  private async prepareBackgroundSpawn(
+    request: SpawnSessionRequest,
+    options: BackgroundSpawnOptions = {},
+  ): Promise<PreparedSpawn> {
     request = normalizeShepherdSpawnRequest(request);
-    const admissionReservation = this.reserveAdmission(request.project, "spawn");
-    let admissionReserved = true;
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
     let agent: SessionRecord["agent"] | undefined;
-    let worktree = false;
+    let worktree: boolean;
     let createdAt: string | undefined;
     let placeholderWritten = false;
     let ownedClaimBatchId: string | undefined;
-    let prompt = "";
+    let prompt: string;
     let steps: string[] | undefined;
     let mode: ResolvedSessionMode | undefined;
     let planMode: boolean;
@@ -14048,7 +14343,7 @@ export class SessionService {
     } | null = null;
     try {
       ({ project, prompt, steps, mode, planMode, restrictWrites, allowedTriggers, selfDestruct } =
-        this.resolveSpawnTarget(request));
+        this.resolveSpawnTarget(request, options.modeResolution ?? "strict"));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -14062,13 +14357,26 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = resolveSpawnAgent(request.agent, project, this.config);
-      launchSelection = await resolveSpawnRequestLaunchSelection(
-        request,
-        project,
-        agent,
-        this.config.models.codexHome,
-      );
+      launchSelection =
+        options.validatedLaunchSelection ??
+        (await resolveSpawnRequestLaunchSelection(
+          request,
+          project,
+          agent,
+          this.config.models.codexHome,
+        ));
       resolvedModel = launchSelection.model;
+      this.assertSpawnAccountReady(request.claudeAccountId);
+      if (worktree && request.branch && !reuseCtx) {
+        await resolveSpawnBranch({
+          repoPath: project.path,
+          requestBranch: request.branch,
+          requestBranchSource: "explicit",
+          worktree,
+          fallbackBranch: "",
+          project,
+        });
+      }
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
         request.project,
@@ -14106,6 +14414,9 @@ export class SessionService {
         restrictWrites,
         worktree,
         reusesWorkspace: reuseCtx !== null,
+        ...(options.closeoutOwnerTransfer !== undefined
+          ? { transferredOwner: options.closeoutOwnerTransfer }
+          : {}),
       });
       const preflightTokenUsage = await this.claimSpawnPreflightBatch(
         preflightBatchId,
@@ -14118,6 +14429,7 @@ export class SessionService {
         project: request.project,
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
+        ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(request.reasoningEffort !== undefined
           ? { reasoningEffort: request.reasoningEffort }
@@ -14147,14 +14459,58 @@ export class SessionService {
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
+      const startupAttachments = this.storeAttachments(
+        workspaceIdOf(placeholder),
+        request.attachments,
+      );
+      if (options.triggerOrigin) placeholder.triggerOrigin = options.triggerOrigin;
+      if (options.triggerBirthKey) {
+        placeholder.triggerBirthKey = options.triggerBirthKey;
+        placeholder.triggerBirthRequest = options.triggerBirthRequest ?? structuredClone(request);
+      }
+      const { attachments: _attachments, configPath: _configPath, ...storedRequest } = request;
+      placeholder.spawnReceipt = { version: 1, acceptedAt: createdAt };
+      placeholder.spawnIntent = {
+        version: 1,
+        phase: "queued",
+        request: {
+          ...storedRequest,
+          prompt,
+          agent,
+          ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+          ...(steps ? { steps } : {}),
+          planMode,
+          restrictWrites,
+          ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
+          ...(selfDestruct !== undefined ? { selfDestruct } : {}),
+        },
+        ...(mode ? { mode } : {}),
+        defaultBranch,
+        preflightBatchId,
+        startupAttachments: startupAttachments.map(({ id, name }) => ({ id, name })),
+        launchSelection,
+        submission: { state: "pending" },
+        ...(options.telegramOrigin ? { telegramOrigin: options.telegramOrigin } : {}),
+      };
+      if (startupAttachments.length > 0) {
+        placeholder.startupAttachmentIds = startupAttachments.map(({ id }) => id);
+      }
       this.assertReuseAnchorPresent(reuseCtx);
+      placeholder.todoLedgerVersion = 1;
+      ensureTodoLedger(this.config.dataDir, placeholder);
+      if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
+      this.pendingSpawnIds.add(sessionId);
+      this.spawnsInFlight.add(sessionId);
       writeSession(this.config.dataDir, placeholder);
       ownedClaimBatchId = undefined;
-      ensureTodoLedger(this.config.dataDir, placeholder);
-      placeholder.todoLedgerVersion = 1;
       placeholderWritten = true;
-      this.admissionReservations.delete(admissionReservation);
-      admissionReserved = false;
+      if (options.telegramOrigin) {
+        writeTelegramReplyTarget(this.config.dataDir, {
+          sessionId,
+          ...options.telegramOrigin,
+          lastInboundAt: nowIso(),
+        });
+      }
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -14172,12 +14528,8 @@ export class SessionService {
         },
       });
 
-      const startupAttachments = this.storeAttachments(
-        workspaceIdOf(placeholder),
-        request.attachments,
-      );
       this.logUserInput(sessionId, request.project, {
-        kind: "spawn_prompt",
+        kind: options.promptKind ?? "spawn_prompt",
         text: prompt,
         source: "spawn_background",
         attachments: startupAttachments,
@@ -14201,58 +14553,54 @@ export class SessionService {
         ...(resolvedBranch ? { resolvedBranch } : {}),
         ...(reuseCtx ? { reuseWorkspacePath: reuseCtx.workspacePath } : {}),
         placeholder,
-        sessionToolDir: this.prepareSessionTools(sessionId, agent, request.project),
         startupAttachments,
         preflightBatchId,
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (sessionId && project && placeholderWritten) {
-        const erroredWorkspaceId = reuseCtx?.workspaceId ?? sessionId;
-        const claimedPreflightUsage = readSession(
-          this.config.dataDir,
-          sessionId,
-        )?.preflightTokenUsage;
-        this.removeSessionArtifacts({
-          id: sessionId,
-          project: request.project,
-          workspaceId: erroredWorkspaceId,
-        });
-        const erroredBranchSource =
-          resolvedBranch?.branchSource ?? (worktree && explicitBranch ? "explicit" : undefined);
-        writeSession(this.config.dataDir, {
-          id: sessionId,
-          project: request.project,
-          workspaceId: erroredWorkspaceId,
-          agent: agent ?? resolveSpawnAgent(request.agent, project, this.config),
-          prompt,
-          branch: resolvedBranch?.branch ?? explicitBranch ?? sessionId,
-          ...(erroredBranchSource ? { branchSource: erroredBranchSource } : {}),
-          worktree,
-          worktreePath: reuseCtx
-            ? reuseCtx.workspacePath
-            : worktree
-              ? join(this.config.worktreeDir, request.project, sessionId)
-              : project.path,
-          tmuxSession: sessionId,
-          launchCommand: "",
-          status: "errored",
-          ...(claimedPreflightUsage ? { preflightTokenUsage: claimedPreflightUsage } : {}),
-          createdAt: createdAt ?? nowIso(),
-          updatedAt: nowIso(),
-          error: message,
-          errorSource: "other",
-        });
-      }
-      if (ownedClaimBatchId !== undefined && sessionId) {
+      if (sessionId) {
+        let current: SessionRecord | null;
         try {
-          if (readSession(this.config.dataDir, sessionId) === null) {
-            await this.preflightUsageStore.release(ownedClaimBatchId, request.project, sessionId);
-          }
+          current = readSession(this.config.dataDir, sessionId);
         } catch {
-          // Cleanup must not mask the spawn failure; an unreadable record keeps the claim.
+          // Unknown durability must retain the record, dependencies and batch claim.
+          throw error;
+        }
+        if (current !== null) {
+          this.pendingSpawnIds.delete(sessionId);
+          this.spawnsInFlight.delete(sessionId);
+          if (
+            current.id === sessionId &&
+            current.project === request.project &&
+            !this.admissionStopped
+          ) {
+            this.registerDurableSpawn(current);
+          }
+          throw error;
+        }
+        if (placeholderWritten) throw error;
+        this.pendingSpawnIds.delete(sessionId);
+        this.spawnsInFlight.delete(sessionId);
+        if (project) {
+          try {
+            this.removeSessionArtifacts({
+              id: sessionId,
+              project: request.project,
+              workspaceId: reuseCtx?.workspaceId ?? sessionId,
+            });
+          } catch {
+            // Preserve the preparation error even if uncommitted cleanup fails.
+          }
+        }
+        if (ownedClaimBatchId !== undefined) {
+          try {
+            await this.preflightUsageStore.release(ownedClaimBatchId, request.project, sessionId);
+          } catch {
+            // Cleanup must not mask the original spawn failure.
+          }
         }
       }
+      if (error instanceof SpawnAdmissionCancelledError) throw error;
+      const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.spawn.failed", {
         level: "error",
         ...(sessionId ? { sessionId } : {}),
@@ -14268,15 +14616,13 @@ export class SessionService {
       throw error;
     } finally {
       if (sessionId) this.spawnsPreparing.delete(sessionId);
-      if (admissionReserved) {
-        this.admissionReservations.delete(admissionReservation);
-      }
     }
   }
 
   private async runBackgroundSpawnAttempt(
     prepared: PreparedSpawn,
     attempt: number,
+    assertTopic?: (agentLaunchId?: string) => void,
   ): Promise<BackgroundSpawnAttemptResult> {
     const {
       agent,
@@ -14295,7 +14641,28 @@ export class SessionService {
     let initialPromptSent = false;
     let launchedRecord: SessionRecord | undefined;
     let launchCandidate: SessionRecord | undefined;
+    let stampedLaunchId: string | undefined;
+    const checkpoint: typeof this.checkpointSpawn = (...args) => {
+      assertTopic?.(stampedLaunchId);
+      return this.checkpointSpawn(...args);
+    };
+    const write = (record: SessionRecord): SessionRecord => {
+      assertTopic?.(stampedLaunchId);
+      return this.writeSpawnRecord(record);
+    };
     try {
+      this.assertSpawnNotKilled(sessionId);
+      assertTopic?.();
+      const current = readSession(this.config.dataDir, sessionId);
+      if (current?.spawnIntent) {
+        prepared.placeholder = { ...current };
+        if (current.error !== undefined && !assertTopic) {
+          delete prepared.placeholder.error;
+          delete prepared.placeholder.errorSource;
+          writeSession(this.config.dataDir, prepared.placeholder);
+        }
+      }
+      const sessionToolDir = this.prepareSessionTools(sessionId, agent, request.project);
       let resolvedBranch = prepared.resolvedBranch;
       let preflightOutcome: SpawnPreflightSelection["outcome"] | undefined;
       let preflightBranch: string | undefined;
@@ -14335,6 +14702,7 @@ export class SessionService {
               );
               this.assertSpawnNotKilled(sessionId);
               prepared.placeholder = { ...prepared.placeholder, preflightTokenUsage: usage };
+              assertTopic?.();
               writeSession(this.config.dataDir, prepared.placeholder);
               if (executionError) {
                 throw executionError instanceof Error
@@ -14424,7 +14792,7 @@ export class SessionService {
         ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
         updatedAt: nowIso(),
       };
-      this.writeSpawnRecord(spawnPlaceholder);
+      write(spawnPlaceholder);
       ensureTodoLedger(this.config.dataDir, spawnPlaceholder);
       prepared.placeholder = spawnPlaceholder;
 
@@ -14478,6 +14846,11 @@ export class SessionService {
         });
       }
 
+      prepared.placeholder = checkpoint(
+        { ...prepared.placeholder, worktreePath: workspacePath },
+        "workspace_ready",
+      );
+
       const firstStage = prepared.steps?.[0];
       const taskPrompt = buildSessionPrompt(prompt, planMode, restrictWrites, mode);
       const initialMessage =
@@ -14490,15 +14863,23 @@ export class SessionService {
         startupAttachments,
       );
       const sidecarNames = manualSidecarNames(resolveSessionSidecars({ agent }, project));
-      const spawnInitialMessage = buildInitialMessage(
-        [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
-        sidecarNames,
-        this.config.tags,
-        project.branchNaming?.regex,
-        selfDestruct,
-        telegramAgentInstructions(project, false),
-        githubPostInstructions(project, sessionId),
-      );
+      const composedInitialMessage = [...startupAttachmentLines, initialMessage]
+        .filter((line) => line.trim())
+        .join("\n");
+      const spawnInitialMessage = request.bareSpawnMessage
+        ? composedInitialMessage
+        : buildInitialMessage(
+            composedInitialMessage,
+            sidecarNames,
+            this.config.tags,
+            project.branchNaming?.regex,
+            selfDestruct,
+            telegramAgentInstructions(
+              project,
+              prepared.placeholder.spawnIntent?.telegramOrigin !== undefined,
+            ),
+            githubPostInstructions(project, sessionId),
+          );
       const budgetLimited = this.holdBudgetLimitedLaunch({
         ...spawnPlaceholder,
         worktreePath: workspacePath,
@@ -14506,7 +14887,7 @@ export class SessionService {
         updatedAt: nowIso(),
       });
       if (budgetLimited) {
-        prepared.placeholder = budgetLimited;
+        prepared.placeholder = this.retireDurableSpawn(budgetLimited);
         return "completed";
       }
 
@@ -14519,7 +14900,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         sessionId,
         worktreePath: workspacePath,
-        sessionToolDir: prepared.sessionToolDir,
+        sessionToolDir,
         ...prepared.launchSelection,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
@@ -14529,11 +14910,13 @@ export class SessionService {
       // Pin a native session id at launch for claude (fresh per attempt so a
       // retry never reuses a possibly-existing transcript id).
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
+      this.assertSpawnAccountReady(request.claudeAccountId);
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...withAgentModeOptions(
           withProjectAgentOptions(project, { ...hookSetup, ...prepared.launchSelection }),
           { planMode, restrictWrites },
         ),
+        ...this.resolveClaudeAuthPlanOptions(prepared.placeholder),
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -14576,7 +14959,7 @@ export class SessionService {
         projectId: request.project,
         sessionId,
         artifactsSessionId: workspaceIdOf(runningRecord),
-        sessionToolDir: prepared.sessionToolDir,
+        sessionToolDir,
         dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
@@ -14585,28 +14968,80 @@ export class SessionService {
       });
       const launchAgent = agent;
       const launchSessionId = sessionId;
+      const startupMessage = launchPlan.initialMessage.trim()
+        ? launchPlan.initialMessage
+        : spawnInitialMessage;
+      const startupBinding =
+        startupMessage.trim() && agent !== "opencode"
+          ? await createAgentSubmitAckBinding(agent, {
+              ...this.submitAckContext(runningRecord),
+              freshLaunch: true,
+            })
+          : null;
+      const launchSubmission = {
+        state: promptDeliveredOnLaunch && agent !== "opencode" ? "uncertain" : "pending",
+        ...(promptDeliveredOnLaunch && agent !== "opencode" ? { uncertainAt: nowIso() } : {}),
+        message: startupMessage,
+        ...(startupBinding ? { ackBaseline: startupBinding.baseline } : {}),
+      } satisfies DurableSpawnIntent["submission"];
       const launchAndBind = async (): Promise<void> => {
         const openCodeSessionBaseline =
           launchAgent === "opencode"
             ? await captureOpenCodeSessionBaseline(workspacePath)
             : undefined;
-
         stage = attempt > 1 ? `retry.${attempt}.tmux.create` : "tmux.create";
-        this.assertSpawnNotKilled(sessionId);
+        await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+          this.assertSpawnNotKilled(sessionId);
+          assertTopic?.();
+          const latest = readSession(this.config.dataDir, launchSessionId);
+          if (latest)
+            runningRecord = withQueuedMessages(runningRecord, queuedMessages(latest), true);
+          runningRecord = checkpoint(
+            {
+              ...runningRecord,
+              ...codexLaunchAttempt(launchAgent, agentLaunchId),
+              status: "spawning",
+            },
+            openCodeSessionBaseline || agent !== "opencode" ? "launching" : "workspace_ready",
+            openCodeSessionBaseline
+              ? { ...launchSubmission, state: promptDeliveredOnLaunch ? "uncertain" : "pending" }
+              : launchSubmission,
+          );
+          stampedLaunchId = agentLaunchId;
+          prepared.placeholder = runningRecord;
+        });
         launchCandidate = runningRecord;
         await createTmuxSession({
           sessionName: launchSessionId,
           cwd: workspacePath,
           launchCommand: launchPlan.launchCommand,
-          launchScriptDir: prepared.sessionToolDir,
+          launchScriptDir: sessionToolDir,
           env: sessionEnv,
+          beforeLaunch: () => {
+            this.assertSpawnNotKilled(sessionId);
+            assertTopic?.(agentLaunchId);
+          },
+        });
+        await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+          this.assertSpawnNotKilled(sessionId);
+          assertTopic?.(agentLaunchId);
         });
         const current = readSession(this.config.dataDir, runningRecord.id);
         if (current && hasQueuedMessages(current)) {
           runningRecord = withQueuedMessages(runningRecord, queuedMessages(current), true);
         }
         launchedRecord = runningRecord;
-        writeSession(this.config.dataDir, { ...runningRecord, status: "spawning" });
+        write(runningRecord);
+        const pane = await this.lookupPanePidQuietly(launchSessionId, { fresh: true });
+        if (pane.status === "ok" && pane.panePid !== null) {
+          const starttime = await readProcessStarttime(pane.panePid);
+          if (starttime !== null) {
+            runningRecord = checkpoint(runningRecord, "launching", undefined, {
+              pid: pane.panePid,
+              starttime,
+            });
+          }
+        }
         this.logEvent("session.spawn.tmux_created", {
           level: "info",
           sessionId: launchSessionId,
@@ -14636,7 +15071,7 @@ export class SessionService {
         if (openCodeSessionBaseline) {
           const agentSessionId = await waitForNewOpenCodeSessionId(openCodeSessionBaseline);
           runningRecord = { ...runningRecord, agentSessionId, updatedAt: nowIso() };
-          this.writeSpawnRecord(runningRecord);
+          write(runningRecord);
         }
       };
       if (launchAgent === "opencode") {
@@ -14647,11 +15082,26 @@ export class SessionService {
 
       this.assertSpawnNotKilled(sessionId);
       let firstStepSubmitted = false;
+      let openCodeLaunchConfirmed = false;
       if (launchPlan.initialMessage.trim()) {
         stage = attempt > 1 ? `retry.${attempt}.prompt.send` : "prompt.send";
         const launchSentAt = Date.now();
+        runningRecord = checkpoint(runningRecord, "launching", {
+          ...runningRecord.spawnIntent?.submission,
+          state: "uncertain",
+          uncertainAt: new Date(launchSentAt).toISOString(),
+          message: launchPlan.initialMessage,
+        });
         const sendOutcome = await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
           freshLaunch: true,
+          onPaneWritten: (ackBaseline, pastedAt) => {
+            runningRecord = checkpoint(runningRecord, "launching", {
+              state: "uncertain",
+              uncertainAt: new Date(pastedAt).toISOString(),
+              message: launchPlan.initialMessage,
+              ...(ackBaseline ? { ackBaseline } : {}),
+            });
+          },
         });
         runningRecord = this.withLaunchSubmitOutcome(runningRecord, sendOutcome, launchSentAt);
         initialPromptSent = true;
@@ -14667,12 +15117,12 @@ export class SessionService {
           },
         });
       } else if (promptDeliveredOnLaunch) {
-        if (
-          agent === "opencode" &&
-          (!runningRecord.agentSessionId ||
-            !(await waitForOpenCodeLaunchMessage(runningRecord.agentSessionId)))
-        ) {
-          throw new Error("OpenCode did not persist the launch prompt");
+        if (agent === "opencode") {
+          openCodeLaunchConfirmed =
+            runningRecord.agentSessionId !== undefined &&
+            (await waitForOpenCodeLaunchMessage(runningRecord.agentSessionId));
+          if (!openCodeLaunchConfirmed)
+            throw new Error("OpenCode did not persist the launch prompt");
         }
         initialPromptSent = true;
         firstStepSubmitted = true;
@@ -14689,6 +15139,18 @@ export class SessionService {
           },
         });
       }
+      const deliveryConfirmed =
+        !startupMessage.trim() ||
+        (launchPlan.initialMessage.trim()
+          ? firstStepSubmitted
+          : openCodeLaunchConfirmed ||
+            (startupBinding !== null && (await startupBinding.scan(startupMessage)).found));
+      if (deliveryConfirmed) {
+        runningRecord = checkpoint(runningRecord, "submitted", {
+          ...runningRecord.spawnIntent?.submission,
+          state: "confirmed",
+        });
+      }
       if (pipeline && firstStepSubmitted) {
         this.logFirstPipelineStepSent(sessionId, request.project, pipeline.steps.length);
       }
@@ -14698,6 +15160,7 @@ export class SessionService {
       if (latestBackground && hasQueuedMessages(latestBackground)) {
         runningRecord = withQueuedMessages(runningRecord, queuedMessages(latestBackground), true);
       }
+      runningRecord = { ...runningRecord, status: "running" };
       let updatedRecord = await this.captureAgentSessionId(
         runningRecord,
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
@@ -14708,8 +15171,24 @@ export class SessionService {
       if (latestAttempt && hasQueuedMessages(latestAttempt)) {
         updatedRecord = withQueuedMessages(updatedRecord, queuedMessages(latestAttempt), true);
       }
-      updatedRecord = this.writeSpawnRecord(updatedRecord);
+      updatedRecord = write(updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
+      if (updatedRecord.spawnIntent?.submission.state === "confirmed") {
+        if (updatedRecord.triggerOrigin) {
+          const settled = await this.withWorkspaceLifecycleLocks(updatedRecord.id, async () => {
+            const proven = await this.proveTaggedDurableLaunch(updatedRecord);
+            if (!proven) {
+              this.holdDurableSpawn(updatedRecord.id, TAGGED_NATIVE_LAUNCH_UNCERTAIN);
+              return null;
+            }
+            return proven.spawnIntent ? this.retireDurableSpawn(proven) : proven;
+          });
+          if (!settled) return "completed";
+          updatedRecord = settled;
+        } else {
+          updatedRecord = this.retireDurableSpawn(updatedRecord);
+        }
+      }
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
@@ -14729,17 +15208,58 @@ export class SessionService {
       }
       return "completed";
     } catch (error) {
+      const interrupted = readSession(this.config.dataDir, sessionId);
+      if (
+        error instanceof CodexEvidenceInvalidatedError &&
+        interrupted?.agent === "codex" &&
+        interrupted.triggerOrigin
+      )
+        return "completed";
+      if (
+        (this.admissionStopped && interrupted?.spawnIntent) ||
+        error instanceof SpawnAdmissionCancelledError ||
+        (interrupted?.spawnReceipt && !interrupted.spawnIntent)
+      ) {
+        if (!this.admissionStopped && launchCandidate) {
+          const cancelledLaunch = launchCandidate;
+          await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+            const current = readSession(this.config.dataDir, sessionId);
+            if (
+              current?.spawnReceipt &&
+              !current.spawnIntent &&
+              current.status !== "running" &&
+              current.agentLaunchId === cancelledLaunch.agentLaunchId
+            ) {
+              await this.killAgentPaneAndConfirmExit(cancelledLaunch, { failOnSurvivors: false });
+            }
+          });
+        }
+        return "completed";
+      }
+      if (assertTopic && (error instanceof InvalidSourceReplyInputError || !launchCandidate))
+        throw error;
+      let launchProvenAbsent = false;
+      if (interrupted?.spawnIntent?.phase === "launching") {
+        const evidence = await this.observeDurableRuntime(interrupted);
+        launchProvenAbsent =
+          evidence.state === "absent" && interrupted.spawnIntent.submission.state === "pending";
+        if (!launchProvenAbsent) {
+          this.holdDurableSpawn(sessionId, error instanceof Error ? error.message : String(error));
+          return "completed";
+        }
+      }
       const message = error instanceof Error ? error.message : String(error);
       const killedBeforeRetention = this.spawnWasKilled(sessionId);
       if (
         !killedBeforeRetention &&
+        !launchProvenAbsent &&
         !launchedRecord &&
         launchCandidate &&
         (await this.launchResourcesMayRemain(launchCandidate))
       ) {
         launchedRecord = launchCandidate;
       }
-      if (launchedRecord && !this.spawnWasKilled(sessionId)) {
+      if (launchedRecord && !launchProvenAbsent && !this.spawnWasKilled(sessionId)) {
         const retained = await this.retainLaunchedError(launchedRecord, error);
         if (retained.status !== "killed") return "completed";
       }
@@ -14771,12 +15291,20 @@ export class SessionService {
         });
       }
       if (!finalFailure) {
-        this.writeSpawnRecord({
-          ...prepared.placeholder,
+        const fresh = readSession(this.config.dataDir, sessionId);
+        if (!fresh?.spawnIntent)
+          throw new Error(`Missing launch intent for ${sessionId}`, { cause: error });
+        const { agentLaunchId: _launch, agentSessionId: _provider, ...unlaunched } = fresh;
+        const { pane: _pane, ...intent } = fresh.spawnIntent;
+        prepared.placeholder = {
+          ...unlaunched,
           launchCommand: "",
           status: "spawning",
           updatedAt: nowIso(),
-        });
+          spawnIntent: { ...intent, phase: "queued", submission: { state: "pending" } },
+        };
+        writeSession(this.config.dataDir, prepared.placeholder);
+        this.pendingSpawnIds.add(sessionId);
         this.logEvent("session.spawn.retrying", {
           level: "warn",
           sessionId,
@@ -14803,7 +15331,7 @@ export class SessionService {
             errorSource: "other",
           });
       if (persistedFailure) {
-        writeSession(this.config.dataDir, persistedFailure);
+        this.retireDurableSpawn(persistedFailure);
       }
       this.logEvent("session.spawn.failed", {
         level: "error",
@@ -14825,21 +15353,130 @@ export class SessionService {
   }
 
   async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
-    const prepared = await this.prepareBackgroundSpawn(request);
-    this.spawnsInFlight.add(prepared.placeholder.id);
-    const placeholder = await this.enrich(prepared.placeholder);
+    return (await this.acceptBackgroundSpawn(request)).session;
+  }
+
+  private async acceptBackgroundSpawn(
+    request: SpawnSessionRequest,
+    options?: BackgroundSpawnOptions,
+  ): Promise<{ session: SessionView; completion: Promise<SessionView> }> {
+    const prepared = await this.prepareBackgroundSpawn(request, options);
+    this.registerDurableSpawn(prepared.placeholder);
+    const acceptedView = Promise.resolve().then(() => this.enrich(prepared.placeholder));
+    const completion = this.startBackgroundSpawn(prepared, acceptedView);
+    const session = await Promise.race([acceptedView, completion]);
+    return { session, completion };
+  }
+
+  private startBackgroundSpawn(
+    prepared: PreparedSpawn,
+    acceptedView?: Promise<SessionView>,
+  ): Promise<SessionView> {
+    if (this.admissionStopped) {
+      const cancelled = Promise.reject<SessionView>(new SpawnAdmissionCancelledError("disposed"));
+      void cancelled.catch(() => {});
+      return cancelled;
+    }
+    const existing = this.spawnCompletions.get(prepared.sessionId);
+    if (this.durableSpawnRuns.has(prepared.sessionId)) {
+      if (!existing) throw new Error(`Missing spawn completion for ${prepared.sessionId}`);
+      return existing.promise;
+    }
+    this.durableSpawnRuns.add(prepared.sessionId);
+    if (!this.spawnCompletions.has(prepared.sessionId)) {
+      let resolve!: (session: SessionView) => void;
+      let reject!: (error: Error) => void;
+      const promise = new Promise<SessionView>((accept, fail) => {
+        resolve = accept;
+        reject = fail;
+      });
+      void promise.catch(() => {});
+      this.spawnCompletions.set(prepared.sessionId, { promise, resolve, reject });
+    }
+    const completion = this.spawnCompletions.get(prepared.sessionId);
+    if (!completion) throw new Error(`Missing spawn completion for ${prepared.sessionId}`);
     const run = new Promise<void>((resolve) => {
       queueMicrotask(() => {
         void (async () => {
           try {
+            if (acceptedView)
+              await Promise.race([
+                acceptedView.then(
+                  () => undefined,
+                  () => undefined,
+                ),
+                completion.promise,
+              ]);
+            const origin = prepared.placeholder.spawnIntent?.telegramOrigin;
+            const assertTopic = origin
+              ? this.queuedTelegramLaunchGuard(prepared.placeholder)
+              : undefined;
+            if (origin) {
+              await this.ensureTelegramTopic(prepared.sessionId, origin);
+              assertTopic?.();
+              const current = readSession(this.config.dataDir, prepared.sessionId);
+              if (!current?.spawnIntent) throw new SpawnAdmissionCancelledError("killed");
+              prepared.placeholder = { ...current };
+            }
             for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
-              const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
+              const reservation = await this.waitForSpawnAdmission(prepared.request.project, {
+                sessionId: prepared.sessionId,
+              });
+              try {
+                await this.withWorkspaceLifecycleLocks(prepared.sessionId, async () => {
+                  assertTopic?.();
+                  this.consumeSpawnAdmission(reservation);
+                  const current = readSession(this.config.dataDir, prepared.sessionId);
+                  if (!current || current.status !== "spawning") {
+                    throw new SpawnAdmissionCancelledError("killed");
+                  }
+                  this.pendingSpawnIds.delete(prepared.sessionId);
+                });
+              } finally {
+                this.admissionReservations.delete(reservation);
+              }
+              const result = await this.runBackgroundSpawnAttempt(prepared, attempt, assertTopic);
               if (result === "completed") {
                 return;
               }
             }
+          } catch (error) {
+            if (!(error instanceof SpawnAdmissionCancelledError)) {
+              this.holdDurableSpawn(
+                prepared.sessionId,
+                error instanceof Error ? error.message : String(error),
+              );
+            }
+            if (prepared.placeholder.spawnIntent?.telegramOrigin) {
+              this.spawnCompletions
+                .get(prepared.sessionId)
+                ?.reject(error instanceof Error ? error : new Error(String(error)));
+              this.spawnCompletions.delete(prepared.sessionId);
+            }
           } finally {
-            this.spawnsInFlight.delete(prepared.placeholder.id);
+            this.durableSpawnRuns.delete(prepared.sessionId);
+            const current = readSession(this.config.dataDir, prepared.sessionId);
+            if (!current?.spawnIntent) {
+              this.durableSpawnIds.delete(prepared.sessionId);
+              this.pendingSpawnIds.delete(prepared.sessionId);
+              this.spawnsInFlight.delete(prepared.sessionId);
+              const completion = this.spawnCompletions.get(prepared.sessionId);
+              if (current?.status === "running") {
+                if (completion) completion.resolve(await this.enrich(current));
+              } else {
+                completion?.reject(
+                  new Error(current?.error ?? `Spawn cancelled for ${prepared.sessionId}`),
+                );
+              }
+              this.spawnCompletions.delete(prepared.sessionId);
+            } else {
+              this.registerDurableSpawn(current);
+              if (current.status === "running") {
+                const completion = this.spawnCompletions.get(prepared.sessionId);
+                if (completion) completion.resolve(await this.enrich(current));
+                this.spawnCompletions.delete(prepared.sessionId);
+              }
+            }
             resolve();
           }
         })();
@@ -14847,7 +15484,595 @@ export class SessionService {
     });
     this.backgroundSpawnRuns.add(run);
     void run.finally(() => this.backgroundSpawnRuns.delete(run));
-    return placeholder;
+    return completion.promise;
+  }
+
+  private registerDurableSpawn(record: SessionRecord): void {
+    if (!record.spawnIntent || isTerminalSessionStatus(record.status)) return;
+    this.durableSpawnIds.add(record.id);
+    this.spawnsInFlight.add(record.id);
+    if (record.spawnIntent.phase === "queued" || record.spawnIntent.phase === "workspace_ready") {
+      this.pendingSpawnIds.add(record.id);
+    } else {
+      this.pendingSpawnIds.delete(record.id);
+    }
+  }
+
+  private protectDurableSpawns(): void {
+    for (const record of listSessions(this.config.dataDir).sort((a, b) =>
+      (a.spawnReceipt?.acceptedAt ?? a.createdAt).localeCompare(
+        b.spawnReceipt?.acceptedAt ?? b.createdAt,
+      ),
+    )) {
+      this.registerDurableSpawn(record);
+    }
+  }
+
+  private holdDurableSpawn(sessionId: string, reason: string): void {
+    if (this.admissionStopped) return;
+    const current = readSession(this.config.dataDir, sessionId);
+    if (!current?.spawnIntent || isTerminalSessionStatus(current.status)) return;
+    this.registerDurableSpawn(current);
+    if (
+      current.spawnIntent.telegramOrigin &&
+      (current.error !== undefined || current.errorSource !== undefined)
+    )
+      return;
+    if (current.agent === "codex" && current.triggerOrigin) {
+      if (
+        current.error &&
+        !(current.errorSource === "other" && current.error === TAGGED_NATIVE_LAUNCH_UNCERTAIN)
+      )
+        return;
+      reason = TAGGED_NATIVE_LAUNCH_UNCERTAIN;
+    }
+    if (current.error === reason) return;
+    writeSession(this.config.dataDir, { ...current, error: reason, errorSource: "other" });
+    this.logEvent("session.spawn.recovery_held", {
+      level: "warn",
+      sessionId,
+      projectId: current.project,
+      message: reason,
+    });
+  }
+
+  private async prepareRecoveredSpawn(record: SessionRecord): Promise<PreparedSpawn> {
+    const intent = record.spawnIntent;
+    if (!intent) throw new Error(`Missing launch intent for ${record.id}`);
+    const project = intent.request.bootstrap
+      ? this.resolveSpawnTarget(intent.request, "carried").project
+      : this.getProject(record.project);
+    this.assertSpawnAccountReady(record.claudeAccountId);
+    const startupAttachments = intent.startupAttachments.map(({ id, name }) => {
+      const artifact = readSessionArtifact(this.config.dataDir, workspaceIdOf(record), id);
+      if (!artifact) throw new Error(`Missing startup artifact ${id} for ${record.id}`);
+      return { id, name, path: artifact.path };
+    });
+    let reuseWorkspacePath =
+      intent.request.reuseWorkspaceSessionId || intent.phase !== "queued"
+        ? record.worktreePath
+        : undefined;
+    if (!reuseWorkspacePath && record.worktree && workspaceExists(record.worktreePath)) {
+      const ownedPath = await findWorktreePathForBranch(project.path, record.branch);
+      if (ownedPath && tryRealpath(ownedPath) === tryRealpath(record.worktreePath)) {
+        reuseWorkspacePath = record.worktreePath;
+      } else {
+        throw new Error(`Accepted workspace ownership is unresolved for ${record.id}`);
+      }
+    }
+    if (reuseWorkspacePath && !workspaceExists(reuseWorkspacePath)) {
+      throw new Error(`Missing accepted workspace for ${record.id}`);
+    }
+    return {
+      request: intent.request,
+      launchSelection: intent.launchSelection,
+      project,
+      agent: record.agent,
+      prompt: record.prompt,
+      ...(intent.request.steps ? { steps: intent.request.steps } : {}),
+      ...(intent.mode ? { mode: intent.mode } : {}),
+      planMode: record.planMode === true,
+      restrictWrites: record.restrictWrites === true,
+      ...(record.allowedTriggers ? { allowedTriggers: record.allowedTriggers } : {}),
+      ...(record.selfDestruct ? { selfDestruct: record.selfDestruct } : {}),
+      worktree: record.worktree,
+      defaultBranch: intent.defaultBranch,
+      sessionId: record.id,
+      ...(reuseWorkspacePath ? { reuseWorkspacePath } : {}),
+      ...(reuseWorkspacePath
+        ? {
+            resolvedBranch: {
+              branch: record.branch,
+              ...(record.branchSource ? { branchSource: record.branchSource } : {}),
+            },
+          }
+        : {}),
+      placeholder: record,
+      startupAttachments,
+      preflightBatchId: intent.preflightBatchId,
+    };
+  }
+
+  private checkpointSpawn(
+    record: SessionRecord,
+    phase: DurableSpawnIntent["phase"],
+    submission = record.spawnIntent?.submission,
+    pane = record.spawnIntent?.pane,
+  ): SessionRecord {
+    if (!record.spawnIntent || !submission)
+      throw new Error(`Missing launch intent for ${record.id}`);
+    return this.writeSpawnRecord({
+      ...record,
+      spawnIntent: { ...record.spawnIntent, phase, submission, ...(pane ? { pane } : {}) },
+    });
+  }
+
+  private retireDurableSpawn(record: SessionRecord, preserveCompletion = false): SessionRecord {
+    const { spawnIntent: _intent, ...settled } = record;
+    writeSession(this.config.dataDir, settled);
+    this.durableSpawnIds.delete(record.id);
+    this.pendingSpawnIds.delete(record.id);
+    this.spawnsInFlight.delete(record.id);
+    if (record.status !== "running" && !preserveCompletion) {
+      this.spawnCompletions
+        .get(record.id)
+        ?.reject(new Error(record.error ?? `Spawn cancelled for ${record.id}`));
+      this.spawnCompletions.delete(record.id);
+    }
+    return settled;
+  }
+
+  private hasTrustedTaggedNativeBinding(record: SessionRecord): boolean {
+    const intent = record.spawnIntent;
+    if (
+      record.agent !== "claude" ||
+      !record.agentSessionId ||
+      !record.agentLaunchId ||
+      !record.spawnReceipt ||
+      !intent ||
+      intent.submission.state !== "confirmed"
+    )
+      return false;
+    const word = String.raw`'(?:[^'\r\n\u0000]|'\\'')*'`;
+    const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+    const effort = intent.launchSelection.reasoningEffort;
+    const command = new RegExp(
+      `^(?:CLAUDE_CONFIG_DIR=${word} )?([A-Za-z0-9_./:+-]+)` +
+        " --dangerously-skip-permissions(?: --permission-mode plan)?" +
+        "(?: --disallowed-tools Edit --disallowed-tools Write --disallowed-tools MultiEdit --disallowed-tools NotebookEdit)?" +
+        `(?: --settings ${word})?(?: --mcp-config ${word} --strict-mcp-config)?` +
+        `(?: --model ${word})? --session-id '(${uuid})'` +
+        (effort === undefined ? "" : ` --effort ${effort}`) +
+        "$",
+    );
+    const match = command.exec(record.launchCommand);
+    return (
+      match !== null &&
+      match[0].length === record.launchCommand.length &&
+      match[1] === extractCommandBinary(record.launchCommand, "") &&
+      match[2] === record.agentSessionId
+    );
+  }
+
+  private assertTaggedCodexObservation(observation?: PreparedSessionObservation): void {
+    if (!observation) return;
+    const current = readSession(this.config.dataDir, observation.session.id);
+    if (
+      !current ||
+      !this.preparedSessionObservationCurrent(observation, current) ||
+      !isDeepStrictEqual(current.triggerOrigin, observation.session.triggerOrigin) ||
+      !isDeepStrictEqual(current.spawnReceipt, observation.session.spawnReceipt) ||
+      !isDeepStrictEqual(current.spawnIntent, observation.session.spawnIntent)
+    )
+      throw new CodexEvidenceInvalidatedError("Tagged Codex observation changed");
+  }
+
+  private async proveTaggedDurableLaunch(
+    record: SessionRecord,
+    prepared?: PreparedSessionObservation,
+  ): Promise<SessionRecord | null> {
+    const observation =
+      record.agent === "codex" ? (prepared ?? this.prepareSessionObservation(record)) : undefined;
+    this.assertTaggedCodexObservation(observation);
+    const owns = (current: SessionRecord): boolean =>
+      !this.admissionStopped &&
+      !isTerminalSessionStatus(current.status) &&
+      current.status === record.status &&
+      current.agentLaunchId === record.agentLaunchId &&
+      sameSessionRuntimeOwner(current, record) &&
+      isDeepStrictEqual(current.triggerOrigin, record.triggerOrigin) &&
+      isDeepStrictEqual(current.spawnReceipt, record.spawnReceipt) &&
+      isDeepStrictEqual(current.spawnIntent, record.spawnIntent);
+    const before = readSession(this.config.dataDir, record.id);
+    if (!before || !owns(before)) throw new SpawnAdmissionCancelledError("killed");
+    if (before.agent === "codex") {
+      if (before.status === "stopped") return null;
+      try {
+        const sinceMs = codexLaunchStartedAt(before);
+        if (
+          !before.triggerOrigin ||
+          !before.agentSessionId ||
+          !before.agentLaunchId ||
+          !before.spawnReceipt ||
+          before.spawnIntent?.submission.state !== "confirmed" ||
+          sinceMs === null
+        )
+          return null;
+        const native = await this.classifyCodexState(before, { sinceMs, nowMs: Date.now() });
+        this.assertTaggedCodexObservation(observation);
+        const hook = native.hookState;
+        const proof = native.launchProof;
+        if (
+          proof?.kind !== "primary" ||
+          proof.threadId !== before.agentSessionId ||
+          !hook ||
+          hook.agentLaunchId !== before.agentLaunchId ||
+          hook.turnId !== proof.turnId ||
+          Date.parse(hook.updatedAt) < sinceMs ||
+          Date.parse(hook.updatedAt) > Date.now()
+        )
+          return null;
+        const evidence = await this.observeDurableRuntime(before, observation);
+        this.assertTaggedCodexObservation(observation);
+        if (evidence.state !== "matching") return null;
+        const verified = await this.classifyCodexState(before, { sinceMs, nowMs: Date.now() });
+        this.assertTaggedCodexObservation(observation);
+        if (
+          !isDeepStrictEqual(verified.launchProof, proof) ||
+          !isDeepStrictEqual(verified.hookState, hook)
+        )
+          return null;
+        const finalHook = readAgentHookState(this.config.dataDir, record.id);
+        const current = readSession(this.config.dataDir, record.id);
+        this.assertTaggedCodexObservation(observation);
+        if (!current || !owns(current) || !isDeepStrictEqual(finalHook, hook)) return null;
+        const settled: SessionRecord = { ...current, status: "running" };
+        if (settled.errorSource === "other" && settled.error === TAGGED_NATIVE_LAUNCH_UNCERTAIN) {
+          delete settled.error;
+          delete settled.errorSource;
+        }
+        const retired = this.retireDurableSpawn(settled);
+        if (observation) this.advancePreparedObservation(observation, retired);
+        return retired;
+      } catch (error) {
+        this.assertTaggedCodexObservation(observation);
+        throw error;
+      }
+    }
+    if (!this.hasTrustedTaggedNativeBinding(before)) return null;
+    const evidence = await this.observeDurableRuntime(before);
+    const current = readSession(this.config.dataDir, record.id);
+    if (!current || !owns(current)) throw new SpawnAdmissionCancelledError("killed");
+    return evidence.state === "matching" ? current : null;
+  }
+
+  private async observeDurableRuntime(
+    record: SessionRecord,
+    observation?: PreparedSessionObservation,
+  ): Promise<
+    | { state: "absent" }
+    | { state: "matching"; generation: PaneGeneration }
+    | { state: "unknown"; reason: string }
+  > {
+    const intent = record.spawnIntent;
+    if (!intent || !record.agentLaunchId || !record.launchCommand) {
+      return { state: "unknown", reason: `Incomplete launch ownership for ${record.id}` };
+    }
+    const [pane, capture] = await Promise.all([
+      this.lookupPanePidQuietly(record.tmuxSession, { fresh: true }),
+      captureAgentProcessesForLaunch({
+        sessionId: record.id,
+        agentLaunchId: record.agentLaunchId,
+        processMatchers: agentProcessMatchers(record.agent, record.launchCommand),
+        recovery: true,
+      }),
+    ]);
+    this.assertTaggedCodexObservation(observation);
+    if (
+      pane.status !== "ok" ||
+      capture.status !== "ok" ||
+      (observation && capture.complete !== true)
+    ) {
+      return { state: "unknown", reason: `Launch ownership probe unavailable for ${record.id}` };
+    }
+    if (pane.panePid === null && capture.complete === true && capture.processes.length === 0) {
+      return { state: "absent" };
+    }
+    if (
+      pane.panePid === null ||
+      capture.processes.length === 0 ||
+      capture.processes.some((process) => process.identity === null)
+    ) {
+      return { state: "unknown", reason: `Launch ownership remains uncertain for ${record.id}` };
+    }
+    const starttime = await readProcessStarttime(pane.panePid);
+    this.assertTaggedCodexObservation(observation);
+    const paneCapture = await capturePaneAgentProcesses({
+      sessionId: record.id,
+      agentLaunchId: record.agentLaunchId,
+      panePid: pane.panePid,
+      paneDead: pane.paneDead,
+      processMatchers: agentProcessMatchers(record.agent, record.launchCommand),
+    });
+    this.assertTaggedCodexObservation(observation);
+    if (
+      starttime === null ||
+      paneCapture.status !== "ok" ||
+      !capture.processes.some((owned) =>
+        paneCapture.processes.some(
+          (child) => child.pid === owned.pid && child.identity === owned.identity,
+        ),
+      ) ||
+      (intent.pane && (intent.pane.pid !== pane.panePid || intent.pane.starttime !== starttime))
+    ) {
+      return { state: "unknown", reason: `Launch generation remains uncertain for ${record.id}` };
+    }
+    for (const process of capture.processes) {
+      const cwd = await readProcessCwd(process.pid);
+      this.assertTaggedCodexObservation(observation);
+      if (!cwd || tryRealpath(cwd) !== tryRealpath(record.worktreePath)) {
+        return {
+          state: "unknown",
+          reason: `Launch workspace identity remains uncertain for ${record.id}`,
+        };
+      }
+    }
+    return {
+      state: "matching",
+      generation: {
+        tmuxSession: record.tmuxSession,
+        panePid: pane.panePid,
+        processStarttime: starttime,
+      },
+    };
+  }
+
+  private async recoverDurableRuntime(record: SessionRecord): Promise<void> {
+    const intent = record.spawnIntent;
+    if (!intent) return;
+    const observation =
+      record.agent === "codex" && record.triggerOrigin
+        ? this.prepareSessionObservation(record)
+        : undefined;
+    this.assertTaggedCodexObservation(observation);
+    try {
+      if (observation && record.status === "stopped") return;
+      if (record.agent === "opencode" && !record.agentSessionId) {
+        throw new Error(`OpenCode native launch identity remains uncertain for ${record.id}`);
+      }
+      const evidence = await this.observeDurableRuntime(record, observation);
+      this.assertTaggedCodexObservation(observation);
+      if (evidence.state === "unknown") throw new Error(evidence.reason);
+      const openCodeLaunchConfirmed =
+        record.agent === "opencode" &&
+        record.agentSessionId !== undefined &&
+        (await waitForOpenCodeLaunchMessage(record.agentSessionId, 0));
+      if (evidence.state === "absent") {
+        if (observation && intent.submission.state !== "pending")
+          throw new Error(TAGGED_NATIVE_LAUNCH_UNCERTAIN);
+        await this.withWorkspaceLifecycleLocks(record.id, async () => {
+          this.assertTaggedCodexObservation(observation);
+          const current = readSession(this.config.dataDir, record.id);
+          if (
+            !current?.spawnIntent ||
+            isTerminalSessionStatus(current.status) ||
+            current.agentLaunchId !== record.agentLaunchId
+          )
+            return;
+          const submission = current.spawnIntent.submission;
+          if (submission.state !== "pending") {
+            const binding = submission.ackBaseline
+              ? await resumeAgentSubmitAckBinding(
+                  current.agent,
+                  this.submitAckContext(current),
+                  submission.ackBaseline,
+                )
+              : null;
+            this.assertTaggedCodexObservation(observation);
+            if (
+              submission.state === "confirmed" ||
+              openCodeLaunchConfirmed ||
+              (binding && submission.message && (await binding.scan(submission.message)).found)
+            ) {
+              const stopped: SessionRecord = { ...current, status: "stopped", updatedAt: nowIso() };
+              delete stopped.error;
+              delete stopped.errorSource;
+              const settled = this.retireDurableSpawn(stopped, true);
+              const completion = this.spawnCompletions.get(record.id);
+              if (completion) completion.resolve(await this.enrich(settled));
+              this.spawnCompletions.delete(record.id);
+              return;
+            }
+            throw new Error(`Startup submission remains uncertain for ${record.id}`);
+          }
+          const { agentLaunchId: _launch, agentSessionId: _provider, ...unlaunched } = current;
+          const { pane: _pane, ...baseIntent } = current.spawnIntent;
+          const resumed: SessionRecord = {
+            ...unlaunched,
+            launchCommand: "",
+            status: "spawning",
+            spawnIntent: {
+              ...baseIntent,
+              phase: "workspace_ready",
+              submission: { state: "pending" },
+            },
+          };
+          if (!observation) {
+            delete resumed.error;
+            delete resumed.errorSource;
+          }
+          writeSession(this.config.dataDir, resumed);
+          if (observation) this.advancePreparedObservation(observation, resumed);
+          this.registerDurableSpawn(resumed);
+          void this.startBackgroundSpawn(await this.prepareRecoveredSpawn(resumed));
+        });
+        return;
+      }
+      const { panePid, processStarttime: starttime } = evidence.generation;
+      if (intent.submission.state !== "confirmed" && !openCodeLaunchConfirmed) {
+        const binding = intent.submission.ackBaseline
+          ? await resumeAgentSubmitAckBinding(
+              record.agent,
+              this.submitAckContext(record),
+              intent.submission.ackBaseline,
+            )
+          : null;
+        this.assertTaggedCodexObservation(observation);
+        const message = intent.submission.message;
+        if (intent.submission.state === "pending" && message?.trim()) {
+          const freshBinding = await createAgentSubmitAckBinding(record.agent, {
+            ...this.submitAckContext(record),
+            freshLaunch: true,
+          });
+          this.assertTaggedCodexObservation(observation);
+          if (!freshBinding)
+            throw new Error(`Startup provider identity unavailable for ${record.id}`);
+          const generation = {
+            tmuxSession: record.tmuxSession,
+            panePid,
+            processStarttime: starttime,
+          };
+          const uncertain = await this.withWorkspaceLifecycleLocks(record.id, async () => {
+            this.assertTaggedCodexObservation(observation);
+            const current = readSession(this.config.dataDir, record.id);
+            if (
+              !current?.spawnIntent ||
+              isTerminalSessionStatus(current.status) ||
+              current.agentLaunchId !== record.agentLaunchId ||
+              !(await this.paneGenerationMatches(current, generation))
+            ) {
+              throw new SpawnAdmissionCancelledError("killed");
+            }
+            this.assertTaggedCodexObservation(observation);
+            const checkpoint = this.checkpointSpawn(current, "launching", {
+              state: "uncertain",
+              uncertainAt: nowIso(),
+              message,
+              ackBaseline: freshBinding.baseline,
+            });
+            if (observation) this.advancePreparedObservation(observation, checkpoint);
+            return checkpoint;
+          });
+          const sent = await this.sendAgentMessageWithGeneration(
+            uncertain,
+            message,
+            { freshLaunch: true },
+            (actual) => {
+              this.assertTaggedCodexObservation(observation);
+              const latest = readSession(this.config.dataDir, record.id);
+              if (
+                this.admissionStopped ||
+                !latest?.spawnIntent ||
+                isTerminalSessionStatus(latest.status) ||
+                latest.agentLaunchId !== record.agentLaunchId ||
+                actual.panePid !== generation.panePid ||
+                actual.processStarttime !== generation.processStarttime
+              )
+                throw new SpawnAdmissionCancelledError("killed");
+            },
+          );
+          this.assertTaggedCodexObservation(observation);
+          if (sent.outcome !== "submitted")
+            throw new Error(`Startup submission remains uncertain for ${record.id}`);
+        } else if (!binding || !message || !(await binding.scan(message)).found) {
+          throw new Error(`Startup submission remains uncertain for ${record.id}`);
+        }
+      }
+      this.assertTaggedCodexObservation(observation);
+      await this.withWorkspaceLifecycleLocks(record.id, async () => {
+        this.assertTaggedCodexObservation(observation);
+        const current = readSession(this.config.dataDir, record.id);
+        if (
+          this.admissionStopped ||
+          !current?.spawnIntent ||
+          isTerminalSessionStatus(current.status) ||
+          current.agentLaunchId !== record.agentLaunchId
+        )
+          return;
+        if (
+          !(await this.paneGenerationMatches(current, {
+            tmuxSession: current.tmuxSession,
+            panePid,
+            processStarttime: starttime,
+          }))
+        )
+          throw new Error(`Launch generation changed for ${record.id}`);
+        this.assertTaggedCodexObservation(observation);
+        const project = this.getProject(current.project);
+        let launched: SessionRecord = { ...current, status: "running", updatedAt: nowIso() };
+        delete launched.submitUnconfirmedAt;
+        if (!observation) {
+          delete launched.error;
+          delete launched.errorSource;
+        } else {
+          launched = this.checkpointSpawn(launched, "submitted", {
+            ...launched.spawnIntent?.submission,
+            state: "confirmed",
+          });
+          this.advancePreparedObservation(observation, launched);
+        }
+        launched = await this.startAutoStartSidecars(launched, project);
+        this.assertTaggedCodexObservation(observation);
+        if (observation) launched = readSession(this.config.dataDir, record.id) ?? launched;
+        launched = this.applyRequestedStateSubscriptions(launched, intent.request.subscriptions);
+        this.assertTaggedCodexObservation(observation);
+        if (launched.triggerOrigin) {
+          if (!observation)
+            launched = this.checkpointSpawn(launched, "submitted", {
+              ...launched.spawnIntent?.submission,
+              state: "confirmed",
+            });
+          const proven = await this.proveTaggedDurableLaunch(launched, observation);
+          if (!proven) {
+            this.holdDurableSpawn(record.id, TAGGED_NATIVE_LAUNCH_UNCERTAIN);
+            return;
+          }
+          launched = proven;
+        }
+        if (launched.spawnIntent) launched = this.retireDurableSpawn(launched);
+        const completion = this.spawnCompletions.get(record.id);
+        if (completion) completion.resolve(await this.enrich(launched));
+        this.spawnCompletions.delete(record.id);
+        if (this.shouldRunDelivery(launched)) this.scheduleDeliveryRunner(launched.id);
+      });
+    } catch (error) {
+      this.assertTaggedCodexObservation(observation);
+      throw error;
+    }
+  }
+
+  private async recoverDurableSpawns(): Promise<void> {
+    if (this.admissionStopped || this.durableRecoveryBusy) return;
+    const ids = [...this.durableSpawnIds].filter((id) => !this.durableSpawnRuns.has(id));
+    if (ids.length === 0) return;
+    const sessionId = ids[this.durableRecoveryCursor++ % ids.length];
+    if (!sessionId) return;
+    const record = readSession(this.config.dataDir, sessionId);
+    if (!record?.spawnIntent || isTerminalSessionStatus(record.status)) {
+      this.durableSpawnIds.delete(sessionId);
+      this.pendingSpawnIds.delete(sessionId);
+      this.spawnsInFlight.delete(sessionId);
+      return;
+    }
+    this.durableRecoveryBusy = true;
+    try {
+      if (record.spawnIntent.phase === "queued" || record.spawnIntent.phase === "workspace_ready") {
+        void this.startBackgroundSpawn(await this.prepareRecoveredSpawn(record));
+      } else {
+        await this.recoverDurableRuntime(record);
+      }
+    } catch (error) {
+      if (
+        !(
+          error instanceof CodexEvidenceInvalidatedError &&
+          record.agent === "codex" &&
+          record.triggerOrigin
+        )
+      )
+        this.holdDurableSpawn(sessionId, error instanceof Error ? error.message : String(error));
+    } finally {
+      this.durableRecoveryBusy = false;
+    }
   }
 
   async spawnShepherd(
@@ -15472,9 +16697,80 @@ export class SessionService {
     sessionId: string,
     origin?: TelegramSpawnOrigin,
   ): Promise<TelegramConversation> {
+    if (this.isQueuedTelegramTopicSpawn(readSession(this.config.dataDir, sessionId))) {
+      const run = this.ensureQueuedTelegramTopic(sessionId, origin);
+      void this.trackBackgroundLoop(
+        run.then(
+          () => undefined,
+          () => undefined,
+        ),
+      );
+      return run;
+    }
     return this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.ensureTelegramTopicLocked(sessionId, origin),
     );
+  }
+
+  private isQueuedTelegramTopicSpawn(session: SessionRecord | null): boolean {
+    return (
+      session?.spawnIntent?.telegramOrigin !== undefined &&
+      (session.spawnIntent.phase === "queued" || session.spawnIntent.phase === "workspace_ready")
+    );
+  }
+
+  private queuedTelegramLaunchGuard(
+    session: SessionRecord,
+  ): ((agentLaunchId?: string) => void) | undefined {
+    const origin = session.spawnIntent?.telegramOrigin;
+    if (!origin) return undefined;
+    const source = this.config.projects[origin.projectId]?.sources[origin.sourceId];
+    if (!source || source.type !== "telegram" || source.chatId === undefined || source.chatId >= 0)
+      return undefined;
+    const token = source.token;
+    const chatId = source.chatId;
+    const owner = structuredClone(session);
+    const revision = this.lifecycle.snapshot(session.id).revision;
+    return (agentLaunchId) => {
+      const current = readSession(this.config.dataDir, session.id);
+      const target = current ? this.telegramReplyTarget(current) : null;
+      const currentSource = this.config.projects[origin.projectId]?.sources[origin.sourceId];
+      if (
+        this.admissionStopped ||
+        !current ||
+        current.status !== "spawning" ||
+        !current.spawnIntent ||
+        current.error !== undefined ||
+        current.errorSource !== undefined ||
+        this.lifecycle.snapshot(session.id).revision !== revision ||
+        !isDeepStrictEqual(current.spawnReceipt, owner.spawnReceipt) ||
+        !isDeepStrictEqual(current.spawnIntent.request, owner.spawnIntent?.request) ||
+        !isDeepStrictEqual(current.spawnIntent.telegramOrigin, owner.spawnIntent?.telegramOrigin) ||
+        (agentLaunchId !== undefined && current.agentLaunchId !== agentLaunchId) ||
+        currentSource !== source ||
+        source.token !== token ||
+        source.chatId !== chatId ||
+        !target ||
+        target.sessionId !== session.id ||
+        target.projectId !== origin.projectId ||
+        target.sourceId !== origin.sourceId ||
+        target.chatId !== chatId ||
+        this.telegramTopicHasOtherOwner(current, target)
+      )
+        throw new InvalidSourceReplyInputError(current?.error ?? QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
+    };
+  }
+
+  private async ensureQueuedTelegramTopic(
+    sessionId: string,
+    origin?: TelegramSpawnOrigin,
+  ): Promise<TelegramConversation> {
+    const prepared = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      if (!this.isQueuedTelegramTopicSpawn(readSession(this.config.dataDir, sessionId)))
+        throw new InvalidSourceReplyInputError(QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
+      return this.prepareTelegramTopic(sessionId, origin, true);
+    });
+    return prepared.kind === "create" ? this.createPreparedTelegramTopic(prepared) : prepared;
   }
 
   private telegramAssignmentMatches(
@@ -15495,10 +16791,23 @@ export class SessionService {
     sessionId: string,
     origin?: TelegramSpawnOrigin,
   ): Promise<TelegramConversation> {
+    if (this.isQueuedTelegramTopicSpawn(readSession(this.config.dataDir, sessionId)))
+      throw new InvalidSourceReplyInputError(QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
+    const prepared = this.prepareTelegramTopic(sessionId, origin, false);
+    return prepared.kind === "create" ? this.createPreparedTelegramTopic(prepared) : prepared;
+  }
+
+  private prepareTelegramTopic(
+    sessionId: string,
+    origin: TelegramSpawnOrigin | undefined,
+    queued: boolean,
+  ): TelegramConversation | PreparedTelegramTopicCreation {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     if (isTerminalSessionStatus(session.status))
       throw new InvalidSourceReplyInputError(`Session ${sessionId} is ${session.status}`);
+    if (queued && (this.admissionStopped || session.status !== "spawning"))
+      throw new InvalidSourceReplyInputError(session.error ?? QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
     const stored = readTelegramReplyTarget(this.config.dataDir, sessionId);
     if (
       origin &&
@@ -15521,6 +16830,8 @@ export class SessionService {
       source.chatId === undefined ||
       source.chatId >= 0
     ) {
+      if (queued && session.error === QUEUED_TELEGRAM_TOPIC_UNRESOLVED)
+        throw new InvalidSourceReplyInputError(QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
       retireTelegramLegacyState(this.config.dataDir, projectId, sourceId, sessionId);
       writeTelegramReplyTarget(this.config.dataDir, {
         sessionId,
@@ -15530,13 +16841,24 @@ export class SessionService {
       });
       return { kind: "disabled" };
     }
+    if (
+      queued &&
+      (session.error !== undefined || session.errorSource !== undefined) &&
+      !(session.error === QUEUED_TELEGRAM_TOPIC_UNRESOLVED && session.errorSource === "other")
+    )
+      throw new InvalidSourceReplyInputError(session.error ?? QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
     const existing = this.telegramReplyTarget(session, stored);
     if (
       existing &&
+      (!queued ||
+        (existing.sessionId === sessionId &&
+          existing.projectId === session.spawnIntent?.telegramOrigin?.projectId &&
+          existing.sourceId === session.spawnIntent.telegramOrigin.sourceId)) &&
       existing.messageThreadId !== undefined &&
       !this.telegramTopicHasOtherOwner(session, existing)
     ) {
       retireTelegramLegacyState(this.config.dataDir, projectId, sourceId, sessionId, existing);
+      if (queued) this.clearQueuedTelegramTopicHold(session);
       return {
         kind: "topic",
         projectId,
@@ -15545,66 +16867,142 @@ export class SessionService {
         messageThreadId: existing.messageThreadId,
       };
     }
+    if (queued) {
+      const partial =
+        stored?.messageThreadId !== undefined ||
+        [...readTelegramBindings(this.config.dataDir, projectId, sourceId).values()].some(
+          (binding) => binding.sessionId === sessionId,
+        );
+      if (session.error === QUEUED_TELEGRAM_TOPIC_UNRESOLVED)
+        throw new InvalidSourceReplyInputError(QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
+      writeSession(this.config.dataDir, {
+        ...session,
+        error: QUEUED_TELEGRAM_TOPIC_UNRESOLVED,
+        errorSource: "other",
+      });
+      if (partial) throw new InvalidSourceReplyInputError(QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
+    }
     const name = telegramTopicName({
       id: session.id,
       agent: session.agent,
       state: session.status === "errored" ? "error" : "working",
       ...(session.slots ? { slots: session.slots } : {}),
     });
-    const chatId = source.chatId;
-    const creationSource = { token: source.token };
-    const topicId = await createTelegramTopic(creationSource, chatId, name);
-    const target: TelegramReplyTarget = {
-      sessionId,
-      projectId,
-      sourceId,
-      chatId,
-      messageThreadId: topicId,
-      topicName: name,
-      updatedAt: nowIso(),
-    };
-    try {
-      const current = readSession(this.config.dataDir, sessionId);
-      const currentSource = this.config.projects[projectId]?.sources[sourceId];
-      if (
-        !current ||
-        isTerminalSessionStatus(current.status) ||
-        !currentSource ||
-        currentSource.type !== "telegram" ||
-        currentSource.chatId !== chatId ||
-        currentSource.token !== creationSource.token ||
-        this.telegramTopicHasOtherOwner(current, target) ||
-        telegramTopicIsDeleting(this.config.dataDir, target.chatId, topicId)
-      )
-        throw new InvalidSourceReplyInputError("Telegram conversation changed during creation");
-      this.bindTelegramChatIfFree(target, sessionId);
-      writeTelegramReplyTarget(this.config.dataDir, target);
-      retireTelegramLegacyState(this.config.dataDir, projectId, sourceId, sessionId, target);
-      return {
-        kind: "topic",
+    return {
+      kind: "create",
+      session: structuredClone(session),
+      source,
+      token: source.token,
+      target: {
+        sessionId,
         projectId,
         sourceId,
-        chatId: target.chatId,
-        messageThreadId: topicId,
+        chatId: source.chatId,
+        topicName: name,
+        updatedAt: nowIso(),
+      },
+      stored: stored ? structuredClone(stored) : null,
+      queued,
+      revision: this.lifecycle.snapshot(sessionId).revision,
+    };
+  }
+
+  private clearQueuedTelegramTopicHold(session: SessionRecord): void {
+    if (session.error !== QUEUED_TELEGRAM_TOPIC_UNRESOLVED || session.errorSource !== "other")
+      return;
+    const { error: _error, errorSource: _source, ...cleared } = session;
+    writeSession(this.config.dataDir, cleared);
+  }
+
+  private async createPreparedTelegramTopic(
+    prepared: PreparedTelegramTopicCreation,
+  ): Promise<TelegramConversation> {
+    const { session, queued, token } = prepared;
+    const { sessionId, projectId, sourceId, chatId } = prepared.target;
+    const creationSource = { token };
+    const topicId = await createTelegramTopic(
+      creationSource,
+      chatId,
+      prepared.target.topicName ?? "",
+    );
+    const target = { ...prepared.target, messageThreadId: topicId };
+    const publication = { bound: false, written: false, complete: false };
+    try {
+      const publish = async (): Promise<TelegramConversation> => {
+        const current = readSession(this.config.dataDir, sessionId);
+        const currentSource = this.config.projects[projectId]?.sources[sourceId];
+        if (
+          !current ||
+          isTerminalSessionStatus(current.status) ||
+          !currentSource ||
+          currentSource.type !== "telegram" ||
+          currentSource.chatId !== chatId ||
+          currentSource.token !== creationSource.token ||
+          (queued &&
+            (this.admissionStopped ||
+              current.status !== "spawning" ||
+              this.lifecycle.snapshot(sessionId).revision !== prepared.revision ||
+              !isDeepStrictEqual(current.spawnIntent, session.spawnIntent) ||
+              !isDeepStrictEqual(current.spawnReceipt, session.spawnReceipt) ||
+              !isDeepStrictEqual(
+                current.spawnIntent?.telegramOrigin,
+                session.spawnIntent?.telegramOrigin,
+              ) ||
+              current.error !== QUEUED_TELEGRAM_TOPIC_UNRESOLVED ||
+              current.errorSource !== "other" ||
+              currentSource !== prepared.source ||
+              !isDeepStrictEqual(
+                readTelegramReplyTarget(this.config.dataDir, sessionId),
+                prepared.stored,
+              ))) ||
+          this.telegramTopicHasOtherOwner(current, target) ||
+          telegramTopicIsDeleting(this.config.dataDir, target.chatId, topicId)
+        )
+          throw new InvalidSourceReplyInputError("Telegram conversation changed during creation");
+        this.bindTelegramChatIfFree(target, sessionId);
+        publication.bound = true;
+        writeTelegramReplyTarget(this.config.dataDir, target);
+        publication.written = true;
+        publication.complete = true;
+        retireTelegramLegacyState(this.config.dataDir, projectId, sourceId, sessionId, target);
+        if (queued) this.clearQueuedTelegramTopicHold(current);
+        return {
+          kind: "topic",
+          projectId,
+          sourceId,
+          chatId: target.chatId,
+          messageThreadId: topicId,
+        };
       };
+      return queued ? await this.withWorkspaceLifecycleLocks(sessionId, publish) : await publish();
     } catch (error) {
-      try {
-        const bindings = readTelegramBindings(this.config.dataDir, projectId, sourceId);
-        const key = telegramBindingKey(target.chatId, topicId);
-        if (bindings.get(key)?.sessionId === sessionId) {
-          bindings.delete(key);
-          writeTelegramBindings(this.config.dataDir, projectId, sourceId, bindings.values());
+      if (!queued || !publication.complete) {
+        try {
+          const bindings = readTelegramBindings(this.config.dataDir, projectId, sourceId);
+          const key = telegramBindingKey(target.chatId, topicId);
+          if ((!queued || publication.bound) && bindings.get(key)?.sessionId === sessionId) {
+            bindings.delete(key);
+            writeTelegramBindings(this.config.dataDir, projectId, sourceId, bindings.values());
+          }
+          if (
+            (!queued || publication.written) &&
+            readTelegramReplyTarget(this.config.dataDir, sessionId)?.messageThreadId === topicId
+          )
+            deleteTelegramReplyTarget(this.config.dataDir, sessionId);
+        } catch (cleanupError) {
+          this.logTelegramNoticeFailure(sessionId, "unpublished topic metadata", cleanupError);
         }
-        if (readTelegramReplyTarget(this.config.dataDir, sessionId)?.messageThreadId === topicId)
-          deleteTelegramReplyTarget(this.config.dataDir, sessionId);
-      } catch (cleanupError) {
-        this.logTelegramNoticeFailure(sessionId, "unpublished topic metadata", cleanupError);
-      }
-      try {
-        if (!this.telegramTopicHasOtherOwner(session, target))
-          await deleteTelegramTopic(creationSource, target.chatId, topicId);
-      } catch (cleanupError) {
-        this.logTelegramNoticeFailure(sessionId, "unpublished topic deletion", cleanupError);
+        try {
+          if (
+            !this.telegramTopicHasOtherOwner(session, target) &&
+            (!queued ||
+              publication.written ||
+              readTelegramReplyTarget(this.config.dataDir, sessionId)?.messageThreadId !== topicId)
+          )
+            await deleteTelegramTopic(creationSource, target.chatId, topicId);
+        } catch (cleanupError) {
+          this.logTelegramNoticeFailure(sessionId, "unpublished topic deletion", cleanupError);
+        }
       }
       throw error;
     }
@@ -19175,7 +20573,7 @@ export class SessionService {
       this.stateCache.delete(sessionId);
       if (options?.skipEnrichment) return;
       await this.refreshDashboardCacheEntry(migrated);
-      return this.enrich(migrated);
+      return this.enrich(this.manualResponseRecord(migrated));
     }
     if (session.status === targetStatus) {
       if (targetStatus === "stopped" && hasSessionErrorEvidence(session)) {
@@ -19195,7 +20593,7 @@ export class SessionService {
         this.stateCache.delete(sessionId);
         if (options?.skipEnrichment) return;
         await this.refreshDashboardCacheEntry(record);
-        return this.enrich(record);
+        return this.enrich(this.manualResponseRecord(record));
       }
       return options?.skipEnrichment ? undefined : this.enrich(session);
     }
@@ -19219,6 +20617,22 @@ export class SessionService {
       }
       if (targetStatus === "completed" && !request.skipPrCheck) {
         session = await this.applyOpenPrAction(session, request.prAction);
+      }
+      if (session.spawnIntent) {
+        session = this.retireDurableSpawn(
+          withQueuedMessages(
+            {
+              ...session,
+              status: targetStatus,
+              updatedAt: nowIso(),
+            },
+            [],
+            false,
+          ),
+        );
+        for (const waiter of this.spawnAdmissionWaiters) {
+          if (waiter.sessionId === sessionId) this.cancelSpawnAdmission(waiter, "killed");
+        }
       }
       if (!request.skipRuntimeTeardown) {
         await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
@@ -19279,7 +20693,21 @@ export class SessionService {
         worktree: session.worktree,
       },
     });
-    return options?.skipEnrichment ? undefined : this.enrich(record);
+    return options?.skipEnrichment ? undefined : this.enrich(this.manualResponseRecord(record));
+  }
+
+  private manualResponseRecord(written: SessionRecord): SessionRecord {
+    const current = readSession(this.config.dataDir, written.id);
+    if (
+      !current ||
+      !sameSessionRuntimeOwner(current, written) ||
+      current.agentLaunchId !== written.agentLaunchId ||
+      current.codexRestoreLaunchId !== written.codexRestoreLaunchId ||
+      current.codexRestoreStartedAt !== written.codexRestoreStartedAt ||
+      !this.lifecycleStateMatches(current, this.lifecycleStamp(written))
+    )
+      throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(written.id));
+    return current;
   }
 
   private async ensureKillDirtyWorktreeAllowed(
@@ -19333,6 +20761,14 @@ export class SessionService {
           session = await this.applyOpenPrAction(session, request.prAction);
         }
       }
+      if (session.spawnIntent) {
+        session = this.retireDurableSpawn(
+          withQueuedMessages({ ...session, status: "killed", updatedAt: nowIso() }, [], false),
+        );
+      }
+      for (const waiter of this.spawnAdmissionWaiters) {
+        if (waiter.sessionId === sessionId) this.cancelSpawnAdmission(waiter, "killed");
+      }
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
       await this.cleanupSessionServices(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
@@ -19349,7 +20785,7 @@ export class SessionService {
 
     this.stateCache.delete(sessionId);
 
-    if (session.status === "killed") {
+    if (currentSession.status === "killed") {
       await this.cleanupTerminalTelegram(session);
       this.logEvent("session.kill.noop", {
         level: "info",
@@ -19377,7 +20813,8 @@ export class SessionService {
     delete record.queuedMessageTyped;
     delete record.submitRequeuedMessage;
     delete record.submitFailedMessage;
-    writeSession(this.config.dataDir, record);
+    if (record.spawnIntent) this.retireDurableSpawn(record);
+    else writeSession(this.config.dataDir, record);
     await this.cleanupTerminalTelegram(record);
     if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
@@ -19665,9 +21102,72 @@ export class SessionService {
       current.agentLaunchId === preceding.agentLaunchId &&
       current.error === preceding.error &&
       current.errorSource === preceding.errorSource &&
+      (!observation.codex ||
+        (current.codexRestoreLaunchId === observation.codex.restoreLaunchId &&
+          current.codexRestoreStartedAt === observation.codex.restoreStartedAt &&
+          current.rateLimitedAt === observation.codex.episode &&
+          isDeepStrictEqual(
+            this.codexMcpDialogOverrides.get(current.id),
+            observation.codex.pane,
+          ))) &&
       this.lifecycleStateMatches(current, this.lifecycleStamp(preceding)) &&
       this.lifecycle.snapshot(current.id).revision === observation.revision,
     );
+  }
+
+  private prepareSessionObservation(session: SessionRecord): PreparedSessionObservation {
+    return {
+      session: session.agent === "codex" ? structuredClone(session) : session,
+      revision: this.lifecycle.snapshot(session.id).revision,
+      ...(session.agent === "codex" && !isTerminalSessionStatus(session.status)
+        ? {
+            codex: {
+              restoreLaunchId: session.codexRestoreLaunchId,
+              restoreStartedAt: session.codexRestoreStartedAt,
+              episode: session.rateLimitedAt,
+              pane: structuredClone(this.codexMcpDialogOverrides.get(session.id)),
+            },
+          }
+        : {}),
+    };
+  }
+
+  private assertCodexObservation(observation?: PreparedSessionObservation): void {
+    if (observation?.codex && !this.preparedSessionObservationCurrent(observation))
+      throw new CodexEvidenceInvalidatedError("Codex observation changed");
+  }
+
+  private advancePreparedObservation(
+    observation: PreparedSessionObservation,
+    written: SessionRecord,
+  ): void {
+    const next: PreparedSessionObservation = {
+      ...observation,
+      session: written.agent === "codex" ? structuredClone(written) : written,
+      ...(observation.codex
+        ? {
+            codex: {
+              ...observation.codex,
+              restoreLaunchId: written.codexRestoreLaunchId,
+              restoreStartedAt: written.codexRestoreStartedAt,
+              episode: written.rateLimitedAt,
+            },
+          }
+        : {}),
+    };
+    this.assertCodexObservation(next);
+    observation.session = next.session;
+    if (next.codex) observation.codex = next.codex;
+  }
+
+  private writeCodexPaneObservation(
+    observation: PreparedSessionObservation,
+    pane?: CodexPaneOverride,
+  ): void {
+    this.assertCodexObservation(observation);
+    if (pane) this.codexMcpDialogOverrides.set(observation.session.id, pane);
+    else this.codexMcpDialogOverrides.delete(observation.session.id);
+    if (observation.codex) observation.codex.pane = structuredClone(pane);
   }
 
   // `paneAlreadyConfirmedGone`: set only by a caller that has JUST killed and
@@ -20015,6 +21515,7 @@ export class SessionService {
       });
     let agentLaunchId = newAgentLaunchId();
     let env = buildLaunchEnv(agentLaunchId);
+    let codexAttempt: Pick<SessionRecord, "codexRestoreStartedAt" | "codexRestoreLaunchId"> = {};
 
     // True whenever this relaunch ends up starting a brand-new agent process
     // with no native resume (no agentSessionId to resume from, or the resume
@@ -20141,6 +21642,20 @@ export class SessionService {
     } else {
       try {
         assertActive();
+        codexAttempt = codexLaunchAttempt(session.agent, agentLaunchId);
+        if (session.agent === "codex") {
+          this.writeRecoverySession(
+            {
+              ...sessionWithAgentId,
+              ...readSession(this.config.dataDir, session.id),
+              agentLaunchId,
+              ...codexAttempt,
+            },
+            options?.wakeClaim,
+            options,
+          );
+        }
+        assertActive();
         await createTmuxSession({
           sessionName: session.tmuxSession,
           cwd: session.worktreePath,
@@ -20159,6 +21674,7 @@ export class SessionService {
               status: "running",
               launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
               agentLaunchId,
+              ...codexAttempt,
             },
             mcpSidecarUpdate,
           ),
@@ -20191,6 +21707,7 @@ export class SessionService {
             ...sessionWithAgentId,
             launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
             agentLaunchId,
+            ...codexAttempt,
           },
           mcpSidecarUpdate,
         );
@@ -20245,6 +21762,20 @@ export class SessionService {
           recoveredAgentSessionId = freshClaudeId;
           persistedLaunchCommand = freshLaunchCommand;
           assertActive();
+          codexAttempt = codexLaunchAttempt(session.agent, agentLaunchId);
+          if (session.agent === "codex") {
+            this.writeRecoverySession(
+              {
+                ...sessionWithAgentId,
+                ...readSession(this.config.dataDir, session.id),
+                agentLaunchId,
+                ...codexAttempt,
+              },
+              options?.wakeClaim,
+              options,
+            );
+          }
+          assertActive();
           await createTmuxSession({
             sessionName: session.tmuxSession,
             cwd: session.worktreePath,
@@ -20262,6 +21793,7 @@ export class SessionService {
                 status: "running",
                 launchCommand: freshLaunchCommand,
                 agentLaunchId,
+                ...codexAttempt,
                 ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
                 updatedAt: nowIso(),
               },
@@ -20374,6 +21906,7 @@ export class SessionService {
             ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
             launchCommand: persistedLaunchCommand,
             agentLaunchId,
+            ...codexAttempt,
             status: "running",
             updatedAt: nowIso(),
           },
@@ -20565,6 +22098,10 @@ export class SessionService {
       }
       if (this.lifecycleStateMatches(latest, claim)) return { claim };
       const reconciledDeadRuntime =
+        sameSessionRuntimeOwner(latest, session) &&
+        latest.agentLaunchId === session.agentLaunchId &&
+        latest.codexRestoreLaunchId === session.codexRestoreLaunchId &&
+        latest.codexRestoreStartedAt === session.codexRestoreStartedAt &&
         (claim.status === "running" || claim.status === "spawning") &&
         (latest.status === "stopped" || latest.status === "errored") &&
         latest.stopReason === undefined;
@@ -20660,7 +22197,7 @@ export class SessionService {
         : null;
     operation?.assertActive();
     if (current.agent === "cursor") this.cursorJsonlReaders.delete(sessionId);
-    const codexRestoreStartedAt = current.agent === "codex" ? nowIso() : null;
+    let codexAttempt: Pick<SessionRecord, "codexRestoreStartedAt" | "codexRestoreLaunchId"> = {};
     // Set before startMcpSidecars below: the on-disk status stays
     // stopped/errored until the restore completes (~50 lines down), so the
     // sidecar reaper's normal running|spawning filter would not protect the
@@ -20862,6 +22399,19 @@ export class SessionService {
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
 
+      codexAttempt = codexLaunchAttempt(current.agent, restoreAgentLaunchId);
+      if (current.agent === "codex") {
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (!latest || reopenInvalidated() || !this.lifecycleStateMatches(latest, claim)) {
+          throw new Error(`Session ${sessionId} changed before restore launch`);
+        }
+        writeSession(this.config.dataDir, {
+          ...latest,
+          launchCommand: restoredLaunchCommand,
+          agentLaunchId: restoreAgentLaunchId,
+          ...codexAttempt,
+        });
+      }
       await createTmuxSession({
         sessionName: current.tmuxSession,
         cwd: current.worktreePath,
@@ -20891,6 +22441,7 @@ export class SessionService {
             status: "running",
             launchCommand: restoredLaunchCommand,
             ...(restoreAgentLaunchId ? { agentLaunchId: restoreAgentLaunchId } : {}),
+            ...codexAttempt,
             updatedAt: nowIso(),
           },
           mcpSidecarUpdate,
@@ -21095,7 +22646,7 @@ export class SessionService {
               status: "running",
               updatedAt: nowIso(),
               ...(cursorRestoreBoundary ? { cursorRestoreBoundary } : {}),
-              ...(codexRestoreStartedAt ? { codexRestoreStartedAt } : {}),
+              ...codexAttempt,
             },
             mcpSidecarUpdate,
           );
@@ -21144,6 +22695,7 @@ export class SessionService {
           ...current,
           launchCommand: restoredLaunchCommand,
           ...(restoreAgentLaunchId ? { agentLaunchId: restoreAgentLaunchId } : {}),
+          ...codexAttempt,
         },
         mcpSidecarUpdate,
       );
@@ -21221,7 +22773,7 @@ export class SessionService {
           status: "running",
           updatedAt: nowIso(),
           ...(cursorRestoreBoundary ? { cursorRestoreBoundary } : {}),
-          ...(codexRestoreStartedAt ? { codexRestoreStartedAt } : {}),
+          ...codexAttempt,
         },
         mcpSidecarUpdate,
       );
@@ -22032,14 +23584,7 @@ export class SessionService {
       this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
       throw error;
     }
-    // Gate before any teardown below. The source session is still on-disk as
-    // running/spawning here, so a denial leaves it fully untouched — no kill,
-    // no status flip. The successor replaces the source rather than adding to
-    // the fleet, so exclude it from the live count: a handoff at exactly the
-    // cap is net-neutral (stop one, start one) and must be allowed.
-    const admissionReservation = this.reserveAdmission(session.project, "spawn", {
-      replacingSessionId: session.id,
-    });
+    const admissionReservation = this.reserveSpawnAdmission(session.project, session.id, false);
 
     try {
       if (this.handoffsInFlight.has(sessionId)) {
@@ -22317,9 +23862,9 @@ export class SessionService {
     // `opencode export`), and remove/flush must not 409 while nothing is
     // being typed.
     let claimed = false;
-    const preparedObservation: PreparedSessionObservation = { session, revision: probeRevision };
+    const preparedObservation = this.prepareSessionObservation(session);
     const observePreparedSession = (prepared: SessionRecord) => {
-      preparedObservation.session = prepared;
+      this.advancePreparedObservation(preparedObservation, prepared);
     };
     try {
       let nextMessage: string | undefined;
@@ -23057,7 +24602,10 @@ export class SessionService {
     });
   }
 
-  private async enrichService(service: ServiceInstanceRecord): Promise<ServiceInstanceView> {
+  private async enrichService(
+    service: ServiceInstanceRecord,
+    preparedObservation?: PreparedSessionObservation,
+  ): Promise<ServiceInstanceView> {
     const {
       exists: runtimeAlive,
       paneDead,
@@ -23065,6 +24613,8 @@ export class SessionService {
     } = await this.readReportingPaneState(
       service.tmuxSession,
       readSession(this.config.dataDir, service.sessionId) ?? undefined,
+      undefined,
+      preparedObservation,
     );
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(service.tmuxSession) : null;
     const updatedAt = new Date(service.updatedAt);
@@ -23105,7 +24655,11 @@ export class SessionService {
   }
 
   private async classifyCodexState(
-    session: Pick<SessionRecord, "id" | "agentSessionId" | "codexRestoreStartedAt">,
+    session: Pick<
+      SessionRecord,
+      "id" | "agentSessionId" | "agentLaunchId" | "codexRestoreLaunchId" | "codexRestoreStartedAt"
+    >,
+    proofContext?: CodexLaunchProofContext,
   ): Promise<{
     state: SessionState;
     source: StateSource;
@@ -23117,6 +24671,7 @@ export class SessionService {
     model?: string;
     tokenUsage?: ProviderTokenUsageSample;
     tokenUsages?: ProviderTokenUsageSample[];
+    launchProof?: CodexLaunchProof;
   }> {
     const hookState = readAgentHookState(this.config.dataDir, session.id);
     const rolloutReader = this.codexRolloutReaders.get(session.id) ?? { files: new Map() };
@@ -23125,25 +24680,28 @@ export class SessionService {
       this.codexSessionsDir(session.id),
       rolloutReader,
       session.agentSessionId,
+      ...(proofContext ? ([proofContext] as const) : ([] as const)),
     );
     const rolloutState = rolloutRead.rollout;
     let state: SessionState = hookState?.state ?? "waiting";
     let source: StateSource = hookState ? "hook" : "status";
 
-    const restoreStartedAtMs = session.codexRestoreStartedAt
-      ? Date.parse(session.codexRestoreStartedAt)
-      : NaN;
+    const restoreStartedAtMs = codexLaunchStartedAt(session);
     const restoreMarkerReady =
       rolloutState?.reason === "thread_settings_applied" &&
-      Number.isFinite(restoreStartedAtMs) &&
+      session.agentSessionId !== undefined &&
+      restoreStartedAtMs !== null &&
       rolloutState.timestampMs >= restoreStartedAtMs &&
-      (rolloutState.precedingState?.timestampMs ?? 0) < restoreStartedAtMs &&
+      rolloutState.precedingState !== undefined &&
+      rolloutState.precedingState.timestampMs < restoreStartedAtMs &&
       (!hookState ||
         hookState.state === "waiting" ||
         new Date(hookState.updatedAt).getTime() < restoreStartedAtMs);
     if (restoreMarkerReady) {
       state = "waiting";
       source = "jsonl";
+    } else if (rolloutState?.reason === "thread_settings_applied") {
+      state = rolloutState.precedingState?.state ?? hookState?.state ?? "working";
     } else if (rolloutState && shouldUseCodexRolloutState(hookState, rolloutState)) {
       state = rolloutState.state;
       source = "jsonl";
@@ -23175,6 +24733,7 @@ export class SessionService {
       rateLimit: rolloutRead.rateLimit,
       activityMs,
       ...(rolloutRead.threadId ? { threadId: rolloutRead.threadId } : {}),
+      ...(rolloutRead.launchProof ? { launchProof: rolloutRead.launchProof } : {}),
       ...(rolloutRead.model ? { model: rolloutRead.model } : {}),
       ...(rolloutRead.tokenUsage ? { tokenUsage: rolloutRead.tokenUsage } : {}),
       ...(rolloutRead.tokenUsages ? { tokenUsages: rolloutRead.tokenUsages } : {}),
@@ -23293,7 +24852,10 @@ export class SessionService {
     records: SessionRecord[];
   } {
     const live = listSessions(this.config.dataDir).filter(
-      (session) => session.id !== excludeSessionId && this.isLiveSessionRecord(session),
+      (session) =>
+        session.id !== excludeSessionId &&
+        !this.pendingSpawnIds.has(session.id) &&
+        this.isLiveSessionRecord(session),
     );
     const byProject = new Map<string, number>();
     for (const session of live) {
@@ -23392,13 +24954,13 @@ export class SessionService {
   private assertAdmissible(
     projectId: string,
     context: "spawn" | "restore" | "wake",
-    opts?: { replacingSessionId?: string; admissionReservation?: symbol },
+    opts?: { replacingSessionId?: string; admissionReservation?: symbol; quiet?: boolean },
   ): void {
     const admission = this.config.admission;
     const sample = this.evaluateMemoryDenial(context);
     const legacyGuardDetail = sample?.legacyDetail;
     const floorGuardDetail = sample?.floorDetail;
-    if (legacyGuardDetail) {
+    if (legacyGuardDetail && !opts?.quiet) {
       this.logEvent("session.admission.memory_guard", {
         level: "warn",
         projectId,
@@ -23416,11 +24978,12 @@ export class SessionService {
         `Cannot ${context} session for project "${projectId}": memory guard crossed — ${denialDetail}`,
         "memory_guard",
       );
-      this.logEvent("session.admission.denied", {
-        level: "warn",
-        projectId,
-        message: denial.message,
-      });
+      if (!opts?.quiet)
+        this.logEvent("session.admission.denied", {
+          level: "warn",
+          projectId,
+          message: denial.message,
+        });
       throw denial;
     }
     const live = this.countLiveSessions(opts?.replacingSessionId);
@@ -23440,11 +25003,12 @@ export class SessionService {
         `Cannot ${context} session for project "${projectId}": at its per-project cap of ${projectCap} live sessions (${this.admissionOccupancy(projectLive, projectReserved)}). ${this.admissionDenialAction(projectCandidates)}`,
         "cap",
       );
-      this.logEvent("session.admission.denied", {
-        level: "warn",
-        projectId,
-        message: denial.message,
-      });
+      if (!opts?.quiet)
+        this.logEvent("session.admission.denied", {
+          level: "warn",
+          projectId,
+          message: denial.message,
+        });
       throw denial;
     }
     const totalLive = live.total + reservedTotal;
@@ -23453,24 +25017,93 @@ export class SessionService {
         `Cannot ${context} session for project "${projectId}": at the global cap of ${admission.maxLiveSessions} live sessions (${this.admissionOccupancy(live.total, reservedTotal)}). ${this.admissionDenialAction(live.records)}`,
         "cap",
       );
-      this.logEvent("session.admission.denied", {
-        level: "warn",
-        projectId,
-        message: denial.message,
-      });
+      if (!opts?.quiet)
+        this.logEvent("session.admission.denied", {
+          level: "warn",
+          projectId,
+          message: denial.message,
+        });
       throw denial;
     }
   }
 
-  private reserveAdmission(
+  private tryReserveSpawnAdmission(
     projectId: string,
-    context: "spawn" | "restore",
-    opts?: { replacingSessionId?: string },
+    replacingSessionId?: string,
+    quiet = true,
+  ): symbol | null {
+    try {
+      return this.reserveSpawnAdmission(projectId, replacingSessionId, quiet);
+    } catch (error) {
+      if (error instanceof SessionAdmissionDeniedError) return null;
+      throw error;
+    }
+  }
+
+  private reserveSpawnAdmission(
+    projectId: string,
+    replacingSessionId?: string,
+    quiet = true,
   ): symbol {
-    this.assertAdmissible(projectId, context, opts);
+    if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
+    this.assertAdmissible(projectId, "spawn", {
+      ...(replacingSessionId ? { replacingSessionId } : {}),
+      quiet,
+    });
     const reservation = Symbol(projectId);
     this.admissionReservations.set(reservation, projectId);
     return reservation;
+  }
+
+  private waitForSpawnAdmission(
+    projectId: string,
+    opts: { sessionId?: string; replacingSessionId?: string } = {},
+  ): Promise<symbol> {
+    if (this.admissionStopped) return Promise.reject(new SpawnAdmissionCancelledError("disposed"));
+    return new Promise<symbol>((resolve, reject) => {
+      this.drainSpawnAdmissions();
+      const waiter: SpawnAdmissionWaiter = { projectId, ...opts, resolve, reject };
+      const reservation = this.tryReserveSpawnAdmission(projectId, opts.replacingSessionId, false);
+      this.spawnAdmissionWaiters.add(waiter);
+      if (reservation !== null) {
+        waiter.reservation = reservation;
+        resolve(reservation);
+      }
+    });
+  }
+
+  private drainSpawnAdmissions(): void {
+    if (this.admissionStopped) return;
+    for (const waiter of this.spawnAdmissionWaiters) {
+      if (waiter.reservation !== undefined) continue;
+      const reservation = this.tryReserveSpawnAdmission(
+        waiter.projectId,
+        waiter.replacingSessionId,
+      );
+      if (reservation === null) continue;
+      waiter.reservation = reservation;
+      waiter.resolve(reservation);
+    }
+  }
+
+  private consumeSpawnAdmission(reservation: symbol): void {
+    for (const waiter of this.spawnAdmissionWaiters) {
+      if (waiter.reservation !== reservation) continue;
+      this.spawnAdmissionWaiters.delete(waiter);
+      break;
+    }
+    if (this.admissionStopped || !this.admissionReservations.has(reservation)) {
+      throw new SpawnAdmissionCancelledError(this.admissionStopped ? "disposed" : "killed");
+    }
+  }
+
+  private cancelSpawnAdmission(
+    waiter: SpawnAdmissionWaiter,
+    reason: SpawnAdmissionCancelledError["reason"],
+  ): void {
+    this.spawnAdmissionWaiters.delete(waiter);
+    if (waiter.reservation !== undefined) this.admissionReservations.delete(waiter.reservation);
+    waiter.reject(new SpawnAdmissionCancelledError(reason));
   }
 
   // Cheap admission snapshot for the daemon-startup log: cap and live count
@@ -23698,8 +25331,10 @@ export class SessionService {
     historySourcePath: string | null,
     serverError: boolean,
     serverErrorEvidence?: "error" | "recovered",
+    observation?: PreparedSessionObservation,
   ): Promise<SessionStateTransition[]> {
     if (this.isDeliveryStopped()) return [];
+    this.assertCodexObservation(observation);
     // Recovery evidence is independent of the displayed state and restore warmup.
     if (serverError && !session.serverErrorAt) {
       this.writeServerErrorMarker(session.id, nowIso());
@@ -23725,10 +25360,16 @@ export class SessionService {
               rateLimitedAt: transitionAt,
               updatedAt: nowIso(),
             });
+            if (observation)
+              this.advancePreparedObservation(observation, {
+                ...current,
+                rateLimitedAt: transitionAt,
+              });
           }
         } else if (current.rateLimitedAt) {
           const { rateLimitedAt: _rateLimitedAt, ...base } = current;
           writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+          if (observation) this.advancePreparedObservation(observation, base);
         }
       }
       if (lastEntry) {
@@ -23742,6 +25383,7 @@ export class SessionService {
           },
           historySourcePath,
         );
+        this.assertCodexObservation(observation);
         this.scheduleStateSubscriptionDispatch(session, {
           at: transitionAt,
           fromState: lastEntry.state,
@@ -23780,7 +25422,10 @@ export class SessionService {
     }
   }
 
-  private async hasServiceIssues(session: Pick<SessionRecord, "id" | "project">): Promise<boolean> {
+  private async hasServiceIssues(
+    session: Pick<SessionRecord, "id" | "project">,
+    preparedObservation?: PreparedSessionObservation,
+  ): Promise<boolean> {
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
       if (service.status !== "running") {
         return true;
@@ -23788,6 +25433,8 @@ export class SessionService {
       const runtime = await this.readReportingPaneState(
         service.tmuxSession,
         readSession(this.config.dataDir, session.id) ?? undefined,
+        undefined,
+        preparedObservation,
       );
       if (runtime.diagnostic || !runtime.exists) {
         return true;
@@ -23836,7 +25483,10 @@ export class SessionService {
     reason: "boot" | "runtime_check",
     workspaceMissing: boolean,
     probeRevision = this.lifecycle.snapshot(session.id).revision,
+    preparation?: SessionPreparationOptions,
   ): Promise<{ session: SessionRecord; runtime: SessionRuntimeSnapshot }> {
+    const assertObserved = () => this.assertCodexObservation(preparation?.preparedObservation);
+    assertObserved();
     if (this.isDeliveryStopped()) return { session, runtime };
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
@@ -23856,13 +25506,15 @@ export class SessionService {
       current.updatedAt === session.updatedAt;
     if (protectedRuntime()) return { session, runtime };
     if (runtime.probeUnresponsive) {
+      const retained = this.retainDetectionError(
+        session,
+        runtime.diagnostic ?? "runtime probe (tmux or ps) timed out; runtime state unknown",
+        "runtime_probe",
+        probeRevision,
+      );
+      preparation?.observePreparedSession?.(retained);
       return {
-        session: this.retainDetectionError(
-          session,
-          runtime.diagnostic ?? "runtime probe (tmux or ps) timed out; runtime state unknown",
-          "runtime_probe",
-          probeRevision,
-        ),
+        session: retained,
         runtime,
       };
     }
@@ -23880,6 +25532,7 @@ export class SessionService {
         try {
           confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
         } catch (error) {
+          assertObserved();
           const diagnostic = error instanceof Error ? error.message : String(error);
           const retained = this.retainDetectionError(
             session,
@@ -23887,6 +25540,7 @@ export class SessionService {
             "runtime_probe",
             probeRevision,
           );
+          preparation?.observePreparedSession?.(retained);
           return {
             session: retained,
             runtime: {
@@ -23899,6 +25553,7 @@ export class SessionService {
             },
           };
         }
+        assertObserved();
         if (this.isDeliveryStopped()) return { session, runtime: confirmedRuntime };
       }
       if (
@@ -23918,6 +25573,7 @@ export class SessionService {
             session.tmuxSession,
             async (ownedPane) => {
               const assertCurrent = () => {
+                assertObserved();
                 const latest = readSession(this.config.dataDir, session.id);
                 if (!latest || protectedRuntime(ownedPane) || !runtimeOwnerMatches(latest)) {
                   throw superseded;
@@ -23934,6 +25590,7 @@ export class SessionService {
             runtime: confirmedRuntime,
           };
         }
+        assertObserved();
       }
       if (live(confirmedRuntime)) {
         return { session, runtime: confirmedRuntime };
@@ -23951,6 +25608,7 @@ export class SessionService {
           "runtime_probe",
           probeRevision,
         );
+        preparation?.observePreparedSession?.(retained);
         this.logEvent("session.runtime.probe_unresponsive", {
           level: "warn",
           sessionId: session.id,
@@ -24001,7 +25659,9 @@ export class SessionService {
         updatedAt,
       };
     }
+    assertObserved();
     writeSession(this.config.dataDir, updated);
+    preparation?.observePreparedSession?.(updated);
     this.stateCache.delete(session.id);
     this.logEvent(
       reason === "boot" ? "session.reconcile.drift" : `session.runtime.${updated.status}`,
@@ -24039,6 +25699,8 @@ export class SessionService {
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
     workspaceMissing: boolean,
+    probeRevision: number,
+    observePromotion?: (session: SessionRecord) => void,
   ): SessionRecord {
     // Shepherd is not exempt: its own terminal exits are "completed" (self
     // destruct) or "killed", and it is never stale-parked, so a stopped or
@@ -24064,6 +25726,11 @@ export class SessionService {
       return session;
     }
     if (
+      !sameSessionRuntimeOwner(latest, session) ||
+      latest.agentLaunchId !== session.agentLaunchId ||
+      latest.codexRestoreLaunchId !== session.codexRestoreLaunchId ||
+      latest.codexRestoreStartedAt !== session.codexRestoreStartedAt ||
+      this.lifecycle.snapshot(session.id).revision !== probeRevision ||
       latest.status !== "stopped" ||
       latest.stopReason === "manual_pause" ||
       latest.stopReason === "token_budget" ||
@@ -24081,6 +25748,7 @@ export class SessionService {
     };
     delete updated.stopReason;
     writeSession(this.config.dataDir, updated);
+    observePromotion?.(updated);
     this.stateCache.delete(session.id);
     this.logEvent("session.reconcile.running", {
       level: "warn",
@@ -24217,22 +25885,33 @@ export class SessionService {
     session: SessionRecord,
     options?: { scanPane?: boolean; reconcileRuntime?: boolean },
     observePreparation?: (session: SessionRecord) => void,
+    prepared = this.prepareSessionObservation(session),
   ): Promise<SessionStateResult> {
     const probeRevision = this.lifecycle.snapshot(session.id).revision;
     let observation = session;
     try {
-      return await this.classifySessionRecordKnown(session, options, (prepared) => {
-        observation = prepared;
-        observePreparation?.(prepared);
-      });
+      return await this.classifySessionRecordKnown(
+        session,
+        options,
+        (current) => {
+          observation = current;
+          observePreparation?.(current);
+        },
+        prepared,
+      );
     } catch (error) {
+      if (error instanceof CodexEvidenceInvalidatedError || error instanceof SessionLifecycleError)
+        throw error;
       if (
         error instanceof SessionResourceNotFoundError &&
         !readSession(this.config.dataDir, session.id)
       ) {
         throw error;
       }
-      return this.classificationErrorResult(observation, error, "other", probeRevision);
+      this.assertCodexObservation(prepared);
+      const result = this.classificationErrorResult(observation, error, "other", probeRevision);
+      this.advancePreparedObservation(prepared, result.session);
+      return { ...result, observation: prepared };
     }
   }
 
@@ -24254,7 +25933,7 @@ export class SessionService {
         probeUnresponsive: true,
         diagnostic,
       },
-      state: "error",
+      state: this.hasCodexLimitEpisode(retained) ? "rate_limited" : "error",
       source: "status",
       workspacePresent: false,
       serverError: false,
@@ -24339,12 +26018,14 @@ export class SessionService {
     )
       return latest ?? current;
     if (latest && isTerminalSessionStatus(latest.status)) return latest;
+    const retentionCandidate = { ...session, ...latest, launchCommand: session.launchCommand };
+    if (session.agent === "codex" && latest) {
+      if (latest.codexRestoreLaunchId === undefined) delete retentionCandidate.codexRestoreLaunchId;
+      if (latest.codexRestoreStartedAt === undefined)
+        delete retentionCandidate.codexRestoreStartedAt;
+    }
     const retained: SessionRecord = {
-      ...withQueuedMessages(
-        { ...session, ...latest, launchCommand: session.launchCommand },
-        queuedMessages(latest ?? session),
-        true,
-      ),
+      ...withQueuedMessages(retentionCandidate, queuedMessages(latest ?? session), true),
       status:
         runtime && !runtime.probeUnresponsive && !runtime.processAlive ? "errored" : "running",
       error: message,
@@ -24377,13 +26058,62 @@ export class SessionService {
     }
   }
 
+  private codexPaneOverride(session: SessionRecord): CodexPaneOverride | undefined {
+    const entry = this.codexMcpDialogOverrides.get(session.id);
+    if (
+      entry &&
+      (entry.nativeId !== session.agentSessionId ||
+        entry.launchId !== session.agentLaunchId ||
+        entry.startedAt !== codexLaunchStartedAt(session))
+    ) {
+      return undefined;
+    }
+    return entry;
+  }
+
+  private hasCodexLimitEpisode(session: SessionRecord): boolean {
+    return (
+      session.agent === "codex" &&
+      (session.status === "running" || session.status === "spawning") &&
+      (session.rateLimitedAt !== undefined || this.codexPaneOverride(session)?.kind === "hard")
+    );
+  }
+
+  private codexCompletionAfterLimit(
+    session: SessionRecord,
+    rollout: CodexRolloutStateRecord | null,
+    rateLimit: RateLimitDetection | null,
+    override: CodexPaneOverride | undefined,
+  ): boolean {
+    const startedAt = codexLaunchStartedAt(session);
+    const episodeAt = session.rateLimitedAt === undefined ? 0 : Date.parse(session.rateLimitedAt);
+    return (
+      Boolean(session.agentSessionId) &&
+      startedAt !== null &&
+      Number.isFinite(episodeAt) &&
+      rollout?.reason === "task_complete" &&
+      rollout.state === "waiting" &&
+      Number.isFinite(rollout.timestampMs) &&
+      rollout.timestampMs <= Date.now() &&
+      rollout.timestampMs >
+        Math.max(startedAt, episodeAt, override?.kind === "hard" ? override.observedAt : 0) &&
+      (rateLimit === null || rateLimit.codexAuthority === "soft")
+    );
+  }
+
   private async classifySessionRecordKnown(
     session: SessionRecord,
     options?: { scanPane?: boolean; reconcileRuntime?: boolean },
     observePreparation?: (session: SessionRecord) => void,
+    observation = this.prepareSessionObservation(session),
   ): Promise<SessionStateResult> {
     const probeLifecycle = this.lifecycle.snapshot(session.id);
     const probeRevision = probeLifecycle.revision;
+    const observeOwned = (prepared: SessionRecord): void => {
+      this.advancePreparedObservation(observation, prepared);
+      observePreparation?.(prepared);
+    };
+    this.assertCodexObservation(observation);
     const ackEntry = { ...session };
     const entryTyped = structuredClone(session.queuedMessageTyped);
     const matchesAckEntry = (current: SessionRecord | null): boolean => {
@@ -24412,6 +26142,7 @@ export class SessionService {
       this.lastClassifiedLogStates.delete(session.id);
       return {
         session,
+        observation,
         runtime: {
           runtimeAlive: true,
           paneUsable: true,
@@ -24419,7 +26150,7 @@ export class SessionService {
           tmuxActivityAt: null,
           probeUnresponsive: false,
         },
-        state: "working",
+        state: this.hasCodexLimitEpisode(session) ? "rate_limited" : "working",
         source: "status",
         historySourcePath: null,
         workspacePresent: probeWorkspace(session.worktreePath).exists,
@@ -24438,14 +26169,18 @@ export class SessionService {
       try {
         runtime = await this.readRuntimeSnapshot(session);
       } catch (error) {
+        if (error instanceof SessionLifecycleError) throw error;
+        this.assertCodexObservation(observation);
         const result = this.classificationErrorResult(
           session,
           error,
           "runtime_probe",
           probeRevision,
         );
+        observeOwned(result.session);
         return {
           ...result,
+          observation,
           session:
             matchesAckEntry(result.session) &&
             matchesAckEntry(readSession(this.config.dataDir, session.id))
@@ -24454,6 +26189,7 @@ export class SessionService {
         };
       }
     }
+    this.assertCodexObservation(observation);
     if (this.isDeliveryStopped())
       return {
         session,
@@ -24511,6 +26247,7 @@ export class SessionService {
           : "other",
         probeRevision,
       );
+      observeOwned(effectiveSession);
     } else if (
       session.status !== "errored" &&
       workspace.exists &&
@@ -24537,7 +26274,7 @@ export class SessionService {
         const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recovered } = latest;
         effectiveSession = { ...recovered, updatedAt: nowIso() };
         writeSession(this.config.dataDir, effectiveSession);
-        observePreparation?.(effectiveSession);
+        observeOwned(effectiveSession);
         this.stateCache.delete(session.id);
         if (this.shouldRunDelivery(effectiveSession)) this.scheduleDeliveryRunner(session.id);
       }
@@ -24575,7 +26312,9 @@ export class SessionService {
         "runtime_check",
         workspace.missing,
         probeRevision,
+        { preparedObservation: observation, observePreparedSession: observeOwned },
       );
+      this.assertCodexObservation(observation);
       effectiveSession = reconciled.session;
       runtime = reconciled.runtime;
     }
@@ -24583,18 +26322,31 @@ export class SessionService {
       effectiveSession,
       runtime,
       workspace.missing,
+      probeRevision,
+      observeOwned,
     );
+    this.assertCodexObservation(observation);
     if (!runtimeOwnerChanged) {
       effectiveSession = this.reconcileStaleErroredSession(
         effectiveSession,
         runtime,
         workspace.exists,
         probeRevision,
-        observePreparation,
+        observeOwned,
       );
     }
+    this.assertCodexObservation(observation);
+    if (
+      observation.codex &&
+      this.codexMcpDialogOverrides.has(session.id) &&
+      !this.codexPaneOverride(effectiveSession)
+    )
+      this.writeCodexPaneObservation(observation);
 
     let rateLimit: RateLimitDetection | null = null;
+    let codexRolloutState: CodexRolloutStateRecord | null = null;
+    let codexCompletionSelected = false;
+    let codexEpisodeRecovered = false;
     let hasServerErrorRecord = false;
     let hasAuthenticationFailure = false;
     let serverErrorEvidence: "error" | "recovered" | undefined;
@@ -24640,6 +26392,7 @@ export class SessionService {
       effectiveSession.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX)
     ) {
       const native = await this.classifyCodexState(session).catch(() => null);
+      this.assertCodexObservation(observation);
       const observedAt = Date.now();
       const current = readSession(this.config.dataDir, session.id);
       const lifecycle = this.lifecycle.snapshot(session.id);
@@ -24689,6 +26442,7 @@ export class SessionService {
         const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recovered } = current;
         effectiveSession = { ...recovered, updatedAt: nowIso() };
         writeSession(this.config.dataDir, effectiveSession);
+        observeOwned(effectiveSession);
         this.stateCache.delete(session.id);
         codexProbeRecovery = native;
       }
@@ -24814,9 +26568,12 @@ export class SessionService {
         }
       } else if (strategy === "hook") {
         const codexState = await this.classifyCodexState(session);
+        this.assertCodexObservation(observation);
         state = codexState.state;
         stateSource = codexState.source;
         rateLimit = codexState.rateLimit;
+        codexRolloutState = codexState.rolloutState;
+        codexCompletionSelected = codexState.source === "jsonl" && codexState.state === "waiting";
         agentActivityAt = activityAtFromMs(codexState.activityMs);
         liveModel = codexState.model;
         tokenUsage = codexState.tokenUsage;
@@ -25018,55 +26775,77 @@ export class SessionService {
           compactingApplied = true;
           classifiedDetail = "State: working (claude compacting)";
         }
-      } else if (scanPane && strategy === "hook") {
-        // Codex-specific: a hard rate-limit banner always wins. Otherwise,
-        // whenever the pane shows a live MCP tool-permission dialog (whether or
-        // not a soft rate-limit signal is also present) the session is
-        // promoted to needs_input.
-        const paneText = await captureTmuxPane(session.tmuxSession);
-        if (paneText === null) {
-          // A failed fork never mutates codexMcpDialogOverrides (no hard-hit
-          // promotion, no delete) — only reapply the stored entry if
-          // unexpired, the same read the scanPane:false branch below does.
-          // Reapplying does NOT refresh the expiry: only the live "detected
-          // dialog" branch below writes it.
-          const expiresAt = this.codexMcpDialogOverrides.get(session.id);
-          if (expiresAt !== undefined && expiresAt > Date.now()) {
-            state = "needs_input";
-            rateLimit = null;
-            classifiedDetail = "State: needs_input (codex MCP permission dialog)";
-          }
-        } else {
+      } else if (strategy === "hook") {
+        const override = this.codexPaneOverride(session);
+        const unresolved = this.hasCodexLimitEpisode(session);
+        const mayDemote =
+          !unresolved && (!rateLimit?.limited || rateLimit.codexAuthority === "soft");
+        const mayRecover = this.codexCompletionAfterLimit(
+          session,
+          codexCompletionSelected ? codexRolloutState : null,
+          rateLimit,
+          override,
+        );
+        const paneFallback = unresolved
+          ? mayRecover
+          : mayDemote &&
+            (codexCompletionSelected ||
+              codexRolloutState === null ||
+              rateLimit?.limited ||
+              override?.kind === "mcp");
+        const paneText =
+          scanPane && paneFallback ? await captureTmuxPane(session.tmuxSession) : null;
+        this.assertCodexObservation(observation);
+        if (paneText !== null && paneText.trim().length > 0) {
           const hardHit = scanTmuxRateLimit(paneText);
           if (hardHit?.limited) {
             rateLimit = hardHit;
-            this.codexMcpDialogOverrides.delete(session.id);
-          } else if (detectCodexMcpPermissionDialog(paneText)) {
-            state = "needs_input";
-            rateLimit = null;
-            this.codexMcpDialogOverrides.set(
-              session.id,
-              Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
-            );
-            classifiedDetail = "State: needs_input (codex MCP permission dialog)";
-          } else {
-            this.codexMcpDialogOverrides.delete(session.id);
+            this.writeCodexPaneObservation(observation, {
+              nativeId: session.agentSessionId,
+              launchId: session.agentLaunchId,
+              startedAt: codexLaunchStartedAt(session),
+              kind: "hard",
+              observedAt: Date.now(),
+              detection: hardHit,
+            });
+          } else if (unresolved && mayRecover) {
+            const latest = readSession(this.config.dataDir, session.id);
+            if (
+              latest &&
+              latest.status === "running" &&
+              sameSessionRuntimeOwner(latest, session) &&
+              latest.agentLaunchId === session.agentLaunchId &&
+              codexLaunchStartedAt(latest) === codexLaunchStartedAt(session) &&
+              latest.rateLimitedAt === session.rateLimitedAt &&
+              this.codexCompletionAfterLimit(
+                latest,
+                codexRolloutState,
+                rateLimit,
+                this.codexPaneOverride(latest),
+              )
+            ) {
+              this.writeCodexPaneObservation(observation);
+              this.stateCache.delete(session.id);
+              codexEpisodeRecovered = true;
+              rateLimit = null;
+              state = "waiting";
+              classifiedDetail = "State: waiting (codex current-launch completion and clear pane)";
+            }
+          } else if (mayDemote && detectCodexMcpPermissionDialog(paneText)) {
+            this.writeCodexPaneObservation(observation, {
+              nativeId: session.agentSessionId,
+              launchId: session.agentLaunchId,
+              startedAt: codexLaunchStartedAt(session),
+              kind: "mcp",
+              expiresAt: Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
+            });
+          } else if (override?.kind === "mcp") {
+            this.writeCodexPaneObservation(observation);
           }
         }
-      } else if (!scanPane && strategy === "hook") {
-        // The scanPane:false dashboard tick can't afford its own capture-pane
-        // fork (see enrichDashboard), but it can still reuse the last live
-        // pane-scan's dialog confirmation while it's fresh, so the dashboard
-        // doesn't keep showing rate_limited (or working) for a session the 5s
-        // attention monitor already knows is parked on a live MCP permission
-        // dialog. The override can be live with no rate-limit signal at all
-        // (the pane-scan branch above sets it independent of rateLimit), so
-        // this reuse branch must not require rateLimit?.limited either, or it
-        // misses that case on 2s ticks. The override-presence + expiry check
-        // below is the real gate; this branch is just a cheap Map.get when
-        // there's nothing to reuse.
-        const expiresAt = this.codexMcpDialogOverrides.get(session.id);
-        if (expiresAt !== undefined && expiresAt > Date.now()) {
+        const current = this.codexPaneOverride(session);
+        if (current?.kind === "hard") rateLimit = current.detection;
+        else if (mayDemote && current?.kind === "mcp" && current.expiresAt > nowMs) {
           state = "needs_input";
           rateLimit = null;
           classifiedDetail = "State: needs_input (codex MCP permission dialog)";
@@ -25170,6 +26949,11 @@ export class SessionService {
       }
     }
 
+    this.assertCodexObservation(observation);
+    if (this.hasCodexLimitEpisode(effectiveSession) && !codexEpisodeRecovered) {
+      state = "rate_limited";
+      classifiedDetail = "State: rate_limited (codex unresolved current-launch episode)";
+    }
     if (!readSession(this.config.dataDir, session.id) || classifiedDetail === undefined) {
       this.lastClassifiedLogStates.delete(session.id);
     } else {
@@ -25194,9 +26978,11 @@ export class SessionService {
         agentActivityAt,
         runtime.probeUnresponsive ? "ack-only" : "normal",
       );
+    this.assertCodexObservation(observation);
 
     return {
       session: effectiveSession,
+      observation,
       runtime,
       state,
       source: stateSource,
@@ -25215,20 +27001,33 @@ export class SessionService {
 
   private async enrichDashboard(
     session: SessionRecord,
+    observation?: PreparedSessionObservation,
   ): Promise<Omit<DashboardSessionView, "lifecycle"> | undefined> {
-    return (await this.assembleDashboard(session))?.view;
+    return (await this.assembleDashboard(session, observation))?.view;
   }
 
   private async assembleDashboard(
     session: SessionRecord,
+    observation?: PreparedSessionObservation,
   ): Promise<
-    { view: Omit<DashboardSessionView, "lifecycle">; source: SessionRecord | null } | undefined
+    | {
+        view: Omit<DashboardSessionView, "lifecycle">;
+        source: SessionRecord | null;
+        observation?: PreparedSessionObservation;
+      }
+    | undefined
   > {
     // The 2s dashboard-cache tick skips the per-session capture-pane scan (the
     // last un-batched fork): jsonl/hook-sourced rate limits still show up
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
     // viewed-session enrich still run the tmux-banner/usage-menu scan.
-    const classified = await this.classifySessionRecord(session, { scanPane: false });
+    const classified = await this.classifySessionRecord(
+      session,
+      { scanPane: false },
+      undefined,
+      observation,
+    );
+    this.assertCodexObservation(classified.observation);
     const persisted = this.persistClassifiedTokenUsage(classified.session, classified);
     if (persisted.status === "missing") return undefined;
     session = persisted.session;
@@ -25236,10 +27035,15 @@ export class SessionService {
     const lastActivityAt = buildLastActivityAt(session, classified);
     const workspaceState = resolveWorkspaceState(this.config.dataDir, session);
     const displaySlots = this.projectSidecarSlots(session, deriveSessionSlots(workspaceState));
-    const sidecars = await this.sidecarViews(session, this.resolveProjectForSession(session));
+    const sidecars = await this.sidecarViews(
+      session,
+      this.resolveProjectForSession(session),
+      classified.observation,
+    );
     const runningSidecarNames = sidecars.filter((view) => view.alive).map((view) => view.name);
 
-    const hasServiceIssues = await this.hasServiceIssues(session);
+    const hasServiceIssues = await this.hasServiceIssues(session, classified.observation);
+    this.assertCodexObservation(classified.observation);
     const persistedSession = session;
     session = this.withReportingError(session);
     const source = isDeepStrictEqual(session, persistedSession) ? session : null;
@@ -25252,6 +27056,9 @@ export class SessionService {
       preflightTokenUsage: _preflightTokenUsage,
       cursorRestoreBoundary: _cursorRestoreBoundary,
       codexRestoreStartedAt: _codexRestoreStartedAt,
+      codexRestoreLaunchId: _codexRestoreLaunchId,
+      spawnIntent: _spawnIntent,
+      spawnReceipt: _spawnReceipt,
       restoredAt: _restoredAt,
       launchCommand: _launchCommand,
       stateSubscriptions: _stateSubscriptions,
@@ -25269,7 +27076,9 @@ export class SessionService {
     } = session;
     const state = this.stabilizeState(
       session.id,
-      hasRetainedSessionError(session) ? "error" : classified.state,
+      hasRetainedSessionError(session) && !this.hasCodexLimitEpisode(session)
+        ? "error"
+        : classified.state,
     );
     await this.updateStateHistory(
       session,
@@ -25278,10 +27087,13 @@ export class SessionService {
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
+      classified.observation,
     );
+    this.assertCodexObservation(classified.observation);
     this.guardSidecarViews(session.id, sidecars);
     return {
       source,
+      ...(classified.observation ? { observation: classified.observation } : {}),
       view: {
         ...dashboardSession,
         ...(session.error ? { error: session.error } : {}),
@@ -25408,9 +27220,13 @@ export class SessionService {
     ownerId: string,
     sidecarName: string,
     session: SessionRecord,
+    preparedObservation?: PreparedSessionObservation,
   ): Promise<{ exists: boolean; paneDead: boolean; diagnostic?: string }> {
-    return this.readReportingPaneState(sidecarTmuxSession(ownerId, sidecarName), session, () =>
-      sidecarTmuxAlive(ownerId, sidecarName),
+    return this.readReportingPaneState(
+      sidecarTmuxSession(ownerId, sidecarName),
+      session,
+      () => sidecarTmuxAlive(ownerId, sidecarName),
+      preparedObservation,
     );
   }
 
@@ -25418,14 +27234,18 @@ export class SessionService {
     tmuxSession: string,
     session?: SessionRecord,
     readExists: () => Promise<boolean> = () => tmuxSessionExists(tmuxSession),
+    preparedObservation = session ? this.prepareSessionObservation(session) : undefined,
   ): Promise<{ exists: boolean; paneDead: boolean; diagnostic?: string }> {
     const probeRevision = session && this.lifecycle.snapshot(session.id).revision;
+    this.assertCodexObservation(preparedObservation);
     try {
       const exists = await readExists();
+      this.assertCodexObservation(preparedObservation);
       if (session && !readSession(this.config.dataDir, session.id)) {
         throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
       }
       const paneDead = exists && (await tmuxPaneDead(tmuxSession));
+      this.assertCodexObservation(preparedObservation);
       if (session) {
         const latest = readSession(this.config.dataDir, session.id);
         if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
@@ -25437,20 +27257,25 @@ export class SessionService {
           latest.error?.startsWith(`${REPORTING_DETECTION_ERROR_PREFIX}${tmuxSession}: `)
         ) {
           const { error: _error, errorSource: _errorSource, ...recovered } = latest;
-          writeSession(this.config.dataDir, { ...recovered, updatedAt: nowIso() });
+          const written = { ...recovered, updatedAt: nowIso() };
+          writeSession(this.config.dataDir, written);
+          if (preparedObservation) this.advancePreparedObservation(preparedObservation, written);
           this.stateCache.delete(session.id);
         }
       }
       return { exists, paneDead };
     } catch (error) {
       if (!(error instanceof TmuxProbeUnknownError)) throw error;
-      if (session && probeRevision !== undefined)
-        this.retainDetectionError(
+      this.assertCodexObservation(preparedObservation);
+      if (session && probeRevision !== undefined) {
+        const retained = this.retainDetectionError(
           session,
           `Resource readout ${tmuxSession}: ${error.message}`,
           "other",
           probeRevision,
         );
+        if (preparedObservation) this.advancePreparedObservation(preparedObservation, retained);
+      }
       return { exists: false, paneDead: false, diagnostic: error.message };
     }
   }
@@ -25483,6 +27308,20 @@ export class SessionService {
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],
   ): Promise<SessionView> {
+    try {
+      return await this.enrichObserved(session, claudeAccounts, sessionBatch);
+    } catch (error) {
+      if (error instanceof CodexEvidenceInvalidatedError)
+        throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(session.id));
+      throw error;
+    }
+  }
+
+  private async enrichObserved(
+    session: SessionRecord,
+    claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
+    sessionBatch?: SessionRecord[],
+  ): Promise<SessionView> {
     const receipt = this.lifecycle.snapshot(session.id);
     const { view, classified, source } = await this.enrichWithClassified(
       session,
@@ -25490,12 +27329,22 @@ export class SessionService {
       sessionBatch,
     );
     const rows = await this.finalizeLifecycleRows(
-      [{ view: this.withSessionDetail(view, classified.session), source, receipt }],
+      [
+        {
+          view: this.withSessionDetail(view, classified.session),
+          source,
+          receipt,
+          ...(classified.observation ? { observation: classified.observation } : {}),
+        },
+      ],
       async (record) => {
         const rebuilt = await this.enrichWithClassified(record);
         return {
           view: this.withSessionDetail(rebuilt.view, rebuilt.classified.session),
           source: rebuilt.source,
+          ...(rebuilt.classified.observation
+            ? { observation: rebuilt.classified.observation }
+            : {}),
         };
       },
       { includePending: false, onExhausted: "refuse" },
@@ -25559,6 +27408,7 @@ export class SessionService {
       Boolean(record.error?.trim() && !record.error.startsWith(STATUS_DETECTION_ERROR_PREFIX));
     const inputHasIndependentError = hasIndependentError(session);
     const classified = await this.classifySessionRecord(session);
+    this.assertCodexObservation(classified.observation);
     const persisted = this.persistClassifiedTokenUsage(classified.session, classified);
     if (persisted.status === "missing") {
       throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
@@ -25574,7 +27424,7 @@ export class SessionService {
 
     const services: ServiceInstanceView[] = [];
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
-      services.push(await this.enrichService(service));
+      services.push(await this.enrichService(service, classified.observation));
     }
 
     const project = this.resolveProjectForSession(session);
@@ -25586,12 +27436,14 @@ export class SessionService {
     // pay for a second read of the same anchor record when there's no
     // workspace file yet.
     const anchorRecord = this.deskAnchorRecord(session);
-    const sidecars = await this.sidecarViews(session, project);
+    const sidecars = await this.sidecarViews(session, project, classified.observation);
+    this.assertCodexObservation(classified.observation);
     const persistedSession = session;
     session = this.withReportingError(session);
     const source = isDeepStrictEqual(session, persistedSession) ? session : null;
     classified.session = session;
-    if (hasRetainedSessionError(session)) classified.state = "error";
+    if (hasRetainedSessionError(session) && !this.hasCodexLimitEpisode(session))
+      classified.state = "error";
     const state = this.stabilizeState(session.id, classified.state);
     await this.updateStateHistory(
       session,
@@ -25600,6 +27452,7 @@ export class SessionService {
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
+      classified.observation,
     );
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
@@ -25615,6 +27468,7 @@ export class SessionService {
     );
     const resolvedClaudeAccounts =
       session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
+    this.assertCodexObservation(classified.observation);
     const {
       launchCommand: _launchCommand,
       prompt: _prompt,
@@ -25627,6 +27481,9 @@ export class SessionService {
       preflightTokenUsage: _preflightTokenUsage,
       cursorRestoreBoundary: _cursorRestoreBoundary,
       codexRestoreStartedAt: _codexRestoreStartedAt,
+      codexRestoreLaunchId: _codexRestoreLaunchId,
+      spawnIntent: _spawnIntent,
+      spawnReceipt: _spawnReceipt,
       restoredAt: _restoredAt,
       // The record's queue state is internal; the view carries queuedMessagesView.
       queuedMessages: _queuedMessages,
@@ -25668,6 +27525,7 @@ export class SessionService {
       !inputHasIndependentError &&
       !preReportHasIndependentError &&
       !hasIndependentError(session);
+    this.assertCodexObservation(classified.observation);
     this.guardSidecarViews(session.id, sidecars);
     return { view, classified, source, detectionOnlyError };
   }
