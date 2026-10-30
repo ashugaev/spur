@@ -905,14 +905,6 @@
           transform: scale(1);
         }
       }
-      .fo-cap {
-        fill: var(--t4);
-        font-family: var(--mono);
-        font-size: 12px;
-        letter-spacing: 0.18em;
-        text-transform: uppercase;
-        text-anchor: middle;
-      }
       .fo-logo path {
         fill: none;
         stroke: var(--brand);
@@ -943,29 +935,9 @@
       .fo-agent.is-ready .fo-primary-label {
         fill: var(--t1);
       }
-      .fo-secondary-label,
-      .fo-agent-state {
-        fill: var(--t4);
-        font-family: var(--mono);
-        font-size: 11px;
-        letter-spacing: 0.1em;
-      }
-      .fo-agent-state {
-        opacity: 0;
-        transition: opacity 0.25s;
-      }
-      .fo-agent.is-active .fo-agent-state,
-      .fo-agent.is-ready .fo-agent-state {
-        opacity: 1;
-      }
       .fo-pkt {
         fill: var(--brand);
         opacity: 0;
-      }
-      @media (max-width: 430px) {
-        .fo-secondary-label:not(.fo-context-label) {
-          display: none;
-        }
       }
 
       /* ── architecture diagram ──────────────────────────────────────── */
@@ -1570,11 +1542,9 @@
           <figure class="fanout" role="img" aria-labelledby="fanout-desc">
             <svg viewBox="0 0 460 400" aria-hidden="true" focusable="false">
               <path class="fo-wire" d="M124 112 C155 112 158 190 190 190" />
-              <path class="fo-wire" d="M124 158 C155 158 158 190 190 190" />
-              <path class="fo-wire" d="M124 204 H190" />
-              <path class="fo-wire" d="M124 250 C155 250 158 190 190 190" />
-              <path class="fo-wire" d="M124 296 C155 296 158 190 190 190" />
-              <path class="fo-wire" d="M124 342 C155 342 158 190 190 190" />
+              <path class="fo-wire" d="M124 174 C155 174 158 190 190 190" />
+              <path class="fo-wire" d="M124 236 C155 236 158 190 190 190" />
+              <path class="fo-wire" d="M124 298 C155 298 158 190 190 190" />
               <path class="fo-wire fo-wire-main" d="M250 190 C285 190 302 112 334 112" />
               <path class="fo-wire fo-wire-main" d="M250 190 C285 190 302 174 334 174" />
               <path class="fo-wire fo-wire-main" d="M250 190 C285 190 302 236 334 236" />
@@ -1594,7 +1564,6 @@
                     </g>
                   </g>
                 </g>
-                <text class="fo-cap" x="220" y="88">you</text>
               </g>
 
               <g class="fo-hub">
@@ -1606,7 +1575,6 @@
                     />
                   </g>
                 </g>
-                <text class="fo-cap" x="220" y="238">Spur</text>
               </g>
 
               <g class="fo-source" data-source-kind="event" data-x="124" data-y="112">
@@ -1616,72 +1584,51 @@
                     d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"
                   />
                 </g>
-                <text class="fo-primary-label" x="40" y="111">GitHub</text>
-                <text class="fo-secondary-label" x="40" y="123">PR / CI</text>
+                <text class="fo-primary-label" x="40" y="117">GitHub</text>
               </g>
-              <g class="fo-source" data-source-kind="event" data-x="124" data-y="158">
-                <rect x="6" y="140" width="118" height="36" />
-                <g class="fo-icon" transform="translate(16 150) scale(.95)">
-                  <path
-                    d="M8.001 15.15 10.945 6.09h-5.89L8 15.15Z M8.001 15.15 5.055 6.09H.925l7.076 9.06Z M.925 6.09.03 8.845a.611.611 0 0 0 .221.683l7.75 5.622L.925 6.09Z M.925 6.09h4.13L3.28.633a.306.306 0 0 0-.581 0L.925 6.09Z M8.001 15.15 10.945 6.09h4.13L8 15.15Z M15.075 6.09l.895 2.755a.611.611 0 0 1-.221.683l-7.75 5.622 7.076-9.06Z M15.075 6.09h-4.13L12.72.633a.306.306 0 0 1 .581 0l1.774 5.457Z"
-                  />
-                </g>
-                <text class="fo-primary-label" x="40" y="163">GitLab</text>
+              <g class="fo-source" data-source-kind="event" data-x="124" data-y="174">
+                <rect x="6" y="156" width="118" height="36" />
+                <path class="fo-icon-stroke" d="M17 180l5-13 5 13m-8-5h6" />
+                <text class="fo-primary-label" x="40" y="179">Sentry</text>
               </g>
-              <g class="fo-source" data-source-kind="event" data-x="124" data-y="204">
-                <rect x="6" y="186" width="118" height="36" />
-                <path class="fo-icon-stroke" d="M17 210l5-13 5 13m-8-5h6" />
-                <text class="fo-primary-label" x="40" y="209">Sentry</text>
-              </g>
-              <g class="fo-source" data-source-kind="event" data-x="124" data-y="250">
-                <rect x="6" y="232" width="118" height="36" />
-                <path class="fo-icon" d="M15 249l15-7-5 16-4-5-3 3 1-5z" />
-                <text class="fo-primary-label" x="40" y="255">Telegram</text>
-              </g>
-              <g class="fo-source" data-source-kind="event" data-x="124" data-y="296">
-                <rect x="6" y="278" width="118" height="36" />
-                <circle class="fo-icon-stroke" cx="22" cy="296" r="8" />
-                <path class="fo-icon-stroke" d="M22 291v5l4 2" />
-                <text class="fo-primary-label" x="40" y="301">cron</text>
+              <g class="fo-source" data-source-kind="event" data-x="124" data-y="236">
+                <rect x="6" y="218" width="118" height="36" />
+                <circle class="fo-icon-stroke" cx="22" cy="236" r="8" />
+                <path class="fo-icon-stroke" d="M22 231v5l4 2" />
+                <text class="fo-primary-label" x="40" y="241">cron</text>
               </g>
               <g class="fo-source" data-source-kind="context">
-                <rect x="6" y="324" width="118" height="36" />
-                <g class="fo-icon" transform="translate(14 333) scale(.75)">
+                <rect x="6" y="280" width="118" height="36" />
+                <g class="fo-icon" transform="translate(14 289) scale(.75)">
                   <path
                     d="M11.53 2c0 2.4 1.97 4.35 4.35 4.35h1.78v1.7c0 2.4 1.94 4.34 4.34 4.35V2.84a.84.84 0 0 0-.84-.84H11.53zM6.77 6.8a4.362 4.362 0 0 0 4.34 4.34h1.8v1.72a4.362 4.362 0 0 0 4.34 4.34V7.63a.84.84 0 0 0-.84-.84H6.77zM2 11.6a4.362 4.362 0 0 0 4.34 4.34h1.8v1.72A4.362 4.362 0 0 0 12.48 22V12.44a.84.84 0 0 0-.84-.84H2z"
                   />
                 </g>
-                <text class="fo-primary-label" x="40" y="341">Jira</text>
-                <text class="fo-secondary-label fo-context-label" x="40" y="353">backlog</text>
+                <text class="fo-primary-label" x="40" y="303">Jira</text>
               </g>
 
               <g class="fo-agent" data-x="334" data-y="112">
                 <rect x="334" y="92" width="120" height="40" />
-                <text class="fo-primary-label" x="346" y="110">claude</text>
-                <text class="fo-agent-state" x="346" y="124">working</text>
+                <text class="fo-primary-label" x="346" y="117">claude</text>
               </g>
               <g class="fo-agent" data-x="334" data-y="174">
                 <rect x="334" y="154" width="120" height="40" />
-                <text class="fo-primary-label" x="346" y="172">codex</text>
-                <text class="fo-agent-state" x="346" y="186">working</text>
+                <text class="fo-primary-label" x="346" y="179">codex</text>
               </g>
               <g class="fo-agent" data-x="334" data-y="236">
                 <rect x="334" y="216" width="120" height="40" />
-                <text class="fo-primary-label" x="346" y="234">cursor</text>
-                <text class="fo-agent-state" x="346" y="248">working</text>
+                <text class="fo-primary-label" x="346" y="241">cursor</text>
               </g>
               <g class="fo-agent" data-x="334" data-y="298">
                 <rect x="334" y="278" width="120" height="40" />
-                <text class="fo-primary-label" x="346" y="296">opencode</text>
-                <text class="fo-agent-state" x="346" y="310">working</text>
+                <text class="fo-primary-label" x="346" y="303">opencode</text>
               </g>
 
               <rect class="fo-pkt" x="-4" y="-4" width="8" height="8" />
             </svg>
             <figcaption id="fanout-desc" class="sr-only">
-              GitHub, GitLab, Sentry, cron, and Telegram events enter Spur, which routes work to one
-              CLI agent and returns the result to you. Jira supplies backlog context or queried work
-              items.
+              GitHub, Sentry and cron events enter Spur, which routes work to one CLI agent and
+              returns the result to you. Jira supplies backlog context or queried work items.
             </figcaption>
           </figure>
         </header>
@@ -2614,7 +2561,6 @@
             });
             agents.forEach(function (agent) {
               agent.classList.remove("is-active", "is-ready");
-              agent.querySelector(".fo-agent-state").textContent = "working";
             });
           }
 
@@ -2657,7 +2603,6 @@
             var sourceY = Number(source.dataset.y);
             var agentX = Number(agent.dataset.x);
             var agentY = Number(agent.dataset.y);
-            var agentState = agent.querySelector(".fo-agent-state");
 
             reset();
             await wait(450);
@@ -2671,12 +2616,10 @@
             await flight(250, 190, agentX, agentY, "var(--brand)", 720);
             if (stale()) return;
             agent.classList.add("is-active");
-            agentState.textContent = "working";
             await wait(1000);
 
             agent.classList.remove("is-active");
             agent.classList.add("is-ready");
-            agentState.textContent = "result ready";
             await flight(agentX, agentY, 250, 190, "var(--ready)", 720);
             if (stale()) return;
             hit(hubFrame, "var(--ready)");

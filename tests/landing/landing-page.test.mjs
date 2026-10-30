@@ -72,25 +72,57 @@ test("hero routes supported events through one accessible visual", () => {
   assert.equal((hero.match(/id="fanout-desc"/g) ?? []).length, 1);
   assert.match(hero, /<svg[^>]+aria-hidden="true" focusable="false">/);
   assert.equal((hero.match(/class="fo-pkt"/g) ?? []).length, 1);
-  assert.equal((hero.match(/data-source-kind="event"/g) ?? []).length, 5);
+  assert.equal((hero.match(/data-source-kind="event"/g) ?? []).length, 3);
   assert.equal((hero.match(/data-source-kind="context"/g) ?? []).length, 1);
   assert.equal((hero.match(/class="fo-agent"/g) ?? []).length, 4);
   const visual = hero.slice(hero.indexOf('<figure class="fanout'), hero.indexOf("</figure>"));
-  for (const label of ["GitHub", "GitLab", "Sentry", "Telegram", "cron", "Jira", "backlog"]) {
+  for (const label of ["GitHub", "Sentry", "cron", "Jira"]) {
     assert.match(hero, new RegExp(`>${label}<`));
   }
   for (const agent of ["claude", "codex", "cursor", "opencode"]) {
     assert.equal((visual.match(new RegExp(`>${agent}<`, "g")) ?? []).length, 1);
   }
-  assert.doesNotMatch(hero, /Slack/i);
+  assert.doesNotMatch(hero, /Slack|GitLab|Telegram|fo-secondary-label|fo-agent-state|fo-cap/);
   assert.match(
     hero.replace(/\s+/g, " "),
-    /GitHub, GitLab, Sentry, cron, and Telegram events enter Spur, which routes work to one CLI agent and returns the result to you\. Jira supplies backlog context or queried work items\./,
+    /GitHub, Sentry and cron events enter Spur, which routes work to one CLI agent and returns the result to you\. Jira supplies backlog context or queried work items\./,
   );
-  assert.doesNotMatch(
+  assert.match(
     html.slice(html.indexOf("var sources"), html.indexOf("var agents")),
-    /context|Jira/,
+    /querySelectorAll\('\.fo-source\[data-source-kind="event"\]'\)/,
   );
+  assert.doesNotMatch(html, /fo-agent-state|fo-secondary-label|fo-context-label|fo-cap/);
+});
+
+test("hero routes start at four sources aligned with the four agent rows", () => {
+  const visual = html.slice(html.indexOf('<figure class="fanout'), html.indexOf("</figure>"));
+  const sources = [
+    ...visual.matchAll(
+      /<g class="fo-source"([^>]*)>\s*<rect x="6" y="(\d+)" width="118" height="(\d+)"/g,
+    ),
+  ];
+  const agents = [
+    ...visual.matchAll(
+      /<g class="fo-agent"[^>]*data-y="(\d+)">\s*<rect x="334" y="(\d+)" width="120" height="(\d+)"/g,
+    ),
+  ];
+  assert.equal(sources.length, 4);
+  assert.equal(agents.length, 4);
+  const sourceRows = sources.map(([, , y, height]) => Number(y) + Number(height) / 2);
+  const agentRows = agents.map(([, routeY, y, height]) => {
+    const center = Number(y) + Number(height) / 2;
+    assert.equal(Number(routeY), center, "agent route must meet the node center");
+    return center;
+  });
+  assert.deepEqual(sourceRows, agentRows);
+  for (const [index, [, attributes]] of sources.entries()) {
+    const row = sourceRows[index];
+    if (attributes.includes('data-source-kind="event"')) {
+      assert.match(attributes, new RegExp(`data-y="${row}"`));
+    }
+    assert.match(visual, new RegExp(`class="fo-wire" d="M124 ${row} [^"]*190 190"`));
+    assert.match(visual, new RegExp(`class="fo-wire fo-wire-main" d="M250 190 [^"]*334 ${row}"`));
+  }
 });
 
 test("hero face keeps eyes and mouth visible without frame-swapping animation", () => {
@@ -99,7 +131,6 @@ test("hero face keeps eyes and mouth visible without frame-swapping animation", 
   assert.equal((user.match(/class="fo-eye"/g) ?? []).length, 2);
   assert.equal((user.match(/class="fo-mouth"/g) ?? []).length, 1);
   assert.match(user, /class="fo-you-frame"/);
-  assert.match(user, />you<\/text>/);
   assert.doesNotMatch(user, /tabindex|aria-label/);
   assert.doesNotMatch(html, /chomp|\.fo-you g(?:\s|[{:])/);
   for (const gesture of ["face-blink", "face-mouth"]) {
