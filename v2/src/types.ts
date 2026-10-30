@@ -1568,6 +1568,9 @@ export type TelegramSpawnOrigin = Pick<
   "projectId" | "sourceId" | "chatId" | "messageThreadId"
 >;
 
+export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+export const MAX_ATTACHMENTS = 10;
+
 export interface SendMessageAttachment {
   name: string;
   data: string; // base64

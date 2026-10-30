@@ -914,6 +914,8 @@ export async function startServer(
         listSessions: async () =>
           (await service.list({ view: "dashboard" })).map(projectSourceSession),
         getSession: (sessionId) => sourceSessionById(service, sessionId),
+        prepareSessionMessage: async (sessionId, request) =>
+          service.prepareSourceMessage(sessionId, request),
         workbench: createSourceWorkbench(service),
         telegramConversations: {
           ensureTopic: (sessionId, origin) => service.ensureTelegramTopic(sessionId, origin),
