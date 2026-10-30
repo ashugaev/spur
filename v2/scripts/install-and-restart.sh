@@ -255,7 +255,12 @@ fi
 
 read -r -a systemctl_cmd <<<"$SYSTEMCTL"
 if command -v "${systemctl_cmd[0]}" >/dev/null 2>&1; then
-  "${systemctl_cmd[@]}" restart spur-daemon.service spur-web.service
+  required_units=(spur-daemon.service spur-web.service spur-mcp.service)
+  if [[ -f /etc/spur/mcp-tunnel.env ]]; then
+    required_units+=(spur-mcp-tunnel.service)
+  fi
+  "${systemctl_cmd[@]}" enable "${required_units[@]}"
+  "${systemctl_cmd[@]}" restart "${required_units[@]}"
   restart_rc=$?
   echo "$(date -u +%FT%TZ) install-and-restart systemctl restart rc=$restart_rc"
   if [ "$restart_rc" -eq 0 ]; then
@@ -265,13 +270,15 @@ import { setTimeout } from 'node:timers/promises';
 const root = process.argv[2];
 const { createRealUpdateDeps } = await import(pathToFileURL(`${root}/dist/update.js`));
 const deps = createRealUpdateDeps(`${root}/dist/cli.js`);
+const { makeTargets, SERVICE_UNITS } = await import(pathToFileURL(`${root}/dist/update-health.js`));
+const targets = makeTargets({ daemon: deps.readDaemonPort(), web: deps.readWebPort(), mcp: deps.readMcpPort() });
 process.exitCode = 1;
 for (let attempt = 0; attempt < 60; attempt += 1) {
-  const results = await Promise.all([
-    deps.probe({ id: 'daemon', url: `http://127.0.0.1:${deps.readDaemonPort()}/info` }),
-    deps.probe({ id: 'web', url: `http://127.0.0.1:${deps.readWebPort()}/` }),
-  ]);
-  if (results.every(result => result.ok)) {
+  const results = await Promise.all(deps.requiredServices().map(async id => {
+    const [probe, state] = await Promise.all([deps.probe(targets[id]), deps.unitState(SERVICE_UNITS[id])]);
+    return probe.ok && state === 'active';
+  }));
+  if (results.every(Boolean)) {
     process.exitCode = 0;
     break;
   }
