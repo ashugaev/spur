@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentStateStrategy } from "./agents/index.js";
@@ -321,6 +322,24 @@ function shouldWriteAgentStateTools(agent: AgentName | undefined): boolean {
   return agentStateStrategy(agent) === "hook";
 }
 
+// Tool wrappers are re-written while the owner agent may be live; truncate-then-write
+// would let a concurrent exec read a partial script. Same-dir temp + rename is atomic.
+function writeToolFileAtomic(
+  path: string,
+  content: string,
+  options: { encoding: "utf8"; mode: number },
+): void {
+  const tmpPath = `${path}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`;
+  try {
+    writeFileSync(tmpPath, content, options);
+    chmodSync(tmpPath, options.mode);
+    renameSync(tmpPath, path);
+  } catch (error) {
+    rmSync(tmpPath, { force: true });
+    throw error;
+  }
+}
+
 export function ensureSessionSlotTool(args: {
   dataDir: string;
   sessionId: string;
@@ -332,7 +351,7 @@ export function ensureSessionSlotTool(args: {
   const toolDir = slotToolDir(args.dataDir, args.sessionId);
   const stateFilePath = join(args.dataDir, "session-agent-state", `${args.sessionId}.json`);
   mkdirSync(toolDir, { recursive: true });
-  writeFileSync(
+  writeToolFileAtomic(
     join(toolDir, SPUR_WRAPPER_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
@@ -340,7 +359,7 @@ exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${
 `,
     { encoding: "utf8", mode: 0o755 },
   );
-  writeFileSync(
+  writeToolFileAtomic(
     join(toolDir, SLOT_TOOL_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
@@ -349,7 +368,7 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" slots --session ${shellEscape(args.sessi
 `,
     { encoding: "utf8", mode: 0o755 },
   );
-  writeFileSync(
+  writeToolFileAtomic(
     join(toolDir, SELF_DESTRUCT_TOOL_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
@@ -358,7 +377,7 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" self-destruct ${shellEscape(args.session
 `,
     { encoding: "utf8", mode: 0o755 },
   );
-  writeFileSync(
+  writeToolFileAtomic(
     join(toolDir, TODO_TOOL_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
@@ -368,7 +387,7 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" todo "$@" --session ${shellEscape(args.s
     { encoding: "utf8", mode: 0o755 },
   );
   if (args.projectId && args.branchNamingRegex) {
-    writeFileSync(
+    writeToolFileAtomic(
       join(toolDir, BRANCH_TOOL_NAME),
       `#!/usr/bin/env bash
 set -euo pipefail
@@ -385,7 +404,7 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" branch "$action" --project ${shellEscape
 `,
       { encoding: "utf8", mode: 0o755 },
     );
-    writeFileSync(
+    writeToolFileAtomic(
       join(toolDir, GIT_WRAPPER_NAME),
       `#!/usr/bin/env bash
 set -euo pipefail
@@ -455,7 +474,7 @@ exec "$REAL_GIT" "$@"
   }
   // Claude uses JSONL-based state classification — no hook state scripts needed.
   if (shouldWriteAgentStateTools(args.agent)) {
-    writeFileSync(
+    writeToolFileAtomic(
       join(toolDir, AGENT_STATE_UPDATER_NAME),
       `#!/usr/bin/env node
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -587,7 +606,7 @@ try {
 `,
       { encoding: "utf8", mode: 0o755 },
     );
-    writeFileSync(
+    writeToolFileAtomic(
       join(toolDir, AGENT_STATE_TOOL_NAME),
       `#!/usr/bin/env bash
 set -euo pipefail
@@ -596,7 +615,7 @@ exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UP
       { encoding: "utf8", mode: 0o755 },
     );
   }
-  writeFileSync(
+  writeToolFileAtomic(
     join(toolDir, "spur-sidecar"),
     `#!/usr/bin/env bash
 set -euo pipefail
