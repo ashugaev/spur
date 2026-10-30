@@ -35,6 +35,13 @@ run_helper() {
   SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo SYSTEMCTL=echo bash "$HELPER" "$@"
 }
 
+seed_runtime_files() {
+  local entry
+  while IFS= read -r entry || [[ -n "$entry" ]]; do
+    case "$entry" in dist/*) : >"$1/$entry" ;; esac
+  done <"$HERE/../required-package-files.txt"
+}
+
 # Case 1: valid version writes the expected install and restart lines.
 rm -f "$LOG_FILE"
 if ! run_helper 1.2.3; then
@@ -207,7 +214,9 @@ cp "$HERE/../scripts/verify-package-files.sh" "$PKG_SCRIPTS_DIR/verify-package-f
 cp "$HERE/../required-package-files.txt" "$PKG_DIR/required-package-files.txt"
 : >"$PKG_DIR/deploy/spur-daemon.npm.service"
 : >"$PKG_DIR/deploy/spur-web.npm.service"
-: >"$PKG_DIR/dist/cli.js"
+: >"$PKG_DIR/deploy/spur-mcp.npm.service"
+: >"$PKG_DIR/deploy/spur-mcp-tunnel.npm.service"
+seed_runtime_files "$PKG_DIR"
 : >"$PKG_DIR/web/dist-server/web-server.js"
 : >"$PKG_DIR/spur.yaml.reference"
 : >"$PKG_DIR/skills/spur/SKILL.md"
@@ -407,7 +416,9 @@ cp "$HERE/../scripts/verify-package-files.sh" "$PKG_SCRIPTS_DIR9/verify-package-
 cp "$HERE/../required-package-files.txt" "$PKG_DIR9/required-package-files.txt"
 : >"$PKG_DIR9/deploy/spur-daemon.npm.service"
 : >"$PKG_DIR9/deploy/spur-web.npm.service"
-: >"$PKG_DIR9/dist/cli.js"
+: >"$PKG_DIR9/deploy/spur-mcp.npm.service"
+: >"$PKG_DIR9/deploy/spur-mcp-tunnel.npm.service"
+seed_runtime_files "$PKG_DIR9"
 : >"$PKG_DIR9/spur.yaml.reference"
 : >"$PKG_DIR9/skills/spur/SKILL.md"
 printf '{"version":"1.2.3"}' >"$PKG_DIR9/package.json"
@@ -480,7 +491,9 @@ cp "$HERE/../scripts/verify-package-files.sh" "$PKG_SCRIPTS_DIR10/verify-package
 cp "$HERE/../required-package-files.txt" "$PKG_DIR10/required-package-files.txt"
 : >"$PKG_DIR10/deploy/spur-daemon.npm.service"
 : >"$PKG_DIR10/deploy/spur-web.npm.service"
-: >"$PKG_DIR10/dist/cli.js"
+: >"$PKG_DIR10/deploy/spur-mcp.npm.service"
+: >"$PKG_DIR10/deploy/spur-mcp-tunnel.npm.service"
+seed_runtime_files "$PKG_DIR10"
 : >"$PKG_DIR10/web/dist-server/web-server.js"
 : >"$PKG_DIR10/spur.yaml.reference"
 : >"$PKG_DIR10/skills/spur/SKILL.md"
@@ -548,7 +561,9 @@ cp "$HERE/../scripts/verify-package-files.sh" "$PKG_SCRIPTS_DIR11/verify-package
 cp "$HERE/../required-package-files.txt" "$PKG_DIR11/required-package-files.txt"
 : >"$PKG_DIR11/deploy/spur-daemon.npm.service"
 : >"$PKG_DIR11/deploy/spur-web.npm.service"
-: >"$PKG_DIR11/dist/cli.js"
+: >"$PKG_DIR11/deploy/spur-mcp.npm.service"
+: >"$PKG_DIR11/deploy/spur-mcp-tunnel.npm.service"
+seed_runtime_files "$PKG_DIR11"
 : >"$PKG_DIR11/web/dist-server/web-server.js"
 : >"$PKG_DIR11/spur.yaml.reference"
 : >"$PKG_DIR11/skills/spur/SKILL.md"
@@ -629,7 +644,9 @@ cp "$HERE/../scripts/verify-package-files.sh" "$PKG_SCRIPTS_DIR17/verify-package
 cp "$HERE/../required-package-files.txt" "$PKG_DIR17/required-package-files.txt"
 : >"$PKG_DIR17/deploy/spur-daemon.npm.service"
 : >"$PKG_DIR17/deploy/spur-web.npm.service"
-: >"$PKG_DIR17/dist/cli.js"
+: >"$PKG_DIR17/deploy/spur-mcp.npm.service"
+: >"$PKG_DIR17/deploy/spur-mcp-tunnel.npm.service"
+seed_runtime_files "$PKG_DIR17"
 : >"$PKG_DIR17/spur.yaml.reference"
 printf '{"version":"1.2.3"}' >"$PKG_DIR17/package.json"
 cat >"$PREFIX_DIR17/bin/spur" <<'EOF'
@@ -685,7 +702,9 @@ cp "$HERE/../scripts/verify-package-files.sh" "$PKG_SCRIPTS_DIR18/verify-package
 cp "$HERE/../required-package-files.txt" "$PKG_DIR18/required-package-files.txt"
 : >"$PKG_DIR18/deploy/spur-daemon.npm.service"
 : >"$PKG_DIR18/deploy/spur-web.npm.service"
-: >"$PKG_DIR18/dist/cli.js"
+: >"$PKG_DIR18/deploy/spur-mcp.npm.service"
+: >"$PKG_DIR18/deploy/spur-mcp-tunnel.npm.service"
+seed_runtime_files "$PKG_DIR18"
 : >"$PKG_DIR18/web/dist-server/web-server.js"
 : >"$PKG_DIR18/spur.yaml.reference"
 : >"$PKG_DIR18/skills/spur/SKILL.md"

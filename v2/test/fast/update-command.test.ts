@@ -54,6 +54,7 @@ import {
   reinitUnits,
   resolveInstallPrefix,
   runUpdate,
+  runUpdateMonitor,
   type UpdateDeps,
 } from "../../src/update.js";
 import type { SpurLogEntry } from "../../src/event-log.js";
@@ -106,6 +107,8 @@ function buildRunFake(opts: {
     },
     readWebPort: () => 4311,
     readDaemonPort: () => 4310,
+    readMcpPort: () => 4311,
+    requiredServices: () => ["daemon", "web", "mcp"],
     launch: () => {
       events.push("launch");
       return { kind: "process", pid: 7 };
@@ -239,6 +242,127 @@ describe("runUpdate", () => {
     expect(fake.lockCounts).toEqual({ acquired: 1, released: 1 });
   });
 
+  it.each(["install", "reinit"] as const)(
+    "records a terminal %s failure under the lease without claiming health",
+    async (stage) => {
+      const fake = buildRunFake({ initialState: EMPTY_STATE });
+      let installed = "0.1.5";
+      fake.deps.readInstalledVersion = () => installed;
+      const failure = Object.assign(new Error(`${stage} failed`), { status: 1 });
+      fake.deps.installVersion = () => {
+        if (stage === "install") throw failure;
+        installed = "0.2.0";
+      };
+      fake.deps.reinit = () => {
+        throw failure;
+      };
+      const write = fake.deps.writeState;
+      let anchor: RollbackState["lastKnownGood"] = null;
+      fake.deps.writeState = (state) => {
+        expect(fake.lockCounts).toEqual({ acquired: 1, released: 0 });
+        if (state.inProgress?.phase === "installing") anchor = state.lastKnownGood;
+        write(state);
+      };
+
+      await expect(runUpdate("/tmp/cli.js", { version: "0.2.0" }, fake.deps)).rejects.toBe(failure);
+      expect(fake.state()).toMatchObject({
+        lastKnownGood: { version: "0.1.5" },
+        inProgress: null,
+        lastFailure: {
+          fromVersion: "0.1.5",
+          toVersion: "0.2.0",
+          stage,
+          installedVersion: installed,
+          exitCode: 1,
+          startedAt: expect.any(String),
+          finishedAt: expect.any(String),
+        },
+      });
+      expect(fake.events).not.toContain("launch");
+      expect(fake.state().lastKnownGood).toBe(anchor);
+      expect(fake.events.some((event) => event.startsWith("deploy-failure:"))).toBe(false);
+      expect(fake.lockCounts).toEqual({ acquired: 1, released: 1 });
+      const terminal = fake.state();
+      // Late health and a detached monitor cannot commit a failed attempt.
+      await runUpdateMonitor("/tmp/cli.js", fake.deps);
+      expect(fake.state()).toBe(terminal);
+
+      // A later explicit request still passes the existing preflight gate.
+      fake.deps.probe = async () => ({ ok: false, reason: "http-error" });
+      await expect(runUpdate("/tmp/cli.js", {}, fake.deps)).rejects.toThrow("preflight");
+      expect(fake.state()).toBe(terminal);
+      fake.deps.probe = async () => ({ ok: true });
+      fake.deps.installVersion = () => {};
+      fake.deps.reinit = () => {};
+      fake.deps.writeState = (state) => {
+        if (state.inProgress?.phase === "installing") expect(state.lastFailure).toBeUndefined();
+        write(state);
+      };
+      await runUpdate("/tmp/cli.js", {}, fake.deps);
+      expect(fake.state().inProgress?.phase).toBe("monitoring");
+      expect(fake.state().lastKnownGood?.version).toBe("0.1.5");
+    },
+  );
+
+  it("records unknown installed version when failed installation metadata is unreadable", async () => {
+    const fake = buildRunFake({ initialState: EMPTY_STATE });
+    fake.deps.installVersion = () => {
+      throw new Error("install failed");
+    };
+    fake.deps.readInstalledVersion = () => {
+      throw new Error("missing package");
+    };
+    await expect(runUpdate("/tmp/cli.js", {}, fake.deps)).rejects.toThrow("install failed");
+    expect(fake.state().lastFailure).toMatchObject({ installedVersion: null, exitCode: null });
+  });
+
+  it("surfaces terminal-record write errors and still releases the settled installer lease", async () => {
+    const fake = buildRunFake({ initialState: EMPTY_STATE });
+    fake.deps.reinit = () => {
+      throw new Error("reinit failed");
+    };
+    const write = fake.deps.writeState;
+    fake.deps.writeState = (state) => {
+      if (state.lastFailure) throw new Error("state disk unavailable");
+      write(state);
+    };
+    await expect(runUpdate("/tmp/cli.js", {}, fake.deps)).rejects.toThrow("state disk unavailable");
+    expect(fake.lockCounts).toEqual({ acquired: 1, released: 1 });
+    expect(fake.events).not.toContain("launch");
+  });
+
+  it.each(["launch", "monitoring-write", "log"] as const)(
+    "does not terminalize an accepted monitor when %s throws",
+    async (boundary) => {
+      const fake = buildRunFake({ initialState: EMPTY_STATE });
+      const failure = new Error(`${boundary} failed`);
+      let accepted = false;
+      const monitor = { kind: "process" as const, pid: 7 };
+      fake.deps.launch = () => {
+        accepted = true;
+        if (boundary === "launch") throw failure;
+        return monitor;
+      };
+      const write = fake.deps.writeState;
+      fake.deps.writeState = (state) => {
+        expect(state.lastFailure).toBeUndefined();
+        if (boundary === "monitoring-write" && state.inProgress?.phase === "monitoring") {
+          throw failure;
+        }
+        write(state);
+      };
+      fake.deps.log = () => {
+        if (boundary === "log") throw failure;
+      };
+      await expect(runUpdate("/tmp/cli.js", {}, fake.deps)).rejects.toBe(failure);
+      expect(accepted).toBe(true);
+      expect(fake.state().lastFailure).toBeUndefined();
+      expect(fake.state().inProgress?.phase).toBe(boundary === "log" ? "monitoring" : "installing");
+      if (boundary === "log") expect(fake.state().inProgress?.monitor).toBe(monitor);
+      expect(fake.lockCounts).toEqual({ acquired: 1, released: 1 });
+    },
+  );
+
   it("supersedes a dead in-progress monitor without --force", async () => {
     const fake = buildRunFake({ initialState: monitoringState(9), pidAlive: false });
     await runUpdate("/tmp/cli.js", {}, fake.deps);
@@ -339,23 +463,52 @@ describe("createRealUpdateDeps launch", () => {
 
   it("launches via systemd-run when it is available", async () => {
     const stateDir = await mkdtemp(join(tmpdir(), "spur-update-launch-"));
-    const deps = createRealUpdateDeps("/tmp/cli.js", join(stateDir, "state.json"));
+    const selectedConfig = join(stateDir, "instance.yaml");
+    await writeFile(selectedConfig, "server:\n  port: 43218\n");
+    const deps = createRealUpdateDeps("/tmp/cli.js", join(stateDir, "state.json"), selectedConfig);
     const ref = deps.launch();
     expect(ref).toEqual({ kind: "systemd", unit: "spur-update-monitor.service" });
     expect(execFileSyncCalls.some((call) => call.file === "systemd-run")).toBe(true);
+    expect(execFileSyncCalls.find((call) => call.file === "systemd-run")?.args).toEqual(
+      expect.arrayContaining(["--config", selectedConfig]),
+    );
     expect(spawnCalls).toEqual([]);
+  });
+
+  it("retains selected update identity without daemon-only source secrets and rejects malformed fields", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "spur-update-secret-"));
+    const selectedConfig = join(dir, "instance.yaml");
+    await writeFile(
+      selectedConfig,
+      `server:\n  port: 43218\nmcp:\n  port: 43220\nprojects:\n  test:\n    path: ${dir}\n    sources:\n      telegram:\n        type: telegram\n        token: \${P2_DAEMON_ONLY_TOKEN}\n        allowedUsers: [123]\n`,
+    );
+    expect(process.env["P2_DAEMON_ONLY_TOKEN"]).toBeUndefined();
+    const deps = createRealUpdateDeps("/tmp/cli.js", join(dir, "state.json"), selectedConfig);
+    expect(deps.readDaemonPort()).toBe(43218);
+    expect(deps.readMcpPort()).toBe(43220);
+    deps.launch();
+    expect(execFileSyncCalls.find((call) => call.file === "systemd-run")?.args).toEqual(
+      expect.arrayContaining(["--config", selectedConfig]),
+    );
+    await writeFile(selectedConfig, "mcp:\n  port: wrong\n");
+    expect(() =>
+      createRealUpdateDeps("/tmp/cli.js", join(dir, "state.json"), selectedConfig),
+    ).toThrow("mcp.port");
   });
 
   it("falls back to a detached, unref'd spawn when systemd-run is absent", async () => {
     systemdRunAvailable = false;
     const home = await mkdtemp(join(tmpdir(), "spur-update-home-"));
     process.env["HOME"] = home;
-    const deps = createRealUpdateDeps("/tmp/cli.js", join(home, "state.json"));
+    const selectedConfig = join(home, "instance.yaml");
+    await writeFile(selectedConfig, "server:\n  port: 43218\n");
+    const deps = createRealUpdateDeps("/tmp/cli.js", join(home, "state.json"), selectedConfig);
     const ref = deps.launch();
     expect(ref).toEqual({ kind: "process", pid: 4321 });
     expect(spawnUnrefCount).toBe(1);
     const monitorSpawn = spawnCalls.find((call) => call.args.includes("update-monitor"));
     expect(monitorSpawn).toBeDefined();
+    expect(monitorSpawn?.args).toEqual(expect.arrayContaining(["--config", selectedConfig]));
   });
 });
 
@@ -475,11 +628,14 @@ describe("createRealUpdateDeps reinit delegation", () => {
     );
     process.env["HOME"] = home;
 
-    const deps = createRealUpdateDeps("/tmp/cli.js", join(home, "state.json"));
+    const selectedConfig = join(home, "instance.yaml");
+    await writeFile(selectedConfig, "server:\n  port: 43218\n");
+    const deps = createRealUpdateDeps("/tmp/cli.js", join(home, "state.json"), selectedConfig);
     deps.reinit();
 
     expect(runNpmInitMock).toHaveBeenCalledOnce();
     expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
+      configPath: selectedConfig,
       webPort: "6200",
       exposeWeb: true,
       tailscale: false,
