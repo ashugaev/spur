@@ -653,6 +653,26 @@ describe("agentSubmitAckPacing", () => {
     await expect(agentEarlySubmitResendAllowed("claude", ctx)).resolves.toBe(false);
   });
 
+  it("refuses the claude early Enter for a slash command without reading the status file", async () => {
+    const ctx = { worktreePath: "/tmp/wt", agentSessionId: "sid-1" };
+    readClaudeSessionStatusMock.mockReset().mockResolvedValue({ state: "waiting" });
+
+    await expect(
+      agentEarlySubmitResendAllowed("claude", { ...ctx, slashCommand: true }),
+    ).resolves.toBe(false);
+    expect(readClaudeSessionStatusMock).not.toHaveBeenCalled();
+    await expect(
+      agentEarlySubmitResendAllowed("claude", { ...ctx, slashCommand: false }),
+    ).resolves.toBe(true);
+  });
+
+  it("keeps the early Enter allowed for agents without a gate, slash or not", async () => {
+    const ctx = { worktreePath: "/tmp/wt", agentSessionId: "sid-1", slashCommand: true };
+    for (const agent of ["codex", "cursor", "opencode"] as const) {
+      await expect(agentEarlySubmitResendAllowed(agent, ctx)).resolves.toBe(true);
+    }
+  });
+
   it("reports launch-send pacing for claude and codex only", () => {
     // Callers scope launch-send handling by this flag, so it must track exactly
     // the agents whose short window and Enter resends justify it.
