@@ -270,6 +270,7 @@ interface WorkItemClaimContext {
   // not among them belongs to a renamed or removed trigger.
   sourceSpawnTriggerIds: ReadonlySet<string>;
   fencedBlocks: ReadonlySet<number>;
+  controllerCurrent(): boolean;
 }
 
 interface PlannedSpawnBlock {
@@ -922,33 +923,50 @@ async function endDeskRetryWithoutLiveAnchor(
     )
     .sort((left, right) => left.blockIndex - right.blockIndex)[0];
   if (anchor?.sessionId === undefined) return planned;
-  if (anchor.state === "running") {
-    const session = await getWorkItemSessionIfPresent(service, anchor.sessionId);
-    if (session) {
-      const outcome = classifyWorkItemOwner(session, readSession(ctx.dataDir, session.id), true);
-      if (outcome === "adopt") return planned;
-      if (outcome === "pending") {
-        patchWorkItemMember(
-          ctx,
-          anchor.blockIndex,
+  const session =
+    anchor.state === "running"
+      ? await getWorkItemSessionIfPresent(service, anchor.sessionId)
+      : null;
+  if (!ctx.controllerCurrent()) return [];
+  const current = readWorkItemLifecycles(ctx.dataDir, ctx.projectId, ctx.sourceId).get(
+    ctx.workItem.externalId,
+  )?.members;
+  if (
+    !planned.every(
+      (entry) =>
+        entry.claimedAt !== undefined &&
+        current?.some(
           (member) =>
-            member.state === "running" && member.sessionId === session.id
-              ? bindWorkItemSession(member, { sessionId: session.id, outcome })
-              : member,
-          anchor.claimedAt,
-        );
-        releaseWorkItemClaim(ctx, planned);
-        return [];
-      }
+            isOwnMember(ctx, member, entry.blockIndex) && member.claimedAt === entry.claimedAt,
+        ),
+    ) ||
+    !current?.some(
+      (member) =>
+        isOwnMember(ctx, member, anchor.blockIndex) &&
+        member.claimedAt === anchor.claimedAt &&
+        member.sessionId === anchor.sessionId &&
+        member.state === anchor.state,
+    )
+  )
+    return [];
+  if (session) {
+    const outcome = classifyWorkItemOwner(session, readSession(ctx.dataDir, session.id), true);
+    if (outcome === "adopt") return planned;
+    if (outcome === "pending") {
+      patchWorkItemMember(
+        ctx,
+        anchor.blockIndex,
+        (member) =>
+          member.state === "running" && member.sessionId === session.id
+            ? bindWorkItemSession(member, { sessionId: session.id, outcome })
+            : member,
+        anchor.claimedAt,
+      );
+      releaseWorkItemClaim(ctx, planned);
+      return [];
     }
   }
   for (const entry of retrying) {
-    const current = readWorkItemLifecycles(ctx.dataDir, ctx.projectId, ctx.sourceId)
-      .get(ctx.workItem.externalId)
-      ?.members.find(
-        (member) => member.triggerId === ctx.triggerId && member.blockIndex === entry.blockIndex,
-      );
-    if (entry.claimedAt === undefined || current?.claimedAt !== entry.claimedAt) continue;
     const patched = patchWorkItemMember(
       ctx,
       entry.blockIndex,
@@ -1277,6 +1295,7 @@ async function runSpawnTrigger(
   deskGroup: boolean | undefined,
   eventData: unknown,
   sourceSpawnTriggerIds: ReadonlySet<string>,
+  controllerCurrent: () => boolean,
   logger: TriggerLogger,
   queue?: { work: PersistedSpawnWork; current(): boolean; save(): boolean },
   fencedBlocks: ReadonlySet<number> = new Set(),
@@ -1312,6 +1331,7 @@ async function runSpawnTrigger(
         autoComplete: autoComplete === true,
         sourceSpawnTriggerIds,
         fencedBlocks,
+        controllerCurrent,
       }
     : null;
 
@@ -2497,6 +2517,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       trigger.spawnDeskGroup,
       work.eventData,
       new Set(),
+      current,
       logger,
       { work, current, save },
     );
@@ -3077,6 +3098,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
               trigger.spawnDeskGroup,
               event.data,
               sourceSpawnTriggerIds,
+              () => !stopped,
               logger,
               undefined,
               fenced,
