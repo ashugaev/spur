@@ -50,11 +50,13 @@
   "dependencies": {
     "@clack/prompts": "^1.1.0",
     "@grammyjs/runner": "2.0.3",
+    "@modelcontextprotocol/sdk": "^1",
     "@playwright/mcp": "0.0.76",
     "commander": "^13.0.0",
     "croner": "^10.0.1",
     "grammy": "1.44.0",
-    "yaml": "^2.8.3"
+    "yaml": "^2.8.3",
+    "zod": "^3.25"
   },
   "devDependencies": {
     "@types/node": "^25.2.3",

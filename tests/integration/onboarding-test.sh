@@ -77,7 +77,11 @@ end_step "Step 2: Repo dependencies installed"
 # Step 3: Pack the published CLI boundary
 start_step "Step 3: Pack Spur tarball"
 PACK_LOG="/tmp/spur-pack-output.log"
-npm pack --json ./v2 > "$PACK_LOG"
+npm pack --json ./v2 > "$PACK_LOG" || {
+    pack_exit=$?
+    cat "$PACK_LOG"
+    exit "$pack_exit"
+}
 PACK_OUTPUT="$(sed -n '/^\[$/,$p' "$PACK_LOG")"
 TARBALL_NAME="$(printf '%s' "$PACK_OUTPUT" | jq -r '.[0].filename')"
 if [ -z "$TARBALL_NAME" ] || [ ! -f "$REPO_ROOT/$TARBALL_NAME" ]; then
