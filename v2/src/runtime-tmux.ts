@@ -168,7 +168,7 @@ function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
     let unresponsive = false;
     let diagnostic: string | undefined;
     try {
-      const out = await tmux("list-windows", "-a", "-F", "#{session_name} #{window_activity}");
+      const out = await tmuxRead("list-windows", "-a", "-F", "#{session_name} #{window_activity}");
       for (const line of out.trim().split("\n")) {
         const [sessionName, activitySeconds, extra] = line.trim().split(/\s+/);
         if (!sessionName) {
@@ -306,7 +306,7 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
     let unresponsive = false;
     let diagnostic: string | undefined;
     try {
-      const out = await tmux(
+      const out = await tmuxRead(
         "list-panes",
         "-a",
         "-F",
@@ -429,12 +429,14 @@ export function withTmuxSocketArgs(args: string[]): string[] {
   return activeTmuxSocketName ? ["-L", activeTmuxSocketName, ...args] : args;
 }
 
-// Every tmux() fork is a local, short-lived control command (list-windows,
-// list-panes, capture-pane, send-keys, ...) — never `attach-session`/`wait-for`
-// (those stay on execFileSync in cli.ts, outside this helper, and block by
-// design). Matches the sibling `getPsSnapshot`'s `timeout: 5_000` for the same
-// kind of local probe; ~250x the measured worst-case latency for these
-// commands on a 78-session fleet, so it only fires on a genuine hang.
+// Every tmux() fork is a local, short-lived write command (send-keys,
+// load-buffer, paste-buffer, delete-buffer, set-option, respawn-pane,
+// kill-session) — never
+// `attach-session`/`wait-for` (those stay on execFileSync in cli.ts, outside
+// this helper, and block by design). Read probes go through `tmuxRead` below,
+// which uses the same 5s limit as a deadline signal. ~250x the measured
+// worst-case latency for these commands on a 78-session fleet, so it only
+// fires on a genuine hang.
 // `runTmuxNewSession` (new-session path) deliberately does NOT go through
 // `tmux()` and keeps no timeout — a new session's own launch command is
 // allowed to take longer.
@@ -443,6 +445,18 @@ const TMUX_COMMAND_TIMEOUT_MS = 5_000;
 async function tmux(...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("tmux", withTmuxSocketArgs(args), {
     timeout: TMUX_COMMAND_TIMEOUT_MS,
+  });
+  return stdout.trimEnd();
+}
+
+// Read probes (list-*, capture-pane) use a deadline signal, not execFile's
+// `timeout`: on expiry `timeout` destroys stdout before SIGTERM and still
+// resolves when the child exits 0, handing back truncated or empty output as
+// success (#1194). The signal always rejects instead. Writes keep `tmux()`'s
+// `timeout`: aborting a completed write reads as a failure and triggers a resend.
+async function tmuxRead(...args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("tmux", withTmuxSocketArgs(args), {
+    signal: AbortSignal.timeout(TMUX_COMMAND_TIMEOUT_MS),
   });
   return stdout.trimEnd();
 }
@@ -554,19 +568,32 @@ export class SensitiveTmuxCleanupError extends Error {
   }
 }
 
-// Node's execFile `timeout` option sends SIGTERM and reports `killed: true`,
-// `signal: "SIGTERM"` on the rejected error — distinct from an external
-// SIGTERM (`killed: false`), a maxBuffer overrun (`killed` undefined), and a
-// plain non-zero exit (`killed: false`). This is the only ambiguous failure:
-// the probe fork (tmux or ps) MIGHT still be alive, so callers must not treat
-// it the same as a confirmed-absent tmux server or process.
+// A probe deadline is either execFile's `timeout` (tmux writes: SIGTERM,
+// `killed: true`, `signal: "SIGTERM"` on the rejected error) or a deadline
+// `AbortSignal.timeout` (tmux reads, ps: AbortError with cause TimeoutError).
+// Both are distinct from an external SIGTERM (`killed: false`), a maxBuffer
+// overrun (`killed` undefined), and a plain non-zero exit (`killed: false`).
+// This is the only ambiguous failure: the probe fork (tmux or ps) MIGHT still
+// be alive, so callers must not treat it the same as a confirmed-absent tmux
+// server or process.
 function isProbeTimeoutKill(error: unknown): boolean {
   if (typeof error !== "object" || error === null) {
     return false;
   }
   const killed = "killed" in error ? error.killed : undefined;
   const signal = "signal" in error ? error.signal : undefined;
-  return killed === true && signal === "SIGTERM";
+  if (killed === true && signal === "SIGTERM") {
+    return true;
+  }
+  const cause = "cause" in error ? error.cause : undefined;
+  return (
+    "name" in error &&
+    error.name === "AbortError" &&
+    typeof cause === "object" &&
+    cause !== null &&
+    "name" in cause &&
+    cause.name === "TimeoutError"
+  );
 }
 
 function isSystemdRunUnavailable(error: unknown): boolean {
@@ -597,16 +624,23 @@ function isSystemdRunUnavailable(error: unknown): boolean {
 async function runTmuxNewSession(
   args: string[],
   operation?: RestoreOperationContext,
+  beforeLaunch?: () => void,
 ): Promise<void> {
   const run = (file: string, commandArgs: string[]): Promise<unknown> =>
     operation ? runRestoreCommand(file, commandArgs, operation) : execFileAsync(file, commandArgs);
   const mode = systemdScopeMode();
   if (mode === "direct") {
+    operation?.assertActive();
+    beforeLaunch?.();
     await run("tmux", args);
     return;
   }
+  const scopedArgs = ["--user", "--scope", "--quiet", "--collect", "tmux", ...args];
+  operation?.assertActive();
+  beforeLaunch?.();
   try {
-    await run("systemd-run", ["--user", "--scope", "--quiet", "--collect", "tmux", ...args]);
+    await run("systemd-run", scopedArgs);
+    return;
   } catch (error) {
     operation?.assertActive();
     if (mode === "auto" && isSystemdRunUnavailable(error)) {
@@ -620,11 +654,13 @@ async function runTmuxNewSession(
             "KillMode=process.\n",
         );
       }
-      await run("tmux", args);
-      return;
+    } else {
+      throw error;
     }
-    throw error;
   }
+  operation?.assertActive();
+  beforeLaunch?.();
+  await run("tmux", args);
 }
 
 // Claude Code identity markers. The spur daemon (or whatever shell spawned
@@ -764,7 +800,7 @@ export function captureTmuxPane(
   // callers that are fine collapsing the distinction.
   return memoizedProbe(capturePaneCache, key, () => {
     const target = exactPaneTarget(sessionName);
-    return tmux("capture-pane", "-t", target, "-p", "-J", "-S", `-${lines}`);
+    return tmuxRead("capture-pane", "-t", target, "-p", "-J", "-S", `-${lines}`);
   }).catch(() => null);
 }
 
@@ -849,8 +885,8 @@ interface PsRow {
 interface PsSnapshot {
   rows: PsRow[];
   diagnostic?: string;
-  // True only when the `ps` fork was killed by its own timeout, never for a
-  // nonzero exit, a maxBuffer overrun, or an empty-but-healthy table. `rows`
+  // True only when the `ps` fork hit its deadline signal, never for a
+  // nonzero exit, a maxBuffer overrun, or a malformed or empty table. `rows`
   // is empty whenever this is true.
   unresponsive: boolean;
 }
@@ -868,21 +904,28 @@ const PS_SNAPSHOT_CACHE_KEY = "ps";
 // a worse outcome than a missed reap — so this is sized well above any
 // observed process table, not just the current one.
 const PS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
+const PS_COMMAND = "ps";
+const PS_ARGUMENTS = ["-eo", "pid,ppid,pgid,tpgid,tty,rss,args"];
+const MALFORMED_PROCESS_TABLE = "malformed process table output";
+
+export function isHistoricalPsProbeDiagnostic(diagnostic: string): boolean {
+  return (
+    diagnostic === probeDiagnostic(PS_COMMAND, MALFORMED_PROCESS_TABLE) ||
+    diagnostic ===
+      probeDiagnostic(PS_COMMAND, `Command failed: ${PS_COMMAND} ${PS_ARGUMENTS.join(" ")}\n`)
+  );
+}
 
 function getPsSnapshot(): Promise<PsSnapshot> {
   return memoizedProbe(psSnapshotCache, PS_SNAPSHOT_CACHE_KEY, async () => {
     try {
-      const { stdout: psOut } = await execFileAsync(
-        "ps",
-        ["-eo", "pid,ppid,pgid,tpgid,tty,rss,args"],
-        {
-          timeout: 5_000,
-          maxBuffer: PS_MAX_BUFFER_BYTES,
-        },
-      );
-      const rows = psOut
-        .split("\n")
-        .map((line) => {
+      const { stdout: psOut } = await execFileAsync(PS_COMMAND, PS_ARGUMENTS, {
+        signal: AbortSignal.timeout(5_000),
+        maxBuffer: PS_MAX_BUFFER_BYTES,
+      });
+      const lines = psOut.split("\n");
+      const rows = lines
+        .map((line, index) => {
           const cols = line.trimStart().split(/\s+/);
           if (
             !line.trim() ||
@@ -891,7 +934,13 @@ function getPsSnapshot(): Promise<PsSnapshot> {
             return null;
           }
           if (cols.length < 7 || !cols.slice(0, 4).every((col) => /^-?\d+$/.test(col))) {
-            throw new Error("malformed process table output");
+            const shape = cols
+              .slice(0, 6)
+              .map((col) => (/^-?\d+$/.test(col) ? "N" : "T"))
+              .join(" ");
+            throw new Error(
+              `${MALFORMED_PROCESS_TABLE} (line ${index + 1}/${lines.length}, ${cols.length} columns, shape ${shape}, ${psOut.length} bytes, ${psOut.endsWith("\n") ? "trailing newline" : "no trailing newline"})`,
+            );
           }
           const pid = Number.parseInt(cols[0] ?? "", 10);
           const ppid = Number.parseInt(cols[1] ?? "", 10);
@@ -911,12 +960,16 @@ function getPsSnapshot(): Promise<PsSnapshot> {
           };
         })
         .filter((row): row is PsRow => row !== null);
+      if (rows.length === 0) {
+        // `ps -e` always lists at least itself: zero rows is a cut or empty read.
+        throw new Error(`${MALFORMED_PROCESS_TABLE} (no data rows, ${psOut.length} bytes)`);
+      }
       return { rows, unresponsive: false };
     } catch (error) {
       return {
         rows: [],
         unresponsive: isProbeTimeoutKill(error),
-        diagnostic: probeDiagnostic("ps", error),
+        diagnostic: probeDiagnostic(PS_COMMAND, error),
       };
     }
   });
@@ -967,7 +1020,7 @@ export async function getFleetSessionRssBytes(
 // WHICH pass answered ALIVE (session-service's probeAgentProcess, issue #871
 // P2) can read it off one snapshot instead of issuing a second, separately
 // memoized call: memoizedProbe's TTL runs from fetch START (:78, :92), so a
-// probe that itself takes >2s (getPsSnapshot's own timeout is 5s, :696)
+// probe that itself takes >2s (getPsSnapshot's own deadline is 5s, :696)
 // leaves the cache already expired by the time a second top-level call
 // checks it, forking again and comparing two different instants.
 export interface TmuxProcessMatch {
@@ -1159,6 +1212,7 @@ export async function createTmuxSession(input: {
   launchScriptDir: string;
   env?: Record<string, string>;
   operation?: RestoreOperationContext;
+  beforeLaunch?: () => void;
 }): Promise<void> {
   input.operation?.assertActive();
   const paneEnv = buildPaneEnv(input.env);
@@ -1181,9 +1235,14 @@ export async function createTmuxSession(input: {
         buildAgentPaneShellCommand(scriptPath, envFile),
       ],
       input.operation,
+      input.beforeLaunch,
     );
   } catch (error) {
-    rmSync(envFile, { force: true });
+    try {
+      rmSync(envFile, { force: true });
+    } catch {
+      // Preserve the launch/authorization failure when local cleanup also fails.
+    }
     throw error;
   }
   invalidateFleetProbeCaches();
@@ -1460,7 +1519,7 @@ async function runTmuxWithStdin(
 
 async function sensitiveBufferAbsent(bufferName: string): Promise<boolean> {
   try {
-    const output = await tmux("list-buffers", "-F", "#{buffer_name}");
+    const output = await tmuxRead("list-buffers", "-F", "#{buffer_name}");
     return !output.split("\n").some((line) => line.trim() === bufferName);
   } catch {
     return false;
