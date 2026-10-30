@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as hostMemory from "../../src/host-memory.js";
+import * as configuredSources from "../../src/event-sources/index.js";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +27,7 @@ import {
   SessionStartingError,
   SidecarPortConflictError,
   SidecarProbeUnresponsiveError,
+  SpawnBatchConflictError,
   SessionService,
 } from "../../src/session-service.js";
 import type { SessionRecord, SessionView, SidecarStopView } from "../../src/types.js";
@@ -37,6 +39,127 @@ import {
 import { findFreePort, startOnFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
+  it("wires source attachment preparation to the requested session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-source-preparation-"));
+    const port = await findFreePort();
+    const configPath = join(root, "config.yaml");
+    await writeFile(
+      configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`,
+    );
+    const sources = vi.spyOn(configuredSources, "startConfiguredSources").mockResolvedValue({
+      stop: vi.fn(),
+      telegramBotIdentity: () => null,
+      clearPollDisabledOverride: () => null,
+    });
+    const prepare = vi
+      .spyOn(SessionService.prototype, "prepareSourceMessage")
+      .mockReturnValue("saved refs");
+    const send = vi.spyOn(SessionService.prototype, "send");
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const callback = sources.mock.calls[0]?.[0].prepareSessionMessage;
+      expect(callback).toBeDefined();
+      const request = { message: "inspect", attachments: [{ name: "file.bin", data: "eA==" }] };
+      expect(await callback?.("target-session", request)).toBe("saved refs");
+      expect(prepare).toHaveBeenCalledExactlyOnceWith("target-session", request);
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      await server.stop();
+      sources.mockRestore();
+      prepare.mockRestore();
+      send.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("GET source-info returns association, absence, and unknown-session 404", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-source-info-server-"));
+    const port = await findFreePort();
+    const configPath = join(root, "config.yaml");
+    await writeFile(
+      configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`,
+    );
+    const sourceInfo = vi
+      .spyOn(SessionService.prototype, "sourceInfo")
+      .mockReturnValueOnce({
+        sessionId: "api-1",
+        source: "telegram",
+        projectId: "api",
+        sourceId: "chat",
+        chatId: -1001,
+        messageThreadId: 22,
+        bot: { id: 44 },
+      })
+      .mockReturnValueOnce({ sessionId: "api-2", source: null })
+      .mockImplementationOnce(() => {
+        throw new SessionResourceNotFoundError("Session not found: missing");
+      });
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const associated = await fetch(`http://127.0.0.1:${port}/sessions/api-1/source-info`);
+      expect(associated.status).toBe(200);
+      expect(await associated.json()).toEqual({
+        sessionId: "api-1",
+        source: "telegram",
+        projectId: "api",
+        sourceId: "chat",
+        chatId: -1001,
+        messageThreadId: 22,
+        bot: { id: 44 },
+      });
+      const absent = await fetch(`http://127.0.0.1:${port}/sessions/api-2/source-info`);
+      expect(absent.status).toBe(200);
+      expect(await absent.json()).toEqual({ sessionId: "api-2", source: null });
+      expect((await fetch(`http://127.0.0.1:${port}/sessions/missing/source-info`)).status).toBe(
+        404,
+      );
+      expect(sourceInfo.mock.calls).toEqual([["api-1"], ["api-2"], ["missing"]]);
+    } finally {
+      await server.stop();
+      sourceInfo.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a source-reply body over 1 MB for images", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-source-reply-server-"));
+    const port = await findFreePort();
+    const configPath = join(root, "config.yaml");
+    await writeFile(
+      configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`,
+    );
+    const reply = vi.spyOn(SessionService.prototype, "replyToSource").mockResolvedValue({
+      ok: true,
+      source: "telegram",
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "chat",
+      chatId: -1001,
+      images: 1,
+    });
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const data = "A".repeat(2_000_000);
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/api-1/source-reply`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "look", images: [{ name: "a.png", data }] }),
+      });
+      expect(response.status).toBe(200);
+      expect(reply).toHaveBeenCalledWith("api-1", {
+        message: "look",
+        images: [{ name: "a.png", data }],
+      });
+    } finally {
+      await server.stop();
+      reply.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(["spawn", "respawn", "handoff"] as const)(
     "returns a client error for rejected %s reasoning effort",
     async (operation) => {
@@ -529,6 +652,51 @@ describe("startServer", () => {
     }
   });
 
+  it.each([
+    { enabled: false, status: 404 },
+    { enabled: true, status: 400 },
+  ])(
+    "POST /sessions/:id/switch-auth gate with authRotation.switchAuth=$enabled returns $status",
+    async ({ enabled, status }) => {
+      const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+      const repoDir = join(root, "repo");
+      const port = await findFreePort();
+      await mkdir(repoDir, { recursive: true });
+      const configPath = join(root, "spur.yaml");
+      await writeFile(
+        configPath,
+        [
+          "server:",
+          "  host: 127.0.0.1",
+          `  port: ${port}`,
+          `dataDir: ${join(root, "data")}`,
+          `worktreeDir: ${join(root, "worktrees")}`,
+          ...(enabled ? ["authRotation:", "  switchAuth: true"] : []),
+          "projects:",
+          "  demo:",
+          `    path: ${repoDir}`,
+        ].join("\n"),
+        "utf8",
+      );
+
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
+
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/switch-auth`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ accountId: "" }),
+        });
+        expect(response.status).toBe(status);
+      } finally {
+        await server.stop();
+      }
+    },
+  );
+
   it("returns 429 naming the cap and live count when spawn is denied by the admission cap", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -953,9 +1121,9 @@ describe("startServer", () => {
     }
 
     expect(calls).toEqual([
-      { includeCompleted: false, view: "full" },
-      { includeCompleted: true, view: "full" },
-      { includeCompleted: false, view: "dashboard" },
+      { includeCompleted: false, view: "full", signal: expect.any(AbortSignal) },
+      { includeCompleted: true, view: "full", signal: expect.any(AbortSignal) },
+      { includeCompleted: false, view: "dashboard", signal: expect.any(AbortSignal) },
     ]);
   });
 
@@ -2037,6 +2205,58 @@ describe("startServer", () => {
       await expect(response.json()).resolves.toMatchObject({
         id: "demo-1",
         status: "spawning",
+      });
+    } finally {
+      SessionService.prototype.spawnInBackground = spawnInBackground;
+      await server.stop();
+    }
+  });
+
+  it("maps a background spawn batch conflict to 409 with code and sessionId", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const spawnInBackground = SessionService.prototype.spawnInBackground;
+    SessionService.prototype.spawnInBackground = async function mockSpawnInBackground() {
+      throw new SpawnBatchConflictError("spawn_committed", "demo-3");
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/background`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ project: "demo", prompt: "ship it" }),
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        code: "spawn_committed",
+        sessionId: "demo-3",
+        error:
+          "Session demo-3 was already created from this submission; submit again to start another session",
       });
     } finally {
       SessionService.prototype.spawnInBackground = spawnInBackground;
@@ -5043,5 +5263,120 @@ describe("startServer", () => {
       (entry) => entry.event === "daemon.registry.warning",
     );
     expect(registryWarnings).toHaveLength(2);
+  });
+});
+
+describe("GET /sessions abort", () => {
+  async function startFixture() {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-abort-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    await mkdir(repoDir);
+    const port = await findFreePort();
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${join(root, "worktrees")}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+    );
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    return { server, port, dataDir, root };
+  }
+
+  const macrotask = () => new Promise<void>((resolve) => setTimeout(resolve, 25));
+
+  const failedRequests = (dataDir: string) =>
+    readEventLog(dataDir).filter(
+      (entry) => entry.event === "http.request.failed" && entry.path === "/sessions",
+    );
+
+  type ListOptions = Parameters<SessionService["list"]>[0];
+
+  function holdList(server: StartedServer) {
+    let signal: AbortSignal | undefined;
+    let settle: (action: "resolve" | "reject") => void = () => undefined;
+    const spy = vi.spyOn(server, "list").mockImplementation((options: ListOptions) => {
+      signal = options?.signal;
+      return new Promise((resolve, reject) => {
+        settle = (action) => (action === "resolve" ? resolve([]) : reject(signal?.reason));
+      });
+    });
+    return { spy, signal: () => signal, settle: (action: "resolve" | "reject") => settle(action) };
+  }
+
+  it("logs and writes nothing when list rejects after the client disconnects", async () => {
+    const { server, port, dataDir, root } = await startFixture();
+    const held = holdList(server);
+    let failed: unknown[];
+    try {
+      const client = new AbortController();
+      const request = fetch(`http://127.0.0.1:${port}/sessions`, { signal: client.signal });
+      const rejected = expect(request).rejects.toMatchObject({ name: "AbortError" });
+      await vi.waitFor(() => expect(held.spy).toHaveBeenCalledTimes(1));
+      client.abort();
+      await vi.waitFor(() => expect(held.signal()?.aborted).toBe(true));
+      held.settle("reject");
+      await macrotask();
+      await rejected;
+    } finally {
+      vi.restoreAllMocks();
+      await server.stop();
+      failed = failedRequests(dataDir);
+      await rm(root, { recursive: true, force: true });
+    }
+    expect(failed).toHaveLength(0);
+  });
+
+  it("sends nothing when list resolves after the client disconnects", async () => {
+    const { server, port, dataDir, root } = await startFixture();
+    const held = holdList(server);
+    let failed: unknown[];
+    try {
+      const client = new AbortController();
+      const request = fetch(`http://127.0.0.1:${port}/sessions`, { signal: client.signal });
+      const rejected = expect(request).rejects.toMatchObject({ name: "AbortError" });
+      await vi.waitFor(() => expect(held.spy).toHaveBeenCalledTimes(1));
+      client.abort();
+      await vi.waitFor(() => expect(held.signal()?.aborted).toBe(true));
+      const info = vi.spyOn(server, "info");
+      info.mockClear();
+      held.settle("resolve");
+      await macrotask();
+      await rejected;
+      expect(info).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+      await server.stop();
+      failed = failedRequests(dataDir);
+      await rm(root, { recursive: true, force: true });
+    }
+    expect(failed).toHaveLength(0);
+  });
+
+  it("does not abort a request that completes normally", async () => {
+    const { server, port, root } = await startFixture();
+    const held = holdList(server);
+    try {
+      const request = fetch(`http://127.0.0.1:${port}/sessions`);
+      await vi.waitFor(() => expect(held.spy).toHaveBeenCalledTimes(1));
+      held.settle("resolve");
+      const response = await request;
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual([]);
+      await macrotask();
+      expect(held.signal()?.aborted).toBe(false);
+    } finally {
+      vi.restoreAllMocks();
+      await server.stop();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

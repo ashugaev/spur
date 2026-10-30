@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
+import { appendEventLog } from "./event-log.js";
 import { parseConsent, type InterfaceConsent } from "./review-interface-consent.js";
 import {
   isSessionState,
@@ -18,6 +19,7 @@ import {
   CI_FAILED_MAX_ATTEMPTS,
   type AvailableBacklogItem,
   type PersistedPendingBatch,
+  type PersistedSpawnWork,
   type ReviewProviderId,
   type ReviewSignal,
   type ReviewSnapshot,
@@ -87,6 +89,10 @@ function reviewSnapshotDir(
 
 function workItemRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "github-work-items", projectId, `${sourceId}.json`);
+}
+
+export function scriptSourceStateDir(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "script", projectId, sourceId);
 }
 
 function availableBacklogFilePath(dataDir: string, projectId: string, backlogId: string): string {
@@ -283,26 +289,105 @@ function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch
   return batch["kind"] === "review" || batch["kind"] === "service" || batch["kind"] === "telegram";
 }
 
+const SESSION_RECORD_STRING_FIELDS = [
+  "id",
+  "project",
+  "agent",
+  "prompt",
+  "branch",
+  "worktreePath",
+  "tmuxSession",
+  "launchCommand",
+  "status",
+  "createdAt",
+  "updatedAt",
+] as const;
+
 function isSessionRecord(value: unknown): value is SessionRecord {
-  return isRecord(value) && typeof value["id"] === "string" && typeof value["project"] === "string";
+  return (
+    isRecord(value) &&
+    SESSION_RECORD_STRING_FIELDS.every((field) => typeof value[field] === "string") &&
+    typeof value["worktree"] === "boolean"
+  );
 }
+
+// A session file whose bytes are not valid JSON or lack the SessionRecord
+// shape. Distinct from I/O failures so listSessions can skip exactly these.
+class InvalidSessionMetadataError extends Error {}
 
 // Distinguishes "file vanished between readdir and read" (a benign race with
-// a concurrent GC archive) from every other read failure, which must still
-// surface — a corrupt record on disk is a real problem, not a race.
-// readSessionFile wraps every failure from its inner try (including a
-// readFileSync ENOENT) in a fresh Error with `cause: error`, so the original
-// error code only survives on `cause`, never on the thrown error itself.
-function isEnoentCause(error: unknown): boolean {
-  const cause = error instanceof Error ? error.cause : undefined;
-  return isRecord(cause) && cause["code"] === "ENOENT";
+// a concurrent GC archive) from every other read failure. listSessions skips
+// an invalid record (bad JSON or shape) with one warn per file version;
+// readSession throws; other I/O errors throw.
+function isEnoent(error: unknown): boolean {
+  return isRecord(error) && error["code"] === "ENOENT";
 }
 
-function tryReadSessionFile(path: string): SessionRecord | null {
+// readSessionFile wraps a readFileSync failure (including ENOENT) in a fresh
+// Error with `cause: error`, so the original error code only survives on
+// `cause`, never on the thrown error itself. Parse and shape failures throw
+// InvalidSessionMetadataError instead.
+function isEnoentCause(error: unknown): boolean {
+  return isEnoent(error instanceof Error ? error.cause : undefined);
+}
+
+// Runs one per-entry fs read of a multi-entry scan: null when the entry
+// vanished mid-scan (ENOENT), any other failure still throws.
+function readUnlessVanished<T>(read: () => T): T | null {
   try {
-    return readSessionFileCached(path);
+    return read();
+  } catch (error) {
+    if (isEnoent(error)) return null;
+    throw error;
+  }
+}
+
+function readJsonNames(dir: string): string[] | null {
+  return readUnlessVanished(() =>
+    readdirSync(dir).filter((fileName) => fileName.endsWith(".json")),
+  );
+}
+
+// Path -> "ino:mtimeMs:size" of the invalid file version last logged.
+const loggedInvalidSessionFiles = new Map<string, string>();
+
+function logInvalidSessionFile(dataDir: string, path: string, error: Error): void {
+  const stat = statFingerprint(path);
+  const version = stat ? `${stat.ino}:${stat.mtimeMs}:${stat.size}` : "gone";
+  if (loggedInvalidSessionFiles.get(path) === version) return;
+  loggedInvalidSessionFiles.set(path, version);
+  try {
+    appendEventLog(dataDir, {
+      event: "session.record.invalid",
+      level: "warn",
+      path,
+      message: error.message,
+    });
+  } catch {
+    // Logging must never block listing.
+  }
+}
+
+function pruneInvalidSessionLogEntries(rootDir: string, visited: Set<string>): void {
+  const rootPrefix = rootDir + sep;
+  for (const loggedPath of loggedInvalidSessionFiles.keys()) {
+    if (loggedPath.startsWith(rootPrefix) && !visited.has(loggedPath)) {
+      loggedInvalidSessionFiles.delete(loggedPath);
+    }
+  }
+}
+
+function tryReadSessionFile(dataDir: string, path: string): SessionRecord | null {
+  try {
+    const record = readSessionFileCached(path);
+    loggedInvalidSessionFiles.delete(path);
+    return record;
   } catch (error) {
     if (isEnoentCause(error)) {
+      return null;
+    }
+    if (error instanceof InvalidSessionMetadataError) {
+      logInvalidSessionFile(dataDir, path, error);
       return null;
     }
     throw error;
@@ -310,17 +395,26 @@ function tryReadSessionFile(path: string): SessionRecord | null {
 }
 
 function readSessionFile(path: string): SessionRecord {
-  let rawSession: unknown;
+  let text: string;
   try {
-    rawSession = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    text = readFileSync(path, "utf-8");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Invalid session metadata JSON at ${path}: ${message}`, {
       cause: error,
     });
   }
+  let rawSession: unknown;
+  try {
+    rawSession = JSON.parse(text) as unknown;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new InvalidSessionMetadataError(`Invalid session metadata JSON at ${path}: ${message}`, {
+      cause: error,
+    });
+  }
   if (!isSessionRecord(rawSession)) {
-    throw new Error(`Invalid session metadata shape at ${path}`);
+    throw new InvalidSessionMetadataError(`Invalid session metadata shape at ${path}`);
   }
   const normalizedSession = normalizeSessionRecord(rawSession);
   if ((!rawSession.pr && normalizedSession.pr) || hasLegacyPrSlotAlias(rawSession)) {
@@ -329,16 +423,18 @@ function readSessionFile(path: string): SessionRecord {
   return normalizedSession;
 }
 
-// listSessions() re-reads and re-parses every session file every call — on a
-// fleet-sized data dir (thousands of files, single digit MB of JSON) that is
-// re-parsed on every 2s dashboard-cache tick even when nothing changed. Since
+// Uncached, listSessions() and readSession() re-parse session files on every
+// call — on a fleet-sized data dir (thousands of files, single digit MB of
+// JSON) that is every 2s dashboard-cache tick, and readSession runs inside
+// per-session loops, so O(N²) parses per tick. Since
 // writeJsonFile always renames a freshly created inode (never edits in
 // place), (ino, mtimeMs, size) is an exact "this file's bytes are what we
 // last read" fingerprint — cheaper and safer than an mtime-only key, which
 // can't distinguish two writes landing in the same millisecond. The cache is
 // internal to this module: no export changes, so callers and their tests are
 // unaffected except that unchanged records are now the SAME object across
-// calls (see the "no in-place mutation of a listed record" contract).
+// calls and between listSessions() and readSession(): never mutate a
+// returned record in place.
 interface FileFingerprint {
   ino: number;
   mtimeMs: number;
@@ -646,6 +742,7 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
         result.set(raw.externalId, {
           ...base,
           state,
+          ...(typeof raw.spawnWorkId === "string" ? { spawnWorkId: raw.spawnWorkId } : {}),
         });
         continue;
       }
@@ -1074,8 +1171,26 @@ function normalizePreflightTokenUsage(value: unknown): SessionRecord["preflightT
 
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const normalizedSession = normalizeSessionPrBinding(session);
+  // The request is an equality fingerprint, never replayed as executable input.
+  const birthRequest = normalizedSession.triggerBirthRequest;
+  const triggerBirth =
+    typeof normalizedSession.triggerBirthKey === "string" &&
+    normalizedSession.triggerBirthKey.trim().length > 0 &&
+    isRecord(birthRequest) &&
+    birthRequest.project === normalizedSession.project &&
+    (birthRequest.prompt === undefined || typeof birthRequest.prompt === "string")
+      ? { triggerBirthKey: normalizedSession.triggerBirthKey, triggerBirthRequest: birthRequest }
+      : {};
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
+  const sidecarLaunches: Record<string, string> = {};
+  if (isRecord(normalizedSession.sidecarLaunches)) {
+    for (const [name, launchId] of Object.entries(normalizedSession.sidecarLaunches)) {
+      if (name.length > 0 && typeof launchId === "string" && launchId.length > 0) {
+        sidecarLaunches[name] = launchId;
+      }
+    }
+  }
   const tokenUsage = normalizeTokenUsage(normalizedSession.tokenUsage);
   const preflightTokenUsage = normalizePreflightTokenUsage(normalizedSession.preflightTokenUsage);
   // Records written before the rename carry the hold as launchUnconfirmedAt;
@@ -1095,6 +1210,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   return {
     id: normalizedSession.id,
     project: normalizedSession.project,
+    ...triggerBirth,
     // Legacy on-disk records only have `deskId` (or neither field); this is
     // where a pre-workspaceId record gets migrated in memory on every read.
     // Delegates to workspaceIdOf so the `deskId ?? id` fallback chain itself
@@ -1128,6 +1244,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(typeof normalizedSession.codexRestoreStartedAt === "string" &&
     Number.isFinite(Date.parse(normalizedSession.codexRestoreStartedAt))
       ? { codexRestoreStartedAt: normalizedSession.codexRestoreStartedAt }
+      : {}),
+    ...(typeof normalizedSession.restoredAt === "string" &&
+    Number.isFinite(Date.parse(normalizedSession.restoredAt))
+      ? { restoredAt: normalizedSession.restoredAt }
       : {}),
     prompt: normalizedSession.prompt,
     ...(normalizedSession.originalTaskPrompt
@@ -1163,6 +1283,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
     ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
     ...(sidecarProcs ? { sidecarProcs } : {}),
+    ...(Object.keys(sidecarLaunches).length > 0 ? { sidecarLaunches } : {}),
     ...(normalizedSession.staleSidecars ? { staleSidecars: normalizedSession.staleSidecars } : {}),
     ...(normalizedSession.pipeline
       ? { pipeline: normalizePipelineState(normalizedSession.pipeline) }
@@ -1260,23 +1381,92 @@ function pruneStaleSessionFileCacheEntries(rootDir: string, visited: Set<string>
   }
 }
 
+interface CachedDirListing extends FileFingerprint {
+  names: readonly string[];
+}
+
+// Keyed on the absolute subdirectory path under dataDir/sessions. That dir
+// holds a handful of project dirs next to one log-shard dir per session
+// (sessions/<id>/), hundreds on a live fleet, none holding *.json. Caches the
+// *.json FILE NAMES only: content still goes through readSessionFileCached's
+// per-file fingerprint.
+const sessionDirListingCache = new Map<string, CachedDirListing>();
+
+// A listing is stored only when the directory mtime was older than this at
+// the moment before its readdir: a mutation landing after the readdir but
+// inside the same timestamp tick as the pre-readdir stat is never cached.
+const DIR_LISTING_MIN_AGE_MS = 1_000;
+
+// Same path-boundary rule as pruneStaleSessionFileCacheEntries, over the
+// directory entries of this listing rather than its files.
+function pruneStaleSessionDirListingEntries(rootDir: string, visitedDirs: Set<string>): void {
+  const rootPrefix = rootDir + sep;
+  for (const cachedDir of sessionDirListingCache.keys()) {
+    if (cachedDir.startsWith(rootPrefix) && !visitedDirs.has(cachedDir)) {
+      sessionDirListingCache.delete(cachedDir);
+    }
+  }
+}
+
+// The *.json entries of one subdirectory of dataDir/sessions, served from
+// cache while the directory's own fingerprint is unchanged. Sound because the
+// directory mtime advances on every entry create, rename and unlink; ino also
+// changes on rm -r + mkdir unless the inode is reused, and then the fresh
+// mtime catches it.
+function listSessionDirJsonNames(dir: string): readonly string[] {
+  const fingerprint = statFingerprint(dir);
+  if (!fingerprint) {
+    // Vanished between the root readdir and this stat, or unreadable: an
+    // uncached listing skips a vanished dir and throws any other error.
+    sessionDirListingCache.delete(dir);
+    return readJsonNames(dir) ?? [];
+  }
+
+  const cached = sessionDirListingCache.get(dir);
+  if (cached && sameFingerprint(cached, fingerprint)) {
+    return cached.names;
+  }
+
+  // Eligibility is decided BEFORE the readdir: a snapshot young when taken
+  // stays uncached however long this reader stalls before storing it.
+  const cacheable = Date.now() - fingerprint.mtimeMs > DIR_LISTING_MIN_AGE_MS;
+  const names = readJsonNames(dir);
+  if (!names) {
+    sessionDirListingCache.delete(dir);
+    return [];
+  }
+  // Keyed on the PRE-readdir fingerprint: a mutation between the stat and the
+  // readdir is stored under the older mtime, so the next stat misses once.
+  if (cacheable) {
+    sessionDirListingCache.set(dir, {
+      ino: fingerprint.ino,
+      mtimeMs: fingerprint.mtimeMs,
+      size: fingerprint.size,
+      names,
+    });
+  }
+  return names;
+}
+
 export function listSessions(dataDir: string): SessionRecord[] {
   const rootDir = join(dataDir, "sessions");
   if (!existsSync(rootDir)) {
     pruneStaleSessionFileCacheEntries(rootDir, new Set());
+    pruneStaleSessionDirListingEntries(rootDir, new Set());
     return [];
   }
 
   const sessions: SessionRecord[] = [];
   const visited = new Set<string>();
+  const visitedDirs = new Set<string>();
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const projectDir = join(rootDir, entry.name);
-    for (const fileName of readdirSync(projectDir)) {
-      if (!fileName.endsWith(".json")) continue;
+    visitedDirs.add(projectDir);
+    for (const fileName of listSessionDirJsonNames(projectDir)) {
       const filePath = join(projectDir, fileName);
       visited.add(filePath);
-      const session = tryReadSessionFile(filePath);
+      const session = tryReadSessionFile(dataDir, filePath);
       if (session) {
         sessions.push(session);
       }
@@ -1284,6 +1474,8 @@ export function listSessions(dataDir: string): SessionRecord[] {
   }
 
   pruneStaleSessionFileCacheEntries(rootDir, visited);
+  pruneInvalidSessionLogEntries(rootDir, visited);
+  pruneStaleSessionDirListingEntries(rootDir, visitedDirs);
 
   sessions.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   return sessions;
@@ -1291,7 +1483,7 @@ export function listSessions(dataDir: string): SessionRecord[] {
 
 export function readSession(dataDir: string, sessionId: string): SessionRecord | null {
   const path = findSessionFilePath(dataDir, sessionId);
-  return path ? readSessionFile(path) : null;
+  return path ? readSessionFileCached(path) : null;
 }
 
 // Group-atomic archival for session GC: moves every member's record (and its
@@ -1302,13 +1494,29 @@ export function readSession(dataDir: string, sessionId: string): SessionRecord |
 // indexed-but-missing entry on its next lookup). Un-archiving is `mv` back
 // into sessions/<project>/<id>.json; the next findSessionFilePath scan or
 // writeSession repairs the index.
+//
+// A member that is workspaceIdOf() of any record staying in sessions/ (any
+// project) is not moved: archiving a desk anchor strands its dependents.
+// Those ids come back in retainedAnchorIds. Invalid record files are skipped
+// by listSessions and hold no anchor.
 export function archiveSessions(
   dataDir: string,
   members: readonly Pick<SessionRecord, "id" | "project">[],
-): { archivedIds: string[]; archiveDir: string } {
+): { archivedIds: string[]; retainedAnchorIds: string[]; archiveDir: string } {
   const archiveDir = join(dataDir, "sessions-archive");
   const archivedIds: string[] = [];
+  const retainedAnchorIds: string[] = [];
+  const memberIds = new Set(members.map((member) => member.id));
+  const heldAnchorIds = new Set(
+    listSessions(dataDir)
+      .filter((record) => !memberIds.has(record.id))
+      .map(workspaceIdOf),
+  );
   for (const member of members) {
+    if (heldAnchorIds.has(member.id)) {
+      retainedAnchorIds.push(member.id);
+      continue;
+    }
     const sourcePath = sessionFilePath(dataDir, member.project, member.id);
     if (!existsSync(sourcePath)) {
       continue;
@@ -1335,7 +1543,7 @@ export function archiveSessions(
     writeSessionIndexFile(dataDir, nextIndex);
   }
 
-  return { archivedIds, archiveDir };
+  return { archivedIds, retainedAnchorIds, archiveDir };
 }
 
 export function writeServiceInstance(dataDir: string, service: ServiceInstanceRecord): void {
@@ -1353,9 +1561,9 @@ export function listServiceInstances(dataDir: string): ServiceInstanceRecord[] {
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const sessionDir = join(rootDir, entry.name);
-    for (const fileName of readdirSync(sessionDir)) {
-      if (!fileName.endsWith(".json")) continue;
-      services.push(readServiceInstanceFile(join(sessionDir, fileName)));
+    for (const fileName of readJsonNames(sessionDir) ?? []) {
+      const service = readUnlessVanished(() => readServiceInstanceFile(join(sessionDir, fileName)));
+      if (service) services.push(service);
     }
   }
 
@@ -1371,9 +1579,9 @@ export function listServiceInstancesForSession(
   if (!existsSync(dir)) return [];
 
   const services: ServiceInstanceRecord[] = [];
-  for (const fileName of readdirSync(dir)) {
-    if (!fileName.endsWith(".json")) continue;
-    services.push(readServiceInstanceFile(join(dir, fileName)));
+  for (const fileName of readJsonNames(dir) ?? []) {
+    const service = readUnlessVanished(() => readServiceInstanceFile(join(dir, fileName)));
+    if (service) services.push(service);
   }
   services.sort((left, right) => left.serviceId.localeCompare(right.serviceId));
   return services;
@@ -1438,8 +1646,7 @@ export function listRuntimeLogCursorKeys(
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const sessionDir = join(rootDir, entry.name);
-    for (const fileName of readdirSync(sessionDir)) {
-      if (!fileName.endsWith(".json")) continue;
+    for (const fileName of readJsonNames(sessionDir) ?? []) {
       keys.push({
         sessionId: entry.name,
         key: fileName.slice(0, -".json".length),
@@ -1459,10 +1666,10 @@ export function readReviewSourceSnapshots(
   if (!existsSync(dir)) return new Map();
 
   const snapshots = new Map<string, ReviewSnapshot>();
-  for (const fileName of readdirSync(dir)) {
-    if (!fileName.endsWith(".json")) continue;
+  for (const fileName of readJsonNames(dir) ?? []) {
     const sessionId = fileName.slice(0, -".json".length);
-    snapshots.set(sessionId, parseReviewSnapshot(join(dir, fileName)));
+    const snapshot = readUnlessVanished(() => parseReviewSnapshot(join(dir, fileName)));
+    if (snapshot) snapshots.set(sessionId, snapshot);
   }
   return snapshots;
 }
@@ -2022,6 +2229,114 @@ export function readPendingSendBatches(dataDir: string): Map<string, PersistedPe
   return existsSync(path) ? readPendingSendBatchesFile(path) : new Map();
 }
 
+export function readPendingSpawnWork(dataDir: string): Map<string, PersistedSpawnWork> {
+  try {
+    const value: unknown = JSON.parse(
+      readFileSync(join(dataDir, "pending-spawn-work.json"), "utf8"),
+    );
+    if (!Array.isArray(value)) return new Map();
+    const result = new Map<string, PersistedSpawnWork>();
+    for (const item of value) {
+      if (!item || typeof item !== "object") continue;
+      const record = item as Record<string, unknown>;
+      if (
+        ![
+          "workId",
+          "projectId",
+          "triggerId",
+          "sourceId",
+          "eventName",
+          "occurrenceId",
+          "routeFingerprint",
+          "createdAt",
+        ].every((key) => typeof record[key] === "string")
+      )
+        continue;
+      if (
+        ![
+          record.revision,
+          record.nextBlockIndex,
+          record.admissionDenials,
+          record.notBeforeAt,
+        ].every(
+          (number) => typeof number === "number" && Number.isSafeInteger(number) && number >= 0,
+        )
+      )
+        continue;
+      if (
+        (record.anchorSessionId !== undefined && typeof record.anchorSessionId !== "string") ||
+        (record.lastSessionId !== undefined && typeof record.lastSessionId !== "string")
+      )
+        continue;
+      if (
+        !Array.isArray(record.failures) ||
+        !record.failures.every((error) => typeof error === "string") ||
+        !Array.isArray(record.blocks) ||
+        record.blocks.length === 0
+      )
+        continue;
+      if (
+        !record.blocks.every((block: unknown) => {
+          if (!block || typeof block !== "object") return false;
+          const outcome = block as Record<string, unknown>;
+          return (
+            typeof outcome.birthKey === "string" &&
+            (outcome.state === "pending" ||
+              (outcome.state === "succeeded" && typeof outcome.sessionId === "string") ||
+              (outcome.state === "failed" &&
+                typeof outcome.error === "string" &&
+                (outcome.sessionId === undefined || typeof outcome.sessionId === "string")))
+          );
+        })
+      )
+        continue;
+      const work = item as PersistedSpawnWork;
+      if (
+        work.nextBlockIndex > work.blocks.length ||
+        work.blocks.some(
+          (block, index) =>
+            block.birthKey !== `${work.workId}:${index}` ||
+            index < work.nextBlockIndex === (block.state === "pending"),
+        )
+      )
+        continue;
+      const successful = work.blocks.filter((block) => block.state === "succeeded");
+      if (
+        work.lastSessionId !== successful.at(-1)?.sessionId ||
+        (work.anchorSessionId !== undefined &&
+          !successful.some((block) => block.sessionId === work.anchorSessionId))
+      )
+        continue;
+      result.set(work.workId, work);
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
+}
+
+export function writePendingSpawnWork(
+  dataDir: string,
+  work: PersistedSpawnWork,
+  expectedRevision?: number,
+): boolean {
+  const records = readPendingSpawnWork(dataDir);
+  const existing = records.get(work.workId);
+  if (expectedRevision !== undefined && existing?.revision !== expectedRevision) return false;
+  if (expectedRevision === undefined && existing) return false;
+  records.set(work.workId, work);
+  writePrivateJsonFile(join(dataDir, "pending-spawn-work.json"), [...records.values()]);
+  return true;
+}
+
+export function deletePendingSpawnWork(dataDir: string, workId: string, revision: number): boolean {
+  const records = readPendingSpawnWork(dataDir);
+  if (records.get(workId)?.revision !== revision) return false;
+  records.delete(workId);
+  writePrivateJsonFile(join(dataDir, "pending-spawn-work.json"), [...records.values()]);
+  return true;
+}
+
 /**
  * Whether a Telegram message for this session is persisted and not yet
  * delivered. `unclaimedOnly` skips a batch whose delivery already started.
@@ -2339,16 +2654,25 @@ function writeTelegramChoices(
  * Records one offer for a session in a chat, retiring that session's previous
  * offer there. Empty `choices` retires without recording: two live questions
  * would let a click answer the wrong one, since the reply carries the value
- * alone.
+ * alone. `keepInterfaceConsent` spares interface-approval choices: their click
+ * is bound to a challenge, not to the latest question.
  */
 export function writeTelegramOffer(
   dataDir: string,
   projectId: string,
   sourceId: string,
-  offer: { sessionId: string; chatId: number; choices: TelegramChoice[] },
+  offer: {
+    sessionId: string;
+    chatId: number;
+    choices: TelegramChoice[];
+    keepInterfaceConsent: boolean;
+  },
 ): void {
   const kept = readTelegramChoices(dataDir, projectId, sourceId).filter(
-    (choice) => choice.sessionId !== offer.sessionId || choice.chatId !== offer.chatId,
+    (choice) =>
+      choice.sessionId !== offer.sessionId ||
+      choice.chatId !== offer.chatId ||
+      (offer.keepInterfaceConsent && choice.interfaceConsent !== undefined),
   );
   writeTelegramChoices(dataDir, projectId, sourceId, [...kept, ...offer.choices]);
 }
@@ -2442,17 +2766,47 @@ export function deleteTelegramReplyTarget(dataDir: string, sessionId: string): v
   rmSync(telegramReplyTargetFilePath(dataDir, sessionId), { force: true });
 }
 
+export function retireTelegramLegacyState(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  assigned?: Pick<TelegramBinding, "chatId" | "messageThreadId">,
+): void {
+  const bindings = readTelegramBindings(dataDir, projectId, sourceId);
+  const originalSize = bindings.size;
+  for (const [key, binding] of bindings) {
+    if (
+      binding.sessionId === sessionId &&
+      (binding.chatId > 0 || (binding.messageThreadId ?? 1) <= 1)
+    )
+      bindings.delete(key);
+  }
+  if (bindings.size !== originalSize) {
+    writeTelegramBindings(dataDir, projectId, sourceId, bindings.values());
+  }
+  const choices = readTelegramChoices(dataDir, projectId, sourceId);
+  const kept = choices.filter(
+    (choice) =>
+      choice.sessionId !== sessionId ||
+      (assigned !== undefined &&
+        choice.chatId === assigned.chatId &&
+        choice.messageThreadId === assigned.messageThreadId),
+  );
+  if (kept.length !== choices.length) writeTelegramChoices(dataDir, projectId, sourceId, kept);
+}
+
 export function deleteTelegramSourceStateForSession(
   dataDir: string,
   projectId: string,
   sessionId: string,
-): { heldBinding: boolean } {
+): { removedBindings: { sourceId: string; binding: TelegramBinding }[] } {
   const dir = join(dataDir, "source-state", "telegram", projectId);
   if (!existsSync(dir)) {
     deleteTelegramReplyTarget(dataDir, sessionId);
-    return { heldBinding: false };
+    return { removedBindings: [] };
   }
-  let heldBinding = false;
+  const removedBindings: { sourceId: string; binding: TelegramBinding }[] = [];
 
   const choiceDir = join(dir, "choices");
   if (existsSync(choiceDir)) {
@@ -2471,9 +2825,11 @@ export function deleteTelegramSourceStateForSession(
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     const sourceId = entry.name.slice(0, -".json".length);
     const bindings = readTelegramBindings(dataDir, projectId, sourceId);
+    for (const binding of bindings.values()) {
+      if (binding.sessionId === sessionId) removedBindings.push({ sourceId, binding });
+    }
     const remaining = [...bindings.values()].filter((binding) => binding.sessionId !== sessionId);
     if (remaining.length !== bindings.size) {
-      heldBinding = true;
       const lastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
       writeTelegramBindings(
         dataDir,
@@ -2485,7 +2841,7 @@ export function deleteTelegramSourceStateForSession(
     }
   }
   deleteTelegramReplyTarget(dataDir, sessionId);
-  return { heldBinding };
+  return { removedBindings };
 }
 
 export function listActiveServiceProblems(
@@ -2502,8 +2858,8 @@ export function listActiveServiceProblems(
     if (!entry.isDirectory()) continue;
     const path = join(dir, entry.name, `${sessionId}.json`);
     if (!existsSync(path)) continue;
-    const state = readServiceSourceStateFile(path);
-    if (state.serviceId !== serviceId) continue;
+    const state = readUnlessVanished(() => readServiceSourceStateFile(path));
+    if (!state || state.serviceId !== serviceId) continue;
     for (const [ruleId, ruleState] of Object.entries(state.rules)) {
       if (ruleState.active) {
         activeRules.add(ruleId);
@@ -2540,8 +2896,8 @@ export function deleteServiceSourceStatesForService(
     if (!entry.isDirectory()) continue;
     const path = join(dir, entry.name, `${sessionId}.json`);
     if (!existsSync(path)) continue;
-    const state = readServiceSourceStateFile(path);
-    if (state.serviceId === serviceId) {
+    const state = readUnlessVanished(() => readServiceSourceStateFile(path));
+    if (state?.serviceId === serviceId) {
       rmSync(path, { force: true });
     }
   }
