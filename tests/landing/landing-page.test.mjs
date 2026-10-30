@@ -39,7 +39,14 @@ test("navigation stays on-page and GitHub buttons identify their destination", (
   const githubButtons = [...html.matchAll(/<a\b[^>]*class="btn(?:\s[^"]*)?"[^>]*>[\s\S]*?<\/a>/g)]
     .map(([anchor]) => anchor)
     .filter((anchor) => /href="https:\/\/github\.com\//.test(anchor));
-  assert.equal(githubButtons.length, 2);
+  assert.deepEqual(
+    githubButtons.map((button) => button.match(/href="([^"]+)"/)[1]).sort(),
+    [
+      "https://github.com/ashugaev/spur",
+      "https://github.com/ashugaev/spur/stargazers",
+      "https://github.com/ashugaev/spur/blob/main/docs/mcp.md",
+    ].sort(),
+  );
   for (const button of githubButtons) {
     assert.match(button, /<svg\b[^>]*aria-hidden="true"[^>]*focusable="false"/);
   }
@@ -248,7 +255,7 @@ test("feature cards describe supported controls and their limits", () => {
     assert.ok(features.includes(`<h3>${heading}</h3>`), `missing feature: ${heading}`);
   }
   assert.match(features, /trusted MCP clients/);
-  assert.match(features, /Full operator access/);
+  assert.match(features, /href="#mcp">Explore MCP &rarr;<\/a>/);
   assert.match(features, /Unknown usage stays\s+unenforced/);
   assert.match(features, /warn only/);
   assert.match(features, /choices follow\s+the\s+selected agent and model/);
@@ -257,6 +264,46 @@ test("feature cards describe supported controls and their limits", () => {
   }
   assert.match(features, /Detached\s+containers need their own teardown/);
   assert.doesNotMatch(features, /die with the\s+session/);
+});
+
+test("MCP section links qualified client control to the canonical setup guide", () => {
+  const mcp = section("mcp");
+  assert.ok(html.indexOf('<section id="cli"') < html.indexOf('<section id="mcp"'));
+  assert.ok(html.indexOf('<section id="mcp"') < html.indexOf('<section id="install"'));
+  const navigation = html.match(/<nav\b[\s\S]*?<\/nav>/)?.[0];
+  assert.match(navigation, /href="#mcp">MCP<\/a>/);
+  assert.match(mcp, /<h2 id="mcp-h">Your AI has tools\. Now give it a team\.<\/h2>/);
+  assert.match(mcp, /Connect an MCP-compatible client to Spur/);
+  for (const capability of ["Start agents", "Send work", "Check progress"]) {
+    assert.match(mcp, new RegExp(`<strong>${capability}<\/strong>`));
+  }
+  assert.match(mcp, /Read conversations and wait for an answer or question/);
+  assert.match(mcp, /Use stdio locally or over SSH, or connect through private HTTP\./);
+  assert.match(mcp, /Connected clients get full operator access to Spur\./);
+  assert.equal((mcp.match(/href="https:\/\//g) ?? []).length, 1);
+  assert.match(mcp, /href="https:\/\/github\.com\/ashugaev\/spur\/blob\/main\/docs\/mcp\.md"/);
+  assert.match(mcp, /Connect your MCP client &rarr;/);
+});
+
+test("MCP diagram describes one request and session without relying on animation", () => {
+  const mcp = section("mcp");
+  assert.match(mcp, /<figure class="mcp-flow rv" role="img" aria-labelledby="mcp-desc">/);
+  assert.equal((mcp.match(/id="mcp-desc"/g) ?? []).length, 1);
+  assert.match(mcp, /class="mcp-stages" aria-hidden="true"/);
+  assert.equal((mcp.match(/class="mcp-stage(?: mcp-stage--hub)?"/g) ?? []).length, 3);
+  for (const label of ["Your MCP client", "Spur", "One agent session"]) {
+    assert.equal((mcp.match(new RegExp(`<strong>${label}<\/strong>`, "g")) ?? []).length, 1);
+  }
+  for (const agent of ["claude", "codex", "cursor", "opencode"]) {
+    assert.equal((mcp.match(new RegExp(`\\b${agent}\\b`, "g")) ?? []).length, 1);
+  }
+  assert.equal((mcp.match(/class="mcp-link"[^>]*focusable="false"/g) ?? []).length, 2);
+  assert.equal((mcp.match(/class="mcp-track"/g) ?? []).length, 2);
+  assert.equal((mcp.match(/class="mcp-pkt /g) ?? []).length, 4);
+  assert.match(
+    mcp.replace(/\s+/g, " "),
+    /Spur starts or messages one coding-agent session; the client can then read its progress, answer or question\./,
+  );
 });
 
 test("installation requirements match supported Node engines and installed services", async () => {
@@ -298,7 +345,7 @@ test("motion-safe CSS keeps all static meaning visible", () => {
   const reduced = html.slice(html.indexOf("@media (prefers-reduced-motion: reduce)"));
   assert.match(reduced, /animation: none !important/);
   assert.match(reduced, /transition: none !important/);
-  assert.match(reduced, /\.a-pkt,[\s\S]*\.fo-pkt[\s\S]*display: none/);
+  assert.match(reduced, /\.a-pkt,[\s\S]*\.fo-pkt,[\s\S]*\.mcp-pkt[\s\S]*display: none/);
   assert.match(reduced, /\.agent-state[\s\S]*opacity: 1/);
   for (const id of ["features", "cli", "install", "faq"]) section(id);
 });

@@ -1398,6 +1398,136 @@
         max-width: 70ch;
       }
 
+      /* ── MCP ───────────────────────────────────────────────────────── */
+      .mcp-capabilities {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 28px;
+        padding: 0;
+        margin: 0 0 36px;
+        list-style: none;
+      }
+      .mcp-capabilities strong {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 500;
+      }
+      .mcp-capabilities span {
+        color: var(--t2);
+        line-height: 1.7;
+      }
+      .mcp-flow {
+        border: 1px solid var(--b);
+        background: var(--term);
+        padding: clamp(18px, 3vw, 32px);
+        margin: 0 0 28px;
+      }
+      .mcp-stages {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 64px minmax(0, 1fr) 64px minmax(0, 1fr);
+        align-items: center;
+      }
+      .mcp-stage {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 10px;
+        min-height: 132px;
+        padding: 20px 12px;
+        border: 1px solid var(--b);
+        background: var(--surface);
+        text-align: center;
+      }
+      .mcp-stage strong {
+        font-weight: 500;
+      }
+      .mcp-stage span {
+        color: var(--t3);
+        font-family: var(--mono);
+        font-size: var(--step--1);
+      }
+      .mcp-stage--hub {
+        border-color: var(--b-strong);
+        color: var(--brand);
+      }
+      .mcp-link {
+        display: block;
+        width: 64px;
+        height: 48px;
+        justify-self: center;
+      }
+      .mcp-track {
+        fill: none;
+        stroke: var(--b-strong);
+        stroke-width: 1.5;
+      }
+      .mcp-pkt {
+        --mcp-travel: 48px;
+        fill: var(--brand);
+        opacity: 0;
+        animation: mcp-pulse 8s linear infinite;
+      }
+      .mcp-pkt--reply {
+        --mcp-travel: -48px;
+        fill: var(--ready);
+      }
+      .mcp-session-request {
+        animation-delay: 1.28s;
+      }
+      .mcp-session-return {
+        animation-delay: 3.84s;
+      }
+      .mcp-client-return {
+        animation-delay: 5.12s;
+      }
+      @keyframes mcp-pulse {
+        0%,
+        8% {
+          opacity: 0;
+          transform: translateX(0);
+        }
+        8.01% {
+          opacity: 1;
+          transform: translateX(0);
+        }
+        23.99% {
+          opacity: 1;
+          transform: translateX(var(--mcp-travel));
+        }
+        24%,
+        100% {
+          opacity: 0;
+          transform: translateX(var(--mcp-travel));
+        }
+      }
+      .mcp-note {
+        color: var(--t2);
+        line-height: 1.7;
+        margin-bottom: 12px;
+      }
+      .mcp-docs {
+        max-width: 100%;
+        margin-top: 12px;
+      }
+      .mcp-docs svg {
+        flex-shrink: 0;
+      }
+      @media (max-width: 720px) {
+        .mcp-capabilities {
+          grid-template-columns: 1fr;
+          gap: 20px;
+        }
+        .mcp-stages {
+          grid-template-columns: minmax(0, 1fr);
+          grid-template-rows: auto 44px auto 44px auto;
+        }
+        .mcp-link {
+          width: 44px;
+          height: 33px;
+          transform: rotate(90deg);
+        }
+      }
+
       /* ── cta + footer ──────────────────────────────────────────────── */
       .endcta {
         text-align: center;
@@ -1457,7 +1587,8 @@
           transform: none;
         }
         .a-pkt,
-        .fo-pkt {
+        .fo-pkt,
+        .mcp-pkt {
           display: none;
         }
         .agent-state {
@@ -1492,6 +1623,7 @@
             <a href="#pipeline">Automation</a>
             <a href="#features">Features</a>
             <a href="#cli">CLI</a>
+            <a href="#mcp">MCP</a>
             <a href="#install">Install</a>
             <a href="#faq">FAQ</a>
           </div>
@@ -2003,10 +2135,8 @@
                 <path d="M8 3v5M16 3v5M5 8h14v3a7 7 0 01-14 0zM12 18v4" />
               </svg>
               <h3>MCP control</h3>
-              <p>
-                Let trusted MCP clients spawn, message and inspect sessions. Full operator access
-                over stdio, SSH or loopback HTTP.
-              </p>
+              <p>Connect trusted MCP clients to Spur and control agent sessions.</p>
+              <a href="#mcp">Explore MCP &rarr;</a>
             </article>
             <article class="cell">
               <svg
@@ -2074,8 +2204,99 @@
           </div>
         </section>
 
-        <section id="install" class="shell" aria-labelledby="install-h">
+        <section id="mcp" class="shell" aria-labelledby="mcp-h">
           <div class="sec-head rv" data-n="06">
+            <span class="mono-label">MCP, built in</span>
+            <h2 id="mcp-h">Your AI has tools. Now give it a team.</h2>
+            <p>
+              Connect an MCP-compatible client to Spur. Start coding agents, send instructions and
+              read their progress from the tool you're already using.
+            </p>
+          </div>
+
+          <ul class="mcp-capabilities rv">
+            <li>
+              <strong>Start agents</strong>
+              <span>Launch a session in one of your Spur projects.</span>
+            </li>
+            <li>
+              <strong>Send work</strong>
+              <span>Send instructions or a follow-up to an existing session.</span>
+            </li>
+            <li>
+              <strong>Check progress</strong>
+              <span>Read conversations and wait for an answer or question.</span>
+            </li>
+          </ul>
+
+          <figure class="mcp-flow rv" role="img" aria-labelledby="mcp-desc">
+            <div class="mcp-stages" aria-hidden="true">
+              <div class="mcp-stage">
+                <strong>Your MCP client</strong>
+                <span>The tool you already use</span>
+              </div>
+              <svg class="mcp-link" viewBox="0 0 64 48" focusable="false">
+                <path class="mcp-track" d="M8 15H56M50 9l6 6-6 6M56 33H8M14 27l-6 6 6 6" />
+                <rect class="mcp-pkt mcp-client-request" x="4" y="11" width="8" height="8" />
+                <rect
+                  class="mcp-pkt mcp-pkt--reply mcp-client-return"
+                  x="52"
+                  y="29"
+                  width="8"
+                  height="8"
+                />
+              </svg>
+              <div class="mcp-stage mcp-stage--hub">
+                <strong>Spur</strong>
+                <span>Start · message · inspect</span>
+              </div>
+              <svg class="mcp-link" viewBox="0 0 64 48" focusable="false">
+                <path class="mcp-track" d="M8 15H56M50 9l6 6-6 6M56 33H8M14 27l-6 6 6 6" />
+                <rect class="mcp-pkt mcp-session-request" x="4" y="11" width="8" height="8" />
+                <rect
+                  class="mcp-pkt mcp-pkt--reply mcp-session-return"
+                  x="52"
+                  y="29"
+                  width="8"
+                  height="8"
+                />
+              </svg>
+              <div class="mcp-stage">
+                <strong>One agent session</strong>
+                <span>claude · codex<br />cursor · opencode</span>
+              </div>
+            </div>
+            <figcaption id="mcp-desc" class="sr-only">
+              An MCP-compatible client sends a request to Spur. Spur starts or messages one
+              coding-agent session; the client can then read its progress, answer or question.
+            </figcaption>
+          </figure>
+
+          <p class="mcp-note">Use stdio locally or over SSH, or connect through private HTTP.</p>
+          <p class="mcp-note">Connected clients get full operator access to Spur.</p>
+          <a
+            class="btn mcp-docs"
+            href="https://github.com/ashugaev/spur/blob/main/docs/mcp.md"
+            rel="noopener"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 16 16"
+              fill="currentColor"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path
+                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"
+              />
+            </svg>
+            <span>Connect your MCP client &rarr;</span>
+          </a>
+        </section>
+
+        <section id="install" class="shell" aria-labelledby="install-h">
+          <div class="sec-head rv" data-n="07">
             <span class="mono-label">Install</span>
             <h2 id="install-h">You don't install it. Your agent does.</h2>
             <p>
@@ -2162,7 +2383,7 @@
         </section>
 
         <section id="faq" class="shell" aria-labelledby="faq-h">
-          <div class="sec-head rv" data-n="07">
+          <div class="sec-head rv" data-n="08">
             <span class="mono-label">FAQ</span>
             <h2 id="faq-h">Before you install.</h2>
           </div>
