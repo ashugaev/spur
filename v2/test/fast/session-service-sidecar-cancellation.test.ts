@@ -107,7 +107,8 @@ function fixture(): {
   };
   const service = Object.create(SessionService.prototype) as SidecarHarness;
   Object.assign(service, {
-    config: { dataDir },
+    config: { dataDir, projects: {} },
+    registryPaths: [],
     sidecarPortLock: Promise.resolve(),
     pruneLegacySidecarLinks: (record: SessionRecord) => record,
     invalidateSidecarEndpoint: vi.fn(),
