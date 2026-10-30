@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -61,7 +62,7 @@ import {
   writeSession,
   updatePendingSendBatchConditional,
 } from "../../src/metadata.js";
-import { appendEventLog } from "../../src/event-log.js";
+import { appendEventLog, readEventLog } from "../../src/event-log.js";
 import type {
   DurableSpawnIntent,
   PersistedPendingBatch,
@@ -3018,13 +3019,137 @@ describe("listSessions concurrency", () => {
     expect(listSessions(dataDir)).toEqual([]);
   });
 
-  it("still throws on a corrupt record file", async () => {
+  it("skips a corrupt record file and logs once", async () => {
     const dataDir = await newDataDir();
     const dir = join(dataDir, "sessions", "api");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "api-1.json"), "{not json", "utf-8");
+    expect(listSessions(dataDir)).toEqual([]);
 
-    expect(() => listSessions(dataDir)).toThrow(/Invalid session metadata JSON/);
+    writeSession(dataDir, { ...sessionBase, id: "api-2", tmuxSession: "api-2" });
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-2"]);
+    expect(invalidEntries(dataDir)).toHaveLength(1);
+  });
+});
+
+function invalidEntries(dataDir: string) {
+  return readEventLog(dataDir).filter((entry) => entry.event === "session.record.invalid");
+}
+
+function writeRawSession(dataDir: string, id: string, body: unknown): string {
+  const dir = join(dataDir, "sessions", "api");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${id}.json`);
+  writeFileSync(path, typeof body === "string" ? body : JSON.stringify(body), "utf-8");
+  return path;
+}
+
+const REQUIRED_SESSION_FIELDS = [
+  "id",
+  "project",
+  "agent",
+  "prompt",
+  "branch",
+  "worktree",
+  "worktreePath",
+  "tmuxSession",
+  "launchCommand",
+  "status",
+  "createdAt",
+  "updatedAt",
+] as const;
+
+describe("session record shape guard", () => {
+  const full = (id: string): Record<string, unknown> => ({
+    ...sessionBase,
+    id,
+    tmuxSession: id,
+  });
+  const incident = (id: string): Record<string, unknown> => {
+    const { prompt: _prompt, launchCommand: _launch, ...rest } = full(id);
+    return { ...rest, workspaceId: id, closeoutOwner: "x", pr: null, error: "boom" };
+  };
+
+  it("readSession throws on the incident key set", async () => {
+    const dataDir = await newDataDir();
+    writeRawSession(dataDir, "api-1", incident("api-1"));
+    expect(() => readSession(dataDir, "api-1")).toThrow(
+      /Invalid session metadata shape at .*api-1\.json/,
+    );
+  });
+
+  it("listSessions returns only the valid sibling of the incident record", async () => {
+    const dataDir = await newDataDir();
+    writeRawSession(dataDir, "api-1", incident("api-1"));
+    writeRawSession(dataDir, "api-2", full("api-2"));
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-2"]);
+  });
+
+  it.each(REQUIRED_SESSION_FIELDS)("readSession throws when %s is missing", async (field) => {
+    const dataDir = await newDataDir();
+    const body = Object.fromEntries(Object.entries(full("api-1")).filter(([key]) => key !== field));
+    writeRawSession(dataDir, "api-1", body);
+    expect(() => readSession(dataDir, "api-1")).toThrow(/Invalid session metadata shape/);
+  });
+
+  it("readSession throws when worktree is a string", async () => {
+    const dataDir = await newDataDir();
+    writeRawSession(dataDir, "api-1", { ...full("api-1"), worktree: "true" });
+    expect(() => readSession(dataDir, "api-1")).toThrow(/Invalid session metadata shape/);
+  });
+
+  it("reads a complete record back with prompt intact", async () => {
+    const dataDir = await newDataDir();
+    writeRawSession(dataDir, "api-1", full("api-1"));
+    expect(readSession(dataDir, "api-1")?.prompt).toBe("ship it");
+  });
+});
+
+describe("invalid record log dedupe", () => {
+  it("logs once per unchanged file across scans, again per new version", async () => {
+    const dataDir = await newDataDir();
+    const path = writeRawSession(dataDir, "api-1", "{not json");
+    listSessions(dataDir);
+    listSessions(dataDir);
+    listSessions(dataDir);
+    expect(invalidEntries(dataDir)).toHaveLength(1);
+    expect(invalidEntries(dataDir)[0]).toMatchObject({ level: "warn", path });
+
+    writeRawSession(dataDir, "api-1", "{still not json");
+    listSessions(dataDir);
+    expect(invalidEntries(dataDir)).toHaveLength(2);
+  });
+
+  it("lists a fixed file and logs again when it turns invalid again", async () => {
+    const dataDir = await newDataDir();
+    writeRawSession(dataDir, "api-1", "{not json");
+    listSessions(dataDir);
+    expect(invalidEntries(dataDir)).toHaveLength(1);
+
+    writeRawSession(dataDir, "api-1", { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
+    expect(invalidEntries(dataDir)).toHaveLength(1);
+
+    writeRawSession(dataDir, "api-1", "{broken again");
+    expect(listSessions(dataDir)).toEqual([]);
+    expect(invalidEntries(dataDir)).toHaveLength(2);
+  });
+
+  it("logs each of two distinct invalid files once, uncollapsed", async () => {
+    const dataDir = await newDataDir();
+    writeRawSession(dataDir, "api-1", "{not json");
+    writeRawSession(dataDir, "api-2", "{not json either!");
+    listSessions(dataDir);
+    listSessions(dataDir);
+    expect(invalidEntries(dataDir)).toHaveLength(2);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("still throws on an unreadable record file", async () => {
+    const dataDir = await newDataDir();
+    const path = writeRawSession(dataDir, "api-1", "{}");
+    chmodSync(path, 0o000);
+    expect(() => listSessions(dataDir)).toThrow();
+    chmodSync(path, 0o600);
   });
 });
 
