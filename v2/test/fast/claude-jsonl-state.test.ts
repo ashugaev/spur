@@ -969,7 +969,7 @@ describe("parseJsonlRecord rate_limit reset detection", () => {
     expect(record?.rateLimitResetAtMs).toBeUndefined();
   });
 
-  it("leaves rateLimitResetAtMs undefined for a weekly-limit banner", () => {
+  it("parses rateLimitResetAtMs from a dated weekly-limit banner", () => {
     const line = JSON.stringify({
       type: "assistant",
       isApiErrorMessage: true,
@@ -980,12 +980,14 @@ describe("parseJsonlRecord rate_limit reset detection", () => {
         model: "<synthetic>",
         role: "assistant",
         stop_reason: "stop_sequence",
-        content: [{ type: "text", text: "You've hit your weekly limit · resets 7pm (UTC)" }],
+        content: [
+          { type: "text", text: "You've hit your weekly limit · resets Jul 15, 8am (UTC)" },
+        ],
       },
     });
     const record = parseJsonlRecord(line, 0);
     expect(record?.rateLimited).toBe(true);
-    expect(record?.rateLimitResetAtMs).toBeUndefined();
+    expect(record?.rateLimitResetAtMs).toBe(Date.parse("2026-07-15T08:00:00.000Z"));
   });
 });
 

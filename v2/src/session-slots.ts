@@ -26,6 +26,8 @@ export const AGENT_STATE_TOOL_NAME = "spur-agent-state";
 const AGENT_STATE_UPDATER_NAME = "spur-agent-state-updater.mjs";
 const SPUR_WRAPPER_NAME = "spur";
 const GIT_WRAPPER_NAME = "git";
+// Every generated git wrapper carries this text; wrappers detect each other by it.
+const GIT_WRAPPER_SIGNATURE = "Spur git wrapper could not find git";
 const BRANCH_TOOL_NAME = "spur-branch";
 export const TODO_TOOL_NAME = "spur-todo";
 export const MANUAL_TITLE_LOCK_MESSAGE =
@@ -388,17 +390,26 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" branch "$action" --project ${shellEscape
       `#!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
-path_without_wrapper=""
+REAL_GIT=""
 IFS=: read -r -a path_parts <<< "\${PATH:-}"
+if [[ -z "\${PATH:-}" ]]; then
+  path_parts=("")
+fi
 for path_part in "\${path_parts[@]}"; do
-  if [[ "$path_part" == "$SCRIPT_DIR" ]]; then
+  candidate="\${path_part:-.}/git"
+  if [[ ! -f "$candidate" || ! -x "$candidate" ]]; then
     continue
   fi
-  path_without_wrapper="\${path_without_wrapper:+$path_without_wrapper:}$path_part"
+  header=""
+  IFS= read -r -d '' -n 4096 header 2>/dev/null < "$candidate" || true
+  if [[ "$header" == *"${GIT_WRAPPER_SIGNATURE}"* ]]; then
+    continue
+  fi
+  REAL_GIT="$candidate"
+  break
 done
-REAL_GIT=$(PATH="$path_without_wrapper" command -v git || true)
 if [[ -z "$REAL_GIT" ]]; then
-  echo "Spur git wrapper could not find git outside $SCRIPT_DIR" >&2
+  echo "${GIT_WRAPPER_SIGNATURE} outside Spur git wrappers" >&2
   exit 127
 fi
 git_command=""

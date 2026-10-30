@@ -198,51 +198,79 @@ export interface ClaudeRateLimitRecord {
   rateLimitResetAtMs?: number;
 }
 
-// Matches "resets 7pm (UTC)" / "resets 11:20am (UTC)" (case-insensitive).
-// Timezone must be spelled out as "(UTC)" — anything else (or nothing) is
-// unparseable, since guessing a timezone would risk a wrong expiry.
-const RATE_LIMIT_RESET_RE = /resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(\s*utc\s*\)/i;
+// Matches "resets 7pm (UTC)" / "resets 11:20am (UTC)" / "resets Sep 16, 8am (UTC)"
+// (case-insensitive). Timezone must be spelled out as "(UTC)" — anything else
+// (or nothing) is unparseable, since guessing a timezone would risk a wrong expiry.
+const RATE_LIMIT_RESET_RE =
+  /resets\s+(?:([a-z]{3})\s+(\d{1,2}),\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(\s*utc\s*\)/i;
 
-// The only banner scope this parser trusts a reset instant from. RATE_LIMIT_MARKERS
-// / TMUX_BANNER_MARKERS also match "hit your weekly limit" and "hit your opus limit",
-// which can carry the same "resets HH (UTC)" clause for a reset days away — parsing
-// that would still land inside this function's forward-only (anchor, anchor+24h]
-// range and report a multi-day limit as expired within a day.
-const SESSION_LIMIT_BANNER = "hit your session limit";
+const MONTH_ABBREVIATIONS: readonly string[] = [
+  "jan",
+  "feb",
+  "mar",
+  "apr",
+  "may",
+  "jun",
+  "jul",
+  "aug",
+  "sep",
+  "oct",
+  "nov",
+  "dec",
+];
+
+// The banner scopes this parser trusts a reset instant from. Claude renders a
+// weekly reset time-only while it is under 24h away and adds "Mon D," beyond
+// that (every weekly record in observed transcripts), so a time-only clause
+// resolves inside the forward-only (anchor, anchor+24h] range for every scope.
+// The opus banner is assumed to share that formatter.
+const RESET_BANNERS: readonly string[] = [
+  "hit your session limit",
+  "hit your weekly limit",
+  "hit your opus limit",
+];
 
 // The truncation window a minute-precision banner clock can hide: the true reset can
 // land up to 60s after the rendered minute.
 const BANNER_CLOCK_TRUNCATION_MS = 60_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-// Parses a claude session-limit banner's trailing "resets HH[:MM](am|pm) (UTC)"
+// Parses a claude limit banner's trailing "resets [Mon D, ]HH[:MM](am|pm) (UTC)"
 // clause into an absolute epoch-ms instant, anchored to the record's own
 // timestamp (never the caller's clock — see claude-jsonl-state.ts's
-// extractRecordTimestampMs). Scope-gated to the session limit: a weekly, opus,
-// or otherwise unrecognized banner returns `undefined` and keeps today's
-// time-blind, stuck-but-safe behavior — see SESSION_LIMIT_BANNER. Forward-only:
-// the returned instant is always strictly after `anchorMs`. The banner's clock
-// is minute-truncated, so the true reset can land up to 60s after the rendered
-// minute; the common case (the rendered minute is still ahead of the anchor)
-// returns that truncated minute as-is, which can be up to 60s earlier than the
-// true reset. Only when the anchor has already reached the rendered minute is
-// the candidate clamped forward to the end of that minute (candidate + 60s)
-// rather than rolled a full day, so it is never earlier than the true reset in
-// that same-minute case specifically. Once the anchor is 60s or more past the
-// rendered minute, the candidate rolls a full day forward instead. Returns
-// `undefined` for any unparseable, out-of-range, or non-UTC form — never a
-// guessed timezone or a fallback expiry.
+// extractRecordTimestampMs). Scope-gated to RESET_BANNERS: any other banner
+// returns `undefined` and keeps the time-blind, stuck-but-safe behavior.
+// Forward-only: the returned instant is always strictly after `anchorMs`. The
+// banner's clock is minute-truncated, so the true reset can land up to 60s after
+// the rendered minute; the common case (the rendered minute is still ahead of
+// the anchor) returns that truncated minute as-is, which can be up to 60s earlier
+// than the true reset. Only when the anchor has already reached the rendered
+// minute is the candidate clamped forward to the end of that minute (candidate +
+// 60s), so it is never earlier than the true reset in that same-minute case
+// specifically. Once the anchor is 60s or more past the rendered minute, a
+// time-only candidate rolls a full day forward and a dated candidate rolls a
+// full year forward (the banner omits the year). Returns `undefined` for any
+// unparseable, out-of-range, or non-UTC form — never a guessed timezone or a
+// fallback expiry.
 export function parseRateLimitResetAtMs(text: string, anchorMs: number): number | undefined {
-  if (!text.toLowerCase().includes(SESSION_LIMIT_BANNER)) {
+  const lower = text.toLowerCase();
+  if (!RESET_BANNERS.some((banner) => lower.includes(banner))) {
     return undefined;
   }
   const match = RATE_LIMIT_RESET_RE.exec(text);
   if (!match) {
     return undefined;
   }
-  const hourRaw = Number(match[1]);
-  const minuteRaw = match[2] !== undefined ? Number(match[2]) : 0;
-  const meridiem = (match[3] ?? "").toLowerCase();
+  const monthRaw = match[1];
+  const month =
+    monthRaw !== undefined ? MONTH_ABBREVIATIONS.indexOf(monthRaw.toLowerCase()) : undefined;
+  const dayRaw = match[2] !== undefined ? Number(match[2]) : undefined;
+  if (month === -1) {
+    return undefined;
+  }
+  const hourRaw = Number(match[3]);
+  const minuteRaw = match[4] !== undefined ? Number(match[4]) : 0;
+  const meridiem = (match[5] ?? "").toLowerCase();
   if (!Number.isFinite(hourRaw) || hourRaw < 1 || hourRaw > 12) {
     return undefined;
   }
@@ -254,8 +282,24 @@ export function parseRateLimitResetAtMs(text: string, anchorMs: number): number 
     hour24 += 12;
   }
   const anchorDate = new Date(anchorMs);
+  const year = anchorDate.getUTCFullYear();
+  if (month !== undefined && dayRaw !== undefined) {
+    const dated = (y: number): number | undefined => {
+      const instant = Date.UTC(y, month, dayRaw, hour24, minuteRaw, 0, 0);
+      // Date.UTC normalizes overflow ("Feb 31" -> Mar 3); reject it instead.
+      return new Date(instant).getUTCDate() === dayRaw ? instant : undefined;
+    };
+    const candidate = dated(year);
+    if (candidate === undefined || candidate > anchorMs) {
+      return candidate;
+    }
+    if (anchorMs - candidate < BANNER_CLOCK_TRUNCATION_MS) {
+      return candidate + BANNER_CLOCK_TRUNCATION_MS;
+    }
+    return dated(year + 1);
+  }
   let candidate = Date.UTC(
-    anchorDate.getUTCFullYear(),
+    year,
     anchorDate.getUTCMonth(),
     anchorDate.getUTCDate(),
     hour24,
@@ -292,6 +336,15 @@ export const CLAUDE_BOOKKEEPING_RECORD_TYPES: ReadonlySet<string> = new Set([
   "file-history-snapshot",
 ]);
 
+// Session-metadata records: `cost-state` is written when the claude process
+// exits, `last-prompt` alongside prompts. Kept out of
+// CLAUDE_BOOKKEEPING_RECORD_TYPES because classifyClaudeJsonlState maps that set
+// to "waiting", while it already walks past these as unknown types.
+const CLAUDE_SESSION_META_RECORD_TYPES: ReadonlySet<string> = new Set([
+  "cost-state",
+  "last-prompt",
+]);
+
 // Claude transcript tail. The most recent meaningful record decides: a synthetic
 // assistant record flagged `error: "rate_limit"` means the session is blocked.
 // Returns null when there is no meaningful record to judge.
@@ -300,7 +353,11 @@ export function detectClaudeRateLimit(
 ): RateLimitDetection | null {
   for (let i = records.length - 1; i >= 0; i--) {
     const record = records[i];
-    if (!record || CLAUDE_BOOKKEEPING_RECORD_TYPES.has(record.type)) {
+    if (
+      !record ||
+      CLAUDE_BOOKKEEPING_RECORD_TYPES.has(record.type) ||
+      CLAUDE_SESSION_META_RECORD_TYPES.has(record.type)
+    ) {
       continue;
     }
     if (record.rateLimited) {
@@ -329,19 +386,21 @@ export function detectCursorRateLimit(text: string | null): RateLimitDetection |
   return null;
 }
 
-// Claude Code's stop-and-wait / ask-your-admin usage-limit menu, whose
+// Claude Code's usage-limit menu ("What do you want to do?"), whose
 // cursor-selected option line would be rejected by scanTmuxRateLimit's
-// gutter/anchor checks. This detector requires three distinct whole physical
-// lines — both menu options plus the confirm/cancel footer — rather than a
-// whole-buffer substring scan, so prose or fixtures that merely mention the
-// menu's wording don't bare-reproduce a matching line and can't self-trigger.
-// Claude Code renders the admin option as "2." on the two-option menu and as
-// "3." on the newer three-option one, whose extra middle option is "2. Wait
-// here, then continue automatically at <date>". Matching either index keeps
-// one detector for both layouts; the three required distinct physical lines
-// stay option one, the admin option, and the footer.
-const CLAUDE_USAGE_MENU_OPTION_ONE = /^[^0-9a-z]{0,3}1\.\s*stop and wait for limit to reset$/i;
-const CLAUDE_USAGE_MENU_OPTION_ADMIN = /^[^0-9a-z]{0,3}[23]\.\s*ask your admin for more usage$/i;
+// gutter/anchor checks. Claude Code 2.1.291 renders a variable option set: the
+// stop label ("Stop and wait for limit to reset"), an optional "Wait here, then
+// continue automatically ..." or "Don't continue automatically" slot, and the
+// extra-usage options ("Ask your admin for more usage", "Add funds to continue
+// with usage credits", "Switch to usage credits") plus "Upgrade your plan", in
+// an order that depends on the account. The menu is therefore recognised by
+// shape: header, numbered/blank lines only, footer, with at least two distinct
+// known labels. Whole physical lines are required so prose or fixtures that
+// merely mention the wording can't self-trigger.
+const CLAUDE_USAGE_MENU_HEADER = /^what do you want to do\?$/i;
+const CLAUDE_USAGE_MENU_NUMBERED = /^[^0-9a-z]{0,3}\d\.\s+\S/i;
+const CLAUDE_USAGE_MENU_KNOWN_LABEL =
+  /^[^0-9a-z]{0,3}\d\.\s*(stop and wait for limit to reset|wait here, then continue automatically(?: shortly| at (?:[a-z]{3} \d{1,2}, (?:\d{4}, )?)?\d{1,2}(?::\d{2})?[ap]m| when the limit resets)?|don[’']t continue automatically|ask your admin for more usage|add funds to continue with usage(?: credits)?|switch to usage(?: credits)?|upgrade your plan)$/i;
 const CLAUDE_USAGE_MENU_FOOTER = /^enter to confirm\s*[·\-|/]\s*esc to cancel$/i;
 
 // captureTmuxPane's default 200-line capture is sized for scanTmuxRateLimit's
@@ -354,35 +413,65 @@ const CLAUDE_USAGE_MENU_FOOTER = /^enter to confirm\s*[·\-|/]\s*esc to cancel$/
 // does not prove the menu is still live.
 const CLAUDE_USAGE_MENU_TAIL_LINES = 20;
 
-export function detectClaudeUsageLimitMenu(paneText: string): RateLimitDetection | null {
+// Numbered option lines (wrapped continuations joined by a space) of the live
+// menu block, or null when the pane tail does not end in a header + numbered/blank
+// lines + footer block. The footer must be the last tail line: content after it
+// means a newer dialog or output, so an older complete menu is stale. An option
+// that took a wrapped continuation must then match a known label exactly.
+function extractClaudeUsageMenuBlock(paneText: string): string[] | null {
   const allLines = paneText.split("\n").map((line) => line.trim());
   let end = allLines.length;
   while (end > 0 && allLines[end - 1] === "") end--;
   const lines = allLines.slice(Math.max(0, end - CLAUDE_USAGE_MENU_TAIL_LINES), end);
-  const hasOptionOne = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_ONE.test(line));
-  const hasAdminOption = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_ADMIN.test(line));
-  const hasFooter = lines.some((line) => CLAUDE_USAGE_MENU_FOOTER.test(line));
-  if (hasOptionOne && hasAdminOption && hasFooter) {
-    return { limited: true, reason: "claude usage limit menu" };
+  const footerIndex = lines.length - 1;
+  if (footerIndex < 0 || !CLAUDE_USAGE_MENU_FOOTER.test(lines[footerIndex] ?? "")) return null;
+  let headerIndex = footerIndex - 1;
+  while (headerIndex >= 0 && !CLAUDE_USAGE_MENU_HEADER.test(lines[headerIndex] ?? ""))
+    headerIndex--;
+  if (headerIndex < 0) return null;
+  const options: string[] = [];
+  const wrapped = new Set<number>();
+  for (const line of lines.slice(headerIndex + 1, footerIndex)) {
+    if (line === "") continue;
+    if (CLAUDE_USAGE_MENU_NUMBERED.test(line)) {
+      options.push(line);
+      continue;
+    }
+    // Narrow panes wrap a long option label onto an unnumbered next line.
+    const last = options.pop();
+    if (last === undefined) return null;
+    options.push(`${last} ${line}`);
+    wrapped.add(options.length - 1);
   }
-  return null;
+  for (const index of wrapped) {
+    if (!CLAUDE_USAGE_MENU_KNOWN_LABEL.test(options[index] ?? "")) return null;
+  }
+  return options;
+}
+
+export function detectClaudeUsageLimitMenu(paneText: string): RateLimitDetection | null {
+  const options = extractClaudeUsageMenuBlock(paneText);
+  if (!options) return null;
+  const labels = new Set<string>();
+  for (const line of options) {
+    const label = CLAUDE_USAGE_MENU_KNOWN_LABEL.exec(line)?.[1];
+    if (label) labels.add(label.toLowerCase());
+  }
+  return labels.size >= 2 ? { limited: true, reason: "claude usage limit menu" } : null;
 }
 
 // Claude Code renders the selection cursor as "❯" (U+276F) in its current TUI
 // and as ">" in older builds; both mean option 1 is highlighted.
 const CLAUDE_USAGE_MENU_OPTION_ONE_SELECTED = /^[>❯]\s*1\.\s*stop and wait for limit to reset$/i;
 
-// True only when the pane's cursor is on "Stop and wait for limit to reset"
-// (option 1), not on any other option ("Wait here, then continue
-// automatically at <date>", "Ask your admin for more usage"). Confirming via
-// Enter must be gated on this specifically — detectClaudeUsageLimitMenu only
-// proves the menu is showing, not which option is currently highlighted, so
-// blindly sending Enter could otherwise select "Ask your admin" instead.
+// True only when the live menu block's cursor is on "Stop and wait for limit to
+// reset" (option 1), not on any other option. Confirming via Enter must be gated
+// on this specifically — detectClaudeUsageLimitMenu only proves the menu is
+// showing, not which option is highlighted, and on reordered menus option 1 is
+// "Add funds", where Enter would buy credits. Scrollback never counts.
 export function claudeUsageMenuOptionOneSelected(paneText: string): boolean {
-  return paneText
-    .split("\n")
-    .map((line) => line.trim())
-    .some((line) => CLAUDE_USAGE_MENU_OPTION_ONE_SELECTED.test(line));
+  const options = extractClaudeUsageMenuBlock(paneText);
+  return options?.some((line) => CLAUDE_USAGE_MENU_OPTION_ONE_SELECTED.test(line)) ?? false;
 }
 
 // Claude Code's compaction spinner ("✳ Compacting conversation… (18s)"). This

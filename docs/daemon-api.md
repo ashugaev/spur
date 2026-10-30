@@ -68,8 +68,8 @@
 - `GET /sessions/:id/todo`
 - `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo)
 - `GET /sessions/:id/auto-ping-suppressions`
-- `POST /sessions/:id/auto-ping-suppressions/unsubscribe`
-- `POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume` — `400|403|404|409`. See [auto-ping](commands.md#auto-ping)
+- `POST /sessions/:id/auto-ping-suppressions/unsubscribe` — `400|403|404|409 grant_not_ready|grant_consumed`. See [auto-ping](commands.md#auto-ping)
+- `POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume` — `400|403|404`. See [auto-ping](commands.md#auto-ping)
 - `POST /sessions/:id/queue/remove` — `{"message": "<exact queued text>"}`. See [send, queue](commands.md#send-queue)
 - `POST /sessions/:id/queue/flush`
 - `POST /sessions/:id/wake`

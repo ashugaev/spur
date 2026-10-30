@@ -1,7 +1,7 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { basename, join } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ensureSessionSlotTool,
@@ -454,6 +454,222 @@ exit 42
       }),
     ).toThrow();
     expect(() => readFileSync(capturedArgsPath, "utf8")).toThrow();
+  });
+
+  describe("git wrapper nested resolution", () => {
+    const makeWrapper = async (sessionId: string): Promise<string> => {
+      const dataDir = await createTempDir("spur-slots-fast-");
+      tempDirs.push(dataDir);
+      return ensureSessionSlotTool({
+        dataDir,
+        sessionId,
+        configPath: "/tmp/spur.yaml",
+        projectId: "api",
+        branchNamingRegex: "^feature/[a-z]+$",
+      });
+    };
+    // Dir with only bash and dirname symlinked (what the wrapper needs), plus an optional fake real git.
+    const makeToolStub = async (withGit: boolean): Promise<string> => {
+      const dir = await createTempDir("spur-slots-stub-");
+      tempDirs.push(dir);
+      const resolved = execFileSync("bash", ["-c", "command -v bash dirname"], {
+        encoding: "utf8",
+      })
+        .trim()
+        .split("\n");
+      for (const target of resolved) {
+        symlinkSync(target, join(dir, basename(target)));
+      }
+      if (withGit) {
+        writeFileSync(join(dir, "git"), `#!/usr/bin/env bash\necho "git version fake-real"\n`, {
+          encoding: "utf8",
+          mode: 0o755,
+        });
+      }
+      return dir;
+    };
+    const runGit = (inner: string, pathValue: string) =>
+      spawnSync(join(inner, "git"), ["--version"], {
+        encoding: "utf8",
+        timeout: 5000,
+        env: { ...process.env, PATH: pathValue },
+      });
+
+    it("resolves real git past a nested wrapper in both PATH orders", async () => {
+      const inner = await makeWrapper("inner");
+      const outer = await makeWrapper("outer");
+      const fakeBin = await makeToolStub(true);
+
+      for (const pathValue of [`${inner}:${outer}:${fakeBin}`, `${outer}:${inner}:${fakeBin}`]) {
+        const result = runGit(inner, pathValue);
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe("git version fake-real\n");
+        expect(result.stderr).toBe("");
+      }
+    });
+
+    it("resolves real git past a legacy-generation outer wrapper", async () => {
+      const inner = await makeWrapper("inner");
+      const legacy = await createTempDir("spur-slots-legacy-");
+      tempDirs.push(legacy);
+      const fakeBin = await makeToolStub(true);
+      writeFileSync(
+        join(legacy, "git"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+path_without_wrapper=""
+IFS=: read -r -a path_parts <<< "\${PATH:-}"
+for path_part in "\${path_parts[@]}"; do
+  if [[ "$path_part" == "$SCRIPT_DIR" ]]; then
+    continue
+  fi
+  path_without_wrapper="\${path_without_wrapper:+$path_without_wrapper:}$path_part"
+done
+REAL_GIT=$(PATH="$path_without_wrapper" command -v git || true)
+if [[ -z "$REAL_GIT" ]]; then
+  echo "Spur git wrapper could not find git outside $SCRIPT_DIR" >&2
+  exit 127
+fi
+exec "$REAL_GIT" "$@"
+`,
+        { encoding: "utf8", mode: 0o755 },
+      );
+
+      const outer = await makeWrapper("outer");
+
+      for (const pathValue of [
+        `${inner}:${legacy}:${fakeBin}`,
+        `${legacy}:${inner}:${fakeBin}`,
+        `${inner}:${outer}:${legacy}:${fakeBin}`,
+        `${inner}:${legacy}:${outer}:${fakeBin}`,
+      ]) {
+        const result = runGit(inner, pathValue);
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe("git version fake-real\n");
+        expect(result.stderr).toBe("");
+      }
+    });
+
+    it("fails with exit 127 when only wrappers are on PATH", async () => {
+      const inner = await makeWrapper("inner");
+      const outer = await makeWrapper("outer");
+      const stub = await makeToolStub(false);
+
+      const result = runGit(inner, `${inner}:${outer}:${stub}`);
+      expect(result.status).toBe(127);
+      expect(result.stderr).toContain("Spur git wrapper could not find git");
+      expect(result.stderr).not.toContain("command not found");
+    });
+
+    it("resolves cwd git at an interior empty PATH component", async () => {
+      const inner = await makeWrapper("inner");
+      const tools = await makeToolStub(false);
+      const cwd = await makeToolStub(true);
+      const later = await makeToolStub(true);
+      writeFileSync(join(cwd, "git"), `#!/usr/bin/env bash\necho "git version cwd"\n`, {
+        encoding: "utf8",
+        mode: 0o755,
+      });
+
+      for (const pathValue of [`${inner}:${tools}::${later}`, `${inner}:${tools}::missing`]) {
+        const result = spawnSync(join(inner, "git"), ["--version"], {
+          cwd,
+          encoding: "utf8",
+          timeout: 5000,
+          env: { ...process.env, PATH: pathValue },
+        });
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe("git version cwd\n");
+        expect(result.stderr).toBe("");
+      }
+    });
+
+    it("preserves cwd lookup, PATH and argv when PATH is empty", async () => {
+      const inner = await makeWrapper("inner");
+      const cwd = await makeToolStub(true);
+      writeFileSync(
+        join(cwd, "git"),
+        `#!/usr/bin/env bash
+printf 'cwd-git\\nPATH=<%s>\\n' "$PATH"
+printf 'arg=<%s>\\n' "$@"
+`,
+        { encoding: "utf8", mode: 0o755 },
+      );
+      const result = spawnSync(join(inner, "git"), ["--version", "", "two words"], {
+        cwd,
+        encoding: "utf8",
+        timeout: 5000,
+        env: { ...process.env, PATH: "" },
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe("cwd-git\nPATH=<>\narg=<--version>\narg=<>\narg=<two words>\n");
+      expect(result.stderr).toBe("");
+    });
+
+    it("retains Bash default lookup when PATH is unset", async () => {
+      const inner = await makeWrapper("inner");
+      const cwd = await makeToolStub(true);
+      const env = { ...process.env };
+      delete env.PATH;
+      const result = spawnSync(join(inner, "git"), ["--version"], {
+        cwd,
+        encoding: "utf8",
+        timeout: 5000,
+        env,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(result.stdout).toMatch(/^git version \d/);
+      expect(result.stderr).toBe("");
+    });
+
+    it("skips cwd wrappers when PATH is empty", async () => {
+      const inner = await makeWrapper("inner");
+      const cwd = await makeToolStub(false);
+      writeFileSync(join(cwd, "git"), readFileSync(join(inner, "git")), { mode: 0o755 });
+      const result = spawnSync(join(inner, "git"), ["--version"], {
+        cwd,
+        encoding: "utf8",
+        timeout: 5000,
+        env: { ...process.env, PATH: "" },
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(127);
+      expect(result.stderr).toBe("Spur git wrapper could not find git outside Spur git wrappers\n");
+    });
+
+    it("blocks a bad-branch push through nested wrappers", async () => {
+      const inner = await makeWrapper("inner");
+      const outer = await makeWrapper("outer");
+      const fakeBin = await makeToolStub(false);
+      const capturedArgsPath = join(fakeBin, "git-args.txt");
+      writeFileSync(
+        join(fakeBin, "git"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == "-C /repo branch --show-current" ]]; then
+  echo "bad-name"
+  exit 0
+fi
+printf '%s\\n' "$@" > ${JSON.stringify(capturedArgsPath)}
+`,
+        { encoding: "utf8", mode: 0o755 },
+      );
+      writeFileSync(join(inner, "spur-branch"), `#!/usr/bin/env bash\nexit 42\n`, {
+        encoding: "utf8",
+        mode: 0o755,
+      });
+
+      const result = spawnSync(join(inner, "git"), ["-C", "/repo", "push"], {
+        encoding: "utf8",
+        timeout: 5000,
+        env: { ...process.env, PATH: `${inner}:${outer}:${fakeBin}` },
+      });
+      expect(result.status).toBe(42);
+      expect(() => readFileSync(capturedArgsPath, "utf8")).toThrow();
+    });
   });
 
   it("keeps spur-sidecar isolated from an overwritten local spur wrapper", async () => {

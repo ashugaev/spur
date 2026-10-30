@@ -812,9 +812,7 @@ const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
 const CURSOR_PANE_READY_OVERRIDE_TTL_MS = 15_000;
 // Ceiling on how far past its own parsed resetAtMs a live usage-limit menu can
 // still re-confirm rate_limited. parseRateLimitResetAtMs (rate-limit-detect.ts)
-// only encodes a time-of-day and rolls at most a full day (DAY_MS) forward
-// when the parsed clock already looks past — so any genuine session-limit
-// reset is always within one day of the record that reported it. Once nowMs
+// yields the instant the reporting record named for the reset. Once nowMs
 // is a full day past resetAtMs with no fresh rate-limit record to refresh it,
 // an entire reset cycle has elapsed uncorroborated: a menu still sitting on
 // the pane is a stuck render, not a live limit, so re-confirmation stops and
