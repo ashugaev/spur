@@ -8,3 +8,6 @@ export const INPUT_CLASS =
   "border border-[var(--color-input-border)] bg-[var(--color-input-bg)] px-2.5 py-2 text-[var(--color-input-text)] outline-none transition focus:border-[var(--color-accent)]";
 
 export const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
+
+export const STATUS_CARD_CLASS =
+  "border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-[0_8px_24px_var(--color-shadow-modal-sm)]";
