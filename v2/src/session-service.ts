@@ -497,6 +497,8 @@ import {
   type ServiceInstanceView,
   type SelfDestructConfig,
   type SendMessageAttachment,
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS,
   type SendMessageRequest,
   type SidecarConfig,
   type SidecarMcpBinding,
@@ -713,8 +715,6 @@ export function getIdleWaitBeforeFlushMs(): number {
 }
 
 const NAME_RE = /^[\w.-]+$/;
-const MAX_DECODED_SIZE = 5 * 1024 * 1024;
-const MAX_ATTACHMENTS = 10;
 const STATE_HISTORY_LIMIT = 100;
 const RESTORE_PLAN_WAIT_MS = 5_000;
 const RESTORE_PLAN_POLL_MS = 250;
@@ -17194,9 +17194,7 @@ export class SessionService {
       throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
     }
 
-    const attachDir = ensureSessionArtifactsDir(this.config.dataDir, sessionId);
-    const stored: StoredImageAttachment[] = [];
-    for (const [index, att] of attachments.entries()) {
+    const decoded = attachments.map((att) => {
       if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
         throw new Error(`Invalid attachment name: ${String(att.name)}`);
       }
@@ -17204,16 +17202,24 @@ export class SessionService {
         throw new Error("Attachment data must be a non-empty base64 string");
       }
       const buf = Buffer.from(att.data, "base64");
-      if (buf.length > MAX_DECODED_SIZE) {
+      if (buf.length === 0 || buf.toString("base64") !== att.data) {
+        throw new Error("Attachment data must be non-empty valid base64");
+      }
+      if (buf.length > MAX_ATTACHMENT_BYTES) {
         throw new Error(`Attachment ${att.name} exceeds 5MB`);
       }
+      return { name: att.name, buf };
+    });
+    const attachDir = ensureSessionArtifactsDir(this.config.dataDir, sessionId);
+    const stored: StoredImageAttachment[] = [];
+    for (const [index, att] of decoded.entries()) {
       let filename = `${Date.now()}-${att.name}`;
       const initialPath = join(attachDir, filename);
       if (existsSync(initialPath)) {
         filename = `${Date.now()}-${index}-${att.name}`;
       }
       const filePath = join(attachDir, filename);
-      writeFileSync(filePath, buf, { mode: 0o644 });
+      writeFileSync(filePath, att.buf, { mode: 0o644 });
       setSessionArtifactOrigin(this.config.dataDir, sessionId, filename, "intentional");
       setSessionArtifactUserAdded(this.config.dataDir, sessionId, filename, true);
       stored.push({ id: filename, path: filePath, name: att.name });
@@ -17340,6 +17346,19 @@ export class SessionService {
         ...(historyArtifactId ? { historyArtifactId } : {}),
       },
     });
+  }
+
+  prepareSourceMessage(
+    sessionId: string,
+    request: Pick<SendMessageRequest, "message" | "attachments">,
+  ): string {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    assertSendableStatus(session);
+    if (!session.worktreePath || !existsSync(session.worktreePath)) {
+      throw new Error(`Session workspace missing: ${sessionId}`);
+    }
+    return this.prepareSendMessage(session, request);
   }
 
   private prepareSendMessage(
