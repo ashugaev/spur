@@ -21,6 +21,7 @@ describe("spur help", () => {
     expect(help).toContain("gc [options]");
     expect(help).toContain("cache [options]");
     expect(help).toContain("init [options]");
+    expect(help).toMatch(/^ {2}mcp \[options\] {2,}/m);
     expect(help).toContain("spawn [options] <project> [prompt...]");
     expect(help).toContain("shepherd [options] [prompt...]");
     expect(help).toContain("list|ls [options]");
@@ -39,7 +40,7 @@ describe("spur help", () => {
     expect(help).toContain("subscribe [options] [targetSessionId]");
     expect(help).toContain("Use `spur <command> --help` for per-command details.");
     expect(help).not.toContain("help [command]");
-    expect(help).not.toContain("daemon");
+    expect(help).not.toMatch(/^ {2}daemon(?:[ \t]|$)/m);
     expect(help).not.toContain("slots");
     expect(help).not.toContain("internal");
     expect(help).not.toContain("playwright");

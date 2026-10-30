@@ -1,14 +1,108 @@
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import type * as FsPromises from "node:fs/promises";
 import {
+  appendFile,
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  CODEX_ROLLOUT_READ_MAX_CONCURRENCY,
+  readCodexConversationTail,
   readCodexRolloutState,
   readCodexTranscriptEntries,
   type CodexRolloutReaderState,
+  type CodexRolloutReadResult,
 } from "../../src/agents/codex.js";
+import { hashHistoryTail, PREFIX_VERIFY_BYTES } from "../../src/agent-history-delta.js";
+import { SCAN_CHUNK_BYTES } from "../../src/jsonl-scan.js";
 import { reconcileTokenUsage } from "../../src/token-usage.js";
+
+// Passthrough fs mock that records how rollout files are opened and read.
+const probe = vi.hoisted(() => ({
+  readFileCalls: [] as string[],
+  reads: [] as Array<{ path: string; length: number; position: number }>,
+  live: 0,
+  peak: 0,
+  delayReads: false,
+  statFail: new Set<string>(),
+  readFail: new Set<string>(),
+  openFailOnce: new Set<string>(),
+  readFailOnce: new Set<string>(),
+  eofOnce: new Set<string>(),
+  maxReadLength: undefined as number | undefined,
+  closeFail: new Set<string>(),
+  beforeRead: undefined as (() => Promise<void>) | undefined,
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof FsPromises>();
+  return {
+    ...actual,
+    readFile: (...args: Parameters<typeof actual.readFile>) => {
+      probe.readFileCalls.push(String(args[0]));
+      return actual.readFile(...args);
+    },
+    stat: (...args: Parameters<typeof actual.stat>) => {
+      if (probe.statFail.has(String(args[0]))) return Promise.reject(new Error("stat failed"));
+      return actual.stat(...args);
+    },
+    open: async (...args: Parameters<typeof actual.open>) => {
+      if (probe.openFailOnce.delete(String(args[0]))) throw new Error("open failed");
+      const handle = await actual.open(...args);
+      const path = String(args[0]);
+      probe.live += 1;
+      probe.peak = Math.max(probe.peak, probe.live);
+      const read = handle.read.bind(handle) as (...a: unknown[]) => Promise<unknown>;
+      const close = handle.close.bind(handle);
+      (handle as unknown as { read: unknown }).read = async (...a: unknown[]) => {
+        await probe.beforeRead?.();
+        if (probe.delayReads) await new Promise((resolve) => setTimeout(resolve, 0));
+        probe.reads.push({ path, length: a[2] as number, position: a[3] as number });
+        if (probe.readFail.has(path)) throw new Error("read failed");
+        if (probe.readFailOnce.delete(path)) throw new Error("read failed once");
+        if (probe.eofOnce.delete(path)) return { bytesRead: 0, buffer: a[0] };
+        if (probe.maxReadLength !== undefined) {
+          a[2] = Math.min(a[2] as number, probe.maxReadLength);
+        }
+        return read(...a);
+      };
+      handle.close = async () => {
+        probe.live -= 1;
+        await close();
+        if (probe.closeFail.delete(path)) throw new Error("close failed");
+      };
+      return handle;
+    },
+  };
+});
+
+beforeEach(() => {
+  probe.readFileCalls.length = 0;
+  probe.reads.length = 0;
+  probe.live = 0;
+  probe.peak = 0;
+  probe.delayReads = false;
+  probe.statFail.clear();
+  probe.readFail.clear();
+  probe.openFailOnce.clear();
+  probe.readFailOnce.clear();
+  probe.eofOnce.clear();
+  probe.maxReadLength = undefined;
+  probe.closeFail.clear();
+  probe.beforeRead = undefined;
+});
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STALE_WORKING_FIXTURE = join(
@@ -1081,7 +1175,686 @@ describe("readCodexRolloutState", () => {
   });
 });
 
+const FIXTURE_DIR = join(__dirname, "../fixtures/agent-history/codex");
+// Kept out of the top-level .jsonl set the rollout-state tests count.
+const EDGE_TRANSCRIPT_FIXTURE = "edge/tool-output-edge-cases.jsonl";
+
+function rolloutPath(sessionsDir: string, filename: string): string {
+  return join(sessionsDir, "2026", "04", "19", filename);
+}
+
+function normalizeResult(result: CodexRolloutReadResult): CodexRolloutReadResult {
+  const { lastProgressMs: _lastProgressMs, ...rest } = result;
+  return rest.rollout
+    ? { ...rest, rollout: { ...rest.rollout, filePath: basename(rest.rollout.filePath) } }
+    : rest;
+}
+
+function eventLine(timestamp: string, type: string, payload: Record<string, unknown>): string {
+  return JSON.stringify({ timestamp, type: "event_msg", payload: { type, ...payload } });
+}
+
+function callLine(timestamp: string, callId: string): string {
+  return JSON.stringify({
+    timestamp,
+    type: "response_item",
+    payload: { type: "function_call", name: "exec_command", call_id: callId },
+  });
+}
+
+function outputLine(timestamp: string, callId: string): string {
+  return JSON.stringify({
+    timestamp,
+    type: "response_item",
+    payload: { type: "function_call_output", call_id: callId, output: "ok" },
+  });
+}
+
+function fillerLine(index: number, bytes: number): string {
+  return JSON.stringify({
+    timestamp: "2026-05-10T10:00:00.000Z",
+    type: "response_item",
+    payload: { type: "message", index, text: "f".repeat(bytes) },
+  });
+}
+
+async function coldRead(content: string, filename: string): Promise<CodexRolloutReadResult> {
+  const sessionsDir = await makeSessionsDir(content, filename);
+  return normalizeResult(await readCodexRolloutState(sessionsDir));
+}
+
+describe("readCodexRolloutState incremental chunked reads", () => {
+  it("T0 matches the pre-change golden for every fixture, cold and at every split point", async () => {
+    const golden = JSON.parse(
+      await readFile(join(FIXTURE_DIR, "rollout-state-golden.json"), "utf8"),
+    ) as Record<string, CodexRolloutReadResult>;
+    const names = (await readdir(FIXTURE_DIR)).filter((name) => name.endsWith(".jsonl")).sort();
+    expect(names).toHaveLength(12);
+    expect(Object.keys(golden).sort()).toEqual(names);
+
+    for (const name of names) {
+      const content = await readFile(join(FIXTURE_DIR, name), "utf8");
+      expect(await coldRead(content, name), name).toEqual(golden[name]);
+
+      const sessionsDir = await makeSessionsDir("", name);
+      for (
+        let split = content.indexOf("\n") + 1;
+        split > 0;
+        split = content.indexOf("\n", split) + 1
+      ) {
+        await writeFile(rolloutPath(sessionsDir, name), content.slice(0, split), "utf8");
+        const reader: CodexRolloutReaderState = { files: new Map() };
+        await readCodexRolloutState(sessionsDir, reader);
+        await appendFile(rolloutPath(sessionsDir, name), content.slice(split));
+        const incremental = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+        expect(incremental, `${name} split ${split}`).toEqual(golden[name]);
+      }
+    }
+  }, 60_000);
+
+  it("extracts cumulative structured components from a sanitized rollout fixture", async () => {
+    const result = await coldRead(
+      await readFile(join(FIXTURE_DIR, "token-components.jsonl"), "utf8"),
+      "token-components.jsonl",
+    );
+
+    expect(result.tokenUsage).toEqual({
+      provider: "codex",
+      generationId: "codex:thread-sanitized",
+      inputTokens: 100,
+      outputTokens: 50,
+      totalTokens: 150,
+      cacheReadInputTokens: 40,
+      cacheWriteInputTokens: 10,
+      reasoningOutputTokens: 20,
+      observedAtMs: Date.parse("2026-09-24T10:00:01.000Z"),
+    });
+  });
+
+  it("T1 reads a large rollout in bounded chunks without readFile", async () => {
+    const fixture = await readFile(WORKING_UNMATCHED_TOOL_CALL_FIXTURE, "utf8");
+    const filler = Array.from({ length: 3 * Math.ceil(SCAN_CHUNK_BYTES / 1000) + 5 }, (_, i) =>
+      fillerLine(i, 1000),
+    );
+    const content = `${fixture.trimEnd()}\n${filler.join("\n")}\n`;
+    const sessionsDir = await makeSessionsDir(content, "rollout-large.jsonl");
+    const filePath = rolloutPath(sessionsDir, "rollout-large.jsonl");
+    probe.readFileCalls.length = 0;
+
+    const result = normalizeResult(await readCodexRolloutState(sessionsDir));
+
+    expect(probe.readFileCalls).not.toContain(filePath);
+    const reads = probe.reads.filter((read) => read.path === filePath);
+    expect(reads.length).toBeGreaterThanOrEqual(3);
+    expect(Math.max(...reads.map((read) => read.length))).toBeLessThanOrEqual(SCAN_CHUNK_BYTES);
+    expect(result).toEqual(await coldRead(fixture, "rollout-large.jsonl"));
+  });
+
+  it("T2 verifies the raw prefix but parses only appended records", async () => {
+    const base = [
+      sessionMeta("append-thread"),
+      eventLine("2026-05-10T10:00:00.000Z", "task_started", { turn_id: "t1" }),
+      eventLine("2026-05-10T10:00:01.000Z", "token_count", {
+        info: { total_token_usage: { input_tokens: 90, output_tokens: 30, total_tokens: 120 } },
+      }),
+      ...Array.from({ length: 30 }, (_, i) => fillerLine(i, 500)),
+    ].join("\n");
+    const sessionsDir = await makeSessionsDir(`${base}\n`, "rollout-append.jsonl");
+    const filePath = rolloutPath(sessionsDir, "rollout-append.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    await readCodexRolloutState(sessionsDir, reader);
+    const previousSize = Buffer.byteLength(`${base}\n`);
+    expect(previousSize).toBeGreaterThan(PREFIX_VERIFY_BYTES);
+    const appended = `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", { turn_id: "t1" })}\n`;
+    probe.reads.length = 0;
+    await appendFile(filePath, appended);
+
+    const parse = vi.spyOn(JSON, "parse");
+    let result: CodexRolloutReadResult;
+    try {
+      result = await readCodexRolloutState(sessionsDir, reader);
+      expect(parse.mock.calls.filter(([line]) => base.split("\n").includes(line))).toHaveLength(0);
+      expect(parse.mock.calls.filter(([line]) => line === appended.trim())).toHaveLength(1);
+    } finally {
+      parse.mockRestore();
+    }
+
+    expect(result.rollout?.state).toBe("waiting");
+    const reads = probe.reads.filter((read) => read.path === filePath);
+    expect(reads.map((read) => read.position)).toEqual([0, previousSize]);
+    const totalBytes = reads.reduce((sum, read) => sum + read.length, 0);
+    expect(totalBytes).toBe(previousSize + Buffer.byteLength(appended));
+    expect(reader.files.get(filePath)?.offset).toBe(previousSize + Buffer.byteLength(appended));
+    expect(result.tokenUsage?.totalTokens).toBe(120);
+    expect(normalizeResult(result)).toEqual(
+      await coldRead(`${base}\n${appended}`, "rollout-append.jsonl"),
+    );
+  });
+
+  it("T4 holds back a partial trailing line until it completes", async () => {
+    const started = eventLine("2026-05-10T10:00:00.000Z", "task_started", { turn_id: "t1" });
+    const complete = eventLine("2026-05-10T10:01:00.000Z", "task_complete", { turn_id: "t1" });
+    const half = complete.slice(0, Math.floor(complete.length / 2));
+    const sessionsDir = await makeSessionsDir(`${started}\n${half}`, "rollout-partial.jsonl");
+    const filePath = rolloutPath(sessionsDir, "rollout-partial.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+
+    const first = await readCodexRolloutState(sessionsDir, reader);
+
+    expect(first.rollout?.state).toBe("working");
+    expect(reader.files.get(filePath)?.offset).toBe(Buffer.byteLength(`${started}\n`));
+
+    await appendFile(filePath, `${complete.slice(half.length)}\n`);
+    const second = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+
+    expect(second).toEqual(await coldRead(`${started}\n${complete}\n`, "rollout-partial.jsonl"));
+    expect(second.rollout?.state).toBe("waiting");
+  });
+
+  it("retains exact cached raw tails across appends, partial lines and refolds", async () => {
+    let content = `${eventLine("2026-05-10T10:00:00.000Z", "task_started", {})}\n \t\r\n`;
+    const sessionsDir = await makeSessionsDir(content);
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    const checkTail = async (): Promise<void> => {
+      await readCodexRolloutState(sessionsDir, reader);
+      const entry = reader.files.get(filePath);
+      if (!entry) throw new Error("expected cache entry");
+      const raw = Buffer.from(content);
+      const tail = raw.subarray(Math.max(0, entry.offset - PREFIX_VERIFY_BYTES), entry.offset);
+      expect(entry.tail).toEqual(tail);
+      expect(entry.tailHash).toBe(hashHistoryTail(tail));
+      expect(entry.prefixHash).toBe(
+        createHash("sha256").update(raw.subarray(0, entry.offset)).digest("hex"),
+      );
+    };
+    await checkTail();
+    const original = reader.files.get(filePath);
+    const originalTail = Buffer.from(original?.tail ?? []);
+    const originalHash = original?.tailHash;
+    const originalPrefixHash = original?.prefixHash;
+    for (const append of [
+      ` \t${JSON.stringify({ type: "unknown", text: "é🙂" })}\r\n`,
+      `${JSON.stringify({ type: "unknown", text: "é🙂".repeat(900) })}\n`,
+      '{"partial":',
+      '"é🙂"}',
+      "\n",
+    ]) {
+      const previousEntry = reader.files.get(filePath);
+      probe.reads.length = 0;
+      content += append;
+      await appendFile(filePath, append);
+      await checkTail();
+      expect(Math.min(...probe.reads.map((read) => read.position))).toBe(0);
+      if (append === '{"partial":') {
+        expect(reader.files.get(filePath)?.offset).toBe(previousEntry?.offset);
+        expect(reader.files.get(filePath)?.tail).toEqual(previousEntry?.tail);
+        expect(reader.files.get(filePath)?.tailHash).toBe(previousEntry?.tailHash);
+      }
+    }
+    expect(original?.tail).toEqual(originalTail);
+    expect(original?.tailHash).toBe(originalHash);
+    expect(original?.prefixHash).toBe(originalPrefixHash);
+    const beforeRewrite = reader.files.get(filePath);
+    content = `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", {})}\n${JSON.stringify({ text: "x".repeat(7000) })}\n`;
+    await writeFile(filePath, content);
+    await checkTail();
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout?.state).toBe("waiting");
+    expect(reader.files.get(filePath)?.fold).not.toBe(beforeRewrite?.fold);
+    content = `${eventLine("2026-05-10T10:02:00.000Z", "task_started", {})}\n`;
+    await writeFile(filePath, content);
+    await checkTail();
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout?.state).toBe("working");
+  });
+
+  it("T5 refolds from scratch after an in-place rewrite", async () => {
+    const original = `${eventLine("2026-05-10T10:00:00.000Z", "task_started", { turn_id: "t1" })}\n`;
+    const sessionsDir = await makeSessionsDir(original, "rollout-rewrite.jsonl");
+    const filePath = rolloutPath(sessionsDir, "rollout-rewrite.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout?.state).toBe("working");
+    const rewritten = [
+      eventLine("2026-05-10T10:02:00.000Z", "task_complete", { turn_id: "t1" }),
+      fillerLine(0, 200),
+      fillerLine(1, 200),
+    ].join("\n");
+    expect(Buffer.byteLength(rewritten)).toBeGreaterThan(Buffer.byteLength(original));
+
+    await writeFile(filePath, `${rewritten}\n`, "utf8");
+    const result = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+
+    expect(result).toEqual(await coldRead(`${rewritten}\n`, "rollout-rewrite.jsonl"));
+    expect(result.rollout?.state).toBe("waiting");
+  });
+
+  it.each([false, true])(
+    "T5 refolds a same-size prefix rewrite with partial=%s",
+    async (partial) => {
+      const pending = partial ? '{"pending":' : "";
+      const suffix = `\n${fillerLine(0, 9000)}\n${pending}`;
+      const original =
+        eventLine("2026-05-10T10:00:00.000Z", "task_started", {}).padEnd(160) + suffix;
+      const rewritten =
+        eventLine("2026-05-10T10:00:00.000Z", "task_complete", {}).padEnd(160) + suffix;
+      const sessionsDir = await makeSessionsDir(original);
+      const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+      const reader: CodexRolloutReaderState = { files: new Map() };
+      expect((await readCodexRolloutState(sessionsDir, reader)).rollout?.state).toBe("working");
+      const entry = reader.files.get(filePath);
+      if (!entry) throw new Error("expected cache entry");
+      const before = await stat(filePath);
+      expect(entry.offset).toBe(before.size - Buffer.byteLength(pending));
+      expect(Buffer.byteLength(rewritten)).toBe(before.size);
+      const unchangedTail = Buffer.from(rewritten).subarray(
+        entry.offset - PREFIX_VERIFY_BYTES,
+        entry.offset,
+      );
+      expect(hashHistoryTail(unchangedTail)).toBe(entry.tailHash);
+
+      await writeFile(filePath, rewritten);
+      await utimes(filePath, new Date(before.atimeMs), new Date(before.mtimeMs + 2000));
+      const after = await stat(filePath);
+      expect(after.ino).toBe(before.ino);
+      expect(after.size).toBe(before.size);
+      expect(after.mtimeMs).not.toBe(before.mtimeMs);
+
+      const warm = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+      const repeat = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+      const cold = normalizeResult(await readCodexRolloutState(sessionsDir));
+      expect(cold.rollout?.state).toBe("waiting");
+      expect(warm).toEqual(cold);
+      expect(repeat).toEqual(cold);
+      expect(reader.files.get(filePath)).not.toBe(entry);
+    },
+  );
+
+  it.each([9213, SCAN_CHUNK_BYTES + 9213])(
+    "refolds a prefix rewrite with growth from %i bytes",
+    async (size) => {
+      const stateLine = (type: string, pad: string): string =>
+        `${JSON.stringify({ timestamp: "2026-10-17T10:00:00.000Z", type: "event_msg", payload: { type, pad } })}\n`;
+      const inert = (length: number): string => {
+        const empty = `${JSON.stringify({ type: "inert", pad: "" })}\n`;
+        return `${JSON.stringify({ type: "inert", pad: "x".repeat(length - Buffer.byteLength(empty)) })}\n`;
+      };
+      const started = stateLine("task_started", "x");
+      const completed = stateLine("task_complete", "");
+      expect(Buffer.byteLength(completed)).toBe(Buffer.byteLength(started));
+      const suffix = inert(size - Buffer.byteLength(started));
+      const original = started + suffix;
+      const rewritten = completed + suffix + inert(83);
+      const sessionsDir = await makeSessionsDir(original);
+      const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+      const reader: CodexRolloutReaderState = { files: new Map() };
+      expect((await readCodexRolloutState(sessionsDir, reader)).rollout?.state).toBe("working");
+      const entry = reader.files.get(filePath);
+      if (!entry) throw new Error("expected cache entry");
+      const before = await stat(filePath);
+      expect(before.size).toBe(size);
+      expect(entry.offset).toBe(before.size);
+      expect(
+        hashHistoryTail(Buffer.from(rewritten).subarray(entry.offset - 4096, entry.offset)),
+      ).toBe(entry.tailHash);
+      await writeFile(filePath, rewritten);
+      await utimes(filePath, new Date(before.atimeMs), new Date(before.mtimeMs + 2000));
+      const after = await stat(filePath);
+      expect(after.size).toBe(size + 83);
+      expect(after.ino).toBe(before.ino);
+      expect(after.mtimeMs).not.toBe(before.mtimeMs);
+      const warm = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+      const repeat = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+      const cold = normalizeResult(await readCodexRolloutState(sessionsDir));
+      expect(cold.rollout?.state).toBe("waiting");
+      expect(cold.rollout?.reason).toBe("task_complete");
+      expect(warm).toEqual(cold);
+      expect(repeat).toEqual(cold);
+      expect(Math.max(...probe.reads.map((read) => read.length))).toBeLessThanOrEqual(
+        SCAN_CHUNK_BYTES,
+      );
+    },
+  );
+
+  it("scans growth from an unconsumed prefix without a verification read", async () => {
+    const completed = eventLine("2026-05-10T10:00:00.000Z", "task_complete", {});
+    const original = completed.slice(0, -1);
+    const sessionsDir = await makeSessionsDir(original);
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    await readCodexRolloutState(sessionsDir, reader);
+    expect(reader.files.get(filePath)?.offset).toBe(0);
+    await appendFile(filePath, "}\n");
+    probe.reads.length = 0;
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout?.state).toBe("waiting");
+    expect(probe.reads).toEqual([
+      { path: filePath, position: 0, length: Buffer.byteLength(completed) + 1 },
+    ]);
+    expect(probe.live).toBe(0);
+  });
+
+  it("verifies growth in bounded chunks through positive short reads", async () => {
+    const original = `${eventLine("2026-05-10T10:00:00.000Z", "task_started", {})}\n${fillerLine(0, SCAN_CHUNK_BYTES + 5000)}\n`;
+    const appended = `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", {})}\n`;
+    const sessionsDir = await makeSessionsDir(original);
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    await readCodexRolloutState(sessionsDir, reader);
+    await appendFile(filePath, appended);
+    probe.reads.length = 0;
+    probe.maxReadLength = 250_000;
+    const result = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+    expect(result.rollout?.state).toBe("waiting");
+    expect(probe.reads.length).toBeGreaterThan(5);
+    expect(Math.max(...probe.reads.map((read) => read.length))).toBeLessThanOrEqual(
+      SCAN_CHUNK_BYTES,
+    );
+    expect(probe.reads.map((read) => read.position)).toEqual([
+      0,
+      250_000,
+      500_000,
+      750_000,
+      1_000_000,
+      Buffer.byteLength(original),
+    ]);
+    expect(reader.files.get(filePath)?.prefixHash).toBe(
+      createHash("sha256")
+        .update(original + appended)
+        .digest("hex"),
+    );
+    expect(probe.live).toBe(0);
+    probe.maxReadLength = undefined;
+    expect(result).toEqual(await coldRead(original + appended, "rollout-test.jsonl"));
+  });
+
+  it.each(["open", "read", "eof"] as const)(
+    "cold-folds growth after a prefix verification %s fault",
+    async (fault) => {
+      const original = `${eventLine("2026-05-10T10:00:00.000Z", "task_started", {})}\n`;
+      const appended = `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", {})}\n`;
+      const sessionsDir = await makeSessionsDir(original);
+      const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+      const reader: CodexRolloutReaderState = { files: new Map() };
+      await readCodexRolloutState(sessionsDir, reader);
+      const oldEntry = reader.files.get(filePath);
+      await appendFile(filePath, appended);
+      if (fault === "open") probe.openFailOnce.add(filePath);
+      if (fault === "read") probe.readFailOnce.add(filePath);
+      if (fault === "eof") probe.eofOnce.add(filePath);
+      const result = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+      expect(result.rollout?.state).toBe("waiting");
+      expect(reader.files.get(filePath)).not.toBe(oldEntry);
+      expect(reader.files.get(filePath)?.prefixHash).toBe(
+        createHash("sha256")
+          .update(original + appended)
+          .digest("hex"),
+      );
+      expect(probe.live).toBe(0);
+      expect(result).toEqual(await coldRead(original + appended, "rollout-test.jsonl"));
+    },
+  );
+
+  it("releases queued growth reads after prefix verification close rejection", async () => {
+    const original = `${eventLine("2026-05-10T10:00:00.000Z", "task_started", {})}\n`;
+    const appended = `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", {})}\n`;
+    const sessionsDir = await makeSessionsDir(original);
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    await readCodexRolloutState(sessionsDir, reader);
+    const oldEntry = reader.files.get(filePath);
+    await appendFile(filePath, appended);
+    probe.closeFail.add(filePath);
+    const first = readCodexRolloutState(sessionsDir, reader);
+    const second = readCodexRolloutState(sessionsDir, reader);
+    await expect(first).rejects.toThrow("close failed");
+    expect(oldEntry?.offset).toBe(Buffer.byteLength(original));
+    expect((await second).rollout?.state).toBe("waiting");
+    expect(probe.live).toBe(0);
+    expect(normalizeResult(await readCodexRolloutState(sessionsDir, reader))).toEqual(
+      await coldRead(original + appended, "rollout-test.jsonl"),
+    );
+  });
+
+  it("T6 drops a call state once its output arrives in an append", async () => {
+    const prefix = [
+      eventLine("2026-05-10T10:00:00.000Z", "task_started", { turn_id: "t1" }),
+      callLine("2026-05-10T10:00:01.000Z", "call-1"),
+    ].join("\n");
+    const output = outputLine("2026-05-10T10:00:02.000Z", "call-1");
+    const sessionsDir = await makeSessionsDir(`${prefix}\n`, "rollout-matched.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout?.reason).toBe(
+      "function_call",
+    );
+
+    await appendFile(rolloutPath(sessionsDir, "rollout-matched.jsonl"), `${output}\n`);
+    const result = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+
+    expect(result).toEqual(await coldRead(`${prefix}\n${output}\n`, "rollout-matched.jsonl"));
+    expect(result.rollout?.reason).toBe("task_started");
+  });
+
+  it("T7 does not double-fold on overlapping reads of one reader", async () => {
+    const content = await readFile(join(FIXTURE_DIR, "token-reset-aliases.jsonl"), "utf8");
+    const lines = content.split("\n").filter(Boolean);
+    const prefix = `${lines.slice(0, 2).join("\n")}\n`;
+    const rest = `${lines.slice(2).join("\n")}\n`;
+    const sessionsDir = await makeSessionsDir(prefix, "rollout-overlap.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    await readCodexRolloutState(sessionsDir, reader);
+    const oldEntry = reader.files.get(rolloutPath(sessionsDir, "rollout-overlap.jsonl"));
+    const oldFold = structuredClone(oldEntry?.fold);
+    await appendFile(rolloutPath(sessionsDir, "rollout-overlap.jsonl"), rest);
+
+    const [left, right] = await Promise.all([
+      readCodexRolloutState(sessionsDir, reader),
+      readCodexRolloutState(sessionsDir, reader),
+    ]);
+
+    const cold = await coldRead(content, "rollout-overlap.jsonl");
+    expect(cold.tokenUsage).toBeDefined();
+    expect(normalizeResult(left)).toEqual(cold);
+    expect(normalizeResult(right)).toEqual(cold);
+    expect(oldEntry?.fold).toEqual(oldFold);
+  });
+
+  it.each([false, true])("coalesces overlapping scans after warm=%s", async (warm) => {
+    const started = `${eventLine("2026-05-10T10:00:00.000Z", "task_started", { turn_id: "t1" })}\n`;
+    const sessionsDir = await makeSessionsDir(started);
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    if (warm) {
+      await readCodexRolloutState(sessionsDir, reader);
+      await appendFile(
+        filePath,
+        `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", { turn_id: "t1" })}\n`,
+      );
+    }
+    probe.reads.length = 0;
+    probe.delayReads = true;
+
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () => readCodexRolloutState(sessionsDir, reader)),
+    );
+
+    expect(
+      results.every((result) => result.rollout?.state === (warm ? "waiting" : "working")),
+    ).toBe(true);
+    // Cold: scan. Append: raw prefix verification + appended scan.
+    expect(probe.reads.filter((read) => read.path === filePath)).toHaveLength(warm ? 2 : 1);
+    expect(probe.live).toBe(0);
+  });
+
+  it("restats queued calls so an append during a scan stays fresh", async () => {
+    const started = `${eventLine("2026-05-10T10:00:00.000Z", "task_started", { turn_id: "t1" })}\n`;
+    const completed = `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", { turn_id: "t1" })}\n`;
+    const sessionsDir = await makeSessionsDir(started);
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    let enter!: () => void;
+    let resume!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    probe.beforeRead = async () => {
+      probe.beforeRead = undefined;
+      enter();
+      await release;
+    };
+    const first = readCodexRolloutState(sessionsDir, reader);
+    await entered;
+    await appendFile(rolloutPath(sessionsDir, "rollout-test.jsonl"), completed);
+    const second = readCodexRolloutState(sessionsDir, reader);
+    resume();
+
+    expect((await first).rollout?.state).toBe("working");
+    expect((await second).rollout?.state).toBe("waiting");
+    expect(normalizeResult(await readCodexRolloutState(sessionsDir, reader))).toEqual(
+      await coldRead(started + completed, "rollout-test.jsonl"),
+    );
+  });
+
+  it("releases rejected reader operations and retries failed scans", async () => {
+    const sessionsDir = await makeSessionsDir(
+      `${eventLine("2026-05-10T10:00:00.000Z", "task_started", {})}\n`,
+    );
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    probe.closeFail.add(filePath);
+    const first = readCodexRolloutState(sessionsDir, reader);
+    const second = readCodexRolloutState(sessionsDir, reader);
+    await expect(first).rejects.toThrow("close failed");
+    expect((await second).rollout?.state).toBe("working");
+
+    await appendFile(filePath, `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", {})}\n`);
+    probe.readFail.add(filePath);
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout).toBeNull();
+    expect(reader.files.has(filePath)).toBe(false);
+    probe.readFail.clear();
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout?.state).toBe("waiting");
+    expect(probe.live).toBe(0);
+  });
+
+  it("drops removed files and keeps restarted readers independent", async () => {
+    const sessionsDir = await makeSessionsDir(
+      `${eventLine("2026-05-10T10:00:00.000Z", "task_started", {})}\n`,
+    );
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    await readCodexRolloutState(sessionsDir, reader);
+    const restarted: CodexRolloutReaderState = { files: new Map() };
+    probe.reads.length = 0;
+    await Promise.all([
+      readCodexRolloutState(sessionsDir, reader),
+      readCodexRolloutState(sessionsDir, restarted),
+    ]);
+    expect(probe.reads.filter((read) => read.path === filePath)).toHaveLength(1);
+    expect(restarted.files.get(filePath)).not.toBe(reader.files.get(filePath));
+    await rm(filePath);
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout).toBeNull();
+    expect(reader.files.size).toBe(0);
+  });
+
+  it("preserves structured quota and state across error and unknown records", async () => {
+    const prefix = `${sessionMeta("quota-thread")}\n${eventLine("2026-05-10T10:00:00.000Z", "task_started", {})}\n`;
+    const appended =
+      [
+        eventLine("2026-05-10T10:01:00.000Z", "token_count", {
+          rate_limits: { primary: { used_percent: 100 } },
+        }),
+        eventLine("2026-05-10T10:02:00.000Z", "error", { message: "synthetic error" }),
+        eventLine("2026-05-10T10:03:00.000Z", "unknown", {}),
+        "null",
+        "{malformed}",
+      ].join("\n") + "\n";
+    const sessionsDir = await makeSessionsDir(prefix);
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    await readCodexRolloutState(sessionsDir, reader);
+    await appendFile(rolloutPath(sessionsDir, "rollout-test.jsonl"), appended);
+
+    const [left, right] = await Promise.all([
+      readCodexRolloutState(sessionsDir, reader),
+      readCodexRolloutState(sessionsDir, reader),
+    ]);
+
+    expect(left.rateLimit).not.toBeNull();
+    expect(left.rollout?.state).toBe("working");
+    expect(left).toEqual(right);
+    expect(normalizeResult(left)).toEqual(await coldRead(prefix + appended, "rollout-test.jsonl"));
+  });
+
+  it("T8 never scans more rollout files at once than the gate allows", async () => {
+    const names = (await readdir(FIXTURE_DIR)).filter((name) => name.endsWith(".jsonl")).sort();
+    const root = await mkdtemp(join(tmpdir(), "codex-rollout-gate-"));
+    tempDirs.push(root);
+    const dayDir = join(root, "sessions", "2026", "04", "19");
+    await mkdir(dayDir, { recursive: true });
+    for (const name of names) await copyFile(join(FIXTURE_DIR, name), join(dayDir, name));
+    probe.delayReads = true;
+
+    await readCodexRolloutState(join(root, "sessions"));
+
+    expect(names).toHaveLength(12);
+    expect(probe.peak).toBe(CODEX_ROLLOUT_READ_MAX_CONCURRENCY);
+    expect(probe.live).toBe(0);
+  });
+
+  it("T9 keeps only the state records since the newest anchor", async () => {
+    const lines: string[] = [];
+    let call = 0;
+    const stamp = (): string => new Date(Date.UTC(2026, 4, 10, 10, 0, call++)).toISOString();
+    for (let turn = 0; turn < 200; turn += 1) {
+      lines.push(eventLine(stamp(), "task_started", { turn_id: `turn-${turn}` }));
+      for (let i = 0; i < 5; i += 1) {
+        lines.push(
+          callLine(stamp(), `call-${turn}-${i}`),
+          outputLine(stamp(), `call-${turn}-${i}`),
+        );
+      }
+      lines.push(eventLine(stamp(), "task_complete", { turn_id: `turn-${turn}` }));
+    }
+    lines.push(eventLine(stamp(), "task_started", { turn_id: "turn-200" }));
+    for (let i = 0; i < 5; i += 1) lines.push(callLine(stamp(), `open-${i}`));
+    for (let i = 0; i < 3; i += 1) lines.push(outputLine(stamp(), `open-${i}`));
+    const sessionsDir = await makeSessionsDir(`${lines.join("\n")}\n`, "rollout-turns.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+
+    const result = await readCodexRolloutState(sessionsDir, reader);
+
+    const fold = reader.files.get(rolloutPath(sessionsDir, "rollout-turns.jsonl"))?.fold;
+    expect(fold?.stateTail.map((record) => record.reason)).toEqual([
+      "task_started",
+      "function_call",
+      "function_call",
+      "function_call",
+      "function_call",
+      "function_call",
+    ]);
+    expect(fold?.matchedCallIds.size).toBe(200 * 5 + 3);
+    expect(result.rollout?.state).toBe("working");
+    expect(result.rollout?.callId).toBe("open-4");
+  });
+
+  it("T10 returns a result but caches nothing when stat fails", async () => {
+    const content = `${eventLine("2026-05-10T10:00:00.000Z", "task_started", { turn_id: "t1" })}\n`;
+    const sessionsDir = await makeSessionsDir(content, "rollout-nostat.jsonl");
+    const filePath = rolloutPath(sessionsDir, "rollout-nostat.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    probe.statFail.add(filePath);
+
+    const result = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+
+    expect(result).toEqual(await coldRead(content, "rollout-nostat.jsonl"));
+    expect(result.rollout?.state).toBe("working");
+    expect(reader.files.has(filePath)).toBe(false);
+  });
+});
+
 describe("readCodexTranscriptEntries", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("parses an assistant message and a tool entry whose output is paired via call_id", async () => {
     const content = await readFile(WORKING_CURRENT_SESSION_FIXTURE, "utf8");
     const sessionsDir = await makeSessionsDir(content, "rollout-transcript-working.jsonl");
@@ -1216,5 +1989,362 @@ describe("readCodexTranscriptEntries", () => {
         timestampMs: Date.parse("2026-05-10T09:00:00.000Z"),
       },
     ]);
+  });
+
+  it("drops non-record assistant content items", async () => {
+    const line = JSON.stringify({
+      timestamp: "2026-05-10T09:00:00.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [null, 7, { type: "output_text", text: "ok" }],
+      },
+    });
+    const sessionsDir = await makeSessionsDir(`${line}\n`, "rollout-transcript-malformed.jsonl");
+    const expected = [
+      {
+        kind: "message",
+        role: "assistant",
+        text: "ok",
+        timestampMs: Date.parse("2026-05-10T09:00:00.000Z"),
+      },
+    ];
+
+    expect(await readCodexTranscriptEntries(sessionsDir)).toEqual(expected);
+    const first = await readCodexConversationTail(sessionsDir, undefined);
+    const second = await readCodexConversationTail(sessionsDir, first?.reader);
+    expect(first?.entries).toEqual(expected);
+    expect(second?.entries).toEqual(expected);
+  });
+
+  it("matches the pre-change transcript golden for every fixture", async () => {
+    const golden = JSON.parse(
+      await readFile(join(FIXTURE_DIR, "transcript-golden.json"), "utf8"),
+    ) as Record<string, { totalEntries: number; sha256: string }>;
+    const names = [
+      ...(await readdir(FIXTURE_DIR)).filter((name) => name.endsWith(".jsonl")),
+      EDGE_TRANSCRIPT_FIXTURE,
+    ].sort();
+    expect(Object.keys(golden).sort()).toEqual(names);
+
+    for (const name of names) {
+      const sessionsDir = await makeSessionsDir(await readFile(join(FIXTURE_DIR, name), "utf8"));
+      const entries = await readCodexTranscriptEntries(sessionsDir);
+      expect(entries?.length, name).toBe(golden[name]?.totalEntries);
+      expect(createHash("sha256").update(JSON.stringify(entries)).digest("hex"), name).toBe(
+        golden[name]?.sha256,
+      );
+    }
+  });
+
+  it("parses each rollout line once", async () => {
+    const content = await readFile(WORKING_CURRENT_SESSION_FIXTURE, "utf8");
+    const lines = content.split("\n").filter((line) => line.trim());
+    const sessionsDir = await makeSessionsDir(content);
+    const parse = vi.spyOn(JSON, "parse");
+
+    await readCodexTranscriptEntries(sessionsDir);
+
+    const lineSet = new Set(lines);
+    const counts = new Map<string, number>();
+    for (const [arg] of parse.mock.calls) {
+      if (typeof arg === "string" && lineSet.has(arg)) counts.set(arg, (counts.get(arg) ?? 0) + 1);
+    }
+    for (const line of lineSet) {
+      const occurrences = lines.filter((other) => other === line).length;
+      expect(counts.get(line), line.slice(0, 80)).toBe(occurrences);
+    }
+  });
+});
+
+const TAIL_WINDOW = 300;
+let lineClock = 0;
+
+function transcriptLine(type: string, payload: Record<string, unknown>): string {
+  lineClock += 1;
+  return JSON.stringify({
+    timestamp: new Date(Date.UTC(2026, 4, 10, 9, 0, 0, lineClock)).toISOString(),
+    type,
+    payload,
+  });
+}
+
+function userLine(text: string): string {
+  return transcriptLine("response_item", {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text }],
+  });
+}
+
+function toolCall(callId: string, args = "{}"): string {
+  return transcriptLine("response_item", {
+    type: "function_call",
+    name: "exec_command",
+    call_id: callId,
+    arguments: args,
+  });
+}
+
+function toolOutput(callId: string, output: string): string {
+  return transcriptLine("response_item", {
+    type: "function_call_output",
+    call_id: callId,
+    output,
+  });
+}
+
+function rollout(lines: string[]): string {
+  return `${lines.join("\n")}\n`;
+}
+
+async function expectTailEqualsFullRead(
+  sessionsDir: string,
+  tail: { entries: unknown[]; totalEntries: number; startIndex: number } | null,
+  label: string,
+): Promise<void> {
+  const full = await readCodexTranscriptEntries(sessionsDir);
+  if (!full || !tail) throw new Error(`expected entries for ${label}`);
+  expect(JSON.stringify(tail.entries), label).toBe(JSON.stringify(full.slice(-TAIL_WINDOW)));
+  expect(tail.totalEntries, label).toBe(full.length);
+  expect(tail.startIndex, label).toBe(Math.max(full.length - TAIL_WINDOW, 0));
+}
+
+function parseCount(parse: { mock: { calls: unknown[][] } }, line: string): number {
+  return parse.mock.calls.filter(([arg]) => arg === line).length;
+}
+
+describe("readCodexConversationTail", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("returns the cached window without reading or parsing an unchanged rollout", async () => {
+    const lines = [userLine("one"), toolCall("call-a"), toolOutput("call-a", "out")];
+    const sessionsDir = await makeSessionsDir(rollout(lines));
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const first = await readCodexConversationTail(sessionsDir, undefined);
+    probe.reads.length = 0;
+    probe.readFileCalls.length = 0;
+    const parse = vi.spyOn(JSON, "parse");
+
+    const second = await readCodexConversationTail(sessionsDir, first?.reader);
+
+    expect(probe.reads.filter((read) => read.path === filePath)).toEqual([]);
+    expect(probe.readFileCalls).toEqual([]);
+    expect(lines.filter((line) => parseCount(parse, line) > 0)).toEqual([]);
+    expect(second?.entries).toBe(first?.entries);
+    expect(second?.reader.cursor).toBe(first?.reader.cursor);
+  });
+
+  it.each(["line boundary", "mid-line", "mid multibyte char"] as const)(
+    "parses only appended bytes at a %s split",
+    async (split) => {
+      const base = [userLine("one"), toolCall("call-a"), toolOutput("call-a", "out")];
+      const added = [userLine("price €5 today"), userLine("two"), userLine("three")];
+      const baseText = rollout(base);
+      const full = Buffer.from(baseText + rollout(added));
+      const cut = {
+        "line boundary": Buffer.byteLength(baseText + rollout(added.slice(0, 1))),
+        "mid-line": Buffer.byteLength(baseText) + 20,
+        "mid multibyte char": full.indexOf(Buffer.from("€")) + 1,
+      }[split];
+      const sessionsDir = await makeSessionsDir("");
+      const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+      await writeFile(filePath, full.subarray(0, cut));
+      const first = await readCodexConversationTail(sessionsDir, undefined);
+      const offset = first?.reader.cursor.offset;
+      await appendFile(filePath, full.subarray(cut));
+      probe.reads.length = 0;
+      const parse = vi.spyOn(JSON, "parse");
+
+      const second = await readCodexConversationTail(sessionsDir, first?.reader);
+
+      let end = Buffer.byteLength(baseText);
+      const consumed = [...base];
+      const fresh: string[] = [];
+      for (const line of added) {
+        end += Buffer.byteLength(`${line}\n`);
+        (end <= cut ? consumed : fresh).push(line);
+      }
+      expect(consumed.filter((line) => parseCount(parse, line) > 0)).toEqual([]);
+      for (const line of fresh) expect(parseCount(parse, line), line).toBe(1);
+      const reads = probe.reads.filter((read) => read.path === filePath);
+      expect(reads.at(-1)?.position).toBe(offset);
+      await expectTailEqualsFullRead(sessionsDir, second, split);
+    },
+  );
+
+  it("matches a full read at every split of every fixture", async () => {
+    const names = [
+      ...(await readdir(FIXTURE_DIR)).filter((name) => name.endsWith(".jsonl")),
+      EDGE_TRANSCRIPT_FIXTURE,
+    ].sort();
+    for (const name of names) {
+      const content = await readFile(join(FIXTURE_DIR, name));
+      const sessionsDir = await makeSessionsDir("");
+      const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+      await writeFile(filePath, content);
+      const cold = await readCodexTranscriptEntries(sessionsDir);
+      const cuts: number[] = [];
+      for (let start = content.indexOf(10) + 1; start > 0; start = content.indexOf(10, start) + 1) {
+        const next = content.indexOf(10, start);
+        cuts.push(start, start + Math.floor(((next < 0 ? content.length : next) - start) / 2));
+      }
+      for (const cut of cuts) {
+        await writeFile(filePath, content.subarray(0, cut));
+        const first = await readCodexConversationTail(sessionsDir, undefined);
+        await appendFile(filePath, content.subarray(cut));
+        const second = await readCodexConversationTail(sessionsDir, first?.reader);
+        expect(JSON.stringify(second?.entries), `${name} cut ${cut}`).toBe(
+          JSON.stringify(cold?.slice(-TAIL_WINDOW)),
+        );
+        expect(second?.totalEntries, `${name} cut ${cut}`).toBe(cold?.length);
+      }
+    }
+  }, 60_000);
+
+  it("matches a full read at splits of a rollout larger than the window", async () => {
+    const lines: string[] = [];
+    for (let index = 0; index < 700; index += 1) {
+      if (index % 3 === 0) lines.push(userLine(`message ${index}`));
+      else if (index % 3 === 1) lines.push(toolCall(`call-${index}`, `{"n":${index}}`));
+      else lines.push(toolOutput(`call-${index - 1}`, `output ${index}`));
+    }
+    for (const cut of [100, 350, 650, 699]) {
+      const sessionsDir = await makeSessionsDir(rollout(lines.slice(0, cut)));
+      const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+      const first = await readCodexConversationTail(sessionsDir, undefined);
+      await appendFile(filePath, rollout(lines.slice(cut)));
+      const second = await readCodexConversationTail(sessionsDir, first?.reader);
+      expect(second?.entries.length).toBe(TAIL_WINDOW);
+      await expectTailEqualsFullRead(sessionsDir, second, `cut ${cut}`);
+    }
+  });
+
+  it.each([
+    {
+      name: "output after call",
+      before: [toolCall("call-a", "A")],
+      added: [toolOutput("call-a", "late")],
+      refold: false,
+      last: { name: "exec_command", callId: "call-a", inputSummary: "A", output: "late" },
+    },
+    {
+      name: "output before call (cross-read -> full refold)",
+      before: [toolOutput("call-a", "early")],
+      added: [toolCall("call-a", "A")],
+      refold: true,
+      last: { name: "exec_command", callId: "call-a", inputSummary: "A", output: "early" },
+    },
+    {
+      name: "call_id reuse across reads",
+      before: [toolCall("call-a", "A"), toolOutput("call-a", "first")],
+      added: [toolCall("call-a", "B")],
+      refold: false,
+      last: { name: "exec_command", callId: "call-a", inputSummary: "B", output: "first" },
+    },
+    {
+      name: "empty output after non-empty",
+      before: [toolCall("call-a", "A"), toolOutput("call-a", "keep")],
+      added: [toolOutput("call-a", "")],
+      refold: false,
+      last: { name: "exec_command", callId: "call-a", inputSummary: "A", output: "keep" },
+    },
+    {
+      name: "reuse of id evicted from window",
+      before: [
+        toolCall("call-a", "A"),
+        toolOutput("call-a", "old"),
+        ...Array.from({ length: TAIL_WINDOW + 10 }, (_, index) => userLine(`filler ${index}`)),
+      ],
+      added: [toolCall("call-a", "B")],
+      refold: true,
+      last: { name: "exec_command", callId: "call-a", inputSummary: "B", output: "old" },
+    },
+  ])("pairs tool outputs across reads: $name", async ({ before, added, refold, last }) => {
+    const sessionsDir = await makeSessionsDir(rollout(before));
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const first = await readCodexConversationTail(sessionsDir, undefined);
+    await appendFile(filePath, rollout(added));
+    const parse = vi.spyOn(JSON, "parse");
+
+    const second = await readCodexConversationTail(sessionsDir, first?.reader);
+
+    const reparsed = before.filter((line) => parseCount(parse, line) > 0);
+    if (refold) expect(reparsed.length).toBeGreaterThan(0);
+    else expect(reparsed).toEqual([]);
+    const entry = second?.entries.at(-1);
+    expect(entry).toMatchObject({ kind: "tool", ...last });
+    expect(Object.keys(entry ?? {}).slice(0, 4)).toEqual([
+      "kind",
+      "name",
+      "callId",
+      "inputSummary",
+    ]);
+    await expectTailEqualsFullRead(sessionsDir, second, "pairs");
+  });
+
+  it("keeps a published window intact when an output patches the next read", async () => {
+    const sessionsDir = await makeSessionsDir(rollout([toolCall("call-a")]));
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const first = await readCodexConversationTail(sessionsDir, undefined);
+    const published = JSON.stringify(first?.entries);
+    await appendFile(filePath, rollout([toolOutput("call-a", "done")]));
+
+    const second = await readCodexConversationTail(sessionsDir, first?.reader);
+
+    expect(JSON.stringify(first?.entries)).toBe(published);
+    expect(second?.entries[0]).toMatchObject({ output: "done" });
+  });
+
+  describe("rewrites", () => {
+    const original = rollout([userLine("one"), toolCall("call-a"), toolOutput("call-a", "out")]);
+
+    async function rewriteAndRead(
+      rewrite: (filePath: string, sessionsDir: string) => Promise<void>,
+    ): Promise<void> {
+      const sessionsDir = await makeSessionsDir(original);
+      const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+      const first = await readCodexConversationTail(sessionsDir, undefined);
+      const before = await stat(filePath);
+      await rewrite(filePath, sessionsDir);
+      const after = await stat(filePath);
+      await utimes(filePath, new Date(after.atimeMs), new Date(before.mtimeMs + 2000));
+      const warm = await readCodexConversationTail(sessionsDir, first?.reader);
+      await expectTailEqualsFullRead(sessionsDir, warm, "rewrite");
+    }
+
+    it("refolds after truncation", async () => {
+      await rewriteAndRead((filePath) => writeFile(filePath, rollout([userLine("short")])));
+    });
+
+    it("refolds after a same-size rewrite with a new mtime", async () => {
+      await rewriteAndRead((filePath) => writeFile(filePath, original.replace("one", "two")));
+    });
+
+    it("refolds after a prefix rewrite with growth", async () => {
+      await rewriteAndRead((filePath) =>
+        writeFile(filePath, original.replace("one", "two") + rollout([userLine("more")])),
+      );
+    });
+
+    it("refolds after a new inode via rename", async () => {
+      await rewriteAndRead(async (filePath) => {
+        const replacement = `${filePath}.tmp`;
+        await writeFile(replacement, original + rollout([userLine("after rename")]));
+        await rename(replacement, filePath);
+      });
+    });
+
+    it("refolds when a newer rollout file takes over", async () => {
+      await rewriteAndRead(async (filePath) => {
+        const newer = join(dirname(filePath), "rollout-newer.jsonl");
+        await writeFile(newer, rollout([userLine("other file")]));
+        const future = new Date(Date.now() + 60_000);
+        await utimes(newer, future, future);
+      });
+    });
   });
 });
