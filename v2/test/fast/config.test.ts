@@ -15,6 +15,7 @@ import {
   loadConfig,
   loadInstanceConfigReadOnly,
   loadProjectConfig,
+  parseConfigText,
   resolveConfigPath,
   writeProjectConfigScaffold,
 } from "../../src/config.js";
@@ -33,6 +34,110 @@ const initialCwd = process.cwd();
 const initialSpurConfig = process.env["SPUR_CONFIG"];
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
+
+describe("script source configuration", () => {
+  async function scriptConfig(fields: string, trigger = "") {
+    return loadConfig(
+      await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sources:
+      check:
+        type: script
+${fields.includes("command:") ? "" : "        command: [bash, ./check.sh]"}
+${fields.includes("schedule:") ? "" : '        schedule: "*/5 * * * *"'}
+${fields}
+${trigger}`),
+    );
+  }
+  it("applies script defaults at boundary", async () => {
+    const config = await scriptConfig("");
+    expect(config.projects["api"]?.sources["check"]).toEqual({
+      type: "script",
+      command: ["bash", "./check.sh"],
+      schedule: "*/5 * * * *",
+      cwd: config.projects["api"]?.path,
+      timeoutMs: 60000,
+      env: {},
+      emitExisting: false,
+      runOnStart: false,
+    });
+  });
+  it("keeps string command as one executable and literal env values intact", async () => {
+    vi.stubEnv("SCRIPT_REGION", "zone");
+    const config = await scriptConfig(
+      '        command: "./check.sh --flag"\n        env: {REGION: US, EXPANDED: "' +
+        "$" +
+        '{SCRIPT_REGION}", EMPTY: ""}',
+    );
+    expect(config.projects["api"]?.sources["check"]).toMatchObject({
+      command: ["./check.sh --flag"],
+      env: { REGION: "US", EXPANDED: "zone", EMPTY: "" },
+    });
+  });
+  it.each(["[]", "[1]", '""', '["bad\\0arg"]'])("rejects invalid command %s", async (command) => {
+    await expect(scriptConfig(`        command: ${command}`)).rejects.toThrow(
+      "projects.api.sources.check.command",
+    );
+  });
+  it.each(['"bad cron"', '"* * * * * *"', "null"])(
+    "rejects invalid schedule %s",
+    async (schedule) => {
+      await expect(scriptConfig(`        schedule: ${schedule}`)).rejects.toThrow(
+        "projects.api.sources.check.schedule",
+      );
+    },
+  );
+  it.each([1, 2147483647])("accepts timeout boundary %s", async (timeoutMs) => {
+    const config = await scriptConfig(`        timeoutMs: ${timeoutMs}`);
+    expect(config.projects["api"]?.sources["check"]).toMatchObject({ timeoutMs });
+  });
+  it.each(["0", "-1", "1.5", "2147483648", '"100"'])(
+    "rejects invalid timeout %s",
+    async (timeout) => {
+      await expect(scriptConfig(`        timeoutMs: ${timeout}`)).rejects.toThrow(
+        "projects.api.sources.check.timeoutMs",
+      );
+    },
+  );
+  it.each(['{A: "' + "$" + '{SPUR_SCRIPT_TEST_UNSET}"}', '{SPUR_X: "spoof"}'])(
+    "rejects invalid env %s",
+    async (env) => {
+      vi.stubEnv("SPUR_SCRIPT_TEST_UNSET", "");
+      await expect(scriptConfig(`        env: ${env}`)).rejects.toThrow(
+        "projects.api.sources.check.env",
+      );
+    },
+  );
+  const trigger = (event: string, action: string) =>
+    `    triggers:\n      handle:\n        source: check\n        event: ${event}\n        ${action}`;
+  it("accepts script spawn autoComplete", async () => {
+    const config = await scriptConfig(
+      "",
+      trigger("script:item.new", 'spawn: {prompt: "{{id}}", autoComplete: true}'),
+    );
+    expect(config.projects["api"]?.triggers["handle"]).toMatchObject({
+      event: "script:item.new",
+      spawn: { autoComplete: true },
+    });
+  });
+  it("rejects wrong events, send triggers and duplicate work-item triggers", async () => {
+    await expect(scriptConfig("", trigger("cron:tick", "spawn: {prompt: fix}"))).rejects.toThrow(
+      "script:item.new",
+    );
+    await expect(
+      scriptConfig("", trigger("script:item.new", "send: {prompt: fix}")),
+    ).rejects.toThrow("send is unsupported");
+    await expect(
+      scriptConfig(
+        "",
+        trigger("script:item.new", "spawn: {prompt: fix}") +
+          "\n      second:\n        source: check\n        event: script:item.new\n        spawn: {prompt: fix}",
+      ),
+    ).rejects.toThrow(/at most one|multiple|already|only one/i);
+  });
+});
 
 async function writeConfig(content: string): Promise<string> {
   return writeNamedConfig("spur.yaml", content);
@@ -72,6 +177,34 @@ afterEach(async () => {
 });
 
 describe("loadConfig", () => {
+  it.each([
+    [4310, 5555, 4311],
+    [4311, 5555, 4312],
+    [4310, 4311, 4312],
+    [4311, 4312, 4313],
+  ])("derives MCP port excluding daemon %i and UI %i", async (daemon, ui, expected) => {
+    const path = await writeNamedConfig(
+      "config.yaml",
+      `server:\n  port: ${daemon}\nui:\n  port: ${ui}\n`,
+    );
+    expect(loadConfig(path).mcp.port).toBe(expected);
+  });
+  it("loads instance MCP port and rejects collisions or invalid ports", async () => {
+    const configPath = await writeNamedConfig("config.yaml", "mcp:\n  port: 4321\n");
+    expect(loadConfig(configPath).mcp.port).toBe(4321);
+    for (const port of [0, 65536, 1.5, 4310, 5555]) {
+      await writeFile(configPath, `mcp:\n  port: ${port}\n`);
+      expect(() => loadConfig(configPath)).toThrow("mcp.port");
+    }
+  });
+
+  it("inherits instance MCP port instead of project override", async () => {
+    const instance = await writeNamedConfig("config.yaml", "mcp:\n  port: 4321\n");
+    const project = await writeConfig(
+      "mcp:\n  port: 9\nprojects:\n  test:\n    path: $REPO_PATH\n",
+    );
+    expect(loadProjectConfig(project, loadConfig(instance)).mcp.port).toBe(4321);
+  });
   it("normalizes webhook sources and resolves their secret", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -2592,6 +2725,174 @@ projects:
     });
   });
 
+  it("accepts a GitHub session marker and rejects unusable templates", async () => {
+    const source = (value: string) => `
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        selfMarker: ${value}
+`;
+    const configured = loadConfig(
+      await writeConfig(source('"[AI-generated, session: {session}]"')),
+    );
+    expect(configured.projects.backend?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      selfMarker: "[AI-generated, session: {session}]",
+    });
+    for (const value of ['"static"', '""', "42"]) {
+      const path = await writeConfig(source(value));
+      expect(() => loadConfig(path)).toThrow();
+    }
+  });
+
+  it("loads github source ignoreChecks", async () => {
+    const configured = loadConfig(
+      await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        ignoreChecks: [approvals, "Spur Approval Gate"]
+`),
+    );
+    expect(configured.projects.backend?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      ignoreChecks: ["approvals", "Spur Approval Gate"],
+    });
+  });
+
+  it("rejects invalid ignoreChecks", async () => {
+    for (const value of ["approvals", '[""]']) {
+      const path = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        ignoreChecks: ${value}
+`);
+      expect(() => loadConfig(path)).toThrow(/\.ignoreChecks/);
+    }
+  });
+
+  describe("signPosts", () => {
+    const marker = "[AI-generated, session: {session}]";
+    const otherMarker = "[bot {session}]";
+    const yaml = (value: string) => JSON.stringify(value);
+    const project = (...sources: string[]) => `
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+${sources.join("")}`;
+    const githubSource = (id: string, ...fields: string[]) =>
+      `      ${id}:\n        type: github\n${fields.map((field) => `        ${field}\n`).join("")}`;
+    const shapes: [name: string, template: string, message: string][] = [
+      ["line break", "a\n{session}", "one line"],
+      ["leading >", "> {session}", 'must not start with ">"'],
+      ["leading spaces then >", "  > {session}", 'must not start with ">"'],
+      ["backtick", "`{session}`", "backtick"],
+    ];
+
+    it("loads with a one-line selfMarker", async () => {
+      const config = loadConfig(
+        await writeConfig(
+          project(githubSource("pr-watch", `selfMarker: ${yaml(marker)}`, "signPosts: true")),
+        ),
+      );
+      expect(config.projects.backend?.sources["pr-watch"]).toMatchObject({
+        type: "github",
+        selfMarker: marker,
+        signPosts: true,
+      });
+    });
+
+    it("rejects a missing selfMarker", async () => {
+      const path = await writeConfig(project(githubSource("pr-watch", "signPosts: true")));
+      expect(() => loadConfig(path)).toThrow(/signPosts requires/);
+    });
+
+    it("rejects a non-boolean value", async () => {
+      const path = await writeConfig(
+        project(githubSource("pr-watch", `selfMarker: ${yaml(marker)}`, 'signPosts: "yes"')),
+      );
+      expect(() => loadConfig(path)).toThrow(/signPosts must be a boolean/);
+    });
+
+    it("false stores nothing", async () => {
+      const config = loadConfig(
+        await writeConfig(project(githubSource("pr-watch", "signPosts: false"))),
+      );
+      const parsed = config.projects.backend?.sources["pr-watch"];
+      expect(parsed).toMatchObject({ type: "github" });
+      expect("signPosts" in (parsed ?? {})).toBe(false);
+    });
+
+    it.each(shapes)("rejects selfMarker shape: %s", async (_name, template, message) => {
+      const path = await writeConfig(
+        project(githubSource("pr-watch", `selfMarker: ${yaml(template)}`, "signPosts: true")),
+      );
+      expect(() => loadConfig(path)).toThrow(message);
+    });
+
+    it("leaves unsigned selfMarker shapes valid", async () => {
+      for (const [, template] of shapes) {
+        const config = loadConfig(
+          await writeConfig(project(githubSource("pr-watch", `selfMarker: ${yaml(template)}`))),
+        );
+        expect(config.projects.backend?.sources["pr-watch"]).toMatchObject({
+          selfMarker: template.trim(),
+        });
+      }
+    });
+
+    it("rejects a different selfMarker", async () => {
+      const cases = [
+        project(
+          githubSource("first", `selfMarker: ${yaml(marker)}`, "signPosts: true"),
+          githubSource("second", `selfMarker: ${yaml(otherMarker)}`, "signPosts: true"),
+        ),
+        project(
+          githubSource("first", `selfMarker: ${yaml(marker)}`, "signPosts: true"),
+          githubSource("second", `selfMarker: ${yaml(otherMarker)}`),
+        ),
+      ];
+      for (const content of cases) {
+        const path = await writeConfig(content);
+        expect(() => loadConfig(path)).toThrow(
+          /sources\.second\.selfMarker must match projects\.backend\.sources\.first\.selfMarker because first sets signPosts/,
+        );
+      }
+    });
+
+    it("accepts a shared or absent selfMarker", async () => {
+      const shared = loadConfig(
+        await writeConfig(
+          project(
+            githubSource("first", `selfMarker: ${yaml(marker)}`, "signPosts: true"),
+            githubSource("second", `selfMarker: ${yaml(marker)}`),
+          ),
+        ),
+      );
+      expect(shared.projects.backend?.sources["second"]).toMatchObject({ selfMarker: marker });
+      const absent = loadConfig(
+        await writeConfig(
+          project(
+            githubSource("first", `selfMarker: ${yaml(marker)}`, "signPosts: true"),
+            githubSource("third"),
+          ),
+        ),
+      );
+      expect(absent.projects.backend?.sources["third"]).toMatchObject({ type: "github" });
+    });
+  });
+
   it("parses the github emitExisting flag", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -5109,6 +5410,7 @@ authRotation:
   autoRotateOnRateLimit: true
   cooldownMinutes: 30
   maxRotationsPerEpisode: 3
+  switchAuth: true
 projects:
   backend:
     path: $REPO_PATH
@@ -5120,6 +5422,7 @@ projects:
       autoRotateOnRateLimit: true,
       cooldownMinutes: 30,
       maxRotationsPerEpisode: 3,
+      switchAuth: true,
     });
   });
 
@@ -5136,6 +5439,7 @@ projects:
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+      switchAuth: false,
     });
   });
 
@@ -5143,6 +5447,7 @@ projects:
     const configPath = await writeConfig(`
 authRotation:
   autoRotateOnRateLimit: true
+  switchAuth: true
 projects:
   backend:
     path: $REPO_PATH
@@ -5154,6 +5459,7 @@ projects:
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+      switchAuth: false,
     });
   });
 
@@ -5948,6 +6254,23 @@ describe("isSameInstanceConfigPath", () => {
     await writeFile(b, "server:\n  port: 5556\n", "utf8");
 
     expect(isSameInstanceConfigPath(a, b)).toBe(false);
+  });
+});
+
+describe("captured config text", () => {
+  it("matches instance and project file loading with logical paths and running defaults", async () => {
+    const instancePath = await writeConfig("server: {port: 44557}\nprojects: {}\n");
+    const instance = loadConfig(instancePath);
+    expect(parseConfigText(instancePath, await readFile(instancePath, "utf8"))).toEqual(instance);
+    const projectPath = await writeConfig(
+      "server: {port: 44558}\nprojects:\n  sample:\n    path: ./repo\n",
+    );
+    const text = await readFile(projectPath, "utf8");
+    const fromFile = loadProjectConfig(projectPath, instance);
+    expect(parseConfigText(projectPath, text, instance)).toEqual(fromFile);
+    expect(fromFile.server.port).toBe(instance.server.port);
+    await writeFile(projectPath, "invalid YAML: [");
+    expect(parseConfigText(projectPath, text, instance)).toEqual(fromFile);
   });
 });
 

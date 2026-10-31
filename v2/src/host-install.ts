@@ -60,6 +60,10 @@ import {
   probe,
   probeHeadroom,
   probeInfo,
+  probeMcpIdentity,
+  makeTargets,
+  requiredServices,
+  SERVICE_UNITS,
   readWebPort,
   resolveDaemonPortReadOnly,
   type ProbeReason,
@@ -297,6 +301,51 @@ export function isActive(ctl: string[], unit: string): boolean {
   const [bin, ...args] = ctl;
   if (!bin) return false;
   return tryExec(bin, [...args, "is-active", unit]) === "active";
+}
+
+function checkServicePersistence(
+  scope: SystemdScope,
+  id: keyof typeof SERVICE_UNITS,
+): HostInstallCheck {
+  const unit = SERVICE_UNITS[id];
+  const [bin, ...args] = scope.ctl;
+  const state = bin
+    ? tryExec(bin, [...args, "show", unit, "--property=UnitFileState", "--value"], {
+        timeoutMs: 2000,
+      })
+    : undefined;
+  const ctl = scope.kind === "system" ? "sudo systemctl" : "systemctl --user";
+  const enable = `${ctl} enable ${unit}`;
+  let fix: string | undefined;
+  let verifiedState = true;
+  if (state === "masked" || state === "masked-runtime") {
+    fix = `${ctl} unmask ${unit}, then ${enable}`;
+  } else if (["disabled", "enabled-runtime", "linked", "linked-runtime"].includes(state ?? "")) {
+    fix = enable;
+  } else if (
+    ["static", "indirect", "alias", "generated", "transient", "bad", "not-found"].includes(
+      state ?? "",
+    )
+  ) {
+    fix = `repair ${unit} with ${scope.kind === "system" ? "the source installer" : "spur reinit"}, then ${enable}`;
+  } else if (state !== "enabled") {
+    verifiedState = false;
+    fix = `${ctl} show ${unit} --property=UnitFileState --value; ${ctl} status ${unit}`;
+  }
+  return {
+    id: `spur-${id}-persistence`,
+    ok: state === "enabled",
+    severity: "error",
+    detail:
+      state === "enabled"
+        ? `${unit} persistently enabled`
+        : !state
+          ? `${unit} persistence unverified: UnitFileState unavailable`
+          : !verifiedState
+            ? `${unit} persistence unverified: UnitFileState=${state}`
+            : `${unit} not persistently enabled: UnitFileState=${state}`,
+    ...(fix ? { fix } : {}),
+  };
 }
 
 export function resolveSystemdScope(home: string): SystemdScope {
@@ -675,7 +724,11 @@ function extractExecStartJsTarget(contents: string, home: string): string | unde
   let target: string | undefined;
   for (const line of contents.split("\n")) {
     const match = /^ExecStart=(.+)$/.exec(line.trim());
-    const token = match?.[1]?.split(/\s+/).find((part) => part.endsWith(".js"));
+    let command = match?.[1];
+    if (command?.startsWith("/usr/bin/env ")) {
+      command = /^\/usr\/bin\/env "SPUR_CONFIG=(?:[^"\\]|\\.)*" (.+)$/.exec(command)?.[1];
+    }
+    const token = command?.split(/\s+/).find((part) => part.endsWith(".js"));
     if (token) target = token;
   }
   return target?.replaceAll("%h", home);
@@ -1546,6 +1599,42 @@ export async function collectHostInstallChecks(
 
   const daemonHost =
     instanceConfig.status === "ok" ? instanceConfig.config.server.host : "127.0.0.1";
+  if (instanceConfig.status === "ok" && unitsInstalled) {
+    const targets = makeTargets({
+      daemon: instanceConfig.config.server.port,
+      web: instanceConfig.config.ui.port,
+      mcp: instanceConfig.config.mcp.port,
+    });
+    const services = requiredServices(scope);
+    if (platform() === "linux") {
+      for (const id of services) {
+        if (existsSync(join(scope.unitDir, SERVICE_UNITS[id]))) {
+          checks.push(checkServicePersistence(scope, id));
+        }
+      }
+    }
+    for (const id of services.filter((id) => id === "mcp" || id === "tunnel")) {
+      const unit = SERVICE_UNITS[id];
+      const installed = existsSync(join(scope.unitDir, unit));
+      const active = installed && isActive(scope.ctl, unit);
+      const result = active ? await probeMcpIdentity(targets[id], scope) : { ok: false };
+      checks.push({
+        id: `spur-${id}`,
+        ok: result.ok,
+        severity: "error",
+        detail: !installed
+          ? `${unit} missing`
+          : !active
+            ? describeInactiveUnit(scope.ctl, unit)
+            : result.ok
+              ? `${unit} initialized and ready`
+              : `${unit} identity or readiness failed`,
+        fix: installed ? `${scope.restartCmd} ${unit}` : "spur reinit",
+      });
+    }
+  }
+  // An absent config provides no selected runtime target for health probes.
+  if (instanceConfig.status !== "ok") return checks;
   const health = await checkServiceHealth(
     scope,
     daemonActive,
@@ -1710,7 +1799,13 @@ export function resolveNpmInitScript(cliEntrypoint: string): string {
 
 export function runNpmInit(
   cliEntrypoint: string,
-  options: { noStart?: boolean; exposeWeb?: boolean; webPort?: string; tailscale?: boolean },
+  options: {
+    noStart?: boolean;
+    exposeWeb?: boolean;
+    webPort?: string;
+    tailscale?: boolean;
+    configPath?: string;
+  },
 ): void {
   const script = resolveNpmInitScript(cliEntrypoint);
   if (!existsSync(script)) {
@@ -1723,6 +1818,7 @@ export function runNpmInit(
   ensureNpmPinFile();
   healNpmrcPrefixLine();
   const args: string[] = [];
+  if (options.configPath) args.push("--config", options.configPath);
   if (options.noStart) {
     args.push("--no-start");
   }

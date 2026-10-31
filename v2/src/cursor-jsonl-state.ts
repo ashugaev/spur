@@ -333,7 +333,7 @@ export async function findLatestCursorTranscriptFile(
 }
 
 // Ack-path-only resolver. Unlike findLatestCursorTranscriptFile's first-dir-wins
-// selection (kept unchanged for state classification and the dialog viewer, I8),
+// selection (kept unchanged for state classification, I8),
 // the no-id case here searches ALL candidate dirs and takes the GLOBAL newest by
 // mtime. A stale shadow project dir (for example a symlinked worktree's raw-path
 // slug, still holding old or stub transcripts) loses on mtime the moment the live
@@ -659,7 +659,7 @@ export async function readCursorJsonlState(
  */
 export async function readCursorTranscriptEntries(
   worktreePath: string,
-  agentSessionId?: string,
+  agentSessionId: string,
 ): Promise<TranscriptEntry[] | null> {
   const filePath = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
   if (!filePath) return null;
