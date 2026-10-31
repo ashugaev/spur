@@ -916,26 +916,25 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     interrupt: boolean,
     session: SessionView,
   ): Promise<DeliveryOutcome> => {
-    return autoPing.withRouteLock(batch.routeFingerprint, async () => {
+    const prepared = await autoPing.withRouteLock(batch.routeFingerprint, async () => {
       const persisted = readPendingSendBatch(deps.config.dataDir, batch.workId);
-      if (!persisted) return { status: "suppressed" };
+      if (!persisted) return { outcome: { status: "suppressed" } as DeliveryOutcome };
       if (
         persisted.claim &&
-        persisted.claim.routeLeaseId !== batch.routeLeaseId &&
         autoPing.isRouteLeaseActive(persisted.claim.routeLeaseId)
       ) {
-        return { status: "suppressed" };
+        return { outcome: { status: "suppressed" } as DeliveryOutcome };
       }
       const authoritativeBatch = restoreSendBatch(persisted.batch);
       if (!authoritativeBatch || authoritativeBatch.sessionId !== batch.batch.sessionId) {
-        return { status: "suppressed" };
+        return { outcome: { status: "suppressed" } as DeliveryOutcome };
       }
       batch.batch = authoritativeBatch;
       batch.admissionCapRetryAt = persisted.admissionCapRetryAt;
       batch.admissionCapDenials = persisted.admissionCapDenials;
       const now = Date.now();
       if (batch.admissionCapRetryAt !== undefined && now < batch.admissionCapRetryAt) {
-        return { status: "suppressed" };
+        return { outcome: { status: "suppressed" } as DeliveryOutcome };
       }
       batch.admissionCapRetryAt = undefined;
       batch.batch.prune(deps.config.dataDir);
@@ -956,9 +955,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       );
       syncBatchOccurrenceReferences(queueKey, batch);
       const beforeAttempt = batch.retryAccounting.map((entry) => ({ ...entry }));
-      const accounting = new Map(batch.retryAccounting.map((entry) => [entry.itemKey, entry]));
+      let accounting = new Map(batch.retryAccounting.map((entry) => [entry.itemKey, entry]));
       const submission = restoreSendBatch(structuredClone(batch.batch.serialize()));
-      if (!submission) return { status: "suppressed" };
+      if (!submission) return { outcome: { status: "suppressed" } as DeliveryOutcome };
       submission.filterItems((item) => {
         const entry = accounting.get(item.itemKey);
         if (!entry || exhausted(entry)) return false;
@@ -984,7 +983,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       const conflictClaims: string[] = [];
       const allTerminal = (): boolean =>
         batch.batch.retryItems().every((item) => {
-          const entry = accounting.get(item.itemKey);
+          const entry = batch.retryAccounting.find((candidate) => candidate.itemKey === item.itemKey);
           return !entry || exhausted(entry);
         });
       const dropTerminal = (claim?: { revision: number; claimId: string }): void => {
@@ -1023,7 +1022,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       };
       if (submission.isEmpty()) {
         if (allTerminal()) dropTerminal();
-        return { status: "suppressed" };
+        return { outcome: { status: "suppressed" } as DeliveryOutcome };
       }
       const charge = (item: SendBatchItem): void => {
         const entry = accounting.get(item.itemKey);
@@ -1062,7 +1061,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           claimed,
         )
       ) {
-        return { status: "suppressed" };
+        return { outcome: { status: "suppressed" } as DeliveryOutcome };
       }
       batch.revision = claimedRevision;
       const persistResult = (suppressedHoldAt?: string): void => {
@@ -1077,12 +1076,14 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           retryAccounting: batch.retryAccounting,
           ...(suppressedHoldAt !== undefined ? { suppressedHoldAt } : {}),
         };
-        updatePendingSendBatchConditional(
+        const updated = updatePendingSendBatchConditional(
           deps.config.dataDir,
           { workId: batch.workId, revision: claimedRevision, claimId },
           record,
         );
+        if (!updated) return;
         batch.revision = claimedRevision + 1;
+        pendingBatches.set(queueKey, batch);
         syncBatchOccurrenceReferences(queueKey, batch);
       };
       if (selectedComments.size > 0 && submission.refresh) {
@@ -1137,19 +1138,20 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         else batch.batch.filterItems((retained) => retained.itemKey !== item.itemKey);
         return accepted;
       });
-      const submittedKeys = new Set(submission.retryItems().map((item) => item.itemKey));
-      const submitted = new Map(
-        originalItems
-          .filter((item) => submittedKeys.has(item.itemKey))
-          .map((item) => [item.itemKey, item]),
-      );
+      const submitted = new Map(submission.retryItems().map((item) => [item.itemKey, item]));
       if (submission.isEmpty()) {
         if (allTerminal()) dropTerminal({ revision: claimedRevision, claimId });
         else persistResult();
-        return { status: "suppressed" };
+        return { outcome: { status: "suppressed" } as DeliveryOutcome };
       }
+      batch.batch.merge(submission);
+      batch.retryAccounting = reconcileRetryAccounting(batch.batch, batch.retryAccounting);
+      accounting = new Map(batch.retryAccounting.map((entry) => [entry.itemKey, entry]));
       for (const item of submitted.values()) {
-        if (!selectedComments.has(item.itemKey)) charge(item);
+        if (!selectedComments.has(item.itemKey) ||
+          originalItems.find((original) => original.itemKey === item.itemKey)?.fingerprint !== item.fingerprint) {
+          charge(item);
+        }
       }
       const updatedClaim = {
         ...claimed,
@@ -1165,7 +1167,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         )
       ) {
         if (conflictClaims.length > 0) autoPing.refundMergeConflict(batch.routeFingerprint);
-        return { status: "suppressed" };
+        return { outcome: { status: "suppressed" } as DeliveryOutcome };
       }
       claimed = updatedClaim;
       claimedRevision = updatedClaim.revision;
@@ -1173,14 +1175,29 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       const refundSubmitted = (): void => {
         const original = new Map(beforeAttempt.map((entry) => [entry.itemKey, entry]));
         batch.retryAccounting = batch.retryAccounting.map((entry) =>
-          submitted.has(entry.itemKey) ? { ...(original.get(entry.itemKey) ?? entry) } : entry,
+          submitted.get(entry.itemKey)?.fingerprint === entry.fingerprint
+            ? { ...(original.get(entry.itemKey) ?? entry), fingerprint: entry.fingerprint }
+            : entry,
         );
       };
+      const delivery = deps.sessionService.deliver(submission.sessionId, submission.format(), {
+        interrupt,
+        sensitivePromptSuffix: submission.formatAutoPingControls(),
+      });
+      return { run: async (): Promise<DeliveryOutcome> => {
       try {
-        await deps.sessionService.deliver(submission.sessionId, submission.format(), {
-          interrupt,
-          sensitivePromptSuffix: submission.formatAutoPingControls(),
-        });
+        await delivery;
+        return await autoPing.withRouteLock(batch.routeFingerprint, async () => {
+        const latest = readPendingSendBatch(deps.config.dataDir, batch.workId);
+        if (latest?.claim?.claimId !== claimId) return { status: "suppressed" };
+        const latestBatch = restoreSendBatch(latest.batch);
+        if (!latestBatch) return { status: "suppressed" };
+        batch.batch = latestBatch;
+        batch.retryAccounting = reconcileRetryAccounting(latestBatch, latest.retryAccounting ?? []);
+        batch.admissionCapRetryAt = latest.admissionCapRetryAt;
+        batch.admissionCapDenials = latest.admissionCapDenials;
+        claimed = { ...latest, claim: latest.claim };
+        claimedRevision = latest.revision ?? 0;
         batch.admissionCapRetryAt = undefined;
         batch.admissionCapDenials = undefined;
         if (batch.customPrompt !== undefined && !batch.customPromptRecorded) {
@@ -1208,14 +1225,39 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             attempt: Math.max(...batch.retryAccounting.map((entry) => entry.deliveryAttempts)),
           },
         });
-        batch.batch.filterItems((item) => !submitted.has(item.itemKey) || item.ciReminder);
+        batch.batch.filterItems((item) =>
+          submitted.get(item.itemKey)?.fingerprint !== item.fingerprint || item.ciReminder,
+        );
         batch.retryAccounting = batch.retryAccounting.filter(
-          (entry) => !submitted.has(entry.itemKey) || submitted.get(entry.itemKey)?.ciReminder,
+          (entry) => submitted.get(entry.itemKey)?.fingerprint !== entry.fingerprint ||
+            submitted.get(entry.itemKey)?.ciReminder,
         );
         if (allTerminal()) dropTerminal({ revision: claimedRevision, claimId });
         else persistResult();
         return { status: "delivered" };
+        });
       } catch (error) {
+        return await autoPing.withRouteLock(batch.routeFingerprint, async () => {
+        const latest = readPendingSendBatch(deps.config.dataDir, batch.workId);
+        if (latest?.claim?.claimId !== claimId) return { status: "suppressed" };
+        const latestBatch = restoreSendBatch(latest.batch);
+        if (!latestBatch) return { status: "suppressed" };
+        batch.batch = latestBatch;
+        batch.retryAccounting = reconcileRetryAccounting(latestBatch, latest.retryAccounting ?? []);
+        batch.admissionCapRetryAt = latest.admissionCapRetryAt;
+        batch.admissionCapDenials = latest.admissionCapDenials;
+        claimed = { ...latest, claim: latest.claim };
+        claimedRevision = latest.revision ?? 0;
+        for (const entry of batch.retryAccounting) {
+          if (submitted.get(entry.itemKey)?.fingerprint !== entry.fingerprint) continue;
+          const charged = accounting.get(entry.itemKey);
+          if (!charged) continue;
+          entry.deliveryAttempts = charged.deliveryAttempts;
+          entry.ciAttempts = charged.ciAttempts;
+          entry.nextAttemptAt = Date.now() + (entry.ciAttempts > 0 && submitted.get(entry.itemKey)?.ciReminder
+            ? CI_FAILED_RETRY_INTERVAL_MS
+            : DELIVERY_RETRY_BASE_MS * 2 ** (entry.deliveryAttempts - 1));
+        }
         if (error instanceof SessionRateLimitedError) {
           if (conflictClaims.length > 0) autoPing.refundMergeConflict(batch.routeFingerprint);
           logTriggerEvent(deps.config.dataDir, "trigger.send.suppressed_rate_limited", {
@@ -1310,14 +1352,18 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         const current = await loadSessionOrClear(queueKey, batch);
         if (current && isClosedState(current.state)) {
           for (const entry of batch.retryAccounting) {
-            if (submitted.has(entry.itemKey)) entry.nextAttemptAt = 0;
+            if (submitted.get(entry.itemKey)?.fingerprint === entry.fingerprint) entry.nextAttemptAt = 0;
           }
         }
         if (allTerminal()) dropTerminal({ revision: claimedRevision, claimId });
         else persistResult();
         return { status: "failed", error: message };
+        });
       }
+      } };
     });
+    if ("outcome" in prepared) return prepared.outcome;
+    return prepared.run();
   };
 
   const scheduleFlushLoop = (): void => {
@@ -1617,6 +1663,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     const routeLeaseId = leaseForRoute(routeFingerprint, route);
     let batch: PendingBatch | undefined;
     let merged = false;
+    let activeClaim = false;
     await autoPing.withRouteLock(routeFingerprint, async () => {
       const cached = pendingBatches.get(queueKey);
       const persisted = readPendingSendBatches(deps.config.dataDir).get(queueKey);
@@ -1624,19 +1671,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         clearBatch(queueKey, cached, { deletePersisted: false });
       } else if (persisted && (!cached || persisted.workId !== cached.workId)) {
         return;
-      } else if (cached && persisted && persisted.workId === cached.workId) {
-        const authoritativeBatch = restoreSendBatch(persisted.batch);
-        if (authoritativeBatch && authoritativeBatch.sessionId === cached.batch.sessionId) {
-          cached.batch = authoritativeBatch;
-          cached.admissionCapRetryAt = persisted.admissionCapRetryAt;
-          cached.admissionCapDenials = persisted.admissionCapDenials;
-          cached.revision = persisted.revision ?? 0;
-          cached.retryAccounting = reconcileRetryAccounting(
-            cached.batch,
-            persisted.retryAccounting ?? [],
-          );
-          syncBatchOccurrenceReferences(queueKey, cached);
-        }
       }
       merged = pendingBatches.has(queueKey);
       if (autoPing.isSuppressed(routeFingerprint, destination, occurrenceId)) return;
@@ -1657,8 +1691,20 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         autoPing.isSuppressed(routeFingerprint, destination, itemOccurrenceId, threadTarget),
       );
       if (sendBatch.isEmpty()) return;
-      batch = mergeIntoBatch(
-        pendingBatches.get(queueKey),
+      const prior = pendingBatches.get(queueKey);
+      const authoritativeBatch = persisted ? restoreSendBatch(persisted.batch) : null;
+      if (merged && (!prior || !authoritativeBatch)) return;
+      const candidate = mergeIntoBatch(
+        prior && authoritativeBatch ? {
+          ...prior,
+          batch: authoritativeBatch,
+          revision: persisted?.revision ?? 0,
+          retryAccounting: reconcileRetryAccounting(
+            authoritativeBatch, persisted?.retryAccounting ?? [],
+          ),
+          admissionCapRetryAt: persisted?.admissionCapRetryAt,
+          admissionCapDenials: persisted?.admissionCapDenials,
+        } : undefined,
         projectId,
         triggerId,
         trigger.source,
@@ -1667,27 +1713,39 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         sendBatch,
         { routeFingerprint, destination, routeLeaseId },
       );
-      batch.revision += merged ? 1 : 0;
-      pendingBatches.set(queueKey, batch);
-      syncBatchOccurrenceReferences(queueKey, batch);
-      recordPendingSendBatch(deps.config.dataDir, {
+      candidate.revision += merged ? 1 : 0;
+      const record = {
         queueKey,
-        workId: batch.workId,
-        revision: batch.revision,
+        workId: candidate.workId,
+        revision: candidate.revision,
         projectId,
         triggerId,
         sourceId: trigger.source,
-        batch: batch.batch.serialize(),
-        retryAccounting: batch.retryAccounting,
+        batch: candidate.batch.serialize(),
+        retryAccounting: candidate.retryAccounting,
         admissionCapRetryAt:
-          batch.admissionCapRetryAt !== undefined && batch.admissionCapRetryAt > Date.now()
-            ? batch.admissionCapRetryAt
+          candidate.admissionCapRetryAt !== undefined && candidate.admissionCapRetryAt > Date.now()
+            ? candidate.admissionCapRetryAt
             : undefined,
-        admissionCapDenials: batch.admissionCapDenials,
+        admissionCapDenials: candidate.admissionCapDenials,
+        ...(persisted?.claim ? { claim: persisted.claim } : {}),
         ...(persisted?.suppressedHoldAt !== undefined
           ? { suppressedHoldAt: persisted.suppressedHoldAt }
           : {}),
-      });
+      };
+      if (persisted) {
+        if (!updatePendingSendBatchConditional(deps.config.dataDir, {
+          workId: candidate.workId,
+          revision: persisted.revision ?? 0,
+          ...(persisted.claim ? { claimId: persisted.claim.claimId } : {}),
+        }, record)) return;
+      } else {
+        recordPendingSendBatch(deps.config.dataDir, record);
+      }
+      batch = candidate;
+      pendingBatches.set(queueKey, candidate);
+      syncBatchOccurrenceReferences(queueKey, candidate);
+      activeClaim = !!persisted?.claim && autoPing.isRouteLeaseActive(persisted.claim.routeLeaseId);
     });
     if (!batch) return;
     logTriggerEvent(deps.config.dataDir, "trigger.send.queued", {
@@ -1704,6 +1762,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       },
     });
     scheduleFlushLoop();
+    if (activeClaim) return;
 
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
@@ -1967,9 +2026,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             );
             return;
           }
-          const queueKey = createQueueKey(projectId, triggerId, sendBatch.sessionId);
-          enqueue(queueKey, async () => {
-            await handleSendEvent(
+          const task = handleSendEvent(
               projectId,
               triggerId,
               event.name,
@@ -1977,7 +2034,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
               trigger,
               sendBatch,
             );
-          });
+          inFlight.add(task);
+          void task.then(
+            () => inFlight.delete(task),
+            () => inFlight.delete(task),
+          );
           return;
         }
 
