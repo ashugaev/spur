@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { findForeignAgentProcessesForSession } from "../../src/agent-processes.js";
@@ -20,6 +20,7 @@ import { listAgentModels, parseOpenCodeVerboseModelsOutput } from "../../src/age
 import type { AgentName, ProviderReasoningEffort, SessionView } from "../../src/types.js";
 import type { ProviderTokenUsageSample } from "../../src/token-usage.js";
 import { createTempDir, execFileAsync, findFreePort, pollUntil } from "../helpers/common.js";
+import { copyFailureEvidence } from "../helpers/failure-evidence.js";
 import {
   isTmuxAvailable,
   killTmuxServer,
@@ -30,6 +31,9 @@ import {
 } from "../helpers/runtime.js";
 
 const SMOKE_REPO_DIR = fileURLToPath(new URL("../../..", import.meta.url));
+const SMOKE_EVIDENCE_DIR = fileURLToPath(
+  new URL("../../test-results/real-agent-smoke", import.meta.url),
+);
 const SMOKE_BASE_REF = await git(SMOKE_REPO_DIR, "rev-parse", "HEAD");
 const tmuxOk = await isTmuxAvailable();
 const CLAUDE_BIN = await binaryPath("claude");
@@ -367,7 +371,19 @@ async function withPinnedAgentBinaries<T>(configPath: string, fn: () => Promise<
   }
 }
 
-async function cleanupSmokeItem(item: CleanupItem): Promise<void> {
+async function cleanupSmokeItem(item: CleanupItem, saveEvidence: boolean): Promise<void> {
+  if (saveEvidence) {
+    const evidenceDir = join(SMOKE_EVIDENCE_DIR, basename(item.rootDir));
+    try {
+      await copyFailureEvidence(item.rootDir, evidenceDir);
+      // eslint-disable-next-line no-console
+      console.warn(`smoke test failed; session state copied to ${evidenceDir}`);
+    } catch (error) {
+      // evidence is best effort; teardown below must still run.
+      // eslint-disable-next-line no-console
+      console.warn(`failed to copy smoke evidence from ${item.rootDir}: ${String(error)}`);
+    }
+  }
   await killTmuxSessionsByPrefix(item.sessionPrefix, item.socketName);
   killTmuxServer(item.socketName);
   if (item.worktreePath) {
@@ -959,11 +975,13 @@ async function runOpenCodeSmoke(explicitOverride: boolean): Promise<void> {
   }
 }
 
-afterEach(async () => {
+afterEach(async ({ task }) => {
+  // vitest sets task.result.state to "fail" before afterEach runs.
+  const saveEvidence = task.result?.state === "fail";
   while (cleanupItems.length > 0) {
     const item = popCleanupItem();
     try {
-      await cleanupSmokeItem(item);
+      await cleanupSmokeItem(item, saveEvidence);
     } catch (error) {
       // one item's cleanup failure must not abandon the rest of the drain.
       // eslint-disable-next-line no-console
