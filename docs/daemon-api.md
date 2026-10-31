@@ -81,7 +81,7 @@
 - `POST /sessions/:id/sidecars/:name/stop` — see [Sidecars](commands.md#sidecars)
 - `GET /sessions/:id/services`
 - `GET /sessions/:id/services/:name`
-- `POST /sessions/:id/services/:name/run`
+- `POST /sessions/:id/services/:name/run` — `503` on an unreadable tmux probe (retry)
 - `GET /sessions/:id/artifacts/:path` — streams one artifact
 - `GET /sessions/:id/session-memory`
 - `GET /sessions/:id/session-memory/:key`

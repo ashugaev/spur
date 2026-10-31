@@ -30983,14 +30983,7 @@ describe("SessionService", () => {
     expect(createTmuxCommandSessionMock).not.toHaveBeenCalled();
   });
 
-  // Same launcher as a sidecar (createTmuxCommandSession), same leak shape —
-  // the two service kill sites route through signalSidecarPane instead of a
-  // blind killTmuxSession. Discriminator: getTmuxPanePid is called at all
-  // ONLY through signalSidecarPane; a bare killTmuxSession call never
-  // touches it, so reverting either site back to `killTmuxSession(...)`
-  // reds this on the missing getTmuxPanePid call.
-  it("runService kills an existing dead service pane via signalSidecarPane, not a blind killTmuxSession", async () => {
-    const workspacePath = resolve(".");
+  const seedExistingServiceInstance = (workspacePath: string): void => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -31034,6 +31027,17 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:00:00.000Z",
     });
+  };
+
+  // Same launcher as a sidecar (createTmuxCommandSession), same leak shape —
+  // the two service kill sites route through signalSidecarPane instead of a
+  // blind killTmuxSession. Discriminator: getTmuxPanePid is called at all
+  // ONLY through signalSidecarPane; a bare killTmuxSession call never
+  // touches it, so reverting either site back to `killTmuxSession(...)`
+  // reds this on the missing getTmuxPanePid call.
+  it("runService kills an existing dead service pane via signalSidecarPane, not a blind killTmuxSession", async () => {
+    const workspacePath = resolve(".");
+    seedExistingServiceInstance(workspacePath);
     tmuxSessionExistsMock.mockResolvedValue(true);
     tmuxPaneDeadMock.mockResolvedValue(true);
     getTmuxPanePidMock.mockResolvedValue(null);
@@ -31051,6 +31055,110 @@ describe("SessionService", () => {
       expect.objectContaining({ fresh: true }),
     );
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--svc--web");
+    expect(deleteServiceInstanceMock).toHaveBeenCalled();
+    expect(deleteServiceSourceStatesForServiceMock).toHaveBeenCalled();
+    expect(createTmuxCommandSessionMock).toHaveBeenCalled();
+    expect(writeServiceInstanceMock).toHaveBeenCalled();
+  });
+
+  // Unreadable tmux probe with an existing service instance: refuse with the
+  // retryable 503 error before any kill, delete, or launch.
+  describe.each([
+    {
+      leg: "session-list timeout",
+      session: {
+        present: false,
+        unresponsive: true,
+        diagnostic: "tmux list-windows failed: tmux timed out",
+      },
+      pane: null,
+    },
+    {
+      leg: "pane-list timeout",
+      session: { present: true, unresponsive: false },
+      pane: {
+        dead: true,
+        unresponsive: true,
+        diagnostic: "tmux list-panes failed: tmux timed out",
+      },
+    },
+    {
+      leg: "non-timeout pane-list diagnostic",
+      session: { present: true, unresponsive: false },
+      pane: {
+        dead: true,
+        unresponsive: false,
+        diagnostic: "tmux list-panes failed: permission denied",
+      },
+    },
+    {
+      leg: "non-timeout session-list diagnostic",
+      session: {
+        present: false,
+        unresponsive: false,
+        diagnostic: "tmux list-windows failed: permission denied",
+      },
+      pane: null,
+    },
+  ])("runService refuses on unreadable tmux probe", ({ leg, session, pane }) => {
+    it(`runService refuses an existing service on ${leg} without side effects`, async () => {
+      const workspacePath = resolve(".");
+      seedExistingServiceInstance(workspacePath);
+      getTmuxSessionPresenceMock.mockResolvedValue(session);
+      if (pane) getTmuxPanePresenceMock.mockResolvedValue(pane);
+
+      const { SessionService, SidecarProbeUnresponsiveError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.runService("api-1", "web", { command: "pnpm dev", cwd: workspacePath }),
+      ).rejects.toBeInstanceOf(SidecarProbeUnresponsiveError);
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(getTmuxPanePidMock).not.toHaveBeenCalled();
+      expect(deleteServiceInstanceMock).not.toHaveBeenCalled();
+      expect(deleteServiceSourceStatesForServiceMock).not.toHaveBeenCalled();
+      expect(createTmuxCommandSessionMock).not.toHaveBeenCalled();
+      expect(writeServiceInstanceMock).not.toHaveBeenCalled();
+      if (!pane) expect(getTmuxPanePresenceMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("runService reaps and relaunches an existing service whose tmux session is readably absent", async () => {
+    const workspacePath = resolve(".");
+    seedExistingServiceInstance(workspacePath);
+    getTmuxSessionPresenceMock.mockResolvedValue({ present: false, unresponsive: false });
+    getTmuxPanePidMock.mockResolvedValue(null);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.runService("api-1", "web", { command: "pnpm dev", cwd: workspacePath });
+
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--svc--web");
+    expect(deleteServiceInstanceMock).toHaveBeenCalled();
+    expect(createTmuxCommandSessionMock).toHaveBeenCalled();
+  });
+
+  it("runService refuses an existing service whose pane is readably alive", async () => {
+    const workspacePath = resolve(".");
+    seedExistingServiceInstance(workspacePath);
+    getTmuxSessionPresenceMock.mockResolvedValue({ present: true, unresponsive: false });
+    getTmuxPanePresenceMock.mockResolvedValue({ dead: false, unresponsive: false });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.runService("api-1", "web", { command: "pnpm dev", cwd: workspacePath }),
+    ).rejects.toThrow("Service is already running");
+
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(getTmuxPanePidMock).not.toHaveBeenCalled();
+    expect(deleteServiceInstanceMock).not.toHaveBeenCalled();
+    expect(deleteServiceSourceStatesForServiceMock).not.toHaveBeenCalled();
+    expect(createTmuxCommandSessionMock).not.toHaveBeenCalled();
+    expect(writeServiceInstanceMock).not.toHaveBeenCalled();
   });
 
   it("runService's failed-launch catch signals the fresh service pane via signalSidecarPane, not a blind killTmuxSession", async () => {
