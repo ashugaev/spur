@@ -19,8 +19,8 @@ scratch_repos() {
 }
 
 log "stopping units"
-systemctl --user stop spur-web spur-daemon 2>/dev/null
-systemctl --user disable spur-web spur-daemon 2>/dev/null
+systemctl --user stop spur-mcp-tunnel spur-mcp spur-web spur-daemon 2>/dev/null
+systemctl --user disable spur-mcp-tunnel spur-mcp spur-web spur-daemon 2>/dev/null
 rm -f "$HOME"/.config/systemd/user/spur-*.service
 rm -f "$HOME"/.config/systemd/user/default.target.wants/spur-*.service
 systemctl --user daemon-reload 2>/dev/null
@@ -29,8 +29,8 @@ loginctl disable-linger "$USER" 2>/dev/null
 # System-scope units come from the source-install deploy mode, which shares this
 # box. Leaving them running holds 4310 and makes the next npm-install run read a
 # stale daemon as its own.
-sudo systemctl stop spur-web spur-daemon 2>/dev/null
-sudo systemctl disable spur-web spur-daemon 2>/dev/null
+sudo systemctl stop spur-mcp-tunnel spur-mcp spur-web spur-daemon 2>/dev/null
+sudo systemctl disable spur-mcp-tunnel spur-mcp spur-web spur-daemon 2>/dev/null
 sudo rm -f /etc/systemd/system/spur-*.service
 sudo rm -f /etc/systemd/system/multi-user.target.wants/spur-*.service
 sudo systemctl daemon-reload 2>/dev/null
@@ -38,6 +38,8 @@ sudo systemctl daemon-reload 2>/dev/null
 log "killing leftover spur processes and tmux servers"
 pkill -f 'spur/dist/cli.js' 2>/dev/null
 pkill -f 'dist/cli.js daemon' 2>/dev/null
+pkill -f 'dist/cli.js.*mcp' 2>/dev/null
+pkill -f 'tunnel-client run' 2>/dev/null
 pkill -f 'web-server.js' 2>/dev/null
 # Spur runs sessions on its own socket (`tmux -L spur-<port>`); a bare
 # `tmux ls` only sees the default one, so kill every server this user owns.
@@ -146,6 +148,7 @@ if [ -z "$profile_leftover" ] && ! diff -q /etc/skel/.profile "$HOME/.profile" >
 fi
 printf '  %-14s %s\n' "profile-lines" "$([ -n "$profile_leftover" ] && echo "leftover: $profile_leftover" || echo clean)"
 printf '  %-14s %s\n' "port-4310"     "$(ss -ltn 2>/dev/null | grep -q ':4310 ' && echo BUSY || echo free)"
+printf '  %-14s %s\n' "port-4311"     "$(ss -ltn 2>/dev/null | grep -q ':4311 ' && echo BUSY || echo free)"
 printf '  %-14s %s\n' "agents"        "$([ -e "$HOME/.local/bin/cursor-agent" ] && echo cursor-agent || echo none)"
 printf '  %-14s %s\n' "harness"       "$([ -x "$HOME/.itest-harness/bin/claude" ] && echo claude || echo MISSING)"
 printf '  %-14s %s\n' "harness-creds" "$([ -s "$HOME/.claude/.credentials.json" ] && echo present || echo MISSING)"

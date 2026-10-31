@@ -1,4 +1,16 @@
-import type { LifecycleAction, SessionLifecycleSnapshot, SpurSessionView } from "./types";
+import type { SessionLifecycleSnapshot, SessionTransition, SpurSessionView } from "./types";
+
+export function killConfirmText(sessionId: string): string {
+  return `Kill session ${sessionId}? This forces cleanup even with local changes.`;
+}
+
+/** Client-only transitions: no daemon receipt, a read showing this status settles them. */
+const CONFIRMED_STATUS: Partial<Record<SessionTransition, string>> = {
+  pause: "stopped",
+  kill: "killed",
+};
+/** A held client-only intent with no confirming read by then is released. */
+export const CLIENT_TRANSITION_HOLD_MS = 20_000;
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -58,7 +70,7 @@ export interface LifecycleIntent {
   operationId: string;
   generation: number;
   instanceId: string;
-  action: LifecycleAction;
+  action: SessionTransition;
   revisions: ReadonlyMap<string, number>;
 }
 
@@ -71,7 +83,13 @@ export class SessionLifecycleConsumer {
   private retired = new Set<string>();
   private rows = new Map<string, SpurSessionView>();
   private rejectedRows = new Set<string>();
-  private intents = new Map<string, { owner: LifecycleIntent; source: SpurSessionView }>();
+  private intents = new Map<
+    string,
+    { owner: LifecycleIntent; source: SpurSessionView; heldUntil?: number }
+  >();
+  private expired: string[] = [];
+
+  constructor(private readonly now: () => number = Date.now) {}
 
   beginRead(): LifecycleRead {
     return { generation: this.generation, sequence: ++this.sequence };
@@ -110,6 +128,12 @@ export class SessionLifecycleConsumer {
     this.acceptedSequence = read.sequence;
     this.rejectedRows.clear();
     const accepted = rows.map((row) => this.acceptRow(row));
+    const now = this.now();
+    for (const [id, intent] of this.intents)
+      if (intent.heldUntil !== undefined && intent.heldUntil <= now) {
+        this.intents.delete(id);
+        this.expired.push(id);
+      }
     return accepted;
   }
 
@@ -124,9 +148,10 @@ export class SessionLifecycleConsumer {
     const intent = this.intents.get(row.id);
     if (
       intent &&
-      snapshot.operation &&
-      (snapshot.operation.operationId === intent.owner.operationId ||
-        snapshot.revision > (intent.source.lifecycle?.revision ?? 0))
+      ((snapshot.operation &&
+        (snapshot.operation.operationId === intent.owner.operationId ||
+          snapshot.revision > (intent.source.lifecycle?.revision ?? 0))) ||
+        row.status === CONFIRMED_STATUS[intent.owner.action])
     )
       this.intents.delete(row.id);
     return row;
@@ -151,7 +176,7 @@ export class SessionLifecycleConsumer {
     return this.acceptRow(row);
   }
 
-  reserve(rows: readonly SpurSessionView[], action: LifecycleAction): LifecycleIntent | null {
+  reserve(rows: readonly SpurSessionView[], action: SessionTransition): LifecycleIntent | null {
     if (
       !this.instanceId ||
       rows.length === 0 ||
@@ -192,10 +217,26 @@ export class SessionLifecycleConsumer {
   releaseUnmatched(owner: LifecycleIntent): void {
     if (!this.isCurrent(owner)) return;
     for (const [id, intent] of this.intents)
-      if (intent.owner === owner && !this.rejectedRows.has(id)) this.intents.delete(id);
+      if (intent.owner === owner && intent.heldUntil === undefined && !this.rejectedRows.has(id))
+        this.intents.delete(id);
   }
 
-  pending(id: string): LifecycleAction | null {
+  /** Accepted client-only request: keep projecting until a read confirms or the hold expires. */
+  hold(owner: LifecycleIntent): void {
+    if (!this.isCurrent(owner)) return;
+    const heldUntil = this.now() + CLIENT_TRANSITION_HOLD_MS;
+    for (const intent of this.intents.values())
+      if (intent.owner === owner) intent.heldUntil = heldUntil;
+  }
+
+  /** Ids whose held intent expired unconfirmed since the last call. */
+  takeExpired(): string[] {
+    const expired = this.expired;
+    this.expired = [];
+    return expired;
+  }
+
+  pending(id: string): SessionTransition | null {
     const intent = this.intents.get(id);
     if (intent) return intent.owner.action;
     const operation = this.rows.get(id)?.lifecycle?.operation;
@@ -212,10 +253,19 @@ export class SessionLifecycleConsumer {
 
 export function projectLifecycleSession<T extends { status: string; state: string }>(
   row: T,
-  action: LifecycleAction | null = null,
+  action: SessionTransition | null = null,
 ): T {
-  if (!action) return row;
-  return action === "complete"
-    ? { ...row, status: "completed", state: "stopped", lifecyclePending: action }
-    : { ...row, status: "running", state: "working", lifecyclePending: action };
+  switch (action) {
+    case null:
+      return row;
+    case "complete":
+      return { ...row, status: "completed", state: "stopped", lifecyclePending: action };
+    case "kill":
+      return { ...row, status: "killed", state: "killed", lifecyclePending: action };
+    case "pause":
+      return { ...row, status: "stopped", state: "stopped", lifecyclePending: action };
+    case "restore":
+    case "reopen":
+      return { ...row, status: "running", state: "working", lifecyclePending: action };
+  }
 }
