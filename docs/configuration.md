@@ -167,6 +167,7 @@ Event names by source:
 
 - `cron`: `cron:tick`.
 - `github`: `github:changes_requested`, `ci_failed`, `comment`, `merge_conflict`, `review_requested`, `ready_for_review`, `approved`, `merged`, `closed`, `work_item.new` (with `query`). PR URLs seed the native `session.pr` binding; other review URLs go to `slots.links`. `work_item.new` spawn-prompt template: `{{url}} {{number}} {{title}} {{repo}} {{externalId}}`.
+- `github:comment`: skips PR issue comments authored by a GitHub App or Actions bot.
 - `github:approved`: per-login signals; initial lifecycle suppression — `v2/src/review-providers/github.ts`, `v2/src/event-sources/github.ts`.
 - `github-ci`: `github-ci:run.completed`.
 - `gitlab`: `gitlab:changes_requested`, `ci_failed`, `comment`, `merge_conflict`.
