@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as hostMemory from "../../src/host-memory.js";
+import * as configuredSources from "../../src/event-sources/index.js";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +11,7 @@ import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
 import { sessionArtifactsDir } from "../../src/session-artifacts.js";
 import { startServer, type StartedServer } from "../../src/server.js";
-import { AgentReasoningEffortError } from "../../src/agents/models.js";
+import { AgentModelError, AgentReasoningEffortError } from "../../src/agents/models.js";
 import { TodoEmptyLedgerError, TodoOpenWorkError } from "../../src/todo.js";
 import {
   buildForeignAgentProcessMessage,
@@ -26,6 +27,7 @@ import {
   SessionStartingError,
   SidecarPortConflictError,
   SidecarProbeUnresponsiveError,
+  SpawnBatchConflictError,
   SessionService,
 } from "../../src/session-service.js";
 import type { SessionRecord, SessionView, SidecarStopView } from "../../src/types.js";
@@ -37,6 +39,127 @@ import {
 import { findFreePort, startOnFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
+  it("wires source attachment preparation to the requested session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-source-preparation-"));
+    const port = await findFreePort();
+    const configPath = join(root, "config.yaml");
+    await writeFile(
+      configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`,
+    );
+    const sources = vi.spyOn(configuredSources, "startConfiguredSources").mockResolvedValue({
+      stop: vi.fn(),
+      telegramBotIdentity: () => null,
+      clearPollDisabledOverride: () => null,
+    });
+    const prepare = vi
+      .spyOn(SessionService.prototype, "prepareSourceMessage")
+      .mockReturnValue("saved refs");
+    const send = vi.spyOn(SessionService.prototype, "send");
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const callback = sources.mock.calls[0]?.[0].prepareSessionMessage;
+      expect(callback).toBeDefined();
+      const request = { message: "inspect", attachments: [{ name: "file.bin", data: "eA==" }] };
+      expect(await callback?.("target-session", request)).toBe("saved refs");
+      expect(prepare).toHaveBeenCalledExactlyOnceWith("target-session", request);
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      await server.stop();
+      sources.mockRestore();
+      prepare.mockRestore();
+      send.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("GET source-info returns association, absence, and unknown-session 404", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-source-info-server-"));
+    const port = await findFreePort();
+    const configPath = join(root, "config.yaml");
+    await writeFile(
+      configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`,
+    );
+    const sourceInfo = vi
+      .spyOn(SessionService.prototype, "sourceInfo")
+      .mockReturnValueOnce({
+        sessionId: "api-1",
+        source: "telegram",
+        projectId: "api",
+        sourceId: "chat",
+        chatId: -1001,
+        messageThreadId: 22,
+        bot: { id: 44 },
+      })
+      .mockReturnValueOnce({ sessionId: "api-2", source: null })
+      .mockImplementationOnce(() => {
+        throw new SessionResourceNotFoundError("Session not found: missing");
+      });
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const associated = await fetch(`http://127.0.0.1:${port}/sessions/api-1/source-info`);
+      expect(associated.status).toBe(200);
+      expect(await associated.json()).toEqual({
+        sessionId: "api-1",
+        source: "telegram",
+        projectId: "api",
+        sourceId: "chat",
+        chatId: -1001,
+        messageThreadId: 22,
+        bot: { id: 44 },
+      });
+      const absent = await fetch(`http://127.0.0.1:${port}/sessions/api-2/source-info`);
+      expect(absent.status).toBe(200);
+      expect(await absent.json()).toEqual({ sessionId: "api-2", source: null });
+      expect((await fetch(`http://127.0.0.1:${port}/sessions/missing/source-info`)).status).toBe(
+        404,
+      );
+      expect(sourceInfo.mock.calls).toEqual([["api-1"], ["api-2"], ["missing"]]);
+    } finally {
+      await server.stop();
+      sourceInfo.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a source-reply body over 1 MB for images", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-source-reply-server-"));
+    const port = await findFreePort();
+    const configPath = join(root, "config.yaml");
+    await writeFile(
+      configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`,
+    );
+    const reply = vi.spyOn(SessionService.prototype, "replyToSource").mockResolvedValue({
+      ok: true,
+      source: "telegram",
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "chat",
+      chatId: -1001,
+      images: 1,
+    });
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const data = "A".repeat(2_000_000);
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/api-1/source-reply`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "look", images: [{ name: "a.png", data }] }),
+      });
+      expect(response.status).toBe(200);
+      expect(reply).toHaveBeenCalledWith("api-1", {
+        message: "look",
+        images: [{ name: "a.png", data }],
+      });
+    } finally {
+      await server.stop();
+      reply.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(["spawn", "respawn", "handoff"] as const)(
     "returns a client error for rejected %s reasoning effort",
     async (operation) => {
@@ -88,6 +211,52 @@ describe("startServer", () => {
           expect.objectContaining({ reasoningEffort: "ultra" }),
           ...(operation === "handoff" ? [undefined] : []),
         );
+      } finally {
+        serviceSpy.mockRestore();
+        await server.stop();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(["spawn", "respawn", "handoff"] as const)(
+    "returns a client error for an unavailable codex model on %s",
+    async (operation) => {
+      const root = await mkdtemp(join(tmpdir(), "spur-server-model-"));
+      const repoDir = join(root, "repo");
+      await mkdir(repoDir);
+      const port = await findFreePort();
+      const configPath = join(root, "spur.yaml");
+      await writeFile(
+        configPath,
+        [
+          "server:",
+          "  host: 127.0.0.1",
+          `  port: ${port}`,
+          `dataDir: ${join(root, "data")}`,
+          `worktreeDir: ${join(root, "worktrees")}`,
+          "projects:",
+          "  demo:",
+          `    path: ${repoDir}`,
+        ].join("\n"),
+      );
+      const message = 'Codex model "auto" is not available; available: gpt-5';
+      const serviceSpy = vi
+        .spyOn(SessionService.prototype, operation)
+        .mockRejectedValue(new AgentModelError(message));
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
+      try {
+        const path = operation === "spawn" ? "/sessions" : `/sessions/demo-1/${operation}`;
+        const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ project: "demo", prompt: "hi", agent: "codex", model: "auto" }),
+        });
+        expect(response.status).toBe(400);
+        expect(await response.json()).toMatchObject({ error: message });
       } finally {
         serviceSpy.mockRestore();
         await server.stop();
@@ -528,6 +697,51 @@ describe("startServer", () => {
       await server.stop();
     }
   });
+
+  it.each([
+    { enabled: false, status: 404 },
+    { enabled: true, status: 400 },
+  ])(
+    "POST /sessions/:id/switch-auth gate with authRotation.switchAuth=$enabled returns $status",
+    async ({ enabled, status }) => {
+      const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+      const repoDir = join(root, "repo");
+      const port = await findFreePort();
+      await mkdir(repoDir, { recursive: true });
+      const configPath = join(root, "spur.yaml");
+      await writeFile(
+        configPath,
+        [
+          "server:",
+          "  host: 127.0.0.1",
+          `  port: ${port}`,
+          `dataDir: ${join(root, "data")}`,
+          `worktreeDir: ${join(root, "worktrees")}`,
+          ...(enabled ? ["authRotation:", "  switchAuth: true"] : []),
+          "projects:",
+          "  demo:",
+          `    path: ${repoDir}`,
+        ].join("\n"),
+        "utf8",
+      );
+
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
+
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/switch-auth`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ accountId: "" }),
+        });
+        expect(response.status).toBe(status);
+      } finally {
+        await server.stop();
+      }
+    },
+  );
 
   it("returns 429 naming the cap and live count when spawn is denied by the admission cap", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
@@ -2044,6 +2258,58 @@ describe("startServer", () => {
     }
   });
 
+  it("maps a background spawn batch conflict to 409 with code and sessionId", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const spawnInBackground = SessionService.prototype.spawnInBackground;
+    SessionService.prototype.spawnInBackground = async function mockSpawnInBackground() {
+      throw new SpawnBatchConflictError("spawn_committed", "demo-3");
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/background`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ project: "demo", prompt: "ship it" }),
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        code: "spawn_committed",
+        sessionId: "demo-3",
+        error:
+          "Session demo-3 was already created from this submission; submit again to start another session",
+      });
+    } finally {
+      SessionService.prototype.spawnInBackground = spawnInBackground;
+      await server.stop();
+    }
+  });
+
   it("routes backlog list through the session service", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -2200,6 +2466,7 @@ describe("startServer", () => {
           intervalMs: 600_000,
           stopCondition: "CI is green",
           message: "Check CI",
+          dispatchClaimId: "echoed-read-only-claim",
         }),
       });
       expect(scheduleResponse.status).toBe(200);
@@ -2386,7 +2653,11 @@ describe("startServer", () => {
       const updateResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ target: "interval", message: "Updated CI" }),
+        body: JSON.stringify({
+          target: "interval",
+          message: "Updated CI",
+          dispatchClaimId: "echoed-read-only-claim",
+        }),
       });
       expect(updateResponse.status).toBe(200);
       await expect(updateResponse.json()).resolves.toMatchObject({
@@ -2485,7 +2756,11 @@ describe("startServer", () => {
       const dispatchResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ target: "interval", dispatch: true }),
+        body: JSON.stringify({
+          target: "interval",
+          dispatch: true,
+          dispatchClaimId: "echoed-read-only-claim",
+        }),
       });
       expect(dispatchResponse.status).toBe(200);
       expect(dispatchRequests).toEqual([{ target: "interval", dispatch: true }]);

@@ -2453,9 +2453,10 @@ test.describe("D6a: Backlog zone", () => {
       },
     ]);
 
-    await page.goto("/");
+    await page.goto("/?project=my-project");
 
     await expect(page.getByText("Backlog")).toBeVisible();
+    await page.getByRole("button", { name: /Backlog/ }).click();
     const backlogLink = page.getByRole("link", { name: /WEB-17/ });
     await expect(backlogLink).toBeVisible();
     await expect(backlogLink).toHaveAttribute("href", "https://jira.example.com/browse/WEB-17");
@@ -2495,8 +2496,9 @@ test.describe("D6a: Backlog zone", () => {
       },
     ]);
 
-    await page.goto("/");
+    await page.goto("/?project=my-project");
 
+    await page.getByRole("button", { name: /Backlog/ }).click();
     await page.getByRole("button", { name: "Take task" }).click();
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
@@ -4207,6 +4209,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
           enabled: true,
           conditions: "After the summary is posted",
         },
+        preflightBatchId: "10000000-0000-4000-8000-000000000001",
       },
     ]);
 
@@ -4271,6 +4274,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
         model: "opus",
         overrides: { worktree: true },
         selfDestruct: { enabled: true },
+        preflightBatchId: "10000000-0000-4000-8000-000000000001",
       },
     ]);
   });
@@ -4479,6 +4483,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await fillSpawnForm(page, { prompt: placeholder.prompt });
     await page.getByRole("button", { name: /^spawn$/i }).click();
 
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(1);
     sessions.splice(0, sessions.length, errored);
     await page.waitForTimeout(DASHBOARD_POLL_WAIT_MS);
 

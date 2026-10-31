@@ -51,11 +51,35 @@ function harness(current = session()) {
     list: vi.fn(async () => [current]),
     get: vi.fn(async () => current),
     restore: vi.fn(async () => session()),
+    complete: vi.fn(async () => session()),
+    kill: vi.fn(async () => session()),
   };
   return { service, projects, workbench: createSourceWorkbench(service) };
 }
 
 describe("source workbench projection", () => {
+  it("delegates lifecycle actions with PR preservation and human Telegram provenance", async () => {
+    const { service, workbench } = harness();
+    await workbench.completeSession("demo-1");
+    await workbench.killSession("demo-1");
+    expect(service.complete).toHaveBeenCalledExactlyOnceWith(
+      "demo-1",
+      { prAction: "leave_open" },
+      {
+        todoActor: { kind: "human", origin: "telegram" },
+      },
+    );
+    expect(service.kill).toHaveBeenCalledExactlyOnceWith("demo-1", { prAction: "leave_open" });
+  });
+
+  it.each(["complete", "kill"] as const)("propagates %s rejection", async (action) => {
+    const { service, workbench } = harness();
+    const error = new Error("Dirty workspace");
+    service[action].mockRejectedValue(error);
+    await expect(
+      action === "complete" ? workbench.completeSession("demo-1") : workbench.killSession("demo-1"),
+    ).rejects.toBe(error);
+  });
   it("projects structured fields without exposing prompts or paths", () => {
     expect(
       projectSourceSession(
@@ -302,6 +326,10 @@ describe("sourceSessionById", () => {
 
 // Compile-time capability boundaries: neither transport can bypass core admission.
 function requestShapes(workbench: SourceWorkbench): void {
+  // @ts-expect-error completion exposes no lifecycle overrides
+  void workbench.completeSession("s", { skipPrCheck: true });
+  // @ts-expect-error kill exposes no force override
+  void workbench.killSession("s", { force: true });
   void workbench.restoreSession({
     sessionId: "s",
     expectedProject: "p",

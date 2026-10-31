@@ -47,6 +47,7 @@ import {
   GitHubReviewBatchError,
   hasTerminalSignal,
 } from "../review-providers/github.js";
+import { resolveWorkspaceState } from "../workspace-store.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
 export {
@@ -560,8 +561,16 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     return count <= CI_HYSTERESIS_ERROR_TOLERANCE;
   };
 
+  // The workspace file owns the PR binding; a member record's own `pr` can be a
+  // stale handoff copy.
   const listPollableSessions = (allSessions: ReturnType<typeof listSessions>) =>
-    allSessions.filter((session) => isEligibleForSourcePoll(session, deps.projectId));
+    allSessions
+      .filter((session) => isEligibleForSourcePoll(session, deps.projectId))
+      .map((record): SessionRecord => {
+        const { pr: _recordPr, ...session } = record;
+        const { pr } = resolveWorkspaceState(deps.dataDir, record);
+        return pr ? { ...session, pr } : session;
+      });
 
   const shouldPollThisTick = (): boolean => {
     refreshPollDisabled();
@@ -681,6 +690,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         deps.sourceId,
         deps.config.maxReviewBatchTargets,
         deps.config.selfMarker,
+        deps.config.ignoreChecks,
       );
       for (const session of pollableSessions) {
         try {
@@ -1036,14 +1046,41 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     return activePoll;
   };
 
+  // Fire-and-forget cycles (tick, deferred start, runOnStart) end here: a throw is
+  // logged once for that cycle and the next tick polls again. The awaited startup
+  // cycle is not routed through it, so start() still rejects there.
+  const reportPollCycleFailure = (error: unknown): void => {
+    const message = extractGithubErrorText(error);
+    deps.logger.warn?.(`[source:${deps.projectId}/${deps.sourceId}] poll cycle failed: ${message}`);
+    logSpurEvent(deps.dataDir, {
+      event: "source.poll_cycle.error",
+      level: "error",
+      projectId: deps.projectId,
+      sourceId: deps.sourceId,
+      message: `Poll cycle failed for ${deps.projectId}/${deps.sourceId}: ${message}`,
+    });
+  };
+
+  // pollCycle hands back the in-flight cycle when one is running: attach the
+  // catch only to a cycle this call started, so a failure is reported once.
+  const firePollCycle = (emitInitial: boolean): void => {
+    if (activePoll) return;
+    pollCycle(emitInitial).catch(reportPollCycleFailure);
+  };
+
   const timer = startInterval(() => {
-    if (!shouldPollThisTick()) return;
-    void pollCycle(false);
+    try {
+      if (!shouldPollThisTick()) return;
+    } catch (error) {
+      reportPollCycleFailure(error);
+      return;
+    }
+    firePollCycle(false);
   }, deps.config.intervalMs);
 
   if (!deps.config.runOnStart) {
     if (deps.deferInitialSync) {
-      void pollCycle(false);
+      firePollCycle(false);
     } else {
       await pollCycle(false);
     }
@@ -1058,7 +1095,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     ...(deps.config.runOnStart
       ? {
           runOnStart(): void {
-            void pollCycle(true);
+            firePollCycle(true);
           },
         }
       : {}),

@@ -20,6 +20,7 @@ import { listAgentModels, parseOpenCodeVerboseModelsOutput } from "../../src/age
 import type { AgentName, ProviderReasoningEffort, SessionView } from "../../src/types.js";
 import type { ProviderTokenUsageSample } from "../../src/token-usage.js";
 import { createTempDir, execFileAsync, findFreePort, pollUntil } from "../helpers/common.js";
+import { SmokeCaseRegistry, type SmokeCase } from "../helpers/smoke-case.js";
 import {
   isTmuxAvailable,
   killTmuxServer,
@@ -55,8 +56,10 @@ interface CleanupItem {
 async function waitForRestorableSession(
   service: { get(sessionId: string): Promise<SessionView> },
   sessionId: string,
+  signal: AbortSignal,
 ): Promise<SessionView> {
   return pollUntil(() => service.get(sessionId), {
+    signal,
     timeoutMs: 20_000,
     intervalMs: 250,
     accept: isRestorableSession,
@@ -67,8 +70,10 @@ async function waitForRestorableSession(
 async function waitForIdleSession(
   service: { get(sessionId: string): Promise<SessionView> },
   sessionId: string,
+  signal: AbortSignal,
 ): Promise<SessionView> {
   return pollUntil(() => service.get(sessionId), {
+    signal,
     timeoutMs: 120_000,
     intervalMs: 500,
     accept: (session) => session.state === "waiting" || session.state === "needs_input",
@@ -397,9 +402,11 @@ async function assertStructuredMainUsage(
   session: SessionView,
   service: Awaited<ReturnType<typeof startServer>>,
   dataDir: string,
+  signal: AbortSignal,
   previousTotal = 0,
 ): Promise<number> {
   const withUsage = await pollUntil(() => service.get(session.id), {
+    signal,
     timeoutMs: 60_000,
     accept: (state) =>
       state.tokenUsageView?.status === "available" &&
@@ -445,6 +452,7 @@ async function assertStructuredMainUsage(
   const structured = sample;
   if (!structured) throw new Error(`${agent} structured usage unavailable`);
   const settled = await pollUntil(() => service.get(session.id), {
+    signal,
     timeoutMs: 30_000,
     accept: (state) =>
       state.tokenUsageView?.status === "available" &&
@@ -483,10 +491,25 @@ async function assertStructuredMainUsage(
   return settledView.totalTokens;
 }
 
-async function runSmoke(
+const smokeCases = new SmokeCaseRegistry();
+
+function runSmoke(
   agent: AgentName,
   options?: { expectedPreflightBranch?: string; selectedEffort?: boolean },
 ): Promise<void> {
+  return smokeCases.run((smokeCase) => runSmokeCase(smokeCase, agent, options));
+}
+
+function runOpenCodeSmoke(explicitOverride: boolean): Promise<void> {
+  return smokeCases.run((smokeCase) => runOpenCodeSmokeCase(smokeCase, explicitOverride));
+}
+
+async function runSmokeCase(
+  smokeCase: SmokeCase,
+  agent: AgentName,
+  options?: { expectedPreflightBranch?: string; selectedEffort?: boolean },
+): Promise<void> {
+  const { signal } = smokeCase;
   const rootDir = await createTempDir(`spur-smoke-${agent}-`);
   const port = await findFreePort();
   const dataDir = join(rootDir, "data");
@@ -548,6 +571,7 @@ async function runSmoke(
       throw new Error(`${agent}: no advertised model available for reasoning smoke; A4 unproved`);
     }
     const service = await startServer(configPath, {});
+    smokeCase.ownService(service);
     const initialSmokeTimeoutMs = agent === "claude" ? 180_000 : 240_000;
     const expectedTitle = `${agent} smoke slots`;
     const expectedLinks = [
@@ -619,10 +643,12 @@ After the file and the session metadata are set, wait for more instructions.${ag
 
       const initialFile = join(session.worktreePath, "smoke-initial.txt");
       await pollUntil(async () => existsSync(initialFile), {
+        signal,
         timeoutMs: initialSmokeTimeoutMs,
         accept: Boolean,
       });
       const liveState = await pollUntil(() => service.get(session.id), {
+        signal,
         timeoutMs: 30_000,
         accept: (state) =>
           state.status === "running" &&
@@ -641,16 +667,18 @@ After the file and the session metadata are set, wait for more instructions.${ag
       }
       expect((await readFile(initialFile, "utf8")).trim()).toBe(`${agent} initial`);
 
-      await waitForIdleSession(service, session.id);
+      await waitForIdleSession(service, session.id, signal);
       const nativeSessionId = (await service.get(session.id)).agentSessionId;
       if (!nativeSessionId) throw new Error(`${agent} native session id missing`);
       if (agent === "codex" && options?.selectedEffort) {
         await expectCodexNativeEffort(dataDir, session.id, nativeSessionId, reasoningEffort);
       }
       const initialUsage =
-        agent === "cursor" ? await assertStructuredMainUsage(agent, session, service, dataDir) : 0;
+        agent === "cursor"
+          ? await assertStructuredMainUsage(agent, session, service, dataDir, signal)
+          : 0;
       await service.pause(session.id);
-      await waitForRestorableSession(service, session.id);
+      await waitForRestorableSession(service, session.id, signal);
 
       const restored = await service.restore(session.id);
       expect(restored.id).toBe(session.id);
@@ -665,6 +693,7 @@ After the file and the session metadata are set, wait for more instructions.${ag
 
       if (agent === "codex") {
         await pollUntil(() => service.get(session.id), {
+          signal,
           timeoutMs: 240_000,
           accept: (state) => state.status === "running" && state.state === "waiting",
           label: "restored agent waiting for follow-up",
@@ -677,6 +706,7 @@ After the file and the session metadata are set, wait for more instructions.${ag
 
       const followupFile = join(session.worktreePath, "smoke-followup.txt");
       await pollUntil(async () => existsSync(followupFile), {
+        signal,
         timeoutMs: 120_000,
         accept: Boolean,
       });
@@ -684,7 +714,7 @@ After the file and the session metadata are set, wait for more instructions.${ag
       if (agent === "codex" && options?.selectedEffort) {
         await expectCodexNativeEffort(dataDir, session.id, nativeSessionId, reasoningEffort);
       }
-      await assertStructuredMainUsage(agent, session, service, dataDir, initialUsage);
+      await assertStructuredMainUsage(agent, session, service, dataDir, signal, initialUsage);
 
       const killed = await service.kill(session.id, { force: true, skipPrCheck: true });
       expect(killed.status).toBe("killed");
@@ -698,6 +728,7 @@ After the file and the session metadata are set, wait for more instructions.${ag
               excludePanePid: null,
             }),
           {
+            signal,
             timeoutMs: 30_000,
             accept: (scan) => scan.status === "ok" && scan.pids.length === 0,
             label: "test-owned Claude processes exited",
@@ -761,7 +792,11 @@ async function nativeOpenCodeUsers(sessionId: string): Promise<Record<string, un
   });
 }
 
-async function runOpenCodeSmoke(explicitOverride: boolean): Promise<void> {
+async function runOpenCodeSmokeCase(
+  smokeCase: SmokeCase,
+  explicitOverride: boolean,
+): Promise<void> {
+  const { signal } = smokeCase;
   const agent = "opencode" as const;
   const rootDir = await createTempDir("spur-smoke-opencode-");
   const port = await findFreePort();
@@ -870,6 +905,7 @@ async function runOpenCodeSmoke(explicitOverride: boolean): Promise<void> {
     );
     await withPinnedAgentBinaries(configPath, async () => {
       const service = await startServer(configPath, {});
+      smokeCase.ownService(service);
       try {
         const session = await service.spawn({
           project: "api",
@@ -885,6 +921,7 @@ async function runOpenCodeSmoke(explicitOverride: boolean): Promise<void> {
         if (!nativeSessionId) throw new Error("OpenCode native session id missing");
 
         await pollUntil(() => service.getConversation(session.id), {
+          signal,
           timeoutMs: 120_000,
           accept: (conversation) =>
             conversation.messages.some(
@@ -905,7 +942,7 @@ async function runOpenCodeSmoke(explicitOverride: boolean): Promise<void> {
         for (const file of protectedFiles) expect(await readFile(file.path)).toEqual(file.bytes);
 
         await service.pause(session.id);
-        await waitForRestorableSession(service, session.id);
+        await waitForRestorableSession(service, session.id, signal);
         const project = service.config.projects["api"];
         if (!project) throw new Error("OpenCode smoke project missing");
         const nextConfig = {
@@ -924,6 +961,7 @@ async function runOpenCodeSmoke(explicitOverride: boolean): Promise<void> {
         expect(restored.agentSessionId).toBe(nativeSessionId);
         await service.send(session.id, { message: "Reply with exactly SPUR_OPENCODE_SMOKE_TWO" });
         await pollUntil(() => service.getConversation(session.id), {
+          signal,
           timeoutMs: 120_000,
           accept: (conversation) =>
             conversation.messages.some(
@@ -941,7 +979,7 @@ async function runOpenCodeSmoke(explicitOverride: boolean): Promise<void> {
         });
         for (const file of protectedFiles) expect(await readFile(file.path)).toEqual(file.bytes);
 
-        await assertStructuredMainUsage(agent, session, service, dataDir);
+        await assertStructuredMainUsage(agent, session, service, dataDir, signal);
 
         const killed = await service.kill(session.id, { force: true, skipPrCheck: true });
         expect(killed.status).toBe("killed");
@@ -959,18 +997,27 @@ async function runOpenCodeSmoke(explicitOverride: boolean): Promise<void> {
   }
 }
 
+// Budget leaves 30s for cleanup inside the 90s hookTimeout.
 afterEach(async () => {
-  while (cleanupItems.length > 0) {
-    const item = popCleanupItem();
-    try {
-      await cleanupSmokeItem(item);
-    } catch (error) {
-      // one item's cleanup failure must not abandon the rest of the drain.
-      // eslint-disable-next-line no-console
-      console.warn(`cleanupSmokeItem failed for ${item.rootDir}: ${String(error)}`);
-    }
+  try {
+    await smokeCases.drain(
+      async () => {
+        while (cleanupItems.length > 0) {
+          const item = popCleanupItem();
+          try {
+            await cleanupSmokeItem(item);
+          } catch (error) {
+            // one item's cleanup failure must not abandon the rest of the drain.
+            // eslint-disable-next-line no-console
+            console.warn(`cleanupSmokeItem failed for ${item.rootDir}: ${String(error)}`);
+          }
+        }
+      },
+      { budgetMs: 60_000 },
+    );
+  } finally {
+    setActiveTmuxSocketName(null);
   }
-  setActiveTmuxSocketName(null);
 });
 
 describe("cursor auth status parsing", () => {
