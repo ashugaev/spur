@@ -1253,7 +1253,7 @@ describe("readCursorTranscriptEntries", () => {
     tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
     await seedTranscript(worktreePath, "working-tool-use.jsonl");
 
-    const entries = await readCursorTranscriptEntries(worktreePath);
+    const entries = await readCursorTranscriptEntries(worktreePath, "chat");
     expect(entries).not.toBeNull();
     if (!entries) throw new Error("expected entries");
 
@@ -1268,7 +1268,7 @@ describe("readCursorTranscriptEntries", () => {
     tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
     await seedTranscript(worktreePath, "needs-input-ask-user.jsonl");
 
-    const entries = await readCursorTranscriptEntries(worktreePath);
+    const entries = await readCursorTranscriptEntries(worktreePath, "chat");
     expect(entries).not.toBeNull();
     if (!entries) throw new Error("expected entries");
 
@@ -1281,7 +1281,32 @@ describe("readCursorTranscriptEntries", () => {
     const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-transcript-missing-"));
     tempRoots.push(worktreePath);
 
-    const entries = await readCursorTranscriptEntries(worktreePath);
+    const entries = await readCursorTranscriptEntries(worktreePath, "missing");
     expect(entries).toBeNull();
+  });
+
+  it("reads only its own chat when a newer peer chat shares the project dir, null for a missing id", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-transcript-shared-"));
+    tempRoots.push(worktreePath);
+    const projectDir = join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath));
+    tempRoots.push(projectDir);
+    const transcriptsDir = join(projectDir, "agent-transcripts");
+    const line = (text: string): string =>
+      `${JSON.stringify({ role: "user", message: { content: [{ type: "text", text }] } })}\n`;
+    const ownPath = join(transcriptsDir, "own", "own.jsonl");
+    const peerPath = join(transcriptsDir, "peer", "peer.jsonl");
+    await mkdir(dirname(ownPath), { recursive: true });
+    await mkdir(dirname(peerPath), { recursive: true });
+    await writeFile(ownPath, line("own turn"));
+    await writeFile(peerPath, line("peer turn"));
+    await utimes(ownPath, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+    await utimes(peerPath, new Date("2026-01-02T00:00:00Z"), new Date("2026-01-02T00:00:00Z"));
+
+    const own = await readCursorTranscriptEntries(worktreePath, "own");
+    expect(JSON.stringify(own)).toContain("own turn");
+    expect(JSON.stringify(own)).not.toContain("peer turn");
+
+    await rm(ownPath);
+    expect(await readCursorTranscriptEntries(worktreePath, "own")).toBeNull();
   });
 });
