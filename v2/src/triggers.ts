@@ -884,7 +884,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         return false;
     }
     const references = occurrenceReferencesByQueue.get(queueKey);
-    if (references && current) {
+    if (references) {
       for (const occurrenceId of references) {
         autoPing.releaseOccurrenceReference(current.routeFingerprint, occurrenceId);
       }
@@ -1256,7 +1256,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
               return { status: "delivered" };
             });
           } catch (error) {
-            return await autoPing.withRouteLock(batch.routeFingerprint, async () => {
+            return autoPing.withRouteLock(batch.routeFingerprint, async () => {
               const latest = readPendingSendBatch(deps.config.dataDir, batch.workId);
               if (latest?.claim?.claimId !== claimId) return { status: "suppressed" };
               const latestBatch = restoreSendBatch(latest.batch);
@@ -1693,100 +1693,104 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     const routeLeaseId = leaseForRoute(routeFingerprint, route);
     let batch: PendingBatch | undefined;
     let merged = false;
-    let activeClaim = false;
-    await autoPing.withRouteLock(routeFingerprint, async () => {
-      const cached = pendingBatches.get(queueKey);
-      const persisted = readPendingSendBatches(deps.config.dataDir).get(queueKey);
-      if (cached && !persisted) {
-        clearBatch(queueKey, cached, { deletePersisted: false });
-      } else if (persisted && (!cached || persisted.workId !== cached.workId)) {
-        return;
-      }
-      merged = pendingBatches.has(queueKey);
-      if (autoPing.isSuppressed(routeFingerprint, destination, occurrenceId)) return;
-      sendBatch.attachAutoPing({
-        occurrenceId,
-        routeFingerprint,
-        destination,
-        createGrant: (scope, target) =>
-          autoPing.createGrant({
-            scope,
-            routeFingerprint,
-            destination,
-            target,
-            actorSessionId: sendBatch.sessionId,
-          }).handle,
-      });
-      sendBatch.filterAutoPing((itemOccurrenceId, threadTarget) =>
-        autoPing.isSuppressed(routeFingerprint, destination, itemOccurrenceId, threadTarget),
-      );
-      if (sendBatch.isEmpty()) return;
-      const prior = pendingBatches.get(queueKey);
-      const authoritativeBatch = persisted ? restoreSendBatch(persisted.batch) : null;
-      if (merged && (!prior || !authoritativeBatch)) return;
-      const candidate = mergeIntoBatch(
-        prior && authoritativeBatch
-          ? {
-              ...prior,
-              batch: authoritativeBatch,
-              revision: persisted?.revision ?? 0,
-              retryAccounting: reconcileRetryAccounting(
-                authoritativeBatch,
-                persisted?.retryAccounting ?? [],
-              ),
-              admissionCapRetryAt: persisted?.admissionCapRetryAt,
-              admissionCapDenials: persisted?.admissionCapDenials,
-            }
-          : undefined,
-        projectId,
-        triggerId,
-        trigger.source,
-        eventName,
-        trigger.send.prompt,
-        sendBatch,
-        { routeFingerprint, destination, routeLeaseId },
-      );
-      candidate.revision += merged ? 1 : 0;
-      const record = {
-        queueKey,
-        workId: candidate.workId,
-        revision: candidate.revision,
-        projectId,
-        triggerId,
-        sourceId: trigger.source,
-        batch: candidate.batch.serialize(),
-        retryAccounting: candidate.retryAccounting,
-        admissionCapRetryAt:
-          candidate.admissionCapRetryAt !== undefined && candidate.admissionCapRetryAt > Date.now()
-            ? candidate.admissionCapRetryAt
-            : undefined,
-        admissionCapDenials: candidate.admissionCapDenials,
-        ...(persisted?.claim ? { claim: persisted.claim } : {}),
-        ...(persisted?.suppressedHoldAt !== undefined
-          ? { suppressedHoldAt: persisted.suppressedHoldAt }
-          : {}),
-      };
-      if (persisted) {
-        if (
-          !updatePendingSendBatchConditional(
-            deps.config.dataDir,
-            {
-              workId: candidate.workId,
-              revision: persisted.revision ?? 0,
-              ...(persisted.claim ? { claimId: persisted.claim.claimId } : {}),
-            },
-            record,
-          )
-        )
+    const activeClaim = Boolean(
+      await autoPing.withRouteLock(routeFingerprint, async () => {
+        const cached = pendingBatches.get(queueKey);
+        const persisted = readPendingSendBatches(deps.config.dataDir).get(queueKey);
+        if (cached && !persisted) {
+          clearBatch(queueKey, cached, { deletePersisted: false });
+        } else if (persisted && (!cached || persisted.workId !== cached.workId)) {
           return;
-      } else {
-        recordPendingSendBatch(deps.config.dataDir, record);
-      }
-      batch = candidate;
-      pendingBatches.set(queueKey, candidate);
-      syncBatchOccurrenceReferences(queueKey, candidate);
-      activeClaim = !!persisted?.claim && autoPing.isRouteLeaseActive(persisted.claim.routeLeaseId);
-    });
+        }
+        merged = pendingBatches.has(queueKey);
+        if (autoPing.isSuppressed(routeFingerprint, destination, occurrenceId)) return;
+        sendBatch.attachAutoPing({
+          occurrenceId,
+          routeFingerprint,
+          destination,
+          createGrant: (scope, target) =>
+            autoPing.createGrant({
+              scope,
+              routeFingerprint,
+              destination,
+              target,
+              actorSessionId: sendBatch.sessionId,
+            }).handle,
+        });
+        sendBatch.filterAutoPing((itemOccurrenceId, threadTarget) =>
+          autoPing.isSuppressed(routeFingerprint, destination, itemOccurrenceId, threadTarget),
+        );
+        if (sendBatch.isEmpty()) return;
+        const prior = pendingBatches.get(queueKey);
+        const authoritativeBatch = persisted ? restoreSendBatch(persisted.batch) : null;
+        if (merged && (!prior || !authoritativeBatch)) return;
+        const candidate = mergeIntoBatch(
+          prior && authoritativeBatch
+            ? {
+                ...prior,
+                batch: authoritativeBatch,
+                revision: persisted?.revision ?? 0,
+                retryAccounting: reconcileRetryAccounting(
+                  authoritativeBatch,
+                  persisted?.retryAccounting ?? [],
+                ),
+                admissionCapRetryAt: persisted?.admissionCapRetryAt,
+                admissionCapDenials: persisted?.admissionCapDenials,
+              }
+            : undefined,
+          projectId,
+          triggerId,
+          trigger.source,
+          eventName,
+          trigger.send.prompt,
+          sendBatch,
+          { routeFingerprint, destination, routeLeaseId },
+        );
+        candidate.revision += merged ? 1 : 0;
+        const record = {
+          queueKey,
+          workId: candidate.workId,
+          revision: candidate.revision,
+          projectId,
+          triggerId,
+          sourceId: trigger.source,
+          batch: candidate.batch.serialize(),
+          retryAccounting: candidate.retryAccounting,
+          admissionCapRetryAt:
+            candidate.admissionCapRetryAt !== undefined &&
+            candidate.admissionCapRetryAt > Date.now()
+              ? candidate.admissionCapRetryAt
+              : undefined,
+          admissionCapDenials: candidate.admissionCapDenials,
+          ...(persisted?.claim ? { claim: persisted.claim } : {}),
+          ...(persisted?.suppressedHoldAt !== undefined
+            ? { suppressedHoldAt: persisted.suppressedHoldAt }
+            : {}),
+        };
+        if (persisted) {
+          if (
+            !updatePendingSendBatchConditional(
+              deps.config.dataDir,
+              {
+                workId: candidate.workId,
+                revision: persisted.revision ?? 0,
+                ...(persisted.claim ? { claimId: persisted.claim.claimId } : {}),
+              },
+              record,
+            )
+          )
+            return;
+        } else {
+          recordPendingSendBatch(deps.config.dataDir, record);
+        }
+        batch = candidate;
+        pendingBatches.set(queueKey, candidate);
+        syncBatchOccurrenceReferences(queueKey, candidate);
+        return Boolean(
+          persisted?.claim && autoPing.isRouteLeaseActive(persisted.claim.routeLeaseId),
+        );
+      }),
+    );
     if (!batch) return;
     logTriggerEvent(deps.config.dataDir, "trigger.send.queued", {
       level: "info",
