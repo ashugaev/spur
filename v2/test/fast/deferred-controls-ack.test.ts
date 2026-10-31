@@ -93,7 +93,11 @@ const getReleasesMock = vi.fn();
 const getVersionMock = vi.fn();
 const reserveNextSessionIdMock = vi.fn();
 const listSessionsMock = vi.fn();
-const archiveSessionsMock = vi.fn(() => ({ archivedIds: [], archiveDir: "/tmp/sessions-archive" }));
+const archiveSessionsMock = vi.fn(() => ({
+  archivedIds: [],
+  retainedAnchorIds: [],
+  archiveDir: "/tmp/sessions-archive",
+}));
 const readAvailableBacklogItemsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
@@ -632,6 +636,7 @@ vi.mock("../../src/agents/codex.js", async (importOriginal) => {
 
 vi.mock("../../src/agents/models.js", () => ({
   resolveCursorLaunchModel: resolveCursorLaunchModelMock,
+  validateCodexModel: async (model: string) => model,
   validateOpenCodeModel: validateOpenCodeModelMock,
 }));
 
@@ -842,6 +847,7 @@ function baseConfig() {
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+      switchAuth: false,
     },
     diskRetention: { warnFreeGb: 10 },
     sessionGc: {
@@ -948,7 +954,8 @@ function createSessionStore() {
   // every call (clone() always allocates a new object), which contradicts
   // the real listSessions() and would make the tick's record-change
   // detection untestable. readSessionMock/writeSessionMock stay a raw clone
-  // per call, mirroring production where only listSessions is stat-gated.
+  // per call: production readSession shares the same cache, but no caller
+  // relies on its identity.
   const published = new Map<string, { json: string; record: SessionRecord }>();
   readSessionMock.mockImplementation((_dataDir: string, sessionId: string) => {
     const session = sessions.get(sessionId);

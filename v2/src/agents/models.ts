@@ -8,6 +8,7 @@ import {
   listClaudeModels,
 } from "./claude.js";
 import { DEFAULT_CURSOR_MODEL, cursorCommand } from "./cursor.js";
+import { codexArgsSelectProvider, codexUsesCustomProvider, readCodexUserConfig } from "./codex.js";
 import { opencodeCommand, readOpenCodeJson } from "./opencode.js";
 import { missingAgentExecutableMessage, resolveAgentExecutable } from "./executable.js";
 import type { AgentName, ProviderReasoningEffort } from "../types.js";
@@ -46,6 +47,10 @@ function orderedEfforts(levels: readonly string[]): ProviderReasoningEffort[] {
 }
 
 export class AgentReasoningEffortError extends Error {
+  readonly statusCode = 400;
+}
+
+export class AgentModelError extends Error {
   readonly statusCode = 400;
 }
 
@@ -123,6 +128,23 @@ async function listCodexModels(
     return [];
   }
   return parseCodexModelsCache(raw, includeHidden);
+}
+
+export async function validateCodexModel(
+  model: string,
+  codexHomePath: string,
+  codexArgs: readonly string[] = [],
+): Promise<string> {
+  if (codexArgsSelectProvider(codexArgs) || codexUsesCustomProvider(await readCodexUserConfig())) {
+    return model;
+  }
+  const models = await listCodexModels(codexHomePath, true);
+  if (models.length === 0 || models.some((entry) => entry.id === model)) {
+    return model;
+  }
+  throw new AgentModelError(
+    `Codex model "${model}" is not available; available: ${models.map((entry) => entry.id).join(", ")}`,
+  );
 }
 
 export function parseCursorModelsOutput(stdout: string): AgentModel[] {
@@ -299,11 +321,39 @@ export function parseOpenCodeVerboseModelsOutput(stdout: string): AgentModel[] {
 // loaded host and blocks the spawn. Match the other OpenCode CLI reads.
 const OPENCODE_MODELS_TIMEOUT_MS = 20_000;
 
-async function discoverOpenCodeModels(): Promise<AgentModel[]> {
+// Same TTL, keying and failure semantics as cursorCache: only successful
+// discovery is cached; a rejected call is evicted from in-flight, never cached.
+const openCodeCache = new Map<string, CursorCacheEntry>();
+const openCodeInFlight = new Map<string, Promise<AgentModel[]>>();
+
+async function execOpenCodeModels(cacheKey: string): Promise<AgentModel[]> {
   const stdout = await readOpenCodeJson(["models", "--verbose"], {
     timeoutMs: OPENCODE_MODELS_TIMEOUT_MS,
   });
-  return parseOpenCodeVerboseModelsOutput(stdout);
+  const models = parseOpenCodeVerboseModelsOutput(stdout);
+  // An empty catalog is not cached: a provider configured later must show up
+  // without waiting out the TTL.
+  if (models.length > 0) {
+    openCodeCache.set(cacheKey, { models, expiresAt: Date.now() + CURSOR_CACHE_TTL_MS });
+  }
+  return models;
+}
+
+async function discoverOpenCodeModels(): Promise<AgentModel[]> {
+  const cacheKey = opencodeCommand();
+  const cached = openCodeCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.models;
+  }
+  const inFlight = openCodeInFlight.get(cacheKey);
+  if (inFlight) {
+    return inFlight;
+  }
+  const request = execOpenCodeModels(cacheKey).finally(() => {
+    openCodeInFlight.delete(cacheKey);
+  });
+  openCodeInFlight.set(cacheKey, request);
+  return request;
 }
 
 function missingOpenCodeExecutableError(error: unknown): Error | null {

@@ -10,9 +10,11 @@ import type {
   ReviewSignalRefreshResult,
 } from "../../src/review-providers/types.js";
 import { EventBus } from "../../src/event-bus.js";
+import { normalizeSlotLinks } from "../../src/session-slots.js";
 import type {
   AutoPingRouteDescriptor,
   PersistedPendingBatch,
+  PersistedSpawnWork,
   ReviewSignal,
   ReviewSnapshot,
   WorkItemLifecycleRecord,
@@ -40,6 +42,7 @@ const logSpurEventMock = vi.fn();
 const refreshSignalsMock =
   vi.fn<(input: RefreshReviewSignalsInput) => Promise<ReviewSignalRefreshResult[]>>();
 const DATA_DIR = `/tmp/spur-trigger-data-${process.pid}`;
+const pendingSpawnWork = new Map<string, PersistedSpawnWork>();
 
 function inputLogEntries(sessionId: string): unknown[] {
   return logSpurEventMock.mock.calls
@@ -60,6 +63,19 @@ vi.mock("../../src/event-log.js", async (importOriginal) => {
 });
 
 vi.mock("../../src/metadata.js", () => ({
+  readPendingSpawnWork: () =>
+    new Map([...pendingSpawnWork].map(([id, work]) => [id, structuredClone(work)])),
+  writePendingSpawnWork: (_dataDir: string, work: PersistedSpawnWork, revision?: number) => {
+    const current = pendingSpawnWork.get(work.workId);
+    if (revision === undefined ? current !== undefined : current?.revision !== revision)
+      return false;
+    pendingSpawnWork.set(work.workId, structuredClone(work));
+    return true;
+  },
+  deletePendingSpawnWork: (_dataDir: string, id: string, revision: number) => {
+    if (pendingSpawnWork.get(id)?.revision !== revision) return false;
+    return pendingSpawnWork.delete(id);
+  },
   deleteWorkItemLifecycle: deleteWorkItemLifecycleMock,
   readGitHubSourceSnapshot: readGitHubSourceSnapshotMock,
   readReviewSourceSnapshot: readReviewSourceSnapshotMock,
@@ -750,6 +766,10 @@ async function loadTriggersModule() {
   return {
     ...module,
     startConfiguredTriggers(deps: Omit<TriggerDeps, "autoPing"> & { autoPing?: AutoPingService }) {
+      deps = {
+        ...deps,
+        sessionService: Object.assign({ getTriggerBirth: () => undefined }, deps.sessionService),
+      };
       if (deps.autoPing) return module.startConfiguredTriggers(deps as TriggerDeps);
       const policyDir = mkdtempSync(join(tmpdir(), "spur-trigger-policy-"));
       const autoPing = new AutoPingService(policyDir);
@@ -780,6 +800,7 @@ async function advanceSendWindow(): Promise<void> {
 
 describe("startConfiguredTriggers", () => {
   beforeEach(() => {
+    pendingSpawnWork.clear();
     vi.useFakeTimers();
     refreshSignalsMock
       .mockReset()
@@ -931,7 +952,7 @@ describe("startConfiguredTriggers", () => {
             expect(pending()?.admissionCapDenials).toBe(1);
             expect(refreshSignalsMock).toHaveBeenCalledTimes(1);
             expect(deliver).toHaveBeenCalledTimes(1);
-            expect(updatePendingSendBatchConditionalMock).toHaveBeenCalledTimes(claims);
+            expect(updatePendingSendBatchConditionalMock).toHaveBeenCalledTimes(claims + 1);
             expect(pending()?.retryAccounting?.every((entry) => entry.deliveryAttempts === 0)).toBe(
               true,
             );
@@ -1381,7 +1402,13 @@ describe("startConfiguredTriggers", () => {
           expect(deliver.mock.calls[0]?.[1]).not.toContain("- failed\n");
           const record = pending();
           expect(record?.batch).toMatchObject({
-            signals: signals.filter((signal) => signal.key !== "comment:2"),
+            signals: signals
+              .filter((signal) => signal.key !== "comment:2")
+              .map((signal) =>
+                ["comment:3", "comment:4"].includes(signal.key)
+                  ? { ...signal, text: "current" }
+                  : signal,
+              ),
           });
           if (reason === "cap") {
             expect(record?.admissionCapRetryAt).toBeGreaterThan(Date.now());
@@ -1464,8 +1491,11 @@ describe("startConfiguredTriggers", () => {
           })),
         );
         await vi.advanceTimersByTimeAsync(10_000);
-        expect(pending()?.retryAccounting?.[0]).toMatchObject({ deliveryAttempts: 2, fingerprint });
-        expect(pending()?.batch).toMatchObject({ signals });
+        expect(pending()?.retryAccounting?.[0]?.deliveryAttempts).toBe(1);
+        expect(pending()?.retryAccounting?.[0]?.fingerprint).not.toBe(fingerprint);
+        expect(pending()?.batch).toMatchObject({
+          signals: [{ ...signals[0], text: "edited remotely" }],
+        });
         emit(
           bus,
           signals.map((signal) => ({ ...signal, text: "separately enqueued edit" })),
@@ -2105,7 +2135,12 @@ describe("startConfiguredTriggers", () => {
           signals: [{ key: "comment:2", kind: "comment", text: "Concurrent live sibling" }],
         },
       });
-      await vi.waitFor(() => expect(recordPendingSendBatchMock).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => {
+        const state = readPendingSendBatchesMock().get("api:send:api-1")?.batch;
+        expect(state?.kind === "review" && state.signals).toEqual(
+          expect.arrayContaining([expect.objectContaining({ key: "comment:2" })]),
+        );
+      });
       readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot("comment:2"));
       release();
       await ticking;
@@ -2355,6 +2390,214 @@ describe("startConfiguredTriggers", () => {
       await replacement?.stop();
       autoPing.dispose();
       rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists a new comment while an earlier delivery waits for acknowledgement", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "spur-trigger-held-intake-"));
+    const autoPing = new AutoPingService(dataDir);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const deliver = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        started();
+        await held;
+        throw new Error("submit acknowledgement failed");
+      })
+      .mockResolvedValue(undefined);
+    const get = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: { ...config(), dataDir } as never,
+      bus,
+      autoPing,
+      sessionService: { get, deliver } as never,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      bus.emit(githubEvent());
+      const advancing = vi.advanceTimersByTimeAsync(35_000);
+      await entered;
+      const before = readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch;
+      expect(before.claim).toBeDefined();
+      readGitHubSourceSnapshotMock.mockReturnValue(
+        storedSnapshot([
+          { key: "comment:1", kind: "comment", text: "A new comment arrived." },
+          { key: "comment:2", kind: "comment", text: "Second comment." },
+        ]),
+      );
+      bus.emit({
+        ...githubEvent("comment:2"),
+        data: {
+          ...githubEvent("comment:2").data,
+          signals: [{ key: "comment:2", kind: "comment", text: "Second comment." }],
+        },
+      });
+      for (let i = 0; i < 12; i++) await Promise.resolve();
+      const during = readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch;
+      expect(
+        during.batch.kind === "review" && during.batch.signals.map((item) => item.key),
+      ).toContain("comment:2");
+      expect(during.claim?.claimId).toBe(before.claim?.claimId);
+      expect(deliver).toHaveBeenCalledTimes(1);
+      const completedAt = Date.now();
+      release();
+      await advancing;
+      expect(
+        (
+          readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch
+        ).retryAccounting?.find((entry) => entry.itemKey.includes("comment:1"))?.nextAttemptAt,
+      ).toBe(completedAt + 10_000);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(deliver.mock.calls[1]?.[1]).toContain("Second comment.");
+    } finally {
+      release();
+      await controller.stop();
+      autoPing.dispose();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a newer fingerprint for the same comment after the old delivery succeeds", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "spur-trigger-same-key-"));
+    const autoPing = new AutoPingService(dataDir);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const deliver = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        started();
+        await held;
+      })
+      .mockResolvedValue(undefined);
+    const get = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: { ...config(), dataDir } as never,
+      bus,
+      autoPing,
+      sessionService: { get, deliver } as never,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      bus.emit(githubEvent());
+      const advancing = vi.advanceTimersByTimeAsync(35_000);
+      await entered;
+      const changed = { key: "comment:1", kind: "comment" as const, text: "Edited after submit." };
+      readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot([changed]));
+      bus.emit({
+        ...githubEvent(),
+        occurrenceId: "newer-edit",
+        data: {
+          ...githubEvent().data,
+          signals: [changed],
+        },
+      });
+      for (let i = 0; i < 12; i++) await Promise.resolve();
+      const during = readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch;
+      expect(during.batch.kind === "review" && during.batch.signals[0]?.text).toBe(changed.text);
+      expect(deliver).toHaveBeenCalledTimes(1);
+      release();
+      for (let i = 0; i < 100 && readPendingSendBatchesMock().get("api:send:api-1")?.claim; i++) {
+        await Promise.resolve();
+      }
+      const after = readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch;
+      expect(after.batch.kind === "review" && after.batch.signals[0]?.text).toBe(changed.text);
+      expect(after.retryAccounting?.[0]).toMatchObject({ deliveryAttempts: 0, nextAttemptAt: 0 });
+      await advancing;
+      await vi.advanceTimersByTimeAsync(35_000);
+      expect(deliver.mock.calls[1]?.[1]).toContain(changed.text);
+    } finally {
+      release();
+      await controller.stop();
+      autoPing.dispose();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a newer merged event when an older session lookup rejects", async () => {
+    let rejectOld!: (error: Error) => void;
+    const oldLookup = new Promise<never>((_, reject) => {
+      rejectOld = reject;
+    });
+    const get = vi
+      .fn()
+      .mockImplementationOnce(() => oldLookup)
+      .mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        lastActivityAt: staleActivity(),
+        workspaceExists: true,
+      });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: { get, deliver } as never,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      bus.emit(githubEvent());
+      await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(1));
+      readGitHubSourceSnapshotMock.mockReturnValue(
+        storedSnapshot([
+          { key: "comment:1", kind: "comment", text: "A new comment arrived." },
+          { key: "comment:2", kind: "comment", text: "Second comment." },
+        ]),
+      );
+      bus.emit({
+        ...githubEvent("comment:2"),
+        data: {
+          ...githubEvent("comment:2").data,
+          signals: [{ key: "comment:2", kind: "comment", text: "Second comment." }],
+        },
+      });
+      await vi.waitFor(() =>
+        expect(readPendingSendBatchesMock().get("api:send:api-1")?.revision).toBe(2),
+      );
+      rejectOld(new Error("stale lookup failed"));
+      for (let i = 0; i < 12; i++) await Promise.resolve();
+      const remaining = readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch;
+      expect(
+        remaining.batch.kind === "review" && remaining.batch.signals.map((item) => item.key),
+      ).toContain("comment:2");
+      expect(deliver).not.toHaveBeenCalled();
+    } finally {
+      rejectOld(new Error("cleanup"));
+      await controller.stop();
     }
   });
 
@@ -3689,7 +3932,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(cronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledWith({
+        expect(spawnMock.mock.calls[0]?.[0]).toEqual({
           project: "api",
           prompt: "ship the task",
           steps: ["review", "continue"],
@@ -3723,7 +3966,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(webhookEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledWith({
+        expect(spawnMock.mock.calls[0]?.[0]).toEqual({
           project: "api",
           prompt: 'Body={"kind":"deploy"} At=2026-09-08T12:00:00.000Z',
         });
@@ -3752,7 +3995,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(cronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledWith({
+        expect(spawnMock.mock.calls[0]?.[0]).toEqual({
           project: "api",
           prompt: "ship the task",
           agent: "codex",
@@ -3783,7 +4026,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(cronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledWith({
+        expect(spawnMock.mock.calls[0]?.[0]).toEqual({
           project: "api",
           prompt: "ship the task",
           mode: "council",
@@ -3817,7 +4060,7 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+      expect(spawnMock.mock.calls[0]?.[0]).toEqual({
         project: "api",
         prompt: "ship ship the task",
         steps: ["review", "continue"],
@@ -3826,7 +4069,7 @@ describe("startConfiguredTriggers", () => {
           worktree: false,
         },
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+      expect(spawnMock.mock.calls[1]?.[0]).toEqual({
         project: "api",
         prompt: "risks for ship the task",
         steps: ["verify"],
@@ -3855,6 +4098,7 @@ describe("startConfiguredTriggers", () => {
       bus,
       sessionService: {
         spawn: spawnMock,
+        get: vi.fn().mockResolvedValue({ status: "running", workspaceExists: true }),
       } as never,
       logger: {
         warn: vi.fn(),
@@ -3866,7 +4110,7 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+      expect(spawnMock.mock.calls[0]?.[0]).toEqual({
         project: "api",
         prompt: "ship ship the task",
         steps: ["review", "continue"],
@@ -3875,7 +4119,7 @@ describe("startConfiguredTriggers", () => {
           worktree: false,
         },
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+      expect(spawnMock.mock.calls[1]?.[0]).toEqual({
         project: "api",
         prompt: "risks for ship the task",
         steps: ["verify"],
@@ -3904,6 +4148,7 @@ describe("startConfiguredTriggers", () => {
       bus,
       sessionService: {
         spawn: spawnMock,
+        get: vi.fn().mockResolvedValue({ status: "running", workspaceExists: true }),
       } as never,
       logger: {
         warn: warnMock,
@@ -3944,6 +4189,7 @@ describe("startConfiguredTriggers", () => {
       bus,
       sessionService: {
         spawn: spawnMock,
+        get: vi.fn().mockResolvedValue({ status: "running", workspaceExists: true }),
       } as never,
       logger: {
         warn: warnMock,
@@ -4049,15 +4295,18 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(1);
       });
-      expect(spawnMock).toHaveBeenCalledWith({
-        project: "api",
-        prompt: "risks for ship the task",
-        steps: ["verify"],
-        agent: "codex",
-        overrides: {
-          worktree: false,
+      expect(spawnMock).toHaveBeenCalledWith(
+        {
+          project: "api",
+          prompt: "risks for ship the task",
+          steps: ["verify"],
+          agent: "codex",
+          overrides: { worktree: false },
         },
-      });
+        {
+          triggerBirthKey: `${JSON.stringify(["api", "morning", "kickoff", "fanout-cron-occurrence-1"])}:1`,
+        },
+      );
       expect(warnMock).toHaveBeenCalledWith(
         "[trigger:api/kickoff] failed to spawn claude: Cannot render prompt placeholder {{missing}}: event data.missing is unavailable",
       );
@@ -4671,7 +4920,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(cronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledWith({
+        expect(spawnMock.mock.calls[0]?.[0]).toEqual({
           project: "api",
           prompt: "review only",
           restrictWrites: true,
@@ -4724,12 +4973,12 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+      expect(spawnMock.mock.calls[0]?.[0]).toEqual({
         project: "api",
         prompt: "review only",
         restrictWrites: true,
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+      expect(spawnMock.mock.calls[1]?.[0]).toEqual({
         project: "api",
         prompt: "write access",
       });
@@ -4775,7 +5024,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(cronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledWith({
+        expect(spawnMock.mock.calls[0]?.[0]).toEqual({
           project: "api",
           prompt: "review only",
           allowedTriggers: [],
@@ -4880,7 +5129,7 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(1);
       });
-      expect(spawnMock).toHaveBeenCalledWith({
+      expect(spawnMock.mock.calls[0]?.[0]).toEqual({
         project: "api",
         prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
         slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
@@ -4925,13 +5174,13 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+      expect(spawnMock.mock.calls[0]?.[0]).toEqual({
         project: "api",
         agent: "claude",
         prompt: "Claude review https://github.com/acme/api/pull/42.",
         slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+      expect(spawnMock.mock.calls[1]?.[0]).toEqual({
         project: "api",
         agent: "codex",
         prompt: "Codex review https://github.com/acme/api/pull/42.",
@@ -4962,7 +5211,7 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+      expect(spawnMock.mock.calls[0]?.[0]).toEqual({
         project: "api",
         agent: "claude",
         model: "sonnet",
@@ -4971,7 +5220,7 @@ describe("startConfiguredTriggers", () => {
         allowedTriggers: [],
         slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+      expect(spawnMock.mock.calls[1]?.[0]).toEqual({
         project: "api",
         agent: "cursor",
         model: "composer-2.5",
@@ -5012,7 +5261,7 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(1);
       });
-      expect(spawnMock).toHaveBeenCalledWith({
+      expect(spawnMock.mock.calls[0]?.[0]).toEqual({
         project: "api",
         prompt: "Triage https://sentry.io/issues/7/ from acme/web.",
         slots: { links: [{ label: "pr", url: "https://sentry.io/issues/7/" }] },
@@ -5032,6 +5281,82 @@ describe("startConfiguredTriggers", () => {
       await controller.stop();
     }
   });
+
+  it.each(["", "https://example.com/issues/1"])(
+    "spawns script items through real slot normalization with url=%s",
+    async (url) => {
+      const normalized: ReturnType<typeof normalizeSlotLinks>[] = [];
+      const spawnMock = vi.fn(
+        async (request: { slots?: { links?: { label: string; url: string }[] } }) => {
+          normalized.push(normalizeSlotLinks(request.slots?.links));
+          return { id: "api-9" };
+        },
+      );
+      useWorkItemLifecycleStore();
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: {
+          dataDir: DATA_DIR,
+          projects: {
+            api: {
+              sources: { check: { type: "script" } },
+              triggers: {
+                handle: {
+                  source: "check",
+                  event: "script:item.new",
+                  spawn: { blocks: [{ prompt: "{{branch}} {{id}}" }], autoComplete: true },
+                },
+              },
+            },
+          },
+        } as never,
+        bus,
+        sessionService: { spawn: spawnMock } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        bus.emit({
+          name: "script:item.new",
+          occurrenceId: "script-occurrence",
+          projectId: "api",
+          sourceId: "check",
+          data: {
+            id: "a",
+            title: "Failure",
+            branch: "main",
+            url,
+            number: 0,
+            repo: "script:check",
+            externalId: "script:check#a",
+          },
+        });
+        await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+        expect(spawnMock).toHaveBeenCalledWith(
+          {
+            project: "api",
+            prompt: "main a",
+            ...(url ? { slots: { links: [{ label: "pr", url }] } } : {}),
+          },
+          { triggerBirthKey: '["api","check","handle","script-occurrence"]:0' },
+        );
+        expect(normalized[0]).toEqual(url ? [{ label: "pr", url }] : []);
+        expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
+          DATA_DIR,
+          "api",
+          "check",
+          expect.objectContaining({
+            externalId: "script:check#a",
+            state: "running",
+            sessionId: "api-9",
+            autoComplete: true,
+          }),
+        );
+      } finally {
+        await controller.stop();
+      }
+    },
+  );
 
   it("suppresses duplicate work-item events once a pending claim exists", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
@@ -5079,7 +5404,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(workItemEvent());
       await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledOnce());
-      expect(spawnMock.mock.calls[0]).toHaveLength(1);
+      expect(spawnMock.mock.calls[0]?.[1]).toEqual({ triggerBirthKey: expect.any(String) });
       const path = join(policyDir, "auto-ping.json");
       const grants = existsSync(path)
         ? (JSON.parse(readFileSync(path, "utf8")) as { grants: unknown[] }).grants
@@ -5145,7 +5470,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(workItemEvent());
       await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledOnce());
-      expect(spawnMock.mock.calls[0]).toHaveLength(1);
+      expect(spawnMock.mock.calls[0]?.[1]).toEqual({ triggerBirthKey: expect.any(String) });
     } finally {
       await controller.stop();
       autoPing.dispose();
@@ -5455,6 +5780,7 @@ describe("startConfiguredTriggers", () => {
           project: "api",
           prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
         }),
+        { triggerBirthKey: expect.any(String) },
       );
     } finally {
       await controller.stop();
@@ -6920,6 +7246,203 @@ describe("startConfiguredTriggers", () => {
         bus.emit(githubEvent());
         await vi.advanceTimersByTimeAsync(10_000);
         expect(deliverMock).not.toHaveBeenCalled();
+      } finally {
+        await controller.stop();
+      }
+    });
+  });
+
+  describe("flush tick in-flight skip", () => {
+    const queueKey = "api:chat:api-1";
+    const persisted: PersistedPendingBatch = {
+      queueKey,
+      projectId: "api",
+      triggerId: "chat",
+      sourceId: "tg",
+      batch: {
+        kind: "telegram",
+        sessionId: "api-1",
+        messages: [{ sessionId: "api-1", chatId: 123, userId: 7, messageId: 1, text: "held" }],
+      },
+    };
+    const sessionIn = (state: string, lastActivityAt: string) => ({
+      id: "api-1",
+      status: "running",
+      state,
+      lastActivityAt,
+      workspaceExists: true,
+    });
+
+    function deferred<T>() {
+      let resolve!: (value: T) => void;
+      const promise = new Promise<T>((done) => {
+        resolve = done;
+      });
+      return { promise, resolve };
+    }
+
+    async function startRestored(getMock: ReturnType<typeof vi.fn>) {
+      readPendingSendBatchesMock.mockReturnValue(new Map([[queueKey, persisted]]));
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: {
+          dataDir: DATA_DIR,
+          projects: {
+            api: {
+              sources: { tg: { type: "telegram" } },
+              triggers: {
+                chat: { source: "tg", event: "telegram:message", send: { interrupt: false } },
+              },
+            },
+          },
+        } as never,
+        bus,
+        sessionService: { get: getMock, deliver: deliverMock } as never,
+        logger: { warn: vi.fn() },
+      });
+      return { controller, deliverMock, bus };
+    }
+
+    it("queues at most one tick flush per key while one is in flight, then delivers once", async () => {
+      const held = deferred<ReturnType<typeof sessionIn>>();
+      const getMock = vi
+        .fn()
+        .mockImplementationOnce(() => held.promise)
+        .mockResolvedValue(sessionIn("working", new Date().toISOString()));
+      const { controller, deliverMock } = await startRestored(getMock);
+      try {
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(getMock).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(5_000);
+        await vi.advanceTimersByTimeAsync(5_000);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(getMock).toHaveBeenCalledTimes(1);
+
+        held.resolve(sessionIn("working", new Date().toISOString()));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(getMock).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(getMock).toHaveBeenCalledTimes(2);
+        expect(readPendingSendBatchesMock().has(queueKey)).toBe(true);
+        expect(deliverMock).not.toHaveBeenCalled();
+
+        getMock.mockResolvedValue(sessionIn("waiting", staleActivity()));
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(getMock).toHaveBeenCalledTimes(3);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+        expect(readPendingSendBatchesMock().has(queueKey)).toBe(false);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("retains new source messages while a tick is held and delivers every message once", async () => {
+      const held = deferred<ReturnType<typeof sessionIn>>();
+      const getMock = vi
+        .fn()
+        .mockImplementationOnce(() => held.promise)
+        .mockResolvedValue(sessionIn("working", new Date().toISOString()));
+      const { controller, deliverMock, bus } = await startRestored(getMock);
+      try {
+        await vi.advanceTimersByTimeAsync(20_000);
+        for (const messageId of [2, 3]) {
+          bus.emit({
+            name: "telegram:message",
+            occurrenceId: `tg-${messageId}`,
+            projectId: "api",
+            sourceId: "tg",
+            data: {
+              sessionId: "api-1",
+              chatId: 123,
+              userId: 7,
+              messageId,
+              text: `new message ${messageId}`,
+            },
+          });
+        }
+        await vi.advanceTimersByTimeAsync(0);
+        expect(getMock).toHaveBeenCalledTimes(3);
+        held.resolve(sessionIn("working", new Date().toISOString()));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(deliverMock).not.toHaveBeenCalled();
+        getMock.mockResolvedValue(sessionIn("waiting", staleActivity()));
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+        const delivered = deliverMock.mock.calls[0]?.[1] as string;
+        expect(delivered).toContain("held");
+        expect(delivered).toContain("new message 2");
+        expect(delivered).toContain("new message 3");
+        expect(readPendingSendBatchesMock().has(queueKey)).toBe(false);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("drains the held tick on shutdown and preserves pending data", async () => {
+      const held = deferred<ReturnType<typeof sessionIn>>();
+      const getMock = vi.fn().mockImplementation(() => held.promise);
+      const { controller, deliverMock } = await startRestored(getMock);
+      await vi.advanceTimersByTimeAsync(20_000);
+      let stopped = false;
+      const stopping = controller.stop().then(() => {
+        stopped = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(stopped).toBe(false);
+      held.resolve(sessionIn("working", new Date().toISOString()));
+      await stopping;
+      expect(stopped).toBe(true);
+      expect(getMock).toHaveBeenCalledTimes(1);
+      expect(deliverMock).not.toHaveBeenCalled();
+      expect(readPendingSendBatchesMock().has(queueKey)).toBe(true);
+    });
+
+    it("still enqueues the interactive flush timer while a tick flush is in flight", async () => {
+      const held = deferred<ReturnType<typeof sessionIn>>();
+      const getMock = vi
+        .fn()
+        .mockResolvedValueOnce(sessionIn("waiting", new Date(Date.now() + 7_000).toISOString()))
+        .mockImplementationOnce(() => held.promise)
+        .mockResolvedValue(sessionIn("working", new Date().toISOString()));
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      const controller = startConfiguredTriggers({
+        config: {
+          dataDir: DATA_DIR,
+          projects: {
+            api: {
+              sources: { tg: { type: "telegram" } },
+              triggers: {
+                chat: { source: "tg", event: "telegram:message", send: { interrupt: false } },
+              },
+            },
+          },
+        } as never,
+        bus,
+        sessionService: { get: getMock, deliver: deliverMock } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        bus.emit({
+          name: "telegram:message",
+          occurrenceId: "tg-1",
+          projectId: "api",
+          sourceId: "tg",
+          data: { sessionId: "api-1", chatId: 123, userId: 7, messageId: 1, text: "hello" },
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(getMock).toHaveBeenCalledTimes(1);
+        // Tick at 5s holds on its get(); the interactive timer (gate ~9s) fires behind it.
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(getMock).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(getMock).toHaveBeenCalledTimes(2);
+        held.resolve(sessionIn("working", new Date().toISOString()));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(getMock).toHaveBeenCalledTimes(3);
       } finally {
         await controller.stop();
       }

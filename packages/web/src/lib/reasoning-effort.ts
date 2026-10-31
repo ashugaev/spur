@@ -1,16 +1,18 @@
 import type { ProviderReasoningEffort } from "@/lib/types";
 
+export const PROVIDER_REASONING_EFFORTS = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+] as const satisfies readonly ProviderReasoningEffort[];
+
 export function isProviderReasoningEffort(value: unknown): value is ProviderReasoningEffort {
-  return (
-    value === "none" ||
-    value === "minimal" ||
-    value === "low" ||
-    value === "medium" ||
-    value === "high" ||
-    value === "xhigh" ||
-    value === "max" ||
-    value === "ultra"
-  );
+  return PROVIDER_REASONING_EFFORTS.some((effort) => effort === value);
 }
 
 export type ReasoningIntent =

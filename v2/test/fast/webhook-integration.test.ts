@@ -135,10 +135,15 @@ projects:
         },
       });
       expect(spawn).toHaveBeenCalledTimes(1);
-      expect(spawn).toHaveBeenCalledWith({
-        project: "api",
-        prompt: `Body=${envelope.data.body} At=${envelope.data.receivedAt}`,
-      });
+      expect(spawn).toHaveBeenCalledWith(
+        {
+          project: "api",
+          prompt: `Body=${envelope.data.body} At=${envelope.data.receivedAt}`,
+        },
+        {
+          triggerBirthKey: `${JSON.stringify(["api", "incoming", "receive", envelope.occurrenceId])}:0`,
+        },
+      );
       resolveSpawn?.({ id: "api-webhook" });
       await vi.waitFor(() => expect(spawnSettled).toBe(true));
     } finally {
