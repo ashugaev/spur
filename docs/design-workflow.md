@@ -1,19 +1,15 @@
-# Design workflow (Claude Design pre-implementation gate)
+# Approve proposed UI
 
-> Scope: Claude Design workflow and export contract. Caveman, no overhead.
+Use for visible `packages/web` changes, in any agent runtime.
 
-Pre-implementation design gate in `$manager`: for visible `packages/web` UI, author a design first, get explicit user approval, then hand a runtime-neutral export to any coding agent (Claude/Codex/Cursor).
+1. Render proposed components and affected states in an isolated sidecar or local HTML preview.
+2. Save screenshot and approval handoff to `$SPUR_SESSION_ARTIFACTS_DIR/design/` per [design skill](../.agents/skills/design/SKILL.md).
+3. Send screenshot as an image attachment to authorized session Telegram through [telegram skill](../.agents/skills/telegram/SKILL.md).
+4. Present current → proposed change and approval request here and in Telegram; route text/buttons and screenshot per [telegram skill](../.agents/skills/telegram/SKILL.md).
+5. Record matching user approval before dependent implementation. Prior approval covering scope counts; screenshot proof still required.
 
-## Gate
+Keep preview code in artifacts. Follow [frontend-codestyle](../.agents/skills/frontend-codestyle/SKILL.md) for components and tokens.
 
-- Trigger: task introduces or changes visible `packages/web` UI.
-- The manager runs the `design-author` process in the main Claude session with the Artifact tool before `architect`. Gate order and approval hard-stop: `manager` skill.
-- Export contract (bundle layout, `design-spec.md` sections, approval field): `design` skill — the owner, not restated here.
-- Post-implementation UI review stays with `designer`; distinct role, unchanged.
+Route approval and gate order through [manager](../.agents/skills/manager/SKILL.md) and [agent protocol](../.agents/skills/github/references/agent-protocol.md). Review implemented UI through `designer`.
 
-## Claude Design integration
-
-- Backend: Claude Design (claude.ai/design). Figma MCP is present but out of scope.
-- Author with the Artifact tool: Artifact quickstart `intent=design` creates a Design canvas. Update task components only.
-- `DesignSync` reads and syncs design-system projects; its tool contract forbids design authoring. No project name is required for the canvas.
-- Run `/design-login` if design scope is missing. A non-Claude runtime consumes the approved local export.
+At a stop, name exact blocker, rule/tool source, current → proposed change and required action in 2–3 lines. Continue independent work while awaiting approval.
