@@ -136,7 +136,7 @@ async function launcherFixture(
   );
   await writeFile(
     join(root, "path/pnpm"),
-    `#!/bin/sh\nexec '${process.execPath}' -e 'const fs=require("node:fs");fs.writeFileSync(process.env.SPUR_TEST_WEB_OWNER+".started","started");(async()=>{const {readLiveProcessStarttime}=await import(${JSON.stringify(resolve("dist/sidecars/reap.js"))});const starttime=await readLiveProcessStarttime(process.pid);if(starttime===null)throw new Error("Missing fixture web identity");fs.writeFileSync(process.env.SPUR_TEST_WEB_OWNER,JSON.stringify({pid:process.pid,starttime}));fs.writeFileSync(process.env.SPUR_TEST_WEB_MARKER,process.env.SPUR_CONFIG);setInterval(()=>{},1000)})()'\n`,
+    `#!/bin/sh\nexec '${process.execPath}' -e 'const fs=require("node:fs");fs.writeFileSync(process.env.SPUR_TEST_WEB_OWNER+".started","started");fs.writeFileSync(process.env.SPUR_TEST_WEB_OWNER+".webhost",process.env.WEB_HOST??"<unset>");(async()=>{const {readLiveProcessStarttime}=await import(${JSON.stringify(resolve("dist/sidecars/reap.js"))});const starttime=await readLiveProcessStarttime(process.pid);if(starttime===null)throw new Error("Missing fixture web identity");fs.writeFileSync(process.env.SPUR_TEST_WEB_OWNER,JSON.stringify({pid:process.pid,starttime}));fs.writeFileSync(process.env.SPUR_TEST_WEB_MARKER,process.env.SPUR_CONFIG);setInterval(()=>{},1000)})()'\n`,
     { mode: 0o755 },
   );
   await writeFile(join(root, "path/sleep"), "#!/bin/sh\nexec /bin/sleep 0.03\n", { mode: 0o755 });
@@ -372,6 +372,19 @@ describe("spur-isolated-ui.sh", () => {
   });
   it("never binds the sidecar web server to all interfaces", () => {
     expect(script).not.toContain("0.0.0.0");
+  });
+  it("strips an ambient WEB_HOST before starting the web child", async (context) => {
+    const fixture = await launcherFixture(context);
+    await writeFile(fixture.runtimeFile, fixture.runtime(fixture.currentDir, "fixture-current"), {
+      mode: 0o600,
+    });
+    const child = fixture.launch({ WEB_HOST: "0.0.0.0" });
+    try {
+      await fixture.waitUntil(child, "web child start", () => exists(fixture.marker));
+      expect(await readFile(`${child.ownerFile}.webhost`, "utf8")).toBe("<unset>");
+    } finally {
+      await stopChild(child);
+    }
   });
   it("reports an already-exited pre-web child without waiting for another exit", async (context) => {
     const fixture = await launcherFixture(context);

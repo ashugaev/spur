@@ -9,11 +9,13 @@ import type { SessionView } from "../../src/types.js";
 import { findFreePort, pollUntil } from "../helpers/common.js";
 import {
   captureTmuxPane,
+  configureOwnedPushRemote,
   createRuntimeTestContext,
   isTmuxAvailable,
   killTmuxSessionsByPrefix,
   syncTmuxEnvironment,
   type RuntimeTestContext,
+  waitForSourceBaseline,
 } from "../helpers/runtime.js";
 
 const tmuxOk = await isTmuxAvailable();
@@ -303,6 +305,7 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-wi-coexist-${port}`;
     activeContexts.push({ context, sessionPrefix });
+    await configureOwnedPushRemote(context);
     await syncTmuxEnvironment(runtimeEnv(context));
 
     const configPath = await context.writeConfig(
@@ -389,11 +392,17 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
       });
 
       try {
-        // Wait for the work-item emit and first per-branch snapshot.
         await pollUntil(async () => events.some((event) => event.name === "github:work_item.new"), {
           timeoutMs: 15_000,
           accept: Boolean,
         });
+        // The work-item emit does not prove the per-branch snapshot exists. A
+        // bound PR is the steady state, and the one the ownership check guards.
+        await pollUntil(async () => service?.get(session.id), {
+          timeoutMs: 15_000,
+          accept: (value) => value?.pr?.number === 99,
+        });
+        await waitForSourceBaseline(context, session.id);
 
         // Now introduce a failing check so the next poll diff emits ci_failed.
         await context.writeGhState({

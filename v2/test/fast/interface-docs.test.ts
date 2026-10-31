@@ -10,6 +10,15 @@ async function readRepoFile(path: string): Promise<string> {
 }
 
 describe("published interface contracts", () => {
+  it("links native Telegram call workflow and source-free launcher opt-out", async () => {
+    expect(await readRepoFile("README.md")).toContain("docs/telegram-calls.md");
+    expect(await readRepoFile("docs/commands.md")).toContain("SPUR_ISOLATED_WITHOUT_TELEGRAM");
+    expect(await readRepoFile("docs/configuration.md")).toContain("voice-call");
+    expect(await readRepoFile(".agents/skills/spur/SKILL.md")).toContain("docs/telegram-calls.md");
+    expect(await readRepoFile(".claude/skills/spur/SKILL.md")).toBe(
+      await readRepoFile(".agents/skills/spur/SKILL.md"),
+    );
+  });
   it("documents launcher-owned isolated UI discovery environment", async () => {
     const commands = await readRepoFile("docs/commands.md");
     expect(commands).toContain("SPUR_ISOLATED_CONFIG");
@@ -51,8 +60,13 @@ describe("published interface contracts", () => {
     expect(commands).toContain("SPUR_SESSION");
     expect(commands).toContain("--session");
     expect(daemonApi).toContain("GET /sessions/:id/auto-ping-suppressions");
-    expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/unsubscribe");
-    expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume");
+    expect(daemonApi).toMatch(
+      /POST \/sessions\/:id\/auto-ping-suppressions\/unsubscribe`[^\n]*409 grant_not_ready\|grant_consumed/,
+    );
+    expect(daemonApi).toMatch(
+      /POST \/sessions\/:id\/auto-ping-suppressions\/:suppressionId\/resume`[^\n]*`400\|403\|404`/,
+    );
+    expect(daemonApi).not.toMatch(/auto-ping-suppressions\/:suppressionId\/resume`[^\n]*409/);
     expect(daemonApi).toContain("POST /projects/:id/preflight-batches");
     expect(configuration).toContain("projects.<id>.tokenBudget");
     expect(configuration).toContain("projects.<id>.tokenBudgetWarnOnly");
