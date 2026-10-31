@@ -9,7 +9,7 @@ import {
   classifyCursorJsonlState,
   configureCursorTurnEndedStore,
   CURSOR_JSONL_TOOL_USE_GRACE_MS,
-  findCursorAckTranscriptFile,
+  cursorChatIdFromTranscriptPath,
   findLatestCursorTranscriptFile,
   parseCursorJsonlRecord,
   readCursorJsonlState,
@@ -1009,57 +1009,33 @@ describe("findLatestCursorTranscriptFile", () => {
   });
 });
 
-describe("findCursorAckTranscriptFile", () => {
+describe("findLatestCursorTranscriptFile with a pinned id", () => {
   const tempRoots: string[] = [];
 
   afterEach(async () => {
     await Promise.all(tempRoots.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
-  // AC1: a symlinked worktree whose stale raw-slug dir is NON-EMPTY resolves,
-  // with no id, to the newer file under the realpath slug. This is the
-  // 177-event bucket: findLatestCursorTranscriptFile's first-dir-wins would
-  // return the stale alias file forever; the ack-only global-newest rule
-  // self-corrects once the live agent writes under the canonical slug.
-  it("resolves to the newer file under the realpath slug when the alias dir is stale but non-empty", async () => {
-    const root = await mkdtemp(join(homedir(), "spur-cursor-ack-symlink-"));
-    tempRoots.push(root);
-    const canonical = join(root, "canonical");
-    const alias = join(root, "alias");
-    await mkdir(canonical);
-    await symlink(canonical, alias);
+  it("derives the chat id from the transcript path layout both builders produce", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-ack-chatid-"));
+    tempRoots.push(worktreePath);
+    const agentSessionId = "bbbbbbbb-1111-2222-3333-444444444444";
+    const pending = await resolveCursorPinnedTranscriptPath(worktreePath, agentSessionId);
+    expect(cursorChatIdFromTranscriptPath(pending)).toBe(agentSessionId);
 
-    const aliasTranscriptsDir = join(
+    const transcriptsDir = join(
       homedir(),
       ".cursor",
       "projects",
-      toCursorProjectPath(alias),
+      toCursorProjectPath(worktreePath),
       "agent-transcripts",
     );
-    const canonicalTranscriptsDir = join(
-      homedir(),
-      ".cursor",
-      "projects",
-      toCursorProjectPath(canonical),
-      "agent-transcripts",
-    );
-    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(alias)));
-    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(canonical)));
-
-    await mkdir(join(aliasTranscriptsDir, "stale-chat"), { recursive: true });
-    await writeFile(
-      join(aliasTranscriptsDir, "stale-chat", "stale-chat.jsonl"),
-      '{"role":"assistant","message":{"content":[{"type":"text","text":"stale"}]}}\n',
-    );
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    await mkdir(join(canonicalTranscriptsDir, "live-chat"), { recursive: true });
-    await writeFile(
-      join(canonicalTranscriptsDir, "live-chat", "live-chat.jsonl"),
-      '{"role":"assistant","message":{"content":[{"type":"text","text":"live"}]}}\n',
-    );
-
-    const filePath = await findCursorAckTranscriptFile(alias);
-    expect(filePath).toBe(join(canonicalTranscriptsDir, "live-chat", "live-chat.jsonl"));
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+    await mkdir(join(transcriptsDir, agentSessionId), { recursive: true });
+    await writeFile(join(transcriptsDir, agentSessionId, `${agentSessionId}.jsonl`), "{}\n");
+    const found = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
+    expect(found).not.toBeNull();
+    expect(found && cursorChatIdFromTranscriptPath(found)).toBe(agentSessionId);
   });
 
   // AC2: with an id, a dir holding a NEWER peer transcript resolves to this
@@ -1092,15 +1068,14 @@ describe("findCursorAckTranscriptFile", () => {
       '{"role":"assistant","message":{"content":[{"type":"text","text":"peer, newer"}]}}\n',
     );
 
-    const filePath = await findCursorAckTranscriptFile(worktreePath, agentSessionId);
+    const filePath = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
     expect(filePath).toBe(join(transcriptsDir, agentSessionId, `${agentSessionId}.jsonl`));
   });
 
   // Review thread (cursor-jsonl-state.ts:149): resolveCursorPinnedTranscriptPath
   // guesses the LAST worktree-path candidate (realpath, i.e. canonical) for the
-  // pending-pin baseline, while findCursorAckTranscriptFile's id branch
-  // (delegated to findLatestCursorTranscriptFile) iterates ALL candidates,
-  // stat-then-continue. When cursor lands the pinned transcript only under the
+  // pending-pin baseline, while findLatestCursorTranscriptFile's id branch
+  // iterates ALL candidates, stat-then-continue. When cursor lands the pinned transcript only under the
   // RAW alias slug (measured fact in the spec: cursor wrote real records under
   // a stale raw slug on 2026-09-04), the guessed path never exists, but the
   // pinned lookup still finds the file because it does not stop at the guess.
@@ -1143,7 +1118,7 @@ describe("findCursorAckTranscriptFile", () => {
       join(canonicalTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`),
     );
 
-    const filePath = await findCursorAckTranscriptFile(alias, agentSessionId);
+    const filePath = await findLatestCursorTranscriptFile(alias, agentSessionId);
     expect(filePath).toBe(join(aliasTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`));
     expect(filePath).not.toBe(pendingPinGuess);
   });
