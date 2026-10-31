@@ -2737,7 +2737,7 @@ function buildSessionEnv(args: {
     // Pins agent self-update (`npm install -g ...`) to `~/.local` even when
     // `~/.npmrc` has been clobbered down to just a registry `_authToken`
     // line. Points at the Spur-owned globalconfig file (`ensureNpmPinFile` in
-    // npm-prefix.ts writes it on every daemon boot) rather than setting
+    // npm-prefix.ts writes it on every default-instance daemon boot) rather than setting
     // npm's plain (non-globalconfig) prefix env var directly:
     // nvm refuses to load whenever it sees that var set (any casing) or a
     // `prefix=`/`globalconfig=` line in `~/.npmrc`, and a session pane that
