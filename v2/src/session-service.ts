@@ -695,6 +695,8 @@ const PANE_WRITE_FENCE_MS = 30_000;
 // any realistic single inference. 300s makes a false flip on a live inference highly unlikely while
 // still clearing an indefinite-"working" hang.
 const CODEX_HUNG_AFTER_TOOLS_MS = 300_000;
+// Hookless turns have no hook to rule out a running tool, so require longer rollout silence (pure inference observed to ~312s).
+const CODEX_HOOKLESS_HUNG_MS = 600_000;
 const RESTORE_WARMUP_MS = 30_000;
 const RESTORE_SETTLE_MS = 2_000;
 const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
@@ -23153,10 +23155,11 @@ export class SessionService {
     // in-content rollout timestamp (rollout mtime is unusable — `codex resume`'s
     // poison-id heal rewrites every file at once) and the hook state. 0 means
     // neither source exists yet. The single derivation for both the hung-turn
-    // check below and the caller's activity/idle-gate signal.
+    // check below and the caller's activity/idle-gate signal. Hookless, rollout
+    // progress after task_started also counts.
     const activityMs = Math.max(
       rolloutState?.timestampMs ?? 0,
-      hookState ? new Date(hookState.updatedAt).getTime() : 0,
+      hookState ? new Date(hookState.updatedAt).getTime() : (rolloutRead.lastProgressMs ?? 0),
     );
 
     // Without hooks, a quiet rollout cannot rule out a tool still running.
@@ -23165,6 +23168,19 @@ export class SessionService {
         state = "waiting";
         source = "codex_stale";
       }
+    }
+
+    // Hookless: a bare task_started (no open tool call) with a silent rollout
+    // for the hookless threshold is a hung turn.
+    if (
+      !hookState &&
+      state === "working" &&
+      rolloutState?.reason === "task_started" &&
+      rolloutRead.lastProgressMs !== undefined &&
+      Date.now() - activityMs >= CODEX_HOOKLESS_HUNG_MS
+    ) {
+      state = "waiting";
+      source = "codex_stale";
     }
 
     return {

@@ -1151,6 +1151,8 @@ export interface CodexRolloutStateRecord {
 export interface CodexRolloutReadResult {
   rollout: CodexRolloutStateRecord | null;
   rateLimit: RateLimitDetection | null;
+  /** Timestamp of the newest parseable rollout line of any kind. */
+  lastProgressMs?: number;
   threadId?: string;
   isSubagent?: boolean;
   model?: string;
@@ -1181,6 +1183,7 @@ interface CodexRolloutFold {
   // can reach the result, so the tail stays one turn long.
   stateTail: CodexRolloutStateLine[];
   rateLimit: RateLimitDetection | null;
+  lastProgressMs?: number;
   model?: string;
   token: {
     previous?: CodexTokenUsageSnapshot;
@@ -1598,6 +1601,10 @@ function foldCodexRolloutLine(fold: CodexRolloutFold, parsed: Record<string, unk
   if (detection) fold.rateLimit = detection;
   const model = extractCodexTurnContextModel(parsed);
   if (model !== undefined) fold.model = model;
+  if (typeof parsed["timestamp"] === "string") {
+    const lineMs = Date.parse(parsed["timestamp"]);
+    if (Number.isFinite(lineMs)) fold.lastProgressMs = lineMs;
+  }
   foldCodexTokenUsage(fold, parsed);
 }
 
@@ -1624,6 +1631,7 @@ function finalizeCodexRolloutFold(
   return {
     rollout,
     rateLimit: fold.rateLimit,
+    ...(fold.lastProgressMs !== undefined ? { lastProgressMs: fold.lastProgressMs } : {}),
     ...(meta ? { threadId: meta.threadId } : {}),
     ...(meta?.isSubagent ? { isSubagent: true } : {}),
     ...(fold.model ? { model: fold.model } : {}),
