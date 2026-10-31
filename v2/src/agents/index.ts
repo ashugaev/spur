@@ -121,7 +121,8 @@ export const DEFERRED_CONTROLS_MAX_RESENDS = 2;
 // agent records the submit within seconds, so a miss means a swallowed Enter,
 // not a slow agent; short windows resend it fast and bound the lock hold to
 // 4 x 5s. The long default windows stay for deliver() into a busy agent,
-// which records the message only when its turn ends.
+// which records the message only when its turn ends. Each resent Enter still
+// passes the agent's early-resend gate, so a menu or prompt never gets one.
 export const INTERACTIVE_SUBMIT_ACK_PACING: SubmitAckPacing = {
   windowMs: 5_000,
   maxResends: 3,
@@ -176,6 +177,8 @@ export interface AgentEarlyResendContext {
   worktreePath: string;
   agentSessionId?: string;
   panePid?: number;
+  /** The text being sent is a slash command; a gated agent refuses the resend. */
+  slashCommand?: boolean;
 }
 
 export interface SubmitAckBinding {
@@ -979,7 +982,9 @@ export async function agentEarlySubmitResendAllowed(
   ctx: AgentEarlyResendContext,
 ): Promise<boolean> {
   const gate = agentAdapter(agent).earlySubmitResendAllowed;
-  return gate ? gate(ctx) : true;
+  if (!gate) return true;
+  if (ctx.slashCommand) return false;
+  return gate(ctx);
 }
 
 /**

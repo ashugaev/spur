@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as claudeJsonlStateModule from "../../src/claude-jsonl-state.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as prLookupModule from "../../src/pr-lookup.js";
+import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
 import type { AppConfig, ProjectConfig, SessionRecord, SessionSlots } from "../../src/types.js";
 
 const { existsSyncMock } = vi.hoisted(() => ({
@@ -128,7 +129,8 @@ vi.mock("../../src/agent-hook-state.js", () => ({
   deleteAgentHookState: vi.fn(),
   readAgentHookState: vi.fn(),
 }));
-vi.mock("../../src/runtime-tmux.js", () => ({
+vi.mock("../../src/runtime-tmux.js", async (importOriginal) => ({
+  TmuxProbeUnknownError: (await importOriginal<typeof RuntimeTmuxModule>()).TmuxProbeUnknownError,
   createTmuxSession: vi.fn(),
   createTmuxCommandSession: vi.fn(),
   createTmuxSidecarSession: vi.fn(),
@@ -258,6 +260,7 @@ function baseConfig(): AppConfig {
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+      switchAuth: false,
     },
     diskRetention: { warnFreeGb: 10 },
     sessionGc: {
@@ -1027,7 +1030,14 @@ describe("PR auto-detect", () => {
     await vi.advanceTimersByTimeAsync(35_000);
     expect(ghMock).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    // Relative clock jump to 10s short of the 30min throttle: advancing the
+    // whole span tick by tick fires every service interval ~1800 times and
+    // times out under CI load. The jump keeps the timers' relative schedule.
+    vi.setSystemTime(Date.now() + 30 * 60_000 - 45_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(ghMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(10_000);
     expect(ghMock).toHaveBeenCalledTimes(2);
 
     service.dispose();

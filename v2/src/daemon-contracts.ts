@@ -150,6 +150,32 @@ const restore = body("RestoreSessionRequest", [
 ]);
 const limit = field("limit", "integer", "Maximum returned entries.", false, 200);
 const project = field("configPath", "string", "Nonblank project configuration path.", true);
+const cronJobIdentity = [
+  field("project", "string", "Existing project ID.", true),
+  field("source", "string", "Existing Cron source ID.", true),
+  field("trigger", "string", "Existing spawn trigger bound to the source.", true),
+];
+const cronJobValidation: readonly ContractResponse[] = [
+  {
+    status: 422,
+    contentType: "application/json",
+    description:
+      "Invalid config/schedule/block or unsupported YAML/action; error, code and optional field.",
+  },
+];
+const cronJobUpdate: ContractBody = {
+  ...body("CronJobEditUpdate", [
+    field("revision", "string", "64 lowercase SHA256 hex characters from the disk draft.", true),
+    field("schedule", "string", "Cron schedule shared by all triggers on this source.", true),
+    field(
+      "blocks",
+      "CronJobEditBlock[]",
+      "Existing block order/count; all properties required; null clears an override.",
+      true,
+    ),
+  ]),
+  definitions: `interface CronJobEditBlock { prompt: string; agent: ${agent.type}|null; model: string|null; reasoningEffort: ${effort.type}|null; }`,
+};
 const requestBodies = {
   spawn,
   send,
@@ -299,6 +325,7 @@ interface OperationOptions {
   status?: number;
   catchAllPathParams?: readonly string[];
   source?: string;
+  extraResponses?: readonly ContractResponse[];
 }
 
 function operation(
@@ -339,6 +366,7 @@ function operation(
       "spawn_shepherd",
       "send_message",
       "respawn_session",
+      "reply_to_source",
     ].includes(operationId)
       ? 15_000_000
       : 1_000_000,
@@ -396,6 +424,7 @@ function operation(
         contentType: "application/json",
         description: "Daemon starting or upstream dependency unavailable.",
       },
+      ...(options.extraResponses ?? []),
     ],
     examples: (options.examples ?? [{}]).map((example) => ({
       ...(pathParams.length ? { pathParams: examplePathParams } : {}),
@@ -511,6 +540,61 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "/projects",
     "List every configured, unconfigured and shepherd project.",
     { response: "ProjectListEntry[]" },
+  ),
+  operation(
+    "list_cron_jobs",
+    "GET",
+    "/projects/cron",
+    "List loaded cron sources, bound triggers, owner-file drift and last observed events.",
+    {
+      query: [field("project", "string", "Project id; omit for all projects.", false)],
+      examples: [{}, { query: { project: "example-project" } }],
+      response: "CronJobsResponse",
+    },
+  ),
+  operation(
+    "get_cron_job_draft",
+    "GET",
+    "/projects/cron/edit",
+    "Read the selected Cron spawn job's raw YAML draft and revision.",
+    {
+      query: cronJobIdentity,
+      examples: [{ query: { project: "example-project", source: "nightly", trigger: "audit" } }],
+      response:
+        "CronJobEditDraft; selected disk values, owner, revision and shared-source trigger IDs.",
+      source: "v2/src/cron-job-editor.ts",
+      extraResponses: cronJobValidation,
+    },
+  ),
+  operation(
+    "save_cron_job_draft",
+    "PATCH",
+    "/projects/cron/edit",
+    "Save validated Cron spawn settings to YAML without applying runtime changes.",
+    {
+      query: cronJobIdentity,
+      body: cronJobUpdate,
+      examples: [
+        {
+          query: { project: "example-project", source: "nightly", trigger: "audit" },
+          body: {
+            revision: "a".repeat(64),
+            schedule: "0 4 * * *",
+            blocks: [
+              {
+                prompt: "Inspect scheduled tasks",
+                agent: null,
+                model: null,
+                reasoningEffort: null,
+              },
+            ],
+          },
+        },
+      ],
+      response: 'CronJobEditResult; saved:true, activation:"pending"; no runtime reload.',
+      source: "v2/src/cron-job-editor.ts",
+      extraResponses: cronJobValidation,
+    },
   ),
   operation("list_backlog", "GET", "/backlog/available", "List available backlog work."),
   operation("list_models", "GET", "/models", "Discover provider model catalog.", {
@@ -916,13 +1000,13 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "reply_to_source",
     "POST",
     "/sessions/{sessionId}/source-reply",
-    "Send reply and optional choices to session source.",
+    "Send reply and optional choices in assigned Telegram forum topic.",
     {
       body: body("SourceReplyRequest", [
         field(
           "message",
           "string",
-          "Nonblank reply text; configured Telegram reply target required.",
+          "Nonblank text; nonterminal session and configured Telegram forum required.",
           true,
         ),
         field(
@@ -935,9 +1019,25 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
           '{version:1,repository:string,baseBranch:string,surfaces:{kind:"UI"|"CLI"|"config"|"API"|"prompt"|"workflow",id:string,before:string[],after:string[],constraints:string[]}[]}',
           "InterfaceManifest; excludes buttons. Nonblank clauses, unique kind/id surfaces; repository/base/source must match native approval policy. Requesting approval never grants it.",
         ),
+        field(
+          "images",
+          "{name:string,data:string}[]",
+          "At most 4 base64 PNG/JPEG/WebP files named .png/.jpg/.jpeg/.webp, 10000000 decoded bytes total; each width+height at most 10000, side ratio at most 20. Sent as photos before the text.",
+        ),
       ]),
       examples: [
         { body: { message: "Choose", buttons: [{ text: "Continue", value: "continue" }] } },
+        {
+          body: {
+            message: "Screenshot",
+            images: [
+              {
+                name: "shot.png",
+                data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+              },
+            ],
+          },
+        },
         {
           body: {
             message: "Approve interface",
@@ -965,8 +1065,8 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "get_source_info",
     "GET",
     "/sessions/{sessionId}/source-info",
-    "Read session Telegram chat association and cached bot identity.",
-    { response: "SourceInfoResponse" },
+    "Read existing canonical Telegram topic and cached bot identity without allocating.",
+    { response: "SourceInfoResponse; source:null without an eligible assigned topic." },
   ),
   operation(
     "enable_source_poll",
@@ -1046,7 +1146,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "complete_session",
     "POST",
     "/sessions/{sessionId}/complete",
-    "Complete session or desk with explicit PR disposition.",
+    "Complete session or desk with explicit PR disposition and owned Telegram topic cleanup.",
     {
       body: requestBodies.complete,
       examples: [
@@ -1061,10 +1161,16 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "/sessions/{sessionId}/self-destruct",
     "Perform session self-destruction.",
   ),
-  operation("kill_session", "POST", "/sessions/{sessionId}/kill", "Terminate session runtime.", {
-    body: requestBodies.kill,
-    examples: [{ body: { force: true, prAction: "leave_open" } }],
-  }),
+  operation(
+    "kill_session",
+    "POST",
+    "/sessions/{sessionId}/kill",
+    "Terminate session runtime and attempt owned Telegram topic deletion.",
+    {
+      body: requestBodies.kill,
+      examples: [{ body: { force: true, prAction: "leave_open" } }],
+    },
+  ),
   operation(
     "restore_session",
     "POST",
@@ -1100,7 +1206,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "switch_session_auth",
     "POST",
     "/sessions/{sessionId}/switch-auth",
-    "Switch Claude account for session.",
+    "Switch Claude account for session. Returns 404 unless authRotation.switchAuth is true.",
     {
       body: body("SwitchAuthRequest", [
         field("accountId", "string", "Nonblank account ID.", true),

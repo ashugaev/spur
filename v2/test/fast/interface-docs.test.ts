@@ -60,8 +60,13 @@ describe("published interface contracts", () => {
     expect(commands).toContain("SPUR_SESSION");
     expect(commands).toContain("--session");
     expect(daemonApi).toContain("GET /sessions/:id/auto-ping-suppressions");
-    expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/unsubscribe");
-    expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume");
+    expect(daemonApi).toMatch(
+      /POST \/sessions\/:id\/auto-ping-suppressions\/unsubscribe`[^\n]*409 grant_not_ready\|grant_consumed/,
+    );
+    expect(daemonApi).toMatch(
+      /POST \/sessions\/:id\/auto-ping-suppressions\/:suppressionId\/resume`[^\n]*`400\|403\|404`/,
+    );
+    expect(daemonApi).not.toMatch(/auto-ping-suppressions\/:suppressionId\/resume`[^\n]*409/);
     expect(daemonApi).toContain("POST /projects/:id/preflight-batches");
     expect(configuration).toContain("projects.<id>.tokenBudget");
     expect(configuration).toContain("projects.<id>.tokenBudgetWarnOnly");

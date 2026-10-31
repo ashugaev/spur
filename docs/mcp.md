@@ -120,7 +120,7 @@ Unattributable questions time out; inspect returned raw conversation/question re
 Attachments and messages over 8192 characters remain unconfirmed by the bounded correlation view; inspect raw conversation and session state.
 Use the returned cursor and inspect questions/conversation when waiting reports a reset or timeout.
 After a disconnected or timed-out write, inspect daemon state before resubmitting.
-`503 session_lifecycle_snapshot_changed` means the daemon could not assemble a stable session snapshot; retry read-only calls, inspect state before repeating writes.
+Single-session reads and writes return `503 session_lifecycle_snapshot_changed` when the daemon cannot assemble a stable session snapshot; retry reads, inspect state before repeating writes. Fleet lists (`list_sessions`) never return it.
 After a version switch, reconnect; expired handles require a fresh read.
 
 CLI/config references: [commands.md](commands.md), [configuration.md](configuration.md).

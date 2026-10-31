@@ -60,6 +60,7 @@ import {
   ensureCodexHooksConfig,
   appendCodexTrustedProjects,
   findCodexSessionId,
+  findLatestCodexSessionFile,
   linkCodexAuth,
   captureCodexRolloutBaseline,
   scanCodexRolloutForMessage,
@@ -1790,5 +1791,113 @@ describe("scanCodexRolloutForMessage", () => {
     const result = await scanCodexRolloutForMessage("/sessions", "in file two", new Map());
     expect(result.found).toBe(true);
     expect(result.lastScannedFile).toBe("/sessions/b.jsonl");
+  });
+});
+
+describe("findLatestCodexSessionFile", () => {
+  const GLOBAL_DIR = "/home/testuser/.codex/sessions";
+  const SESSION_DIR = "/session-root";
+  const TTL_MS = 30_000;
+  // Forward-only so the module-level global cache from an earlier test is expired.
+  let clock = Date.parse("2030-01-01T00:00:00.000Z");
+  const files = new Map<string, number>();
+
+  function dirCalls(dir: string): number {
+    return mockReaddir.mock.calls.filter(([arg]) => arg === dir).length;
+  }
+
+  function statCalls(path: string): number {
+    return mockStat.mock.calls.filter(([arg]) => arg === path).length;
+  }
+
+  beforeEach(() => {
+    clock += 3_600_000;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(clock);
+    files.clear();
+    mockReaddir.mockReset();
+    mockStat.mockReset();
+    mockLstat.mockReset();
+    mockLstat.mockResolvedValue({ isDirectory: () => false });
+    mockReaddir.mockImplementation(async (dir: string) => {
+      const names = [...files.keys()]
+        .filter((path) => path.slice(0, path.lastIndexOf("/")) === dir)
+        .map((path) => path.slice(path.lastIndexOf("/") + 1));
+      if (names.length === 0) throw new Error("ENOENT");
+      return names;
+    });
+    mockStat.mockImplementation(async (path: string) => {
+      const mtimeMs = files.get(path);
+      if (mtimeMs === undefined) throw new Error("ENOENT");
+      return { mtimeMs };
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shares one global walk between concurrent callers on an expired cache", async () => {
+    files.set(`${GLOBAL_DIR}/a.jsonl`, 100);
+
+    const results = await Promise.all([findLatestCodexSessionFile(), findLatestCodexSessionFile()]);
+
+    expect(results).toEqual([`${GLOBAL_DIR}/a.jsonl`, `${GLOBAL_DIR}/a.jsonl`]);
+    expect(dirCalls(GLOBAL_DIR)).toBe(1);
+  });
+
+  it("walks the global dir once per TTL and re-stats the cached file every call", async () => {
+    files.set(`${GLOBAL_DIR}/a.jsonl`, 100);
+
+    await findLatestCodexSessionFile();
+    vi.setSystemTime(clock + TTL_MS - 1);
+    await findLatestCodexSessionFile();
+
+    expect(dirCalls(GLOBAL_DIR)).toBe(1);
+    expect(statCalls(`${GLOBAL_DIR}/a.jsonl`)).toBe(2);
+
+    vi.setSystemTime(clock + TTL_MS + 1);
+    await findLatestCodexSessionFile();
+
+    expect(dirCalls(GLOBAL_DIR)).toBe(2);
+  });
+
+  it("walks again at once when the cached global file vanished", async () => {
+    files.set(`${GLOBAL_DIR}/a.jsonl`, 200);
+    files.set(`${GLOBAL_DIR}/b.jsonl`, 100);
+    expect(await findLatestCodexSessionFile()).toBe(`${GLOBAL_DIR}/a.jsonl`);
+
+    files.delete(`${GLOBAL_DIR}/a.jsonl`);
+
+    expect(await findLatestCodexSessionFile()).toBe(`${GLOBAL_DIR}/b.jsonl`);
+    expect(dirCalls(GLOBAL_DIR)).toBe(2);
+  });
+
+  it("walks a per-session root on every call", async () => {
+    files.set(`${SESSION_DIR}/s.jsonl`, 100);
+
+    await findLatestCodexSessionFile({ sessionRootDir: SESSION_DIR });
+    await findLatestCodexSessionFile({ sessionRootDir: SESSION_DIR });
+
+    expect(dirCalls(SESSION_DIR)).toBe(2);
+    expect(dirCalls(GLOBAL_DIR)).toBe(1);
+  });
+
+  it("picks the strictly newest file, preferring the per-session root on a tie", async () => {
+    files.set(`${SESSION_DIR}/s.jsonl`, 200);
+    files.set(`${GLOBAL_DIR}/g.jsonl`, 100);
+    expect(await findLatestCodexSessionFile({ sessionRootDir: SESSION_DIR })).toBe(
+      `${SESSION_DIR}/s.jsonl`,
+    );
+
+    files.set(`${GLOBAL_DIR}/g.jsonl`, 200);
+    expect(await findLatestCodexSessionFile({ sessionRootDir: SESSION_DIR })).toBe(
+      `${SESSION_DIR}/s.jsonl`,
+    );
+
+    files.set(`${GLOBAL_DIR}/g.jsonl`, 201);
+    expect(await findLatestCodexSessionFile({ sessionRootDir: SESSION_DIR })).toBe(
+      `${GLOBAL_DIR}/g.jsonl`,
+    );
   });
 });

@@ -3,6 +3,8 @@ import {
   isStaleParked,
   type AgentName,
   type SelfDestructConfig,
+  type SendMessageAttachment,
+  type SendMessageRequest,
   type SessionRecord,
   type SessionLaunchOptions,
   type SessionState,
@@ -11,6 +13,7 @@ import {
   type SourceType,
   type TelegramSpawnOrigin,
   type TelegramBotIdentity,
+  type TelegramConversation,
 } from "../types.js";
 
 export interface SpurEvent<T = unknown> {
@@ -39,11 +42,12 @@ export interface SourceSessionListItem {
 export interface SourceSpawnSessionRequest {
   project: string;
   prompt?: string;
+  attachments?: SendMessageAttachment[];
   agent?: AgentName;
   model?: string;
   mode?: string;
   selfDestruct?: SelfDestructConfig;
-  /** Chat the spawn came from; becomes the session's reply target before the agent can speak. */
+  /** Origin source selects the canonical forum; ingress chat remains manual. */
   telegramOrigin?: TelegramSpawnOrigin;
 }
 
@@ -93,10 +97,18 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   /** One session by id, same inclusion as listSessions. */
   getSession?(sessionId: string): Promise<SourceSessionListItem | null>;
   workbench?: SourceWorkbench;
+  telegramConversations?: {
+    ensureTopic(sessionId: string, origin: TelegramSpawnOrigin): Promise<TelegramConversation>;
+    unwatch(sessionId: string, origin: TelegramSpawnOrigin): Promise<boolean>;
+  };
   emit<TEvent = unknown>(name: string, data?: TEvent): void;
   signal: AbortSignal;
   logger: SourceLogger;
   spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
+  prepareSessionMessage?(
+    sessionId: string,
+    request: Pick<SendMessageRequest, "message" | "attachments">,
+  ): Promise<string>;
   /**
    * Every configured, non-shepherd project this daemon knows about — the
    * spawnable-project list for a source's own project picker. Filtered at

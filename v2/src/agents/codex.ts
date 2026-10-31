@@ -21,6 +21,7 @@ import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type { ProviderReasoningEffort, TranscriptEntry, SidecarMcpBinding } from "../types.js";
+import { MAX_RETAINED_CONVERSATION_ENTRIES } from "../claude-jsonl-state.js";
 import { createConcurrencyGate } from "../concurrency-gate.js";
 import { SCAN_CHUNK_BYTES, scanJsonlLines } from "../jsonl-scan.js";
 import { hashHistoryTail, PREFIX_VERIFY_BYTES } from "../agent-history-delta.js";
@@ -523,22 +524,71 @@ export async function findCodexSessionId(
   return null;
 }
 
+interface LatestRolloutFile {
+  filePath: string;
+  mtimeMs: number;
+}
+
+// Walking the global sessions dir costs ~100 ms per call, so its newest file is
+// cached process-wide; only that file's mtime is re-read per call.
+let globalLatestRollout: { expiresAt: number; filePath: string | null } | null = null;
+let globalRolloutWalk: Promise<LatestRolloutFile | null> | null = null;
+
+async function newestRolloutFile(dir: string): Promise<LatestRolloutFile | null> {
+  let bestMatch: LatestRolloutFile | null = null;
+  const files = await collectJsonlFiles(dir).catch(() => []);
+  for (const filePath of files) {
+    try {
+      const fileStat = await stat(filePath);
+      if (!bestMatch || fileStat.mtimeMs > bestMatch.mtimeMs) {
+        bestMatch = { filePath, mtimeMs: fileStat.mtimeMs };
+      }
+    } catch {
+      // Ignore inaccessible files.
+    }
+  }
+  return bestMatch;
+}
+
+// Concurrent callers on an expired cache share one walk.
+function walkGlobalRolloutDir(): Promise<LatestRolloutFile | null> {
+  globalRolloutWalk ??= (async () => {
+    const expiresAt = Date.now() + SESSION_INDEX_TTL_MS;
+    try {
+      const best = await newestRolloutFile(CODEX_SESSIONS_DIR);
+      globalLatestRollout = { expiresAt, filePath: best?.filePath ?? null };
+      return best;
+    } finally {
+      globalRolloutWalk = null;
+    }
+  })();
+  return globalRolloutWalk;
+}
+
+async function globalLatestRolloutFile(): Promise<LatestRolloutFile | null> {
+  const cached = globalLatestRollout;
+  if (!cached || cached.expiresAt <= Date.now()) return walkGlobalRolloutDir();
+  if (!cached.filePath) return null;
+  try {
+    return { filePath: cached.filePath, mtimeMs: (await stat(cached.filePath)).mtimeMs };
+  } catch {
+    if (globalLatestRollout === cached) globalLatestRollout = null;
+    return walkGlobalRolloutDir();
+  }
+}
+
 export async function findLatestCodexSessionFile(options?: {
   sessionRootDir?: string;
   sessionRootDirs?: string[];
 }): Promise<string | null> {
-  let bestMatch: { filePath: string; mtimeMs: number } | null = null;
+  let bestMatch: LatestRolloutFile | null = null;
   for (const sessionRootDir of resolveSessionRootDirs(options)) {
-    const files = await collectJsonlFiles(sessionRootDir).catch(() => []);
-    for (const filePath of files) {
-      try {
-        const fileStat = await stat(filePath);
-        if (!bestMatch || fileStat.mtimeMs > bestMatch.mtimeMs) {
-          bestMatch = { filePath, mtimeMs: fileStat.mtimeMs };
-        }
-      } catch {
-        // Ignore inaccessible files.
-      }
+    const candidate =
+      sessionRootDir === CODEX_SESSIONS_DIR
+        ? await globalLatestRolloutFile()
+        : await newestRolloutFile(sessionRootDir);
+    if (candidate && (!bestMatch || candidate.mtimeMs > bestMatch.mtimeMs)) {
+      bestMatch = candidate;
     }
   }
   return bestMatch?.filePath ?? null;
@@ -895,6 +945,13 @@ function extractUserTextFromLine(line: string, strict?: CodexSubmitAckScope): st
     if (strict) throw new Error("Malformed original rollout record");
     return null;
   }
+  return extractUserText(parsed, strict);
+}
+
+function extractUserText(
+  parsed: Record<string, unknown>,
+  strict?: CodexSubmitAckScope,
+): string | null {
   if (strict) {
     const meta = strictSessionMeta(parsed);
     if (
@@ -942,16 +999,7 @@ function extractUserTextFromLine(line: string, strict?: CodexSubmitAckScope): st
   return null;
 }
 
-function extractAssistantTextFromLine(line: string): string | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch {
-    return null;
-  }
-  if (!isRecord(parsed)) {
-    return null;
-  }
+function extractAssistantText(parsed: Record<string, unknown>): string | null {
   const type = parsed["type"];
   const payload = parsed["payload"];
   if (!isRecord(payload)) {
@@ -964,7 +1012,7 @@ function extractAssistantTextFromLine(line: string): string | null {
       const texts = p.content
         .filter(
           (c): c is { type: string; text: string } =>
-            c.type === "output_text" && typeof c.text === "string",
+            isRecord(c) && c.type === "output_text" && typeof c.text === "string",
         )
         .map((c) => c.text);
       return texts.length > 0 ? texts.join("") : null;
@@ -1103,6 +1151,8 @@ export interface CodexRolloutStateRecord {
 export interface CodexRolloutReadResult {
   rollout: CodexRolloutStateRecord | null;
   rateLimit: RateLimitDetection | null;
+  /** Timestamp of the newest parseable rollout line of any kind. */
+  lastProgressMs?: number;
   threadId?: string;
   isSubagent?: boolean;
   model?: string;
@@ -1133,6 +1183,7 @@ interface CodexRolloutFold {
   // can reach the result, so the tail stays one turn long.
   stateTail: CodexRolloutStateLine[];
   rateLimit: RateLimitDetection | null;
+  lastProgressMs?: number;
   model?: string;
   token: {
     previous?: CodexTokenUsageSnapshot;
@@ -1142,14 +1193,17 @@ interface CodexRolloutFold {
   };
 }
 
-interface CodexRolloutFileEntry extends CodexRolloutFileFingerprint {
+interface CodexJsonlCursor<F> extends CodexRolloutFileFingerprint {
   // Bytes folded so far; can trail `size` when the file ends mid-line.
   offset: number;
   prefixHash: string;
   // Hash of the PREFIX_VERIFY_BYTES before `offset`, to detect an in-place rewrite.
   tailHash: string;
   tail: Buffer;
-  fold: CodexRolloutFold;
+  fold: F;
+}
+
+interface CodexRolloutFileEntry extends CodexJsonlCursor<CodexRolloutFold> {
   candidate: CodexRolloutCandidate | null;
 }
 
@@ -1547,6 +1601,10 @@ function foldCodexRolloutLine(fold: CodexRolloutFold, parsed: Record<string, unk
   if (detection) fold.rateLimit = detection;
   const model = extractCodexTurnContextModel(parsed);
   if (model !== undefined) fold.model = model;
+  if (typeof parsed["timestamp"] === "string") {
+    const lineMs = Date.parse(parsed["timestamp"]);
+    if (Number.isFinite(lineMs)) fold.lastProgressMs = lineMs;
+  }
   foldCodexTokenUsage(fold, parsed);
 }
 
@@ -1573,6 +1631,7 @@ function finalizeCodexRolloutFold(
   return {
     rollout,
     rateLimit: fold.rateLimit,
+    ...(fold.lastProgressMs !== undefined ? { lastProgressMs: fold.lastProgressMs } : {}),
     ...(meta ? { threadId: meta.threadId } : {}),
     ...(meta?.isSubagent ? { isSubagent: true } : {}),
     ...(fold.model ? { model: fold.model } : {}),
@@ -1615,15 +1674,25 @@ async function readCodexRolloutPrefix(
   }
 }
 
+interface CodexLineFolder<F> {
+  start: () => F;
+  // Copy of a cached fold to append to; the cached one is never mutated.
+  resume: (fold: F) => F;
+  line: (fold: F, parsed: Record<string, unknown>) => void;
+}
+
 // One gate slot covers prefix verification and the scan, so concurrent opens
-// never exceed CODEX_ROLLOUT_READ_MAX_CONCURRENCY. Null: read failed, entry dropped.
-async function readCodexRolloutFile(
+// never exceed CODEX_ROLLOUT_READ_MAX_CONCURRENCY. Resumes from `cached` only
+// when the verified prefix is unchanged, else folds the whole file. Null: read
+// failed. `cursor` is null without a fingerprint.
+async function foldCodexJsonlFile<F>(
   filePath: string,
   fingerprint: CodexRolloutFileFingerprint | null,
-  cached: CodexRolloutFileEntry | undefined,
-): Promise<{ candidate: CodexRolloutCandidate | null; entry?: CodexRolloutFileEntry } | null> {
+  cached: CodexJsonlCursor<F> | undefined,
+  folder: CodexLineFolder<F>,
+): Promise<{ fold: F; cursor: CodexJsonlCursor<F> | null } | null> {
   return codexRolloutReadGate.run(async () => {
-    let fold = newCodexRolloutFold();
+    let fold = folder.start();
     let offset = 0;
     let previousTail: Buffer = Buffer.alloc(0);
     let prefixHasher = createHash("sha256");
@@ -1640,7 +1709,7 @@ async function readCodexRolloutFile(
         verified.tailHash === cached.tailHash &&
         verified.hash.copy().digest("hex") === cached.prefixHash
       ) {
-        fold = cloneCodexRolloutFold(cached.fold);
+        fold = folder.resume(cached.fold);
         offset = cached.offset;
         previousTail = cached.tail;
         prefixHasher = verified.hash;
@@ -1656,37 +1725,49 @@ async function readCodexRolloutFile(
         } catch {
           return false;
         }
-        if (isRecord(parsed)) foldCodexRolloutLine(fold, parsed);
+        if (isRecord(parsed)) folder.line(fold, parsed);
         return true;
       },
       fingerprint?.size,
       (bytes) => prefixHasher.update(bytes),
     );
     if (!scan) return null;
-    const result = finalizeCodexRolloutFold(fold, filePath);
-    const candidate =
-      !result.rollout && !result.rateLimit && !result.model && !result.tokenUsage
-        ? null
-        : { result, mtimeMs: fingerprint?.mtimeMs ?? 0 };
-    if (!fingerprint) return { candidate };
-    const endOffset = offset + scan.consumedBytes;
+    if (!fingerprint) return { fold, cursor: null };
     const tail = Buffer.from(
       Buffer.concat([previousTail, scan.tail]).subarray(-PREFIX_VERIFY_BYTES),
     );
-    const tailHash = hashHistoryTail(tail);
     return {
-      candidate,
-      entry: {
+      fold,
+      cursor: {
         ...fingerprint,
-        offset: endOffset,
+        offset: offset + scan.consumedBytes,
         prefixHash: prefixHasher.digest("hex"),
-        tailHash,
+        tailHash: hashHistoryTail(tail),
         tail,
         fold,
-        candidate,
       },
     };
   });
+}
+
+// Null: read failed, entry dropped.
+async function readCodexRolloutFile(
+  filePath: string,
+  fingerprint: CodexRolloutFileFingerprint | null,
+  cached: CodexRolloutFileEntry | undefined,
+): Promise<{ candidate: CodexRolloutCandidate | null; entry?: CodexRolloutFileEntry } | null> {
+  const read = await foldCodexJsonlFile(filePath, fingerprint, cached, {
+    start: newCodexRolloutFold,
+    resume: cloneCodexRolloutFold,
+    line: foldCodexRolloutLine,
+  });
+  if (!read) return null;
+  const result = finalizeCodexRolloutFold(read.fold, filePath);
+  const candidate =
+    !result.rollout && !result.rateLimit && !result.model && !result.tokenUsage
+      ? null
+      : { result, mtimeMs: fingerprint?.mtimeMs ?? 0 };
+  return { candidate, ...(read.cursor ? { entry: { ...read.cursor, candidate } } : {}) };
 }
 
 export async function readCodexRolloutState(
@@ -1825,36 +1906,6 @@ async function readCodexRolloutStateSnapshot(
 
 // ── Transcript entries (unified message/tool/question timeline) ──────
 
-/** Maps call_id → output text from every function_call_output/custom_tool_call_output line. */
-function buildToolOutputMap(lines: string[]): Map<string, string> {
-  const outputs = new Map<string, string>();
-  for (const line of lines) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (!isRecord(parsed) || parsed["type"] !== "response_item") {
-      continue;
-    }
-    const payload = parsed["payload"];
-    if (!isRecord(payload)) {
-      continue;
-    }
-    const payloadType = payload["type"];
-    if (payloadType !== "function_call_output" && payloadType !== "custom_tool_call_output") {
-      continue;
-    }
-    const callId = readRolloutString(payload["call_id"]);
-    const output = readRolloutString(payload["output"]);
-    if (callId && output) {
-      outputs.set(callId, output);
-    }
-  }
-  return outputs;
-}
-
 interface CodexReasoningSummaryItem {
   type?: string;
   text?: string;
@@ -1902,98 +1953,263 @@ export async function readCodexTranscriptEntries(
   if (!filePath) {
     return null;
   }
+  const read = await foldCodexJsonlFile(
+    filePath,
+    null,
+    undefined,
+    codexTranscriptFolder(Number.POSITIVE_INFINITY),
+  );
+  return read?.fold.entries ?? null;
+}
 
-  let content: string;
+// Tool entries are the only ones a later line can change: an output line for
+// their call_id fills `output`. Entries are replaced, never mutated, so a
+// published window stays valid.
+function codexToolEntry(
+  name: string,
+  callId: string | undefined,
+  inputSummary: string | undefined,
+  ts: { timestampMs: number } | Record<string, never>,
+  output: string | undefined,
+): TranscriptEntry {
+  return {
+    kind: "tool",
+    name,
+    ...(callId ? { callId } : {}),
+    ...(inputSummary ? { inputSummary } : {}),
+    ...(output ? { output } : {}),
+    ...ts,
+  };
+}
+
+interface CodexTranscriptFold {
+  // MAX_RETAINED_CONVERSATION_ENTRIES, or Infinity for a full read.
+  limit: number;
+  // Newest entries, oldest first; at most `limit` once a pass finishes.
+  entries: TranscriptEntry[];
+  // Entries ever produced from this file.
+  totalEntries: number;
+  // Last non-empty output per call_id; after a pass only ids of retained tool entries.
+  outputs: Map<string, string>;
+  // call_id -> indexes into `entries` of its tool entries.
+  toolOrdinals: Map<string, number[]>;
+  // Every call_id that ever had an output, never pruned: a call whose output was
+  // pruned from `outputs` cannot be resolved without a full read.
+  outputCallIds: Set<string>;
+  needsFullRead: boolean;
+}
+
+function newCodexTranscriptFold(limit: number): CodexTranscriptFold {
+  return {
+    limit,
+    entries: [],
+    totalEntries: 0,
+    outputs: new Map(),
+    toolOrdinals: new Map(),
+    outputCallIds: new Set(),
+    needsFullRead: false,
+  };
+}
+
+function cloneCodexTranscriptFold(fold: CodexTranscriptFold): CodexTranscriptFold {
+  return {
+    ...fold,
+    entries: fold.entries.slice(),
+    outputs: new Map(fold.outputs),
+    toolOrdinals: new Map(
+      [...fold.toolOrdinals].map(([callId, ordinals]) => [callId, [...ordinals]]),
+    ),
+    outputCallIds: new Set(fold.outputCallIds),
+    needsFullRead: false,
+  };
+}
+
+function trimCodexTranscriptFold(fold: CodexTranscriptFold, keep: number): void {
+  const drop = fold.entries.length - keep;
+  if (drop <= 0) return;
+  fold.entries.splice(0, drop);
+  for (const [callId, ordinals] of fold.toolOrdinals) {
+    const kept = ordinals.filter((ordinal) => ordinal >= drop).map((ordinal) => ordinal - drop);
+    if (kept.length > 0) fold.toolOrdinals.set(callId, kept);
+    else fold.toolOrdinals.delete(callId);
+  }
+}
+
+function appendCodexTranscriptEntry(
+  fold: CodexTranscriptFold,
+  entry: TranscriptEntry,
+  toolCallId?: string,
+): void {
+  fold.entries.push(entry);
+  fold.totalEntries += 1;
+  if (toolCallId) {
+    const ordinals = fold.toolOrdinals.get(toolCallId) ?? [];
+    ordinals.push(fold.entries.length - 1);
+    fold.toolOrdinals.set(toolCallId, ordinals);
+  }
+  // Trim in batches so the per-line cost stays constant.
+  if (fold.entries.length > 2 * fold.limit) trimCodexTranscriptFold(fold, fold.limit);
+}
+
+function foldCodexTranscriptLine(fold: CodexTranscriptFold, parsed: Record<string, unknown>): void {
+  const timestamp = typeof parsed["timestamp"] === "string" ? parsed["timestamp"] : undefined;
+  const parsedTimestampMs = timestamp ? Date.parse(timestamp) : NaN;
+  const ts: { timestampMs: number } | Record<string, never> = Number.isFinite(parsedTimestampMs)
+    ? { timestampMs: parsedTimestampMs }
+    : {};
+
+  const type = parsed["type"];
+
+  if (type === "response_item") {
+    const userText = extractUserText(parsed);
+    if (userText !== null && userText.trim()) {
+      appendCodexTranscriptEntry(fold, { kind: "message", role: "user", text: userText, ...ts });
+      return;
+    }
+
+    const assistantText = extractAssistantText(parsed);
+    if (assistantText !== null && assistantText.trim()) {
+      appendCodexTranscriptEntry(fold, {
+        kind: "message",
+        role: "assistant",
+        text: assistantText,
+        ...ts,
+      });
+      return;
+    }
+
+    const payload = parsed["payload"];
+    if (!isRecord(payload)) {
+      return;
+    }
+    const payloadType = payload["type"];
+
+    if (payloadType === "reasoning") {
+      const text = extractCodexReasoningText(payload["summary"]);
+      if (text) {
+        appendCodexTranscriptEntry(fold, { kind: "reasoning", text, ...ts });
+      }
+      return;
+    }
+
+    if (payloadType === "function_call" || payloadType === "custom_tool_call") {
+      const name = typeof payload["name"] === "string" ? payload["name"] : "";
+      const callId = readRolloutString(payload["call_id"]);
+      if (name === "request_user_input") {
+        appendCodexTranscriptEntry(fold, { kind: "question", header: "", prompt: "", ...ts });
+        return;
+      }
+      const output = callId ? fold.outputs.get(callId) : undefined;
+      if (callId && output === undefined && fold.outputCallIds.has(callId)) {
+        fold.needsFullRead = true;
+      }
+      appendCodexTranscriptEntry(
+        fold,
+        codexToolEntry(name, callId, readRolloutString(payload["arguments"]), ts, output),
+        callId,
+      );
+      return;
+    }
+
+    if (payloadType === "function_call_output" || payloadType === "custom_tool_call_output") {
+      const callId = readRolloutString(payload["call_id"]);
+      const output = readRolloutString(payload["output"]);
+      if (!callId || !output) return;
+      fold.outputs.set(callId, output);
+      fold.outputCallIds.add(callId);
+      for (const ordinal of fold.toolOrdinals.get(callId) ?? []) {
+        const entry = fold.entries[ordinal];
+        if (entry?.kind !== "tool") continue;
+        fold.entries[ordinal] = codexToolEntry(
+          entry.name,
+          entry.callId,
+          entry.inputSummary,
+          entry.timestampMs === undefined ? {} : { timestampMs: entry.timestampMs },
+          output,
+        );
+      }
+    }
+    return;
+  }
+
+  if (type === "event_msg") {
+    const payload = parsed["payload"];
+    if (!isRecord(payload) || payload["type"] !== "input_required") {
+      return;
+    }
+    const { header, prompt } = extractCodexQuestionText(payload);
+    appendCodexTranscriptEntry(fold, { kind: "question", header, prompt, ...ts });
+  }
+}
+
+// Drop what the next append cannot reach: entries past the window and outputs
+// of calls no longer retained.
+function finishCodexTranscriptPass(fold: CodexTranscriptFold): void {
+  trimCodexTranscriptFold(fold, fold.limit);
+  for (const callId of fold.outputs.keys()) {
+    if (!fold.toolOrdinals.has(callId)) fold.outputs.delete(callId);
+  }
+}
+
+function codexTranscriptFolder(limit: number): CodexLineFolder<CodexTranscriptFold> {
+  return {
+    start: () => newCodexTranscriptFold(limit),
+    resume: cloneCodexTranscriptFold,
+    line: foldCodexTranscriptLine,
+  };
+}
+
+export interface CodexConversationReaderState {
+  filePath: string;
+  cursor: CodexJsonlCursor<CodexTranscriptFold>;
+}
+
+/**
+ * Newest MAX_RETAINED_CONVERSATION_ENTRIES transcript entries of the latest
+ * rollout, equal to the tail of `readCodexTranscriptEntries`. An unchanged file
+ * is not read; an append parses only the new bytes; a rewrite, rotation, or
+ * a call whose output left the window re-reads the whole file.
+ */
+export async function readCodexConversationTail(
+  sessionsDir: string,
+  reader: CodexConversationReaderState | undefined,
+): Promise<{
+  entries: TranscriptEntry[];
+  totalEntries: number;
+  startIndex: number;
+  reader: CodexConversationReaderState;
+} | null> {
+  const filePath = await findLatestCodexSessionFile({ sessionRootDir: sessionsDir });
+  if (!filePath) return null;
+  let fingerprint: CodexRolloutFileFingerprint;
   try {
-    content = await readFile(filePath, "utf8");
+    const fileStat = await stat(filePath);
+    fingerprint = { ino: fileStat.ino, mtimeMs: fileStat.mtimeMs, size: fileStat.size };
   } catch {
     return null;
   }
-
-  const lines = content
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const toolOutputs = buildToolOutputMap(lines);
-
-  const entries: TranscriptEntry[] = [];
-
-  for (const line of lines) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
+  const cached = reader?.filePath === filePath ? reader.cursor : undefined;
+  let cursor = cached;
+  if (
+    !cursor ||
+    cursor.ino !== fingerprint.ino ||
+    cursor.mtimeMs !== fingerprint.mtimeMs ||
+    cursor.size !== fingerprint.size
+  ) {
+    const folder = codexTranscriptFolder(MAX_RETAINED_CONVERSATION_ENTRIES);
+    let read = await foldCodexJsonlFile(filePath, fingerprint, cached, folder);
+    if (read?.fold.needsFullRead) {
+      read = await foldCodexJsonlFile(filePath, fingerprint, undefined, folder);
     }
-    if (!isRecord(parsed)) {
-      continue;
-    }
-
-    const timestamp = typeof parsed["timestamp"] === "string" ? parsed["timestamp"] : undefined;
-    const parsedTimestampMs = timestamp ? Date.parse(timestamp) : NaN;
-    const ts: { timestampMs: number } | Record<string, never> = Number.isFinite(parsedTimestampMs)
-      ? { timestampMs: parsedTimestampMs }
-      : {};
-
-    const type = parsed["type"];
-
-    if (type === "response_item") {
-      const userText = extractUserTextFromLine(line);
-      if (userText !== null && userText.trim()) {
-        entries.push({ kind: "message", role: "user", text: userText, ...ts });
-        continue;
-      }
-
-      const assistantText = extractAssistantTextFromLine(line);
-      if (assistantText !== null && assistantText.trim()) {
-        entries.push({ kind: "message", role: "assistant", text: assistantText, ...ts });
-        continue;
-      }
-
-      const payload = parsed["payload"];
-      if (!isRecord(payload)) {
-        continue;
-      }
-      const payloadType = payload["type"];
-
-      if (payloadType === "reasoning") {
-        const text = extractCodexReasoningText(payload["summary"]);
-        if (text) {
-          entries.push({ kind: "reasoning", text, ...ts });
-        }
-        continue;
-      }
-
-      if (payloadType === "function_call" || payloadType === "custom_tool_call") {
-        const name = typeof payload["name"] === "string" ? payload["name"] : "";
-        const callId = readRolloutString(payload["call_id"]);
-        if (name === "request_user_input") {
-          entries.push({ kind: "question", header: "", prompt: "", ...ts });
-          continue;
-        }
-        const inputSummary = readRolloutString(payload["arguments"]);
-        const output = callId ? toolOutputs.get(callId) : undefined;
-        entries.push({
-          kind: "tool",
-          name,
-          ...(callId ? { callId } : {}),
-          ...(inputSummary ? { inputSummary } : {}),
-          ...(output ? { output } : {}),
-          ...ts,
-        });
-      }
-      continue;
-    }
-
-    if (type === "event_msg") {
-      const payload = parsed["payload"];
-      if (!isRecord(payload) || payload["type"] !== "input_required") {
-        continue;
-      }
-      const { header, prompt } = extractCodexQuestionText(payload);
-      entries.push({ kind: "question", header, prompt, ...ts });
-    }
+    if (!read?.cursor) return null;
+    finishCodexTranscriptPass(read.fold);
+    cursor = read.cursor;
   }
-
-  return entries;
+  const { entries, totalEntries } = cursor.fold;
+  return {
+    entries,
+    totalEntries,
+    startIndex: totalEntries - entries.length,
+    reader: { filePath, cursor },
+  };
 }

@@ -2339,6 +2339,63 @@ test.describe("S2a: Logs modal", () => {
 
 // S2b: Conversation dialog
 test.describe("S2b: Conversation dialog", () => {
+  test("older-page loading belongs to the pending request", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-older-owner", state: "waiting" });
+    await mockSessionDetail(page, session);
+    let releaseOlder = () => {};
+    const olderGate = new Promise<void>((resolve) => {
+      releaseOlder = resolve;
+    });
+    await page.route(`**/api/sessions/${session.id}/conversation*`, async (route) => {
+      const older = new URL(route.request().url()).searchParams.get("from") === "100";
+      if (older) await olderGate;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "waiting",
+          startIndex: older ? 100 : 200,
+          totalEntries: 500,
+          hasMore: true,
+          messages: Array.from({ length: 100 }, (_, index) => ({
+            role: "user",
+            text: `${older ? "older" : "tail"} message ${index}`,
+            timestampMs: index + 1,
+          })),
+        }),
+      });
+    });
+    try {
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("tail message 99", { exact: true })).toBeVisible();
+      const scroll = page.getByTestId("conversation-scroll");
+      const requested = page.waitForRequest((request) =>
+        request.url().endsWith(`/api/sessions/${session.id}/conversation?from=100`),
+      );
+      await scroll.evaluate((element) => {
+        element.scrollTop = 0;
+        element.dispatchEvent(new Event("scroll"));
+      });
+      await requested;
+      await expect(page.getByLabel("Loading older messages")).toBeVisible();
+      releaseOlder();
+      await expect(page.getByText("older message 0", { exact: true })).toBeVisible();
+      await expect(page.getByLabel("Loading older messages")).toHaveCount(0);
+      const resumed = page.waitForRequest((request) =>
+        request.url().endsWith(`/api/sessions/${session.id}/conversation`),
+      );
+      await scroll.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+        element.dispatchEvent(new Event("scroll"));
+      });
+      await resumed;
+      await expect(page.getByText("tail message 99", { exact: true })).toBeVisible();
+      await expect(page.getByLabel("Loading older messages")).toHaveCount(0);
+    } finally {
+      releaseOlder();
+    }
+  });
+
   test("long unbroken dialog and queued tokens hard-wrap on mobile without horizontal overflow", async ({
     page,
   }) => {

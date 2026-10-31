@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as hostMemory from "../../src/host-memory.js";
+import * as configuredSources from "../../src/event-sources/index.js";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +27,7 @@ import {
   SessionStartingError,
   SidecarPortConflictError,
   SidecarProbeUnresponsiveError,
+  SpawnBatchConflictError,
   SessionService,
 } from "../../src/session-service.js";
 import type { SessionRecord, SessionView, SidecarStopView } from "../../src/types.js";
@@ -37,6 +39,40 @@ import {
 import { findFreePort, startOnFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
+  it("wires source attachment preparation to the requested session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-source-preparation-"));
+    const port = await findFreePort();
+    const configPath = join(root, "config.yaml");
+    await writeFile(
+      configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`,
+    );
+    const sources = vi.spyOn(configuredSources, "startConfiguredSources").mockResolvedValue({
+      stop: vi.fn(),
+      telegramBotIdentity: () => null,
+      clearPollDisabledOverride: () => null,
+    });
+    const prepare = vi
+      .spyOn(SessionService.prototype, "prepareSourceMessage")
+      .mockReturnValue("saved refs");
+    const send = vi.spyOn(SessionService.prototype, "send");
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const callback = sources.mock.calls[0]?.[0].prepareSessionMessage;
+      expect(callback).toBeDefined();
+      const request = { message: "inspect", attachments: [{ name: "file.bin", data: "eA==" }] };
+      expect(await callback?.("target-session", request)).toBe("saved refs");
+      expect(prepare).toHaveBeenCalledExactlyOnceWith("target-session", request);
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      await server.stop();
+      sources.mockRestore();
+      prepare.mockRestore();
+      send.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("GET source-info returns association, absence, and unknown-session 404", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-source-info-server-"));
     const port = await findFreePort();
@@ -83,6 +119,43 @@ describe("startServer", () => {
     } finally {
       await server.stop();
       sourceInfo.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a source-reply body over 1 MB for images", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-source-reply-server-"));
+    const port = await findFreePort();
+    const configPath = join(root, "config.yaml");
+    await writeFile(
+      configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`,
+    );
+    const reply = vi.spyOn(SessionService.prototype, "replyToSource").mockResolvedValue({
+      ok: true,
+      source: "telegram",
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "chat",
+      chatId: -1001,
+      images: 1,
+    });
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const data = "A".repeat(2_000_000);
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/api-1/source-reply`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "look", images: [{ name: "a.png", data }] }),
+      });
+      expect(response.status).toBe(200);
+      expect(reply).toHaveBeenCalledWith("api-1", {
+        message: "look",
+        images: [{ name: "a.png", data }],
+      });
+    } finally {
+      await server.stop();
+      reply.mockRestore();
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -578,6 +651,51 @@ describe("startServer", () => {
       await server.stop();
     }
   });
+
+  it.each([
+    { enabled: false, status: 404 },
+    { enabled: true, status: 400 },
+  ])(
+    "POST /sessions/:id/switch-auth gate with authRotation.switchAuth=$enabled returns $status",
+    async ({ enabled, status }) => {
+      const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+      const repoDir = join(root, "repo");
+      const port = await findFreePort();
+      await mkdir(repoDir, { recursive: true });
+      const configPath = join(root, "spur.yaml");
+      await writeFile(
+        configPath,
+        [
+          "server:",
+          "  host: 127.0.0.1",
+          `  port: ${port}`,
+          `dataDir: ${join(root, "data")}`,
+          `worktreeDir: ${join(root, "worktrees")}`,
+          ...(enabled ? ["authRotation:", "  switchAuth: true"] : []),
+          "projects:",
+          "  demo:",
+          `    path: ${repoDir}`,
+        ].join("\n"),
+        "utf8",
+      );
+
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
+
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/switch-auth`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ accountId: "" }),
+        });
+        expect(response.status).toBe(status);
+      } finally {
+        await server.stop();
+      }
+    },
+  );
 
   it("returns 429 naming the cap and live count when spawn is denied by the admission cap", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
@@ -2094,6 +2212,58 @@ describe("startServer", () => {
     }
   });
 
+  it("maps a background spawn batch conflict to 409 with code and sessionId", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const spawnInBackground = SessionService.prototype.spawnInBackground;
+    SessionService.prototype.spawnInBackground = async function mockSpawnInBackground() {
+      throw new SpawnBatchConflictError("spawn_committed", "demo-3");
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/background`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ project: "demo", prompt: "ship it" }),
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        code: "spawn_committed",
+        sessionId: "demo-3",
+        error:
+          "Session demo-3 was already created from this submission; submit again to start another session",
+      });
+    } finally {
+      SessionService.prototype.spawnInBackground = spawnInBackground;
+      await server.stop();
+    }
+  });
+
   it("routes backlog list through the session service", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -2250,6 +2420,7 @@ describe("startServer", () => {
           intervalMs: 600_000,
           stopCondition: "CI is green",
           message: "Check CI",
+          dispatchClaimId: "echoed-read-only-claim",
         }),
       });
       expect(scheduleResponse.status).toBe(200);
@@ -2436,7 +2607,11 @@ describe("startServer", () => {
       const updateResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ target: "interval", message: "Updated CI" }),
+        body: JSON.stringify({
+          target: "interval",
+          message: "Updated CI",
+          dispatchClaimId: "echoed-read-only-claim",
+        }),
       });
       expect(updateResponse.status).toBe(200);
       await expect(updateResponse.json()).resolves.toMatchObject({
@@ -2535,7 +2710,11 @@ describe("startServer", () => {
       const dispatchResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ target: "interval", dispatch: true }),
+        body: JSON.stringify({
+          target: "interval",
+          dispatch: true,
+          dispatchClaimId: "echoed-read-only-claim",
+        }),
       });
       expect(dispatchResponse.status).toBe(200);
       expect(dispatchRequests).toEqual([{ target: "interval", dispatch: true }]);
