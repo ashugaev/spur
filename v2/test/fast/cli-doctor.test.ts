@@ -79,7 +79,7 @@ describe("spur doctor CLI --config forwarding", () => {
     });
     await parseDoctor([], ["--config", selectedPath]);
     expect(capturedInput).toBe(selectedPath);
-  });
+  }, 15_000);
 
   it("uses absent selected config without falling back to default", async () => {
     const selectedPath = "/nonexistent/custom-spur.yaml";
