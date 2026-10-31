@@ -52,13 +52,18 @@ setup_scenario() {
 
   : >"$pkg_root/deploy/spur-daemon.npm.service"
   cp "$DEPLOY_WEB_UNIT" "$pkg_root/deploy/spur-web.npm.service"
-  : >"$pkg_root/dist/cli.js"
+  cp "$HERE/../deploy/spur-mcp.npm.service" "$pkg_root/deploy/spur-mcp.npm.service"
+  cp "$HERE/../deploy/spur-mcp-tunnel.npm.service" "$pkg_root/deploy/spur-mcp-tunnel.npm.service"
+  while IFS= read -r entry || [[ -n "$entry" ]]; do
+    case "$entry" in dist/*) : >"$pkg_root/$entry" ;; esac
+  done <"$REQUIRED_FILES_LIST"
   : >"$pkg_root/web/dist-server/web-server.js"
   : >"$pkg_root/spur.yaml.reference"
   : >"$pkg_root/skills/spur/SKILL.md"
 
   cat >"$fake_bin/node" <<'EOF'
 #!/usr/bin/env bash
+if [ "$#" -eq 6 ] && [ "${1:-}" = "--input-type=module" ]; then printf '%s' "$HOME/.spur/config.yaml"; fi
 exit 0
 EOF
 
@@ -128,6 +133,13 @@ UNIT_DIR="$FAKE_HOME/.config/systemd/user"
 
 [ -f "$UNIT_DIR/spur-web.service" ] || fail "spur-web.service was not installed into $UNIT_DIR"
 [ -f "$UNIT_DIR/spur-daemon.service" ] || fail "spur-daemon.service was not installed into $UNIT_DIR"
+[ -f "$UNIT_DIR/spur-mcp.service" ] || fail "spur-mcp.service was not installed"
+[ -f "$UNIT_DIR/spur-mcp-tunnel.service" ] || fail "spur-mcp-tunnel.service template was not installed"
+grep -q '^Restart=always$' "$UNIT_DIR/spur-mcp.service" || fail "MCP must restart after crashes"
+grep -q '^WantedBy=default.target$' "$UNIT_DIR/spur-mcp.service" || fail "MCP must start at boot"
+if grep -Eq '^(Requires|BindsTo|EnvironmentFile)=' "$UNIT_DIR/spur-mcp.service"; then
+  fail "generic MCP must survive daemon stop and must not inherit tunnel secrets"
+fi
 [ ! -f "$UNIT_DIR/spur-direct-terminal.service" ] || fail "spur-direct-terminal.service must not be installed"
 
 grep -qi "spur-direct-terminal\|14801" "$OUT_FILE" &&
@@ -430,7 +442,8 @@ FAKE_BIN="${bin_kv#BIN=}"
 PKG_ROOT="${pkg_kv#PKG=}"
 cat >"$FAKE_BIN/node" <<'EOF'
 #!/usr/bin/env bash
-if [ "${1:-}" = "--input-type=module" ]; then exit 1; fi
+if [ "$#" -eq 6 ] && [ "${1:-}" = "--input-type=module" ]; then printf '%s' "$HOME/.spur/config.yaml"; fi
+if [ "$#" -eq 3 ] && [ "${1:-}" = "--input-type=module" ]; then exit 1; fi
 exit 0
 EOF
 cat >"$FAKE_BIN/curl" <<'EOF'
@@ -450,5 +463,32 @@ fi
 grep -q 'one or more units failed to start' "$OUT_FILE" ||
   fail "npm-init.sh did not report failed readiness"
 echo "npm-init.test.sh: stale-daemon scenario OK"
+
+read -r home_kv bin_kv pkg_kv < <(setup_scenario configured-tunnel)
+FAKE_HOME="${home_kv#HOME=}"
+FAKE_BIN="${bin_kv#BIN=}"
+PKG_ROOT="${pkg_kv#PKG=}"
+mkdir -p "$FAKE_HOME/.spur"
+printf 'SPUR_MCP_TUNNEL_PROFILE=fixture\nCONTROL_PLANE_API_KEY=fixture\n' >"$FAKE_HOME/.spur/mcp-tunnel.env"
+chmod 600 "$FAKE_HOME/.spur/mcp-tunnel.env"
+SYSTEMCTL_TRACE="$WORK_DIR/configured-tunnel-trace"
+cat >"$FAKE_BIN/systemctl" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$SYSTEMCTL_TRACE"
+exit 0
+EOF
+cat >"$FAKE_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+echo 200
+EOF
+chmod +x "$FAKE_BIN/systemctl" "$FAKE_BIN/curl"
+OUT_FILE="$WORK_DIR/configured-tunnel-output.log"
+SYSTEMCTL_TRACE="$SYSTEMCTL_TRACE" HOME="$FAKE_HOME" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  bash "$PKG_ROOT/scripts/npm-init.sh" --no-tailscale >"$OUT_FILE" 2>&1
+grep -q -- '--user enable spur-daemon.service spur-web.service spur-mcp.service spur-mcp-tunnel.service' "$SYSTEMCTL_TRACE" ||
+  fail "configured tunnel must be enabled with mandatory services"
+grep -q -- '--user restart spur-mcp-tunnel.service' "$SYSTEMCTL_TRACE" ||
+  fail "configured tunnel must restart during init/reinit"
+echo "npm-init.test.sh: configured-tunnel scenario OK"
 
 echo "npm-init.test.sh: OK"
