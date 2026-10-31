@@ -56,7 +56,7 @@
     "croner": "^10.0.1",
     "grammy": "1.44.0",
     "yaml": "^2.8.3",
-    "zod": "^3.25"
+    "zod": "^4.6"
   },
   "devDependencies": {
     "@types/node": "^25.2.3",
