@@ -28,6 +28,13 @@ export function useFooterPopover(): FooterPopover {
     hoverTimerRef.current = null;
   };
 
+  const close = () => {
+    clearHoverTimer();
+    setDismissed(true);
+    setPinned(false);
+    setHovered(false);
+  };
+
   useEffect(() => clearHoverTimer, []);
 
   useEffect(() => {
@@ -40,9 +47,7 @@ export function useFooterPopover(): FooterPopover {
       const target = event.target;
       if (!(target instanceof Node)) return;
       if (containerRef.current?.contains(target)) return;
-      setDismissed(true);
-      setPinned(false);
-      setHovered(false);
+      close();
     };
 
     document.addEventListener("pointerdown", onPointerDown);
@@ -56,8 +61,7 @@ export function useFooterPopover(): FooterPopover {
     open,
     onBlur(event: FocusEvent<HTMLDivElement>) {
       if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-        setPinned(false);
-        setDismissed(true);
+        close();
       }
     },
     onMouseEnter() {
@@ -77,9 +81,6 @@ export function useFooterPopover(): FooterPopover {
       setDismissed(false);
       setPinned((current) => !current);
     },
-    dismiss() {
-      setDismissed(true);
-      setPinned(false);
-    },
+    dismiss: close,
   };
 }

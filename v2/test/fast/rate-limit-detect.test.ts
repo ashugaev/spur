@@ -97,6 +97,54 @@ afterEach(async () => {
 });
 
 describe("detectCodexRateLimit", () => {
+  it.each([
+    { primary: { used_percent: 100, window_minutes: 10080 }, secondary: null },
+    { primary: { used_percent: 100, window_minutes: 300 }, secondary: null },
+    { primary: null, secondary: { used_percent: 100, window_minutes: 10080 } },
+    {
+      primary: { used_percent: 100, window_minutes: 300 },
+      secondary: { used_percent: 100, window_minutes: 10080 },
+    },
+  ])("permits paid-credit continuation despite exhausted windows: %j", (windows) => {
+    expect(detectCodexRateLimit({ ...CODEX_HEALTHY, ...windows })).toEqual({
+      limited: false,
+      reason: "",
+    });
+  });
+
+  it("preserves explicit provider refusal despite available paid credits", () => {
+    expect(
+      detectCodexRateLimit({
+        ...CODEX_HEALTHY,
+        primary: { used_percent: 100, window_minutes: 10080 },
+        rate_limit_reached_type: "workspace_owner_credits_depleted",
+      }),
+    ).toEqual({ limited: true, reason: "codex workspace_owner_credits_depleted" });
+  });
+
+  it.each([false, undefined, null, "true", 1])(
+    "preserves exhausted-window limits without explicit paid credits: %j",
+    (hasCredits) => {
+      expect(
+        detectCodexRateLimit({
+          primary: { used_percent: 100, window_minutes: 10080 },
+          credits: { has_credits: hasCredits },
+          rate_limit_reached_type: null,
+        }),
+      ).toEqual({ limited: true, reason: "codex 5h window exhausted" });
+    },
+  );
+
+  it.each([undefined, null, [], true, "true"])(
+    "preserves exhausted-window limits with malformed or missing credits: %j",
+    (credits) => {
+      expect(detectCodexRateLimit({ primary: { used_percent: 100 }, credits })).toEqual({
+        limited: true,
+        reason: "codex 5h window exhausted",
+      });
+    },
+  );
+
   it("flags out-of-credits via credits.has_credits=false", () => {
     expect(detectCodexRateLimit(CODEX_OUT_OF_CREDITS)).toEqual({
       limited: true,
@@ -300,6 +348,73 @@ describe("detectCursorRateLimit", () => {
   });
 });
 
+const R_HEADER = "What do you want to do?";
+const R_FOOTER = "Enter to confirm \u00b7 Esc to cancel";
+const R_OLD_MENU = [
+  R_HEADER,
+  "",
+  "\u276f 1. Stop and wait for limit to reset",
+  "  2. Ask your admin for more usage",
+  "",
+  R_FOOTER,
+];
+const R10_PARTIAL_NEWER_MENU = [
+  ...R_OLD_MENU,
+  R_HEADER,
+  "\u276f 1. Add funds to continue with usage credits",
+  "  2. Upgrade your plan",
+];
+const R10_POST_FOOTER_OUTPUT = [...R_OLD_MENU, "normal task output"];
+const R12_UNKNOWN_PROSE = [
+  R_HEADER,
+  "\u276f 1. Stop and wait for limit to reset",
+  "  2. Upgrade your plan",
+  "  3. Something unrelated",
+  "This is prose, not a wrapped menu label",
+  R_FOOTER,
+];
+const R12_WAIT_HERE_PROSE = [
+  R_HEADER,
+  "\u276f 1. Stop and wait for limit to reset",
+  "  2. Wait here, then continue automatically shortly",
+  "This is prose, not a wrapped menu label",
+  R_FOOTER,
+];
+
+const DATED_FOOTER = "Enter to confirm \u00b7 Esc to cancel";
+const datedMenu = (waitLines: string[]): string =>
+  [
+    "What do you want to do?",
+    "",
+    "\u276f 1. Stop and wait for limit to reset",
+    ...waitLines,
+    "  3. Ask your admin for more usage",
+    "",
+    DATED_FOOTER,
+  ].join("\n");
+const DATED_PROSE_CASES: ReadonlyArray<readonly [string, string[]]> = [
+  [
+    "prose after a dated wait-here option",
+    [
+      "  2. Wait here, then continue automatically at Sep 2, 8am",
+      "This is prose, not a wrapped menu label",
+    ],
+  ],
+  [
+    "prose across two continuation lines after a dated wait-here option",
+    [
+      "  2. Wait here, then continue automatically at Sep 2, 8am",
+      "This is prose",
+      "not a wrapped menu label",
+    ],
+  ],
+  [
+    "a wrapped at-suffix that is not a formatted date",
+    ["  2. Wait here, then continue automatically at", "  some other prose"],
+  ],
+];
+const DATED_FORMATS = ["8am", "8:30pm", "Sep 2, 8am", "Sep 2, 8:30am", "Sep 2, 2027, 8am"];
+
 describe("detectClaudeUsageLimitMenu", () => {
   const MENU_TEXT = [
     "What do you want to do?",
@@ -450,7 +565,7 @@ describe("detectClaudeUsageLimitMenu", () => {
     expect(detectClaudeUsageLimitMenu(`${THREE_OPTION_MENU_TEXT}\n${subsequentOutput}`)).toBeNull();
   });
 
-  it("returns null when the wait-here option is present but the admin option is not", () => {
+  it("flags the menu with stop-and-wait and wait-here but no extra-usage option", () => {
     const paneText = [
       "What do you want to do?",
       "",
@@ -459,7 +574,242 @@ describe("detectClaudeUsageLimitMenu", () => {
       "",
       "Enter to confirm \u00b7 Esc to cancel",
     ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  const LIMITED = { limited: true, reason: "claude usage limit menu" };
+  const FOOTER = "Enter to confirm \u00b7 Esc to cancel";
+  const A0B7_MENU_TEXT = [
+    "What do you want to do?",
+    "",
+    "   \u276f 1. Stop and wait for limit to reset",
+    "     2. Wait here, then continue automatically shortly",
+    "     3. Ask your admin for more usage",
+    "",
+    FOOTER,
+  ].join("\n");
+  const PRO_MENU_TEXT = [
+    "What do you want to do?",
+    "",
+    "\u276f 1. Stop and wait for limit to reset",
+    "  2. Switch to usage credits",
+    "  3. Upgrade your plan",
+    "",
+    FOOTER,
+  ].join("\n");
+  const REORDERED_MENU_TEXT = [
+    "What do you want to do?",
+    "",
+    "\u276f 1. Add funds to continue with usage credits",
+    "  2. Upgrade your plan",
+    "  3. Stop and wait for limit to reset",
+    "",
+    FOOTER,
+  ].join("\n");
+
+  it("flags the verbatim captured menu with the wait-here and admin options", () => {
+    expect(detectClaudeUsageLimitMenu(A0B7_MENU_TEXT)).toEqual(LIMITED);
+  });
+
+  it("flags the Pro variant with switch-to-usage-credits and upgrade options", () => {
+    expect(detectClaudeUsageLimitMenu(PRO_MENU_TEXT)).toEqual(LIMITED);
+  });
+
+  it("flags the reordered variant whose option 1 is add-funds", () => {
+    expect(detectClaudeUsageLimitMenu(REORDERED_MENU_TEXT)).toEqual(LIMITED);
+  });
+
+  it("flags stop-and-wait with only an upgrade-your-plan option", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Upgrade your plan",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual(LIMITED);
+  });
+
+  it.each(["\u2019", "'"])(
+    "flags stop-and-wait with the don%st-continue auto-resume slot",
+    (apostrophe) => {
+      const paneText = [
+        "What do you want to do?",
+        "",
+        "\u276f 1. Stop and wait for limit to reset",
+        `  2. Don${apostrophe}t continue automatically`,
+        "",
+        FOOTER,
+      ].join("\n");
+      expect(detectClaudeUsageLimitMenu(paneText)).toEqual(LIMITED);
+    },
+  );
+
+  it("flags a menu holding an unknown-label numbered option beside two known labels", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Some future promo option",
+      "  3. Upgrade your plan",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual(LIMITED);
+  });
+
+  it("returns null for a prose numbered list followed by an unrelated dialog footer", () => {
+    const paneText = [
+      "\u25cf Options:",
+      "  1. Upgrade your plan",
+      "  2. Switch to usage credits",
+      "",
+      "",
+      "Some unrelated dialog",
+      "",
+      FOOTER,
+    ].join("\n");
     expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null for two known numbered options directly above a footer with no menu header", () => {
+    const paneText = [
+      "Some assistant text",
+      "",
+      "  1. Upgrade your plan",
+      "  2. Switch to usage credits",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("flags the verbatim captured menu when the wait-here option wraps in a narrow pane", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Wait here, then continue automatically when the",
+      "  limit resets",
+      "  3. Ask your admin for more usage",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual(LIMITED);
+  });
+
+  it("flags the reordered menu when the add-funds option wraps in a narrow pane", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Add funds to continue with",
+      "  usage credits",
+      "  2. Upgrade your plan",
+      "  3. Stop and wait for limit to reset",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual(LIMITED);
+  });
+
+  it("flags the Pro menu when the stop option itself wraps", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit",
+      "  to reset",
+      "  2. Switch to usage credits",
+      "  3. Upgrade your plan",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual(LIMITED);
+  });
+
+  it("returns null when a prose line precedes the first option in the menu block", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "some prose before the options",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Upgrade your plan",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it.each([
+    ["a newer partial menu after an old complete menu", R10_PARTIAL_NEWER_MENU],
+    ["ordinary output after the footer", R10_POST_FOOTER_OUTPUT],
+    ["prose after an unknown option", R12_UNKNOWN_PROSE],
+    ["prose after a wait-here option", R12_WAIT_HERE_PROSE],
+  ])("returns null for %s", (_name, lines) => {
+    expect(detectClaudeUsageLimitMenu(lines.join("\n"))).toBeNull();
+  });
+
+  it.each(DATED_PROSE_CASES)("returns null for %s", (_name, waitLines) => {
+    expect(detectClaudeUsageLimitMenu(datedMenu(waitLines))).toBeNull();
+  });
+
+  it.each(DATED_FORMATS)("flags the wait-here option dated %s", (date) => {
+    expect(
+      detectClaudeUsageLimitMenu(
+        datedMenu([`  2. Wait here, then continue automatically at ${date}`]),
+      ),
+    ).toEqual(LIMITED);
+  });
+
+  it("flags the wait-here option when a dated suffix with a year wraps in a narrow pane", () => {
+    expect(
+      detectClaudeUsageLimitMenu(
+        datedMenu(["  2. Wait here, then continue automatically at Sep 2, 2027,", "  8am"]),
+      ),
+    ).toEqual(LIMITED);
+  });
+
+  it("flags the wait-here option when its dated suffix wraps in a narrow pane", () => {
+    expect(
+      detectClaudeUsageLimitMenu(
+        datedMenu(["  2. Wait here, then continue automatically at Sep 2,", "  8:30am"]),
+      ),
+    ).toEqual(LIMITED);
+  });
+
+  it("returns null when a non-numbered prose line sits inside the menu block", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Upgrade your plan",
+      "  some prose in the block",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null for one known label plus an unknown option", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Upgrade your plan",
+      "  2. Something unrelated",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null when the Pro variant has scrolled out of the live tail", () => {
+    const subsequentOutput = Array.from({ length: 25 }, (_, i) => `line ${i}: follow-up`).join(
+      "\n",
+    );
+    expect(detectClaudeUsageLimitMenu(`${PRO_MENU_TEXT}\n${subsequentOutput}`)).toBeNull();
   });
 
   it("returns null for unrelated normal Claude Code output", () => {
@@ -556,10 +906,187 @@ describe("claudeUsageMenuOptionOneSelected", () => {
     expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
   });
 
+  const REORDERED_LIVE_MENU = [
+    "What do you want to do?",
+    "",
+    "\u276f 1. Add funds to continue with usage credits",
+    "  2. Upgrade your plan",
+    "  3. Stop and wait for limit to reset",
+    "",
+    "Enter to confirm \u00b7 Esc to cancel",
+  ];
+  const STALE_SELECTED_STOP = "\u276f 1. Stop and wait for limit to reset";
+  const SCROLLBACK = Array.from({ length: 25 }, (_, i) => `line ${i}: later output`);
+
+  it("returns false on the reordered menu where option 1 is add-funds", () => {
+    expect(claudeUsageMenuOptionOneSelected(REORDERED_LIVE_MENU.join("\n"))).toBe(false);
+  });
+
+  it("returns false when a stale selected stop line sits in scrollback above a reordered menu", () => {
+    const paneText = [STALE_SELECTED_STOP, ...SCROLLBACK, ...REORDERED_LIVE_MENU].join("\n");
+    expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
+  });
+
+  it("returns false when the selected stop line is in scrollback and no live menu block exists", () => {
+    const paneText = [STALE_SELECTED_STOP, ...SCROLLBACK].join("\n");
+    expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
+  });
+
+  it("returns true on the verbatim captured menu with the cursor on option 1", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "   \u276f 1. Stop and wait for limit to reset",
+      "     2. Wait here, then continue automatically shortly",
+      "     3. Ask your admin for more usage",
+      "",
+      "   Enter to confirm \u00b7 Esc to cancel",
+    ].join("\n");
+    expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(true);
+  });
+
+  it("returns true when the wrapped option-2 label follows a selected option 1", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Wait here, then continue automatically when the",
+      "  limit resets",
+      "",
+      "Enter to confirm \u00b7 Esc to cancel",
+    ].join("\n");
+    expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(true);
+  });
+
+  it("returns false when the selected option-1 label carries wrapped extra text", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  and buy credits",
+      "  2. Upgrade your plan",
+      "",
+      "Enter to confirm \u00b7 Esc to cancel",
+    ].join("\n");
+    expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
+  });
+
+  it.each([
+    ["a newer partial menu after an old complete menu", R10_PARTIAL_NEWER_MENU],
+    ["ordinary output after the footer", R10_POST_FOOTER_OUTPUT],
+    ["prose after an unknown option", R12_UNKNOWN_PROSE],
+    ["prose after a wait-here option", R12_WAIT_HERE_PROSE],
+  ])("returns false for %s", (_name, lines) => {
+    expect(claudeUsageMenuOptionOneSelected(lines.join("\n"))).toBe(false);
+  });
+
+  it.each(DATED_PROSE_CASES)("returns false for %s", (_name, waitLines) => {
+    expect(claudeUsageMenuOptionOneSelected(datedMenu(waitLines))).toBe(false);
+  });
+
+  it("returns true when the dated wait-here suffix wraps after a selected option 1", () => {
+    expect(
+      claudeUsageMenuOptionOneSelected(
+        datedMenu(["  2. Wait here, then continue automatically at Sep 2,", "  8:30am"]),
+      ),
+    ).toBe(true);
+  });
+
   it("returns false for plain unrelated text", () => {
     expect(claudeUsageMenuOptionOneSelected("just some regular output\nnothing to see here")).toBe(
       false,
     );
+  });
+});
+
+describe("usage-limit menu 20-physical-line tail window", () => {
+  const TAIL = 20;
+  const HEADER = "What do you want to do?";
+  const FOOTER = "Enter to confirm \u00b7 Esc to cancel";
+  const STOP = "   \u276f 1. Stop and wait for limit to reset";
+  const WAIT = "     2. Wait here, then continue automatically shortly";
+  const ADMIN = "     3. Ask your admin for more usage";
+  const blanks = (count: number): string[] => Array.from({ length: count }, () => "");
+  const filler = (count: number): string[] =>
+    Array.from({ length: count }, (_, i) => `earlier output ${i}`);
+  // Menu whose header..footer span is exactly `span` physical lines, the extra
+  // lines being internal blanks right after the header.
+  const menuSpanning = (span: number): string[] => [
+    HEADER,
+    ...blanks(span - 6),
+    STOP,
+    WAIT,
+    ADMIN,
+    "",
+    FOOTER,
+  ];
+  const expectDetected = (lines: string[]): void => {
+    const text = lines.join("\n");
+    expect(detectClaudeUsageLimitMenu(text)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+    expect(claudeUsageMenuOptionOneSelected(text)).toBe(true);
+  };
+  const expectRejected = (lines: string[]): void => {
+    const text = lines.join("\n");
+    expect(detectClaudeUsageLimitMenu(text)).toBeNull();
+    expect(claudeUsageMenuOptionOneSelected(text)).toBe(false);
+  };
+
+  it("detects a menu whose header is exactly the 20th line from the end", () => {
+    expectDetected([...filler(10), ...menuSpanning(TAIL)]);
+  });
+
+  it("rejects a menu whose header is the 21st line from the end", () => {
+    expectRejected([...filler(10), ...menuSpanning(TAIL + 1)]);
+  });
+
+  it("counts internal blank lines: 7 non-blank lines over 21 physical lines are rejected", () => {
+    expectRejected([
+      HEADER,
+      ...blanks(5),
+      STOP,
+      ...blanks(5),
+      WAIT,
+      ...blanks(5),
+      ADMIN,
+      "",
+      FOOTER,
+    ]);
+  });
+
+  it("counts internal blank lines: the same spacing at 20 physical lines is detected", () => {
+    expectDetected([
+      HEADER,
+      ...blanks(5),
+      STOP,
+      ...blanks(5),
+      WAIT,
+      ...blanks(4),
+      ADMIN,
+      "",
+      FOOTER,
+    ]);
+  });
+
+  it("does not count trailing blank lines after the footer", () => {
+    expectDetected([...filler(5), ...menuSpanning(TAIL), "", "   ", "", "", ""]);
+  });
+
+  it("rejects a wrapped option whose continuation is the first window line and numbered line is outside", () => {
+    const lines = [
+      HEADER,
+      "   \u276f 1. Stop and wait for limit",
+      "     to reset",
+      ...blanks(TAIL - 4),
+      "     2. Upgrade your plan",
+      "",
+      FOOTER,
+    ];
+    // Window = last 20 lines starts exactly at the continuation line.
+    expect(lines.length - TAIL).toBe(lines.indexOf("     to reset"));
+    expectRejected(lines);
   });
 });
 
@@ -883,16 +1410,90 @@ describe("parseRateLimitResetAtMs", () => {
     ).toBeUndefined();
   });
 
-  it("returns undefined for a weekly-limit banner carrying a resets clause", () => {
+  it("parses a dated weekly-limit banner days ahead of the anchor", () => {
+    const anchorMs = Date.parse("2026-09-20T11:51:02.493Z");
     expect(
-      parseRateLimitResetAtMs("You've hit your weekly limit · resets 7pm (UTC)", 0),
+      parseRateLimitResetAtMs("You've hit your weekly limit · resets Sep 23, 8am (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-09-23T08:00:00.000Z"));
+  });
+
+  it("parses a time-only weekly-limit banner as the next occurrence within a day", () => {
+    const anchorMs = Date.parse("2026-09-15T09:00:09.991Z");
+    expect(
+      parseRateLimitResetAtMs("You've hit your weekly limit · resets 8am (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-09-16T08:00:00.000Z"));
+  });
+
+  it("parses a dated opus-limit banner with minutes", () => {
+    const anchorMs = Date.parse("2026-09-20T11:51:00.000Z");
+    expect(
+      parseRateLimitResetAtMs("You've hit your opus limit · resets Sep 22, 7:30pm (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-09-22T19:30:00.000Z"));
+  });
+
+  it("rolls a dated banner into the next year across the year boundary", () => {
+    const anchorMs = Date.parse("2026-12-30T10:00:00.000Z");
+    expect(
+      parseRateLimitResetAtMs("You've hit your weekly limit · resets Jan 2, 8am (UTC)", anchorMs),
+    ).toBe(Date.parse("2027-01-02T08:00:00.000Z"));
+  });
+
+  it("clamps a dated banner to the end of its truncated minute", () => {
+    const anchorMs = Date.parse("2026-09-23T08:00:30.000Z");
+    expect(
+      parseRateLimitResetAtMs("You've hit your weekly limit · resets Sep 23, 8am (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-09-23T08:01:00.000Z"));
+  });
+
+  it("returns undefined for an unknown month or an impossible day", () => {
+    expect(
+      parseRateLimitResetAtMs("You've hit your weekly limit · resets Foo 3, 8am (UTC)", 0),
+    ).toBeUndefined();
+    expect(
+      parseRateLimitResetAtMs("You've hit your weekly limit · resets Feb 31, 8am (UTC)", 0),
     ).toBeUndefined();
   });
 
-  it("returns undefined for an opus-limit banner carrying a resets clause", () => {
+  it("returns undefined for an unrecognized banner carrying a resets clause", () => {
     expect(
-      parseRateLimitResetAtMs("You've hit your opus limit · resets 7pm (UTC)", 0),
+      parseRateLimitResetAtMs("You've hit your usage limit · resets 7pm (UTC)", 0),
     ).toBeUndefined();
+  });
+});
+
+describe("claude weekly limit followed by session-meta records", () => {
+  const weeklyLimitLine = JSON.stringify({
+    type: "assistant",
+    isApiErrorMessage: true,
+    error: "rate_limit",
+    timestamp: "2026-09-20T11:51:02.493Z",
+    message: {
+      model: "<synthetic>",
+      role: "assistant",
+      stop_reason: "stop_sequence",
+      content: [{ type: "text", text: "You've hit your weekly limit · resets Sep 23, 8am (UTC)" }],
+    },
+  });
+  const tail = [
+    weeklyLimitLine,
+    JSON.stringify({ type: "last-prompt", lastPrompt: "continue", sessionId: "s" }),
+    JSON.stringify({ type: "cost-state", sessionId: "s", totalCostUSD: 1 }),
+  ].map((line, index) => parseJsonlRecord(line, index));
+  const records = tail.filter((record) => record !== null);
+  const resetAtMs = Date.parse("2026-09-23T08:00:00.000Z");
+
+  it("stays limited before the weekly reset", () => {
+    expect(records).toHaveLength(3);
+    const detection = detectClaudeRateLimit(records);
+    expect(detection).toEqual({ limited: true, reason: "claude rate_limit", resetAtMs });
+    expect(detection && rateLimitExpired(detection, resetAtMs - 1)).toBe(false);
+  });
+
+  it("is expired after the weekly reset", () => {
+    const detection = detectClaudeRateLimit(records);
+    expect(detection && rateLimitExpired(detection, Date.parse("2026-10-04T00:00:00.000Z"))).toBe(
+      true,
+    );
   });
 });
 
