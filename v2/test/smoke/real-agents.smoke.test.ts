@@ -1017,8 +1017,6 @@ async function runOpenCodeSmokeCase(
 
 // Budget leaves 30s for cleanup inside the 90s hookTimeout.
 afterEach(async ({ task }) => {
-// Budget leaves 30s for cleanup inside the 90s hookTimeout.
-afterEach(async ({ task }) => {
   // vitest sets task.result.state to "fail" before afterEach runs.
   const saveEvidence = task.result?.state === "fail";
   try {
