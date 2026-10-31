@@ -9,7 +9,11 @@ import {
   RestoreOperationError,
 } from "./session-lifecycle.js";
 import { parseAgentName } from "./agents/index.js";
-import { AgentReasoningEffortError, listAgentModelCatalog } from "./agents/models.js";
+import {
+  AgentModelError,
+  AgentReasoningEffortError,
+  listAgentModelCatalog,
+} from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { AutoPingError, AutoPingService } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
@@ -2433,6 +2437,7 @@ export async function startServer(
       }
       if (
         error instanceof AgentReasoningEffortError ||
+        error instanceof AgentModelError ||
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidConfigPathError ||

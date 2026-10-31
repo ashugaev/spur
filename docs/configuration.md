@@ -80,7 +80,7 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `dataDir` (`~/.spur`), `worktreeDir` (`~/.spur/worktrees`), `projectsRoot` (`<dataDir>/projects`).
 - `defaultAgent` (`claude|codex|cursor|opencode`, default `claude`).
 - `ui.port` (`5555`; `spur-web.service` `PORT` env wins on mismatch, `spur doctor` warns `web-ui-port-drift`).
-- `models.codexHome` (`~/.codex`, instance only).
+- `models.codexHome` (`~/.codex`, instance only). Its `models_cache.json` gates every spawn with an explicit codex model, including CLI `--model`, respawn, handoff, trigger spawn blocks and Telegram `autoSpawn`: a model absent from a non-empty cache is rejected with 400. Skipped when the cache is missing or empty, when `~/.codex/config.toml` sets a non-`openai` top-level `model_provider` or a top-level `profile`, or when project `codexArgs` pass `--oss`, `--local-provider`, `--profile`/`-p`, or a `-c`/`--config` override of `model_provider` or `profile`.
 - `SPUR_CLAUDE_BIN`/`SPUR_CODEX_BIN`/`SPUR_CURSOR_BIN`/`SPUR_OPENCODE_BIN`: process env, per-agent executable override.
 - `tags.<name>.{description,color}`: `description` required, instance only.
 - `authRotation.{autoRotateOnRateLimit false, cooldownMinutes 60, maxRotationsPerEpisode 2, switchAuth false}`: instance only. `switchAuth` gates per-session [Switch auth](claude-accounts.md#per-session-switch); off hides it in web and `POST /sessions/:id/switch-auth` returns 404.

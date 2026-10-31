@@ -132,6 +132,7 @@ import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor
 import {
   resolveAgentReasoningEffort,
   resolveCursorLaunchModel,
+  validateCodexModel,
   validateOpenCodeModel,
 } from "./agents/models.js";
 import {
@@ -3200,6 +3201,10 @@ async function resolveSpawnRequestLaunchSelection(
   codexHomePath: string,
   preserveModel = false,
 ): Promise<AgentLaunchSelection> {
+  const explicitModel = preserveModel ? undefined : request.model;
+  if (agent === "codex" && explicitModel !== undefined) {
+    await validateCodexModel(explicitModel, codexHomePath, project.codexArgs ?? []);
+  }
   const effort =
     request.reasoningEffort !== undefined
       ? request.reasoningEffort
@@ -3215,11 +3220,7 @@ async function resolveSpawnRequestLaunchSelection(
       ...(selection.variantNames ? { reasoningVariantNames: selection.variantNames } : {}),
     };
   }
-  const resolvedModel = await resolveAgentLaunchModel(
-    agent,
-    model,
-    preserveModel ? undefined : request.model,
-  );
+  const resolvedModel = await resolveAgentLaunchModel(agent, model, explicitModel);
   return resolvedModel !== undefined ? { model: resolvedModel } : {};
 }
 
