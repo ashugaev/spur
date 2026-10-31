@@ -9,10 +9,22 @@ import {
   RestoreOperationError,
 } from "./session-lifecycle.js";
 import { parseAgentName } from "./agents/index.js";
-import { AgentReasoningEffortError, listAgentModelCatalog } from "./agents/models.js";
+import {
+  AgentModelError,
+  AgentReasoningEffortError,
+  listAgentModelCatalog,
+} from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { AutoPingError, AutoPingService } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
+import { projectConversationPage } from "./conversation-page.js";
+import { readCronJobs, UnknownCronProjectError } from "./cron-jobs.js";
+import {
+  CronJobEditError,
+  cronJobIdentity,
+  readCronJobDraft,
+  saveCronJobDraft,
+} from "./cron-job-editor.js";
 import type { ProcSnapshot } from "./sidecars/reap.js";
 import {
   clearFailedDeploySwitchRecord,
@@ -74,6 +86,7 @@ import {
   SessionStartingError,
   SidecarPortConflictError,
   SidecarProbeUnresponsiveError,
+  SpawnBatchConflictError,
   WakeDispatchConflictError,
   WakeTargetMissingError,
 } from "./session-service.js";
@@ -195,7 +208,10 @@ export async function sourceSessionById(
 }
 
 export function createSourceWorkbench(
-  service: Pick<SessionService, "listProjects" | "launchOptions" | "list" | "get" | "restore">,
+  service: Pick<
+    SessionService,
+    "listProjects" | "launchOptions" | "list" | "get" | "restore" | "complete" | "kill"
+  >,
 ): SourceWorkbench {
   const assertSpawnableProject = (project: string): void => {
     if (!spawnableProjects(service.listProjects()).some((entry) => entry.id === project)) {
@@ -214,6 +230,18 @@ export function createSourceWorkbench(
     },
     async getSession(sessionId) {
       return projectSourceSession(await service.get(sessionId));
+    },
+    async completeSession(sessionId) {
+      await service.complete(
+        sessionId,
+        { prAction: "leave_open" },
+        {
+          todoActor: { kind: "human", origin: "telegram" },
+        },
+      );
+    },
+    async killSession(sessionId) {
+      await service.kill(sessionId, { prAction: "leave_open" });
     },
     async restoreSession({ sessionId, expectedProject }) {
       const current = await service.get(sessionId);
@@ -255,7 +283,7 @@ function readParsedBody(request: IncomingMessage): unknown {
 }
 
 function parseOrigin(value: string | string[] | undefined): UserActionOrigin {
-  if (value === "cli" || value === "ui") return value;
+  if (value === "cli" || value === "ui" || value === "mcp") return value;
   return "unknown";
 }
 
@@ -277,7 +305,7 @@ export async function resolveTodoMutationActor(args: {
     const caller = await lookup(callerHeader);
     return { kind: "agent", agent: caller.agent, sessionId: caller.id };
   }
-  if (origin === "cli" || origin === "ui") return { kind: "human", origin };
+  if (origin === "cli" || origin === "ui" || origin === "mcp") return { kind: "human", origin };
   throw new InvalidTodoRequestError("ToDo mutation origin is invalid");
 }
 
@@ -301,7 +329,7 @@ async function authorizeAutoPingTarget(args: {
     }
     return;
   }
-  if (args.origin !== "cli" && args.origin !== "ui") {
+  if (args.origin !== "cli" && args.origin !== "ui" && args.origin !== "mcp") {
     throw new AutoPingError("forbidden", 403, "Auto-ping request origin is invalid");
   }
 }
@@ -321,7 +349,7 @@ function humanTodoOptions(
   origin: UserActionOrigin,
   callerHeader: string | string[] | undefined,
 ): { todoActor: TodoActor } | undefined {
-  if (callerHeader || (origin !== "cli" && origin !== "ui")) return undefined;
+  if (callerHeader || (origin !== "cli" && origin !== "ui" && origin !== "mcp")) return undefined;
   return { todoActor: { kind: "human", origin } };
 }
 
@@ -833,6 +861,9 @@ export async function startServer(
   const bus = new EventBus();
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
+  service.setTelegramBotIdentityReader(
+    (projectId, sourceId) => sources?.telegramBotIdentity(projectId, sourceId) ?? null,
+  );
   // Closure over the reassignable `sources` above, so this stays correct
   // across reloadAutomation recreating sources — registered once, not
   // re-registered per (re)start.
@@ -888,7 +919,13 @@ export async function startServer(
         listSessions: async () =>
           (await service.list({ view: "dashboard" })).map(projectSourceSession),
         getSession: (sessionId) => sourceSessionById(service, sessionId),
+        prepareSessionMessage: async (sessionId, request) =>
+          service.prepareSourceMessage(sessionId, request),
         workbench: createSourceWorkbench(service),
+        telegramConversations: {
+          ensureTopic: (sessionId, origin) => service.ensureTelegramTopic(sessionId, origin),
+          unwatch: (sessionId, origin) => service.unwatchTelegramTopic(sessionId, origin),
+        },
         spawnSession: async (request) => {
           const { telegramOrigin, ...spawnRequest } = request;
           const session = await service.spawn(
@@ -1252,7 +1289,18 @@ export async function startServer(
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "true";
         const requestedView = url.searchParams.get("view")?.trim().toLowerCase();
         const view = requestedView === "dashboard" ? "dashboard" : "full";
-        const sessions = await service.list({ includeCompleted, view });
+        const abort = new AbortController();
+        response.once("close", () => {
+          if (!response.writableEnded) abort.abort();
+        });
+        let sessions: Awaited<ReturnType<typeof service.list>>;
+        try {
+          sessions = await service.list({ includeCompleted, view, signal: abort.signal });
+        } catch (error) {
+          if (abort.signal.aborted) return;
+          throw error;
+        }
+        if (abort.signal.aborted) return;
         response.setHeader("x-spur-lifecycle-instance-id", service.info().lifecycleInstanceId);
         sendJson(response, 200, sessions);
         return;
@@ -1260,6 +1308,61 @@ export async function startServer(
 
       if (method === "GET" && path === "/projects") {
         sendJson(response, 200, service.listProjects());
+        return;
+      }
+
+      if ((method === "GET" || method === "PATCH") && path === "/projects/cron/edit") {
+        try {
+          const identity = cronJobIdentity(url.searchParams);
+          const context = {
+            running: service.config,
+            bootstrapConfigPath: service.bootstrapConfigPath,
+            registryPaths: service.getRegistryPaths(),
+          };
+          let body: unknown;
+          if (method === "PATCH") {
+            try {
+              body = await readJsonBody<unknown>(request);
+            } catch {
+              throw new CronJobEditError(400, "invalid_body", "Invalid editor JSON body.");
+            }
+          }
+          sendJson(
+            response,
+            200,
+            method === "GET"
+              ? readCronJobDraft(context, identity)
+              : saveCronJobDraft(context, identity, body),
+          );
+        } catch (error) {
+          if (!(error instanceof CronJobEditError)) throw error;
+          sendJson(response, error.status, {
+            error: error.message,
+            code: error.code,
+            ...(error.field !== undefined ? { field: error.field } : {}),
+          });
+        }
+        return;
+      }
+
+      if (method === "GET" && path === "/projects/cron") {
+        const projectId = url.searchParams.get("project")?.trim() || undefined;
+        try {
+          sendJson(
+            response,
+            200,
+            await readCronJobs({
+              config: service.config,
+              bootstrapConfigPath: service.bootstrapConfigPath,
+              registryPaths: service.getRegistryPaths(),
+              knownProjectIds: new Set(service.listProjects().map((entry) => entry.id)),
+              ...(projectId !== undefined ? { projectId } : {}),
+            }),
+          );
+        } catch (error) {
+          if (!(error instanceof UnknownCronProjectError)) throw error;
+          sendError(response, 404, error.message);
+        }
         return;
       }
 
@@ -1719,13 +1822,36 @@ export async function startServer(
 
       const conversationSessionId = path.match(/^\/sessions\/([^/]+)\/conversation$/)?.[1];
       if (method === "GET" && conversationSessionId) {
+        const view = url.searchParams.get("view");
+        const limitValue = url.searchParams.get("limit");
+        const limit = limitValue === null ? 50 : Number(limitValue);
+        if (view !== null && view !== "messages") {
+          sendError(response, 400, "Unsupported conversation view");
+          return;
+        }
+        if (
+          view === "messages" &&
+          (!/^\d+$/.test(limitValue ?? "50") ||
+            !Number.isInteger(limit) ||
+            limit < 1 ||
+            limit > 100)
+        ) {
+          sendError(response, 400, "Conversation limit must be an integer from 1 to 100");
+          return;
+        }
         const fromValue = url.searchParams.get("from");
         const from =
           fromValue && /^\d+$/.test(fromValue) ? Number.parseInt(fromValue, 10) : undefined;
+        const conversation = await service.getConversation(conversationSessionId, {
+          ...(from !== undefined ? { from } : {}),
+          ...(view === "messages" ? { preserveEnd: true } : {}),
+        });
         sendJson(
           response,
           200,
-          await service.getConversation(conversationSessionId, from !== undefined ? { from } : {}),
+          view === "messages"
+            ? projectConversationPage(conversation, conversationSessionId, limit)
+            : conversation,
         );
         return;
       }
@@ -1973,9 +2099,15 @@ export async function startServer(
         return;
       }
 
+      const sourceInfoSessionId = path.match(/^\/sessions\/([^/]+)\/source-info$/)?.[1];
+      if (method === "GET" && sourceInfoSessionId) {
+        sendJson(response, 200, service.sourceInfo(sourceInfoSessionId));
+        return;
+      }
+
       const sourceReplySessionId = path.match(/^\/sessions\/([^/]+)\/source-reply$/)?.[1];
       if (method === "POST" && sourceReplySessionId) {
-        const body = await readJsonBody<SourceReplyRequest>(request);
+        const body = await readJsonBody<SourceReplyRequest>(request, 15_000_000);
         sendJson(response, 200, await service.replyToSource(sourceReplySessionId, body));
         return;
       }
@@ -2173,6 +2305,10 @@ export async function startServer(
 
       const switchAuthSessionId = path.match(/^\/sessions\/([^/]+)\/switch-auth$/)?.[1];
       if (method === "POST" && switchAuthSessionId) {
+        if (!service.config.authRotation.switchAuth) {
+          sendError(response, 404, "switch-auth is disabled; set authRotation.switchAuth: true");
+          return;
+        }
         const body = await readJsonBody<{ accountId?: unknown; force?: unknown }>(request);
         const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
         if (!accountId) {
@@ -2301,6 +2437,7 @@ export async function startServer(
       }
       if (
         error instanceof AgentReasoningEffortError ||
+        error instanceof AgentModelError ||
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidConfigPathError ||
@@ -2329,7 +2466,8 @@ export async function startServer(
         error instanceof SidecarPortConflictError ||
         error instanceof OpenPrActionRequiredError ||
         error instanceof GithubPrCheckUnavailableError ||
-        error instanceof SessionNotRestorableError
+        error instanceof SessionNotRestorableError ||
+        error instanceof SpawnBatchConflictError
       ) {
         failRequest(response, error.statusCode, message, {
           method,

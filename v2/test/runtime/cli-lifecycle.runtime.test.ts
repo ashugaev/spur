@@ -640,10 +640,10 @@ async function runRestoreScenario(args: {
     },
   );
   expect(exited[0]?.workspaceExists).toBe(true);
-  if (stopMode === "exit") {
-    expect(exited[0]?.stopReason).toBeUndefined();
-    expect(exited[0]?.error).toBe("Agent runtime exited unexpectedly.");
-  }
+  expect(exited[0]?.error).toBe(
+    stopMode === "pause" ? undefined : "Agent runtime exited unexpectedly.",
+  );
+  expect(exited[0]?.stopReason).toBe(stopMode === "pause" ? "manual_pause" : undefined);
 
   if (args.agent) {
     await context.fetchJson(`/sessions/${spawned.id}/restore`, { method: "POST" });
@@ -701,6 +701,8 @@ async function runRestoreScenario(args: {
   });
 
   expect(log).toContain(`startup:resume:${expectedResumeId}:`);
+  expect(restored[0]?.id).toBe(spawned.id);
+  expect(restored[0]?.status).toBe("running");
   expect(restored[0]?.runtimeAlive).toBe(true);
   expect(existsSync(restored[0]?.worktreePath ?? "")).toBe(true);
   if (expectRestorePrompt) {
@@ -4799,8 +4801,8 @@ projects:
           value[0]?.runtimeAlive === true,
       },
     );
-    expect(exited[0]?.stopReason).toBeUndefined();
     expect(exited[0]?.error).toBe("Agent runtime exited unexpectedly.");
+    expect(exited[0]?.stopReason).toBeUndefined();
 
     await rm(join(context.rootDir, ".claude"), { recursive: true, force: true });
 
@@ -4832,9 +4834,10 @@ projects:
       {
         timeoutMs: 30_000,
         accept: (value) =>
-          value[0]?.state !== "stopped" &&
-          value[0]?.state !== "error" &&
-          value[0]?.runtimeAlive === true,
+          value[0] !== undefined &&
+          value[0].state !== "stopped" &&
+          value[0].state !== "error" &&
+          value[0].runtimeAlive === true,
       },
     );
     const restoredPane = await pollUntil(async () => captureTmuxPane(spawned.id), {
@@ -4845,6 +4848,7 @@ projects:
     await sendKeysToTmux(controllerSessionName, "q");
 
     expect(restored[0]?.id).toBe(spawned.id);
+    expect(restored[0]?.status).toBe("running");
     expect(restored[0]?.runtimeAlive).toBe(true);
     expect(existsSync(restored[0]?.worktreePath ?? "")).toBe(true);
     expect(restoredPane).toContain("Original task:");

@@ -45,6 +45,11 @@ interface StartArgs {
 }
 
 interface SidecarHarness {
+  finishStaleWake(
+    session: SessionRecord,
+    project: ProjectConfig,
+    operation?: RestoreOperationContext,
+  ): Promise<SessionRecord>;
   clearSidecarLaunch(ownerId: string, sidecarName: string, launchId: string): void;
   stopSidecarLocked(sessionId: string, sidecarName: string): Promise<unknown>;
   withSidecarPortLock<T>(task: () => Promise<T>, operation?: RestoreOperationContext): Promise<T>;
@@ -102,7 +107,8 @@ function fixture(): {
   };
   const service = Object.create(SessionService.prototype) as SidecarHarness;
   Object.assign(service, {
-    config: { dataDir },
+    config: { dataDir, projects: {} },
+    registryPaths: [],
     sidecarPortLock: Promise.resolve(),
     pruneLegacySidecarLinks: (record: SessionRecord) => record,
     invalidateSidecarEndpoint: vi.fn(),
@@ -144,6 +150,42 @@ afterEach(() => {
 });
 
 describe("restore-owned sidecar cancellation", () => {
+  it.each([false, true])(
+    "preserves cached stale-wake metadata when replay cancellation is %s",
+    async (cancelAfterReplay) => {
+      const { service, session, project, dataDir } = fixture();
+      writeSession(dataDir, {
+        ...session,
+        status: "running",
+        stopReason: "stale_timeout",
+        staleSidecars: ["proxy"],
+      });
+      const cached = readSession(dataDir, session.id);
+      if (!cached) throw new Error("Expected cached session");
+      Object.freeze(cached);
+      const controller = new AbortController();
+      const replay = vi.fn(async () => {
+        if (cancelAfterReplay) controller.abort();
+        return cached;
+      });
+      Object.assign(service, { startSidecarWithDependencies: replay });
+
+      const waking = service.finishStaleWake(cached, project, operation(controller.signal));
+      if (cancelAfterReplay) {
+        await expect(waking).rejects.toThrow("cancelled");
+      } else {
+        const awake = await waking;
+        expect(awake).not.toBe(cached);
+        expect(awake).not.toHaveProperty("stopReason");
+        expect(awake).not.toHaveProperty("staleSidecars");
+      }
+      expect(replay).toHaveBeenCalledTimes(1);
+      expect(readSession(dataDir, session.id)).toBe(cached);
+      expect(cached.stopReason).toBe("stale_timeout");
+      expect(cached.staleSidecars).toEqual(["proxy"]);
+    },
+  );
+
   it.each([{ unresponsive: true }, { unresponsive: false, diagnostic: "pane probe failed" }])(
     "preserves an interrupted launch when tmux is present but its pane probe is unknown: %j",
     async (unknown) => {

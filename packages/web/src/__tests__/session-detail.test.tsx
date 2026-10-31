@@ -2808,61 +2808,282 @@ describe("SessionDetail voice input", () => {
     });
   });
 
-  it("resets to a no-from conversation fetch on a session switch after loading an older page", async () => {
-    const fetchedUrls: string[] = [];
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      fetchedUrls.push(url);
-      if (url === "/api/sessions/api-a1") {
-        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+  describe("older-page request ownership", () => {
+    function deferred<T>() {
+      let resolve: (value: T) => void = () => {};
+      let reject: (error: Error) => void = () => {};
+      const promise = new Promise<T>((done, fail) => {
+        resolve = done;
+        reject = fail;
+      });
+      return { promise, resolve, reject };
+    }
+
+    function page(startIndex: number) {
+      return conversationFixture({
+        startIndex,
+        totalEntries: 500,
+        hasMore: startIndex > 0,
+        messages: [{ role: "user", text: `page-${startIndex}`, timestampMs: 1 }],
+      });
+    }
+
+    function response(startIndex: number) {
+      return new Response(JSON.stringify(page(startIndex)));
+    }
+
+    async function mountPaging(conversation: (url: string) => Promise<Response> | Response) {
+      const requests: string[] = [];
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        requests.push(url);
+        if (url === "/api/sessions/api-a1")
+          return new Response(JSON.stringify(sessionFixture({ state: "waiting" })));
+        if (url.startsWith("/api/sessions/api-a1/conversation")) return conversation(url);
+        if (url === "/api/runtime/voice")
+          return new Response(JSON.stringify({ available: false, modelPath: "" }));
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      let unmount = () => {};
+      await act(async () => {
+        ({ unmount } = render(<SessionDetail sessionId="api-a1" />));
+      });
+      expect(screen.getByText("page-200")).toBeInTheDocument();
+      const scroll = pagingScroll();
+      return { scroll, requests, unmount };
+    }
+
+    function pagingScroll() {
+      const scroll = screen.getByTestId("conversation-scroll");
+      Object.defineProperty(scroll, "scrollTop", { configurable: true, writable: true, value: 0 });
+      Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1000 });
+      Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 300 });
+      return scroll;
+    }
+
+    it("keeps older loading when a decoded tail and scroll share a React batch", async () => {
+      vi.useFakeTimers();
+      const heldTail = deferred<Response>();
+      const decoded = deferred<undefined>();
+      const older = deferred<Response>();
+      let tailCalls = 0;
+      const view = await mountPaging((url) => {
+        if (url.endsWith("?from=100")) return older.promise;
+        return ++tailCalls === 1 ? response(200) : heldTail.promise;
+      });
+      try {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expect(tailCalls).toBe(2);
+        const tail = response(200);
+        tail.json = async () => {
+          decoded.resolve(undefined);
+          return page(200);
+        };
+        await act(async () => {
+          heldTail.resolve(tail);
+          await decoded.promise;
+          await Promise.resolve();
+          fireEvent.scroll(view.scroll);
+        });
+        expect(view.requests.filter((url) => url.endsWith("?from=100"))).toHaveLength(1);
+        expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+        fireEvent.scroll(view.scroll);
+        expect(view.requests.filter((url) => url.endsWith("?from=100"))).toHaveLength(1);
+        await act(async () => {
+          older.resolve(response(100));
+        });
+        expect(screen.getByText("page-100")).toBeInTheDocument();
+        expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+      } finally {
+        view.unmount();
+        heldTail.resolve(response(200));
+        older.resolve(response(100));
+        vi.useRealTimers();
       }
-      if (url === "/api/sessions/api-b2") {
-        return new Response(JSON.stringify(sessionFixture({ id: "api-b2" })), { status: 200 });
-      }
-      if (url.startsWith("/api/sessions/api-a1/conversation")) {
-        return new Response(
-          JSON.stringify(
-            conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true }),
-          ),
-          { status: 200 },
-        );
-      }
-      if (url.startsWith("/api/sessions/api-b2/conversation")) {
-        return new Response(
-          JSON.stringify(conversationFixture({ startIndex: 0, totalEntries: 2, hasMore: false })),
-          { status: 200 },
-        );
-      }
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
     });
 
-    const { rerender } = render(<SessionDetail sessionId="api-a1" />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Original prompt")).toBeInTheDocument();
+    it("keeps loading owned by the newly requested older page", async () => {
+      vi.useFakeTimers();
+      const previous = deferred<Response>();
+      const decoded = deferred<undefined>();
+      const next = deferred<Response>();
+      let olderCalls = 0;
+      const view = await mountPaging((url) => {
+        if (url.endsWith("?from=0")) return next.promise;
+        if (url.endsWith("?from=100")) return ++olderCalls === 1 ? response(100) : previous.promise;
+        return response(200);
+      });
+      try {
+        await act(async () => fireEvent.scroll(view.scroll));
+        expect(screen.getByText("page-100")).toBeInTheDocument();
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expect(olderCalls).toBe(2);
+        const oldPage = response(100);
+        oldPage.json = async () => {
+          decoded.resolve(undefined);
+          return page(100);
+        };
+        await act(async () => {
+          fireEvent.scroll(view.scroll);
+          previous.resolve(oldPage);
+          await decoded.promise;
+          await Promise.resolve();
+        });
+        expect(view.requests.filter((url) => url.endsWith("?from=0"))).toHaveLength(1);
+        expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+        await act(async () => next.resolve(response(0)));
+        expect(screen.getByText("page-0")).toBeInTheDocument();
+        expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+      } finally {
+        view.unmount();
+        previous.resolve(response(100));
+        next.resolve(response(0));
+        vi.useRealTimers();
+      }
     });
 
-    const scrollEl = screen.getByTestId("conversation-scroll");
-    Object.defineProperty(scrollEl, "scrollTop", { configurable: true, writable: true, value: 0 });
-    Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
-    Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
-    fireEvent.scroll(scrollEl);
+    it.each(["non-OK response", "rejected fetch", "failed decode"])(
+      "clears older loading when its request fails: %s",
+      async (failure) => {
+        vi.useFakeTimers();
+        const failed = deferred<Response>();
+        const next = deferred<Response>();
+        let olderCalls = 0;
+        const view = await mountPaging((url) => {
+          if (url.endsWith("?from=0")) return next.promise;
+          if (url.endsWith("?from=100")) return ++olderCalls === 1 ? failed.promise : response(100);
+          return response(200);
+        });
+        try {
+          await act(async () => fireEvent.scroll(view.scroll));
+          expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+          await act(async () => {
+            if (failure === "rejected fetch") failed.reject(new Error("fetch failed"));
+            else if (failure === "non-OK response")
+              failed.resolve(new Response(null, { status: 500 }));
+            else {
+              const invalid = response(100);
+              invalid.json = async () => {
+                throw new Error("decode failed");
+              };
+              failed.resolve(invalid);
+            }
+          });
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(4_000);
+          });
+          expect(screen.getByText("page-100")).toBeInTheDocument();
+          expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+          await act(async () => fireEvent.scroll(pagingScroll()));
+          expect(view.requests.filter((url) => url.endsWith("?from=0"))).toHaveLength(1);
+          expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+          await act(async () => next.resolve(response(0)));
+        } finally {
+          view.unmount();
+          failed.resolve(response(100));
+          next.resolve(response(0));
+          vi.useRealTimers();
+        }
+      },
+    );
 
-    await waitFor(() => {
-      expect(fetchedUrls.some((url) => url === "/api/sessions/api-a1/conversation?from=100")).toBe(
-        true,
-      );
+    it("resets older loading when resuming the tail", async () => {
+      const previous = deferred<Response>();
+      const next = deferred<Response>();
+      let olderCalls = 0;
+      const view = await mountPaging((url) => {
+        if (url.endsWith("?from=100")) return ++olderCalls === 1 ? previous.promise : next.promise;
+        return response(200);
+      });
+      try {
+        await act(async () => fireEvent.scroll(view.scroll));
+        expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+        view.scroll.scrollTop = 700;
+        await act(async () => fireEvent.scroll(view.scroll));
+        expect(
+          view.requests.filter((url) => url === "/api/sessions/api-a1/conversation"),
+        ).toHaveLength(2);
+        expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+        view.scroll.scrollTop = 0;
+        await act(async () => fireEvent.scroll(view.scroll));
+        await act(async () => previous.resolve(response(100)));
+        expect(screen.getByText("page-200")).toBeInTheDocument();
+        expect(screen.queryByText("page-100")).not.toBeInTheDocument();
+        expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+        await act(async () => next.resolve(response(100)));
+        expect(screen.getByText("page-100")).toBeInTheDocument();
+        expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+      } finally {
+        view.unmount();
+        previous.resolve(response(100));
+        next.resolve(response(100));
+      }
     });
 
-    rerender(<SessionDetail sessionId="api-b2" />);
-
-    // The switched-to session's fromIndex settles back to null (no `from`)
-    // even though the prior session had an older page loaded.
-    await waitFor(() => {
-      expect(fetchedUrls.some((url) => url === "/api/sessions/api-b2/conversation")).toBe(true);
+    it("resets to a no-from conversation fetch on a session switch after loading an older page", async () => {
+      const fetchedUrls: string[] = [];
+      const previous = deferred<Response>();
+      const next = deferred<Response>();
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        fetchedUrls.push(url);
+        if (url === "/api/sessions/api-a1") {
+          return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+        }
+        if (url === "/api/sessions/api-b2") {
+          return new Response(JSON.stringify(sessionFixture({ id: "api-b2" })), { status: 200 });
+        }
+        if (url.startsWith("/api/sessions/api-a1/conversation")) {
+          if (url.endsWith("?from=100")) return previous.promise;
+          return new Response(
+            JSON.stringify(
+              conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true }),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/sessions/api-b2/conversation")) {
+          if (url.endsWith("?from=100")) return next.promise.then(() => response(100));
+          return response(200);
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      const { rerender, unmount } = render(<SessionDetail sessionId="api-a1" />);
+      try {
+        await waitFor(() => {
+          expect(screen.getByText("Original prompt")).toBeInTheDocument();
+        });
+        fireEvent.scroll(pagingScroll());
+        await waitFor(() => {
+          expect(fetchedUrls).toContain("/api/sessions/api-a1/conversation?from=100");
+        });
+        expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+        rerender(<SessionDetail sessionId="api-b2" />);
+        await waitFor(() => {
+          expect(fetchedUrls).toContain("/api/sessions/api-b2/conversation");
+          expect(screen.getByText("page-200")).toBeInTheDocument();
+        });
+        expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+        await act(async () => fireEvent.scroll(pagingScroll()));
+        expect(fetchedUrls).toContain("/api/sessions/api-b2/conversation?from=100");
+        await act(async () => previous.resolve(response(100)));
+        expect(screen.getByText("page-200")).toBeInTheDocument();
+        expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+        await act(async () => next.resolve(response(100)));
+        expect(screen.getByText("page-100")).toBeInTheDocument();
+        expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+      } finally {
+        unmount();
+        previous.resolve(response(100));
+        next.resolve(response(100));
+      }
     });
   });
 
@@ -6200,6 +6421,44 @@ describe("SessionDetail load state", () => {
     window.history.replaceState(null, "", "/sessions/api-a1");
   });
 
+  it.each(["Daemon is starting", `Session not found\n${"detail".repeat(80)}`])(
+    "preserves load error detail and recovers with Retry: %s",
+    async (detail) => {
+      let recovered = false;
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(JSON.stringify(recovered ? sessionFixture() : { error: detail }), {
+            status: recovered ? 200 : 503,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url === "/api/sessions/api-a1/conversation") {
+          return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+        }
+        if (url === "/api/runtime/info") {
+          return new Response(JSON.stringify({ lifecycleInstanceId: "test-instance" }), {
+            status: 200,
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+
+      render(<SessionDetail sessionId="api-a1" />);
+      const card = await screen.findByRole("region", { name: "Unable to load this session." });
+      expect(card.querySelector("p")?.textContent).toBe(detail);
+      expect(card.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+      expect(card.querySelector(".animate-spin")).toBeNull();
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /back/i })).toBeInTheDocument();
+
+      recovered = true;
+      fireEvent.click(within(card).getByRole("button", { name: "Retry" }));
+      await screen.findByRole("heading", { name: "Fix auth" });
+      expect(screen.queryByRole("region", { name: "Unable to load this session." })).toBeNull();
+    },
+  );
+
   it("shows a page load error instead of stale content when the current session fails", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
@@ -6340,12 +6599,14 @@ describe("SessionDetail load state", () => {
       expect(screen.getAllByText("temporary failure").length).toBeGreaterThan(0);
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
-
-    await waitFor(() => {
-      expect(screen.queryByText("temporary failure")).not.toBeInTheDocument();
-    });
-  });
+    // Pause holds its optimistic status, so the next poll is the successful reload.
+    await waitFor(
+      () => {
+        expect(screen.queryByText("temporary failure")).not.toBeInTheDocument();
+      },
+      { timeout: 6_000 },
+    );
+  }, 10_000);
 });
 
 describe("SessionDetail display state", () => {
