@@ -494,11 +494,12 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           if (ordering === "before acknowledgement") await heldLookup;
           return view;
         };
-        gatedService.deliver = async (_sessionId, message) => {
+        gatedService.deliver = async (sessionId, message, options) => {
           messages.push(message);
           if (messages.length === 1) {
             await held; // Simulates submit-ack latency at the trigger's deliver boundary.
           }
+          return service.deliver(sessionId, message, options);
         };
         const config = loadProjectConfig(triggerConfig, loadConfig(triggerConfig));
         const bus = new EventBus();
