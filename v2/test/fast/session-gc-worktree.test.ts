@@ -147,6 +147,32 @@ describe("session gc against a real git worktree", () => {
     expect(stdout).toContain(fixture.worktreePath);
   });
 
+  it("rechecks for a spawn that joined the workspace after waiting for the workspace lock", async () => {
+    const fixture = await createFixture();
+    const group = planFor(fixture.config).groups[0];
+    if (!group) throw new Error("fixture has no GC group");
+    const lockPath = join(fixture.repoPath, ".git", "spur-workspace.lock");
+    writeFileSync(lockPath, `${process.pid}:test`);
+    const ownerProbe = vi.spyOn(process, "kill");
+    const removal = createGcDeps(fixture.config).removeWorktree(group, [fixture.session]);
+    const rejection = expect(removal).rejects.toThrow("Session GC blocked: changed_during_run");
+    try {
+      await vi.waitFor(() => expect(ownerProbe).toHaveBeenCalledWith(process.pid, 0));
+    } finally {
+      ownerProbe.mockRestore();
+    }
+    writeSession(fixture.config.dataDir, {
+      ...fixture.session,
+      id: "api-2",
+      status: "spawning",
+      tmuxSession: "api-2",
+    });
+    await rm(lockPath);
+    await rejection;
+
+    expect(existsSync(fixture.worktreePath)).toBe(true);
+  });
+
   it("removes the worktree through git, prunes the repo, archives the record, and reports freed bytes", async () => {
     const fixture = await createFixture();
     const plan = planFor(fixture.config);
@@ -240,15 +266,18 @@ describe("session gc against a real git worktree", () => {
     // archiving. A mutation dropping that second check would archive it: the
     // session vanishes from the fleet and can never be woken again.
     const fixture = await createFixture();
+    writeSession(fixture.config.dataDir, { ...fixture.session, status: "stopped" });
+    await rm(fixture.worktreePath, { recursive: true, force: true });
+
+    const plan = planFor(fixture.config);
+    expect(plan.groups[0]?.action).toBe("archive");
+    // Parked after planning, updatedAt untouched: only the pre-archive
+    // liveness recheck can see it.
     writeSession(fixture.config.dataDir, {
       ...fixture.session,
       status: "stopped",
       stopReason: "stale_timeout",
     });
-    await rm(fixture.worktreePath, { recursive: true, force: true });
-
-    const plan = planFor(fixture.config);
-    expect(plan.groups[0]?.action).toBe("archive");
 
     const report = await executeSessionGc(plan, depsWithoutGh(fixture.config, NO_OPEN_PRS), {
       dryRun: false,
@@ -261,6 +290,89 @@ describe("session gc against a real git worktree", () => {
     expect(existsSync(join(fixture.config.dataDir, "sessions-archive", "api", "api-1.json"))).toBe(
       false,
     );
+  });
+
+  it("archives all but the newest record of a dirty shared worktree and leaves the worktree intact", async () => {
+    const fixture = await createFixture();
+    const sibling = (id: string, updatedAt: string): SessionRecord => ({
+      ...fixture.session,
+      id,
+      workspaceId: "api-1",
+      tmuxSession: id,
+      updatedAt,
+    });
+    writeSession(fixture.config.dataDir, sibling("api-2", "2026-01-02T00:00:00.000Z"));
+    writeSession(fixture.config.dataDir, sibling("api-3", "2026-01-03T00:00:00.000Z"));
+    writeFileSync(join(fixture.worktreePath, "scratch.txt"), "unsaved work\n");
+
+    const report = await executeSessionGc(
+      planFor(fixture.config),
+      depsWithoutGh(fixture.config, NO_OPEN_PRS),
+      { dryRun: false, sizes: false },
+    );
+
+    expect(report.groups[0]).toMatchObject({
+      action: "partial",
+      blockReasons: ["uncommitted_changes"],
+      archiveSessionIds: ["api-2"],
+      removed: false,
+      archived: true,
+    });
+    expect(
+      listSessions(fixture.config.dataDir)
+        .map((session) => session.id)
+        .sort(),
+    ).toEqual(["api-1", "api-3"]);
+    expect(existsSync(join(fixture.config.dataDir, "sessions-archive", "api", "api-2.json"))).toBe(
+      true,
+    );
+    expect(existsSync(join(fixture.worktreePath, "scratch.txt"))).toBe(true);
+  });
+
+  it("keeps a record for a dirty owned worktree shared with a worktree:false record", async () => {
+    const fixture = await createFixture();
+    writeSession(fixture.config.dataDir, {
+      ...fixture.session,
+      id: "api-2",
+      workspaceId: "api-2",
+      worktree: false,
+      tmuxSession: "api-2",
+    });
+    writeFileSync(join(fixture.worktreePath, "scratch.txt"), "unsaved work\n");
+
+    const plan = planFor(fixture.config);
+    expect(plan.groups[0]?.action).toBe("partial");
+    const report = await executeSessionGc(plan, depsWithoutGh(fixture.config, NO_OPEN_PRS), {
+      dryRun: false,
+      sizes: false,
+    });
+
+    expect(report.groups[0]).toMatchObject({ action: "partial", removed: false, archived: true });
+    expect(listSessions(fixture.config.dataDir)).toHaveLength(1);
+    expect(existsSync(join(fixture.worktreePath, "scratch.txt"))).toBe(true);
+  });
+
+  it("keeps the worktree:true record across successive sweeps when a newer alias shares a dirty worktree", async () => {
+    const fixture = await createFixture();
+    writeSession(fixture.config.dataDir, {
+      ...fixture.session,
+      id: "api-2",
+      workspaceId: "api-2",
+      worktree: false,
+      tmuxSession: "api-2",
+      updatedAt: "2026-01-02T00:00:00.000Z",
+    });
+    writeFileSync(join(fixture.worktreePath, "scratch.txt"), "unsaved work\n");
+
+    for (let sweep = 0; sweep < 2; sweep += 1) {
+      await executeSessionGc(planFor(fixture.config), depsWithoutGh(fixture.config, NO_OPEN_PRS), {
+        dryRun: false,
+        sizes: false,
+      });
+    }
+
+    expect(listSessions(fixture.config.dataDir).map((session) => session.id)).toEqual(["api-1"]);
+    expect(existsSync(join(fixture.worktreePath, "scratch.txt"))).toBe(true);
   });
 
   it("blocks a worktree holding unpushed commits", async () => {
@@ -285,8 +397,9 @@ describe("session gc against a real git worktree", () => {
     const report = await executeSessionGc(
       planFor(fixture.config),
       depsWithoutGh(fixture.config, {
+        checkoutRepo: "acme/api",
         numbers: new Set(),
-        branches: new Set(["feature/gc-one"]),
+        branches: new Set(["acme/api#feature/gc-one"]),
       }),
       { dryRun: false, sizes: false },
     );

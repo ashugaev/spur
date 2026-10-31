@@ -622,9 +622,8 @@ async function runRestoreScenario(args: {
 
   // A manual pause kills the tmux session outright (runtimeAlive false, status
   // "stopped"). An agent process exiting on its own leaves the tmux pane/session
-  // alive with no matching agent process, which reconcileUnexpectedStop treats
-  // as an unexpected crash (status "errored") rather than a clean stop — see
-  // "fix(session): preserve agent exit errors".
+  // alive with no matching agent process. That unexpected exit becomes errored;
+  // runtime_lost is reserved for an unavailable terminal.
   const expectedState = stopMode === "pause" ? "stopped" : "error";
   const expectedStatus = stopMode === "pause" ? "stopped" : "errored";
   const exited = await pollUntil(
@@ -641,6 +640,10 @@ async function runRestoreScenario(args: {
     },
   );
   expect(exited[0]?.workspaceExists).toBe(true);
+  expect(exited[0]?.error).toBe(
+    stopMode === "pause" ? undefined : "Agent runtime exited unexpectedly.",
+  );
+  expect(exited[0]?.stopReason).toBe(stopMode === "pause" ? "manual_pause" : undefined);
 
   if (args.agent) {
     await context.fetchJson(`/sessions/${spawned.id}/restore`, { method: "POST" });
@@ -674,7 +677,10 @@ async function runRestoreScenario(args: {
       ) as SessionView[],
     {
       timeoutMs: 45_000,
-      accept: (value) => value[0]?.state !== expectedState && value[0]?.runtimeAlive === true,
+      accept: (value) =>
+        value[0]?.state !== "stopped" &&
+        value[0]?.state !== "error" &&
+        value[0]?.runtimeAlive === true,
     },
   );
   if (!args.agent) {
@@ -695,6 +701,8 @@ async function runRestoreScenario(args: {
   });
 
   expect(log).toContain(`startup:resume:${expectedResumeId}:`);
+  expect(restored[0]?.id).toBe(spawned.id);
+  expect(restored[0]?.status).toBe("running");
   expect(restored[0]?.runtimeAlive).toBe(true);
   expect(existsSync(restored[0]?.worktreePath ?? "")).toBe(true);
   if (expectRestorePrompt) {
@@ -3381,6 +3389,11 @@ projects:
     expect(detail.tmuxSession).toBe(`${spawned.id}--svc--web`);
     expect(detail.port).toBe(3000);
     expect(detail.state).toBe("running");
+    await pollUntil(async () => captureTmuxPane(detail.tmuxSession), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("SERVICE_BOOT"),
+      label: "service pane SERVICE_BOOT",
+    });
 
     const helperLogs = JSON.parse(
       (
@@ -3393,7 +3406,15 @@ projects:
         })
       ).stdout,
     ) as SpurLogEntry[];
-    expect(helperLogs).toEqual([]);
+    expect(helperLogs).toEqual([
+      expect.objectContaining({
+        event: "service.output",
+        level: "info",
+        message: "SERVICE_BOOT",
+        sessionId: spawned.id,
+        details: { serviceId: "web" },
+      }),
+    ]);
 
     const controllerSessionName = `${sessionPrefix}-service-ui`;
     currentActiveContext().controllerSessionName = controllerSessionName;
@@ -3438,7 +3459,7 @@ projects:
     expect(detachedPane).toContain("l logs");
   });
 
-  it("returns an empty sidecar log result when runtime log capture is disabled", async () => {
+  it("reads sidecar pane output when background runtime log capture is disabled", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-sidecar-logs-${port}`;
@@ -3489,6 +3510,13 @@ projects:
       (await context.execCli(["--config", configPath, "spawn", "api", "browser logs", "--json"]))
         .stdout,
     ) as SessionView;
+    const browserPane = spawned.sidecars.find((sidecar) => sidecar.name === "browser")?.tmuxSession;
+    if (!browserPane) throw new Error("Missing browser sidecar pane in spawned session view");
+    await pollUntil(async () => captureTmuxPane(browserPane), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("BROWSER_READY"),
+      label: "browser sidecar pane BROWSER_READY",
+    });
 
     const sidecarLogs = JSON.parse(
       (
@@ -3504,7 +3532,15 @@ projects:
         ])
       ).stdout,
     ) as SpurLogEntry[];
-    expect(sidecarLogs).toEqual([]);
+    expect(sidecarLogs).toEqual([
+      expect.objectContaining({
+        event: "sidecar.output",
+        level: "info",
+        message: "BROWSER_READY",
+        sessionId: spawned.id,
+        details: { sidecarName: "browser" },
+      }),
+    ]);
   });
 
   it("surfaces service command errors through the built CLI", async () => {
@@ -4750,19 +4786,23 @@ projects:
     await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
 
     // The agent process exits on its own, leaving the tmux pane/session alive
-    // with no matching process — reconcileUnexpectedStop treats that as an
-    // unexpected crash (status "errored"), not a clean stop. See
-    // "fix(session): preserve agent exit errors".
-    await pollUntil(
+    // with no matching process. Reconciliation persists an inferred exit error
+    // while preserving the pane for the native-resume attempt.
+    const exited = await pollUntil(
       async () =>
         JSON.parse(
           (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
         ) as SessionView[],
       {
         timeoutMs: 45_000,
-        accept: (value) => value[0]?.state === "error" && value[0]?.runtimeAlive === true,
+        accept: (value) =>
+          value[0]?.state === "error" &&
+          value[0]?.status === "errored" &&
+          value[0]?.runtimeAlive === true,
       },
     );
+    expect(exited[0]?.error).toBe("Agent runtime exited unexpectedly.");
+    expect(exited[0]?.stopReason).toBeUndefined();
 
     await rm(join(context.rootDir, ".claude"), { recursive: true, force: true });
 
@@ -4793,7 +4833,11 @@ projects:
         ) as SessionView[],
       {
         timeoutMs: 30_000,
-        accept: (value) => value[0]?.state !== "error" && value[0]?.runtimeAlive === true,
+        accept: (value) =>
+          value[0] !== undefined &&
+          value[0].state !== "stopped" &&
+          value[0].state !== "error" &&
+          value[0].runtimeAlive === true,
       },
     );
     const restoredPane = await pollUntil(async () => captureTmuxPane(spawned.id), {
@@ -4804,6 +4848,7 @@ projects:
     await sendKeysToTmux(controllerSessionName, "q");
 
     expect(restored[0]?.id).toBe(spawned.id);
+    expect(restored[0]?.status).toBe("running");
     expect(restored[0]?.runtimeAlive).toBe(true);
     expect(existsSync(restored[0]?.worktreePath ?? "")).toBe(true);
     expect(restoredPane).toContain("Original task:");

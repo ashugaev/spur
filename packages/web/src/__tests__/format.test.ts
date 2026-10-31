@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   formatBytes,
   formatRelativeTime,
+  formatShortTimestamp,
   formatTokenCount,
   getSessionSubtitle,
   getSessionTitle,
@@ -146,5 +147,21 @@ describe("truncateMiddle", () => {
     const result = truncateMiddle(value, 16);
     expect(result).toContain("…");
     expect(result.length).toBeLessThan(value.length);
+  });
+});
+
+describe("formatShortTimestamp", () => {
+  it("formats host-local time as Mon D HH:MM:SS, independent of TZ and locale", () => {
+    // Built from local fields so the expectation holds in any TZ.
+    expect(formatShortTimestamp(new Date(2026, 9, 7, 3, 4, 5).toISOString())).toBe(
+      "Oct 7 03:04:05",
+    );
+    expect(formatShortTimestamp(new Date(2026, 0, 27, 23, 59, 0).toISOString())).toBe(
+      "Jan 27 23:59:00",
+    );
+  });
+
+  it("returns unknown for an unparseable timestamp", () => {
+    expect(formatShortTimestamp("not-a-date")).toBe("unknown");
   });
 });
