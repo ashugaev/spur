@@ -4350,7 +4350,10 @@ export function createProgram(cliEntrypoint: string): Command {
   service
     .command("run")
     .description("Run a service command bound to the current Spur session.")
-    .argument("<serviceId>", "Logical service id")
+    .argument(
+      "<serviceId>",
+      "Logical service id declared as a project source with type: service and service: <id>",
+    )
     .argument("<command...>", "Shell command to run")
     .option("--port <number>", "Port held by this service")
     .option("--json", "Print raw JSON")
