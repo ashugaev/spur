@@ -447,7 +447,10 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       );
       const triggerConfig = await context.writeConfig(
         "ack-trigger.yaml",
-        automationConfig(context, sessionPrefix, `    sources:
+        automationConfig(
+          context,
+          sessionPrefix,
+          `    sources:
       pr-watch:
         type: github
         intervalMs: 250
@@ -458,7 +461,8 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         event: github:ci_failed
         send:
           interrupt: false
-`),
+`,
+        ),
       );
       const branch = "feature-runtime-ack";
       const pr = {
@@ -475,20 +479,36 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       await context.writeGhState(state());
       const daemon = await context.startDaemon(daemonConfig);
       currentActiveContext().daemonPid = daemon.info.pid;
-      const session = JSON.parse((await context.execCli([
-        "--config", daemonConfig, "spawn", "api", "initial ack runtime prompt",
-        "--agent", "claude", "--branch", branch, "--json",
-      ])).stdout) as SessionView;
+      const session = JSON.parse(
+        (
+          await context.execCli([
+            "--config",
+            daemonConfig,
+            "spawn",
+            "api",
+            "initial ack runtime prompt",
+            "--agent",
+            "claude",
+            "--branch",
+            branch,
+            "--json",
+          ])
+        ).stdout,
+      ) as SessionView;
 
       await withRuntimeEnv(context, async () => {
         const service = new SessionService(triggerConfig, "2026-03-18T10:00:00.000Z");
         currentService = service;
         let release!: () => void;
-        const held = new Promise<void>((resolve) => { release = resolve; });
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
         const messages: string[] = [];
         const gatedService = Object.create(service) as SessionService;
         let releaseLookup!: () => void;
-        const heldLookup = new Promise<void>((resolve) => { releaseLookup = resolve; });
+        const heldLookup = new Promise<void>((resolve) => {
+          releaseLookup = resolve;
+        });
         gatedService.get = async (sessionId) => {
           const view = await service.get(sessionId);
           if (ordering === "before acknowledgement") await heldLookup;
@@ -504,22 +524,32 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         const config = loadProjectConfig(triggerConfig, loadConfig(triggerConfig));
         const bus = new EventBus();
         const controller = startConfiguredTriggers({
-          config, bus, sessionService: gatedService,
+          config,
+          bus,
+          sessionService: gatedService,
           logger: { warn: () => {} },
         });
         const abortController = new AbortController();
         const source = await githubSourceModule.start({
-          sourceId: "pr-watch", projectId: "api", dataDir: context.dataDir,
+          sourceId: "pr-watch",
+          projectId: "api",
+          dataDir: context.dataDir,
           config: config.projects.api?.sources["pr-watch"] as never,
           emit(name, data) {
-            bus.emit({ name, data, projectId: "api", sourceId: "pr-watch", occurrenceId: randomUUID() });
+            bus.emit({
+              name,
+              data,
+              projectId: "api",
+              sourceId: "pr-watch",
+              occurrenceId: randomUUID(),
+            });
           },
           signal: abortController.signal,
           logger: { warn: () => {} },
           resolveWebBaseUrl: () => Promise.resolve(`http://127.0.0.1:${port}`),
         });
-        const pending = () => readPendingSendBatches(context.dataDir)
-          .get(`api:pr-watch-ci:${session.id}`);
+        const pending = () =>
+          readPendingSendBatches(context.dataDir).get(`api:pr-watch-ci:${session.id}`);
         const signalText = () => {
           const batch = pending()?.batch;
           return batch?.kind === "review" ? batch.signals[0]?.text : undefined;
@@ -527,28 +557,33 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         try {
           await waitForSourceBaseline(context, session.id);
           await pollUntil(async () => (await service.get(session.id)).state, {
-            timeoutMs: 20_000, accept: (value) => value === "waiting",
+            timeoutMs: 20_000,
+            accept: (value) => value === "waiting",
           });
           await context.writeGhState(state("first check"));
           await pollUntil(async () => signalText(), {
-            timeoutMs: 15_000, accept: (text) => text?.includes("first check") === true,
+            timeoutMs: 15_000,
+            accept: (text) => text?.includes("first check") === true,
           });
           if (ordering === "before acknowledgement") {
             await context.writeGhState(state("second check"));
             await pollUntil(async () => signalText(), {
-              timeoutMs: 15_000, accept: (text) => text?.includes("second check") === true,
+              timeoutMs: 15_000,
+              accept: (text) => text?.includes("second check") === true,
             });
             releaseLookup();
           }
           await pollUntil(async () => messages.length, {
-            timeoutMs: 45_000, accept: (count) => count > 0,
+            timeoutMs: 45_000,
+            accept: (count) => count > 0,
           });
           const claimId = pending()?.claim?.claimId;
           expect(claimId).toBeDefined();
           if (ordering === "during acknowledgement") {
             await context.writeGhState(state("second check"));
             await pollUntil(async () => signalText(), {
-              timeoutMs: 15_000, accept: (text) => text?.includes("second check") === true,
+              timeoutMs: 15_000,
+              accept: (text) => text?.includes("second check") === true,
             });
             expect(pending()?.claim?.claimId).toBe(claimId);
             expect(messages[0]).toContain("first check");
@@ -560,7 +595,8 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           release();
           if (ordering === "during acknowledgement") {
             await pollUntil(async () => messages.length, {
-              timeoutMs: 20_000, accept: (count) => count === 2,
+              timeoutMs: 20_000,
+              accept: (count) => count === 2,
             });
             expect(messages[1]).toContain("second check");
           } else {
