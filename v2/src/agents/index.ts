@@ -121,7 +121,8 @@ export const DEFERRED_CONTROLS_MAX_RESENDS = 2;
 // agent records the submit within seconds, so a miss means a swallowed Enter,
 // not a slow agent; short windows resend it fast and bound the lock hold to
 // 4 x 5s. The long default windows stay for deliver() into a busy agent,
-// which records the message only when its turn ends.
+// which records the message only when its turn ends. Each resent Enter still
+// passes the agent's early-resend gate, so a menu or prompt never gets one.
 export const INTERACTIVE_SUBMIT_ACK_PACING: SubmitAckPacing = {
   windowMs: 5_000,
   maxResends: 3,
@@ -155,11 +156,14 @@ export interface AgentSubmitAckContext {
   freshLaunch?: boolean;
   /** Session-private cursor config dir, used to re-resolve a rotated chat id. */
   cursorConfigDir?: string;
+  /** Opt-in historical Codex receipt from its original persisted native file. */
+  codexAckScope?: "current-native-baseline";
 }
 
 export interface SubmitAckScanResult {
   found: boolean;
   lastScannedFile: string | null;
+  qualifiedNoMatch?: true;
 }
 
 export interface SubmitAckPacing {
@@ -173,6 +177,8 @@ export interface AgentEarlyResendContext {
   worktreePath: string;
   agentSessionId?: string;
   panePid?: number;
+  /** The text being sent is a slash command; a gated agent refuses the resend. */
+  slashCommand?: boolean;
 }
 
 export interface SubmitAckBinding {
@@ -184,6 +190,7 @@ export interface ConversationReadContext {
   worktreePath: string;
   codexSessionsDir?: string;
   agentSessionId?: string;
+  cursorConfigDir?: string;
 }
 
 interface AgentAdapter {
@@ -589,6 +596,8 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
     submitAck: async (ctx, persisted) => {
+      if (ctx.codexAckScope && (!ctx.agentSessionId?.trim() || persisted?.agent !== "codex"))
+        return null;
       const baseline =
         persisted?.agent === "codex"
           ? new Map(Object.entries(persisted.offsets))
@@ -596,6 +605,11 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       return {
         baseline: { agent: "codex", offsets: Object.fromEntries(baseline) },
         async scan(text) {
+          if (ctx.codexAckScope && ctx.agentSessionId)
+            return scanCodexRolloutForMessage(ctx.codexSessionsDir, text, baseline, {
+              nativeSessionId: ctx.agentSessionId,
+              worktreePath: ctx.worktreePath,
+            });
           return scanCodexRolloutForMessage(ctx.codexSessionsDir, text, baseline);
         },
       };
@@ -613,7 +627,14 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         worktreePath,
         options?.cursorConfigDir ? { configDir: options.cursorConfigDir } : undefined,
       ),
-    readConversation: (ctx) => readCursorTranscriptEntries(ctx.worktreePath, ctx.agentSessionId),
+    readConversation: async (ctx) => {
+      const chatId =
+        ctx.agentSessionId ??
+        (ctx.cursorConfigDir
+          ? await findCursorSessionId(ctx.worktreePath, { configDir: ctx.cursorConfigDir })
+          : null);
+      return chatId ? readCursorTranscriptEntries(ctx.worktreePath, chatId) : null;
+    },
     setup: async ({ worktreePath, restrictWrites, cursorConfigDir }) => {
       await ensureCursorWorkspaceTrust(worktreePath);
       if (cursorConfigDir) {
@@ -969,7 +990,9 @@ export async function agentEarlySubmitResendAllowed(
   ctx: AgentEarlyResendContext,
 ): Promise<boolean> {
   const gate = agentAdapter(agent).earlySubmitResendAllowed;
-  return gate ? gate(ctx) : true;
+  if (!gate) return true;
+  if (ctx.slashCommand) return false;
+  return gate(ctx);
 }
 
 /**
