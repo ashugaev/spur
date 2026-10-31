@@ -26638,6 +26638,217 @@ describe("SessionService", () => {
       };
     }
 
+    describe("cgroup memory.max headroom", () => {
+      // E = 2e9 from baseConfig (shedCriticalFloorBytes 4e9 / 2); band (E, 2E] = (2e9, 4e9].
+      const cgroupAt = (currentBytes: number, maxBytes: number | null = 10_000_000_000) => ({
+        path: "/system.slice/spur-daemon.service",
+        currentBytes,
+        highBytes: null,
+        maxBytes,
+      });
+      type CgroupGateService = {
+        readMemoryPressure(nowMs: number): unknown;
+        runMemoryShedTick(): Promise<void>;
+        memoryHoldEngaged(): boolean;
+        dispose(): void;
+      };
+
+      beforeEach(() => {
+        loadConfigMock.mockReturnValue(baseConfig());
+        readHostMemoryMock.mockReturnValue(denyingMemory(20_000_000_000));
+        readCgroupPressureMock.mockReturnValue(null);
+        readCgroupMemorySnapshotMock.mockReturnValue(cgroupAt(9_000_000_000));
+      });
+
+      async function newService() {
+        const mod = await loadSessionServiceModule();
+        const service = new mod.SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        return { ...mod, service };
+      }
+
+      function stoppedRecord(stopReason: "manual_pause" | "memory_shed") {
+        const sessions = createSessionStore();
+        sessions.set("api-1", {
+          id: "api-1",
+          project: "api",
+          agent: "claude",
+          prompt: "hello",
+          branch: "api-1",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          tmuxSession: "api-1",
+          launchCommand: "claude --dangerously-skip-permissions",
+          status: "stopped",
+          stopReason,
+          createdAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T10:01:00.000Z",
+        });
+        tmuxSessionExistsMock.mockResolvedValue(false);
+      }
+
+      async function spawnOutcome(service: { spawn: (input: never) => Promise<unknown> }) {
+        return await service.spawn({ project: "api", prompt: "hello" } as never).then(
+          () => null,
+          (error: unknown) => error,
+        );
+      }
+
+      it("T1 denies spawn when headroom is within the emergency threshold", async () => {
+        const { service, SessionAdmissionDeniedError } = await newService();
+        const error = await spawnOutcome(service);
+        expect(error).toBeInstanceOf(SessionAdmissionDeniedError);
+        expect(error).toMatchObject({ reason: "memory_guard", statusCode: 429 });
+        expect((error as Error).message).toContain("memory.max headroom");
+        service.dispose();
+      });
+
+      it("T2 denies restore of a stopped session", async () => {
+        stoppedRecord("manual_pause");
+        const { service, SessionAdmissionDeniedError } = await newService();
+        const restoreError = await service.restore("api-1").catch((error: unknown) => error);
+        expect(restoreError).toBeInstanceOf(SessionAdmissionDeniedError);
+        expect(restoreError).toMatchObject({ reason: "memory_guard" });
+        service.dispose();
+      });
+
+      it("T3 denies a wake of a memory_shed record", async () => {
+        mockClaudeJsonlState("waiting");
+        stoppedRecord("memory_shed");
+        const { service, SessionAdmissionDeniedError } = await newService();
+        const sendError = await service
+          .send("api-1", { message: "resume", queue: false })
+          .catch((error: unknown) => error);
+        expect(sendError).toBeInstanceOf(SessionAdmissionDeniedError);
+        expect(sendError).toMatchObject({ reason: "memory_guard" });
+        service.dispose();
+      });
+
+      it("T4 keeps denying inside the release band only while latched", async () => {
+        const { service, SessionAdmissionDeniedError } = await newService();
+        const gate = service as unknown as CgroupGateService;
+        gate.readMemoryPressure(Date.now());
+        readCgroupMemorySnapshotMock.mockReturnValue(cgroupAt(7_000_000_000));
+        gate.readMemoryPressure(Date.now());
+        const latchedError = await spawnOutcome(service);
+        expect(latchedError).toBeInstanceOf(SessionAdmissionDeniedError);
+        expect(latchedError).toMatchObject({ reason: "memory_guard" });
+        // Latched band is 2E = 4e9 bytes = 3815MB; headroom 3e9 = 2861MB.
+        expect((latchedError as Error).message).toContain(
+          "memory.max headroom 2861MB is within the 3815MB shed band",
+        );
+        service.dispose();
+
+        const fresh = await newService();
+        expect(await spawnOutcome(fresh.service)).toBeNull();
+        fresh.service.dispose();
+      });
+
+      it("T5 admits again once headroom exceeds twice the threshold and the latch clears", async () => {
+        const { service, SessionAdmissionDeniedError } = await newService();
+        const gate = service as unknown as CgroupGateService;
+        gate.readMemoryPressure(Date.now());
+        const denied = await spawnOutcome(service);
+        expect(denied).toBeInstanceOf(SessionAdmissionDeniedError);
+        expect(denied).toMatchObject({ reason: "memory_guard" });
+        readCgroupMemorySnapshotMock.mockReturnValue(cgroupAt(5_500_000_000));
+        gate.readMemoryPressure(Date.now());
+        expect(await spawnOutcome(service)).toBeNull();
+        service.dispose();
+      });
+
+      it("denies at headroom exactly E on a fresh service", async () => {
+        readCgroupMemorySnapshotMock.mockReturnValue(cgroupAt(8_000_000_000));
+        const { service, SessionAdmissionDeniedError } = await newService();
+        const error = await spawnOutcome(service);
+        expect(error).toBeInstanceOf(SessionAdmissionDeniedError);
+        expect(error).toMatchObject({ reason: "memory_guard" });
+        service.dispose();
+      });
+
+      it("denies at headroom exactly 2E while latched", async () => {
+        const { service, SessionAdmissionDeniedError } = await newService();
+        const gate = service as unknown as CgroupGateService;
+        gate.readMemoryPressure(Date.now());
+        readCgroupMemorySnapshotMock.mockReturnValue(cgroupAt(6_000_000_000));
+        gate.readMemoryPressure(Date.now());
+        const error = await spawnOutcome(service);
+        expect(error).toBeInstanceOf(SessionAdmissionDeniedError);
+        expect(error).toMatchObject({ reason: "memory_guard" });
+        service.dispose();
+      });
+
+      it("T6 fails open on a null snapshot and on unlimited memory.max", async () => {
+        const { service } = await newService();
+        readCgroupMemorySnapshotMock.mockReturnValue(null);
+        expect(await spawnOutcome(service)).toBeNull();
+        readCgroupMemorySnapshotMock.mockReturnValue(cgroupAt(9_000_000_000, null));
+        expect(await spawnOutcome(service)).toBeNull();
+        service.dispose();
+      });
+
+      it("T7 does not deny when enforceFloors is false", async () => {
+        const config = baseConfig();
+        loadConfigMock.mockReturnValue({
+          ...config,
+          admission: {
+            ...config.admission,
+            memoryGuard: { ...config.admission.memoryGuard, enforceFloors: false },
+          },
+        });
+        const { service } = await newService();
+        expect(await spawnOutcome(service)).toBeNull();
+        service.dispose();
+      });
+
+      it("T8 engages the memory hold with cause cgroup_max_headroom, holds in band, clears above 2E", async () => {
+        // Mirrors MEMORY_HOLD_CLEAR_TICKS in src/session-service.ts (not exported).
+        const clearTicks = 10;
+        const { service } = await newService();
+        const gate = service as unknown as CgroupGateService;
+        await gate.runMemoryShedTick();
+        expect(gate.memoryHoldEngaged()).toBe(true);
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "daemon.memory.hold.engaged",
+            details: expect.objectContaining({ cause: "cgroup_max_headroom" }),
+          }),
+        );
+        // In-band (latched, h=3e9 <= 2E): hold stays engaged however many ticks pass.
+        readCgroupMemorySnapshotMock.mockReturnValue(cgroupAt(7_000_000_000));
+        for (let i = 0; i < clearTicks + 1; i += 1) await gate.runMemoryShedTick();
+        expect(gate.memoryHoldEngaged()).toBe(true);
+        // Above 2E (h=4.5e9): hold clears only after clearTicks consecutive ticks.
+        readCgroupMemorySnapshotMock.mockReturnValue(cgroupAt(5_500_000_000));
+        for (let i = 0; i < clearTicks - 1; i += 1) await gate.runMemoryShedTick();
+        expect(gate.memoryHoldEngaged()).toBe(true);
+        await gate.runMemoryShedTick();
+        expect(gate.memoryHoldEngaged()).toBe(false);
+        service.dispose();
+      });
+
+      it("T9 with shedEnabled false denies only at headroom <= E, never in the band", async () => {
+        const config = baseConfig();
+        loadConfigMock.mockReturnValue({
+          ...config,
+          admission: {
+            ...config.admission,
+            memoryGuard: { ...config.admission.memoryGuard, shedEnabled: false },
+          },
+        });
+        const { service, SessionAdmissionDeniedError } = await newService();
+        const gate = service as unknown as CgroupGateService;
+        expect(await spawnOutcome(service)).toBeInstanceOf(SessionAdmissionDeniedError);
+        await gate.runMemoryShedTick();
+        readCgroupMemorySnapshotMock.mockReturnValue(cgroupAt(7_000_000_000));
+        await gate.runMemoryShedTick();
+        expect(await spawnOutcome(service)).toBeNull();
+        service.dispose();
+      });
+    });
+
     it("memory guard denial carries reason memory_guard and cap denial carries reason cap", async () => {
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
