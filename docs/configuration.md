@@ -2,9 +2,12 @@
 
 > Scope: config layers, fields, sources, triggers, events — names and defaults only. Schema/validation, merge order, and every behavioral rule not stated here: `v2/src/config.ts`. Any config or interface change updates this file in the same change.
 
-Instance config: `~/.spur/config.yaml` by default (daemon host/port, data dirs, tmux socket, default agent, UI port, `voice:` — see [voice.md](voice.md)). Project config: nearest `spur.yaml`/`spur.yml`, `projects:` only. Merge order and per-session resolution: `v2/src/config.ts`.
+Instance selection: `--config` > `SPUR_CONFIG` > private `~/.spur/installed-instance.json` (`0600`, `{configPath}`) > `~/.spur/config.yaml`; `v2/src/config.ts`, `v2/src/installed-instance.ts`.
+Project config: nearest `spur.yaml`/`spur.yml`, `projects:` only; merge/per-session resolution: `v2/src/config.ts`; voice: [voice.md](voice.md).
 
 Spur ToDo is always on, no config field. See [todo](commands.md#todo).
+`mcp.port` (instance-only, `1..65535`, loopback, default first port from `4311` distinct from daemon/UI): `v2/src/config.ts`, `v2/src/ports.ts`; [MCP](mcp.md).
+`SPUR_MCP_TUNNEL_PROFILE`, `CONTROL_PLANE_API_KEY`, `SPUR_MCP_TUNNEL_ENV_FILE`: `v2/src/mcp-tunnel.ts`; [tunnel setup](mcp.md#connect-openai-products).
 Reviewer App JSON `repositories`, `receiptRoot`, `code|browser.{appId,keyPath}`: caller-owned `--app-config` file; `v2/src/review-app.ts`.
 `SPUR_REVIEW_APP_CONFIG`: reviewer App config with private `consent.approverUserId`; `v2/src/review-interface-consent.ts`.
 Approval Gate policy JSON requires CI run-name provenance from `.github/workflows/ci.yml`: `v2/src/review-gate.ts`.
@@ -49,20 +52,21 @@ A mode is a prompt suffix naming a skill, set via `projects.<id>.modes.<name>.{s
 
 ## Telegram binding
 
-`/watch [sessionId]` binds chat/topic; successful forum binding confirmations omit session identity; `/unwatch` drops binding; source `allowedUsers`/`allowedChats` gates access; `/spawn [agent] [task]`, `autoSpawn.*` handles unbound messages — `v2/src/event-sources/telegram.ts`.
-Task launch and attention cards: [`/new`, `/work`](commands.md#source-reply).
-[`source reply`](commands.md#source-reply) targets latest inbound chat, else `chatId`; sends claim chat and enroll attention pushes — `v2/src/session-service.ts`.
-Bot-message replies in private chats and group main reach recorded sender ahead of binding; confirmed forum topics (`is_topic_message`) and plain messages follow binding; gone or stopped/error/killed targets answer `not delivered` without delivery — `v2/src/event-sources/telegram.ts`.
+`chatId<0` selects canonical agent forum; missing/positive `chatId` disables agent communication; `allowedUsers`/`allowedChats` gates manual access — `v2/src/session-service.ts`, `v2/src/event-sources/telegram.ts`.
+Task launch, attention cards, topic lifecycle: [`/new`, `/work`, `/complete`, `/kill`](commands.md#source-reply); complete/kill topic deletion requires bot administrator `can_delete_messages`.
+[`source reply`](commands.md#source-reply), questions, attention and typing use assigned topic; Telegram spawn assigns before launch; legacy destinations migrate on input/output — `v2/src/session-service.ts`.
+DMs support commands/spawn tasks; existing-agent text, buttons and voice outside assigned topic redirect without delivery — `v2/src/event-sources/telegram.ts`.
+Telegram attachments (photo/document/audio/video/animation/voice/video_note/sticker): spawn/followup artifact references, optional captions, 10 files × 5 MiB; grouped albums reject late members — `v2/src/event-sources/telegram.ts`, `v2/src/types.ts`.
 Failed inbound update from an allowed user answers `Message not delivered. Send it again.` once in the same chat/topic; taps on buttons older than 48h answer in the group main — `v2/src/event-sources/telegram.ts`.
-`/spawn` changes plain-message recipient; group-main replies retain sender routing; forum takeover detaches old session — `v2/src/event-sources/telegram.ts`.
+`/spawn` creates its own canonical topic; `/watch` and `/work` Continue return topic links; `/unwatch` removes selected binding and retains topic — `v2/src/event-sources/telegram.ts`, `v2/src/session-service.ts`.
 Recorded bot-message owners: 1000 per source, oldest evicted first — `v2/src/metadata.ts`.
 Pending button choices: 200 per source, oldest offers evicted first; session cleanup retires its choices — `v2/src/metadata.ts`.
-Private/forum placeholders: `Received. <label> is thinking...`, `is busy; your message is queued.`, `needs input in its terminal; your message is queued.`; next agent send edits placeholder — `v2/src/event-sources/telegram.ts`, `v2/src/session-service.ts`.
+Assigned-topic placeholders: `Received. <label> is thinking...`, `is busy; your message is queued.`, `needs input in its terminal; your message is queued.`; next agent send edits placeholder; a reply with images deletes it after the text lands — `v2/src/event-sources/telegram.ts`, `v2/src/session-service.ts`, `v2/src/telegram-source-state.ts`.
 Queued Telegram sends suppress `is waiting.` notices and ToDo nudges — `v2/src/session-service.ts`.
-Private/forum typing: delivered, unanswered messages while session works; 10 min cap — `v2/src/session-service.ts`.
+Assigned-topic typing: delivered, unanswered messages while session works; 10 min cap — `v2/src/session-service.ts`.
 Agent Markdown: bold, strike, inline/fenced code, HTTP(S) links and headings render as HTML; Telegram parse rejection retries plain text — `v2/src/telegram-markdown.ts`, `v2/src/telegram-source-state.ts`.
-Forum topic names: status emoji, title, session id, agent; titled names capped at 128 UTF-16 units, title truncation preserves identity when it fits — `v2/src/session-service.ts`.
-Generated Telegram launch instructions require source `chatId` and matching `telegram:message` send trigger; inbound origin/provenance selects Telegram readership and decisions, capability-only launches select user-requested sends — `v2/src/session-service.ts`.
+Forum topic names: status emoji, title, session id, agent; names capped at 128 UTF-16 units, title truncation preserves identity when it fits — `v2/src/session-service.ts`.
+Generated Telegram launch instructions require source `chatId<0` and matching `telegram:message` send trigger — `v2/src/session-service.ts`.
 
 ## Event log retention
 
@@ -79,7 +83,7 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `models.codexHome` (`~/.codex`, instance only). Its `models_cache.json` gates every spawn with an explicit codex model, including CLI `--model`, respawn, handoff, trigger spawn blocks and Telegram `autoSpawn`: a model absent from a non-empty cache is rejected with 400. Skipped when the cache is missing or empty, when `~/.codex/config.toml` sets a non-`openai` top-level `model_provider` or a top-level `profile`, or when project `codexArgs` pass `--oss`, `--local-provider`, `--profile`/`-p`, or a `-c`/`--config` override of `model_provider` or `profile`.
 - `SPUR_CLAUDE_BIN`/`SPUR_CODEX_BIN`/`SPUR_CURSOR_BIN`/`SPUR_OPENCODE_BIN`: process env, per-agent executable override.
 - `tags.<name>.{description,color}`: `description` required, instance only.
-- `authRotation.{autoRotateOnRateLimit false, cooldownMinutes 60, maxRotationsPerEpisode 2}`: instance only.
+- `authRotation.{autoRotateOnRateLimit false, cooldownMinutes 60, maxRotationsPerEpisode 2, switchAuth false}`: instance only. `switchAuth` gates per-session [Switch auth](claude-accounts.md#per-session-switch); off hides it in web and `POST /sessions/:id/switch-auth` returns 404.
 - `diskRetention.warnFreeGb` (`10`, instance only, drives `doctor`'s `home-disk-headroom`).
 - `rateLimitReactivation.afterHours` (`0`, instance only).
 - `staleAfterMinutes` (`720`, instance/per-project). See [Stale mode](#stale-mode).
@@ -99,12 +103,17 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `projects.<id>.sidecars.<name>` (map, mutually exclusive with `devServer`; built-in `playwright` — [Built-in MCP sidecars](commands.md#built-in-mcp-sidecars)), `.idleTtlMinutes` ([Sidecar reaping](#sidecar-reaping)), `.ports.<id>.{env,start,end,url}` ([Sidecars](commands.md#sidecars)); `v2/src/config.ts`.
 - Isolated Telegram: retained `TELEGRAM_TEST_BOT_TOKEN`, `TELEGRAM_TEST_CHAT_ID`, `TELEGRAM_TEST_ALLOWED_USERS`, `TELEGRAM_TEST_ALLOWED_CHATS` string fields; reject known resolved supplied-project Telegram token collisions before seed/attachment, unresolved/undisclosed tokens unchecked, one local poller per bot, no production fallback; `v2/src/config.ts`, `v2/src/isolated-telegram.ts`, [Sidecars](commands.md#sidecars).
 - Isolated voice: current daemon-owner readiness precedes private UI receipt; fail-closed discovery without parent helper or production fallback; `v2/src/ports.ts`, [Session tools](commands.md#session-tools-and-environment).
+- Native Telegram call sidecars: `voice-daemon`, `voice-call` require configured integration inputs; direct agent tools and isolated child config: [prototype workflow](telegram-calls.md), `scripts/telegram-call/bridge.py`, `scripts/spur-isolated-daemon.sh`, `spur.yaml`.
 - `projects.<id>.mcp.exclude` (`[]`). See [Suppressing a host MCP server](commands.md#suppressing-a-host-mcp-server).
 - `projects.<id>.symlinks` (`[]`), `.branchNaming.regex`, `.spawn.steps`, `.defaultModels` (agent fallbacks: `v2/src/agents/claude.ts`, `cursor.ts`), `.codexArgs`.
 - `projects.<id>.reasoningEffort.{claude,codex,cursor,opencode}`: live launch defaults; explicit session override wins; omitted uses native default; OpenCode permits only selected variant for that model until effort changes or is removed; provider/model constraints in `v2/src/session-service.ts`, YAML validation in `v2/src/config.ts`.
 - `projects.<id>.preflight`/`.preflight.prompt`: branch or sentinel `NO_PROJECT_RULES`; retains structured preview/retry usage. Preflight batches expire after 30 days; spawn claims each batch once.
 - `projects.<id>.modes.<name>.{skill,default}`. See [Modes](#modes).
-- `projects.<id>.sources.<sourceId>.type` (required, `cron|github|github-ci|gitlab|jira|sentry|service|telegram|webhook`), `.runOnStart` (`false`, unsupported by jira and webhook), `.schedule` (`cron`), `.intervalMs` (`60000` github/jira, `2000` service), `.query` (github/jira), `.draft` (`false`, github, poll drafts only), `.emitExisting` (`false`), `.maxResults` (`100`, jira, clamped), `.adaptivePoll.{slowIntervalMs,activeGraceMs 600000}`, `.maxReviewBatchTargets`, `.pollDisabledRecheckMs` (`86400000`, github), `.service`, `.tailLines` (`200`), `.rules.<ruleId>.{match,clear,cooldownMs 60000}`, `.token`, `.baseUrl`, `.email` (jira, `${VAR}`-resolvable), `.allowedUsers`, `.allowedChats` (telegram, integer array or `${VAR}` comma-separated list), `.chatId` (telegram, agent-send fallback destination, must be in `allowedChats` when set), `.autoSpawn.{enabled true,project spur-shepherd,agent opencode,model,selfDestruct}`. Full per-type shape: `v2/src/config.ts`, event names: [Events](#events).
+- `projects.<id>.sources.<sourceId>.type` (required, `cron|script|github|github-ci|gitlab|jira|sentry|service|telegram|webhook`), `.runOnStart` (`false`, unsupported by jira and webhook), `.schedule` (`cron`), `.intervalMs` (`60000` github/jira, `2000` service), `.query` (github/jira), `.draft` (`false`, github, poll drafts only), `.emitExisting` (`false`), `.maxResults` (`100`, jira, clamped), `.adaptivePoll.{slowIntervalMs,activeGraceMs 600000}`, `.maxReviewBatchTargets`, `.pollDisabledRecheckMs` (`86400000`, github), `.ignoreChecks` (`[]`, github, exact case-sensitive check-run/status-context names dropped from `ci_failed`, e.g. `approvals`, not the workflow name), `.service`, `.tailLines` (`200`), `.rules.<ruleId>.{match,clear,cooldownMs 60000}`, `.token`, `.baseUrl`, `.email` (jira, `${VAR}`-resolvable), `.allowedUsers`, `.allowedChats` (telegram, integer array or `${VAR}` comma-separated list), `.chatId` (telegram, canonical forum destination when `<0`; see [Telegram binding](#telegram-binding); must be in `allowedChats` when set), `.autoSpawn.{enabled true,project spur-shepherd,agent opencode,model,selfDestruct}`. Full per-type shape: `v2/src/config.ts`, event names: [Events](#events).
+- Footer Cron editor saves existing spawn-job settings to YAML; runtime activation requires config reload or daemon restart; `v2/src/cron-job-editor.ts`.
+- `projects.<id>.sources.<sourceId>` with `type: script`: `command` argv, `schedule` cron, `timeoutMs` (`60000`), `env`, `emitExisting`/`runOnStart` (`false`); stdout items, limits, replay contract and `script:item.new` spawn event: `v2/src/event-sources/script.ts`, validation: `v2/src/config.ts`, process/environment: `v2/src/event-sources/script-process.ts`.
+- `projects.<id>.sources.<sourceId>.selfMarker` (github, optional): nonempty template requiring `{session}`; replace each placeholder with the session ID, then filter inline comments, review bodies, and issue comments with a case-sensitive match in contiguous unquoted body text (`>` quote lines excluded), regardless of author login. Unset: filter new feedback by polling login; previously filtered feedback stays filtered after config changes. `v2/src/config.ts`, `v2/src/review-providers/github.ts`.
+- `projects.<id>.sources.<sourceId>.signPosts` (`false`, github): requires `selfMarker` with no line break, leading `>` or backtick, equal to every other github `selfMarker` in the project; adds a `GitHub posts:` block to session launch prompts project-wide. `v2/src/config.ts`, `v2/src/session-service.ts`.
 - Webhook `.host` (IP literal, `127.0.0.1`; no hostname or zone id), `.port` (required integer `1..65535`; same-port bind cannot overlap another webhook, server, or UI bind; a server hostname overlaps every webhook host), `.path` (required exact path, 1..2048 visible ASCII bytes; one leading `/`; no query, fragment, whitespace, or control byte), `.secret` (required 16..512 visible ASCII bytes; `${VAR}`-resolvable).
 - `projects.<id>.triggers.<triggerId>.{source,event,spawn|send}`.
 - `spawn[].{prompt,steps,agent,model,reasoningEffort,mode,selfDestruct,branch,overrides.worktree,overrides.defaultBranch,restrictWrites,autoComplete}`, `spawnDeskGroup`: effort overrides project default; `v2/src/config.ts`; see [Desk groups](#desk-groups), [selfDestruct](#selfdestruct-steps).
@@ -116,7 +125,11 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 
 Cap limits concurrent live sessions at spawn, restore, and the wake of a stale-parked or memory-shed session. Over cap: `429` naming stop candidates. Reporting route: [`GET /headroom`](daemon-api.md). CLI: [`spur doctor`](commands.md#doctor). Schema `v2/src/config.ts`, enforcement `v2/src/session-service.ts`.
 
+`stopReason: "runtime_lost"`: confirmed runtime loss becomes restorable `stopped`, retains error evidence, releases capacity; unknown probes retain capacity (`v2/src/session-service.ts`).
+
 The shed's session stop writes `status: "stopped"`, `stopReason: "memory_shed"`. Queued trigger batches for such a session are held, not dropped, and its wake passes the admission gate.
+
+Memory guard floors (`enforceFloors`) also deny spawn, restore, and wake while the daemon cgroup's `memory.max` headroom is within the shed's emergency threshold, or its release band while the shed is latched. Unreadable cgroup or unlimited `memory.max` adds no denial.
 
 Events: `daemon.memory.shed`(`.failed`), `session.admission.denied`, `session.admission.memory_guard`, `daemon.memory.unbounded`, `daemon.memory.hold.engaged`(`.cleared`/`.failed`), `trigger.send.suppressed_memory_guard`.
 
@@ -146,7 +159,9 @@ A session bound to a PR GitHub reports as nonexistent stops signal polling after
 
 ## Events
 
-Sources emit events; triggers `spawn` or `send`. Auto-ping scopes: [commands.md#auto-ping](commands.md#auto-ping). `--thread` targets: `github` (review threads), `gitlab` (discussions), `telegram` (forum topics) — no other source has a thread target. `cron`, `github-ci`, `sentry`, `jira` carry no auto-ping controls at all (spawn-only sources). Retry/backoff and poll-cost mechanics: `v2/src/event-sources/*.ts`.
+Sources emit events; triggers `spawn` or `send`. Auto-ping scopes: [commands.md#auto-ping](commands.md#auto-ping). `--thread` targets: `github` (review threads), `gitlab` (discussions), `telegram` (forum topics) — no other source has a thread target. `cron`, `github-ci`, `sentry`, `jira`, `script` carry no auto-ping controls at all (spawn-only sources). Retry/backoff and poll-cost mechanics: `v2/src/event-sources/*.ts`.
+
+Trigger spawn retry: cap/memory denials persist across restarts, preserve successful desk members; source-type/trigger changes or removal discard pending work (`v2/src/triggers.ts`).
 
 Event names by source:
 
@@ -156,6 +171,7 @@ Event names by source:
 - `github-ci`: `github-ci:run.completed`.
 - `gitlab`: `gitlab:changes_requested`, `ci_failed`, `comment`, `merge_conflict`.
 - `jira`: `jira:work_item.new` (with `query`; else connection-only, backs `projects.<id>.backlog`). Template: `{{key}}` plus inherited `{{url}} {{number}} {{title}} {{repo}} {{externalId}}`.
+- `script`: `script:item.new`; template contract: `v2/src/event-sources/script.ts`.
 - `sentry`: `sentry:issue.new`.
 - `service`: `service:<ruleId>`.
 - `telegram`: `telegram:message`. Voice-note transcription: [voice.md](voice.md#telegram-voice-notes).
@@ -163,7 +179,7 @@ Event names by source:
 
 - Webhook request: `POST <path>` with `Authorization: Bearer <secret>` and `Content-Type: application/json`; runtime behavior and limits: `v2/src/event-sources/webhook.ts`.
 
-Other event names (see source file for trigger conditions): `trigger.spawn.suppressed`, `source.poll.disabled`, `source.poll.enabled`, `gh.poll_cycle`, `gh.usage`, `gh.poll_budget_paused`, `session.message.{sent,delivery_recovered,delivery_failed,requeued,submit_unconfirmed,queued_ahead,queue_removed,stalled}`, `session.spawn.{orphan_stopped,launch_unconfirmed,launch_submitted}`, `session.controls.delivery_recovered`, `session.todo.{nudge_failed,nudge_disabled,nudge_exhausted}`, `session.{complete,pause,self_destruct,desk_complete,handoff}.{completed,failed}`, `session.wake.{failed,daily_failed,interval_failed,sent,daily_sent,interval_sent,interval_cancelled,daily_cancelled,suppressed}`, `session.wake.token_budget_blocked`, `session.token_budget.exhausted`, `session.token_budget.unenforced`, `session.token_budget.teardown_failed`, `session.attention_monitor.{failed,session_failed,slow}`, `session.runtime.{probe_unresponsive,pane_child_fallback}`, `session.agent_process.{pane_pid_unreadable,capture_unavailable,capture_blind,survivors}`, `session.{handoff,respawn}.startup_attachment_missing`, `session.server_error.reactivation_exhausted`, `session.sidecar.{start_noop,start_rejected,launch_reap_skipped}`, `session.submit.{timeout,confirmed,released,failure_dismissed}`, `session.subscription.{delivery_failed,spawn_failed}`, `session.recover.context_unconfirmed`, `trigger.send.{failed,suppressed_admission,suppressed_launch_pending}`, `host.disk.low`, `daemon.admission.startup`, `daemon.registry.{count,warning}`, `daemon.auto_update.{started,failed,retry,skipped,suppressed,paused,config_invalid,disarm_failed}`, `daemon.deploy_switch.{started,rejected}`, `cli.update.{started,rolled_back,abandoned}`.
+Other event names (see source file for trigger conditions): `trigger.spawn.suppressed`, `source.poll.disabled`, `source.poll.enabled`, `source.poll_cycle.error`, `source.telegram.{callback_dropped,choice_rejected}`, `gh.poll_cycle`, `gh.usage`, `gh.poll_budget_paused`, `session.message.{sent,delivery_recovered,delivery_failed,requeued,submit_unconfirmed,queued_ahead,queue_removed,stalled}`, `session.spawn.{orphan_stopped,launch_unconfirmed,launch_submitted}`, `session.controls.delivery_recovered`, `session.todo.{nudge_failed,nudge_disabled,nudge_exhausted}`, `session.{complete,pause,self_destruct,desk_complete,handoff}.{completed,failed}`, `session.wake.{failed,daily_failed,interval_failed,sent,daily_sent,interval_sent,interval_cancelled,daily_cancelled,suppressed}`, `session.wake.token_budget_blocked`, `session.token_budget.exhausted`, `session.token_budget.unenforced`, `session.token_budget.teardown_failed`, `session.attention_monitor.{failed,session_failed,slow}`, `session.runtime.{probe_unresponsive,pane_child_fallback}`, `session.agent_process.{pane_pid_unreadable,capture_unavailable,capture_blind,survivors}`, `session.{handoff,respawn}.startup_attachment_missing`, `session.server_error.reactivation_exhausted`, `session.sidecar.{start_noop,start_rejected,launch_reap_skipped,owner_missing}`, `session.list.enrich_failed`, `session.submit.{timeout,confirmed,released,failure_dismissed}`, `session.subscription.{delivery_failed,spawn_failed}`, `session.recover.context_unconfirmed`, `session.record.invalid`, `trigger.send.{failed,suppressed_admission,suppressed_launch_pending}`, `host.disk.low`, `daemon.admission.startup`, `daemon.registry.{count,warning}`, `daemon.auto_update.{started,failed,retry,skipped,suppressed,paused,config_invalid,disarm_failed}`, `daemon.deploy_switch.{started,rejected}`, `cli.update.{started,rolled_back,abandoned}`.
 
 ## Auto update
 

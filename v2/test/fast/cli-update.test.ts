@@ -12,6 +12,13 @@ const MONITOR_MODULES = [
   "../../src/update-decision.ts",
   "../../src/update-health.ts",
   "../../src/update-state.ts",
+  "../../src/mcp-http.ts",
+  "../../src/mcp.ts",
+  "../../src/mcp-gateway.ts",
+  "../../src/mcp-results.ts",
+  "../../src/mcp-tunnel.ts",
+  "../../src/daemon-contracts.ts",
+  "../../src/build-identity.ts",
 ] as const;
 
 describe("spur update CLI", () => {
