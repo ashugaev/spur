@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,11 +15,13 @@ import type { SessionView } from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   captureTmuxPane,
+  configureOwnedPushRemote,
   createRuntimeTestContext,
   isTmuxAvailable,
   killTmuxSessionsByPrefix,
   syncTmuxEnvironment,
   type RuntimeTestContext,
+  waitForSourceBaseline,
 } from "../helpers/runtime.js";
 
 const tmuxOk = await isTmuxAvailable();
@@ -109,10 +111,7 @@ function runtimeEnv(context: RuntimeTestContext) {
 }
 
 async function syncAutomationTmuxEnvironment(context: RuntimeTestContext): Promise<void> {
-  await execFileAsync("git", ["config", "push.default", "current"], { cwd: context.repoDir });
-  await execFileAsync("git", ["config", "remote.pushDefault", "upstream"], {
-    cwd: context.repoDir,
-  });
+  await configureOwnedPushRemote(context);
   await syncTmuxEnvironment(runtimeEnv(context));
 }
 
@@ -384,18 +383,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       });
 
       try {
-        const snapshotPath = join(
-          context.dataDir,
-          "source-state",
-          "github",
-          "api",
-          "pr-watch",
-          `${session.id}.json`,
-        );
-        await pollUntil(async () => existsSync(snapshotPath), {
-          timeoutMs: 15_000,
-          accept: Boolean,
-        });
+        await waitForSourceBaseline(context, session.id);
 
         await context.writeGhState({
           prsByBranch: {
@@ -534,6 +522,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         });
 
         try {
+          await waitForSourceBaseline(context, session.id);
           await context.writeGhState({
             prsByBranch: {
               "feature-runtime-ci": {
@@ -683,6 +672,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           accept: (value) => value.status === "stopped" && value.state === "stale",
         });
         expect(parked.stopReason).toBe("stale_timeout");
+        await waitForSourceBaseline(context, session.id);
 
         await context.writeGhState({
           prsByBranch: {
@@ -836,6 +826,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             accept: (value) => value.pr?.number === 42,
           },
         );
+        await waitForSourceBaseline(context, session.id);
 
         await execFileAsync("git", ["-C", session.worktreePath, "switch", "-c", "feature-drifted"]);
 
@@ -1088,18 +1079,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       });
 
       try {
-        const snapshotPath = join(
-          context.dataDir,
-          "source-state",
-          "github",
-          "api",
-          "pr-watch",
-          `${session.id}.json`,
-        );
-        await pollUntil(async () => existsSync(snapshotPath), {
-          timeoutMs: 15_000,
-          accept: Boolean,
-        });
+        await waitForSourceBaseline(context, session.id);
 
         await context.writeGhState({
           prsByBranch: {
@@ -1271,6 +1251,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         });
 
         try {
+          await waitForSourceBaseline(context, session.id);
           await context.writeGhState({
             prsByBranch: {
               "feature-runtime-merge-conflict": {
@@ -1421,6 +1402,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
         try {
           const conflictMarker = 'GitHub updates on PR #42 "Restore merge conflict alerts":';
+          await waitForSourceBaseline(context, session.id);
           await context.writeGhState({
             prsByBranch: {
               "feature-runtime-merge-conflict-restore": {

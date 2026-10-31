@@ -31,9 +31,17 @@ make_deploy_root() {
   local root="$1"
   git init -q "$root"
   git -C "$root" config user.email t@t && git -C "$root" config user.name t
-  mkdir -p "$root/deploy" "$root/scripts"
+  mkdir -p "$root/deploy" "$root/scripts" "$root/v2/dist"
+  printf 'v2/dist/\n' >"$root/.gitignore"
+  cp "$repo_root/v2/required-package-files.txt" "$root/v2/required-package-files.txt"
+  local entry
+  while IFS= read -r entry || [[ -n "$entry" ]]; do
+    case "$entry" in dist/*) : >"$root/v2/$entry" ;; esac
+  done <"$root/v2/required-package-files.txt"
   cp "$repo_root/deploy/spur-daemon.service" "$root/deploy/"
   cp "$repo_root/deploy/spur-web.service" "$root/deploy/"
+  cp "$repo_root/deploy/spur-mcp.service" "$root/deploy/"
+  cp "$repo_root/deploy/spur-mcp-tunnel.service" "$root/deploy/"
   cp "$script" "$root/scripts/main-deploy.sh"
   git -C "$root" add -A
   git -C "$root" commit -qm init
@@ -52,12 +60,14 @@ setup_env() {
   # never escalates; it execs the remaining args directly.
   cat >"$sudo_dir/sudo" <<EOF
 #!/usr/bin/env bash
+if [[ "\${1:-}" == -u ]]; then shift 2; fi
 exec "\$@"
 EOF
   chmod +x "$sudo_dir/sudo"
 
   export PATH="$sudo_dir:$stub_dir:$PATH"
   export HOME="$work/home"
+  export MAIN_DEPLOY_SERVICE_HOME="$HOME"
   mkdir -p "$HOME"
   # Do NOT preset MAIN_DEPLOY_REEXECED: let the script acquire the deploy lock
   # and re-exec from $deploy_root exactly as in prod, so the test exercises the
@@ -68,6 +78,7 @@ EOF
   export SYSTEMCTL="$stub_dir/systemctl"
   export SPUR_DEPLOY_SS="$stub_dir/ss"
   export SPUR_DEPLOY_CURL="$stub_dir/curl"
+  export SPUR_DEPLOY_NODE="$stub_dir/node-health"
   export SPUR_DEPLOY_LOCKFILE="$work/main-deploy.lock"
   export SPUR_DEPLOY_STATE="$work/state.log"
   # web_is_serving's own retry cadence, not the heal loop's — 0 keeps every
@@ -82,6 +93,8 @@ EOF
   unset SPUR_DEPLOY_DAEMON_PORT_PID
   unset SPUR_DEPLOY_DAEMON_MAIN_PID
   unset SPUR_DEPLOY_DAEMON_REBIND_PID
+  unset SPUR_DEPLOY_TEST_DAEMON_PORT
+  unset SPUR_DEPLOY_SELECT_RC
   unset SPUR_DEPLOY_HTML_CHUNKS
   unset SPUR_DEPLOY_HTML_BUILD_ID
   unset SPUR_DEPLOY_HTML_ESCAPED_CHUNKS
@@ -589,7 +602,7 @@ test_build_abort_leaves_web_active() {
   setup_env "$work"
   make_deploy_root "$MAIN_DEPLOY_ROOT" >/dev/null
   # No stamp file -> deployed_head != remote_head -> build path.
-  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+  printf 'start spur-daemon.service\nstart spur-web.service\nstart spur-mcp.service\n' >"$SPUR_DEPLOY_STATE"
 
   local pnpm_stub="$work/sudobin/pnpm"
   cat >"$pnpm_stub" <<'EOF'
@@ -632,6 +645,12 @@ EOF
   else
     bad "build-abort: exit trap did not log restore"
     printf '%s\n' "$out"
+  fi
+  if grep -qx 'stop spur-mcp.service' "$SPUR_DEPLOY_STATE" &&
+    [[ "$(grep ' spur-mcp.service$' "$SPUR_DEPLOY_STATE" | tail -1)" == 'start spur-mcp.service' ]]; then
+    ok "build-abort: restores MCP stopped by this run"
+  else
+    bad "build-abort: MCP restore missing"
   fi
 }
 
@@ -1019,6 +1038,139 @@ start spur-web.service" ]]; then
   fi
 }
 
+test_selected_daemon_port() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  export MAIN_DEPLOY_SERVICE_HOME="$work/service-home"
+  local head
+  head="$(make_deploy_root "$MAIN_DEPLOY_ROOT")"
+  printf '%s\n' "$head" >"$MAIN_DEPLOY_ROOT/.git/main-deploy-last-successful"
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+  export SPUR_DEPLOY_TEST_DAEMON_PORT=43217
+  sleep 1000 &
+  local orphan=$!
+  sleep 1000 &
+  local unrelated=$!
+  export SPUR_DEPLOY_DAEMON_PORT_PID="$orphan"
+  local rc=0
+  bash "$script" >"$work/out" 2>&1 || rc=$?
+  if [[ "$rc" == 0 ]] && ! kill -0 "$orphan" 2>/dev/null && kill -0 "$unrelated" 2>/dev/null; then
+    ok "custom-port: cleans selected orphan and preserves unrelated process"
+  else
+    bad "custom-port: cleanup or preservation failed"
+    cat "$work/out"
+  fi
+  if grep -qx 43217 "$SPUR_DEPLOY_STATE.ports" && ! grep -qx 4310 "$SPUR_DEPLOY_STATE.ports"; then
+    ok "custom-port: scans selected port without scanning 4310"
+  else
+    bad "custom-port: wrong port scanned"
+  fi
+  if grep -qx "probe-context $MAIN_DEPLOY_SERVICE_HOME $MAIN_DEPLOY_SERVICE_HOME/.spur/config.yaml" "$SPUR_DEPLOY_STATE"; then
+    ok "custom-port: health uses service HOME and canonical selected config"
+  else
+    bad "custom-port: health uses caller context"
+  fi
+  kill "$unrelated" "$orphan" 2>/dev/null || true
+}
+
+test_invalid_selection_restores_without_mutation() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  make_deploy_root "$MAIN_DEPLOY_ROOT" >/dev/null
+  printf 'start spur-daemon.service\nstart spur-web.service\nstart spur-mcp.service\n' >"$SPUR_DEPLOY_STATE"
+  export SPUR_DEPLOY_SELECT_RC=1
+  cat >"$work/sudobin/pnpm" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$work/sudobin/pnpm"
+  if bash "$script" >"$work/out" 2>&1; then
+    bad "invalid-selection: accepted failed configuration probe"
+  else
+    ok "invalid-selection: failed after build"
+  fi
+  if [[ ! -e "$SPUR_DEPLOY_STATE.ports" && ! -e "$MAIN_DEPLOY_SYSTEMD_DIR/spur-daemon.service" ]] &&
+    ! grep -q '^restart ' "$SPUR_DEPLOY_STATE"; then
+    ok "invalid-selection: no port scans, new units or daemon restart"
+  else
+    bad "invalid-selection: mutated installation or scanned port"
+  fi
+  if [[ "$(grep ' spur-mcp.service$' "$SPUR_DEPLOY_STATE" | tail -1)" == 'start spur-mcp.service' ]] &&
+    [[ "$(grep ' spur-web.service$' "$SPUR_DEPLOY_STATE" | tail -1)" == 'start spur-web.service' ]]; then
+    ok "invalid-selection: restores only stopped MCP/web"
+  else
+    bad "invalid-selection: failed to restore owned services"
+  fi
+}
+
+test_runtime_integrity() {
+  local mode="$1" work head rc=0
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  head="$(make_deploy_root "$MAIN_DEPLOY_ROOT")"
+  printf '%s\n' "$head" >"$MAIN_DEPLOY_ROOT/.git/main-deploy-last-successful"
+  printf 'start spur-daemon.service\nstart spur-web.service\nstart spur-mcp.service\n' >"$SPUR_DEPLOY_STATE"
+  if [[ "$mode" != complete ]]; then rm "$MAIN_DEPLOY_ROOT/v2/dist/mcp-http.js"; fi
+  export SPUR_DEPLOY_RUNTIME_BUILD_MODE="$mode"
+  cat >"$work/sudobin/pnpm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+for argument in "$@"; do
+  if [[ "$argument" == build ]]; then
+    printf 'build\n' >>"$SPUR_DEPLOY_STATE"
+    [[ ! -e "$MAIN_DEPLOY_SYSTEMD_DIR/spur-mcp.service" ]] || exit 99
+    case "$SPUR_DEPLOY_RUNTIME_BUILD_MODE" in
+      fail) exit 1 ;;
+      repair) : >"$MAIN_DEPLOY_ROOT/v2/dist/mcp-http.js" ;;
+    esac
+  fi
+done
+EOF
+  chmod +x "$work/sudobin/pnpm"
+  bash "$script" >"$work/out" 2>&1 || rc=$?
+  if [[ "$mode" == repair ]]; then
+    if [[ "$rc" == 0 ]] && grep -qx build "$SPUR_DEPLOY_STATE" && [[ -f "$MAIN_DEPLOY_ROOT/v2/dist/mcp-http.js" ]]; then
+      ok "runtime-repair: same SHA and helper rebuild missing MCP before unit installation"
+    else
+      bad "runtime-repair: missing MCP did not trigger successful rebuild"
+      cat "$work/out"
+    fi
+  elif [[ "$mode" == complete ]]; then
+    if [[ "$rc" == 0 ]] && ! grep -qx build "$SPUR_DEPLOY_STATE"; then
+      ok "runtime-complete: matching SHA and full manifest keep fast path"
+    else
+      bad "runtime-complete: fast path rebuilt or failed"
+      cat "$work/out"
+    fi
+  else
+    if [[ "$rc" != 0 && ! -e "$MAIN_DEPLOY_SYSTEMD_DIR/spur-mcp.service" ]] &&
+      ! grep -q '^restart ' "$SPUR_DEPLOY_STATE" && ! grep -q 'main deployed:' "$work/out"; then
+      ok "runtime-$mode: failed or incomplete build installs no units and publishes no success"
+    else
+      bad "runtime-$mode: accepted failure or mutated installation"
+      cat "$work/out"
+    fi
+    if [[ "$(grep ' spur-mcp.service$' "$SPUR_DEPLOY_STATE" | tail -1)" == 'start spur-mcp.service' &&
+      "$(grep ' spur-web.service$' "$SPUR_DEPLOY_STATE" | tail -1)" == 'start spur-web.service' &&
+      "$(<"$MAIN_DEPLOY_ROOT/.git/main-deploy-last-successful")" == "$head" ]]; then
+      ok "runtime-$mode: restores stopped services and preserves prior success stamp"
+    else
+      bad "runtime-$mode: service restore or prior stamp changed"
+    fi
+  fi
+}
+
+test_runtime_integrity repair
+test_runtime_integrity complete
+test_runtime_integrity fail
+test_runtime_integrity leave
+test_selected_daemon_port
+test_invalid_selection_restores_without_mutation
 test_concurrency
 test_heal
 test_loud_failure
