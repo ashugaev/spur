@@ -2500,6 +2500,49 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("keeps a newer merged event when an older session lookup rejects", async () => {
+    let rejectOld!: (error: Error) => void;
+    const oldLookup = new Promise<never>((_, reject) => { rejectOld = reject; });
+    const get = vi.fn().mockImplementationOnce(() => oldLookup).mockResolvedValue({
+      id: "api-1", status: "running", state: "waiting",
+      lastActivityAt: staleActivity(), workspaceExists: true,
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: { get, deliver } as never,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      bus.emit(githubEvent());
+      await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(1));
+      readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot([
+        { key: "comment:1", kind: "comment", text: "A new comment arrived." },
+        { key: "comment:2", kind: "comment", text: "Second comment." },
+      ]));
+      bus.emit({ ...githubEvent("comment:2"), data: {
+        ...githubEvent("comment:2").data,
+        signals: [{ key: "comment:2", kind: "comment", text: "Second comment." }],
+      } });
+      await vi.waitFor(() => expect(
+        readPendingSendBatchesMock().get("api:send:api-1")?.revision,
+      ).toBe(2));
+      rejectOld(new Error("stale lookup failed"));
+      for (let i = 0; i < 12; i++) await Promise.resolve();
+      const remaining = readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch;
+      expect(remaining.batch.kind === "review" && remaining.batch.signals.map((item) => item.key))
+        .toContain("comment:2");
+      expect(deliver).not.toHaveBeenCalled();
+    } finally {
+      rejectOld(new Error("cleanup"));
+      await controller.stop();
+    }
+  });
+
   it("does not let a stale controller overwrite replacement work", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "spur-trigger-work-replaced-"));
     const autoPing = new AutoPingService(dataDir);

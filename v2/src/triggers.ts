@@ -869,9 +869,18 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     options?: {
       keepInterrupted?: boolean;
       deletePersisted?: boolean;
+      expectedRevision?: number;
     },
-  ): void => {
+  ): boolean => {
     const current = pendingBatches.get(queueKey);
+    if (current?.workId !== batch.workId) return false;
+    if (options?.deletePersisted !== false) {
+      const revision = options?.expectedRevision ?? batch.revision;
+      if (current.revision !== revision || !deletePendingSendBatchConditional(
+        deps.config.dataDir,
+        { workId: batch.workId, revision },
+      )) return false;
+    }
     const references = occurrenceReferencesByQueue.get(queueKey);
     if (references && current) {
       for (const occurrenceId of references) {
@@ -880,9 +889,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }
     occurrenceReferencesByQueue.delete(queueKey);
     pendingBatches.delete(queueKey);
-    if (options?.deletePersisted !== false) {
-      deletePendingSendBatchConditional(deps.config.dataDir, { workId: batch.workId });
-    }
     if (!options?.keepInterrupted) {
       interruptedKeys.delete(queueKey);
     }
@@ -890,6 +896,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       clearInterval(flushTimer);
       flushTimer = null;
     }
+    return true;
   };
 
   const syncBatchOccurrenceReferences = (queueKey: string, batch: PendingBatch): void => {
@@ -1533,10 +1540,12 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     queueKey: string,
     batch: PendingBatch,
   ): Promise<SessionView | null> => {
+    const expectedRevision = batch.revision;
     try {
       return await deps.sessionService.get(batch.batch.sessionId);
     } catch (error) {
-      clearBatch(queueKey, batch);
+      const cleared = clearBatch(queueKey, batch, { expectedRevision });
+      if (!cleared) return null;
       const message = error instanceof Error ? error.message : String(error);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
