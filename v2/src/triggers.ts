@@ -38,6 +38,7 @@ import {
   type TriggerSpawnBlockConfig,
   type SpawnTriggerConfig,
   type WorkItemEventData,
+  type PersistedPendingBatch,
   type PersistedSpawnWork,
 } from "./types.js";
 import type { EventBus } from "./event-bus.js";
@@ -1047,7 +1048,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       }
       const claimId = randomUUID();
       let claimedRevision = (persisted.revision ?? 0) + 1;
-      let claimed = {
+      let claimed: PersistedPendingBatch = {
         ...persisted,
         admissionCapRetryAt: batch.admissionCapRetryAt,
         admissionCapDenials: batch.admissionCapDenials,
