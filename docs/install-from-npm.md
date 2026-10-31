@@ -198,7 +198,7 @@ Pin first and the flag is still armed: within the next 5-minute tick the daemon 
 
 `spur init` installs user units. System scope: [source install](install-from-source.md).
 Don't run `spur update` / `spur reinit` on a system-unit host: they take the user-scope path and create conflicting services.
-The npm pin still gets created on daemon boot; an nvm `npmrc-nvm-conflict` requires the manual fix printed by `spur doctor`.
+The npm pin still gets created on default-config daemon boot; an nvm `npmrc-nvm-conflict` requires the manual fix printed by `spur doctor`.
 
 ## Reference
 
