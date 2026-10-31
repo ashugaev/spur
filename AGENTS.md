@@ -45,7 +45,7 @@ Capabilities loaded by description match. Source: .agents/skills/
   github              .agents/skills/github/SKILL.md              Use gh CLI for PRs, issues, checks, or releases
   shallow-scoring     .agents/skills/shallow-scoring/SKILL.md     Route a task to a deliberation tier by ambiguity × blast radius
   self-verify         .agents/skills/self-verify/SKILL.md         Final close-out gate validation
-  telegram            .agents/skills/telegram/SKILL.md            Send Telegram notification or fetch updates
+  telegram            .agents/skills/telegram/SKILL.md            Send Telegram notification
   telegram-e2e        .agents/skills/telegram-e2e/SKILL.md        Live test the Telegram source on a test bot before close-out of any Telegram change
   pr-comments-fix     .agents/skills/pr-comments-fix/SKILL.md     Fix and resolve PR review comments
   docs                .agents/skills/docs/SKILL.md                Task touches published docs under docs/ or the root doc files
