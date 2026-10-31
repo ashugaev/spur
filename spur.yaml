@@ -32,6 +32,17 @@ projects:
       - 'service_tier="default"'
     preflight: {}
     sidecars:
+      voice-daemon:
+        command: ./scripts/telegram-call/run-daemon.sh
+        ports:
+          daemon:
+            env: SPUR_RESERVED_PORT_DAEMON
+            start: 4320
+            end: 4399
+      voice-call:
+        command: ./scripts/telegram-call/run-call.sh
+        dependsOn:
+          - voice-daemon
       isolated-daemon:
         command: ./scripts/spur-isolated-daemon.sh
         ports:
@@ -77,7 +88,7 @@ projects:
         source: gh
         event: github:approved
         send:
-          prompt: "Run $manager and $github. Resume user-authorized review workflow with initial caller-supplied trusted external contract path/digest and receipt root; missing trust/query authority blocks. Apply owner gate to current receipts, paginated reviews, required checks and blocking threads. Correlated affirmation replies resume existing invocation. Continue authorized work after gate; human merges."
+          prompt: "Run $manager and $github. Resume user-authorized review workflow with initial caller-supplied trusted external contract path/digest and receipt root; missing trust/query authority blocks aggregate reads. Continue authorized fixes/review responses while CI pending/failing. Apply owner gate to merge/release/deploy readiness using current receipts, paginated reviews, required checks and blocking threads. Correlated affirmation replies resume existing invocation; human merges."
       gh-changes-requested:
         source: gh
         event: github:changes_requested
