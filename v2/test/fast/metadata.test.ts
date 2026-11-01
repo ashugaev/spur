@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -35,6 +36,7 @@ import {
   readReviewSourceSnapshot,
   writeReviewSourceSnapshot,
   readTelegramBindings,
+  retireTelegramLegacyState,
   readTelegramLastUpdateId,
   readTelegramChoices,
   readTelegramReplyTarget,
@@ -58,7 +60,7 @@ import {
   writeSession,
   updatePendingSendBatchConditional,
 } from "../../src/metadata.js";
-import { appendEventLog } from "../../src/event-log.js";
+import { appendEventLog, readEventLog } from "../../src/event-log.js";
 import type {
   PersistedPendingBatch,
   PersistedSpawnWork,
@@ -472,6 +474,58 @@ describe("work-item lifecycle registry", () => {
 });
 
 describe("telegram source state", () => {
+  it("retires own legacy bindings/offers while preserving forum cleanup ownership and other sessions", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramBindings(
+      dataDir,
+      "api",
+      "tg",
+      [
+        { sessionId: "api-1", chatId: 123 },
+        { sessionId: "api-1", chatId: -1001 },
+        { sessionId: "api-1", chatId: -1001, messageThreadId: 22 },
+        { sessionId: "api-1", chatId: -1001, messageThreadId: 23 },
+        { sessionId: "api-2", chatId: 456 },
+      ],
+      { lastUpdateId: 75 },
+    );
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "legacy", chatId: 123 })], "api-1", 123),
+    );
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([
+        choice({ token: "old", messageThreadId: 22 }),
+        choice({ token: "current", messageThreadId: 23 }),
+      ]),
+    );
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "other", sessionId: "api-2", chatId: 456 })], "api-2", 456),
+    );
+    retireTelegramLegacyState(dataDir, "api", "tg", "api-1", {
+      chatId: -1001,
+      messageThreadId: 23,
+    });
+    expect([...readTelegramBindings(dataDir, "api", "tg").values()]).toEqual([
+      { sessionId: "api-1", chatId: -1001, messageThreadId: 22 },
+      { sessionId: "api-1", chatId: -1001, messageThreadId: 23 },
+      { sessionId: "api-2", chatId: 456 },
+    ]);
+    expect(readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token)).toEqual([
+      "current",
+      "other",
+    ]);
+    expect(readTelegramLastUpdateId(dataDir, "api", "tg")).toBe(75);
+  });
+
   it("removes bindings and reply targets for one session", async () => {
     const dataDir = await newDataDir();
     writeTelegramBindings(
@@ -493,7 +547,10 @@ describe("telegram source state", () => {
     });
 
     expect(deleteTelegramSourceStateForSession(dataDir, "api", "api-1")).toEqual({
-      heldBinding: true,
+      removedBindings: [
+        { sourceId: "telegram-a", binding: { chatId: 1, sessionId: "api-1" } },
+        { sourceId: "telegram-b", binding: { chatId: 3, sessionId: "api-1" } },
+      ],
     });
 
     expect([...readTelegramBindings(dataDir, "api", "telegram-a").values()]).toEqual([
@@ -503,7 +560,7 @@ describe("telegram source state", () => {
     expect(readTelegramLastUpdateId(dataDir, "api", "telegram-a")).toBe(55);
     expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
     expect(deleteTelegramSourceStateForSession(dataDir, "api", "api-1")).toEqual({
-      heldBinding: false,
+      removedBindings: [],
     });
   });
 
@@ -609,9 +666,55 @@ describe("telegram source state", () => {
     const dataDir = await newDataDir();
     writeTelegramOffer(dataDir, "api", "tg", offerOf([choice({ token: "t1" })]));
 
-    writeTelegramOffer(dataDir, "api", "tg", offerOf([]));
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([], "api-1", -1001, true));
 
     expect(readTelegramChoices(dataDir, "api", "tg")).toHaveLength(0);
+  });
+
+  it("keeps a pending interface approval through later replies of the session", async () => {
+    const dataDir = await newDataDir();
+    const consentOffer = (offerId: string, challenge: string) =>
+      offerOf(
+        ["approved", "rejected", "revoked"].map((decision) =>
+          choice({
+            token: `${offerId}-${decision}`,
+            offerId,
+            value: decision,
+            interfaceConsent: {
+              challenge,
+              decision: decision as "approved" | "rejected" | "revoked",
+            },
+          }),
+        ),
+      );
+    const tokens = () => readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token);
+    writeTelegramOffer(dataDir, "api", "tg", consentOffer("consent-1", "c1"));
+
+    // Buttonless reply and ordinary question keep the approval; the ordinary
+    // question is still retired by the next reply.
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([], "api-1", -1001, true));
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "ask", offerId: "offer-ask" })], "api-1", -1001, true),
+    );
+    expect(tokens()).toEqual([
+      "consent-1-approved",
+      "consent-1-rejected",
+      "consent-1-revoked",
+      "ask",
+    ]);
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([], "api-1", -1001, true));
+    expect(tokens()).toEqual(["consent-1-approved", "consent-1-rejected", "consent-1-revoked"]);
+
+    // A new approval supersedes the old challenge.
+    writeTelegramOffer(dataDir, "api", "tg", consentOffer("consent-2", "c2"));
+    expect(tokens()).toEqual(["consent-2-approved", "consent-2-rejected", "consent-2-revoked"]);
+
+    // Retire-all (displacement) drops the approval too.
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([]));
+    expect(tokens()).toEqual([]);
   });
 
   it("drops expired choices and caps the store", async () => {
@@ -685,8 +788,13 @@ describe("telegram source state", () => {
   });
 });
 
-function offerOf(choices: TelegramChoice[], sessionId = "api-1", chatId = -1001) {
-  return { sessionId, chatId, choices };
+function offerOf(
+  choices: TelegramChoice[],
+  sessionId = "api-1",
+  chatId = -1001,
+  keepInterfaceConsent = false,
+) {
+  return { sessionId, chatId, choices, keepInterfaceConsent };
 }
 
 function choice(
@@ -1035,6 +1143,18 @@ describe("session workspaceId normalization", () => {
     });
 
     expect(readSession(dataDir, "api-2")?.workspaceId).toBe("api-1");
+  });
+
+  it("persists the restore idle baseline and accepts legacy records without one", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = { ...legacyBase, id: "api-1", tmuxSession: "api-1" };
+    const restoredAt = "2026-03-18T10:05:00.000Z";
+    writeSession(dataDir, { ...record, restoredAt });
+    expect(readSession(dataDir, record.id)?.restoredAt).toBe(restoredAt);
+    writeSession(dataDir, record);
+    expect(readSession(dataDir, record.id)?.restoredAt).toBeUndefined();
+    writeSession(dataDir, { ...record, restoredAt: "invalid" });
+    expect(readSession(dataDir, record.id)?.restoredAt).toBeUndefined();
   });
 
   it("persists only valid error provenance beside an error", async () => {
@@ -1838,66 +1958,70 @@ describe("session metadata PR migration", () => {
     expect(readSession(dataDir, "api-1")).toEqual(expect.objectContaining({ mode: "council" }));
   });
 
-  it("preserves wake state when writing, reading, and listing session records", async () => {
-    const dataDir = await newDataDir();
-    const session: SessionRecord = {
-      id: "api-1",
-      project: "api",
-      agent: "claude",
-      prompt: "ship it",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude",
-      status: "running",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-      scheduledWake: {
-        dueAt: "2026-03-18T10:06:00.000Z",
-        message: "Check once",
-      },
-      intervalWake: {
-        nextDueAt: "2026-03-18T10:06:00.000Z",
-        intervalMs: 300_000,
-        message: "Check CI",
-        stopCondition: "CI is green",
-      },
-      dailyWake: {
-        dailyAt: ["09:30", "17:45"],
-        nextDueAt: "2026-03-19T09:30:00.000Z",
-        message: "Check daily state",
-        stopCondition: "Daily checks done",
-      },
-    };
+  it.each([undefined, "manual-claim-roundtrip"])(
+    "preserves wake state with claim %s when writing, reading, and listing session records",
+    async (dispatchClaimId) => {
+      const dataDir = await newDataDir();
+      const session: SessionRecord = {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        scheduledWake: {
+          dueAt: "2026-03-18T10:06:00.000Z",
+          message: "Check once",
+        },
+        intervalWake: {
+          nextDueAt: "2026-03-18T10:06:00.000Z",
+          intervalMs: 300_000,
+          message: "Check CI",
+          stopCondition: "CI is green",
+          ...(dispatchClaimId === undefined ? {} : { dispatchClaimId }),
+        },
+        dailyWake: {
+          dailyAt: ["09:30", "17:45"],
+          nextDueAt: "2026-03-19T09:30:00.000Z",
+          message: "Check daily state",
+          stopCondition: "Daily checks done",
+        },
+      };
 
-    writeSession(dataDir, session);
+      writeSession(dataDir, session);
 
-    const rawSession = JSON.parse(
-      readFileSync(join(dataDir, "sessions", "api", "api-1.json"), "utf-8"),
-    );
-    expect(rawSession).toEqual(
-      expect.objectContaining({
-        scheduledWake: session.scheduledWake,
-        intervalWake: session.intervalWake,
-        dailyWake: session.dailyWake,
-      }),
-    );
-    expect(readSession(dataDir, "api-1")).toEqual(
-      expect.objectContaining({
-        scheduledWake: session.scheduledWake,
-        intervalWake: session.intervalWake,
-        dailyWake: session.dailyWake,
-      }),
-    );
-    expect(listSessions(dataDir)).toEqual([
-      expect.objectContaining({
-        scheduledWake: session.scheduledWake,
-        intervalWake: session.intervalWake,
-        dailyWake: session.dailyWake,
-      }),
-    ]);
-  });
+      const rawSession = JSON.parse(
+        readFileSync(join(dataDir, "sessions", "api", "api-1.json"), "utf-8"),
+      );
+      expect(rawSession).toEqual(
+        expect.objectContaining({
+          scheduledWake: session.scheduledWake,
+          intervalWake: session.intervalWake,
+          dailyWake: session.dailyWake,
+        }),
+      );
+      expect(readSession(dataDir, "api-1")).toEqual(
+        expect.objectContaining({
+          scheduledWake: session.scheduledWake,
+          intervalWake: session.intervalWake,
+          dailyWake: session.dailyWake,
+        }),
+      );
+      expect(listSessions(dataDir)).toEqual([
+        expect.objectContaining({
+          scheduledWake: session.scheduledWake,
+          intervalWake: session.intervalWake,
+          dailyWake: session.dailyWake,
+        }),
+      ]);
+    },
+  );
 
   it("preserves claudeAccountId when writing, reading, and listing session records", async () => {
     const dataDir = await newDataDir();
@@ -2171,6 +2295,7 @@ describe("session metadata PR migration", () => {
     const baselines: SubmitAckBaseline[] = [
       { agent: "claude", file: "/c.jsonl", size: 7 },
       { agent: "cursor", file: "/k.jsonl", size: 9 },
+      { agent: "cursor", file: null, size: 0 },
       { agent: "cursor", file: "/k.jsonl", size: 9, rotated: { file: "/r.jsonl", size: 40 } },
       { agent: "opencode", sessionId: "ses_1", after: { createdMs: 200, id: "msg_2" } },
       { agent: "opencode", sessionId: "ses_1", after: null },
@@ -2194,6 +2319,13 @@ describe("session metadata PR migration", () => {
     writeSession(dataDir, {
       ...base,
       queuedMessageTyped: { message: "m", typedAt, ackBaseline: malformed },
+    });
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual({ message: "m", typedAt });
+    // Only cursor may carry a pending (null) file.
+    const claudeNullFile = { agent: "claude", file: null, size: 0 } as unknown as SubmitAckBaseline;
+    writeSession(dataDir, {
+      ...base,
+      queuedMessageTyped: { message: "m", typedAt, ackBaseline: claudeNullFile },
     });
     expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual({ message: "m", typedAt });
     // A malformed rotation entry drops alone; the pinned offset survives.
@@ -2407,13 +2539,137 @@ describe("listSessions concurrency", () => {
     expect(listSessions(dataDir)).toEqual([]);
   });
 
-  it("still throws on a corrupt record file", async () => {
+  it("skips a corrupt record file and logs once", async () => {
     const dataDir = await newDataDir();
     const dir = join(dataDir, "sessions", "api");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "api-1.json"), "{not json", "utf-8");
+    expect(listSessions(dataDir)).toEqual([]);
 
-    expect(() => listSessions(dataDir)).toThrow(/Invalid session metadata JSON/);
+    writeSession(dataDir, { ...sessionBase, id: "api-2", tmuxSession: "api-2" });
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-2"]);
+    expect(invalidEntries(dataDir)).toHaveLength(1);
+  });
+});
+
+function invalidEntries(dataDir: string) {
+  return readEventLog(dataDir).filter((entry) => entry.event === "session.record.invalid");
+}
+
+function writeRawSession(dataDir: string, id: string, body: unknown): string {
+  const dir = join(dataDir, "sessions", "api");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${id}.json`);
+  writeFileSync(path, typeof body === "string" ? body : JSON.stringify(body), "utf-8");
+  return path;
+}
+
+const REQUIRED_SESSION_FIELDS = [
+  "id",
+  "project",
+  "agent",
+  "prompt",
+  "branch",
+  "worktree",
+  "worktreePath",
+  "tmuxSession",
+  "launchCommand",
+  "status",
+  "createdAt",
+  "updatedAt",
+] as const;
+
+describe("session record shape guard", () => {
+  const full = (id: string): Record<string, unknown> => ({
+    ...sessionBase,
+    id,
+    tmuxSession: id,
+  });
+  const incident = (id: string): Record<string, unknown> => {
+    const { prompt: _prompt, launchCommand: _launch, ...rest } = full(id);
+    return { ...rest, workspaceId: id, closeoutOwner: "x", pr: null, error: "boom" };
+  };
+
+  it("readSession throws on the incident key set", async () => {
+    const dataDir = await newDataDir();
+    writeRawSession(dataDir, "api-1", incident("api-1"));
+    expect(() => readSession(dataDir, "api-1")).toThrow(
+      /Invalid session metadata shape at .*api-1\.json/,
+    );
+  });
+
+  it("listSessions returns only the valid sibling of the incident record", async () => {
+    const dataDir = await newDataDir();
+    writeRawSession(dataDir, "api-1", incident("api-1"));
+    writeRawSession(dataDir, "api-2", full("api-2"));
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-2"]);
+  });
+
+  it.each(REQUIRED_SESSION_FIELDS)("readSession throws when %s is missing", async (field) => {
+    const dataDir = await newDataDir();
+    const body = Object.fromEntries(Object.entries(full("api-1")).filter(([key]) => key !== field));
+    writeRawSession(dataDir, "api-1", body);
+    expect(() => readSession(dataDir, "api-1")).toThrow(/Invalid session metadata shape/);
+  });
+
+  it("readSession throws when worktree is a string", async () => {
+    const dataDir = await newDataDir();
+    writeRawSession(dataDir, "api-1", { ...full("api-1"), worktree: "true" });
+    expect(() => readSession(dataDir, "api-1")).toThrow(/Invalid session metadata shape/);
+  });
+
+  it("reads a complete record back with prompt intact", async () => {
+    const dataDir = await newDataDir();
+    writeRawSession(dataDir, "api-1", full("api-1"));
+    expect(readSession(dataDir, "api-1")?.prompt).toBe("ship it");
+  });
+});
+
+describe("invalid record log dedupe", () => {
+  it("logs once per unchanged file across scans, again per new version", async () => {
+    const dataDir = await newDataDir();
+    const path = writeRawSession(dataDir, "api-1", "{not json");
+    listSessions(dataDir);
+    listSessions(dataDir);
+    listSessions(dataDir);
+    expect(invalidEntries(dataDir)).toHaveLength(1);
+    expect(invalidEntries(dataDir)[0]).toMatchObject({ level: "warn", path });
+
+    writeRawSession(dataDir, "api-1", "{still not json");
+    listSessions(dataDir);
+    expect(invalidEntries(dataDir)).toHaveLength(2);
+  });
+
+  it("lists a fixed file and logs again when it turns invalid again", async () => {
+    const dataDir = await newDataDir();
+    writeRawSession(dataDir, "api-1", "{not json");
+    listSessions(dataDir);
+    expect(invalidEntries(dataDir)).toHaveLength(1);
+
+    writeRawSession(dataDir, "api-1", { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
+    expect(invalidEntries(dataDir)).toHaveLength(1);
+
+    writeRawSession(dataDir, "api-1", "{broken again");
+    expect(listSessions(dataDir)).toEqual([]);
+    expect(invalidEntries(dataDir)).toHaveLength(2);
+  });
+
+  it("logs each of two distinct invalid files once, uncollapsed", async () => {
+    const dataDir = await newDataDir();
+    writeRawSession(dataDir, "api-1", "{not json");
+    writeRawSession(dataDir, "api-2", "{not json either!");
+    listSessions(dataDir);
+    listSessions(dataDir);
+    expect(invalidEntries(dataDir)).toHaveLength(2);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("still throws on an unreadable record file", async () => {
+    const dataDir = await newDataDir();
+    const path = writeRawSession(dataDir, "api-1", "{}");
+    chmodSync(path, 0o000);
+    expect(() => listSessions(dataDir)).toThrow();
+    chmodSync(path, 0o600);
   });
 });
 

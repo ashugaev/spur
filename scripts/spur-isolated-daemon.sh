@@ -135,9 +135,8 @@ prune_stale_config_dirs() {
   while IFS= read -r -d '' dir; do
     [[ "$dir" == "$CONFIG_DIR" ]] && continue
 
-    # Here-string, never `printf | grep -q`: under pipefail an early match
-    # SIGPIPEs printf on a >64 KB listing and reads as "not in use" (#1012).
-    if grep -qF -- "$dir" <<<"$ps_output"; then
+    # Match in Bash: pipelines can SIGPIPE and large here-strings need temp files.
+    if [[ "$ps_output" == *"$dir"* ]]; then
       continue
     fi
 

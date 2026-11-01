@@ -4209,6 +4209,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
           enabled: true,
           conditions: "After the summary is posted",
         },
+        preflightBatchId: "10000000-0000-4000-8000-000000000001",
       },
     ]);
 
@@ -4273,6 +4274,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
         model: "opus",
         overrides: { worktree: true },
         selfDestruct: { enabled: true },
+        preflightBatchId: "10000000-0000-4000-8000-000000000001",
       },
     ]);
   });
@@ -4481,6 +4483,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await fillSpawnForm(page, { prompt: placeholder.prompt });
     await page.getByRole("button", { name: /^spawn$/i }).click();
 
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(1);
     sessions.splice(0, sessions.length, errored);
     await page.waitForTimeout(DASHBOARD_POLL_WAIT_MS);
 
@@ -4639,7 +4642,12 @@ test.describe("D7d: Sessions list cache on revisit", () => {
       await route.fallback();
     });
 
-    await page.getByRole("link", { name: session.prompt }).first().click();
+    // A dev server compiles /sessions/[id] on demand, so the first click can
+    // outlast the 5s expect window; wait for the navigation to commit first.
+    await Promise.all([
+      page.waitForURL((url) => url.pathname === `/sessions/${session.id}`),
+      page.getByRole("link", { name: session.prompt }).first().click(),
+    ]);
     await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
 
     await Promise.all([page.waitForURL("/"), page.getByRole("link", { name: /back/i }).click()]);

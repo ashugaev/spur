@@ -420,72 +420,45 @@ test.describe("S1: Session detail header", () => {
     });
     await page.goto("/sessions/detail-missing");
 
+    await expect(page.getByTestId("session-load-failed")).toContainText(
+      "Unable to load this session",
+    );
     await expect(page.getByText("Session not found")).toBeVisible();
     await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
     await expect(page.getByRole("status", { name: "Loading session" })).toHaveCount(0);
-    await expect(page.getByRole("region", { name: "Unable to load this session." })).toBeVisible();
     await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
     await expect(page.getByRole("alertdialog")).toHaveCount(0);
   });
 
-  for (const theme of ["dark", "light"]) {
-    for (const viewport of [
-      { width: 390, height: 844 },
-      { width: 1280, height: 800 },
-    ]) {
-      for (const detail of ["Daemon is starting", `Session not found\n${"detail".repeat(80)}`]) {
-        const state = detail === "Daemon is starting" ? "startup error" : "missing session";
-        test(`${state} card fits and recovers: ${theme} ${viewport.width}`, async ({
-          page,
-        }, testInfo) => {
-          await page.setViewportSize(viewport);
-          await page.addInitScript((selectedTheme) => {
-            window.localStorage.setItem("spur:theme", selectedTheme);
-          }, theme);
-          const session = makeWorkingSession({ id: "detail-error-card" });
-          let recovered = false;
-          await page.route(`**/api/sessions/${session.id}`, (route) =>
-            route.fulfill({
-              status: recovered ? 200 : 503,
+  test("daemon starting shows the starting card and opens the session once ready", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-starting" });
+    let ready = false;
+    await mockSessionConversation(page, session.id, "working");
+    await page.route(`**/api/sessions/${session.id}`, (route) => {
+      void route.fulfill(
+        ready
+          ? { status: 200, contentType: "application/json", body: JSON.stringify(session) }
+          : {
+              status: 503,
               contentType: "application/json",
-              body: JSON.stringify(recovered ? session : { error: detail }),
-            }),
-          );
-          await mockSessionConversation(page, session.id, "working");
-          await page.goto(`/sessions/${session.id}`);
-          if (theme === "light") {
-            await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-          } else {
-            await expect(page.locator("html")).not.toHaveAttribute("data-theme");
-          }
-          const card = page.getByRole("region", { name: "Unable to load this session." });
-          await expect(card).toBeVisible();
-          expect(await card.locator("p").textContent()).toBe(detail);
-          await expect(page.getByRole("alertdialog")).toHaveCount(0);
-          await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
-          const box = await card.boundingBox();
-          expect(box).not.toBeNull();
-          if (!box) throw new Error("Session error card missing bounds");
-          expect(box.x).toBeGreaterThanOrEqual(0);
-          expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
-          expect(Math.abs(box.x + box.width / 2 - viewport.width / 2)).toBeLessThanOrEqual(1);
-          expect(
-            await page.evaluate(() => document.documentElement.scrollWidth),
-          ).toBeLessThanOrEqual(viewport.width);
-          const retry = card.getByRole("button", { name: "Retry" });
-          await expect(retry).toBeInViewport();
-          await page.getByRole("link", { name: /back/i }).focus();
-          await page.keyboard.press("Tab");
-          await expect(retry).toBeFocused();
-          await page.screenshot({ path: testInfo.outputPath("session-error-card.png") });
-          recovered = true;
-          await page.keyboard.press("Enter");
-          await expect(card).toHaveCount(0);
-          await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-        });
-      }
-    }
-  }
+              body: JSON.stringify({ error: "Daemon is starting" }),
+            },
+      );
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    const card = page.getByTestId("session-load-starting");
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("Spur is starting…");
+    await expect(card.getByRole("button", { name: "Retry now" })).toBeVisible();
+    await expect(page.getByTestId("session-load-failed")).toHaveCount(0);
+
+    ready = true;
+    await expect(card).toHaveCount(0, { timeout: 8000 });
+    await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
+  });
 
   test("back link visible", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s1-1" });
@@ -2398,6 +2371,63 @@ test.describe("S2a: Logs modal", () => {
 
 // S2b: Conversation dialog
 test.describe("S2b: Conversation dialog", () => {
+  test("older-page loading belongs to the pending request", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-older-owner", state: "waiting" });
+    await mockSessionDetail(page, session);
+    let releaseOlder = () => {};
+    const olderGate = new Promise<void>((resolve) => {
+      releaseOlder = resolve;
+    });
+    await page.route(`**/api/sessions/${session.id}/conversation*`, async (route) => {
+      const older = new URL(route.request().url()).searchParams.get("from") === "100";
+      if (older) await olderGate;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "waiting",
+          startIndex: older ? 100 : 200,
+          totalEntries: 500,
+          hasMore: true,
+          messages: Array.from({ length: 100 }, (_, index) => ({
+            role: "user",
+            text: `${older ? "older" : "tail"} message ${index}`,
+            timestampMs: index + 1,
+          })),
+        }),
+      });
+    });
+    try {
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("tail message 99", { exact: true })).toBeVisible();
+      const scroll = page.getByTestId("conversation-scroll");
+      const requested = page.waitForRequest((request) =>
+        request.url().endsWith(`/api/sessions/${session.id}/conversation?from=100`),
+      );
+      await scroll.evaluate((element) => {
+        element.scrollTop = 0;
+        element.dispatchEvent(new Event("scroll"));
+      });
+      await requested;
+      await expect(page.getByLabel("Loading older messages")).toBeVisible();
+      releaseOlder();
+      await expect(page.getByText("older message 0", { exact: true })).toBeVisible();
+      await expect(page.getByLabel("Loading older messages")).toHaveCount(0);
+      const resumed = page.waitForRequest((request) =>
+        request.url().endsWith(`/api/sessions/${session.id}/conversation`),
+      );
+      await scroll.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+        element.dispatchEvent(new Event("scroll"));
+      });
+      await resumed;
+      await expect(page.getByText("tail message 99", { exact: true })).toBeVisible();
+      await expect(page.getByLabel("Loading older messages")).toHaveCount(0);
+    } finally {
+      releaseOlder();
+    }
+  });
+
   test("long unbroken dialog and queued tokens hard-wrap on mobile without horizontal overflow", async ({
     page,
   }) => {

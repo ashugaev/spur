@@ -25,6 +25,8 @@ import type {
 } from "./types.js";
 
 const RECENT_LIMIT = 5;
+// Reduce queued reads when dashboard transcript I/O competes for the filesystem.
+const EVENT_SCAN_CHUNK_BYTES = 8 << 20;
 const CRON_TICK_EVENT = "cron:tick";
 const SOURCE_EMITTED_EVENT = "source.event.emitted";
 const CRON_ACTION_EVENTS: ReadonlySet<string> = new Set<CronActionEventName>([
@@ -197,6 +199,8 @@ async function scanCronEventTail(
       return true;
     },
     size,
+    undefined,
+    EVENT_SCAN_CHUNK_BYTES,
   );
   return { events, eventsSince };
 }
@@ -292,7 +296,7 @@ function failedFile(file: CronOwnerFile): CronFailedConfigFile | null {
 // The daemon keeps no load-time project -> file record, so ownership comes only
 // from a file that declares the project. With no declaring file, a file that
 // fails to read or parse may or may not hold it: never attribute across files.
-function ownerFor(projectId: string, files: readonly CronOwnerFile[]): OwnerMatch {
+export function ownerFor(projectId: string, files: readonly CronOwnerFile[]): OwnerMatch {
   for (const file of files) {
     if (
       file.state === "loaded" &&

@@ -9,12 +9,22 @@ import {
   RestoreOperationError,
 } from "./session-lifecycle.js";
 import { parseAgentName } from "./agents/index.js";
-import { AgentReasoningEffortError, listAgentModelCatalog } from "./agents/models.js";
+import {
+  AgentModelError,
+  AgentReasoningEffortError,
+  listAgentModelCatalog,
+} from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { AutoPingError, AutoPingService } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
 import { projectConversationPage } from "./conversation-page.js";
 import { readCronJobs, UnknownCronProjectError } from "./cron-jobs.js";
+import {
+  CronJobEditError,
+  cronJobIdentity,
+  readCronJobDraft,
+  saveCronJobDraft,
+} from "./cron-job-editor.js";
 import type { ProcSnapshot } from "./sidecars/reap.js";
 import {
   clearFailedDeploySwitchRecord,
@@ -76,6 +86,7 @@ import {
   SessionStartingError,
   SidecarPortConflictError,
   SidecarProbeUnresponsiveError,
+  SpawnBatchConflictError,
   WakeDispatchConflictError,
   WakeTargetMissingError,
 } from "./session-service.js";
@@ -908,7 +919,13 @@ export async function startServer(
         listSessions: async () =>
           (await service.list({ view: "dashboard" })).map(projectSourceSession),
         getSession: (sessionId) => sourceSessionById(service, sessionId),
+        prepareSessionMessage: async (sessionId, request) =>
+          service.prepareSourceMessage(sessionId, request),
         workbench: createSourceWorkbench(service),
+        telegramConversations: {
+          ensureTopic: (sessionId, origin) => service.ensureTelegramTopic(sessionId, origin),
+          unwatch: (sessionId, origin) => service.unwatchTelegramTopic(sessionId, origin),
+        },
         spawnSession: async (request) => {
           const { telegramOrigin, ...spawnRequest } = request;
           const session = await service.spawn(
@@ -1291,6 +1308,40 @@ export async function startServer(
 
       if (method === "GET" && path === "/projects") {
         sendJson(response, 200, service.listProjects());
+        return;
+      }
+
+      if ((method === "GET" || method === "PATCH") && path === "/projects/cron/edit") {
+        try {
+          const identity = cronJobIdentity(url.searchParams);
+          const context = {
+            running: service.config,
+            bootstrapConfigPath: service.bootstrapConfigPath,
+            registryPaths: service.getRegistryPaths(),
+          };
+          let body: unknown;
+          if (method === "PATCH") {
+            try {
+              body = await readJsonBody<unknown>(request);
+            } catch {
+              throw new CronJobEditError(400, "invalid_body", "Invalid editor JSON body.");
+            }
+          }
+          sendJson(
+            response,
+            200,
+            method === "GET"
+              ? readCronJobDraft(context, identity)
+              : saveCronJobDraft(context, identity, body),
+          );
+        } catch (error) {
+          if (!(error instanceof CronJobEditError)) throw error;
+          sendJson(response, error.status, {
+            error: error.message,
+            code: error.code,
+            ...(error.field !== undefined ? { field: error.field } : {}),
+          });
+        }
         return;
       }
 
@@ -2056,7 +2107,7 @@ export async function startServer(
 
       const sourceReplySessionId = path.match(/^\/sessions\/([^/]+)\/source-reply$/)?.[1];
       if (method === "POST" && sourceReplySessionId) {
-        const body = await readJsonBody<SourceReplyRequest>(request);
+        const body = await readJsonBody<SourceReplyRequest>(request, 15_000_000);
         sendJson(response, 200, await service.replyToSource(sourceReplySessionId, body));
         return;
       }
@@ -2254,6 +2305,10 @@ export async function startServer(
 
       const switchAuthSessionId = path.match(/^\/sessions\/([^/]+)\/switch-auth$/)?.[1];
       if (method === "POST" && switchAuthSessionId) {
+        if (!service.config.authRotation.switchAuth) {
+          sendError(response, 404, "switch-auth is disabled; set authRotation.switchAuth: true");
+          return;
+        }
         const body = await readJsonBody<{ accountId?: unknown; force?: unknown }>(request);
         const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
         if (!accountId) {
@@ -2382,6 +2437,7 @@ export async function startServer(
       }
       if (
         error instanceof AgentReasoningEffortError ||
+        error instanceof AgentModelError ||
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidConfigPathError ||
@@ -2410,7 +2466,8 @@ export async function startServer(
         error instanceof SidecarPortConflictError ||
         error instanceof OpenPrActionRequiredError ||
         error instanceof GithubPrCheckUnavailableError ||
-        error instanceof SessionNotRestorableError
+        error instanceof SessionNotRestorableError ||
+        error instanceof SpawnBatchConflictError
       ) {
         failRequest(response, error.statusCode, message, {
           method,

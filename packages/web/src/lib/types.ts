@@ -124,6 +124,32 @@ export interface CronJobsResponse {
   eventsSince: string | null;
 }
 
+export interface CronJobEditBlock {
+  prompt: string;
+  agent: AgentName | null;
+  model: string | null;
+  reasoningEffort: ProviderReasoningEffort | null;
+}
+
+export interface CronJobEditUpdate {
+  revision: string;
+  schedule: string;
+  blocks: CronJobEditBlock[];
+}
+
+export interface CronJobEditDraft extends CronJobEditUpdate {
+  projectId: string;
+  sourceId: string;
+  triggerId: string;
+  ownerPath: string;
+  sourceTriggerIds: string[];
+}
+
+export interface CronJobEditResult extends CronJobEditDraft {
+  saved: true;
+  activation: "pending";
+}
+
 export interface SpurServiceView {
   serviceId: string;
   status: "running" | "stopped" | "errored";
@@ -185,6 +211,7 @@ export interface SpurSidecarPort {
   id: string;
   env: string;
   port: number;
+  listening: boolean | null;
 }
 
 // `tmuxSession` is the daemon's own name for the sidecar's pane — for a
