@@ -302,6 +302,7 @@ import {
   getTmuxPanePresence,
   getTmuxSessionPresence,
   lookupTmuxPanePid,
+  lookupTmuxSessionPanePids,
   probeTmuxProcessMatch,
   killTmuxSession,
   killTmuxSessionTree,
@@ -320,6 +321,7 @@ import {
   TmuxProbeUnknownError,
   isHistoricalPsProbeDiagnostic,
   type TmuxPanePidLookup,
+  type TmuxSessionPanesLookup,
 } from "./runtime-tmux.js";
 import {
   isSystemdOomdPresent,
@@ -18927,17 +18929,47 @@ export class SessionService {
   // probe failure must not replace the error that actually matters (a spawn
   // failure, for one). A thrown lookup reads as "unavailable", the same
   // fail-safe answer a failed `list-panes` produces.
-  private async lookupPanePidQuietly(
-    tmuxSession: string,
-    options?: { fresh?: boolean },
-  ): Promise<TmuxPanePidLookup> {
+  private async readPaneLookupQuietly<T>(
+    read: () => Promise<T>,
+  ): Promise<T | { status: "unavailable" }> {
     try {
-      return options
-        ? await lookupTmuxPanePid(tmuxSession, options)
-        : await lookupTmuxPanePid(tmuxSession);
+      return await read();
     } catch {
       return { status: "unavailable" };
     }
+  }
+
+  private lookupPanePidQuietly(
+    tmuxSession: string,
+    options?: { fresh?: boolean },
+  ): Promise<TmuxPanePidLookup> {
+    return this.readPaneLookupQuietly(() =>
+      options ? lookupTmuxPanePid(tmuxSession, options) : lookupTmuxPanePid(tmuxSession),
+    );
+  }
+
+  // Every live pane for Codex ownership.
+  private lookupSessionPanePidsQuietly(
+    tmuxSession: string,
+    options?: { fresh?: boolean },
+  ): Promise<TmuxSessionPanesLookup> {
+    return this.readPaneLookupQuietly(() =>
+      options
+        ? lookupTmuxSessionPanePids(tmuxSession, options)
+        : lookupTmuxSessionPanePids(tmuxSession),
+    );
+  }
+
+  private async lookupOwnershipExclusions(
+    session: Pick<SessionRecord, "agent" | "tmuxSession">,
+  ): Promise<TmuxSessionPanesLookup> {
+    if (session.agent === "codex") {
+      return this.lookupSessionPanePidsQuietly(session.tmuxSession, { fresh: true });
+    }
+    const lookup = await this.lookupPanePidQuietly(session.tmuxSession);
+    return lookup.status === "unavailable"
+      ? lookup
+      : { status: "ok", panePids: lookup.panePid === null ? [] : [lookup.panePid] };
   }
 
   private async killAgentPaneAndConfirmExit(
@@ -18958,7 +18990,11 @@ export class SessionService {
     };
     assertActive();
     const wait = <T>(pending: Promise<T>): Promise<T> => operation?.wait(pending) ?? pending;
-    const paneLookup = await wait(this.lookupPanePidQuietly(session.tmuxSession, { fresh: true }));
+    const paneLookup = await wait<TmuxSessionPanesLookup | TmuxPanePidLookup>(
+      session.agent === "codex"
+        ? this.lookupSessionPanePidsQuietly(session.tmuxSession, { fresh: true })
+        : this.lookupPanePidQuietly(session.tmuxSession, { fresh: true }),
+    );
     assertActive();
     if (paneLookup.status === "unavailable") {
       // tmux could not be read, so P1 has nothing to verify against. Record
@@ -18970,13 +19006,20 @@ export class SessionService {
         message: `Session ${session.id}: tmux pane pid unreadable; cannot confirm the prior agent process exited`,
       });
     }
+    const paneTarget:
+      | { panePids: readonly number[] }
+      | { panePid: number | null; paneDead: boolean } =
+      paneLookup.status !== "ok"
+        ? { panePids: [] }
+        : "panePids" in paneLookup
+          ? { panePids: paneLookup.panePids }
+          : { panePid: paneLookup.panePid, paneDead: paneLookup.paneDead };
     const capture = await wait(
       capturePaneAgentProcesses({
         sessionId: session.id,
         agentLaunchId: session.agentLaunchId,
-        panePid: paneLookup.status === "ok" ? paneLookup.panePid : null,
-        paneDead: paneLookup.status === "ok" ? paneLookup.paneDead : false,
         processMatchers: sessionProcessMatchers(session),
+        ...paneTarget,
       }),
     );
     assertActive();
@@ -19061,7 +19104,7 @@ export class SessionService {
   // bypasses killAgentPaneAndConfirmExit's own P1 survivor check.
   private async assertNoForeignAgentForSession(
     session: Pick<SessionRecord, "id" | "agent" | "launchCommand" | "tmuxSession">,
-    paneLookup: TmuxPanePidLookup,
+    paneLookup: TmuxSessionPanesLookup,
     force: boolean,
   ): Promise<void> {
     if (force) {
@@ -19070,7 +19113,7 @@ export class SessionService {
     // An unreadable tmux would leave the exclusion set empty, so the session's
     // OWN live agent would read as foreign. That joins the "unavailable"
     // branch: this guard must never block on a scan it could not perform.
-    // "ok" with a null pane pid is a real answer (no pane, nothing to
+    // "ok" with no pane pids is a real answer (no pane, nothing to
     // exclude) and is safe to scan on.
     if (paneLookup.status === "unavailable") {
       this.logEvent("session.agent_process.scan_skipped", {
@@ -19083,7 +19126,7 @@ export class SessionService {
     const scan = await findForeignAgentProcessesForSession({
       sessionId: session.id,
       processMatchers: sessionProcessMatchers(session),
-      excludePanePid: paneLookup.panePid,
+      excludePanePids: paneLookup.panePids,
     });
     if (scan.status !== "ok") {
       return;
@@ -19941,7 +19984,7 @@ export class SessionService {
     }
     await this.assertNoForeignAgentForSession(
       session,
-      await this.lookupPanePidQuietly(session.tmuxSession),
+      await this.lookupOwnershipExclusions(session),
       false,
     );
     assertActive();
@@ -20680,7 +20723,7 @@ export class SessionService {
     });
     await this.assertNoForeignAgentForSession(
       current,
-      await this.lookupPanePidQuietly(current.tmuxSession),
+      await this.lookupOwnershipExclusions(current),
       request.force === true,
     );
     operation?.assertActive();

@@ -186,6 +186,13 @@ const lookupTmuxPanePidMock = vi.fn((_sessionName?: string, _options?: { fresh?:
     panePid: null,
   }),
 );
+const lookupTmuxSessionPanePidsMock = vi.fn(
+  (_sessionName?: string, _options?: { fresh?: boolean }) =>
+    Promise.resolve<{ status: "ok"; panePids: readonly number[] } | { status: "unavailable" }>({
+      status: "ok",
+      panePids: [],
+    }),
+);
 const getFleetSessionRssBytesMock = vi
   .fn<(liveSessionByWorkspaceId?: ReadonlyMap<string, string>) => Promise<Map<string, number>>>()
   .mockResolvedValue(new Map());
@@ -241,9 +248,13 @@ const terminateAgentProcessesMock = vi.fn<
 // returns, and matches the P2 guard's own never-blocks-on-what-it-cannot-see
 // contract, so no unrelated restore/relaunch/switchAuth test below has to
 // know this guard exists.
-const findForeignAgentProcessesForSessionMock = vi.fn(() =>
-  Promise.resolve<SessionAgentScan>({ status: "unavailable" }),
-);
+const findForeignAgentProcessesForSessionMock = vi.fn<
+  (input: {
+    sessionId?: string;
+    processMatchers?: readonly string[];
+    excludePanePids: readonly number[];
+  }) => Promise<SessionAgentScan>
+>(() => Promise.resolve<SessionAgentScan>({ status: "unavailable" }));
 const killTmuxSessionTreeMock: Mock = vi.fn();
 const sendMessageToTmuxMock: Mock = vi.fn();
 const sendInterruptKeysToTmuxMock: Mock = vi.fn();
@@ -817,6 +828,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
     getTmuxSessionPresence: getTmuxSessionPresenceMock,
     getTmuxPanePresence: getTmuxPanePresenceMock,
     lookupTmuxPanePid: lookupTmuxPanePidMock,
+    lookupTmuxSessionPanePids: lookupTmuxSessionPanePidsMock,
     getFleetSessionRssBytes: getFleetSessionRssBytesMock,
     isProcessRunningInTmux: isProcessRunningInTmuxMock,
     probeTmuxProcessMatch: probeTmuxProcessMatchMock,
@@ -1661,6 +1673,11 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
     .mockImplementation(async (_name, options) =>
       options?.fresh ? { status: "unavailable" } : { status: "ok", panePid: null },
     );
+  lookupTmuxSessionPanePidsMock.mockReset().mockImplementation(async (name, options) => {
+    const lookup = await lookupTmuxPanePidMock(name, options);
+    if (lookup.status !== "ok") return { status: "unavailable" };
+    return { status: "ok", panePids: lookup.panePid === null ? [] : [lookup.panePid] };
+  });
   getFleetSessionRssBytesMock.mockReset().mockResolvedValue(new Map());
   readHostMemoryMock.mockReset().mockReturnValue(null);
   readCgroupPressureMock.mockReset().mockReturnValue(null);
@@ -1996,6 +2013,7 @@ export {
   getTmuxSessionActivityMock,
   getTmuxPanePidMock,
   lookupTmuxPanePidMock,
+  lookupTmuxSessionPanePidsMock,
   getFleetSessionRssBytesMock,
   readHostMemoryMock,
   readCgroupPressureMock,
