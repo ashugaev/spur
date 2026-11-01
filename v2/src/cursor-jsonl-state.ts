@@ -340,8 +340,9 @@ export function cursorChatIdFromTranscriptPath(file: string): string {
 // Path builder for the pending-pin baseline (change c). Cursor may not have
 // created the pinned transcript file yet at capture time; this still returns
 // the path it will land at once cursor writes, so the ack wait can WAIT on it
-// instead of reporting no baseline at all (session-service.ts:10468-10470 treats
-// a null binding as an unconditional, un-waited "submitted").
+// instead of reporting no baseline at all (the `!binding` branch in
+// session-service.ts treats a null binding as an unconditional, un-waited
+// "submitted").
 export async function resolveCursorPinnedTranscriptPath(
   worktreePath: string,
   agentSessionId: string,

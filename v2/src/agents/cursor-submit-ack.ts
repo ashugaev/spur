@@ -6,6 +6,7 @@ import {
   readCursorStableOffset,
   resolveCursorPinnedTranscriptPath,
 } from "../cursor-jsonl-state.js";
+import type { SubmitAckFileScanResult } from "./claude-submit-ack.js";
 import { findCursorSessionId } from "./cursor.js";
 
 export interface CursorSubmitBaseline {
@@ -80,11 +81,6 @@ async function resolveCursorChatId(
 ): Promise<string | null> {
   if (agentSessionId) return agentSessionId;
   return cursorConfigDir ? findCursorSessionId(worktreePath, { configDir: cursorConfigDir }) : null;
-}
-
-export interface CursorSubmitAckScanResult {
-  found: boolean;
-  scannedFile: string | null;
 }
 
 export async function captureCursorSubmitBaseline(
@@ -216,7 +212,7 @@ export async function scanCursorJsonlForMessage(
   worktreePath: string,
   agentSessionId?: string,
   options?: { cursorConfigDir?: string },
-): Promise<CursorSubmitAckScanResult> {
+): Promise<SubmitAckFileScanResult> {
   const normalizedTarget = submitAckMatchText(text);
   if (!normalizedTarget) {
     return { found: false, scannedFile: baseline.file };
