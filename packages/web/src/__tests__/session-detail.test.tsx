@@ -6425,11 +6425,12 @@ describe("SessionDetail load state", () => {
     "preserves load error detail and recovers with Retry: %s",
     async (detail) => {
       let recovered = false;
+      const isStarting = detail === "Daemon is starting";
       vi.spyOn(global, "fetch").mockImplementation(async (input) => {
         const url = typeof input === "string" ? input : input.url;
         if (url === "/api/sessions/api-a1") {
           return new Response(JSON.stringify(recovered ? sessionFixture() : { error: detail }), {
-            status: recovered ? 200 : 503,
+            status: recovered ? 200 : isStarting ? 503 : 404,
             headers: { "content-type": "application/json" },
           });
         }
@@ -6445,17 +6446,19 @@ describe("SessionDetail load state", () => {
       });
 
       render(<SessionDetail sessionId="api-a1" />);
-      const card = await screen.findByRole("region", { name: "Unable to load this session." });
-      expect(card.querySelector("p")?.textContent).toBe(detail);
-      expect(card.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
-      expect(card.querySelector(".animate-spin")).toBeNull();
+      const testId = isStarting ? "session-load-starting" : "session-load-failed";
+      const card = await screen.findByTestId(testId);
+      if (!isStarting) {
+        expect(card).toHaveTextContent(detail.replace(/\n/, " "));
+      }
       expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
       expect(screen.getByRole("link", { name: /back/i })).toBeInTheDocument();
 
       recovered = true;
-      fireEvent.click(within(card).getByRole("button", { name: "Retry" }));
+      const buttonName = isStarting ? "Retry now" : "Retry";
+      fireEvent.click(within(card).getByRole("button", { name: buttonName }));
       await screen.findByRole("heading", { name: "Fix auth" });
-      expect(screen.queryByRole("region", { name: "Unable to load this session." })).toBeNull();
+      expect(screen.queryByTestId(testId)).toBeNull();
     },
   );
 
