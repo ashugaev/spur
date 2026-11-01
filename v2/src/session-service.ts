@@ -17558,10 +17558,14 @@ export class SessionService {
         ? await createAgentSubmitAckBinding(session.agent, {
             ...this.submitAckContext(session),
             freshLaunch: false,
+            message,
           })
         : null;
       const writeStartedAt = Date.now();
-      await sendSensitiveMessageToTmux(session.tmuxSession, message, { agent: session.agent });
+      await binding?.markWriteStart?.();
+      await sendSensitiveMessageToTmux(session.tmuxSession, binding?.inputText ?? message, {
+        agent: session.agent,
+      });
       this.recordPaneWrite(session, writeStartedAt);
       if (!binding) return "submitted" as const;
       // Bounded resend loop, short window on every agent: this callback holds
@@ -17691,6 +17695,7 @@ export class SessionService {
       ? await createAgentSubmitAckBinding(session.agent, {
           ...this.submitAckContext(session),
           freshLaunch,
+          message,
         })
       : null;
     options?.operation?.assertActive();
@@ -17735,7 +17740,9 @@ export class SessionService {
     const pastedAt = Date.now();
     const send = async () => {
       options?.operation?.assertActive();
-      await sendMessageToTmux(session.tmuxSession, message, {
+      await binding?.markWriteStart?.();
+      options?.operation?.assertActive();
+      await sendMessageToTmux(session.tmuxSession, binding?.inputText ?? message, {
         agent: session.agent,
         ...(options?.operation ? { operation: options.operation } : {}),
         ...(session.agent === "codex" && options?.interrupt === false

@@ -102,6 +102,8 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `projects.<id>.restoreAfterReboot` (`false`). See [Restore after reboot](#restore-after-reboot).
 - `projects.<id>.sidecars.<name>` (map, mutually exclusive with `devServer`; built-in `playwright` — [Built-in MCP sidecars](commands.md#built-in-mcp-sidecars)), `.idleTtlMinutes` ([Sidecar reaping](#sidecar-reaping)), `.ports.<id>.{env,start,end,url}` ([Sidecars](commands.md#sidecars)); `v2/src/config.ts`.
 - Isolated Telegram: retained `TELEGRAM_TEST_BOT_TOKEN`, `TELEGRAM_TEST_CHAT_ID`, `TELEGRAM_TEST_ALLOWED_USERS`, `TELEGRAM_TEST_ALLOWED_CHATS` string fields; reject known resolved supplied-project Telegram token collisions before seed/attachment, unresolved/undisclosed tokens unchecked, one local poller per bot, no production fallback; `v2/src/config.ts`, `v2/src/isolated-telegram.ts`, [Sidecars](commands.md#sidecars).
+- `SPUR_ISOLATED_TELEGRAM`: `test` (default) or `off` (no TEST fixture, lease, or Telegram source); empty/invalid reject launch; set on daemon sidecar `env`, UI env does not propagate to dependency; `scripts/spur-isolated-daemon.sh`.
+- `TMPDIR` isolated `owner.sock` full pathname: Linux107/Darwin103 UTF-8 bytes, checked before TEST setup; `v2/bin/isolated-daemon-owner.mjs`.
 - Isolated voice: current daemon-owner readiness precedes private UI receipt; fail-closed discovery without parent helper or production fallback; `v2/src/ports.ts`, [Session tools](commands.md#session-tools-and-environment).
 - Native Telegram call sidecars: `voice-daemon`, `voice-call` require configured integration inputs; direct agent tools and isolated child config: [prototype workflow](telegram-calls.md), `scripts/telegram-call/bridge.py`, `scripts/spur-isolated-daemon.sh`, `spur.yaml`.
 - `projects.<id>.mcp.exclude` (`[]`). See [Suppressing a host MCP server](commands.md#suppressing-a-host-mcp-server).
@@ -158,6 +160,8 @@ Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 
 A session bound to a PR GitHub reports as nonexistent stops signal polling after one attempt, logs `source.poll.disabled` once (`warn`), and persists the disable per source under `<dataDir>/source-state/github-poll-disabled/<projectId>/<sourceId>.json` across source reload and daemon restart. Clear via rebind away from that PR, [`spur source poll-enable`](commands.md#source), or `spur restore`/`spur reopen`. Bounded recheck every `pollDisabledRecheckMs` (default 24h); a still-missing PR does not re-emit `source.poll.disabled`. A resolved recheck logs `source.poll.enabled` once.
 
 ## Events
+
+Cursor input correlation: [send, queue](commands.md#send-queue); retained baseline: [Session routes](daemon-api.md#session-routes).
 
 Sources emit events; triggers `spawn` or `send`. Auto-ping scopes: [commands.md#auto-ping](commands.md#auto-ping). `--thread` targets: `github` (review threads), `gitlab` (discussions), `telegram` (forum topics) — no other source has a thread target. `cron`, `github-ci`, `sentry`, `jira`, `script` carry no auto-ping controls at all (spawn-only sources). Retry/backoff and poll-cost mechanics: `v2/src/event-sources/*.ts`.
 

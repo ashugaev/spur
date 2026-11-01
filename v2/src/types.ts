@@ -1,4 +1,5 @@
 import type { HostMemory } from "./host-memory.js";
+import type { CursorPersistedSubmitBaseline } from "./agents/cursor-submit-ack.js";
 
 export type AgentName = "claude" | "codex" | "cursor" | "opencode";
 export const SPUR_DAEMON_API_VERSION = 3;
@@ -2095,14 +2096,7 @@ export interface ConversationMessage {
 export type SubmitAckBaseline =
   | { agent: "claude"; file: string; size: number }
   | { agent: "codex"; offsets: Record<string, number> }
-  | {
-      agent: "cursor";
-      /** null: no chat transcript existed at send time (pending baseline). */
-      file: string | null;
-      size: number;
-      /** Rotated chat transcript and its offset at send time. */
-      rotated?: { file: string; size: number };
-    }
+  | ({ agent: "cursor" } & CursorPersistedSubmitBaseline)
   | {
       agent: "opencode";
       sessionId: string;

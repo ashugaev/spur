@@ -39,7 +39,7 @@ SAFETY
   Token budgets, session overrides, and installed Cursor hook: docs/configuration.md. Unknown usage never blocks execution.
   Treat project `spur.yaml` as code: `script` commands run as daemon user.
   Start dev servers with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, never a bare dev-server command.
-  Isolated TEST constraints: docs/configuration.md; managed project input and stand readiness: docs/commands.md Sidecars and Session tools.
+  Isolated source selection/TEST attachment: docs/configuration.md; retained owner control, managed project input and stand readiness: docs/commands.md Sidecars and Session tools.
   Read ports with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`; Open contract: docs/commands.md#sidecars. Never grep `/proc` or session state for ports.
   Use per-port `listening` for a TCP listener; `alive` describes the pane. Contract: docs/commands.md#sidecars.
 
@@ -48,6 +48,7 @@ DOCS
   Doc index: https://raw.githubusercontent.com/ashugaev/spur/main/README.md
   Any path under `docs/` resolves as https://raw.githubusercontent.com/ashugaev/spur/main/<path>
   Commands, session tools and variables: docs/commands.md
+  Cursor send correlation and retained acknowledgement baselines: docs/commands.md, docs/daemon-api.md.
   Reviewer publication evidence and trusted legacy receipt recovery: docs/commands.md
   Routes, bounded conversation pages, pre-flight batches, lifecycle receipts, restore cancellation: docs/daemon-api.md
   Config, admission, trigger-spawn retry, reviewer App/consent: docs/configuration.md; events: docs/configuration.md#events

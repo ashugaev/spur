@@ -67,6 +67,34 @@ if [[ $# -eq 0 ]]; then
   exec "$SPUR_TEST_REAL_NODE"
 fi
 case "$1" in
+  "$SPUR_TEST_REPO/v2/bin/isolated-daemon-owner.mjs")
+    if [[ "\${2:-}" == preflight ]]; then
+      exec "$SPUR_TEST_REAL_NODE" "$@"
+    fi
+    if [[ "\${2:-}" == request ]]; then
+      echo "owner-control" >> "$SPUR_TEST_LOG"
+      exit 0
+    fi
+    echo "daemon-start" >> "$SPUR_TEST_LOG"
+    config="$3"
+    runtime="$5"
+    directory="\${config%/*}"
+    starttime="$("$SPUR_TEST_REAL_NODE" "$SPUR_TEST_ENDPOINT_FIXTURE" --owner-starttime "$$")"
+    cat > "$runtime" <<ENV
+SPUR_ISOLATED_CONFIG="$config"
+SPUR_ISOLATED_UI_ENDPOINT_FILE="$directory/ui-endpoint.json"
+SPUR_ISOLATED_DATA_DIR="$directory/data"
+SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:4791"
+SPUR_ISOLATED_TMUX_SOCKET_NAME="spur-4791"
+SPUR_ISOLATED_DAEMON_PID="$$"
+SPUR_ISOLATED_DAEMON_STARTTIME="$starttime"
+ENV
+    if [[ "\${SPUR_TEST_DAEMON_STDIN:-}" == "1" ]]; then
+      echo "daemon-ready"
+      read -r release || true
+    fi
+    exit 0
+    ;;
   "$SPUR_TEST_REPO/v2/dist/cli.js")
     if [[ "\${2:-}" == "--version" ]]; then
       echo "cli-probe" >> "$SPUR_TEST_LOG"
@@ -131,7 +159,7 @@ fi
 if [[ "$1" == "--dir" && "$3" == "build" ]]; then
   echo "build" >> "$SPUR_TEST_LOG"
   mkdir -p "$SPUR_TEST_REPO/v2/dist"
-  for file_name in cli.js isolated-instance-config.js isolated-project-config.js isolated-telegram.js isolated-web-endpoint.js; do
+  for file_name in cli.js isolated-instance-config.js isolated-project-config.js isolated-telegram.js isolated-web-endpoint.js isolated-daemon-owner.js; do
     printf 'built\\n' > "$SPUR_TEST_REPO/v2/dist/$file_name"
   done
   exit 0
@@ -156,6 +184,10 @@ function createFixture(): FakeWorktree {
   const tmpDir = join(repoDir, "tmp");
   mkdirSync(scriptDir, { recursive: true });
   mkdirSync(join(repoDir, "v2", "bin"), { recursive: true });
+  copyFileSync(
+    join(REPO_ROOT, "v2", "bin", "isolated-daemon-owner.mjs"),
+    join(repoDir, "v2", "bin", "isolated-daemon-owner.mjs"),
+  );
   mkdirSync(join(repoDir, "v2", "src"), { recursive: true });
   mkdirSync(webDir, { recursive: true });
   mkdirSync(toolDir, { recursive: true });
@@ -391,6 +423,60 @@ function hasPendingFlockWaiter(inode: number): boolean {
 }
 
 describe("isolated sidecar workspace dependency lock (#823)", () => {
+  it.each(["test", "off"])(
+    "rejects an overlong owned TMPDIR before any %s fixture, writer, lease, build or shared publication",
+    async (selector) => {
+      const worktree = createFixture();
+      const longTmp = join(worktree.tmpDir, "x".repeat(80));
+      mkdirSync(longTmp);
+      const sharedRuntime = join(worktree.toolDir, "isolated-env.sh");
+      const sharedWrapper = join(worktree.toolDir, "spur-isolated");
+      const foreignFixture = join(worktree.repoDir, "fixture-sentinel");
+      writeFileSync(sharedRuntime, "prior runtime");
+      writeFileSync(sharedWrapper, "prior wrapper");
+      writeFileSync(foreignFixture, "retained fixture and lease");
+      await expect(
+        runIsolatedDaemon(worktree, { TMPDIR: longTmp, SPUR_ISOLATED_TELEGRAM: selector }),
+      ).rejects.toThrow("socket pathname exceeds");
+      expect(readLog(worktree)).toEqual([]);
+      expect(readFileSync(sharedRuntime, "utf8")).toBe("prior runtime");
+      expect(readFileSync(sharedWrapper, "utf8")).toBe("prior wrapper");
+      expect(readFileSync(foreignFixture, "utf8")).toBe("retained fixture and lease");
+      expect(existsSync(join(worktree.toolDir, "workspace-deps.lock"))).toBe(false);
+      const { readdirSync } = await import("node:fs");
+      expect(readdirSync(longTmp)).toEqual([]);
+      materializeReadyTree(worktree.repoDir);
+      await runIsolatedDaemon(worktree, { SPUR_ISOLATED_TELEGRAM: selector });
+      expect(readLog(worktree)).toContain("daemon-start");
+    },
+  );
+  it("routes exact owner controls, rejects prefixed/config overrides, and forwards unrelated literal data", async () => {
+    const worktree = createFixture();
+    materializeReadyTree(worktree.repoDir);
+    await runIsolatedDaemon(worktree);
+    const wrapper = join(worktree.toolDir, "spur-isolated");
+    const invoke = (args: string[]) =>
+      execFileAsync("bash", [wrapper, ...args], { env: testEnv(worktree) });
+    for (const args of [
+      ["daemon", "restart"],
+      ["daemon", "stop", "--json"],
+    ])
+      await invoke(args);
+    expect(readLog(worktree).filter((line) => line === "owner-control")).toHaveLength(2);
+    const before = readLog(worktree);
+    for (const args of [
+      ["--config", "foreign", "daemon", "restart"],
+      ["--config=foreign", "daemon", "stop"],
+      ["daemon", "--config", "foreign", "restart"],
+      ["daemon", "restart", "--config", "foreign"],
+      ["daemon", "stop", "--json", "extra"],
+    ])
+      await expect(invoke(args)).rejects.toThrow("Invalid isolated daemon control arguments");
+    expect(readLog(worktree)).toEqual(before);
+    await invoke(["source", "reply", "daemon", "stop"]);
+    expect(readLog(worktree).filter((line) => line === "owner-control")).toHaveLength(2);
+    expect(readLog(worktree).filter((line) => line === "daemon-start")).toHaveLength(2);
+  });
   it("AC1: isolated-ui repairs the tree before it waits for isolated-env.sh", async () => {
     const worktree = createFixture();
 

@@ -2,8 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ClaudeModule from "../../src/agents/claude.js";
 import type * as OpenCodeModule from "../../src/agents/opencode.js";
 import type * as CursorSubmitAckModule from "../../src/agents/cursor-submit-ack.js";
-import type * as CursorJsonlStateModule from "../../src/cursor-jsonl-state.js";
 import type * as CursorModule from "../../src/agents/cursor.js";
+import type * as CursorJsonlStateModule from "../../src/cursor-jsonl-state.js";
 
 vi.mock("../../src/cursor-token-usage.js", () => ({
   ensureCursorTokenUsageHook: vi.fn(() => true),
@@ -22,9 +22,12 @@ const {
   scanCursorJsonlForMessageMock,
   readClaudeSessionStatusMock,
   findCursorSessionIdMock,
+  findLatestCursorTranscriptFileMock,
   readCursorTranscriptEntriesMock,
+  readCursorStableOffsetMock,
 } = vi.hoisted(() => ({
   findCursorSessionIdMock: vi.fn(),
+  findLatestCursorTranscriptFileMock: vi.fn(),
   readCursorTranscriptEntriesMock: vi.fn(),
   readClaudeSessionStatusMock: vi.fn(),
   ensureCodexHooksConfigMock: vi.fn(),
@@ -37,7 +40,10 @@ const {
   readFileMock: vi.fn(),
   captureCursorSubmitBaselineMock: vi.fn(),
   scanCursorJsonlForMessageMock: vi.fn(),
+  readCursorStableOffsetMock: vi.fn(),
 }));
+
+const findCursorAckTranscriptFileMock = findLatestCursorTranscriptFileMock;
 
 vi.mock("node:fs/promises", () => ({
   writeFile: writeFileMock,
@@ -76,6 +82,8 @@ vi.mock("../../src/agents/cursor.js", async (importOriginal) => ({
 vi.mock("../../src/cursor-jsonl-state.js", async (importOriginal) => ({
   ...(await importOriginal<typeof CursorJsonlStateModule>()),
   readCursorTranscriptEntries: readCursorTranscriptEntriesMock,
+  readCursorStableOffset: readCursorStableOffsetMock,
+  findLatestCursorTranscriptFile: findLatestCursorTranscriptFileMock,
 }));
 
 vi.mock("../../src/agents/claude-submit-ack.js", () => ({
@@ -91,6 +99,11 @@ vi.mock("../../src/agents/cursor-submit-ack.js", async (importOriginal) => ({
   ...(await importOriginal<typeof CursorSubmitAckModule>()),
   captureCursorSubmitBaseline: captureCursorSubmitBaselineMock,
   scanCursorJsonlForMessage: scanCursorJsonlForMessageMock,
+}));
+
+vi.mock("../../src/agents/cursor.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof CursorModule>()),
+  findCursorSessionId: findCursorSessionIdMock,
 }));
 
 import {
@@ -120,6 +133,8 @@ beforeEach(() => {
   scanCursorJsonlForMessageMock.mockReset();
   findCursorSessionIdMock.mockReset().mockResolvedValue(null);
   readCursorTranscriptEntriesMock.mockReset().mockResolvedValue(null);
+  readCursorStableOffsetMock.mockReset().mockRejectedValue(new Error("ENOENT"));
+  findCursorAckTranscriptFileMock.mockReset();
 });
 
 describe("readAgentConversation cursor", () => {
@@ -663,6 +678,49 @@ describe("createAgentSubmitAckBinding", () => {
     expect(result).toEqual({ found: true, lastScannedFile: "/rotated/chat.jsonl" });
   });
 
+  it("refreshes both the persisted baseline and the live scan baseline", async () => {
+    const live: CursorSubmitAckModule.CursorSubmitBaseline = {
+      file: "/some/chat.jsonl",
+      size: 7,
+      rotationOffsets: new Map([["/rotated/chat.jsonl", 9]]),
+    };
+    captureCursorSubmitBaselineMock.mockResolvedValue(live);
+    scanCursorJsonlForMessageMock.mockResolvedValue({
+      found: false,
+      scannedFile: "/some/chat.jsonl",
+    });
+
+    readCursorStableOffsetMock.mockImplementation(async (file: string) =>
+      file === live.file ? 70 : 90,
+    );
+    findCursorSessionIdMock.mockResolvedValue("rotated-id");
+    findCursorAckTranscriptFileMock.mockResolvedValue("/rotated/chat.jsonl");
+    const binding = await createAgentSubmitAckBinding("cursor", {
+      ...ctx,
+      agentSessionId: "pinned-id",
+      cursorConfigDir: "/tmp/cursor-config",
+    });
+    const persisted = binding?.baseline;
+    await binding?.markWriteStart?.();
+    await binding?.scan("hello");
+
+    expect(binding?.baseline).toBe(persisted);
+    expect(persisted).toMatchObject({
+      agent: "cursor",
+      size: 70,
+      rotated: { file: "/rotated/chat.jsonl", size: 90 },
+    });
+    expect(live.size).toBe(70);
+    expect(live.rotationOffsets?.get("/rotated/chat.jsonl")).toBe(90);
+    expect(scanCursorJsonlForMessageMock.mock.calls[0]?.[0]).toBe(live);
+  });
+
+  it("gives only cursor a markWriteStart hook (#982)", async () => {
+    captureClaudeSubmitBaselineMock.mockResolvedValue({ file: "/c.jsonl", size: 1 });
+    const claude = await createAgentSubmitAckBinding("claude", ctx);
+    expect(claude?.markWriteStart).toBeUndefined();
+  });
+
   it("forwards cursorConfigDir into the cursor scan when present", async () => {
     captureCursorSubmitBaselineMock.mockResolvedValue({ file: "/some/chat.jsonl", size: 7 });
     scanCursorJsonlForMessageMock.mockResolvedValue({
@@ -886,6 +944,30 @@ describe("Codex historical submit-ack scope", () => {
 });
 
 describe("cursor submit-ack resume", () => {
+  it("Q3/Q3b: restored cursor binding reuses identity, fresh paste differs, slash stays unchanged", async () => {
+    const ctx = {
+      worktreePath: "/owned/worktree",
+      codexSessionsDir: "/owned/codex",
+      message: "continue",
+    };
+    captureCursorSubmitBaselineMock.mockImplementation(async (_path, _id, options) => {
+      if (!options?.deliveryId) return null;
+      return { file: null, size: 0, deliveryId: options.deliveryId };
+    });
+    const first = await createAgentSubmitAckBinding("cursor", ctx);
+    if (!first || first.baseline.agent !== "cursor") throw new Error("missing cursor binding");
+    const id = first.baseline.deliveryId;
+    expect(id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(first.inputText).toBe(`[Spur delivery: ${id}]\n\ncontinue`);
+    const restored = await resumeAgentSubmitAckBinding("cursor", ctx, first.baseline);
+    expect(restored?.baseline).toEqual(first.baseline);
+    expect(restored?.inputText).toBe(first.inputText);
+    expect(captureCursorSubmitBaselineMock).toHaveBeenCalledTimes(1);
+    const next = await createAgentSubmitAckBinding("cursor", ctx);
+    expect(next?.baseline).not.toEqual(first.baseline);
+    const slash = await createAgentSubmitAckBinding("cursor", { ...ctx, message: "/help" });
+    expect(slash).toBeNull();
+  });
   it("rebinds a persisted rotated-chat offset and forwards cursorConfigDir to the scan", async () => {
     scanCursorJsonlForMessageMock.mockResolvedValue({ found: true, scannedFile: "/r.jsonl" });
     const ctx = {
