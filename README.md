@@ -25,12 +25,15 @@ By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/ins
 ## Docs
 
 - [docs/commands.md](docs/commands.md) — CLI reference (spawn, wake, list, service, sidecars)
+- [docs/mcp.md](docs/mcp.md) — full-access MCP over stdio, SSH or HTTP; optional OpenAI tunnel
+- [docs/ci-admission.md](docs/ci-admission.md) — CI runner admission classes and limits
 - [docs/daemon-api.md](docs/daemon-api.md) — daemon HTTP routes
 - [docs/configuration.md](docs/configuration.md) — config layers, fields, sources/triggers, events
 - [docs/dashboard-search.md](docs/dashboard-search.md) — dashboard search fields and desk behavior
 - [docs/web-terminal.md](docs/web-terminal.md) — recent web links in terminal output
 - [docs/claude-accounts.md](docs/claude-accounts.md) — claude account rotation and per-session credential switch
 - [docs/voice.md](docs/voice.md) — voice input setup
+- [docs/telegram-calls.md](docs/telegram-calls.md) — native Telegram call prototype with sandbox Shepherd
 - [docs/https-tailscale.md](docs/https-tailscale.md) — HTTPS on the tailnet hostname (required for voice)
 - [docs/install-from-npm.md](docs/install-from-npm.md) — install from npm (official)
 - [docs/install-from-source.md](docs/install-from-source.md) — install from source (contributors only)
@@ -39,7 +42,7 @@ By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/ins
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — fixes for common local failures
 - [SECURITY.md](SECURITY.md) — reporting and network posture
 - [AGENTS.md](AGENTS.md) — repo-specific implementation rules
-- [docs/design-workflow.md](docs/design-workflow.md) — Claude Design pre-implementation gate
+- [docs/design-workflow.md](docs/design-workflow.md) — proposed UI screenshots and approval
 
 ## Repo layout
 

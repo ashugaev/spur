@@ -5,6 +5,7 @@ import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promise
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
+import { readGitHubSourceSnapshot } from "../../src/metadata.js";
 import type { RuntimeInfo, TodoProjection } from "../../src/types.js";
 import { createTempDir, execFileAsync, pollUntil, processExists } from "./common.js";
 
@@ -195,6 +196,36 @@ export async function waitForCleanTodoLedger(
     timeoutMs,
     accept: (projection) => projection.counts.open === 0 && projection.counts.held === 0,
     label: `clean Spur ToDo ledger for session ${sessionId}`,
+  });
+}
+
+// The GitHub source emits only on change against its per-session snapshot.
+// A poll can skip a session whose branch PR lookup SessionService auto-detect
+// still owns, so a state flipped before the snapshot exists is the first
+// observation: baselined, never emitted (#1017). Reads the `api`/`pr-watch`
+// source the runtime fixtures configure.
+export async function waitForSourceBaseline(
+  context: RuntimeTestContext,
+  sessionId: string,
+): Promise<void> {
+  await pollUntil(
+    async () => readGitHubSourceSnapshot(context.dataDir, "api", "pr-watch", sessionId),
+    {
+      timeoutMs: 15_000,
+      accept: (value) => value !== null,
+      label: `github source baseline snapshot for session ${sessionId}`,
+    },
+  );
+}
+
+// Points session branch pushes at the `upstream` acme/api remote, so the GitHub
+// source treats a fake PR bound to the session as owned and keeps its
+// ci_failed and merge_conflict signals. Without it a bound PR fails the
+// ownership check and those signals vanish once auto-detect binds the PR.
+export async function configureOwnedPushRemote(context: RuntimeTestContext): Promise<void> {
+  await execFileAsync("git", ["config", "push.default", "current"], { cwd: context.repoDir });
+  await execFileAsync("git", ["config", "remote.pushDefault", "upstream"], {
+    cwd: context.repoDir,
   });
 }
 
@@ -650,7 +681,13 @@ $extra"
   done
   ${cursorEmitBuffered}
   touch_chat_store "$chat_id"
-  case "$line" in
+  dispatch_line="$line"
+  cursor_marker='^\\[Spur delivery: [0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\\]$'
+  if [[ "$line" =~ $cursor_marker && "$full_msg" == "$line"$'\\n\\n'* ]]; then
+    logical_msg="\${full_msg#"$line"$'\\n\\n'}"
+    dispatch_line="\${logical_msg%%$'\\n'*}"
+  fi
+  case "$dispatch_line" in
     show-waiting-menu)
       ${signalNeedsInput}
       printf '%s\\n' "Entered plan mode"
@@ -670,7 +707,7 @@ $extra"
       exit 0
       ;;
     *)
-      printf '%s\\n' "ack: $line"
+      printf '%s\\n' "ack: $dispatch_line"
       printf '%s\\n' "${prompt}"
       ${signalWaiting}
       ;;

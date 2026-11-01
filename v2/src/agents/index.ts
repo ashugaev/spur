@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import {
@@ -35,6 +36,8 @@ import {
 import { ensureCursorTokenUsageHook } from "../cursor-token-usage.js";
 import {
   captureCursorSubmitBaseline,
+  cursorDeliveryInput,
+  markCursorWriteStart,
   persistCursorSubmitBaseline,
   restoreCursorSubmitBaseline,
   scanCursorJsonlForMessage,
@@ -121,7 +124,8 @@ export const DEFERRED_CONTROLS_MAX_RESENDS = 2;
 // agent records the submit within seconds, so a miss means a swallowed Enter,
 // not a slow agent; short windows resend it fast and bound the lock hold to
 // 4 x 5s. The long default windows stay for deliver() into a busy agent,
-// which records the message only when its turn ends.
+// which records the message only when its turn ends. Each resent Enter still
+// passes the agent's early-resend gate, so a menu or prompt never gets one.
 export const INTERACTIVE_SUBMIT_ACK_PACING: SubmitAckPacing = {
   windowMs: 5_000,
   maxResends: 3,
@@ -147,6 +151,7 @@ const CODEX_LAUNCH_SUBMIT_ACK_WINDOW_MS = 10_000;
 const CODEX_LAUNCH_SUBMIT_MAX_RESENDS = 2;
 
 export interface AgentSubmitAckContext {
+  message?: string;
   worktreePath: string;
   codexSessionsDir: string;
   /** Pinned native session id, used to bind claude ack scanning by id. */
@@ -155,11 +160,14 @@ export interface AgentSubmitAckContext {
   freshLaunch?: boolean;
   /** Session-private cursor config dir, used to re-resolve a rotated chat id. */
   cursorConfigDir?: string;
+  /** Opt-in historical Codex receipt from its original persisted native file. */
+  codexAckScope?: "current-native-baseline";
 }
 
 export interface SubmitAckScanResult {
   found: boolean;
   lastScannedFile: string | null;
+  qualifiedNoMatch?: true;
 }
 
 export interface SubmitAckPacing {
@@ -173,17 +181,23 @@ export interface AgentEarlyResendContext {
   worktreePath: string;
   agentSessionId?: string;
   panePid?: number;
+  /** The text being sent is a slash command; a gated agent refuses the resend. */
+  slashCommand?: boolean;
 }
 
 export interface SubmitAckBinding {
+  inputText?: string;
   baseline: SubmitAckBaseline;
   scan(text: string): Promise<SubmitAckScanResult>;
+  /** Called once per send right before the pane write; mutates `baseline` in place. Cursor only. */
+  markWriteStart?(): Promise<void>;
 }
 
 export interface ConversationReadContext {
   worktreePath: string;
   codexSessionsDir?: string;
   agentSessionId?: string;
+  cursorConfigDir?: string;
 }
 
 interface AgentAdapter {
@@ -534,13 +548,13 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       return {
         baseline: { agent: "claude", ...baseline },
         async scan(text) {
-          const found = await scanClaudeJsonlForMessage(
+          const result = await scanClaudeJsonlForMessage(
             baseline,
             text,
             ctx.worktreePath,
             ctx.agentSessionId,
           );
-          return { found, lastScannedFile: baseline.file };
+          return { found: result.found, lastScannedFile: result.scannedFile };
         },
       };
     },
@@ -589,6 +603,8 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
     submitAck: async (ctx, persisted) => {
+      if (ctx.codexAckScope && (!ctx.agentSessionId?.trim() || persisted?.agent !== "codex"))
+        return null;
       const baseline =
         persisted?.agent === "codex"
           ? new Map(Object.entries(persisted.offsets))
@@ -596,6 +612,11 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       return {
         baseline: { agent: "codex", offsets: Object.fromEntries(baseline) },
         async scan(text) {
+          if (ctx.codexAckScope && ctx.agentSessionId)
+            return scanCodexRolloutForMessage(ctx.codexSessionsDir, text, baseline, {
+              nativeSessionId: ctx.agentSessionId,
+              worktreePath: ctx.worktreePath,
+            });
           return scanCodexRolloutForMessage(ctx.codexSessionsDir, text, baseline);
         },
       };
@@ -613,8 +634,14 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         worktreePath,
         options?.cursorConfigDir ? { configDir: options.cursorConfigDir } : undefined,
       ),
-    readConversation: async (ctx) =>
-      ctx.agentSessionId ? readCursorTranscriptEntries(ctx.worktreePath, ctx.agentSessionId) : null,
+    readConversation: async (ctx) => {
+      const chatId =
+        ctx.agentSessionId ??
+        (ctx.cursorConfigDir
+          ? await findCursorSessionId(ctx.worktreePath, { configDir: ctx.cursorConfigDir })
+          : null);
+      return chatId ? readCursorTranscriptEntries(ctx.worktreePath, chatId) : null;
+    },
     setup: async ({ worktreePath, restrictWrites, cursorConfigDir }) => {
       await ensureCursorWorkspaceTrust(worktreePath);
       if (cursorConfigDir) {
@@ -647,29 +674,58 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     busyQueuedSendAwaitsPrompt: true,
     queuedSendPromptGraceMs: 5_000,
     submitAck: async (ctx, persisted) => {
+      const deliveryId =
+        persisted?.agent === "cursor"
+          ? persisted.deliveryId
+          : ctx.message && !ctx.message.trimStart().startsWith("/")
+            ? randomUUID()
+            : undefined;
       const baseline =
         persisted?.agent === "cursor"
           ? restoreCursorSubmitBaseline(persisted)
           : await captureCursorSubmitBaseline(
               ctx.worktreePath,
               ctx.agentSessionId,
-              ctx.cursorConfigDir ? { cursorConfigDir: ctx.cursorConfigDir } : undefined,
+              ctx.cursorConfigDir || deliveryId
+                ? {
+                    ...(ctx.cursorConfigDir ? { cursorConfigDir: ctx.cursorConfigDir } : {}),
+                    ...(deliveryId ? { deliveryId } : {}),
+                  }
+                : undefined,
             );
       if (!baseline) {
         return null;
       }
+      const cursorOptions = ctx.cursorConfigDir
+        ? { cursorConfigDir: ctx.cursorConfigDir }
+        : undefined;
+      const persistedBaseline: Extract<SubmitAckBaseline, { agent: "cursor" }> = {
+        agent: "cursor",
+        ...persistCursorSubmitBaseline(baseline),
+      };
       return {
-        baseline: { agent: "cursor", ...persistCursorSubmitBaseline(baseline) },
+        baseline: persistedBaseline,
+        ...(deliveryId && ctx.message
+          ? { inputText: cursorDeliveryInput(deliveryId, ctx.message) }
+          : {}),
         async scan(text) {
           const result = await scanCursorJsonlForMessage(
             baseline,
             text,
             ctx.worktreePath,
             ctx.agentSessionId,
-            ctx.cursorConfigDir ? { cursorConfigDir: ctx.cursorConfigDir } : undefined,
+            cursorOptions,
           );
           return { found: result.found, lastScannedFile: result.scannedFile };
         },
+        markWriteStart: () =>
+          markCursorWriteStart(
+            baseline,
+            persistedBaseline,
+            ctx.worktreePath,
+            ctx.agentSessionId,
+            cursorOptions,
+          ),
       };
     },
   },
@@ -682,7 +738,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     buildResumePlan: (agentSessionId, binary, options) =>
       buildOpenCodeResumePlan(agentSessionId, binary, openCodePlanOptions(options)),
     findSessionId: (worktreePath) => findOpenCodeSessionId(worktreePath),
-    readConversation: (ctx) => readOpenCodeConversation(ctx.agentSessionId),
+    readConversation: (ctx) => readOpenCodeConversation(ctx.agentSessionId, ctx.worktreePath),
     setup: async ({
       mcpBindings,
       restrictWrites,
@@ -716,7 +772,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       const baseline =
         persisted?.agent === "opencode"
           ? { sessionId: persisted.sessionId, after: persisted.after }
-          : await captureOpenCodeSubmitBaseline(ctx.agentSessionId);
+          : await captureOpenCodeSubmitBaseline(ctx.agentSessionId, ctx.worktreePath);
       if (!baseline) {
         throw new Error("OpenCode submit acknowledgment requires a pinned native session");
       }
@@ -728,7 +784,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         },
         async scan(text) {
           return {
-            found: await scanOpenCodeForTypedMessage(baseline, text),
+            found: await scanOpenCodeForTypedMessage(baseline, text, ctx.worktreePath),
             lastScannedFile: null,
           };
         },
@@ -970,7 +1026,9 @@ export async function agentEarlySubmitResendAllowed(
   ctx: AgentEarlyResendContext,
 ): Promise<boolean> {
   const gate = agentAdapter(agent).earlySubmitResendAllowed;
-  return gate ? gate(ctx) : true;
+  if (!gate) return true;
+  if (ctx.slashCommand) return false;
+  return gate(ctx);
 }
 
 /**
