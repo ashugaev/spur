@@ -21862,11 +21862,37 @@ describe("SessionService", () => {
       expect(internals.cursorPaneReadyOverrides.get("cursor-1")).toBe(expiresAt);
     });
 
-    it("applies a 60-second grace window to minMtimeMs for unpinned cursor sessions", async () => {
+    it("cursor id-less tick without private chat stays working", async () => {
       const service = await createDisposedSessionService();
       const internals = sessionServiceInternals(service);
-      const createdAt = "2026-03-18T10:00:00.000Z";
-      const cursorSession = runningSession({ id: "cursor-1", agent: "cursor", createdAt });
+      const cursorSession = runningSession({ id: "cursor-1", agent: "cursor" });
+      findAgentSessionIdMock.mockResolvedValue(null);
+      readCursorJsonlStateMock.mockResolvedValue({
+        state: "error",
+        reader: {
+          filePath: "/tmp/foreign.jsonl",
+          lastOffset: 0,
+          lastMtimeMs: 0,
+          tailRecords: [],
+        },
+        rateLimit: { limited: true, reason: "cursor out of usage" },
+      });
+
+      const classified = await internals.classifySessionRecord(cursorSession, { scanPane: false });
+
+      expect(classified.state).toBe("working");
+      expect(classified.state).not.toBe("rate_limited");
+      expect(readCursorJsonlStateMock).not.toHaveBeenCalled();
+      expect(findAgentSessionIdMock).toHaveBeenCalledWith("cursor", cursorSession.worktreePath, {
+        cursorConfigDir: join(TEST_DATA_DIR, "cursor", cursorSession.id),
+      });
+    });
+
+    it("cursor id-less tick reads private-dir chat transcript", async () => {
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      const cursorSession = runningSession({ id: "cursor-1", agent: "cursor" });
+      findAgentSessionIdMock.mockResolvedValue("private-chat");
       mockCursorJsonlState("working");
 
       await internals.classifySessionRecord(cursorSession);
@@ -21874,22 +21900,25 @@ describe("SessionService", () => {
       expect(readCursorJsonlStateMock).toHaveBeenCalledWith(
         cursorSession.worktreePath,
         undefined,
-        undefined,
-        { minMtimeMs: new Date(createdAt).getTime() - 60_000 },
+        "private-chat",
+        {},
       );
+      expect(
+        writeSessionMock.mock.calls.some(
+          (call) => (call[1] as SessionRecord).agentSessionId === "private-chat",
+        ),
+      ).toBe(false);
     });
 
-    it("skips minMtimeMs when agentSessionId is pinned for cursor sessions", async () => {
+    it("cursor pinned agentSessionId skips private lookup", async () => {
       const service = await createDisposedSessionService();
       const internals = sessionServiceInternals(service);
-      const createdAt = "2026-03-18T10:00:00.000Z";
-      const agentSessionId = "pinned-cursor-session-123";
       const cursorSession = runningSession({
         id: "cursor-1",
         agent: "cursor",
-        createdAt,
-        agentSessionId,
+        agentSessionId: "pinned-id",
       });
+      findAgentSessionIdMock.mockResolvedValue("other");
       mockCursorJsonlState("working");
 
       await internals.classifySessionRecord(cursorSession);
@@ -21897,9 +21926,10 @@ describe("SessionService", () => {
       expect(readCursorJsonlStateMock).toHaveBeenCalledWith(
         cursorSession.worktreePath,
         undefined,
-        agentSessionId,
-        { minMtimeMs: undefined },
+        "pinned-id",
+        {},
       );
+      expect(findAgentSessionIdMock).not.toHaveBeenCalled();
     });
 
     it("passes the persisted Cursor restore boundary to structured classification", async () => {
@@ -21921,7 +21951,7 @@ describe("SessionService", () => {
         cursorSession.worktreePath,
         undefined,
         cursorSession.agentSessionId,
-        { minMtimeMs: undefined, after: cursorRestoreBoundary },
+        { after: cursorRestoreBoundary },
       );
     });
 

@@ -11663,10 +11663,6 @@ export class SessionService {
     const from = options?.from;
 
     const readFullEntries = async (): Promise<TranscriptEntry[]> => {
-      const agentSessionId =
-        session.agent === "cursor"
-          ? await this.cursorTranscriptId(session)
-          : (session.agentSessionId ?? null);
       return readAgentConversation(session.agent, {
         worktreePath: session.worktreePath,
         ...(session.agent === "codex"
@@ -11675,7 +11671,7 @@ export class SessionService {
         ...(session.agent === "cursor"
           ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
           : {}),
-        ...(agentSessionId ? { agentSessionId } : {}),
+        ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
       }).then((result) => result ?? []);
     };
 
