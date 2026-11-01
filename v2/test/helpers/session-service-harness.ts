@@ -248,9 +248,13 @@ const terminateAgentProcessesMock = vi.fn<
 // returns, and matches the P2 guard's own never-blocks-on-what-it-cannot-see
 // contract, so no unrelated restore/relaunch/switchAuth test below has to
 // know this guard exists.
-const findForeignAgentProcessesForSessionMock = vi.fn(() =>
-  Promise.resolve<SessionAgentScan>({ status: "unavailable" }),
-);
+const findForeignAgentProcessesForSessionMock = vi.fn<
+  (input: {
+    sessionId?: string;
+    processMatchers?: readonly string[];
+    excludePanePids: readonly number[];
+  }) => Promise<SessionAgentScan>
+>(() => Promise.resolve<SessionAgentScan>({ status: "unavailable" }));
 const killTmuxSessionTreeMock: Mock = vi.fn();
 const sendMessageToTmuxMock: Mock = vi.fn();
 const sendInterruptKeysToTmuxMock: Mock = vi.fn();
