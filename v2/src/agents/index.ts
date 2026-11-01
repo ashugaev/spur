@@ -143,9 +143,12 @@ const CLAUDE_SUBMIT_FIRST_ACK_WINDOW_MS = 5_000;
 // Launch-send pacing for codex, same shape as claude's: a launch send that
 // never acked stayed in "spawning" behind the 300s default window. A healthy
 // codex launch records the prompt in its rollout ~2.5-4s after the submit,
-// so 10s windows leave margin before an Enter resend.
+// so 10s windows leave margin before an Enter resend. The ready markers already
+// match codex's startup composer, which ignores Enter before codex <0.156
+// finishes startup (25-30s+ with npx MCP servers), so the resends span 100s.
+// Codex >=0.156 queues the first Enter and ignores the rest.
 const CODEX_LAUNCH_SUBMIT_ACK_WINDOW_MS = 10_000;
-const CODEX_LAUNCH_SUBMIT_MAX_RESENDS = 2;
+const CODEX_LAUNCH_SUBMIT_MAX_RESENDS = 9;
 
 export interface AgentSubmitAckContext {
   worktreePath: string;
