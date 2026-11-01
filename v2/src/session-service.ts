@@ -19006,7 +19006,9 @@ export class SessionService {
         message: `Session ${session.id}: tmux pane pid unreadable; cannot confirm the prior agent process exited`,
       });
     }
-    const paneTarget: { panePids: readonly number[] } | { panePid: number | null; paneDead: boolean } =
+    const paneTarget:
+      | { panePids: readonly number[] }
+      | { panePid: number | null; paneDead: boolean } =
       paneLookup.status !== "ok"
         ? { panePids: [] }
         : "panePids" in paneLookup
