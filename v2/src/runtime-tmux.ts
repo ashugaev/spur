@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import type { RestoreOperationContext } from "./session-lifecycle.js";
 import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -167,7 +168,7 @@ function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
     let unresponsive = false;
     let diagnostic: string | undefined;
     try {
-      const out = await tmux("list-windows", "-a", "-F", "#{session_name} #{window_activity}");
+      const out = await tmuxRead("list-windows", "-a", "-F", "#{session_name} #{window_activity}");
       for (const line of out.trim().split("\n")) {
         const [sessionName, activitySeconds, extra] = line.trim().split(/\s+/);
         if (!sessionName) {
@@ -308,7 +309,7 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
     let unresponsive = false;
     let diagnostic: string | undefined;
     try {
-      const out = await tmux(
+      const out = await tmuxRead(
         "list-panes",
         "-a",
         "-F",
@@ -435,12 +436,14 @@ export function withTmuxSocketArgs(args: string[]): string[] {
   return activeTmuxSocketName ? ["-L", activeTmuxSocketName, ...args] : args;
 }
 
-// Every tmux() fork is a local, short-lived control command (list-windows,
-// list-panes, capture-pane, send-keys, ...) — never `attach-session`/`wait-for`
-// (those stay on execFileSync in cli.ts, outside this helper, and block by
-// design). Matches the sibling `getPsSnapshot`'s `timeout: 5_000` for the same
-// kind of local probe; ~250x the measured worst-case latency for these
-// commands on a 78-session fleet, so it only fires on a genuine hang.
+// Every tmux() fork is a local, short-lived write command (send-keys,
+// load-buffer, paste-buffer, delete-buffer, set-option, respawn-pane,
+// kill-session) — never
+// `attach-session`/`wait-for` (those stay on execFileSync in cli.ts, outside
+// this helper, and block by design). Read probes go through `tmuxRead` below,
+// which uses the same 5s limit as a deadline signal. ~250x the measured
+// worst-case latency for these commands on a 78-session fleet, so it only
+// fires on a genuine hang.
 // `runTmuxNewSession` (new-session path) deliberately does NOT go through
 // `tmux()` and keeps no timeout — a new session's own launch command is
 // allowed to take longer.
@@ -451,6 +454,79 @@ async function tmux(...args: string[]): Promise<string> {
     timeout: TMUX_COMMAND_TIMEOUT_MS,
   });
   return stdout.trimEnd();
+}
+
+// Read probes (list-*, capture-pane) use a deadline signal, not execFile's
+// `timeout`: on expiry `timeout` destroys stdout before SIGTERM and still
+// resolves when the child exits 0, handing back truncated or empty output as
+// success (#1194). The signal always rejects instead. Writes keep `tmux()`'s
+// `timeout`: aborting a completed write reads as a failure and triggers a resend.
+async function tmuxRead(...args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("tmux", withTmuxSocketArgs(args), {
+    signal: AbortSignal.timeout(TMUX_COMMAND_TIMEOUT_MS),
+  });
+  return stdout.trimEnd();
+}
+
+// Restore mutations wait for close, including after cancellation, before their
+// caller may release a pane or sidecar lock.
+async function runRestoreCommand(
+  file: string,
+  args: string[],
+  operation: RestoreOperationContext,
+): Promise<void> {
+  operation.assertActive();
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(file, args, { detached: true, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString("utf8")).slice(-8_192);
+    });
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let failure: unknown;
+    const kill = (signal: NodeJS.Signals): void => {
+      if (child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch {
+          // The group may already have exited; still signal the owned child.
+        }
+      }
+      child.kill(signal);
+    };
+    const abort = (): void => {
+      kill("SIGTERM");
+      killTimer = setTimeout(() => kill("SIGKILL"), 1_000);
+      killTimer.unref();
+    };
+    operation.signal.addEventListener("abort", abort, { once: true });
+    child.once("error", (error) => {
+      failure = error;
+    });
+    child.once("close", (code) => {
+      if (killTimer) clearTimeout(killTimer);
+      operation.signal.removeEventListener("abort", abort);
+      try {
+        operation.assertActive();
+        if (failure instanceof Error) throw failure;
+        if (code !== 0)
+          throw Object.assign(new Error(`${file} exited with code ${code}`), { stderr });
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    });
+    if (operation.signal.aborted) abort();
+  });
+}
+
+async function mutateTmux(
+  operation: RestoreOperationContext | undefined,
+  ...args: string[]
+): Promise<void> {
+  if (operation) await runRestoreCommand("tmux", withTmuxSocketArgs(args), operation);
+  else await tmux(...args);
 }
 
 export type SensitiveTmuxOperation =
@@ -499,19 +575,32 @@ export class SensitiveTmuxCleanupError extends Error {
   }
 }
 
-// Node's execFile `timeout` option sends SIGTERM and reports `killed: true`,
-// `signal: "SIGTERM"` on the rejected error — distinct from an external
-// SIGTERM (`killed: false`), a maxBuffer overrun (`killed` undefined), and a
-// plain non-zero exit (`killed: false`). This is the only ambiguous failure:
-// the probe fork (tmux or ps) MIGHT still be alive, so callers must not treat
-// it the same as a confirmed-absent tmux server or process.
+// A probe deadline is either execFile's `timeout` (tmux writes: SIGTERM,
+// `killed: true`, `signal: "SIGTERM"` on the rejected error) or a deadline
+// `AbortSignal.timeout` (tmux reads, ps: AbortError with cause TimeoutError).
+// Both are distinct from an external SIGTERM (`killed: false`), a maxBuffer
+// overrun (`killed` undefined), and a plain non-zero exit (`killed: false`).
+// This is the only ambiguous failure: the probe fork (tmux or ps) MIGHT still
+// be alive, so callers must not treat it the same as a confirmed-absent tmux
+// server or process.
 function isProbeTimeoutKill(error: unknown): boolean {
   if (typeof error !== "object" || error === null) {
     return false;
   }
   const killed = "killed" in error ? error.killed : undefined;
   const signal = "signal" in error ? error.signal : undefined;
-  return killed === true && signal === "SIGTERM";
+  if (killed === true && signal === "SIGTERM") {
+    return true;
+  }
+  const cause = "cause" in error ? error.cause : undefined;
+  return (
+    "name" in error &&
+    error.name === "AbortError" &&
+    typeof cause === "object" &&
+    cause !== null &&
+    "name" in cause &&
+    cause.name === "TimeoutError"
+  );
 }
 
 function isSystemdRunUnavailable(error: unknown): boolean {
@@ -539,22 +628,28 @@ function isSystemdRunUnavailable(error: unknown): boolean {
 // the service user, while `required` propagates the failure. Either way,
 // KillMode=process on the daemon unit remains the actual guarantee that a
 // daemon restart does not stop the session.
-async function runTmuxNewSession(args: string[]): Promise<void> {
+async function runTmuxNewSession(
+  args: string[],
+  operation?: RestoreOperationContext,
+  beforeLaunch?: () => void,
+): Promise<void> {
+  const run = (file: string, commandArgs: string[]): Promise<unknown> =>
+    operation ? runRestoreCommand(file, commandArgs, operation) : execFileAsync(file, commandArgs);
   const mode = systemdScopeMode();
   if (mode === "direct") {
-    await execFileAsync("tmux", args);
+    operation?.assertActive();
+    beforeLaunch?.();
+    await run("tmux", args);
     return;
   }
+  const scopedArgs = ["--user", "--scope", "--quiet", "--collect", "tmux", ...args];
+  operation?.assertActive();
+  beforeLaunch?.();
   try {
-    await execFileAsync("systemd-run", [
-      "--user",
-      "--scope",
-      "--quiet",
-      "--collect",
-      "tmux",
-      ...args,
-    ]);
+    await run("systemd-run", scopedArgs);
+    return;
   } catch (error) {
+    operation?.assertActive();
     if (mode === "auto" && isSystemdRunUnavailable(error)) {
       if (!warnedSystemdScopeFallback) {
         warnedSystemdScopeFallback = true;
@@ -566,11 +661,13 @@ async function runTmuxNewSession(args: string[]): Promise<void> {
             "KillMode=process.\n",
         );
       }
-      await execFileAsync("tmux", args);
-      return;
+    } else {
+      throw error;
     }
-    throw error;
   }
+  operation?.assertActive();
+  beforeLaunch?.();
+  await run("tmux", args);
 }
 
 // Claude Code identity markers. The spur daemon (or whatever shell spawned
@@ -710,7 +807,7 @@ export function captureTmuxPane(
   // callers that are fine collapsing the distinction.
   return memoizedProbe(capturePaneCache, key, () => {
     const target = exactPaneTarget(sessionName);
-    return tmux("capture-pane", "-t", target, "-p", "-J", "-S", `-${lines}`);
+    return tmuxRead("capture-pane", "-t", target, "-p", "-J", "-S", `-${lines}`);
   }).catch(() => null);
 }
 
@@ -819,8 +916,8 @@ interface PsRow {
 interface PsSnapshot {
   rows: PsRow[];
   diagnostic?: string;
-  // True only when the `ps` fork was killed by its own timeout, never for a
-  // nonzero exit, a maxBuffer overrun, or an empty-but-healthy table. `rows`
+  // True only when the `ps` fork hit its deadline signal, never for a
+  // nonzero exit, a maxBuffer overrun, or a malformed or empty table. `rows`
   // is empty whenever this is true.
   unresponsive: boolean;
 }
@@ -838,21 +935,28 @@ const PS_SNAPSHOT_CACHE_KEY = "ps";
 // a worse outcome than a missed reap — so this is sized well above any
 // observed process table, not just the current one.
 const PS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
+const PS_COMMAND = "ps";
+const PS_ARGUMENTS = ["-eo", "pid,ppid,pgid,tpgid,tty,rss,args"];
+const MALFORMED_PROCESS_TABLE = "malformed process table output";
+
+export function isHistoricalPsProbeDiagnostic(diagnostic: string): boolean {
+  return (
+    diagnostic === probeDiagnostic(PS_COMMAND, MALFORMED_PROCESS_TABLE) ||
+    diagnostic ===
+      probeDiagnostic(PS_COMMAND, `Command failed: ${PS_COMMAND} ${PS_ARGUMENTS.join(" ")}\n`)
+  );
+}
 
 function getPsSnapshot(): Promise<PsSnapshot> {
   return memoizedProbe(psSnapshotCache, PS_SNAPSHOT_CACHE_KEY, async () => {
     try {
-      const { stdout: psOut } = await execFileAsync(
-        "ps",
-        ["-eo", "pid,ppid,pgid,tpgid,tty,rss,args"],
-        {
-          timeout: 5_000,
-          maxBuffer: PS_MAX_BUFFER_BYTES,
-        },
-      );
-      const rows = psOut
-        .split("\n")
-        .map((line) => {
+      const { stdout: psOut } = await execFileAsync(PS_COMMAND, PS_ARGUMENTS, {
+        signal: AbortSignal.timeout(5_000),
+        maxBuffer: PS_MAX_BUFFER_BYTES,
+      });
+      const lines = psOut.split("\n");
+      const rows = lines
+        .map((line, index) => {
           const cols = line.trimStart().split(/\s+/);
           if (
             !line.trim() ||
@@ -861,7 +965,13 @@ function getPsSnapshot(): Promise<PsSnapshot> {
             return null;
           }
           if (cols.length < 7 || !cols.slice(0, 4).every((col) => /^-?\d+$/.test(col))) {
-            throw new Error("malformed process table output");
+            const shape = cols
+              .slice(0, 6)
+              .map((col) => (/^-?\d+$/.test(col) ? "N" : "T"))
+              .join(" ");
+            throw new Error(
+              `${MALFORMED_PROCESS_TABLE} (line ${index + 1}/${lines.length}, ${cols.length} columns, shape ${shape}, ${psOut.length} bytes, ${psOut.endsWith("\n") ? "trailing newline" : "no trailing newline"})`,
+            );
           }
           const pid = Number.parseInt(cols[0] ?? "", 10);
           const ppid = Number.parseInt(cols[1] ?? "", 10);
@@ -881,12 +991,16 @@ function getPsSnapshot(): Promise<PsSnapshot> {
           };
         })
         .filter((row): row is PsRow => row !== null);
+      if (rows.length === 0) {
+        // `ps -e` always lists at least itself: zero rows is a cut or empty read.
+        throw new Error(`${MALFORMED_PROCESS_TABLE} (no data rows, ${psOut.length} bytes)`);
+      }
       return { rows, unresponsive: false };
     } catch (error) {
       return {
         rows: [],
         unresponsive: isProbeTimeoutKill(error),
-        diagnostic: probeDiagnostic("ps", error),
+        diagnostic: probeDiagnostic(PS_COMMAND, error),
       };
     }
   });
@@ -937,7 +1051,7 @@ export async function getFleetSessionRssBytes(
 // WHICH pass answered ALIVE (session-service's probeAgentProcess, issue #871
 // P2) can read it off one snapshot instead of issuing a second, separately
 // memoized call: memoizedProbe's TTL runs from fetch START (:78, :92), so a
-// probe that itself takes >2s (getPsSnapshot's own timeout is 5s, :696)
+// probe that itself takes >2s (getPsSnapshot's own deadline is 5s, :696)
 // leaves the cache already expired by the time a second top-level call
 // checks it, forking again and comparing two different instants.
 export interface TmuxProcessMatch {
@@ -1128,27 +1242,38 @@ export async function createTmuxSession(input: {
   /** Session tool dir; holds the launch script, removed with the session. */
   launchScriptDir: string;
   env?: Record<string, string>;
+  operation?: RestoreOperationContext;
+  beforeLaunch?: () => void;
 }): Promise<void> {
-  const paneEnv = buildPaneEnv(input.env);
+  input.operation?.assertActive();
+  const paneEnv = buildPaneEnv({ DISABLE_AUTO_UPDATE: "true", ...input.env });
   const scriptPath = writeAgentLaunchScript(input.launchScriptDir, input.launchCommand);
   // Env file lives in the session tool dir, so it goes away with the session
   // if the pane never starts; the pane deletes it on start otherwise.
   const envFile = writePaneEnvFile(input.launchScriptDir, paneEnv);
   try {
-    await runTmuxNewSession([
-      ...withTmuxSocketArgs([]),
-      "-f",
-      TMUX_CONFIG_PATH,
-      "new-session",
-      "-d",
-      "-s",
-      input.sessionName,
-      "-c",
-      input.cwd,
-      buildAgentPaneShellCommand(scriptPath, envFile),
-    ]);
+    await runTmuxNewSession(
+      [
+        ...withTmuxSocketArgs([]),
+        "-f",
+        TMUX_CONFIG_PATH,
+        "new-session",
+        "-d",
+        "-s",
+        input.sessionName,
+        "-c",
+        input.cwd,
+        buildAgentPaneShellCommand(scriptPath, envFile),
+      ],
+      input.operation,
+      input.beforeLaunch,
+    );
   } catch (error) {
-    rmSync(envFile, { force: true });
+    try {
+      rmSync(envFile, { force: true });
+    } catch {
+      // Preserve the launch/authorization failure when local cleanup also fails.
+    }
     throw error;
   }
   invalidateFleetProbeCaches();
@@ -1180,8 +1305,9 @@ function writeAgentLaunchScript(dir: string, launchCommand: string): string {
 // prompt (oh-my-zsh's "update? [Y/n]") ate the first typed character, so
 // codex started as `ODEX_HOME=...` on the default home and Spur never saw
 // its rollout. The login+interactive shell keeps the user's rc environment
-// (PATH, nvm, exported keys) exactly as a typed launch had; an rc prompt now
-// waits visibly in the pane instead of corrupting the command. Sourcing the
+// (PATH, nvm, exported keys) exactly as a typed launch had. Pane env sets
+// DISABLE_AUTO_UPDATE=true: suppresses the omz update prompt. Other rc
+// prompts still wait visibly in the pane, show in ready-timeout tail. Sourcing the
 // script keeps the agent a direct child of the pane shell, and the pane
 // drops to the same login shell when the agent exits.
 // The env file launcher runs first, so the env lands before any rc file, as
@@ -1226,7 +1352,9 @@ export async function createTmuxCommandSession(input: {
   // promise — the ownership question a cleanup path must answer before it
   // kills by tmux name.
   onCreated?: () => void;
+  operation?: RestoreOperationContext;
 }): Promise<void> {
+  input.operation?.assertActive();
   const paneTarget = exactPaneTarget(input.sessionName);
   const shellCommand = buildCommandSessionShellCommand(input.launchCommand);
   const paneEnv = buildPaneEnv(input.env);
@@ -1237,31 +1365,37 @@ export async function createTmuxCommandSession(input: {
   // tears the pane down before the pane option can land — making the failure
   // invisible. `remain-on-exit` is a pane option, so set it with `-p` on the
   // pane we are about to respawn.
-  await runTmuxNewSession([
-    ...withTmuxSocketArgs([]),
-    "-f",
-    TMUX_CONFIG_PATH,
-    "new-session",
-    "-d",
-    "-s",
-    input.sessionName,
-    "-c",
-    input.cwd,
-  ]);
+  await runTmuxNewSession(
+    [
+      ...withTmuxSocketArgs([]),
+      "-f",
+      TMUX_CONFIG_PATH,
+      "new-session",
+      "-d",
+      "-s",
+      input.sessionName,
+      "-c",
+      input.cwd,
+    ],
+    input.operation,
+  );
   // The detached session now exists; bust the fleet caches so a just-created
   // session is immediately visible to tmuxSessionExists/pane probes.
   invalidateFleetProbeCaches();
   // After the cache bust, so a throwing callback can never leave the fleet
   // caches holding a snapshot taken before this session existed.
   input.onCreated?.();
-  await tmux("set-option", "-p", "-t", paneTarget, "remain-on-exit", "on");
+  input.operation?.assertActive();
+  const control = (...args: string[]): Promise<void> => mutateTmux(input.operation, ...args);
+  await control("set-option", "-p", "-t", paneTarget, "remain-on-exit", "on");
+  input.operation?.assertActive();
   // The env file is written last, right before the respawn that consumes it,
   // so no earlier step that can throw leaves a secret file behind. The
   // transient default shell from new-session runs without the file's env and
   // is killed by `respawn-pane -k`.
   const envFile = writePaneEnvFile(resolveTempDir(), paneEnv);
   try {
-    await tmux(
+    await control(
       "respawn-pane",
       "-k",
       "-t",
@@ -1278,18 +1412,20 @@ async function pasteLiteral(
   sessionName: string,
   payload: string,
   bracketed = false,
+  operation?: RestoreOperationContext,
 ): Promise<void> {
+  operation?.assertActive();
   const target = exactPaneTarget(sessionName);
   const bufferName = `spur-${randomUUID()}`;
   const tempPath = join(resolveTempDir(), `spur-${randomUUID()}.txt`);
   writeFileSync(tempPath, payload, { encoding: "utf-8", mode: 0o600 });
   try {
-    await tmux("load-buffer", "-b", bufferName, tempPath);
+    await mutateTmux(operation, "load-buffer", "-b", bufferName, tempPath);
     const args = ["paste-buffer", "-b", bufferName, "-t", target, "-d"];
     if (bracketed) {
       args.splice(1, 0, "-p");
     }
-    await tmux(...args);
+    await mutateTmux(operation, ...args);
   } finally {
     try {
       unlinkSync(tempPath);
@@ -1304,14 +1440,18 @@ async function pasteLiteral(
   }
 }
 
-async function sendLiteral(sessionName: string, message: string): Promise<void> {
+async function sendLiteral(
+  sessionName: string,
+  message: string,
+  operation?: RestoreOperationContext,
+): Promise<void> {
   const target = exactPaneTarget(sessionName);
   if (message.includes("\n") || message.length > 200) {
-    await pasteLiteral(sessionName, message);
+    await pasteLiteral(sessionName, message, false, operation);
     return;
   }
 
-  await tmux("send-keys", "-t", target, "-l", message);
+  await mutateTmux(operation, "send-keys", "-t", target, "-l", message);
 }
 
 const DEFAULT_SUBMIT_DELAY_MS = 300;
@@ -1411,7 +1551,7 @@ async function runTmuxWithStdin(
 
 async function sensitiveBufferAbsent(bufferName: string): Promise<boolean> {
   try {
-    const output = await tmux("list-buffers", "-F", "#{buffer_name}");
+    const output = await tmuxRead("list-buffers", "-F", "#{buffer_name}");
     return !output.split("\n").some((line) => line.trim() === bufferName);
   } catch {
     return false;
@@ -1531,7 +1671,7 @@ export async function sendInterruptKeysToTmux(
 export async function sendMessageToTmux(
   sessionName: string,
   message: string,
-  options?: { agent?: AgentName; interrupt?: false },
+  options?: { agent?: AgentName; interrupt?: false; operation?: RestoreOperationContext },
 ): Promise<void> {
   const target = exactPaneTarget(sessionName);
   const useBracketedPaste =
@@ -1542,26 +1682,32 @@ export async function sendMessageToTmux(
   // outside copy-mode; if a user accidentally entered it (mouse drag, PageUp),
   // C-u and Enter would otherwise be interpreted by the copy buffer and never
   // reach the agent's stdin. Older tmux builds may exit non-zero here — swallow.
-  await tmux("send-keys", "-t", target, "-X", "cancel").catch(() => {});
-  await tmux("send-keys", "-t", target, "C-u");
+  const operation = options?.operation;
+  await mutateTmux(operation, "send-keys", "-t", target, "-X", "cancel").catch(() => {});
+  await mutateTmux(operation, "send-keys", "-t", target, "C-u");
   if (useBracketedPaste) {
     // Codex TUI enables bracketed paste and handles it as a distinct paste event.
     // The bash-based fake Codex runtime used in tests does not, so keep those
     // runs on plain tmux input to avoid losing the first resumed prompt send.
     // Submit with a real Enter key so delivery does not depend on newline characters
     // inside the pasted payload or on Codex's paste-burst heuristics.
-    await pasteLiteral(sessionName, message, true);
-    await tmux("send-keys", "-t", target, "Enter");
+    await pasteLiteral(sessionName, message, true, operation);
+    await mutateTmux(operation, "send-keys", "-t", target, "Enter");
     return;
   }
-  await sendLiteral(sessionName, message);
-  await sleep(DEFAULT_SUBMIT_DELAY_MS);
-  await tmux("send-keys", "-t", target, "Enter");
+  await sendLiteral(sessionName, message, operation);
+  const settle = sleep(DEFAULT_SUBMIT_DELAY_MS);
+  if (operation) await operation.wait(settle);
+  else await settle;
+  await mutateTmux(operation, "send-keys", "-t", target, "Enter");
 }
 
-export async function sendSubmitKeyToTmux(sessionName: string): Promise<void> {
+export async function sendSubmitKeyToTmux(
+  sessionName: string,
+  operation?: RestoreOperationContext,
+): Promise<void> {
   const target = exactPaneTarget(sessionName);
-  await tmux("send-keys", "-t", target, "Enter");
+  await mutateTmux(operation, "send-keys", "-t", target, "Enter");
 }
 
 /**
@@ -1610,10 +1756,12 @@ export async function waitForTmuxReady(
   sessionName: string,
   readyMarkers: string[],
   timeoutMs = AGENT_READY_TIMEOUT_MS,
-  options?: { agent?: AgentName },
+  options?: { agent?: AgentName; operation?: RestoreOperationContext },
 ): Promise<void> {
+  const wait = <T>(promise: Promise<T>): Promise<T> => options?.operation?.wait(promise) ?? promise;
+  options?.operation?.assertActive();
   if (readyMarkers.length === 0) {
-    await sleep(1_500);
+    await wait(sleep(1_500));
     return;
   }
 
@@ -1629,7 +1777,8 @@ export async function waitForTmuxReady(
     // Cursor trust-confirm retries. Back off to reduce pressure on the shared
     // tmux server when several agents start concurrently, with per-session
     // jitter so batch spawns don't stay phase-aligned.
-    const capture = await captureTmuxPane(sessionName, 200, { fresh: true });
+    options?.operation?.assertActive();
+    const capture = await wait(captureTmuxPane(sessionName, 200, { fresh: true }));
     if (capture === null) {
       throw new TmuxProbeUnknownError(
         `tmux capture-pane failed while waiting for session "${sessionName}" readiness`,
@@ -1645,13 +1794,13 @@ export async function waitForTmuxReady(
       // launch prompt pasted at first sight of it was lost (live, 1 in 10
       // spawns), leaving an empty composer. Same settle as after a trust
       // confirm.
-      await sleep(CURSOR_READY_SETTLE_DELAY_MS);
+      await wait(sleep(CURSOR_READY_SETTLE_DELAY_MS));
       return;
     }
     if (readyMarkers.every((marker) => capture.includes(marker))) {
       if (options?.agent === "codex") {
         // Codex can print its prompt before the next stdin read is ready.
-        await sleep(CODEX_READY_SETTLE_DELAY_MS);
+        await wait(sleep(CODEX_READY_SETTLE_DELAY_MS));
       }
       return;
     }
@@ -1663,12 +1812,14 @@ export async function waitForTmuxReady(
     ) {
       cursorTrustConfirmAttempts += 1;
       lastCursorTrustConfirmAt = Date.now();
-      await sendSubmitKeyToTmux(sessionName);
+      options.operation?.assertActive();
+      await sendSubmitKeyToTmux(sessionName, options.operation);
+      options.operation?.assertActive();
       pollDelayMs = AGENT_READY_POLL_INITIAL_MS;
-      await sleep(AGENT_READY_POLL_INITIAL_MS);
+      await wait(sleep(AGENT_READY_POLL_INITIAL_MS));
       continue;
     }
-    await sleep(pollDelayMs + pollJitterMs);
+    await wait(sleep(pollDelayMs + pollJitterMs));
     if (Date.now() - startedAt >= AGENT_READY_POLL_BACKOFF_AFTER_MS) {
       pollDelayMs = Math.min(pollDelayMs * 2, AGENT_READY_POLL_MAX_MS);
     }
@@ -1680,11 +1831,16 @@ export async function waitForTmuxReady(
   throw new PromptReadyTimeoutError({ sessionName, elapsedMs: Date.now() - startedAt, detail });
 }
 
-export async function killTmuxSession(sessionName: string): Promise<void> {
+export async function killTmuxSession(
+  sessionName: string,
+  operation?: RestoreOperationContext,
+): Promise<void> {
   const target = exactSessionTarget(sessionName);
+  operation?.assertActive();
   try {
-    await tmux("kill-session", "-t", target);
+    await mutateTmux(operation, "kill-session", "-t", target);
   } catch {
+    operation?.assertActive();
     // Best effort only.
   } finally {
     invalidateFleetProbeCaches();
@@ -1713,12 +1869,14 @@ export async function createTmuxSidecarSession(input: {
   // Required, not optional: every sidecar start must be able to tell an
   // uncreated launch from a half-created one before it reaps by name.
   onCreated: () => void;
+  operation?: RestoreOperationContext;
 }): Promise<void> {
   await createTmuxCommandSession({
     sessionName: sidecarTmuxSession(input.sessionId, input.sidecarName),
     cwd: input.cwd,
     launchCommand: input.command,
     onCreated: input.onCreated,
+    ...(input.operation ? { operation: input.operation } : {}),
     ...(input.env ? { env: input.env } : {}),
   });
 }

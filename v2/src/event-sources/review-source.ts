@@ -1,4 +1,5 @@
 import { clearInterval, setInterval as startInterval } from "node:timers";
+import { logSpurEvent } from "../event-log.js";
 import {
   deleteReviewSourceSnapshot,
   listSessions,
@@ -149,13 +150,30 @@ export function createReviewSourceModule(
         }
       };
 
+      // Fire-and-forget polls (tick, deferred start, runOnStart) end here: a throw is
+      // logged once for that cycle and the next tick polls again. The awaited startup
+      // poll is not routed through it, so start() still rejects there.
+      const reportPollCycleFailure = (error: unknown): void => {
+        const message = error instanceof Error ? error.message : String(error);
+        deps.logger.warn?.(
+          `[source:${deps.projectId}/${deps.sourceId}] poll cycle failed: ${message}`,
+        );
+        logSpurEvent(deps.dataDir, {
+          event: "source.poll_cycle.error",
+          level: "error",
+          projectId: deps.projectId,
+          sourceId: deps.sourceId,
+          message: `Poll cycle failed for ${deps.projectId}/${deps.sourceId}: ${message}`,
+        });
+      };
+
       const timer = startInterval(() => {
-        void poll(false);
+        poll(false).catch(reportPollCycleFailure);
       }, deps.config.intervalMs);
 
       if (!deps.config.runOnStart) {
         if (deps.deferInitialSync) {
-          void poll(false);
+          poll(false).catch(reportPollCycleFailure);
         } else {
           await poll(false);
         }
@@ -173,7 +191,7 @@ export function createReviewSourceModule(
         ...(deps.config.runOnStart
           ? {
               runOnStart(): void {
-                void poll(true);
+                poll(true).catch(reportPollCycleFailure);
               },
             }
           : {}),
