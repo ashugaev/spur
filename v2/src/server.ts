@@ -1,6 +1,7 @@
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { URL } from "node:url";
 import {
   lifecycleErrorReceipt,
@@ -179,6 +180,8 @@ export function projectSourceSession(session: SessionListView): SourceWorkSessio
   };
 }
 
+const SOURCE_SESSION_RETRY_DELAYS_MS = [250, 750];
+
 function isSnapshotChanged(error: unknown): boolean {
   return (
     error instanceof SessionLifecycleError &&
@@ -192,12 +195,15 @@ export async function sourceSessionById(
   sessionId: string,
 ): Promise<SourceWorkSessionItem | null> {
   try {
-    let view: SessionView;
-    try {
-      view = await service.get(sessionId);
-    } catch (error) {
-      if (!isSnapshotChanged(error)) throw error;
-      view = await service.get(sessionId);
+    let view: SessionView | undefined;
+    for (let attempt = 0; view === undefined; attempt += 1) {
+      try {
+        view = await service.get(sessionId);
+      } catch (error) {
+        const delay = SOURCE_SESSION_RETRY_DELAYS_MS[attempt];
+        if (!isSnapshotChanged(error) || delay === undefined) throw error;
+        await sleep(delay);
+      }
     }
     return isListedSessionView(view, view.lifecycle.operation, false)
       ? projectSourceSession(view)
