@@ -1007,7 +1007,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             accept: (value) => value.status === "stopped",
           });
           expect(closed.state).toBe("stopped");
-          expect(closed).not.toHaveProperty("stopReason");
+          expect(closed).toHaveProperty("stopReason", "runtime_lost");
           bus.emit({
             name: "github:comment",
             occurrenceId: randomUUID(),
