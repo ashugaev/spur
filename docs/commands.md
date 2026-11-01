@@ -5,7 +5,7 @@
 Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance; fallback: [configuration.md](configuration.md).
 `review-app prepare|block|recover|status|publish`: daemon-free lane lifecycle, App access and pinned reviews; `recover --legacy-sha256 <digest>` requires exact legacy bytes, returns verified PENDING; row evidence required, legacy coverage optional; `v2/src/review-app.ts`.
 `review-gate evaluate`: approval aggregation with `GITHUB_TOKEN` and `--policy`; `v2/src/review-gate.ts`.
-`mcp [--http]`, `mcp-tunnel`: full-access daemon MCP over stdio/loopback HTTP, optional supervised tunnel; `v2/src/mcp.ts`, `v2/src/mcp-tunnel.ts`; [client setup](mcp.md).
+`mcp [--http]`, `mcp-tunnel`: daemon MCP, durable backend restart receipts, bounded daemon logs, cache-only attached PR status; `v2/src/mcp.ts`, `v2/src/mcp-tunnel.ts`; [contracts/setup](mcp.md).
 
 ## Session tools and environment
 

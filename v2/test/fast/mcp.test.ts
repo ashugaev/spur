@@ -1,16 +1,19 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { afterEach, expect, it } from "vitest";
+import { join } from "node:path";
+import { afterEach, expect, it, vi } from "vitest";
 import { createMcpServer } from "../../src/mcp.js";
 import { DAEMON_OPERATIONS } from "../../src/daemon-contracts.js";
 import { McpGateway } from "../../src/mcp-gateway.js";
 import { mcpFixture, session } from "./mcp-fixture.js";
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const close of cleanups.splice(0).reverse()) await close();
 });
 async function setup() {
   const fixture = await mcpFixture();
+  vi.stubEnv("SPUR_MCP_TUNNEL_ENV_FILE", join(fixture.root, "absent-tunnel.env"));
   cleanups.push(fixture.close);
   const server = await createMcpServer(fixture.configPath);
   const client = new Client({ name: "test", version: "1" });
@@ -27,7 +30,7 @@ async function setup() {
 }
 it("exposes all projects, raw conversation and complete operator requests without inherited identity", async () => {
   const { fixture, call, client } = await setup();
-  expect((await client.listTools()).tools).toHaveLength(13);
+  expect((await client.listTools()).tools).toHaveLength(17);
   const projects = (await call("list_projects")).structuredContent;
   expect(projects).toMatchObject({ ok: true, status: 200, body: fixture.state.projects });
   expect((await call("get_session", { sessionId: "loose-one" })).isError).toBeUndefined();

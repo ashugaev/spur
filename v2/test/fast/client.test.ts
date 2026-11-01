@@ -276,6 +276,19 @@ describe("client.ensureServer", () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
+  it("refuses to signal a daemon whose PID changed after MCP admission", async () => {
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(runtimeInfo(undefined, 8888)), { status: 200 }),
+    );
+    const { restartDaemonIfRunning } = await loadClientModule();
+    await expect(
+      restartDaemonIfRunning("/tmp/dist/cli.js", "/tmp/spur.yaml", 4242),
+    ).rejects.toThrow("identity changed");
+    expect(killSpy).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
   it("falls back to spawnDaemon after a short external restart grace period", async () => {
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
     const fetchMock = vi.mocked(fetch);
