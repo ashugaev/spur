@@ -1,4 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
+import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { readSpurInstanceRuntimeConfig } from "../../../../server/spur-instance";
 import {
   type GitHubGraphQLError,
   getGitHubRateLimitError,
@@ -13,12 +16,14 @@ import {
   recordGitHubPrNode,
 } from "@/lib/github-pr-status";
 import { glabHeaders, resolveGlabToken } from "@/lib/gitlab-api";
-import { type CiStatus, type PrState } from "@/lib/pr-status-shape";
+import { type CiStatus, type PrState, isPrReady, prStatusIndicator } from "@/lib/pr-status-shape";
 import {
   type PrStatusResponse,
   cacheKeyForCoords,
+  cacheTtlMs,
   errorResponse,
   extractPrCoords,
+  inspectCachedPrStatus,
   readCachedPrStatus,
   resetPrStatusCacheForTests,
 } from "@/lib/pr-status-store";
@@ -336,6 +341,17 @@ async function handleGitLabStatus(url: string) {
 }
 
 export async function GET(request: NextRequest) {
+  const cacheOnly = request.nextUrl.searchParams.get("cacheOnly") === "1";
+  let instance: string | undefined;
+  if (cacheOnly) {
+    const { configPath } = readSpurInstanceRuntimeConfig();
+    instance = createHash("sha256").update(realpathSync(configPath)).digest("hex");
+    if (request.nextUrl.searchParams.get("instance") !== instance)
+      return NextResponse.json(
+        { status: "unavailable", reason: "instance_mismatch" },
+        { status: 409 },
+      );
+  }
   const url = request.nextUrl.searchParams.get("url");
   if (!url) {
     return NextResponse.json({ error: "url parameter is required" }, { status: 400 });
@@ -344,6 +360,45 @@ export async function GET(request: NextRequest) {
   const provider = detectProvider(url);
   if (!provider) {
     return NextResponse.json({ error: "invalid review URL" }, { status: 400 });
+  }
+
+  if (cacheOnly) {
+    let info: PrStatusResponse | null = null;
+    if (provider === "github") {
+      const coords = extractPrCoords(url);
+      if (coords) info = inspectCachedPrStatus(cacheKeyForCoords(coords));
+    } else {
+      const coords = gitlabCoords(url);
+      if (coords) {
+        const key = gitlabCacheKey(coords);
+        const last = gitlabLastGoodCache.get(key);
+        info =
+          readCachedGitLabStatus(key) ??
+          (last ? { ...last, mergeConflict: false, stale: true } : null);
+      }
+    }
+    const observedAt = Date.now();
+    return NextResponse.json(
+      {
+        instance,
+        provider,
+        source: "spur-web-pr-status-cache",
+        observedAt,
+        status: info && info.state !== null ? "available" : "unknown",
+        info,
+        ready: info && info.state !== null ? isPrReady(info) : null,
+        indicator: info ? prStatusIndicator(info) : null,
+        ageMs: info?.fetchedAt === undefined ? null : Math.max(0, observedAt - info.fetchedAt),
+        stale: info
+          ? info.stale === true ||
+            info.fetchedAt === undefined ||
+            observedAt - info.fetchedAt >=
+              (provider === "github" ? cacheTtlMs() : GITLAB_CACHE_TTL_MS)
+          : null,
+        refreshed: false,
+      },
+      { headers: { "cache-control": "no-store" } },
+    );
   }
 
   return provider === "github" ? handleGitHubStatus(url) : handleGitLabStatus(url);

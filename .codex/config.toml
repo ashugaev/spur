@@ -23,7 +23,7 @@ description = "UI review gate. Verify layout, visual consistency, and UI states 
 config_file = "agents/designer.toml"
 
 [agents.design-author]
-description = "Author and export a UI design before implementation. Use when a task introduces or changes visible packages/web UI. Produces a Claude Design update, a runtime-neutral export, and a design-spec for approval. Claude runtime only."
+description = "Prepare proposed UI screenshots and design-spec before visible packages/web changes. Use for UI approval evidence in any runtime."
 config_file = "agents/design-author.toml"
 
 [agents.developer]

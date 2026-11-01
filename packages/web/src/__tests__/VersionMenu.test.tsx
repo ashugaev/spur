@@ -1230,7 +1230,9 @@ describe("live version from the heartbeat", () => {
     await waitFor(() => expect(trigger).toHaveTextContent("1.4.0"));
     const initialLabel = trigger.querySelector("span");
     expect(initialLabel).not.toBeNull();
-    expect(initialLabel).toHaveClass("w-[21ch]", "truncate", "text-center");
+    expect(initialLabel).toHaveClass("max-w-[24ch]", "truncate");
+    expect(initialLabel).not.toHaveClass("w-[21ch]");
+    expect(initialLabel).not.toHaveClass("text-center");
     expect(initialLabel).toHaveAttribute("title", "1.4.0");
     expect(initialLabel).not.toHaveClass(
       "motion-safe:animate-pulse",

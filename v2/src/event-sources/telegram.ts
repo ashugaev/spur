@@ -2,7 +2,6 @@ import { run, type RunnerHandle } from "@grammyjs/runner";
 import { Bot, type Context } from "grammy";
 import { logSpurEvent } from "../event-log.js";
 import {
-  deleteTelegramReplyTarget,
   readInterfaceConsent,
   writeInterfaceConsent,
   readSession,
@@ -15,16 +14,21 @@ import {
   takeTelegramChoice,
   telegramBindingKey,
   writeTelegramBindings,
-  writeTelegramOffer,
   writeTelegramReplyTarget,
 } from "../metadata.js";
 import {
   TELEGRAM_CHOICE_CALLBACK_PREFIX,
   TELEGRAM_MESSAGE_EVENT,
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS,
+  type SendMessageAttachment,
   type TelegramAutoSpawnConfig,
   type TelegramBinding,
+  type TelegramBotIdentity,
+  type TelegramChoice,
   type TelegramMessageEventData,
   type TelegramSourceConfig,
+  type TelegramConversation,
 } from "../types.js";
 import type {
   SourceHandle,
@@ -34,13 +38,16 @@ import type {
   SourceSessionListItem,
   SourceStartDeps,
 } from "./types.js";
-import { formatTelegramSessionLabel } from "../telegram-source-state.js";
+import { formatTelegramSessionLabel, telegramTopicIsDeleting } from "../telegram-source-state.js";
 import { telegramStatusEmoji } from "../telegram-status-emoji.js";
 import {
+  ConsentRejectedError,
   consentPolicy,
   decideConsent,
   reconcileInterfaceConsent,
   repositoryOf,
+  type ConsentRejectReason,
+  type InterfaceConsent,
 } from "../review-interface-consent.js";
 import { workspaceIdOf } from "../session-desk.js";
 import { readCurrentBranch } from "../workspace.js";
@@ -77,13 +84,32 @@ const TELEGRAM_COMMANDS = [
   { command: "new", description: "Launch a task with project defaults" },
   { command: "work", description: "Inspect tasks needing attention" },
   { command: "unwatch", description: "Unbind this chat" },
+  { command: "complete", description: "Complete this topic's Spur session" },
+  { command: "kill", description: "Kill this topic's Spur session" },
 ] as const;
+
+interface TelegramFile {
+  file_id: string;
+  file_unique_id: string;
+  file_size?: number;
+  file_name?: string;
+  mime_type?: string;
+}
 
 interface TelegramTextMessage {
   message_id: number;
   message_thread_id?: number | undefined;
   is_topic_message?: true;
   text?: string;
+  caption?: string;
+  photo?: (TelegramFile & { width: number; height: number })[];
+  media_group_id?: string;
+  document?: TelegramFile;
+  audio?: TelegramFile;
+  video?: TelegramFile;
+  animation?: TelegramFile;
+  video_note?: TelegramFile;
+  sticker?: TelegramFile & { is_animated?: boolean; is_video?: boolean };
   chat: {
     id: number;
   };
@@ -94,16 +120,11 @@ interface TelegramTextMessage {
   reply_to_message?: {
     message_id: number;
   };
-  voice?: {
-    file_id: string;
-    file_unique_id: string;
-    duration: number;
-    mime_type?: string;
-    file_size?: number;
-  };
+  voice?: TelegramFile & { duration: number };
 }
 
 interface TelegramTextContext {
+  me?: { username?: string };
   update?: {
     update_id?: number;
   };
@@ -119,6 +140,10 @@ interface TelegramSentMessage {
   message_id?: number;
 }
 
+interface TelegramInlineMarkup {
+  inline_keyboard: { text: string; callback_data?: string; url?: string }[][];
+}
+
 interface TelegramCallbackContext {
   update?: {
     update_id?: number;
@@ -131,6 +156,7 @@ interface TelegramCallbackContext {
       message_thread_id?: number | undefined;
       is_topic_message?: true;
       text?: string;
+      reply_markup?: TelegramInlineMarkup;
       chat: {
         id: number;
       };
@@ -140,8 +166,9 @@ interface TelegramCallbackContext {
       username?: string;
     };
   };
-  answerCallbackQuery(text?: string): Promise<unknown>;
+  answerCallbackQuery(text?: string | { text: string; show_alert?: boolean }): Promise<unknown>;
   editMessageText?(text: string, options?: unknown): Promise<unknown>;
+  editMessageReplyMarkup?(other: { reply_markup: TelegramInlineMarkup }): Promise<unknown>;
   reply?(text: string, options?: unknown): Promise<unknown>;
   api?: {
     editMessageText(chatId: number, messageId: number, text: string): Promise<unknown>;
@@ -152,11 +179,14 @@ interface TelegramRuntime {
   deps: SourceStartDeps<TelegramSourceConfig>;
   bindings: Map<string, TelegramBinding>;
   lastUpdateId?: number;
-  botUsername?: string;
+  botIdentity?: TelegramBotIdentity;
   pendingSpawns: Map<string, TelegramPendingSpawn>;
   autoSpawnInFlight: Set<string>;
+  mediaAbort: AbortController;
+  mediaGroups: Map<string, TelegramMediaGroup>;
+  closedMediaGroups: Map<string, { expiresAt: number; messageIds: Set<number> }>;
   workbench: TelegramWorkbench;
-  persistBindings(options?: { removeKeys?: string[] }): Promise<void>;
+  persistBindings(): Promise<void>;
   drainWrites(): Promise<void>;
 }
 
@@ -178,6 +208,7 @@ interface TelegramPendingSpawn {
 }
 
 type TelegramCommand =
+  | { kind: "complete" | "kill"; invalidArgs: boolean }
   | { kind: "new"; task?: string }
   | { kind: "work" }
   | {
@@ -219,6 +250,10 @@ export function parseTelegramCommand(text: string, botUsername?: string): Telegr
   }
   const args = rest?.trim();
   switch (command) {
+    case "complete":
+    case "kill":
+      if (mention && !botUsername) return null;
+      return { kind: command, invalidArgs: Boolean(args) };
     case "new":
       return args ? { kind: "new", task: args } : { kind: "new" };
     case "work":
@@ -271,11 +306,13 @@ function mergePersistedBindings(
 async function rememberUpdate(
   runtime: TelegramRuntime,
   update?: { update_id?: number },
+  reconcileKey?: string,
 ): Promise<boolean> {
   const updateId = update?.update_id;
-  if (typeof updateId !== "number" || !Number.isInteger(updateId)) return true;
-  if (runtime.lastUpdateId !== undefined && updateId <= runtime.lastUpdateId) return false;
-  runtime.lastUpdateId = updateId;
+  if (typeof updateId === "number" && Number.isInteger(updateId)) {
+    if (runtime.lastUpdateId !== undefined && updateId <= runtime.lastUpdateId) return false;
+    runtime.lastUpdateId = updateId;
+  } else if (reconcileKey === undefined) return true;
   try {
     await runtime.persistBindings();
   } catch (error) {
@@ -297,23 +334,6 @@ function isSameTelegramTarget(
   messageThreadId?: number,
 ): boolean {
   return binding.chatId === chatId && binding.messageThreadId === messageThreadId;
-}
-
-function sessionBindingConflict(
-  runtime: TelegramRuntime,
-  chatId: number,
-  messageThreadId: number | undefined,
-  sessionId: string,
-): boolean {
-  for (const binding of runtime.bindings.values()) {
-    if (
-      binding.sessionId === sessionId &&
-      !isSameTelegramTarget(binding, chatId, messageThreadId)
-    ) {
-      return true;
-    }
-  }
-  return false;
 }
 
 function telegramPendingSpawnKey(
@@ -525,6 +545,8 @@ async function sendHelp(ctx: TelegramTextContext): Promise<void> {
       "/new <task> - launch with displayed project defaults",
       "/work - inspect Attention, Working, and Recent tasks",
       "/unwatch - unbind this chat",
+      "/complete - complete this topic's session; keep PR open",
+      "/kill - kill this topic's session; requires saved and pushed work",
       "",
       "Plain text goes to the bound agent. Commands stay in Telegram.",
     ].join("\n"),
@@ -649,7 +671,7 @@ export function wrapTelegramSpawnPrompt(taskText: string): string {
 }
 
 async function editOrReply(
-  ctx: Pick<TelegramTextContext, "reply" | "api">,
+  ctx: TelegramTextContext,
   chatId: number,
   statusMessageId: number | undefined,
   text: string,
@@ -665,46 +687,16 @@ async function editOrReply(
   return extractMessageId(await ctx.reply(text));
 }
 
-/**
- * Reassign the group's plain-message binding and retire displaced outbound
- * target/offers. Group-main recorded replies still reach their sender.
- */
-async function detachDisplacedSession(
-  runtime: TelegramRuntime,
-  ctx: Pick<TelegramTextContext, "reply">,
-  chatId: number,
-  messageThreadId: number | undefined,
-  taker: SourceSessionListItem,
-  displacedId: string,
-): Promise<void> {
-  const deps = runtime.deps;
-  try {
-    const target = readTelegramReplyTarget(deps.dataDir, displacedId);
-    if (target && isSameTelegramTarget(target, chatId, messageThreadId)) {
-      deleteTelegramReplyTarget(deps.dataDir, displacedId);
-    }
-    writeTelegramOffer(deps.dataDir, deps.projectId, deps.sourceId, {
-      sessionId: displacedId,
-      chatId,
-      choices: [],
-    });
-    const displaced = await findSession(deps, displacedId);
-    const label = (session: Pick<SourceSessionListItem, "id" | "title">): string =>
-      formatTelegramSessionLabel(session.id, session.title?.trim() || undefined);
-    await ctx.reply(
-      messageThreadId === undefined
-        ? `${label(taker)} receives plain messages in this chat. Reply to an agent's message to reach that agent.`
-        : `${label(taker)} took over this thread from ${label(displaced ?? { id: displacedId })}.`,
-    );
-  } catch (error) {
-    logPersistError(deps, error);
-  }
-}
-
 type TelegramSpawnOutcome =
   | { phase: "not_submitted"; error?: unknown }
   | { phase: "submitted_unknown"; error: unknown }
-  | { phase: "created"; session: SourceSessionListItem; bound: boolean; error?: unknown };
+  | {
+      phase: "created";
+      session: SourceSessionListItem;
+      bound: boolean;
+      conversation?: TelegramConversation;
+      error?: unknown;
+    };
 
 async function bindSpawnedSession(
   runtime: TelegramRuntime,
@@ -713,13 +705,15 @@ async function bindSpawnedSession(
   messageThreadId: number | undefined,
   request: SourceSpawnSessionRequest,
   options?: { current(): boolean; created(): void },
+  stillCurrent?: () => boolean,
 ): Promise<TelegramSpawnOutcome> {
   const deps = runtime.deps;
   let submitted = false;
   let created: SourceSessionListItem | undefined;
   let bound = false;
   let statusMessageId: number | undefined;
-  const current = (): boolean => !deps.signal.aborted && (!options || options.current());
+  const current = (): boolean =>
+    !deps.signal.aborted && (!options || options.current()) && (!stillCurrent || stillCurrent());
   try {
     if (!current()) return { phase: "not_submitted" };
     if (!deps.spawnSession) {
@@ -740,7 +734,10 @@ async function bindSpawnedSession(
     submitted = true;
     const session = await deps.spawnSession({
       ...request,
-      prompt: wrapTelegramSpawnPrompt(request.prompt ?? ""),
+      prompt:
+        deps.config.chatId !== undefined && deps.config.chatId < 0
+          ? wrapTelegramSpawnPrompt(request.prompt ?? "")
+          : (request.prompt ?? ""),
       telegramOrigin: {
         projectId: deps.projectId,
         sourceId: deps.sourceId,
@@ -753,26 +750,17 @@ async function bindSpawnedSession(
     if (!current()) {
       return { phase: "created", session, bound: false };
     }
-    // Plain messages follow the binding; group-main replies can reach other senders.
-    const key = telegramBindingKey(chatId, messageThreadId);
-    if (chatId < 0 && !runtime.bindings.has(key)) mergePersistedBindings(runtime);
-    const displacedId = chatId < 0 ? runtime.bindings.get(key)?.sessionId : undefined;
-    await bindTelegramThread(runtime, chatId, messageThreadId, session.id);
-    bound = true;
+    const conversation = await bindTelegramThread(runtime, chatId, messageThreadId, session.id);
+    bound = conversation.kind === "topic";
     rememberSent(deps, session.id, chatId, statusMessageId);
     if (!options)
       await editOrReply(
         ctx,
         chatId,
         statusMessageId,
-        chatId < 0 && messageThreadId !== undefined
-          ? "Spawned and bound."
-          : `Spawned and bound: ${session.id}.`,
+        `Spawned ${session.id}. ${conversationText(conversation)}`,
       );
-    if (displacedId !== undefined && displacedId !== session.id) {
-      await detachDisplacedSession(runtime, ctx, chatId, messageThreadId, session, displacedId);
-    }
-    return { phase: "created", session, bound };
+    return { phase: "created", session, bound, conversation };
   } catch (error) {
     if (
       created &&
@@ -802,11 +790,7 @@ async function bindSpawnedSession(
 }
 
 /**
- * Records an inbound Telegram touch as the session's reply target. Carries the
- * unconsumed status message and the last reply stamp across the whole-file
- * replace. A placeholder is kept for a private chat or a forum topic, never for
- * a group main chat (its first reply must create the topic), and never leaves
- * the chat and thread it was posted in.
+ * Records input in the checked assigned topic, preserving its pending placeholder.
  */
 function recordTelegramReplyTarget(
   deps: SourceStartDeps<TelegramSourceConfig>,
@@ -815,18 +799,13 @@ function recordTelegramReplyTarget(
     chatId: number;
     messageThreadId?: number;
     statusMessageId?: number;
-    /** Bind path: keep the previous inbound stamp while the chat and thread are unchanged. */
-    keepInboundStamp?: boolean;
   },
 ): void {
   const previous = readTelegramReplyTarget(deps.dataDir, target.sessionId);
   const sameTarget =
     previous !== null && isSameTelegramTarget(previous, target.chatId, target.messageThreadId);
   const carriedStatus = sameTarget ? previous.statusMessageId : undefined;
-  const lastInboundAt =
-    target.keepInboundStamp && sameTarget && previous.lastInboundAt !== undefined
-      ? previous.lastInboundAt
-      : new Date().toISOString();
+  const lastInboundAt = new Date().toISOString();
   const keepsNewStatus =
     target.statusMessageId !== undefined &&
     (target.chatId > 0 || target.messageThreadId !== undefined);
@@ -849,34 +828,18 @@ async function bindTelegramThread(
   chatId: number,
   messageThreadId: number | undefined,
   sessionId: string,
-): Promise<void> {
+): Promise<TelegramConversation> {
   const deps = runtime.deps;
-  const key = telegramBindingKey(chatId, messageThreadId);
-  const previous = runtime.bindings.get(key);
-  runtime.bindings.set(telegramBindingKey(chatId, messageThreadId), {
+  if (!deps.telegramConversations) throw new Error("Telegram conversations unavailable");
+  const conversation = await deps.telegramConversations.ensureTopic(sessionId, {
+    projectId: deps.projectId,
+    sourceId: deps.sourceId,
     chatId,
     ...(messageThreadId !== undefined ? { messageThreadId } : {}),
-    sessionId,
   });
-  try {
-    await runtime.persistBindings();
-  } catch (error) {
-    if (previous) {
-      runtime.bindings.set(key, previous);
-    } else {
-      runtime.bindings.delete(key);
-    }
-    logPersistError(deps, error);
-    throw error;
-  }
-  // A bind is not an inbound message: it must not move lastInboundAt past an
-  // agent reply that already landed.
-  recordTelegramReplyTarget(deps, {
-    sessionId,
-    chatId,
-    ...(messageThreadId !== undefined ? { messageThreadId } : {}),
-    keepInboundStamp: true,
-  });
+  runtime.bindings.clear();
+  mergePersistedBindings(runtime);
+  return conversation;
 }
 
 async function unbindTelegramThread(
@@ -886,22 +849,67 @@ async function unbindTelegramThread(
 ): Promise<{ deleted: boolean; binding: TelegramBinding | undefined }> {
   const deps = runtime.deps;
   const key = telegramBindingKey(chatId, messageThreadId);
-  const binding = runtime.bindings.get(key);
-  const deleted = runtime.bindings.delete(key);
-  try {
-    await runtime.persistBindings({ removeKeys: [key] });
-  } catch (error) {
-    if (binding) {
-      runtime.bindings.set(key, binding);
-    }
-    logPersistError(deps, error);
-    throw error;
-  }
-  const target = binding ? readTelegramReplyTarget(deps.dataDir, binding.sessionId) : null;
-  if (binding && target && target.chatId === chatId && target.messageThreadId === messageThreadId) {
-    deleteTelegramReplyTarget(deps.dataDir, binding.sessionId);
-  }
+  const binding = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId).get(key);
+  if (!binding) return { deleted: false, binding: undefined };
+  if (!deps.telegramConversations) throw new Error("Telegram conversations unavailable");
+  const deleted = await deps.telegramConversations.unwatch(binding.sessionId, {
+    projectId: deps.projectId,
+    sourceId: deps.sourceId,
+    chatId,
+    ...(messageThreadId !== undefined ? { messageThreadId } : {}),
+  });
+  runtime.bindings.clear();
+  mergePersistedBindings(runtime);
   return { deleted, binding };
+}
+
+function conversationText(conversation: TelegramConversation): string {
+  return conversation.kind === "disabled"
+    ? "Telegram conversation unavailable; configure a forum chatId."
+    : `Continue in [agent topic](https://t.me/c/${String(conversation.chatId).replace(/^-100/, "")}/${conversation.messageThreadId}).`;
+}
+
+function conversationIsCurrent(
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  sessionId: string,
+  conversation: TelegramConversation,
+): conversation is Extract<TelegramConversation, { kind: "topic" }> {
+  if (conversation.kind !== "topic" || deps.config.chatId !== conversation.chatId) return false;
+  const record = readSession(deps.dataDir, sessionId);
+  if (record?.status === "completed" || record?.status === "killed") return false;
+  const target = readTelegramReplyTarget(deps.dataDir, sessionId);
+  return (
+    target?.projectId === conversation.projectId &&
+    target.sourceId === conversation.sourceId &&
+    target.chatId === conversation.chatId &&
+    target.messageThreadId === conversation.messageThreadId &&
+    readTelegramBindings(deps.dataDir, conversation.projectId, conversation.sourceId).get(
+      telegramBindingKey(conversation.chatId, conversation.messageThreadId),
+    )?.sessionId === sessionId &&
+    !telegramTopicIsDeleting(deps.dataDir, conversation.chatId, conversation.messageThreadId)
+  );
+}
+
+async function guardAgentInput(
+  runtime: TelegramRuntime,
+  ctx: Pick<TelegramTextContext, "reply">,
+  message: TelegramTextMessage,
+  sessionId: string,
+): Promise<TelegramConversation | null> {
+  const conversation = await bindTelegramThread(
+    runtime,
+    message.chat.id,
+    message.message_thread_id,
+    sessionId,
+  );
+  if (
+    !conversationIsCurrent(runtime.deps, sessionId, conversation) ||
+    !isSameTelegramTarget(conversation, message.chat.id, message.message_thread_id)
+  ) {
+    await ctx.reply(conversationText(conversation));
+    return null;
+  }
+  return conversation;
 }
 
 type AutoSpawnAcquireResult =
@@ -925,15 +933,26 @@ async function runAutoSpawn(
   text: string,
   key: string,
   autoSpawn: TelegramAutoSpawnConfig,
+  attachments?: SendMessageAttachment[],
+  stillCurrent?: () => boolean,
 ): Promise<void> {
   try {
-    await bindSpawnedSession(runtime, ctx, chatId, messageThreadId, {
-      project: autoSpawn.project,
-      agent: autoSpawn.agent,
-      ...(autoSpawn.model !== undefined ? { model: autoSpawn.model } : {}),
-      ...(autoSpawn.selfDestruct !== undefined ? { selfDestruct: autoSpawn.selfDestruct } : {}),
-      prompt: text,
-    });
+    await bindSpawnedSession(
+      runtime,
+      ctx,
+      chatId,
+      messageThreadId,
+      {
+        project: autoSpawn.project,
+        agent: autoSpawn.agent,
+        ...(autoSpawn.model !== undefined ? { model: autoSpawn.model } : {}),
+        ...(autoSpawn.selfDestruct !== undefined ? { selfDestruct: autoSpawn.selfDestruct } : {}),
+        prompt: text,
+        ...(attachments ? { attachments } : {}),
+      },
+      undefined,
+      stillCurrent,
+    );
   } finally {
     runtime.autoSpawnInFlight.delete(key);
   }
@@ -1036,32 +1055,10 @@ async function bindWorkbenchSession(
   runtime: TelegramRuntime,
   card: WorkbenchCard,
   session: SourceSessionListItem,
-): Promise<void> {
+): Promise<TelegramConversation> {
   const { chatId, threadId, userId } = card.owner;
-  mergePersistedBindings(runtime);
-  if (sessionBindingConflict(runtime, chatId, threadId, session.id)) {
-    throw new Error("Session is already bound elsewhere");
-  }
-  const displacedId =
-    chatId < 0 ? runtime.bindings.get(telegramBindingKey(chatId, threadId))?.sessionId : undefined;
   clearPendingSpawn(runtime, chatId, threadId, userId);
-  await bindTelegramThread(runtime, chatId, threadId, session.id);
-  if (!workbenchCurrent(runtime, card)) return;
-  if (displacedId && displacedId !== session.id) {
-    await detachDisplacedSession(
-      runtime,
-      {
-        reply: async (text) => {
-          const sent = await ctx.reply?.(text);
-          return sent as TelegramSentMessage | undefined;
-        },
-      },
-      chatId,
-      threadId,
-      session,
-      displacedId,
-    );
-  }
+  return bindTelegramThread(runtime, chatId, threadId, session.id);
 }
 
 async function notifyUnboundWorkbenchResult(
@@ -1166,7 +1163,7 @@ async function handleWorkbenchCallback(
       }
       if (outcome.phase === "created") {
         await editWorkbenchCard(ctx, runtime, card, {
-          text: `${outcome.bound && !outcome.error && owner.chatId < 0 && owner.threadId !== undefined ? "Created. Bound here." : `Created ${outcome.session.id}. ${outcome.bound ? "Bound here." : "Not bound; use Continue here or /work."}`}${outcome.error ? `\n${redactedErrorText(runtime.deps, outcome.error)}` : ""}`,
+          text: `Created ${outcome.session.id}. ${outcome.conversation ? conversationText(outcome.conversation) : "No Telegram conversation; use /work to inspect."}${outcome.error ? `\n${redactedErrorText(runtime.deps, outcome.error)}` : ""}`,
           rows: outcome.bound
             ? []
             : [
@@ -1201,9 +1198,6 @@ async function handleWorkbenchCallback(
       if (!workbenchCurrent(runtime, card)) return;
       if (session.id !== action.sessionId || session.project !== action.project)
         throw new Error("Session changed");
-      mergePersistedBindings(runtime);
-      if (sessionBindingConflict(runtime, owner.chatId, owner.threadId, session.id))
-        throw new Error("Session is already bound elsewhere");
       if (action.kind === "restore") {
         if (!runtime.deps.listProjects) throw new Error("Project listing unavailable");
         const projects = await runtime.deps.listProjects();
@@ -1230,9 +1224,9 @@ async function handleWorkbenchCallback(
         !session.canContinue
       )
         throw new Error("Continue unavailable");
-      await bindWorkbenchSession(ctx, runtime, card, session);
+      const conversation = await bindWorkbenchSession(ctx, runtime, card, session);
       await editWorkbenchCard(ctx, runtime, card, {
-        text: `${owner.chatId < 0 && owner.threadId !== undefined ? "Bound." : `Bound ${session.id}.`} Plain messages here go to this task.`,
+        text: conversationText(conversation),
         rows: [],
       });
       return;
@@ -1299,12 +1293,30 @@ async function handleTelegramCallback(
     ? { ...query.message, message_thread_id: telegramMessageThreadId(query.message) }
     : undefined;
   const deps = runtime.deps;
-  if (!(await rememberUpdate(runtime, ctx.update))) return;
+  const updateId = ctx.update?.update_id;
+  const drop = (
+    reason: "duplicate" | "no-data" | "no-message" | "not-allowed" | "no-sender",
+  ): void =>
+    logSpurEvent(deps.dataDir, {
+      event: "source.telegram.callback_dropped",
+      level: "warn",
+      projectId: deps.projectId,
+      sourceId: deps.sourceId,
+      message: `Telegram callback dropped: ${reason}`,
+      details: {
+        reason,
+        ...(updateId !== undefined ? { updateId } : {}),
+        ...(message ? { chatId: message.chat.id } : {}),
+        ...(query?.from ? { userId: query.from.id } : {}),
+      },
+    });
+  if (!(await rememberUpdate(runtime, ctx.update))) return drop("duplicate");
   runtime.workbench.prune();
-  if (!data || !message) return;
+  if (!data) return drop("no-data");
+  if (!message) return drop("no-message");
   const from = query.from;
-  if (!isAllowed(deps.config, message.chat.id, from)) return;
-  if (!from) return;
+  if (!from) return drop("no-sender");
+  if (!isAllowed(deps.config, message.chat.id, from)) return drop("not-allowed");
 
   if (data.startsWith(WORKBENCH_CALLBACK_PREFIX)) {
     await handleWorkbenchCallback(
@@ -1470,14 +1482,15 @@ async function handleTelegramCallback(
     await ctx.answerCallbackQuery("Session is no longer active.");
     return;
   }
-  if (sessionBindingConflict(runtime, message.chat.id, message.message_thread_id, sessionId)) {
-    await ctx.answerCallbackQuery("Session is already bound elsewhere.");
-    return;
-  }
-
   clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
+  let conversation: TelegramConversation;
   try {
-    await bindTelegramThread(runtime, message.chat.id, message.message_thread_id, sessionId);
+    conversation = await bindTelegramThread(
+      runtime,
+      message.chat.id,
+      message.message_thread_id,
+      sessionId,
+    );
   } catch (error) {
     await ctx.answerCallbackQuery("Bind failed.");
     const failureMessage = `Failed to bind Spur session ${sessionId}: ${redactedErrorText(deps, error)}`;
@@ -1488,11 +1501,8 @@ async function handleTelegramCallback(
     }
     return;
   }
-  const forum = message.chat.id < 0 && message.message_thread_id !== undefined;
-  const reply = forum
-    ? "Bound this Telegram thread."
-    : `Bound this Telegram thread to Spur session ${sessionId}.`;
-  await ctx.answerCallbackQuery(forum ? "Bound." : `Bound ${sessionId}.`);
+  const reply = conversationText(conversation);
+  await ctx.answerCallbackQuery("Conversation selected.");
   if (ctx.editMessageText) {
     await ctx.editMessageText(reply);
   } else {
@@ -1500,10 +1510,88 @@ async function handleTelegramCallback(
   }
 }
 
+type ChoiceRejectReason =
+  | ConsentRejectReason
+  | "inactive"
+  | "session-missing"
+  | "session-inactive"
+  | "internal";
+
+/** Alert per rejected click; every text stays under Telegram's 200-char answer limit. */
+const CHOICE_REJECT_TEXT: Record<Exclude<ChoiceRejectReason, "session-inactive">, string> = {
+  inactive: "This choice is no longer active.",
+  retired: "This choice is no longer active.",
+  "session-missing": "Session is no longer active.",
+  "not-approver": "Only the designated approver can decide this interface approval.",
+  expired: "This interface approval expired. Ask the agent to request it again.",
+  decided: "This interface approval is already decided.",
+  superseded: "A newer interface approval replaced this one.",
+  "not-delivered": "This interface approval was not delivered.",
+  "binding-mismatch": "This interface approval belongs to another chat or source.",
+  "policy-unavailable": "Interface approval policy is unavailable or changed.",
+  "policy-changed": "Interface approval policy is unavailable or changed.",
+  "task-changed": "The session branch or workspace changed since approval was requested.",
+  internal: "Choice failed. Try again.",
+};
+
+interface ChoiceRejection {
+  reason: ChoiceRejectReason;
+  alert: string;
+  error?: unknown;
+}
+
+function choiceRejection(
+  reason: Exclude<ChoiceRejectReason, "session-inactive">,
+  error?: unknown,
+): ChoiceRejection {
+  return { reason, alert: CHOICE_REJECT_TEXT[reason], ...(error !== undefined ? { error } : {}) };
+}
+
+function singleChoiceButton(text: string, callbackData: string): TelegramInlineMarkup {
+  return { inline_keyboard: [[{ text, callback_data: callbackData }]] };
+}
+
+/** Best-effort keyboard edit; resolves whether Telegram accepted it. */
+async function editChoiceMarkup(
+  ctx: TelegramCallbackContext,
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  markup: TelegramInlineMarkup,
+): Promise<boolean> {
+  if (!ctx.editMessageReplyMarkup) return false;
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: markup });
+    return true;
+  } catch (error) {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram choice keyboard edit failed: ${redactedErrorText(deps, error)}`,
+    );
+    return false;
+  }
+}
+
+/**
+ * Best-effort: Telegram expires callback queries, and a rejected answer must
+ * not swallow a click that was already consumed.
+ */
+async function answerChoice(
+  ctx: TelegramCallbackContext,
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  answer: string | { text: string; show_alert: true },
+): Promise<void> {
+  try {
+    await ctx.answerCallbackQuery(answer);
+  } catch (error) {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram choice ack failed: ${redactedErrorText(deps, error)}`,
+    );
+  }
+}
+
 /**
  * Delivers a click on an agent-offered button as an ordinary user message to
  * the session that offered it. The token is single-use and carries the whole
- * offer with it, so sibling buttons go dead on the first click.
+ * offer with it, so sibling buttons go dead on the first click. The keyboard
+ * turns "Sending" before any lookup; a rejection restores it and alerts why.
  */
 async function handleAgentChoiceCallback(
   ctx: TelegramCallbackContext,
@@ -1513,148 +1601,108 @@ async function handleAgentChoiceCallback(
   from: { id: number; username?: string },
 ): Promise<void> {
   const deps = runtime.deps;
-  const pending = findTelegramChoice(
-    deps.dataDir,
-    deps.projectId,
-    deps.sourceId,
-    token,
-    message.chat.id,
-  );
+  const chatId = message.chat.id;
+  const callbackData = `${TELEGRAM_CHOICE_CALLBACK_PREFIX}${token}`;
+  let sending = false;
+  const reject = async (rejection: ChoiceRejection, pending?: TelegramChoice): Promise<void> => {
+    // Only a keyboard this click changed is put back: the original while the
+    // offer is live, none once it is spent.
+    if (sending) {
+      const live = findTelegramChoice(deps.dataDir, deps.projectId, deps.sourceId, token, chatId);
+      const restore = live ? message.reply_markup : undefined;
+      await editChoiceMarkup(ctx, deps, restore ?? { inline_keyboard: [] });
+    }
+    logSpurEvent(deps.dataDir, {
+      event: "source.telegram.choice_rejected",
+      level: "warn",
+      projectId: deps.projectId,
+      sourceId: deps.sourceId,
+      ...(pending ? { sessionId: pending.sessionId } : {}),
+      message: `Telegram choice rejected: ${rejection.reason}`,
+      details: {
+        reason: rejection.reason,
+        chatId,
+        userId: from.id,
+        consent: pending?.interfaceConsent !== undefined,
+        ...(rejection.error !== undefined
+          ? { error: redactedErrorText(deps, rejection.error) }
+          : {}),
+      },
+    });
+    await answerChoice(ctx, deps, { text: rejection.alert, show_alert: true });
+  };
+  const pending = findTelegramChoice(deps.dataDir, deps.projectId, deps.sourceId, token, chatId);
   if (!pending) {
-    await ctx.answerCallbackQuery("This choice is no longer active.");
+    await reject(choiceRejection("inactive"));
     return;
   }
-  // Liveness before consumption: a dead lookup must leave the offer clickable.
-  const session = await findSession(deps, pending.sessionId);
+  if (message.reply_markup)
+    sending = await editChoiceMarkup(
+      ctx,
+      deps,
+      singleChoiceButton(`Sending: ${pending.text}…`, callbackData),
+    );
+  let session: SourceSessionListItem | null;
+  try {
+    session = await findSession(deps, pending.sessionId);
+  } catch (error) {
+    await reject(choiceRejection("internal", error), pending);
+    return;
+  }
   if (!session) {
-    await ctx.answerCallbackQuery("Session is no longer active.");
+    await reject(choiceRejection("session-missing"), pending);
+    return;
+  }
+  const inputThreadId =
+    message.date === 0
+      ? pending.messageThreadId
+      : telegramMessageThreadId(message, message.message_thread_id ?? pending.messageThreadId);
+  const conversation = await bindTelegramThread(
+    runtime,
+    message.chat.id,
+    inputThreadId,
+    session.id,
+  );
+  if (
+    !conversationIsCurrent(deps, session.id, conversation) ||
+    !isSameTelegramTarget(conversation, message.chat.id, inputThreadId)
+  ) {
+    if (sending) {
+      await editChoiceMarkup(ctx, deps, message.reply_markup ?? { inline_keyboard: [] });
+    }
+    await answerChoice(ctx, deps, "Continue in the assigned topic.");
+    await ctx.reply?.(conversationText(conversation));
     return;
   }
   if (session.inactive) {
-    await ctx.answerCallbackQuery(
-      `${formatTelegramSessionLabel(session.id, session.title?.trim() || undefined)} is not active.`,
+    await reject(
+      {
+        reason: "session-inactive",
+        alert: `${formatTelegramSessionLabel(session.id, session.title?.trim() || undefined)} is not active.`,
+      },
+      pending,
     );
     return;
   }
-  let choice: ReturnType<typeof takeTelegramChoice> = null;
-  if (pending.interfaceConsent) {
-    try {
-      const policy = await consentPolicy(deps.config.allowedUsers);
-      const record = readInterfaceConsent(deps.dataDir, pending.sessionId);
-      if (
-        !record ||
-        policy.approverUserId !== record.approverUserId ||
-        !policy.repositories.includes(record.repository)
-      )
-        throw new Error("Interface approval policy changed");
-      const actualSession = readSession(deps.dataDir, pending.sessionId);
-      if (
-        !actualSession ||
-        actualSession.project !== record.projectId ||
-        actualSession.branch !== record.branch ||
-        workspaceIdOf(actualSession) !== record.authority ||
-        (await readCurrentBranch(actualSession.worktreePath)) !== record.branch
-      )
-        throw new Error("Interface approval task changed");
-      const relocated = readSession(deps.dataDir, pending.sessionId);
-      if (
-        !relocated ||
-        relocated.project !== record.projectId ||
-        relocated.branch !== record.branch ||
-        workspaceIdOf(relocated) !== record.authority
-      )
-        throw new Error("Interface approval task changed");
-      const validatedPath = relocated.worktreePath;
-      if (validatedPath !== actualSession.worktreePath) {
-        const [branch, repository] = await Promise.all([
-          readCurrentBranch(validatedPath),
-          repositoryOf(validatedPath),
-        ]);
-        if (branch !== record.branch || repository !== record.repository)
-          throw new Error("Interface approval task changed");
-      }
-      const active = findTelegramChoice(
-        deps.dataDir,
-        deps.projectId,
-        deps.sourceId,
-        token,
-        message.chat.id,
-      );
-      const current = readInterfaceConsent(deps.dataDir, pending.sessionId);
-      const currentSession = readSession(deps.dataDir, pending.sessionId);
-      if (
-        !active?.interfaceConsent ||
-        !current ||
-        current.generation !== record.generation ||
-        current.challenge !== record.challenge ||
-        current.authority !== record.authority ||
-        !currentSession ||
-        currentSession.project !== record.projectId ||
-        currentSession.branch !== record.branch ||
-        currentSession.worktreePath !== validatedPath ||
-        workspaceIdOf(currentSession) !== record.authority
-      )
-        throw new Error("Interface approval superseded");
-      const decision = decideConsent(current, {
-        session: pending.sessionId,
-        sourceId: deps.sourceId,
-        projectId: deps.projectId,
-        chatId: message.chat.id,
-        actor: from.id,
-        challenge: active.interfaceConsent.challenge,
-        decision: active.interfaceConsent.decision,
-      });
-      choice = takeTelegramChoice(
-        deps.dataDir,
-        deps.projectId,
-        deps.sourceId,
-        token,
-        message.chat.id,
-      );
-      if (!choice) throw new Error("Interface approval choice retired");
-      writeInterfaceConsent(deps.dataDir, decision);
-      // Failed external publication keeps the durable outbox for the next lifecycle call.
-      await reconcileInterfaceConsent(deps.dataDir, pending.sessionId).catch(() => {
-        deps.logger.warn?.("Interface consent publication blocked; decision retained locally.");
-      });
-    } catch {
-      await ctx.answerCallbackQuery(
-        "Interface approval is inactive or requires the designated approver.",
-      );
-      return;
-    }
-  }
-  choice ??= takeTelegramChoice(
-    deps.dataDir,
-    deps.projectId,
-    deps.sourceId,
-    token,
-    message.chat.id,
+  const outcome = await claimAgentChoice(deps, pending, token, chatId, from.id, conversation).catch(
+    (error: unknown) =>
+      error instanceof ConsentRejectedError
+        ? choiceRejection(error.reason)
+        : choiceRejection("internal", error),
   );
-  // Lost the race with a sibling click or a superseding reply.
-  if (!choice) {
-    await ctx.answerCallbackQuery("This choice is no longer active.");
+  if ("reason" in outcome) {
+    await reject(outcome, pending);
     return;
   }
-  // Best-effort: Telegram expires callback queries, and a rejected answer must
-  // not swallow a click that was already consumed.
-  try {
-    await ctx.answerCallbackQuery(`Sent: ${choice.text}`);
-  } catch (error) {
-    deps.logger.warn?.(
-      `[source:${deps.projectId}/${deps.sourceId}] telegram choice ack failed: ${errorText(error)}`,
-    );
-  }
-  // Replacing the text also drops the keyboard, so the answered offer cannot be clicked again.
-  if (ctx.editMessageText && message.text) {
-    try {
-      await ctx.editMessageText(`${message.text}\n\nSelected: ${choice.text}`);
-    } catch (error) {
-      deps.logger.warn?.(
-        `[source:${deps.projectId}/${deps.sourceId}] telegram choice edit failed: ${errorText(error)}`,
-      );
-    }
-  }
+  const choice = outcome;
+  await answerChoice(ctx, deps, `Sent: ${choice.text}`);
+  // Text and formatting stay; the spent keyboard shows the pick.
+  await editChoiceMarkup(ctx, deps, singleChoiceButton(`Selected: ${choice.text}`, callbackData));
+  // Failed external publication keeps the durable outbox for the next lifecycle call.
+  if (choice.interfaceConsent)
+    await reconcileInterfaceConsent(deps.dataDir, choice.sessionId).catch(() => {
+      deps.logger.warn?.("Interface consent publication blocked; decision retained locally.");
+    });
   // The clicked message is the truth about the thread: an offer sent before a
   // forum topic existed carries none, and a stale one would strand the reply.
   const messageThreadId =
@@ -1667,6 +1715,7 @@ async function handleAgentChoiceCallback(
     chat: { id: choice.chatId },
     from,
   };
+  if (!conversationIsCurrent(deps, choice.sessionId, conversation)) return;
   // A click posts no status message of its own.
   recordTelegramReplyTarget(deps, {
     sessionId: choice.sessionId,
@@ -1674,6 +1723,105 @@ async function handleAgentChoiceCallback(
     ...(messageThreadId !== undefined ? { messageThreadId } : {}),
   });
   deps.emit(TELEGRAM_MESSAGE_EVENT, eventData(clickMessage, choice.sessionId, choice.value));
+}
+
+/** Liveness before consumption: a dead lookup must leave the offer clickable. */
+async function claimAgentChoice(
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  pending: TelegramChoice,
+  token: string,
+  chatId: number,
+  actor: number,
+  conversation: TelegramConversation,
+): Promise<TelegramChoice | ChoiceRejection> {
+  const session = await findSession(deps, pending.sessionId);
+  if (!session) return choiceRejection("session-missing");
+  if (session.inactive)
+    return {
+      reason: "session-inactive",
+      alert: `${formatTelegramSessionLabel(session.id, session.title?.trim() || undefined)} is not active.`,
+    };
+  const decision = pending.interfaceConsent
+    ? await decideConsentClick(deps, pending.sessionId, token, chatId, actor, conversation)
+    : undefined;
+  const choice = takeTelegramChoice(deps.dataDir, deps.projectId, deps.sourceId, token, chatId);
+  // Lost the race with a sibling click or a superseding reply.
+  if (!choice) return choiceRejection("retired");
+  if (decision) writeInterfaceConsent(deps.dataDir, decision);
+  return choice;
+}
+
+/** Re-validates policy and task binding of an approval click; throws a named rejection. */
+async function decideConsentClick(
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  sessionId: string,
+  token: string,
+  chatId: number,
+  actor: number,
+  conversation: TelegramConversation,
+): Promise<InterfaceConsent> {
+  const policy = await consentPolicy(deps.config.allowedUsers).catch((error: unknown) => {
+    throw new ConsentRejectedError("policy-unavailable", errorText(error));
+  });
+  const record = readInterfaceConsent(deps.dataDir, sessionId);
+  if (
+    !record ||
+    policy.approverUserId !== record.approverUserId ||
+    !policy.repositories.includes(record.repository)
+  )
+    throw new ConsentRejectedError("policy-changed", "Interface approval policy changed");
+  const actualSession = readSession(deps.dataDir, sessionId);
+  if (
+    !actualSession ||
+    actualSession.project !== record.projectId ||
+    actualSession.branch !== record.branch ||
+    workspaceIdOf(actualSession) !== record.authority ||
+    (await readCurrentBranch(actualSession.worktreePath)) !== record.branch
+  )
+    throw new ConsentRejectedError("task-changed", "Interface approval task changed");
+  const relocated = readSession(deps.dataDir, sessionId);
+  if (
+    !relocated ||
+    relocated.project !== record.projectId ||
+    relocated.branch !== record.branch ||
+    workspaceIdOf(relocated) !== record.authority
+  )
+    throw new ConsentRejectedError("task-changed", "Interface approval task changed");
+  const validatedPath = relocated.worktreePath;
+  if (validatedPath !== actualSession.worktreePath) {
+    const [branch, repository] = await Promise.all([
+      readCurrentBranch(validatedPath),
+      repositoryOf(validatedPath),
+    ]);
+    if (branch !== record.branch || repository !== record.repository)
+      throw new ConsentRejectedError("task-changed", "Interface approval task changed");
+  }
+  const active = findTelegramChoice(deps.dataDir, deps.projectId, deps.sourceId, token, chatId);
+  const current = readInterfaceConsent(deps.dataDir, sessionId);
+  const currentSession = readSession(deps.dataDir, sessionId);
+  if (
+    !conversationIsCurrent(deps, sessionId, conversation) ||
+    !active?.interfaceConsent ||
+    !current ||
+    current.generation !== record.generation ||
+    current.challenge !== record.challenge ||
+    current.authority !== record.authority ||
+    !currentSession ||
+    currentSession.project !== record.projectId ||
+    currentSession.branch !== record.branch ||
+    currentSession.worktreePath !== validatedPath ||
+    workspaceIdOf(currentSession) !== record.authority
+  )
+    throw new ConsentRejectedError("superseded", "Interface approval superseded");
+  return decideConsent(current, {
+    session: sessionId,
+    sourceId: deps.sourceId,
+    projectId: deps.projectId,
+    chatId,
+    actor,
+    challenge: active.interfaceConsent.challenge,
+    decision: active.interfaceConsent.decision,
+  });
 }
 
 async function handleTelegramText(
@@ -1684,14 +1832,58 @@ async function handleTelegramText(
     ? { ...ctx.message, message_thread_id: telegramMessageThreadId(ctx.message) }
     : undefined;
   const deps = runtime.deps;
-  if (!(await rememberUpdate(runtime, ctx.update))) return;
+  const command = message?.text ? parseTelegramCommand(message.text, ctx.me?.username) : null;
+  const lifecycle = command?.kind === "complete" || command?.kind === "kill";
+  if (lifecycle && (!message || !isAllowed(deps.config, message.chat.id, message.from))) return;
+  const lifecycleKey =
+    lifecycle && message && message.chat.id < 0 && message.message_thread_id !== undefined
+      ? telegramBindingKey(message.chat.id, message.message_thread_id)
+      : undefined;
+  if (!(await rememberUpdate(runtime, ctx.update, lifecycleKey))) return;
   runtime.workbench.prune();
   if (!message?.text || !message.text.trim()) return;
   const from = message.from;
   if (!isAllowed(deps.config, message.chat.id, from)) return;
   if (!from) return;
 
-  const command = parseTelegramCommand(message.text, runtime.botUsername);
+  if (command?.kind === "complete" || command?.kind === "kill") {
+    if (command.invalidArgs) {
+      await ctx.reply(`Usage: /${command.kind}`);
+      return;
+    }
+    if (lifecycleKey === undefined) {
+      await ctx.reply(`Use /${command.kind} inside a bound forum topic.`);
+      return;
+    }
+    const selected = runtime.bindings.get(lifecycleKey);
+    const current = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId).get(
+      lifecycleKey,
+    );
+    if (current) runtime.bindings.set(lifecycleKey, current);
+    else runtime.bindings.delete(lifecycleKey);
+    if (!current) {
+      await ctx.reply("No Spur session bound here.");
+      return;
+    }
+    if (selected?.sessionId !== current.sessionId) {
+      await ctx.reply("Topic binding changed. Send the command again.");
+      return;
+    }
+    if (!deps.workbench) {
+      await ctx.reply("Session operation unavailable.");
+      return;
+    }
+    try {
+      if (command.kind === "complete") await deps.workbench.completeSession(current.sessionId);
+      else await deps.workbench.killSession(current.sessionId);
+      for (const [key, binding] of runtime.bindings) {
+        if (binding.sessionId === current.sessionId) runtime.bindings.delete(key);
+      }
+    } catch (error) {
+      await ctx.reply(`Failed to ${command.kind} session: ${redactedErrorText(deps, error)}`);
+    }
+    return;
+  }
   const owner: WorkbenchOwner = {
     userId: from.id,
     chatId: message.chat.id,
@@ -1742,31 +1934,21 @@ async function handleTelegramText(
       await ctx.reply(`No active Spur session ${command.sessionId}.`);
       return;
     }
-    if (
-      sessionBindingConflict(runtime, message.chat.id, message.message_thread_id, command.sessionId)
-    ) {
-      await ctx.reply(`Spur session ${command.sessionId} is already bound elsewhere.`);
-      return;
-    }
     clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
     try {
-      await bindTelegramThread(
+      const conversation = await bindTelegramThread(
         runtime,
         message.chat.id,
         message.message_thread_id,
         command.sessionId,
       );
+      await ctx.reply(conversationText(conversation));
     } catch (error) {
       await ctx.reply(
         `Failed to bind Spur session ${command.sessionId}: ${redactedErrorText(deps, error)}`,
       );
       return;
     }
-    await ctx.reply(
-      message.chat.id < 0 && message.message_thread_id !== undefined
-        ? "Bound this Telegram thread."
-        : `Bound this Telegram thread to Spur session ${command.sessionId}.`,
-    );
     return;
   }
   if (command?.kind === "watch_menu") {
@@ -1838,6 +2020,7 @@ async function routeTelegramPrompt(
   message: TelegramTextMessage,
   from: { id: number; username?: string },
   text: string,
+  attachments?: SendMessageAttachment[],
 ): Promise<void> {
   const deps = runtime.deps;
   const key = telegramBindingKey(message.chat.id, message.message_thread_id);
@@ -1859,6 +2042,7 @@ async function routeTelegramPrompt(
       agent: peekedSpawn.agent,
       project: peekedSpawn.project,
       prompt: text,
+      ...(attachments ? { attachments } : {}),
     });
     return;
   }
@@ -1870,25 +2054,14 @@ async function routeTelegramPrompt(
 
   // Private/group-main bot-message replies reach their sender without
   // changing bindings or auto-spawning.
-  const repliedTo = message.reply_to_message?.message_id;
-  // Forum topics retain their binding, including after another session takes over.
-  const ownerId =
-    repliedTo === undefined || (message.chat.id < 0 && message.message_thread_id !== undefined)
-      ? null
-      : findTelegramMessageSession(
-          deps.dataDir,
-          deps.projectId,
-          deps.sourceId,
-          message.chat.id,
-          repliedTo,
-        );
+  const ownerId = telegramReplyOwner(deps, message);
   if (ownerId !== null) {
     const owner = await findSession(deps, ownerId);
     if (!owner) {
       await ctx.reply(`Spur session ${ownerId} is gone. Message not delivered.`);
       return;
     }
-    await deliverRoutedPrompt(deps, ctx, message, owner, text, undefined);
+    await deliverRoutedPrompt(runtime, ctx, message, owner, text, undefined, attachments);
     return;
   }
 
@@ -1916,6 +2089,7 @@ async function routeTelegramPrompt(
           text,
           key,
           acquireResult.autoSpawn,
+          attachments,
         );
         return;
       case "off":
@@ -1969,6 +2143,7 @@ async function routeTelegramPrompt(
           text,
           key,
           acquireResult.autoSpawn,
+          attachments,
         );
         return;
       case "off":
@@ -1983,7 +2158,7 @@ async function routeTelegramPrompt(
     );
     return;
   }
-  await deliverRoutedPrompt(deps, ctx, message, session, text, ackId);
+  await deliverRoutedPrompt(runtime, ctx, message, session, text, ackId, attachments);
 }
 
 /** Forum-topic ack posted before the session lookup; edited to its final text afterwards. */
@@ -1996,10 +2171,26 @@ async function postDeliveryAck(
     return extractMessageId(await ctx.reply(`Received. Delivering to ${sessionId}...`));
   } catch (error) {
     deps.logger.warn?.(
-      `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${errorText(error)}`,
+      `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${redactedErrorText(deps, error)}`,
     );
     return undefined;
   }
+}
+
+function telegramReplyOwner(
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  message: TelegramTextMessage,
+): string | null {
+  const repliedTo = message.reply_to_message?.message_id;
+  return repliedTo === undefined || (message.chat.id < 0 && message.message_thread_id !== undefined)
+    ? null
+    : findTelegramMessageSession(
+        deps.dataDir,
+        deps.projectId,
+        deps.sourceId,
+        message.chat.id,
+        repliedTo,
+      );
 }
 
 /**
@@ -2022,13 +2213,20 @@ function placeholderText(label: string, state: string): string {
  * message gets a notice instead, so the user never waits on a dead agent.
  */
 async function deliverRoutedPrompt(
-  deps: SourceStartDeps<TelegramSourceConfig>,
+  runtime: TelegramRuntime,
   ctx: Pick<TelegramTextContext, "reply" | "api">,
   message: TelegramTextMessage,
   session: SourceSessionListItem,
   text: string,
-  ackMessageId: number | undefined,
+  ackMessageId?: number | undefined,
+  attachments?: SendMessageAttachment[],
+  stillCurrent?: () => boolean,
 ): Promise<void> {
+  const deps = runtime.deps;
+  const current = (): boolean => !mediaIsAborted(runtime) && (!stillCurrent || stillCurrent());
+  if (!current()) return;
+  const conversation = await guardAgentInput(runtime, ctx, message, session.id);
+  if (!conversation || !current()) return;
   const label = formatTelegramSessionLabel(session.id, session.title?.trim() || undefined);
   if (session.inactive) {
     await editOrReply(
@@ -2038,6 +2236,32 @@ async function deliverRoutedPrompt(
       `${label} is not active. Message not delivered.`,
     );
     return;
+  }
+  if (attachments?.length) {
+    if (!deps.prepareSessionMessage) {
+      await ctx.reply("Attachment delivery is unavailable. Message not delivered.");
+      return;
+    }
+    const target = await findSession(deps, session.id);
+    if (!current() || !conversationIsCurrent(deps, session.id, conversation)) return;
+    if (!target || target.inactive) {
+      await ctx.reply("Agent is not active. Message not delivered.");
+      return;
+    }
+    try {
+      text = await deps.prepareSessionMessage(session.id, { message: text, attachments });
+    } catch (error) {
+      if (current())
+        await ctx.reply(`Attachment delivery failed: ${redactedErrorText(deps, error)}`);
+      return;
+    }
+    if (!current() || !conversationIsCurrent(deps, session.id, conversation)) return;
+    const preparedTarget = await findSession(deps, session.id);
+    if (!current() || !conversationIsCurrent(deps, session.id, conversation)) return;
+    if (!preparedTarget || preparedTarget.inactive) {
+      await ctx.reply("Agent is not active. Message not delivered.");
+      return;
+    }
   }
   let statusMessageId: number | undefined;
   try {
@@ -2049,8 +2273,18 @@ async function deliverRoutedPrompt(
     );
   } catch (error) {
     deps.logger.warn?.(
-      `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${errorText(error)}`,
+      `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${redactedErrorText(deps, error)}`,
     );
+  }
+  const currentSession = await findSession(deps, session.id);
+  if (
+    !currentSession ||
+    currentSession.inactive ||
+    !current() ||
+    !conversationIsCurrent(deps, session.id, conversation)
+  ) {
+    if (current()) await ctx.reply("Agent conversation changed. Message not delivered.");
+    return;
   }
   // Read and replaced in one synchronous step: a reply that claimed the old
   // placeholder before this point is not superseded, and one that starts after
@@ -2150,40 +2384,28 @@ function isAborted(deps: SourceStartDeps<TelegramSourceConfig>): boolean {
   return deps.signal.aborted;
 }
 
+function mediaIsAborted(runtime: TelegramRuntime): boolean {
+  return runtime.deps.signal.aborted || runtime.mediaAbort.signal.aborted;
+}
+
 // ffmpeg + whisper_cpp can run to ~4 minutes on a slow host
 // (packages/web/src/lib/voice.ts:951-963); this bounds the detached task so
 // a stuck transcription cannot hold a voice note open indefinitely.
 const VOICE_TRANSCRIBE_TIMEOUT_MS = 300_000;
 
-/**
- * Downloads the voice note referenced by `ctx.getFile()` and posts it to the
- * web UI's transcribe route. Throws on any failure; the caller decides how
- * to surface it. Voice notes are always OGG/Opus, so the fixed `voice.ogg`
- * filename picks the right decoder (packages/web/src/lib/voice.ts:937/1015
- * take the extension from the filename).
- */
 async function transcribeTelegramVoice(
-  ctx: Pick<TelegramTextContext, "getFile">,
+  audio: Uint8Array<ArrayBuffer>,
   deps: SourceStartDeps<TelegramSourceConfig>,
   webBaseUrl: string,
+  stopSignal: AbortSignal,
 ): Promise<string> {
-  if (!ctx.getFile) {
-    throw new Error("Telegram file API unavailable");
-  }
-  const signal = AbortSignal.any([deps.signal, AbortSignal.timeout(VOICE_TRANSCRIBE_TIMEOUT_MS)]);
-  const file = await ctx.getFile(signal);
-  if (!file.file_path) {
-    throw new Error("Telegram returned no file path for this voice note");
-  }
-  const fileUrl = `https://api.telegram.org/file/bot${deps.config.token}/${file.file_path}`;
-  const fileResponse = await fetch(fileUrl, { signal });
-  if (!fileResponse.ok) {
-    throw new Error(`Telegram file download failed with status ${fileResponse.status}`);
-  }
-  const audioBuffer = await fileResponse.arrayBuffer();
-
+  const signal = AbortSignal.any([
+    deps.signal,
+    stopSignal,
+    AbortSignal.timeout(VOICE_TRANSCRIBE_TIMEOUT_MS),
+  ]);
   const form = new FormData();
-  form.set("audio", new File([audioBuffer], "voice.ogg", { type: "audio/ogg" }));
+  form.set("audio", new File([audio], "voice.ogg", { type: "audio/ogg" }));
   const transcribeResponse = await fetch(`${webBaseUrl}/api/runtime/voice/transcribe`, {
     method: "POST",
     body: form,
@@ -2201,118 +2423,472 @@ async function transcribeTelegramVoice(
   return text;
 }
 
-/**
- * The detached task behind a voice update: transcribes, echoes the
- * transcript back to the chat, then routes it exactly like typed text. Never
- * awaited by the sink handler — see `handleTelegramVoice`. Every step after
- * an `await` re-checks `deps.signal.aborted` so a source `stop()` mid-flight
- * degrades to silence rather than a stale reply or a spawn after shutdown.
- */
-async function transcribeAndRoute(
-  runtime: TelegramRuntime,
-  ctx: TelegramTextContext,
-  message: TelegramTextMessage,
-  from: { id: number; username?: string },
-  statusMessageId: number | undefined,
-): Promise<void> {
-  const deps = runtime.deps;
-  const webBaseUrl = await deps.resolveWebBaseUrl();
-  if (isAborted(deps)) return;
-  if (webBaseUrl === null) {
-    await editOrReply(
-      ctx,
-      message.chat.id,
-      statusMessageId,
-      "Voice transcription is disabled for this Spur instance.",
-    );
-    return;
-  }
-
-  let transcript: string;
-  try {
-    transcript = await transcribeTelegramVoice(ctx, deps, webBaseUrl);
-  } catch (error) {
-    deps.logger.warn?.(
-      `[source:${deps.projectId}/${deps.sourceId}] telegram voice transcription failed: ${redactedErrorText(deps, error)}`,
-    );
-    if (isAborted(deps)) return;
-    try {
-      await editOrReply(
-        ctx,
-        message.chat.id,
-        statusMessageId,
-        `Voice transcription failed: ${redactedErrorText(deps, error)}`,
-      );
-    } catch (noticeError) {
-      deps.logger.warn?.(
-        `[source:${deps.projectId}/${deps.sourceId}] telegram voice failure notice failed: ${redactedErrorText(deps, noticeError)}`,
-      );
+type TelegramIntake =
+  | {
+      kind: "agent";
+      binding: string | undefined;
+      sessionId: string;
+      conversation: TelegramConversation;
     }
-    return;
-  }
-  if (isAborted(deps)) return;
+  | { kind: "spawn"; binding: string | undefined; pending: TelegramPendingSpawn; autoSpawn?: never }
+  | {
+      kind: "spawn";
+      binding: string | undefined;
+      pending: null;
+      autoSpawn: TelegramAutoSpawnConfig;
+    };
 
-  const trimmed = transcript.trim();
-  if (!trimmed) {
-    await editOrReply(
-      ctx,
-      message.chat.id,
-      statusMessageId,
-      "Could not transcribe voice message (empty transcript).",
-    );
-    return;
-  }
-
-  try {
-    await editOrReply(ctx, message.chat.id, statusMessageId, `Heard: "${trimmed}"`);
-  } catch (error) {
-    deps.logger.warn?.(
-      `[source:${deps.projectId}/${deps.sourceId}] telegram voice echo failed: ${redactedErrorText(deps, error)}`,
-    );
-  }
-  if (isAborted(deps)) return;
-
-  await routeTelegramPrompt(runtime, ctx, message, from, trimmed);
+function telegramIntakeIsCurrent(
+  runtime: TelegramRuntime,
+  message: TelegramTextMessage,
+  userId: number,
+  intake: TelegramIntake,
+): boolean {
+  const deps = runtime.deps;
+  if (mediaIsAborted(runtime)) return false;
+  if (!isAllowed(deps.config, message.chat.id, { id: userId })) return false;
+  const binding = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId).get(
+    telegramBindingKey(message.chat.id, message.message_thread_id),
+  )?.sessionId;
+  if (binding !== intake.binding) return false;
+  if (intake.kind === "agent")
+    return conversationIsCurrent(deps, intake.sessionId, intake.conversation);
+  const pending = peekPendingSpawn(runtime, message.chat.id, message.message_thread_id, userId);
+  if (intake.pending !== null) return pending === intake.pending;
+  return (
+    pending === null &&
+    deps.config.autoSpawn?.enabled === true &&
+    JSON.stringify(deps.config.autoSpawn) === JSON.stringify(intake.autoSpawn)
+  );
 }
 
-/**
- * Sink handler for `message:voice`. Does only cheap, ordered work —
- * `rememberUpdate`, allow-check, one ack reply — then detaches the
- * transcribe-and-route task and returns, so `sink.concurrency: 1` never
- * blocks the source on a multi-minute transcription.
- */
-async function handleTelegramVoice(
+async function captureMediaIntake(
+  ctx: TelegramTextContext,
+  runtime: TelegramRuntime,
+  message: TelegramTextMessage,
+  from: { id: number; username?: string },
+): Promise<TelegramIntake | null> {
+  const deps = runtime.deps;
+  const binding = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId).get(
+    telegramBindingKey(message.chat.id, message.message_thread_id),
+  )?.sessionId;
+  const replyOwner = telegramReplyOwner(deps, message);
+  const pending = peekPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
+  if (pending === "expired") {
+    clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
+    await ctx.reply(SPAWN_EXPIRED_TEXT);
+    return null;
+  }
+  if (pending?.project !== undefined) return { kind: "spawn", binding, pending };
+  if (replyOwner !== null || binding !== undefined) {
+    const sessionId = replyOwner ?? binding;
+    if (sessionId === undefined) return null;
+    const conversation = await guardAgentInput(runtime, ctx, message, sessionId);
+    if (!conversation || mediaIsAborted(runtime)) return null;
+    const intake: TelegramIntake = { kind: "agent", binding, sessionId, conversation };
+    const session = await findSession(deps, sessionId);
+    if (!telegramIntakeIsCurrent(runtime, message, from.id, intake)) return null;
+    if (!session || session.inactive) {
+      await ctx.reply("Agent is not active. Message not delivered.");
+      return null;
+    }
+    return intake;
+  }
+  if (pending) {
+    await ctx.reply("Pick a project for the pending /spawn, or run /spawn again.");
+    return null;
+  }
+  if (deps.config.autoSpawn?.enabled === true)
+    return {
+      kind: "spawn",
+      binding,
+      pending: null,
+      autoSpawn: structuredClone(deps.config.autoSpawn),
+    };
+  await ctx.reply("Use /spawn to send an attachment task.");
+  return null;
+}
+
+type TelegramMediaKind =
+  | "photo"
+  | "animation"
+  | "audio"
+  | "document"
+  | "video"
+  | "video_note"
+  | "voice"
+  | "sticker";
+
+interface TelegramMediaMember {
+  ctx: TelegramTextContext;
+  message: TelegramTextMessage;
+  kind: TelegramMediaKind;
+  file: TelegramFile;
+  name: string;
+}
+
+interface TelegramMediaGroup {
+  members: TelegramMediaMember[];
+  intake: TelegramIntake;
+  from: { id: number; username?: string };
+  quietTimer?: ReturnType<typeof setTimeout>;
+  deadlineTimer: ReturnType<typeof setTimeout>;
+  processing: boolean;
+}
+
+const TELEGRAM_MIME_EXTENSIONS = new Map([
+  ["image/jpeg", "jpg"],
+  ["image/png", "png"],
+  ["image/gif", "gif"],
+  ["image/webp", "webp"],
+  ["audio/ogg", "ogg"],
+  ["audio/mpeg", "mp3"],
+  ["audio/mp4", "m4a"],
+  ["audio/wav", "wav"],
+  ["video/mp4", "mp4"],
+  ["video/webm", "webm"],
+  ["application/pdf", "pdf"],
+  ["application/zip", "zip"],
+]);
+
+function telegramMediaMember(
+  ctx: TelegramTextContext,
+  message: TelegramTextMessage,
+): TelegramMediaMember | null {
+  // Match Grammy's getFile priority; animation also has a document alias.
+  const kinds: TelegramMediaKind[] = [
+    "photo",
+    "animation",
+    "audio",
+    "document",
+    "video",
+    "video_note",
+    "voice",
+    "sticker",
+  ];
+  for (const kind of kinds) {
+    const file = kind === "photo" ? message.photo?.at(-1) : message[kind];
+    if (!file) continue;
+    const extension =
+      kind === "photo"
+        ? "jpg"
+        : kind === "voice"
+          ? "ogg"
+          : kind === "sticker"
+            ? message.sticker?.is_video
+              ? "webm"
+              : message.sticker?.is_animated
+                ? "tgs"
+                : "webp"
+            : (TELEGRAM_MIME_EXTENSIONS.get(file.mime_type ?? "") ??
+              (kind === "audio" ? "mp3" : kind === "document" ? "bin" : "mp4"));
+    const fallback = `telegram-${message.message_id}.${extension}`;
+    let name =
+      file.file_name
+        ?.split(/[\\/]/)
+        .at(-1)
+        ?.replace(/[^\w.-]/g, "_") || fallback;
+    if (/^\.+$/.test(name)) name = fallback;
+    if (name.length > 160) {
+      const dot = name.lastIndexOf(".");
+      const suffix = dot > 0 ? name.slice(dot).slice(-80) : "";
+      name = name.slice(0, 160 - suffix.length) + suffix;
+    }
+    return { ctx, message, kind, file, name };
+  }
+  return null;
+}
+
+async function downloadTelegramMedia(
+  runtime: TelegramRuntime,
+  member: TelegramMediaMember,
+): Promise<Uint8Array<ArrayBuffer>> {
+  if ((member.file.file_size ?? 0) > MAX_ATTACHMENT_BYTES)
+    throw new Error("Attachment exceeds 5MB");
+  if (!member.ctx.getFile) throw new Error("Telegram file API unavailable");
+  const signal = AbortSignal.any([
+    runtime.deps.signal,
+    runtime.mediaAbort.signal,
+    AbortSignal.timeout(60_000),
+  ]);
+  const file = await member.ctx.getFile(signal);
+  if (!file.file_path) throw new Error("Telegram returned no file path for this attachment");
+  const response = await fetch(
+    `https://api.telegram.org/file/bot${runtime.deps.config.token}/${file.file_path}`,
+    { signal },
+  );
+  if (!response.ok) throw new Error(`Telegram file download failed with status ${response.status}`);
+  if (!response.body) throw new Error("Telegram returned an empty attachment");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      byteLength += chunk.value.byteLength;
+      if (byteLength > MAX_ATTACHMENT_BYTES) {
+        await reader.cancel();
+        throw new Error("Attachment exceeds 5MB");
+      }
+      chunks.push(chunk.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (byteLength === 0) throw new Error("Telegram returned an empty attachment");
+  return Buffer.concat(chunks, byteLength);
+}
+
+async function runMediaTask(
+  runtime: TelegramRuntime,
+  members: TelegramMediaMember[],
+  from: { id: number; username?: string },
+  intake: TelegramIntake,
+): Promise<void> {
+  const first = members[0];
+  if (!first) return;
+  const { ctx, message } = first;
+  const deps = runtime.deps;
+  const current = (): boolean => telegramIntakeIsCurrent(runtime, message, from.id, intake);
+  const requireCurrent = async (): Promise<void> => {
+    if (!current()) throw new Error("Attachment context changed. Send the message again.");
+    if (intake.kind === "agent") {
+      const session = await findSession(deps, intake.sessionId);
+      if (!current() || !session || session.inactive)
+        throw new Error("Agent conversation changed. Message not delivered.");
+    }
+  };
+  try {
+    const attachments: SendMessageAttachment[] = [];
+    const captions: string[] = [];
+    for (const member of members) {
+      await requireCurrent();
+      let statusMessageId: number | undefined;
+      if (member.kind === "voice") {
+        try {
+          statusMessageId = extractMessageId(await ctx.reply("Transcribing voice message..."));
+        } catch (error) {
+          deps.logger.warn?.(
+            `[source:${deps.projectId}/${deps.sourceId}] telegram voice ack failed: ${redactedErrorText(deps, error)}`,
+          );
+        }
+        await requireCurrent();
+      }
+      const bytes = await downloadTelegramMedia(runtime, member);
+      await requireCurrent();
+      attachments.push({ name: member.name, data: Buffer.from(bytes).toString("base64") });
+      if (member.message.caption?.trim()) captions.push(member.message.caption.trim());
+      if (member.kind === "voice") {
+        let transcript = "";
+        let notice: string;
+        try {
+          const webBaseUrl = await deps.resolveWebBaseUrl();
+          await requireCurrent();
+          if (webBaseUrl === null) {
+            notice =
+              "Voice transcription is disabled for this Spur instance. Sending original file.";
+          } else {
+            transcript = (
+              await transcribeTelegramVoice(bytes, deps, webBaseUrl, runtime.mediaAbort.signal)
+            ).trim();
+            await requireCurrent();
+            notice = transcript
+              ? intake.kind === "agent"
+                ? `Heard: "${transcript}"`
+                : "Voice task received."
+              : "Empty voice transcript. Sending original file.";
+          }
+        } catch (error) {
+          deps.logger.warn?.(
+            `[source:${deps.projectId}/${deps.sourceId}] telegram voice transcription failed: ${redactedErrorText(deps, error)}`,
+          );
+          await requireCurrent();
+          notice = `Voice transcription failed: ${redactedErrorText(deps, error)}. Sending original file.`;
+        }
+        try {
+          await editOrReply(ctx, message.chat.id, statusMessageId, notice);
+        } catch (error) {
+          deps.logger.warn?.(
+            `[source:${deps.projectId}/${deps.sourceId}] telegram voice echo failed: ${redactedErrorText(deps, error)}`,
+          );
+        }
+        await requireCurrent();
+        if (transcript) captions.push(transcript);
+      }
+    }
+    await requireCurrent();
+    const text = captions.join("\n") || "Inspect the attached files.";
+    if (intake.kind === "agent") {
+      const session = await findSession(deps, intake.sessionId);
+      await requireCurrent();
+      if (session)
+        await deliverRoutedPrompt(
+          runtime,
+          ctx,
+          message,
+          session,
+          text,
+          undefined,
+          attachments,
+          current,
+        );
+      return;
+    }
+    if (intake.pending !== null) {
+      const project = intake.pending.project;
+      if (project === undefined) throw new Error("Pick a project for the pending /spawn.");
+      clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
+      const consumedCurrent = (): boolean =>
+        !mediaIsAborted(runtime) &&
+        peekPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id) === null &&
+        readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId).get(
+          telegramBindingKey(message.chat.id, message.message_thread_id),
+        )?.sessionId === intake.binding;
+      await bindSpawnedSession(
+        runtime,
+        ctx,
+        message.chat.id,
+        message.message_thread_id,
+        {
+          agent: intake.pending.agent,
+          project,
+          prompt: text,
+          attachments,
+        },
+        undefined,
+        consumedCurrent,
+      );
+    } else {
+      const key = telegramBindingKey(message.chat.id, message.message_thread_id);
+      const acquired = tryAcquireAutoSpawn(runtime, key);
+      if (acquired.status !== "acquired") throw new Error("Spawn already in progress here.");
+      await runAutoSpawn(
+        runtime,
+        ctx,
+        message.chat.id,
+        message.message_thread_id,
+        text,
+        key,
+        acquired.autoSpawn,
+        attachments,
+        current,
+      );
+    }
+  } catch (error) {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram attachment failed: ${redactedErrorText(deps, error)}`,
+    );
+    if (!mediaIsAborted(runtime))
+      await ctx.reply(`Attachment task failed: ${redactedErrorText(deps, error)}`);
+  }
+}
+
+function detachMediaTask(runtime: TelegramRuntime, task: Promise<void>): void {
+  void task.catch((error: unknown) => {
+    runtime.deps.logger.warn?.(
+      `[source:${runtime.deps.projectId}/${runtime.deps.sourceId}] telegram attachment notice failed: ${redactedErrorText(runtime.deps, error)}`,
+    );
+  });
+}
+
+function closeMediaGroup(runtime: TelegramRuntime, key: string, group: TelegramMediaGroup): void {
+  clearTimeout(group.quietTimer);
+  clearTimeout(group.deadlineTimer);
+  group.processing = true;
+  runtime.closedMediaGroups.set(key, {
+    expiresAt: Date.now() + 10 * 60_000,
+    messageIds: new Set(group.members.map((member) => member.message.message_id)),
+  });
+}
+
+async function handleTelegramMedia(
   ctx: TelegramTextContext,
   runtime: TelegramRuntime,
 ): Promise<void> {
   const deps = runtime.deps;
+  if (mediaIsAborted(runtime)) return;
   if (!(await rememberUpdate(runtime, ctx.update))) return;
+  if (mediaIsAborted(runtime)) return;
   const message = ctx.message
     ? { ...ctx.message, message_thread_id: telegramMessageThreadId(ctx.message) }
     : undefined;
-  if (!message?.voice) return;
+  if (!message?.from || !isAllowed(deps.config, message.chat.id, message.from)) return;
+  const member = telegramMediaMember(ctx, message);
+  if (!member) return;
   const from = message.from;
-  if (!isAllowed(deps.config, message.chat.id, from)) return;
-  if (!from) return;
-
-  let statusMessageId: number | undefined;
-  try {
-    statusMessageId = extractMessageId(await ctx.reply("Transcribing voice message..."));
-  } catch (error) {
-    deps.logger.warn?.(
-      `[source:${deps.projectId}/${deps.sourceId}] telegram voice ack failed: ${errorText(error)}`,
-    );
+  if (!message.media_group_id) {
+    const intake = await captureMediaIntake(ctx, runtime, message, from);
+    if (mediaIsAborted(runtime)) return;
+    if (intake) detachMediaTask(runtime, runMediaTask(runtime, [member], from, intake));
+    return;
   }
-
-  void transcribeAndRoute(runtime, ctx, message, from, statusMessageId).catch(
-    async (error: unknown) => {
-      deps.logger.warn?.(
-        `[source:${deps.projectId}/${deps.sourceId}] telegram voice failed: ${redactedErrorText(deps, error)}`,
+  const key = `${telegramBindingKey(message.chat.id, message.message_thread_id)}:${from.id}:${message.media_group_id}`;
+  for (const [closedKey, closed] of runtime.closedMediaGroups)
+    if (closed.expiresAt <= Date.now()) runtime.closedMediaGroups.delete(closedKey);
+  const closed = runtime.closedMediaGroups.get(key);
+  if (closed) {
+    if (closed.messageIds.has(message.message_id)) return;
+    await ctx.reply("Album already closed. Resend all files as a new album.");
+    return;
+  }
+  let group = runtime.mediaGroups.get(key);
+  if (!group) {
+    if (
+      runtime.mediaGroups.size >= 10 ||
+      runtime.closedMediaGroups.size + runtime.mediaGroups.size >= 1000
+    ) {
+      await ctx.reply("Attachment intake is busy. Resend the album later.");
+      return;
+    }
+    const intake = await captureMediaIntake(ctx, runtime, message, from);
+    if (!intake || mediaIsAborted(runtime)) return;
+    const deadlineTimer = setTimeout(() => {
+      const collecting = runtime.mediaGroups.get(key);
+      if (!collecting || collecting.processing) return;
+      if (mediaIsAborted(runtime)) {
+        clearTimeout(collecting.quietTimer);
+        runtime.mediaGroups.delete(key);
+        return;
+      }
+      closeMediaGroup(runtime, key, collecting);
+      runtime.mediaGroups.delete(key);
+      detachMediaTask(
+        runtime,
+        ctx.reply("Album collection timed out. Resend all files.").then(() => undefined),
       );
-      if (isAborted(deps)) return;
-      await noticeUndelivered(deps, ctx);
-    },
-  );
+    }, 5_000);
+    group = {
+      members: [],
+      intake,
+      from,
+      processing: false,
+      deadlineTimer,
+    };
+    runtime.mediaGroups.set(key, group);
+  }
+  if (group.members.some((existing) => existing.message.message_id === message.message_id)) return;
+  group.members.push(member);
+  clearTimeout(group.quietTimer);
+  if (group.members.length > MAX_ATTACHMENTS) {
+    closeMediaGroup(runtime, key, group);
+    runtime.mediaGroups.delete(key);
+    await ctx.reply(`Too many attachments (max ${MAX_ATTACHMENTS}). Resend the album.`);
+    return;
+  }
+  const collected = group;
+  group.quietTimer = setTimeout(() => {
+    closeMediaGroup(runtime, key, collected);
+    detachMediaTask(
+      runtime,
+      runMediaTask(
+        runtime,
+        collected.members.sort((a, b) => a.message.message_id - b.message.message_id),
+        collected.from,
+        collected.intake,
+      ).finally(() => runtime.mediaGroups.delete(key)),
+    );
+  }, 750);
 }
 
 async function startTelegramSource(
@@ -2328,16 +2904,37 @@ async function startTelegramSource(
     ...(lastUpdateId !== undefined ? { lastUpdateId } : {}),
     pendingSpawns: new Map(),
     autoSpawnInFlight: new Set(),
+    mediaAbort: new AbortController(),
+    mediaGroups: new Map(),
+    closedMediaGroups: new Map(),
     workbench: new TelegramWorkbench(),
-    persistBindings(options: { removeKeys?: string[] } = {}): Promise<void> {
-      const removedKeys = new Set(options.removeKeys ?? []);
-      const next = writeQueue.then(() =>
-        writeTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId, bindings.values(), {
-          ...(runtime.lastUpdateId !== undefined ? { lastUpdateId: runtime.lastUpdateId } : {}),
-          preserveExisting: true,
-          ...(removedKeys.size > 0 ? { removeKeys: removedKeys } : {}),
-        }),
-      );
+    persistBindings(): Promise<void> {
+      const next = writeQueue.then(() => {
+        const persisted = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId);
+        bindings.clear();
+        for (const [key, binding] of persisted) {
+          bindings.set(key, binding);
+        }
+        for (const [key, binding] of bindings) {
+          const record = readSession(deps.dataDir, binding.sessionId);
+          if (
+            record?.status === "completed" ||
+            record?.status === "killed" ||
+            telegramTopicIsDeleting(deps.dataDir, binding.chatId, binding.messageThreadId)
+          ) {
+            bindings.delete(key);
+          }
+        }
+        return writeTelegramBindings(
+          deps.dataDir,
+          deps.projectId,
+          deps.sourceId,
+          bindings.values(),
+          {
+            ...(runtime.lastUpdateId !== undefined ? { lastUpdateId: runtime.lastUpdateId } : {}),
+          },
+        );
+      });
       writeQueue = next.catch((error: unknown) => {
         logPersistError(deps, error);
       });
@@ -2351,7 +2948,7 @@ async function startTelegramSource(
   const bot = new Bot(deps.config.token);
   try {
     const me = await bot.api.getMe();
-    runtime.botUsername = me.username;
+    runtime.botIdentity = { id: me.id, ...(me.username ? { username: me.username } : {}) };
   } catch (error) {
     logSetupError(deps, error);
     logSpurEvent(deps.dataDir, {
@@ -2377,9 +2974,28 @@ async function startTelegramSource(
   bot.on("message:text", async (ctx: Context) => {
     await handleTelegramText(ctx as TelegramTextContext, runtime);
   });
-  bot.on("message:voice", async (ctx: Context) => {
-    await handleTelegramVoice(ctx as TelegramTextContext, runtime);
-  });
+  bot.on(
+    [
+      "message:photo",
+      "message:animation",
+      "message:audio",
+      "message:document",
+      "message:video",
+      "message:video_note",
+      "message:voice",
+      "message:sticker",
+    ],
+    async (ctx: Context) => {
+      try {
+        await handleTelegramMedia(ctx as TelegramTextContext, runtime);
+      } catch (error) {
+        deps.logger.warn?.(
+          `[source:${deps.projectId}/${deps.sourceId}] telegram attachment failed: ${redactedErrorText(deps, error)}`,
+        );
+        if (!mediaIsAborted(runtime)) await noticeUndelivered(deps, ctx as TelegramTextContext);
+      }
+    },
+  );
   bot.on("callback_query:data", async (ctx: Context) => {
     await handleTelegramCallback(ctx as TelegramCallbackContext, runtime);
   });
@@ -2403,6 +3019,13 @@ async function startTelegramSource(
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
+    runtime.mediaAbort.abort();
+    for (const group of runtime.mediaGroups.values()) {
+      clearTimeout(group.quietTimer);
+      clearTimeout(group.deadlineTimer);
+    }
+    runtime.mediaGroups.clear();
+    runtime.closedMediaGroups.clear();
     runtime.workbench.clear();
     const stopTask = handle.stop() as Promise<void> | undefined;
     try {
@@ -2429,6 +3052,7 @@ async function startTelegramSource(
 
   return {
     stop,
+    ...(runtime.botIdentity ? { telegramBotIdentity: runtime.botIdentity } : {}),
   };
 }
 

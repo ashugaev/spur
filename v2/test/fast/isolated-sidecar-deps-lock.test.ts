@@ -67,6 +67,34 @@ if [[ $# -eq 0 ]]; then
   exec "$SPUR_TEST_REAL_NODE"
 fi
 case "$1" in
+  "$SPUR_TEST_REPO/v2/bin/isolated-daemon-owner.mjs")
+    if [[ "\${2:-}" == preflight ]]; then
+      exec "$SPUR_TEST_REAL_NODE" "$@"
+    fi
+    if [[ "\${2:-}" == request ]]; then
+      echo "owner-control" >> "$SPUR_TEST_LOG"
+      exit 0
+    fi
+    echo "daemon-start" >> "$SPUR_TEST_LOG"
+    config="$3"
+    runtime="$5"
+    directory="\${config%/*}"
+    starttime="$("$SPUR_TEST_REAL_NODE" "$SPUR_TEST_ENDPOINT_FIXTURE" --owner-starttime "$$")"
+    cat > "$runtime" <<ENV
+SPUR_ISOLATED_CONFIG="$config"
+SPUR_ISOLATED_UI_ENDPOINT_FILE="$directory/ui-endpoint.json"
+SPUR_ISOLATED_DATA_DIR="$directory/data"
+SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:4791"
+SPUR_ISOLATED_TMUX_SOCKET_NAME="spur-4791"
+SPUR_ISOLATED_DAEMON_PID="$$"
+SPUR_ISOLATED_DAEMON_STARTTIME="$starttime"
+ENV
+    if [[ "\${SPUR_TEST_DAEMON_STDIN:-}" == "1" ]]; then
+      echo "daemon-ready"
+      read -r release || true
+    fi
+    exit 0
+    ;;
   "$SPUR_TEST_REPO/v2/dist/cli.js")
     if [[ "\${2:-}" == "--version" ]]; then
       echo "cli-probe" >> "$SPUR_TEST_LOG"
@@ -131,7 +159,7 @@ fi
 if [[ "$1" == "--dir" && "$3" == "build" ]]; then
   echo "build" >> "$SPUR_TEST_LOG"
   mkdir -p "$SPUR_TEST_REPO/v2/dist"
-  for file_name in cli.js isolated-instance-config.js isolated-project-config.js isolated-telegram.js isolated-web-endpoint.js; do
+  for file_name in cli.js isolated-instance-config.js isolated-project-config.js isolated-telegram.js isolated-web-endpoint.js isolated-daemon-owner.js; do
     printf 'built\\n' > "$SPUR_TEST_REPO/v2/dist/$file_name"
   done
   exit 0
@@ -156,6 +184,10 @@ function createFixture(): FakeWorktree {
   const tmpDir = join(repoDir, "tmp");
   mkdirSync(scriptDir, { recursive: true });
   mkdirSync(join(repoDir, "v2", "bin"), { recursive: true });
+  copyFileSync(
+    join(REPO_ROOT, "v2", "bin", "isolated-daemon-owner.mjs"),
+    join(repoDir, "v2", "bin", "isolated-daemon-owner.mjs"),
+  );
   mkdirSync(join(repoDir, "v2", "src"), { recursive: true });
   mkdirSync(webDir, { recursive: true });
   mkdirSync(toolDir, { recursive: true });
@@ -216,17 +248,77 @@ function testEnv(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv): NodeJS.P
   };
 }
 
+// Every script run started through runIsolatedUi/runIsolatedDaemon is tracked
+// until it settles; afterEach stops survivors BEFORE deleting the fixture, so a
+// test that fails or times out cannot leave a script running on a deleted tree.
+const liveScriptRuns = new Set<ScriptRun>();
+
+// setsid makes the script a process-group leader (pid == pgid), so teardown
+// can signal the script and the fake children it spawned in one kill(-pid).
+// spur-isolated-ui.sh starts `pnpm dev` under its own setsid, outside this group.
+function trackScriptRun(run: ScriptRun): ScriptRun {
+  liveScriptRuns.add(run);
+  // Teardown awaits the run; never an unhandled rejection.
+  void run.catch(() => undefined).finally(() => liveScriptRuns.delete(run));
+  return run;
+}
+
 function runIsolatedUi(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv) {
-  return execFileAsync("bash", [join(worktree.repoDir, "scripts", "spur-isolated-ui.sh")], {
-    cwd: worktree.repoDir,
-    env: testEnv(worktree, extraEnv),
-  });
+  return trackScriptRun(
+    execFileAsync("setsid", ["bash", join(worktree.repoDir, "scripts", "spur-isolated-ui.sh")], {
+      cwd: worktree.repoDir,
+      env: testEnv(worktree, extraEnv),
+    }),
+  );
 }
 
 function runIsolatedDaemon(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv) {
-  return execFileAsync("bash", [join(worktree.repoDir, "scripts", "spur-isolated-daemon.sh")], {
-    env: testEnv(worktree, extraEnv),
-  });
+  return trackScriptRun(
+    execFileAsync(
+      "setsid",
+      ["bash", join(worktree.repoDir, "scripts", "spur-isolated-daemon.sh")],
+      {
+        env: testEnv(worktree, extraEnv),
+      },
+    ),
+  );
+}
+
+type ScriptRun = ReturnType<typeof execFileAsync>;
+
+// Readiness is the observed marker, not a fixed poll: fail fast when the
+// script exits without producing it, otherwise wait out a generous budget
+// (startup scans host process cwds, which stalls under full-suite load).
+async function waitForScriptMarker(
+  run: ScriptRun,
+  isReady: () => boolean,
+  description: string,
+): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (!isReady()) {
+    if (run.child.exitCode !== null || run.child.signalCode !== null) {
+      throw new Error(`Script exited before ${description}`);
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for ${description}`);
+    }
+    await sleep(10);
+  }
+}
+
+// Teardown must not delete the fixture under a live script: kill the script's
+// whole process group (fake pnpm/node children included), then await exit.
+async function stopScriptRun(run: ScriptRun): Promise<void> {
+  const pid = run.child.pid;
+  if (pid !== undefined) {
+    // Unconditional: the leader may be gone while group members hold stdio.
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      // Group already gone.
+    }
+  }
+  await run.catch(() => undefined);
 }
 
 function readLog(worktree: FakeWorktree): string[] {
@@ -280,7 +372,8 @@ function materializeReadyTree(repoDir: string): ReadyTreeMarkers {
   return markers;
 }
 
-afterEach(() => {
+afterEach(async () => {
+  await Promise.all([...liveScriptRuns].map(stopScriptRun));
   for (const path of cleanupPaths.splice(0)) {
     rmSync(path, { recursive: true, force: true });
   }
@@ -330,6 +423,60 @@ function hasPendingFlockWaiter(inode: number): boolean {
 }
 
 describe("isolated sidecar workspace dependency lock (#823)", () => {
+  it.each(["test", "off"])(
+    "rejects an overlong owned TMPDIR before any %s fixture, writer, lease, build or shared publication",
+    async (selector) => {
+      const worktree = createFixture();
+      const longTmp = join(worktree.tmpDir, "x".repeat(80));
+      mkdirSync(longTmp);
+      const sharedRuntime = join(worktree.toolDir, "isolated-env.sh");
+      const sharedWrapper = join(worktree.toolDir, "spur-isolated");
+      const foreignFixture = join(worktree.repoDir, "fixture-sentinel");
+      writeFileSync(sharedRuntime, "prior runtime");
+      writeFileSync(sharedWrapper, "prior wrapper");
+      writeFileSync(foreignFixture, "retained fixture and lease");
+      await expect(
+        runIsolatedDaemon(worktree, { TMPDIR: longTmp, SPUR_ISOLATED_TELEGRAM: selector }),
+      ).rejects.toThrow("socket pathname exceeds");
+      expect(readLog(worktree)).toEqual([]);
+      expect(readFileSync(sharedRuntime, "utf8")).toBe("prior runtime");
+      expect(readFileSync(sharedWrapper, "utf8")).toBe("prior wrapper");
+      expect(readFileSync(foreignFixture, "utf8")).toBe("retained fixture and lease");
+      expect(existsSync(join(worktree.toolDir, "workspace-deps.lock"))).toBe(false);
+      const { readdirSync } = await import("node:fs");
+      expect(readdirSync(longTmp)).toEqual([]);
+      materializeReadyTree(worktree.repoDir);
+      await runIsolatedDaemon(worktree, { SPUR_ISOLATED_TELEGRAM: selector });
+      expect(readLog(worktree)).toContain("daemon-start");
+    },
+  );
+  it("routes exact owner controls, rejects prefixed/config overrides, and forwards unrelated literal data", async () => {
+    const worktree = createFixture();
+    materializeReadyTree(worktree.repoDir);
+    await runIsolatedDaemon(worktree);
+    const wrapper = join(worktree.toolDir, "spur-isolated");
+    const invoke = (args: string[]) =>
+      execFileAsync("bash", [wrapper, ...args], { env: testEnv(worktree) });
+    for (const args of [
+      ["daemon", "restart"],
+      ["daemon", "stop", "--json"],
+    ])
+      await invoke(args);
+    expect(readLog(worktree).filter((line) => line === "owner-control")).toHaveLength(2);
+    const before = readLog(worktree);
+    for (const args of [
+      ["--config", "foreign", "daemon", "restart"],
+      ["--config=foreign", "daemon", "stop"],
+      ["daemon", "--config", "foreign", "restart"],
+      ["daemon", "restart", "--config", "foreign"],
+      ["daemon", "stop", "--json", "extra"],
+    ])
+      await expect(invoke(args)).rejects.toThrow("Invalid isolated daemon control arguments");
+    expect(readLog(worktree)).toEqual(before);
+    await invoke(["source", "reply", "daemon", "stop"]);
+    expect(readLog(worktree).filter((line) => line === "owner-control")).toHaveLength(2);
+    expect(readLog(worktree).filter((line) => line === "daemon-start")).toHaveLength(2);
+  });
   it("AC1: isolated-ui repairs the tree before it waits for isolated-env.sh", async () => {
     const worktree = createFixture();
 
@@ -350,18 +497,14 @@ describe("isolated sidecar workspace dependency lock (#823)", () => {
     const fifoPath = join(worktree.repoDir, "install.fifo");
     await execFileAsync("mkfifo", [fifoPath]);
 
-    const uiPromise = runIsolatedUi(worktree, { SPUR_TEST_INSTALL_FIFO: fifoPath }).catch(
-      (error) => error,
-    );
-
+    const uiRun = runIsolatedUi(worktree, { SPUR_TEST_INSTALL_FIFO: fifoPath });
+    const uiPromise = uiRun.catch((error) => error);
     // Wait for the UI to be inside the install (holding the lock).
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      if (readLog(worktree).includes("install-start")) {
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    expect(readLog(worktree)).toContain("install-start");
+    await waitForScriptMarker(
+      uiRun,
+      () => readLog(worktree).includes("install-start"),
+      "isolated-ui install-start",
+    );
     expect(readLog(worktree)).not.toContain("install-end");
 
     const daemonPromise = runIsolatedDaemon(worktree);
@@ -424,7 +567,7 @@ describe("isolated sidecar workspace dependency lock (#823)", () => {
     expect(existsSync(join(worktree.toolDir, "isolated-env.sh"))).toBe(true);
     // Only one repair ran total, no matter which sidecar took the lock.
     expect(finalLog.filter((line) => line === "install-start")).toHaveLength(1);
-  });
+  }, 70_000);
 
   it("AC3: with a ready tree neither sidecar installs, and pre-seeded markers survive", async () => {
     const worktree = createFixture();

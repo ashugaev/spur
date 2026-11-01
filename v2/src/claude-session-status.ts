@@ -10,10 +10,13 @@ export interface ClaudeSessionStatusRecord {
   filePath: string;
   status: string;
   updatedMs: number;
+  statusUpdatedMs?: number;
   cwd?: string;
   sessionId?: string;
   waitingFor?: string;
   pid?: number;
+  // Set only by the ancestry probe; a UUID/cwd match cannot establish it.
+  paneOwned?: true;
 }
 
 export interface ReadClaudeSessionStatusOptions {
@@ -110,10 +113,13 @@ function extractCandidate(
   const sessionId = readString(parsed["sessionId"]);
   const waitingFor = readWaitingFor(parsed);
   const pid = readPid(parsed["pid"]);
+  const statusUpdatedMs =
+    readTimestampMs(parsed["statusUpdatedAt"]) ?? readTimestampMs(parsed["statusUpdated"]);
   return {
     filePath,
     status,
     updatedMs: extractUpdatedMs(parsed, fileMtimeMs),
+    ...(statusUpdatedMs !== null ? { statusUpdatedMs } : {}),
     ...(cwd ? { cwd } : {}),
     ...(sessionId ? { sessionId } : {}),
     ...(waitingFor !== undefined ? { waitingFor } : {}),
@@ -158,7 +164,7 @@ async function filterByPaneTree(
   );
   const owned = candidates.filter((_, index) => verdicts[index] === "owned");
   if (owned.length > 0) {
-    return owned;
+    return owned.map((candidate) => ({ ...candidate, paneOwned: true as const }));
   }
   // Nothing is confidently owned. Drop confirmed strangers (the collision this
   // guards against) but keep unresolvable/pid-less files: a session's own final

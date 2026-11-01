@@ -8,6 +8,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as ghModule from "../../src/gh.js";
+import type { SourceHandle } from "../../src/event-sources/types.js";
 import type { SessionRecord } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -23,14 +24,17 @@ vi.mock("../../src/event-log.js", () => ({
 }));
 
 const { githubSourceModule } = await import("../../src/event-sources/github.js");
-const { writeSession, recordGitHubPollDisabledSession } = await import("../../src/metadata.js");
+const { writeSession, recordGitHubPollDisabledSession, readReviewSourceSnapshot } =
+  await import("../../src/metadata.js");
 const { rmSync, existsSync } = await import("node:fs");
 
 const flushPollCycle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 const tempDirs: string[] = [];
+const handles: SourceHandle[] = [];
 
 afterEach(async () => {
+  await Promise.all(handles.splice(0).map((handle) => handle.stop()));
   vi.clearAllMocks();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
@@ -92,7 +96,7 @@ async function makeSession(dataDir: string, worktreePath: string): Promise<Sessi
 }
 
 async function startHandle(dataDir: string) {
-  return githubSourceModule.start({
+  const handle = await githubSourceModule.start({
     sourceId: "pr-watch",
     projectId: "api",
     dataDir,
@@ -102,6 +106,8 @@ async function startHandle(dataDir: string) {
     logger: { info: vi.fn(), warn: vi.fn() },
     resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
   });
+  handles.push(handle);
+  return handle;
 }
 
 describe("github poll-disabled registry survives a real restart", () => {
@@ -113,10 +119,9 @@ describe("github poll-disabled registry survives a real restart", () => {
     const handle = await startHandle(dataDir);
     handle.runOnStart?.();
     await flushPollCycle();
-
-    expect(ghTransportMock).toHaveBeenCalledTimes(1);
-
+    await vi.waitFor(() => expect(ghTransportMock).toHaveBeenCalledTimes(1));
     await handle.stop();
+    expect(ghTransportMock).toHaveBeenCalledTimes(1);
   });
 
   it("case 2: a registry entry recorded before a fresh handle start survives it", async () => {
@@ -128,14 +133,13 @@ describe("github poll-disabled registry survives a real restart", () => {
     const handle = await startHandle(dataDir);
     handle.runOnStart?.();
     await flushPollCycle();
+    await handle.stop();
 
     expect(ghTransportMock).toHaveBeenCalledTimes(0);
     const disabledEvents = logSpurEventMock.mock.calls
       .map(([, entry]) => entry as { event?: string })
       .filter((entry) => entry.event === "source.poll.disabled");
     expect(disabledEvents).toHaveLength(0);
-
-    await handle.stop();
   });
 
   it("case 3 (mutation check): removing the registry file re-arms polling", async () => {
@@ -157,10 +161,9 @@ describe("github poll-disabled registry survives a real restart", () => {
     const handle = await startHandle(dataDir);
     handle.runOnStart?.();
     await flushPollCycle();
-
-    expect(ghTransportMock).toHaveBeenCalledTimes(1);
-
+    await vi.waitFor(() => expect(ghTransportMock).toHaveBeenCalledTimes(1));
     await handle.stop();
+    expect(ghTransportMock).toHaveBeenCalledTimes(1);
   });
 
   // A8: the recheck deadline is stamped onto the disk entry (lastCheckedAtMs), so a
@@ -176,8 +179,8 @@ describe("github poll-disabled registry survives a real restart", () => {
     const handleBeforeWindow = await startHandle(dataDir);
     handleBeforeWindow.runOnStart?.();
     await flushPollCycle();
-    expect(ghTransportMock).toHaveBeenCalledTimes(0);
     await handleBeforeWindow.stop();
+    expect(ghTransportMock).toHaveBeenCalledTimes(0);
 
     const registryPath = join(
       dataDir,
@@ -203,8 +206,13 @@ describe("github poll-disabled registry survives a real restart", () => {
     const handleAfterWindow = await startHandle(dataDir);
     handleAfterWindow.runOnStart?.();
     await flushPollCycle();
-    expect(ghTransportMock).toHaveBeenCalledTimes(1);
-
+    await vi.waitFor(() => expect(ghTransportMock).toHaveBeenCalledTimes(1));
     await handleAfterWindow.stop();
+    expect(ghTransportMock).toHaveBeenCalledTimes(1);
+    expect(
+      readReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-a1b2"),
+    ).toMatchObject({
+      prNumber: 42,
+    });
   });
 });
