@@ -2,7 +2,7 @@
 
 > Scope: route names only, one method + full path per line, every line `git grep`-able verbatim. Payload/status-code contracts: `v2/src/server.ts`. CLI usage: [commands.md](commands.md). Default `127.0.0.1:4310`.
 
-- `GET /info` — `lifecycleInstanceId`: process identity; `v2/src/session-lifecycle.ts`.
+- `GET /info` — `lifecycleInstanceId`, runtime `buildId`: process/build identity; `v2/src/session-lifecycle.ts`, `v2/src/build-identity.ts`.
 - `GET /headroom`
 - `GET /models` — model and default reasoning capabilities; discovery in `v2/src/agents/models.ts`.
 - `GET /user-actions`
@@ -19,6 +19,9 @@
 ## Project routes
 
 - `GET /projects`
+- `GET /projects/cron?project=<id>` — cron sources, bound triggers, owner-file drift, last tick/action from the live event log; `project` optional; `404` unknown project; `v2/src/cron-jobs.ts`.
+- `GET /projects/cron/edit` — disk draft for a Cron spawn trigger; MCP `get_cron_job_draft`; `v2/src/cron-job-editor.ts`.
+- `PATCH /projects/cron/edit` — save validated YAML with revision conflict detection; MCP `save_cron_job_draft`; `v2/src/cron-job-editor.ts`.
 - `POST /projects`
 - `PATCH /projects/:id`
 - `DELETE /projects/:id`
@@ -29,43 +32,44 @@
 - `GET /projects/:id/spawn-defaults?agent=<name>` — `{model, reasoningEffort, worktree}`; unset effort is `null`.
 - `GET /projects/:id/branches/exists?name=<branch>`
 - `POST /projects/:id/preflight-batches`
-- `POST /projects/:id/preflight`
+- `POST /projects/:id/preflight` — same `409` as `POST /sessions/background` when `preflightBatchId` is already claimed.
 
 ## Session routes
 
-- `GET /sessions` — array body, `sidecars[].url` ready endpoint; `v2/src/types.ts`; producing `x-spur-lifecycle-instance-id` header, per-row `lifecycle`; `v2/src/session-lifecycle.ts`.
+- `GET /sessions` — array body, `sidecars[].url` ready endpoint, `sidecars[].ports[].listening` host TCP listener true|false|null; `v2/src/types.ts`; producing `x-spur-lifecycle-instance-id` header, per-row `lifecycle`; `v2/src/session-lifecycle.ts`; never `503` on lifecycle churn, a still-moving row carries its last build and that build's receipt.
 - `POST /sessions` — optional `reasoningEffort` overrides project default; provider/model validation in `v2/src/session-service.ts`.
-- `POST /sessions/background`
+- `POST /sessions/background` — `409 spawn_in_progress|spawn_committed|spawn_failed` body `{ code, sessionId, error }` when `preflightBatchId` is already claimed; `sessionId` is the claiming session; `v2/src/session-service.ts`.
 - `POST /shepherd/spawn`
 - `POST /sidecars/sweep` — body `{ reap?: boolean }`, default `false`. Always `200`. Response `{ supported, leaked, reaped }`: `supported` is `false` when the process table or procfs is unreadable, in which case `leaked` and `reaped` are both `[]`. Each `leaked` row carries `kind: "worktree-tree" | "orphan-daemon"`; a `worktree-tree` row's `reapable` reflects proven Spur provenance and carries `rootPid`, `pgid`, `ageSeconds`, `worktreePath`, `args`, `sidecarName`, `tree` (descendant pids, root first), `treeRssKb`; an `orphan-daemon` row is always `reapable: false` and carries `configPath`/`cliEntryPath` instead of a `sidecarName`, plus `port: number | null` and `liveness: "serving" | "not-serving" | "unknown"`. `reap: true` signals only `reapable` rows — never an `orphan-daemon` row, serving or not — and populates `reaped`, one entry per `reapable` leaked tree it signaled: `{ sessionName, panePid, survivors, blindKill }` — `survivors` is the pids still alive after the SIGKILL confirmation window, and `blindKill` is `true` when tmux was killed with no verified process-tree signal (no pane pid, or an unusable snapshot, and no identity fallback confirmed a reap either) — a `survivors: []` alongside `blindKill: true` is not proof anything died, only that nothing was checked. See [Sidecars](commands.md#sidecars)
-- `GET /sessions/:id` — current row, `sidecars[].url` ready endpoint; `v2/src/types.ts`; ephemeral `lifecycle` receipt; `v2/src/session-lifecycle.ts`.
+- `GET /sessions/:id` — current row, `sidecars[].url` ready endpoint, `sidecars[].ports[].listening` host TCP listener true|false|null; Cursor `queuedMessageTyped.ackBaseline.deliveryId` optional UUIDv4, correlated `file:null` requires `size:0` and valid ID, malformed IDs drop baseline, legacy string-file floors retained; optional read-only `intervalWake.dispatchClaimId`: opaque correlation, absent on legacy records, ignored on input; `v2/src/types.ts`, `v2/src/metadata.ts`; ephemeral `lifecycle` receipt; `v2/src/session-lifecycle.ts`.
 - `GET /sessions/:id/slash-commands`
-- `GET /sessions/:id/conversation`
+- `GET /sessions/:id/conversation` — optional `view=messages&limit=<1..100>` (default 50): bounded visible-message page; `v2/src/server.ts`, `v2/src/conversation-page.ts`; omit view for legacy response.
 - `GET /sessions/:id/user-actions`
 - `GET /sessions/:id/subscriptions`
-- `GET /sessions/:id/logs` — `?scope=runtime|sidecar|service|all`
+- `GET /sessions/:id/logs` — `scope=runtime|sidecar|service|all`, `name`, `limit` (default 200 globally); retained pane and archived rows; existing session record and `limit>0`: 404 for named no-pane/no-archive or outputless stopped service, 502 for failed capture; absent record: archived rows (200); `v2/src/server.ts`.
 - `POST /sessions/:id/send` — response `queuedAheadReason: "no_interrupt"`: queued at the head
 - `POST /sessions/:id/source-poll-enable` — `{}`. Clears durable poll-disable registry (every file under the project, incl. removed sources) + live in-process gate per `github` source; `200 { ok, sessionId, projectId, cleared: { sourceId, prNumber }[] }`; `cleared: []` no-op; `404` unknown session. See [source](commands.md#source)
 - `POST /sessions/:id/answer`
 - `POST /sessions/:id/launch/submit` — presses submit over a pending `submitUnconfirmedAt` prompt
 - `POST /sessions/:id/submit-failed/retry` — re-queues `submitFailedMessage` at the head
 - `POST /sessions/:id/submit-failed/dismiss` — drops `submitFailedMessage`
-- `POST /sessions/:id/source-reply`
+- `POST /sessions/:id/source-reply`: `requestInterfaceApproval` semantic proposal; `images` `{name,data}[]` base64, invalid -> 400 before any send; body cap 15 MB; response `images` count; `v2/src/session-service.ts`.
+- `GET /sessions/:id/source-info` — read-only association and cached bot identity; `v2/src/server.ts`, `v2/src/session-service.ts`.
 - `POST /sessions/:id/opened`
 - `POST /sessions/:id/pause`
 - `POST /sessions/:id/complete` — optional correlation `operationId`, group `completedIds`/outcomes, lifecycle 409/503; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/self-destruct`
 - `POST /sessions/:id/kill`
-- `POST /sessions/:id/restore` — optional correlation `operationId`, settled receipt, lifecycle 409/503; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
+- `POST /sessions/:id/restore` — optional `operationId`, settled receipt, lifecycle 409/503, 20-minute deadline 504, disconnect cancellation; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/reopen` — restore request fields and single reopen receipt; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/handoff` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
 - `POST /sessions/:id/respawn` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
-- `POST /sessions/:id/switch-auth`
+- `POST /sessions/:id/switch-auth` — 404 unless `authRotation.switchAuth: true`
 - `GET /sessions/:id/todo`
 - `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo)
 - `GET /sessions/:id/auto-ping-suppressions`
-- `POST /sessions/:id/auto-ping-suppressions/unsubscribe`
-- `POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume` — `400|403|404|409`. See [auto-ping](commands.md#auto-ping)
+- `POST /sessions/:id/auto-ping-suppressions/unsubscribe` — `400|403|404|409 grant_not_ready|grant_consumed`. See [auto-ping](commands.md#auto-ping)
+- `POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume` — `400|403|404`. See [auto-ping](commands.md#auto-ping)
 - `POST /sessions/:id/queue/remove` — `{"message": "<exact queued text>"}`. See [send, queue](commands.md#send-queue)
 - `POST /sessions/:id/queue/flush`
 - `POST /sessions/:id/wake`
@@ -77,7 +81,7 @@
 - `POST /sessions/:id/sidecars/:name/stop` — see [Sidecars](commands.md#sidecars)
 - `GET /sessions/:id/services`
 - `GET /sessions/:id/services/:name`
-- `POST /sessions/:id/services/:name/run`
+- `POST /sessions/:id/services/:name/run` — `503` on an unreadable tmux probe (retry)
 - `GET /sessions/:id/artifacts/:path` — streams one artifact
 - `GET /sessions/:id/session-memory`
 - `GET /sessions/:id/session-memory/:key`

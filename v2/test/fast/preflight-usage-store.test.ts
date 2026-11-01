@@ -3,7 +3,10 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PreflightUsageStore } from "../../src/preflight-usage-store.js";
+import {
+  PreflightBatchClaimedError,
+  PreflightUsageStore,
+} from "../../src/preflight-usage-store.js";
 
 const directories: string[] = [];
 
@@ -239,6 +242,35 @@ describe("PreflightUsageStore", () => {
     });
     await expect(ledger.claim(batch, "api", "api-1")).resolves.toEqual(claimed);
     await expect(ledger.claim(batch, "api", "api-2")).rejects.toThrow("claimed by another session");
+    await expect(ledger.claim(batch, "api", "api-2")).rejects.toMatchObject({
+      claimedBy: "api-1",
+    });
+    await expect(ledger.claim(batch, "api", "api-2")).rejects.toBeInstanceOf(
+      PreflightBatchClaimedError,
+    );
+    const attempt = ledger.runAttempt(batch, "api", "claude", async () => ({}));
+    await expect(attempt).rejects.toBeInstanceOf(PreflightBatchClaimedError);
+    await expect(attempt).rejects.toMatchObject({ claimedBy: "api-1" });
+  });
+
+  it("release clears only the matching claim", async () => {
+    const ledger = await store();
+    const batch = await ledger.create("api");
+    await ledger.runAttempt(batch, "api", "claude", async () => ({
+      usage: { inputTokens: 4, outputTokens: 1, totalTokens: 5 },
+    }));
+    const claimed = await ledger.claim(batch, "api", "api-1");
+
+    await ledger.release(batch, "api", "api-2");
+    await expect(ledger.claim(batch, "api", "api-2")).rejects.toBeInstanceOf(
+      PreflightBatchClaimedError,
+    );
+
+    await ledger.release(batch, "api", "api-1");
+    await expect(ledger.claim(batch, "api", "api-2")).resolves.toEqual(claimed);
+    await expect(ledger.claim(batch, "api", "api-1")).rejects.toBeInstanceOf(
+      PreflightBatchClaimedError,
+    );
   });
 
   it("preserves explicit measured zero and terminal unknown separately", async () => {

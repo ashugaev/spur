@@ -481,10 +481,13 @@ test("loads local JetBrains Mono faces in both dashboard themes", async ({ page 
     if (request.resourceType() === "font") failedFonts.push(request.url());
   });
   await mockSessions(page, []);
+  await page.emulateMedia({ colorScheme: "dark" });
   await page.goto("/");
   for (const theme of ["dark", "light"] as const) {
-    if (theme === "light")
-      await page.getByRole("button", { name: "Switch to light theme" }).click();
+    if (theme === "light") {
+      await page.getByRole("button", { name: "Theme" }).click();
+      await page.getByRole("radio", { name: "Light" }).click();
+    }
     const typography = await page.evaluate(async () => {
       const variable = getComputedStyle(document.documentElement)
         .getPropertyValue("--font-jetbrains-mono")
@@ -868,11 +871,13 @@ test.describe("D1: Header renders correctly", () => {
     ];
 
     await mockSessions(page, [], projects);
+    await page.emulateMedia({ colorScheme: "dark" });
     await page.goto("/");
 
     for (const theme of ["dark", "light"] as const) {
       if (theme === "light") {
-        await page.getByRole("button", { name: "Switch to light theme" }).click();
+        await page.getByRole("button", { name: "Theme" }).click();
+        await page.getByRole("radio", { name: "Light" }).click();
         await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
       }
 
@@ -2448,9 +2453,10 @@ test.describe("D6a: Backlog zone", () => {
       },
     ]);
 
-    await page.goto("/");
+    await page.goto("/?project=my-project");
 
     await expect(page.getByText("Backlog")).toBeVisible();
+    await page.getByRole("button", { name: /Backlog/ }).click();
     const backlogLink = page.getByRole("link", { name: /WEB-17/ });
     await expect(backlogLink).toBeVisible();
     await expect(backlogLink).toHaveAttribute("href", "https://jira.example.com/browse/WEB-17");
@@ -2490,8 +2496,9 @@ test.describe("D6a: Backlog zone", () => {
       },
     ]);
 
-    await page.goto("/");
+    await page.goto("/?project=my-project");
 
+    await page.getByRole("button", { name: /Backlog/ }).click();
     await page.getByRole("button", { name: "Take task" }).click();
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
@@ -4202,6 +4209,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
           enabled: true,
           conditions: "After the summary is posted",
         },
+        preflightBatchId: "10000000-0000-4000-8000-000000000001",
       },
     ]);
 
@@ -4266,6 +4274,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
         model: "opus",
         overrides: { worktree: true },
         selfDestruct: { enabled: true },
+        preflightBatchId: "10000000-0000-4000-8000-000000000001",
       },
     ]);
   });
@@ -4474,6 +4483,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await fillSpawnForm(page, { prompt: placeholder.prompt });
     await page.getByRole("button", { name: /^spawn$/i }).click();
 
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(1);
     sessions.splice(0, sessions.length, errored);
     await page.waitForTimeout(DASHBOARD_POLL_WAIT_MS);
 
@@ -4632,7 +4642,12 @@ test.describe("D7d: Sessions list cache on revisit", () => {
       await route.fallback();
     });
 
-    await page.getByRole("link", { name: session.prompt }).first().click();
+    // A dev server compiles /sessions/[id] on demand, so the first click can
+    // outlast the 5s expect window; wait for the navigation to commit first.
+    await Promise.all([
+      page.waitForURL((url) => url.pathname === `/sessions/${session.id}`),
+      page.getByRole("link", { name: session.prompt }).first().click(),
+    ]);
     await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
 
     await Promise.all([page.waitForURL("/"), page.getByRole("link", { name: /back/i }).click()]);

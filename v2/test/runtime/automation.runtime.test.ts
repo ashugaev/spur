@@ -8,19 +8,25 @@ import { EventBus } from "../../src/event-bus.js";
 import { AutoPingService } from "../../src/auto-ping.js";
 import { githubSourceModule } from "../../src/event-sources/github.js";
 import { _resetGhPathCacheForTests, pollBudgetState } from "../../src/gh.js";
+import {
+  readGitHubSourceSnapshot,
+  readPendingSendBatches,
+  readSession,
+} from "../../src/metadata.js";
 import { SessionService } from "../../src/session-service.js";
-import { readPendingSendBatches, readSession } from "../../src/metadata.js";
 import { startConfiguredTriggers as startTriggerController } from "../../src/triggers.js";
 import type { SessionRecord, SessionView } from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   captureTmuxPane,
+  configureOwnedPushRemote,
   createRuntimeTestContext,
   isTmuxAvailable,
   killTmuxSession,
   killTmuxSessionsByPrefix,
   syncTmuxEnvironment,
   type RuntimeTestContext,
+  waitForSourceBaseline,
 } from "../helpers/runtime.js";
 
 const tmuxOk = await isTmuxAvailable();
@@ -110,6 +116,7 @@ function runtimeEnv(context: RuntimeTestContext) {
 }
 
 async function syncAutomationTmuxEnvironment(context: RuntimeTestContext): Promise<void> {
+  await configureOwnedPushRemote(context);
   await syncTmuxEnvironment(runtimeEnv(context));
 }
 
@@ -381,18 +388,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       });
 
       try {
-        const snapshotPath = join(
-          context.dataDir,
-          "source-state",
-          "github",
-          "api",
-          "pr-watch",
-          `${session.id}.json`,
-        );
-        await pollUntil(async () => existsSync(snapshotPath), {
-          timeoutMs: 15_000,
-          accept: Boolean,
-        });
+        await waitForSourceBaseline(context, session.id);
 
         await context.writeGhState({
           prsByBranch: {
@@ -441,6 +437,189 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       }
     });
   });
+
+  it.each(["during acknowledgement", "before acknowledgement"] as const)(
+    "persists a changed GitHub CI signal %s in an isolated runtime",
+    async (ordering) => {
+      const port = await findFreePort();
+      const context = await createRuntimeTestContext(port);
+      const sessionPrefix = `rt-gh-ack-${port}`;
+      activeContexts.push({ context, sessionPrefix });
+      await syncAutomationTmuxEnvironment(context);
+      const daemonConfig = await context.writeConfig(
+        "ack-daemon.yaml",
+        automationConfig(context, sessionPrefix, "    sources: {}\n    triggers: {}\n"),
+      );
+      const triggerConfig = await context.writeConfig(
+        "ack-trigger.yaml",
+        automationConfig(
+          context,
+          sessionPrefix,
+          `    sources:
+      pr-watch:
+        type: github
+        intervalMs: 250
+        runOnStart: false
+    triggers:
+      pr-watch-ci:
+        source: pr-watch
+        event: github:ci_failed
+        send:
+          interrupt: false
+`,
+        ),
+      );
+      const branch = "feature-runtime-ack";
+      const pr = {
+        number: 42,
+        title: "Hold acknowledgement",
+        url: "https://github.com/acme/api/pull/42",
+        repo: "acme/api",
+        reviewDecision: null,
+      };
+      const state = (checkName?: string) => ({
+        prsByBranch: { [branch]: pr },
+        checksByPr: { "42": checkName ? [{ name: checkName, state: "FAILURE" }] : [] },
+      });
+      await context.writeGhState(state());
+      const daemon = await context.startDaemon(daemonConfig);
+      currentActiveContext().daemonPid = daemon.info.pid;
+      const session = JSON.parse(
+        (
+          await context.execCli([
+            "--config",
+            daemonConfig,
+            "spawn",
+            "api",
+            "initial ack runtime prompt",
+            "--agent",
+            "claude",
+            "--branch",
+            branch,
+            "--json",
+          ])
+        ).stdout,
+      ) as SessionView;
+
+      await withRuntimeEnv(context, async () => {
+        const service = new SessionService(triggerConfig, "2026-03-18T10:00:00.000Z");
+        currentService = service;
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const messages: string[] = [];
+        const gatedService = Object.create(service) as SessionService;
+        let releaseLookup!: () => void;
+        const heldLookup = new Promise<void>((resolve) => {
+          releaseLookup = resolve;
+        });
+        gatedService.get = async (sessionId) => {
+          const view = await service.get(sessionId);
+          if (ordering === "before acknowledgement") await heldLookup;
+          return view;
+        };
+        gatedService.deliver = async (sessionId, message, options) => {
+          messages.push(message);
+          if (messages.length === 1) {
+            await held; // Simulates submit-ack latency at the trigger's deliver boundary.
+          }
+          return service.deliver(sessionId, message, options);
+        };
+        const config = loadProjectConfig(triggerConfig, loadConfig(triggerConfig));
+        const bus = new EventBus();
+        const controller = startConfiguredTriggers({
+          config,
+          bus,
+          sessionService: gatedService,
+          logger: { warn: () => {} },
+        });
+        const abortController = new AbortController();
+        const source = await githubSourceModule.start({
+          sourceId: "pr-watch",
+          projectId: "api",
+          dataDir: context.dataDir,
+          config: config.projects.api?.sources["pr-watch"] as never,
+          emit(name, data) {
+            bus.emit({
+              name,
+              data,
+              projectId: "api",
+              sourceId: "pr-watch",
+              occurrenceId: randomUUID(),
+            });
+          },
+          signal: abortController.signal,
+          logger: { warn: () => {} },
+          resolveWebBaseUrl: () => Promise.resolve(`http://127.0.0.1:${port}`),
+        });
+        const pending = () =>
+          readPendingSendBatches(context.dataDir).get(`api:pr-watch-ci:${session.id}`);
+        const signalText = () => {
+          const batch = pending()?.batch;
+          return batch?.kind === "review" ? batch.signals[0]?.text : undefined;
+        };
+        try {
+          await waitForSourceBaseline(context, session.id);
+          await pollUntil(async () => (await service.get(session.id)).state, {
+            timeoutMs: 20_000,
+            accept: (value) => value === "waiting",
+          });
+          await context.writeGhState(state("first check"));
+          await pollUntil(async () => signalText(), {
+            timeoutMs: 15_000,
+            accept: (text) => text?.includes("first check") === true,
+          });
+          if (ordering === "before acknowledgement") {
+            await context.writeGhState(state("second check"));
+            await pollUntil(async () => signalText(), {
+              timeoutMs: 15_000,
+              accept: (text) => text?.includes("second check") === true,
+            });
+            releaseLookup();
+          }
+          await pollUntil(async () => messages.length, {
+            timeoutMs: 45_000,
+            accept: (count) => count > 0,
+          });
+          const claimId = pending()?.claim?.claimId;
+          expect(claimId).toBeDefined();
+          if (ordering === "during acknowledgement") {
+            await context.writeGhState(state("second check"));
+            await pollUntil(async () => signalText(), {
+              timeoutMs: 15_000,
+              accept: (text) => text?.includes("second check") === true,
+            });
+            expect(pending()?.claim?.claimId).toBe(claimId);
+            expect(messages[0]).toContain("first check");
+            expect(messages[0]).not.toContain("second check");
+          } else {
+            expect(messages[0]).toContain("second check");
+          }
+          expect(messages).toHaveLength(1);
+          release();
+          if (ordering === "during acknowledgement") {
+            await pollUntil(async () => messages.length, {
+              timeoutMs: 20_000,
+              accept: (count) => count === 2,
+            });
+            expect(messages[1]).toContain("second check");
+          } else {
+            await sleep(2_000);
+            expect(signalText()).toContain("second check");
+            expect(messages).toHaveLength(1);
+          }
+        } finally {
+          releaseLookup();
+          release();
+          abortController.abort();
+          source.stop();
+          await controller.stop();
+        }
+      });
+    },
+    120_000,
+  );
 
   it.each(["claude", "codex"] as const)(
     "delivers github:ci_failed to a live %s session through the trigger pipeline",
@@ -531,6 +710,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         });
 
         try {
+          await waitForSourceBaseline(context, session.id);
           await context.writeGhState({
             prsByBranch: {
               "feature-runtime-ci": {
@@ -974,6 +1154,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             accept: (value) => value.pr?.number === 42,
           },
         );
+        await waitForSourceBaseline(context, session.id);
 
         await execFileAsync("git", ["-C", session.worktreePath, "switch", "-c", "feature-drifted"]);
 
@@ -984,6 +1165,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
               number: 42,
               title: "Keep CI green",
               url: "https://github.com/acme/api/pull/42",
+              headRefName: "feature-runtime-ci",
               repo: "acme/api",
               reviewDecision: null,
             },
@@ -1009,6 +1191,145 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         abortController.abort();
         handle.stop();
         await controller.stop();
+      }
+    });
+  });
+
+  it("suppresses foreign same-name fork fixes and emits owned fixes through an isolated source poll", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-gh-fork-owner-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncAutomationTmuxEnvironment(context);
+    await execFileAsync(
+      "git",
+      ["config", "remote.upstream.pushurl", "https://github.com/owned/api.git"],
+      { cwd: context.repoDir },
+    );
+    const configPath = await context.writeConfig(
+      "github-fork-owner.yaml",
+      automationConfig(
+        context,
+        sessionPrefix,
+        `    sources:
+      pr-watch:
+        type: github
+        intervalMs: 250
+        runOnStart: false
+    triggers: {}
+`,
+      ),
+    );
+    const branch = "feature-runtime-fork-owner";
+    const fakePrState = (headRepository: string) => ({
+      prsByBranch: {
+        [branch]: {
+          number: 42,
+          title: "Check fork ownership",
+          url: "https://github.com/acme/api/pull/42",
+          repo: "acme/api",
+          headRefName: branch,
+          headRepository,
+          reviewDecision: "CHANGES_REQUESTED",
+          mergeable: "CONFLICTING",
+          mergeStateStatus: "DIRTY",
+        },
+      },
+      checksByPr: { "42": [{ name: "fork check", state: "FAILURE" }] },
+      commentsByPr: {
+        "42": [{ id: 7001, body: "Reviewer feedback", user: { login: "reviewer" } }],
+      },
+    });
+    await context.writeGhState(fakePrState("foreign/api"));
+
+    await withRuntimeEnv(context, async () => {
+      const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+      currentService = service;
+      const session = await service.spawn({
+        project: "api",
+        agent: "claude",
+        branch,
+        prompt: "initial fork ownership runtime prompt",
+      });
+      const sessionPath = join(context.dataDir, "sessions", "api", `${session.id}.json`);
+      await pollUntil(
+        async () => JSON.parse(readFileSync(sessionPath, "utf8")) as { pr?: { number?: number } },
+        { timeoutMs: 20_000, accept: (value) => value.pr?.number === 42 },
+      );
+      const { stdout: pushRef } = await execFileAsync(
+        "git",
+        ["for-each-ref", "--format=%(refname)\t%(push:remotename)", `refs/heads/${branch}`],
+        { cwd: session.worktreePath },
+      );
+      expect(pushRef.trim()).toBe(`refs/heads/${branch}\tupstream`);
+      const { stdout: pushUrl } = await execFileAsync(
+        "git",
+        ["remote", "get-url", "--push", "--all", "upstream"],
+        { cwd: session.worktreePath },
+      );
+      expect(pushUrl.trim()).toBe("https://github.com/owned/api.git");
+
+      const events: Array<{ name: string; data?: unknown }> = [];
+      const abortController = new AbortController();
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: context.dataDir,
+        config: {
+          type: "github",
+          intervalMs: 250,
+          runOnStart: false,
+          emitExisting: false,
+        },
+        emit(name, data) {
+          events.push({ name, data });
+        },
+        signal: abortController.signal,
+        logger: { warn: () => {} },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      try {
+        const snapshot = () =>
+          readGitHubSourceSnapshot(context.dataDir, "api", "pr-watch", session.id);
+        const foreign = await pollUntil(async () => snapshot(), {
+          timeoutMs: 20_000,
+          accept: (value) => value?.signals.has("comment:7001") === true,
+        });
+        if (!foreign) throw new Error("missing foreign PR snapshot");
+        expect(foreign.prNumber).toBe(42);
+        for (const key of ["changes_requested", "ci_failed", "merge_conflict"]) {
+          expect(foreign.signals.has(key), key).toBe(false);
+        }
+        expect(
+          events.some((event) =>
+            ["github:changes_requested", "github:ci_failed", "github:merge_conflict"].includes(
+              event.name,
+            ),
+          ),
+        ).toBe(false);
+
+        await context.writeGhState(fakePrState("owned/api"));
+        const owned = await pollUntil(async () => snapshot(), {
+          timeoutMs: 20_000,
+          accept: (value) =>
+            value !== null &&
+            ["changes_requested", "ci_failed", "merge_conflict"].every((key) =>
+              value.signals.has(key),
+            ),
+        });
+        if (!owned) throw new Error("missing owned PR snapshot");
+        expect(owned.signals.has("comment:7001")).toBe(true);
+        await pollUntil(async () => events.map((event) => event.name), {
+          timeoutMs: 10_000,
+          accept: (names) =>
+            ["github:changes_requested", "github:ci_failed", "github:merge_conflict"].every(
+              (name) => names.includes(name),
+            ),
+        });
+      } finally {
+        abortController.abort();
+        handle.stop();
       }
     });
   });
@@ -1086,18 +1407,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       });
 
       try {
-        const snapshotPath = join(
-          context.dataDir,
-          "source-state",
-          "github",
-          "api",
-          "pr-watch",
-          `${session.id}.json`,
-        );
-        await pollUntil(async () => existsSync(snapshotPath), {
-          timeoutMs: 15_000,
-          accept: Boolean,
-        });
+        await waitForSourceBaseline(context, session.id);
 
         await context.writeGhState({
           prsByBranch: {
@@ -1269,6 +1579,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         });
 
         try {
+          await waitForSourceBaseline(context, session.id);
           await context.writeGhState({
             prsByBranch: {
               "feature-runtime-merge-conflict": {
@@ -1419,6 +1730,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
         try {
           const conflictMarker = 'GitHub updates on PR #42 "Restore merge conflict alerts":';
+          await waitForSourceBaseline(context, session.id);
           await context.writeGhState({
             prsByBranch: {
               "feature-runtime-merge-conflict-restore": {

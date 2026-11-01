@@ -23,10 +23,12 @@ import {
 } from "./types.js";
 import {
   clearGitHubMergeConflictRestoreReplay,
+  deleteIgnoredGitHubFeedback,
   clearGitHubPollDisabledSession,
   deleteReviewSourceSnapshot,
   hasGitHubMergeConflictRestoreReplay,
   listSessions,
+  listIgnoredGitHubFeedbackSessions,
   markGitHubPollDisabledChecked,
   readGitHubPollDisabled,
   readLifecycleBaselinedSessions,
@@ -45,6 +47,7 @@ import {
   GitHubReviewBatchError,
   hasTerminalSignal,
 } from "../review-providers/github.js";
+import { resolveWorkspaceState } from "../workspace-store.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
 export {
@@ -306,6 +309,18 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     deps.projectId,
     deps.sourceId,
   );
+  const pruneIgnoredFeedback = (sessionIds: Set<string>): void => {
+    for (const sessionId of listIgnoredGitHubFeedbackSessions(
+      deps.dataDir,
+      deps.projectId,
+      deps.sourceId,
+    )) {
+      if (!sessionIds.has(sessionId)) {
+        deleteIgnoredGitHubFeedback(deps.dataDir, deps.projectId, deps.sourceId, sessionId);
+      }
+    }
+  };
+  pruneIgnoredFeedback(new Set(listSessions(deps.dataDir).map((session) => session.id)));
   const seenWorkItems = deps.config.query
     ? readWorkItemRegistry(deps.dataDir, deps.projectId, deps.sourceId)
     : null;
@@ -528,7 +543,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   let stopped = false;
   let polling = false;
   let pollingWorkItems = false;
-  let pollingCycle = false;
+  let activePoll: Promise<void> | null = null;
   let cooldownUntilMs = 0;
   let rateLimitFailures = 0;
   let authDisabled = false;
@@ -546,8 +561,16 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     return count <= CI_HYSTERESIS_ERROR_TOLERANCE;
   };
 
+  // The workspace file owns the PR binding; a member record's own `pr` can be a
+  // stale handoff copy.
   const listPollableSessions = (allSessions: ReturnType<typeof listSessions>) =>
-    allSessions.filter((session) => isEligibleForSourcePoll(session, deps.projectId));
+    allSessions
+      .filter((session) => isEligibleForSourcePoll(session, deps.projectId))
+      .map((record): SessionRecord => {
+        const { pr: _recordPr, ...session } = record;
+        const { pr } = resolveWorkspaceState(deps.dataDir, record);
+        return pr ? { ...session, pr } : session;
+      });
 
   const shouldPollThisTick = (): boolean => {
     refreshPollDisabled();
@@ -666,6 +689,8 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         deps.projectId,
         deps.sourceId,
         deps.config.maxReviewBatchTargets,
+        deps.config.selfMarker,
+        deps.config.ignoreChecks,
       );
       for (const session of pollableSessions) {
         try {
@@ -903,6 +928,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           lifecycleBaselined.delete(sessionId);
         }
       }
+      pruneIgnoredFeedback(existingSessionIds);
 
       for (const sessionId of [...attemptedSessionIds]) {
         if (!currentSessionIds.has(sessionId)) attemptedSessionIds.delete(sessionId);
@@ -984,60 +1010,92 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     }
   };
 
-  const pollCycle = async (emitInitial: boolean): Promise<void> => {
-    if (pollingCycle) return;
-    pollingCycle = true;
-    // No refreshPollDisabled() here: pollSignals (called synchronously below, with no
-    // await in between) does its own refresh at its try-block entry, and the interval
-    // tick path already refreshed in shouldPollThisTick immediately before calling this.
-    // Captured before pollSignals runs: if a cooldown/auth-disabled gate was
-    // already active going into this cycle, no real polling happened, so the
-    // adaptive deadline must not move — otherwise it silently consumes the
-    // slow window during an outage instead of resuming promptly once it lifts.
-    const skippedByCooldown = shouldSkipGitHubCalls();
-    const adaptiveDeadlineAtStart = nextEligiblePollAtMs;
-    try {
-      await runGhPollCycle(
-        { kind: "github_source", projectId: deps.projectId, sourceId: deps.sourceId },
-        async () => {
-          await pollSignals(emitInitial);
-          if (shouldSkipGitHubCalls()) return;
-          await syncWorkItems();
-          if (!shouldSkipGitHubCalls()) {
-            rateLimitFailures = 0;
-          }
-        },
-      );
-    } finally {
-      if (adaptive && !skippedByCooldown && Date.now() >= adaptiveDeadlineAtStart) {
-        nextEligiblePollAtMs = Date.now() + adaptive.slowIntervalMs;
+  const pollCycle = (emitInitial: boolean): Promise<void> => {
+    if (stopped || deps.signal.aborted) return Promise.resolve();
+    if (activePoll) return activePoll;
+    activePoll = Promise.resolve().then(async () => {
+      // No refreshPollDisabled() here: pollSignals (called synchronously below, with no
+      // await in between) does its own refresh at its try-block entry, and the interval
+      // tick path already refreshed in shouldPollThisTick immediately before calling this.
+      // Captured before pollSignals runs: if a cooldown/auth-disabled gate was
+      // already active going into this cycle, no real polling happened, so the
+      // adaptive deadline must not move — otherwise it silently consumes the
+      // slow window during an outage instead of resuming promptly once it lifts.
+      const skippedByCooldown = shouldSkipGitHubCalls();
+      const adaptiveDeadlineAtStart = nextEligiblePollAtMs;
+      try {
+        if (stopped || deps.signal.aborted) return;
+        await runGhPollCycle(
+          { kind: "github_source", projectId: deps.projectId, sourceId: deps.sourceId },
+          async () => {
+            await pollSignals(emitInitial);
+            if (shouldSkipGitHubCalls()) return;
+            await syncWorkItems();
+            if (!shouldSkipGitHubCalls()) {
+              rateLimitFailures = 0;
+            }
+          },
+        );
+      } finally {
+        if (adaptive && !skippedByCooldown && Date.now() >= adaptiveDeadlineAtStart) {
+          nextEligiblePollAtMs = Date.now() + adaptive.slowIntervalMs;
+        }
+        activePoll = null;
       }
-      pollingCycle = false;
-    }
+    });
+    return activePoll;
+  };
+
+  // Fire-and-forget cycles (tick, deferred start, runOnStart) end here: a throw is
+  // logged once for that cycle and the next tick polls again. The awaited startup
+  // cycle is not routed through it, so start() still rejects there.
+  const reportPollCycleFailure = (error: unknown): void => {
+    const message = extractGithubErrorText(error);
+    deps.logger.warn?.(`[source:${deps.projectId}/${deps.sourceId}] poll cycle failed: ${message}`);
+    logSpurEvent(deps.dataDir, {
+      event: "source.poll_cycle.error",
+      level: "error",
+      projectId: deps.projectId,
+      sourceId: deps.sourceId,
+      message: `Poll cycle failed for ${deps.projectId}/${deps.sourceId}: ${message}`,
+    });
+  };
+
+  // pollCycle hands back the in-flight cycle when one is running: attach the
+  // catch only to a cycle this call started, so a failure is reported once.
+  const firePollCycle = (emitInitial: boolean): void => {
+    if (activePoll) return;
+    pollCycle(emitInitial).catch(reportPollCycleFailure);
   };
 
   const timer = startInterval(() => {
-    if (!shouldPollThisTick()) return;
-    void pollCycle(false);
+    try {
+      if (!shouldPollThisTick()) return;
+    } catch (error) {
+      reportPollCycleFailure(error);
+      return;
+    }
+    firePollCycle(false);
   }, deps.config.intervalMs);
 
   if (!deps.config.runOnStart) {
     if (deps.deferInitialSync) {
-      void pollCycle(false);
+      firePollCycle(false);
     } else {
       await pollCycle(false);
     }
   }
 
   return {
-    stop(): void {
+    async stop(): Promise<void> {
       stopped = true;
       clearInterval(timer);
+      await activePoll;
     },
     ...(deps.config.runOnStart
       ? {
           runOnStart(): void {
-            void pollCycle(true);
+            firePollCycle(true);
           },
         }
       : {}),

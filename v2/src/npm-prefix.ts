@@ -94,13 +94,13 @@ function explicitPrefixOverridden(home: string): boolean {
 // Writes/refreshes the Spur-owned globalconfig pin file that `NPM_CONFIG_
 // GLOBALCONFIG`/`npm_config_globalconfig` point at (session env, `npm-
 // init.sh`'s gate, the doctor probe) — a pure `writeFileSync` into Spur's own
-// `<home>/.spur/`, safe to call unconditionally on every daemon boot: it
-// never reads or writes `<home>/.npmrc`, so calling it repeatedly never
-// mutates a shared user file. `daemon start` (the sole real boot path —
-// never the exported `startServer` fast tests call directly against
-// arbitrary/real `$HOME`) wraps this call in its own try/catch instead of
-// throwing through it: a read-only filesystem or a permissions error writing
-// into `<home>/.spur/` must never abort daemon boot.
+// `<home>/.spur/`, safe to call repeatedly: it never reads or writes
+// `<home>/.npmrc`. `daemon start` (the sole real boot path — never the
+// exported `startServer` fast tests call directly against arbitrary/real
+// `$HOME`) calls it only for the default instance config, never a non-default
+// `--config`, and wraps the call in its own try/catch instead of throwing
+// through it: a read-only filesystem or a permissions error writing into
+// `<home>/.spur/` must never abort daemon boot.
 //
 // Unlike `healNpmrcPrefixLine`, this write is unconditional — it does NOT
 // check `explicitPrefixOverridden`. Every consumer that points `NPM_CONFIG_

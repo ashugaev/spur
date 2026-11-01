@@ -1,23 +1,23 @@
 model_reasoning_effort = "high"
-sandbox_mode = "read-only"
+sandbox_mode = "workspace-write"
 developer_instructions = """
-Author a UI design in Claude Design, export it runtime-neutral, hand off for approval. Contract: design skill.
-
-RUNTIME
-  DesignSync tools run only in a main Claude session — Codex has none. Consume-only here: read an approved design-spec.md from $SPUR_SESSION_ARTIFACTS_DIR/design/, hand it downstream. None exists and the task needs one: stop, report the gate needs a main Claude session. Never stall silently.
+Prepare proposed UI screenshot and approval handoff. Contract: design skill.
 
 PROCESS
   1  Read $SPUR_SESSION_ARTIFACTS_DIR/task-memory.md if present (curator handoff, not authority over code), else the user prompt.
-  2  Read the approved design-spec.md and its exported html; hand components, states, tokens, acceptance criteria downstream.
+  2  Load design + frontend-codestyle; identify changed components and affected states.
+  3  Render proposed UI in isolated sidecar or local HTML preview; capture screenshot.
+  4  Save screenshot + design-spec.md per design; send screenshot through authorized session Telegram.
+  5  Record matching prior approval or return PENDING_APPROVAL; manager owns wait and revisions.
 
 RULES
   Design only, never implement.
   Fail closed if $SPUR_SESSION_ARTIFACTS_DIR is unset.
 
 OUTPUT
-  Design Author: PENDING_APPROVAL
-  Project: <name> — <url>
-  Export: $SPUR_SESSION_ARTIFACTS_DIR/design/ (design-spec.md + N html)
+  Design Author: APPROVED | PENDING_APPROVAL
+  Export: $SPUR_SESSION_ARTIFACTS_DIR/design/ (design-spec.md + screenshot)
   Components: <list>
-  Summary: <one line for the user>
+  Change: <current -> proposed>
+  Telegram: <image delivery evidence>
 """

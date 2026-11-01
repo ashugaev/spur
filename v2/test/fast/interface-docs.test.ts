@@ -10,6 +10,15 @@ async function readRepoFile(path: string): Promise<string> {
 }
 
 describe("published interface contracts", () => {
+  it("links native Telegram call workflow and source-free launcher opt-out", async () => {
+    expect(await readRepoFile("README.md")).toContain("docs/telegram-calls.md");
+    expect(await readRepoFile("docs/commands.md")).toContain("SPUR_ISOLATED_WITHOUT_TELEGRAM");
+    expect(await readRepoFile("docs/configuration.md")).toContain("voice-call");
+    expect(await readRepoFile(".agents/skills/spur/SKILL.md")).toContain("docs/telegram-calls.md");
+    expect(await readRepoFile(".claude/skills/spur/SKILL.md")).toBe(
+      await readRepoFile(".agents/skills/spur/SKILL.md"),
+    );
+  });
   it("documents launcher-owned isolated UI discovery environment", async () => {
     const commands = await readRepoFile("docs/commands.md");
     expect(commands).toContain("SPUR_ISOLATED_CONFIG");
@@ -43,18 +52,21 @@ describe("published interface contracts", () => {
       readRepoFile(".claude/skills/spur/SKILL.md"),
     ]);
 
-    // Surface names, flags, and codes only — behavioral semantics (TTLs, scope
+    // Surface names and flags only — behavioral semantics (TTLs, scope
     // rules, per-source control support) live in code + tests, not doc prose.
-    expect(commands).toContain("spur auto-ping unsubscribe --event <handle>");
-    expect(commands).toContain("spur auto-ping unsubscribe --thread <handle>");
-    expect(commands).toContain("spur auto-ping unsubscribe --subscription <handle>");
+    const autoPing = commands.split("## auto-ping")[1]?.split("\n## ")[0] ?? "";
+    expect(autoPing).toContain("spur auto-ping unsubscribe");
+    for (const flag of ["--event", "--thread", "--subscription"]) expect(autoPing).toContain(flag);
     expect(commands).toContain("SPUR_SESSION");
     expect(commands).toContain("--session");
-    expect(commands).toContain("grant_not_ready");
     expect(daemonApi).toContain("GET /sessions/:id/auto-ping-suppressions");
-    expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/unsubscribe");
-    expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume");
-    expect(daemonApi).toMatch(/auto-ping-suppressions[^\n]*409/);
+    expect(daemonApi).toMatch(
+      /POST \/sessions\/:id\/auto-ping-suppressions\/unsubscribe`[^\n]*409 grant_not_ready\|grant_consumed/,
+    );
+    expect(daemonApi).toMatch(
+      /POST \/sessions\/:id\/auto-ping-suppressions\/:suppressionId\/resume`[^\n]*`400\|403\|404`/,
+    );
+    expect(daemonApi).not.toMatch(/auto-ping-suppressions\/:suppressionId\/resume`[^\n]*409/);
     expect(daemonApi).toContain("POST /projects/:id/preflight-batches");
     expect(configuration).toContain("projects.<id>.tokenBudget");
     expect(configuration).toContain("projects.<id>.tokenBudgetWarnOnly");
@@ -62,7 +74,10 @@ describe("published interface contracts", () => {
     expect(configuration).toContain("session.token_budget.unenforced");
     expect(configuration).toContain("session.token_budget.teardown_failed");
     expect(configuration).toContain("session.wake.token_budget_blocked");
-    expect(configuration).toContain("cron|github|github-ci|gitlab|jira|sentry|service|telegram");
+    expect(configuration).toContain(
+      "cron|script|github|github-ci|gitlab|jira|sentry|service|telegram",
+    );
+    expect(configuration).toContain("script:item.new");
     expect(configuration).toMatch(
       /github-ci[^\n]*no auto-ping controls|no auto-ping controls[^\n]*github-ci/,
     );

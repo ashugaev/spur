@@ -1,10 +1,193 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  closeTelegramTopic,
+  claimTelegramTopicDeletion,
+  createTelegramTopic,
+  deleteTelegramTopic,
   editTelegramTopic,
   sendTelegramChatAction,
   sendTelegramReply,
+  type TelegramPhoto,
+  telegramTopicIsDeleting,
 } from "../../src/telegram-source-state.js";
+import { presentConsent, proposeConsent } from "../../src/review-interface-consent.js";
+
+describe("terminal Telegram cleanup transport", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("deletes the topic directly and treats only known missing topics as absent", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: true })));
+    await expect(deleteTelegramTopic({ token: "secret" }, -10, 22)).resolves.toBe("deleted");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.telegram.org/botsecret/deleteForumTopic",
+      expect.objectContaining({
+        body: JSON.stringify({ chat_id: -10, message_thread_id: 22 }),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ ok: false, description: "Bad Request: MESSAGE_THREAD_NOT_FOUND" }),
+        { status: 400 },
+      ),
+    );
+    await expect(deleteTelegramTopic({ token: "secret" }, -10, 22)).resolves.toBe("already_absent");
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: false, description: "CHAT_NOT_FOUND" }), { status: 400 }),
+    );
+    await expect(deleteTelegramTopic({ token: "secret" }, -10, 22)).rejects.toThrow(
+      "CHAT_NOT_FOUND",
+    );
+  });
+
+  it("reports deletion permission without leaking the bot token", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ ok: false, description: "Forbidden" }), { status: 403 }),
+    );
+    await expect(deleteTelegramTopic({ token: "secret" }, -10, 22)).rejects.toThrow(
+      "can_delete_messages",
+    );
+    vi.mocked(fetch).mockRejectedValue(
+      new Error("https://api.telegram.org/botsecret/deleteForumTopic"),
+    );
+    vi.useFakeTimers();
+    const result = deleteTelegramTopic({ token: "secret" }, -10, 22);
+    const assertion = expect(result).rejects.toThrow("Telegram topic deletion failed or timed out");
+    await vi.runAllTimersAsync();
+    await assertion;
+  });
+
+  it("caps repeated 429 retries for deletion and General notices", async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch).mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            ok: false,
+            description: "Too Many Requests",
+            parameters: { retry_after: 1 },
+          }),
+          { status: 429 },
+        ),
+    );
+    const deletion = expect(deleteTelegramTopic({ token: "secret" }, -10, 22)).rejects.toThrow();
+    await vi.runAllTimersAsync();
+    await deletion;
+    expect(fetch).toHaveBeenCalledTimes(3);
+    vi.mocked(fetch).mockClear();
+    const notice = expect(
+      sendTelegramReply({ token: "secret" }, { chatId: -10 }, "finished", { lifecycle: true }),
+    ).rejects.toThrow();
+    await vi.runAllTimersAsync();
+    await notice;
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(fetch).mock.calls.every(([url]) => String(url).endsWith("/sendMessage"))).toBe(
+      true,
+    );
+  });
+
+  it.each(["fetch", "body"])("aborts hung %s transport for lifecycle notices", async (phase) => {
+    vi.useFakeTimers();
+    const signals: AbortSignal[] = [];
+    vi.mocked(fetch).mockImplementation((_url, init) => {
+      signals.push(init?.signal as AbortSignal);
+      if (phase === "fetch") return new Promise(() => {});
+      const response = new Response("{}");
+      vi.spyOn(response, "json").mockImplementation(() => new Promise(() => {}));
+      return Promise.resolve(response);
+    });
+    const result = expect(
+      sendTelegramReply({ token: "secret" }, { chatId: 10 }, "finished", { lifecycle: true }),
+    ).rejects.toThrow();
+    await vi.runAllTimersAsync();
+    await result;
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("creates topics explicitly without sending a body", async () => {
+    const order: string[] = [];
+    vi.mocked(fetch).mockImplementation(async (url) => {
+      order.push(String(url).split("/").at(-1)!);
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          result: String(url).endsWith("createForumTopic")
+            ? { message_thread_id: 22 }
+            : { message_id: 1 },
+        }),
+      );
+    });
+    await expect(createTelegramTopic({ token: "secret" }, -10, "agent")).resolves.toBe(22);
+    expect(order).toEqual(["createForumTopic"]);
+  });
+
+  it.each(["network", "server", "malformed", "forbidden"])(
+    "never retries ambiguous/rejected %s creation or sends fallback body",
+    async (failure) => {
+      vi.mocked(fetch).mockImplementation(async () => {
+        if (failure === "network") throw new Error("connection lost");
+        return new Response(
+          JSON.stringify(
+            failure === "malformed"
+              ? { ok: true, result: {} }
+              : { ok: false, description: failure },
+          ),
+          { status: failure === "server" ? 500 : failure === "forbidden" ? 403 : 200 },
+        );
+      });
+      await expect(createTelegramTopic({ token: "secret" }, -10, "agent")).rejects.toThrow();
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toMatch(/createForumTopic$/);
+    },
+  );
+
+  it("bounds strict creation timeout and retries only definite rejected 429", async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | null | undefined;
+    vi.mocked(fetch).mockImplementation((_url, options) => {
+      signal = options?.signal;
+      return new Promise(() => {});
+    });
+    const timeout = expect(
+      createTelegramTopic({ token: "secret" }, -10, "agent"),
+    ).rejects.toThrow();
+    await vi.runAllTimersAsync();
+    await timeout;
+    expect(signal?.aborted).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    vi.mocked(fetch)
+      .mockReset()
+      .mockImplementation(
+        async () =>
+          new Response(JSON.stringify({ ok: false, parameters: { retry_after: 1 } }), {
+            status: 429,
+          }),
+      );
+    const limited = expect(
+      createTelegramTopic({ token: "secret" }, -10, "agent"),
+    ).rejects.toThrow();
+    await vi.runAllTimersAsync();
+    await limited;
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("claims deletion by physical destination and releases it", () => {
+    const release = claimTelegramTopicDeletion("test", -10, 22);
+    expect(release).not.toBeNull();
+    expect(telegramTopicIsDeleting("test", -10, 22)).toBe(true);
+    expect(claimTelegramTopicDeletion("test", -10, 22)).toBeNull();
+    release?.();
+    expect(telegramTopicIsDeleting("test", -10, 22)).toBe(false);
+  });
+});
 
 describe("sendTelegramReply", () => {
   beforeEach(() => {
@@ -229,7 +412,7 @@ describe("sendTelegramReply", () => {
     ).rejects.toThrow("Telegram reply failed");
   });
 
-  it("creates a forum topic for a group reply before sending to it", async () => {
+  it("sends body only to an explicitly created forum topic", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock
       .mockResolvedValueOnce(
@@ -239,9 +422,15 @@ describe("sendTelegramReply", () => {
         new Response(JSON.stringify({ ok: true, result: { message_id: 55 } })),
       );
 
-    const result = await sendTelegramReply({ token: "token-123" }, { chatId: -1001 }, "hello", {
-      topicName: "🟡 api-1 codex",
-    });
+    const topicId = await createTelegramTopic({ token: "token-123" }, -1001, "🟡 api-1 codex");
+    const result = await sendTelegramReply(
+      { token: "token-123" },
+      { chatId: -1001, messageThreadId: topicId },
+      "hello",
+      {
+        sessionLabel: "api-1 — Task title",
+      },
+    );
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
@@ -266,6 +455,177 @@ describe("sendTelegramReply", () => {
       }),
     );
     expect(result).toEqual({ messageThreadId: 44, messageIds: [55] });
+  });
+});
+
+describe("sendTelegramReply images", () => {
+  const config = { token: "token-123" };
+  const png = (name: string): TelegramPhoto => ({
+    name,
+    contentType: "image/png",
+    data: new Uint8Array([1, 2, 3]),
+  });
+  const ok = (result: unknown): Response => new Response(JSON.stringify({ ok: true, result }));
+  const call = (index: number): { method: string; init: RequestInit } => {
+    const [url, init] = vi.mocked(fetch).mock.calls[index] as [string, RequestInit];
+    return { method: url.split("/").at(-1) as string, init };
+  };
+  const form = (index: number): FormData => {
+    const body = call(index).init.body;
+    expect(body).toBeInstanceOf(FormData);
+    return body as FormData;
+  };
+  const json = (index: number): Record<string, unknown> =>
+    JSON.parse(call(index).init.body as string) as Record<string, unknown>;
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("sends one image as sendPhoto into the thread, then the text below it", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(ok({ message_id: 10 }))
+      .mockResolvedValueOnce(ok({ message_id: 11 }));
+
+    const result = await sendTelegramReply(config, { chatId: -1001, messageThreadId: 7 }, "done", {
+      images: [png("a.png")],
+    });
+
+    expect(call(0).method).toBe("sendPhoto");
+    expect(call(0).init.headers).toBeUndefined();
+    const photo = form(0);
+    expect(photo.get("chat_id")).toBe("-1001");
+    expect(photo.get("message_thread_id")).toBe("7");
+    const file = photo.get("photo") as File;
+    expect(file.name).toBe("a.png");
+    expect(file.type).toBe("image/png");
+    expect([...new Uint8Array(await file.arrayBuffer())]).toEqual([1, 2, 3]);
+    expect(call(1).method).toBe("sendMessage");
+    expect(json(1)).toMatchObject({ chat_id: -1001, message_thread_id: 7, text: "done" });
+    expect(result).toEqual({ messageThreadId: 7, messageIds: [10, 11] });
+  });
+
+  it("sends several images as one album, then the text with the keyboard", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(ok([{ message_id: 10 }, { message_id: 11 }, { message_id: 12 }]))
+      .mockResolvedValueOnce(ok({ message_id: 13 }));
+
+    const result = await sendTelegramReply(config, { chatId: -1001, messageThreadId: 7 }, "done", {
+      images: [png("a.png"), png("b.png"), png("c.png")],
+      buttons: [{ text: "Approve", callbackData: "approve" }],
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(call(0).method).toBe("sendMediaGroup");
+    const album = form(0);
+    expect(album.get("message_thread_id")).toBe("7");
+    expect(JSON.parse(album.get("media") as string)).toEqual([
+      { type: "photo", media: "attach://p0" },
+      { type: "photo", media: "attach://p1" },
+      { type: "photo", media: "attach://p2" },
+    ]);
+    expect((album.get("p2") as File).name).toBe("c.png");
+    expect(json(1)).toMatchObject({
+      message_thread_id: 7,
+      reply_markup: { inline_keyboard: [[{ text: "Approve", callback_data: "approve" }]] },
+    });
+    expect(result).toEqual({ messageThreadId: 7, messageIds: [10, 11, 12, 13] });
+  });
+
+  it("posts the photos into the target topic, same thread as the text", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(ok({ message_id: 10 }))
+      .mockResolvedValueOnce(ok({ message_id: 11 }));
+
+    const result = await sendTelegramReply(config, { chatId: -1001, messageThreadId: 44 }, "done", {
+      images: [png("a.png")],
+    });
+
+    expect([0, 1].map((index) => call(index).method)).toEqual(["sendPhoto", "sendMessage"]);
+    expect(form(0).get("message_thread_id")).toBe("44");
+    expect(json(1)).toMatchObject({ message_thread_id: 44 });
+    expect(result).toEqual({ messageThreadId: 44, messageIds: [10, 11] });
+  });
+
+  it("sends new messages below the photos and deletes the placeholder instead of editing it", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(ok({ message_id: 10 }))
+      .mockResolvedValueOnce(ok({ message_id: 11 }))
+      .mockResolvedValueOnce(ok(true));
+
+    const result = await sendTelegramReply(
+      config,
+      { chatId: -1001, messageThreadId: 7, statusMessageId: 77 },
+      "done",
+      { images: [png("a.png")] },
+    );
+
+    expect([0, 1, 2].map((index) => call(index).method)).toEqual([
+      "sendPhoto",
+      "sendMessage",
+      "deleteMessage",
+    ]);
+    expect(form(0).get("message_thread_id")).toBe("7");
+    expect(json(1)).toMatchObject({ message_thread_id: 7, text: "done" });
+    expect(json(2)).toEqual({ chat_id: -1001, message_id: 77 });
+    expect(result).toEqual({ statusMessageIdConsumed: true, messageIds: [10, 11] });
+  });
+
+  it("swallows a failed placeholder delete without retrying it", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(ok({ message_id: 10 }))
+      .mockResolvedValueOnce(ok({ message_id: 11 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: false, description: "Internal" }), { status: 500 }),
+      );
+
+    const result = await sendTelegramReply(
+      config,
+      { chatId: -1001, messageThreadId: 7, statusMessageId: 77 },
+      "done",
+      { images: [png("a.png")] },
+    );
+
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(result).toEqual({ statusMessageIdConsumed: true, messageIds: [10, 11] });
+  });
+
+  it("names the delivered photo count when the text fails after the album", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(ok([{ message_id: 10 }, { message_id: 11 }]))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: false, description: "Bad Request: chat not found" }), {
+          status: 400,
+        }),
+      );
+
+    await expect(
+      sendTelegramReply(config, { chatId: -1001, messageThreadId: 7 }, "done", {
+        images: [png("a.png"), png("b.png")],
+      }),
+    ).rejects.toThrow(
+      "Telegram reply failed after 2 photo(s) were sent; resend the text only: Telegram reply failed: Bad Request: chat not found",
+    );
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("sends nothing else when the photo upload fails", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: false, description: "Bad Request: PHOTO_INVALID" }), {
+        status: 400,
+      }),
+    );
+
+    await expect(
+      sendTelegramReply(config, { chatId: -1001, messageThreadId: 7, statusMessageId: 77 }, "x", {
+        images: [png("a.png")],
+      }),
+    ).rejects.toThrow("Telegram reply failed: Bad Request: PHOTO_INVALID");
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -311,14 +671,65 @@ describe("sendTelegramReply formatting", () => {
   it("bolds the escaped session signature without parsing title markdown", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(okId(55));
-    await sendTelegramReply(config, { chatId: 123 }, "\n\nDone **today**", {
+    await sendTelegramReply(config, { chatId: 123, messageThreadId: 22 }, "\n\nDone **today**", {
       sessionLabel: "api-1 — <checkout> & **literal** `title`",
     });
     expect(bodyOf(fetchMock, 0)).toEqual({
       chat_id: 123,
       text: "<b>api-1 — &lt;checkout&gt; &amp; **literal** `title`</b>\n\nDone <b>today</b>",
       parse_mode: "HTML",
+      message_thread_id: 22,
     });
+  });
+
+  it.each([undefined, 77])(
+    "omits forum signatures for send/edit %s with buttons",
+    async (statusMessageId) => {
+      const fetchMock = vi.mocked(fetch);
+      fetchMock.mockResolvedValueOnce(okId(statusMessageId ?? 55));
+      await sendTelegramReply(
+        config,
+        {
+          chatId: -1001,
+          messageThreadId: 22,
+          ...(statusMessageId !== undefined ? { statusMessageId } : {}),
+        },
+        "Done **today**",
+        {
+          sessionLabel: "api-1 — Task title",
+          buttons: [{ text: "Yes", callbackData: "spur_choice:t0" }],
+        },
+      );
+      expect(bodyOf(fetchMock, 0)).toMatchObject({
+        text: "Done <b>today</b>",
+        reply_markup: { inline_keyboard: [[{ text: "Yes", callback_data: "spur_choice:t0" }]] },
+      });
+    },
+  );
+
+  it("keeps explicit administrative group-main sends free of topic creation", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(okId(55));
+    await sendTelegramReply(config, { chatId: -1001 }, "Done", {
+      sessionLabel: "api-1 — Task title",
+    });
+    expect(bodyOf(fetchMock, 0)).toMatchObject({ text: "<b>api-1 — Task title</b>\n\nDone" });
+    expect(bodyOf(fetchMock, 0)).not.toHaveProperty("message_thread_id");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("omits forum signatures on chunking and plain parse-error fallback", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(parseError())
+      .mockResolvedValueOnce(okId(55))
+      .mockResolvedValueOnce(okId(56));
+    await sendTelegramReply(config, { chatId: -1001, messageThreadId: 22 }, "x".repeat(4097), {
+      sessionLabel: "api-1",
+    });
+    expect(bodyOf(fetchMock, 1)).toMatchObject({ text: "x".repeat(4096), message_thread_id: 22 });
+    expect(bodyOf(fetchMock, 1)).not.toHaveProperty("parse_mode");
+    expect(bodyOf(fetchMock, 2)).toMatchObject({ text: "x", message_thread_id: 22 });
   });
 
   it("keeps one empty line after an id-only signature when editing a placeholder with buttons", async () => {
@@ -336,6 +747,90 @@ describe("sendTelegramReply formatting", () => {
     });
     expect(result).toEqual({ statusMessageIdConsumed: true, messageIds: [77] });
   });
+  it.each([
+    { mode: "outside forum", chatId: 123, statusMessageId: undefined },
+    { mode: "forum send", chatId: -1001, statusMessageId: undefined },
+    { mode: "forum placeholder edit", chatId: -1001, statusMessageId: 55 },
+  ])(
+    "renders consent once with purpose keyboard/thread in $mode",
+    async ({ chatId, statusMessageId }) => {
+      const record = proposeConsent(
+        {
+          session: "api-1",
+          repository: "owner/repo",
+          branch: "feature/change",
+          baseBranch: "main",
+          projectId: "api",
+          sourceId: "telegram",
+          chatId,
+          approverUserId: 7,
+          manifest: {
+            version: 1,
+            repository: "owner/repo",
+            baseBranch: "main",
+            surfaces: [
+              {
+                kind: "CLI",
+                id: "run",
+                before: ["no flag"],
+                after: ["--dry-run"],
+                constraints: ["no process created"],
+              },
+            ],
+          },
+        },
+        null,
+      );
+      const fetchMock = vi.mocked(fetch);
+      fetchMock.mockResolvedValueOnce(okId(55));
+      await sendTelegramReply(
+        config,
+        { chatId, messageThreadId: 22, ...(statusMessageId ? { statusMessageId } : {}) },
+        `Approve scope\n\n${presentConsent(record)}`,
+        {
+          sessionLabel: "api-1 — Scope <review>",
+          buttons: [
+            { text: "Approve interface", callbackData: "spur_choice:approve" },
+            { text: "Reject", callbackData: "spur_choice:reject" },
+            { text: "Revoke", callbackData: "spur_choice:revoke" },
+          ],
+        },
+      );
+      const payload = bodyOf(fetchMock, 0);
+      expect(payload).toMatchObject({
+        chat_id: chatId,
+        ...(statusMessageId ? { message_id: statusMessageId } : { message_thread_id: 22 }),
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Approve interface", callback_data: "spur_choice:approve" }],
+            [{ text: "Reject", callback_data: "spur_choice:reject" }],
+            [{ text: "Revoke", callback_data: "spur_choice:revoke" }],
+          ],
+        },
+      });
+      if (typeof payload.text !== "string") throw new Error("missing Telegram text");
+      if (chatId > 0) {
+        expect(payload.text).toContain("<b>api-1 — Scope &lt;review&gt;</b>\n\nApprove scope");
+        expect(payload.text.match(/api-1/g)).toHaveLength(1);
+      } else {
+        expect(payload.text).toMatch(/^Approve scope/);
+        expect(payload.text).not.toContain("api-1");
+        expect(payload.text).not.toContain("Scope &lt;review&gt;");
+      }
+      for (const clause of ["Approve scope", "no flag", "--dry-run", "no process created"]) {
+        expect(payload.text.split(clause)).toHaveLength(2);
+      }
+      expect(payload.text).toContain("<b>Interface approval</b>");
+      expect(payload.text).toContain(
+        "\n\n<b>CLI: run</b>\nBefore: no flag\nAfter: --dry-run\nConstraints: no process created",
+      );
+      expect(payload.text).not.toContain("none");
+      expect(fetchMock.mock.calls[0]?.[0]).toMatch(
+        statusMessageId ? /\/editMessageText$/ : /\/sendMessage$/,
+      );
+      expect(record.decision).toBe("pending");
+    },
+  );
 
   it("includes the signature in the first chunk limit without repeating it on continuation", async () => {
     const fetchMock = vi.mocked(fetch);
@@ -546,44 +1041,6 @@ describe("editTelegramTopic", () => {
     await expect(
       editTelegramTopic({ token: "token-123" }, -1001, 22, "🟡 api-1 codex"),
     ).resolves.toBe(true);
-  });
-});
-
-describe("closeTelegramTopic", () => {
-  beforeEach(() => {
-    vi.stubGlobal("fetch", vi.fn());
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it("posts closeForumTopic and swallows failures", async () => {
-    const fetchMock = vi.mocked(fetch);
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: true })));
-
-    await closeTelegramTopic({ token: "token-123" }, -1001, 22);
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      "https://api.telegram.org/bottoken-123/closeForumTopic",
-      expect.objectContaining({
-        body: JSON.stringify({
-          chat_id: -1001,
-          message_thread_id: 22,
-        }),
-      }),
-    );
-  });
-
-  it("swallows a non-ok closeForumTopic response without throwing", async () => {
-    const fetchMock = vi.mocked(fetch);
-    fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ ok: false, description: "topic not found" }), {
-        status: 400,
-      }),
-    );
-
-    await expect(closeTelegramTopic({ token: "token-123" }, -1001, 22)).resolves.toBeUndefined();
   });
 });
 

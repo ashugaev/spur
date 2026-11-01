@@ -1,14 +1,15 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   findOpenCodeSessionId,
-  readOpenCodeConversation,
+  readOpenCodeConversation as readOpenCodeConversationIn,
   readOpenCodeJson,
-  readOpenCodeState,
-  readOpenCodeStructuredState,
+  readOpenCodeState as readOpenCodeStateIn,
+  readOpenCodeStructuredState as readOpenCodeStructuredStateIn,
   invalidateOpenCodeState,
   resetOpenCodeExportState,
   buildOpenCodePlan,
@@ -33,9 +34,53 @@ import {
   waitForOpenCodeLaunchMessage,
   parseOpenCodeLatestUserMessage,
   withOpenCodeLaunchIdentityLock,
+  assertOpenCodeCompatibility,
 } from "../../src/agents/opencode.js";
 
+// Any existing directory: the session's working directory the reads run in.
+const SESSION_CWD = tmpdir();
+const readOpenCodeState = (sessionId: string, activityAtMs?: number | null) =>
+  readOpenCodeStateIn(sessionId, SESSION_CWD, activityAtMs);
+const readOpenCodeStructuredState = (
+  sessionId: string,
+  activityAtMs?: number | null,
+  force?: boolean,
+) => readOpenCodeStructuredStateIn(sessionId, SESSION_CWD, activityAtMs, force);
+const readOpenCodeConversation = (sessionId: string) =>
+  readOpenCodeConversationIn(sessionId, SESSION_CWD);
+
 describe("OpenCode adapter", () => {
+  it("kills and reaps a TERM-resistant compatibility probe within the restore drain budget", async ({
+    onTestFinished,
+  }) => {
+    const directory = await mkdtemp(join(tmpdir(), "spur-opencode-version-"));
+    const executable = fileURLToPath(
+      new URL("./fixtures/term-resistant-opencode.mjs", import.meta.url),
+    );
+    const pidFile = join(directory, "pid");
+    onTestFinished(async () => {
+      const pid = Number(await readFile(pidFile, "utf8").catch(() => "0"));
+      if (pid > 0) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Already reaped.
+        }
+      }
+      vi.unstubAllEnvs();
+      await rm(directory, { recursive: true, force: true });
+    });
+    vi.stubEnv("SPUR_OPENCODE_BIN", executable);
+    vi.stubEnv("SPUR_TEST_OPENCODE_PID", pidFile);
+    const startedAt = Date.now();
+    await expect(assertOpenCodeCompatibility()).rejects.toMatchObject({
+      cause: { killed: true, signal: "SIGKILL" },
+    });
+    expect(Date.now() - startedAt).toBeLessThan(15_000);
+    const pid = Number(await readFile(pidFile, "utf8"));
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 10_000);
+
   it("combines selected variant with MCP and permissions without replacing native selected options", () => {
     const config = JSON.parse(
       buildOpenCodeConfig([{ server: "tools", url: "http://localhost/mcp" }], true, {
@@ -465,6 +510,7 @@ describe("OpenCode adapter", () => {
         [
           "#!/usr/bin/env node",
           `require("node:fs").appendFileSync(${JSON.stringify(countPath)}, process.argv[process.argv.length - 1] + "\\n");`,
+          `require("node:fs").appendFileSync(${JSON.stringify(join(dir, "cwds.log"))}, process.cwd() + "\\n");`,
           ...(options?.exitCode
             ? [`process.exit(${options.exitCode});`]
             : [
@@ -501,6 +547,44 @@ describe("OpenCode adapter", () => {
     async function spawnCountFor(countPath: string, sessionId: string): Promise<number> {
       return (await spawnLines(countPath)).filter((line) => line === sessionId).length;
     }
+
+    it("still reads the export when the session worktree no longer exists", async () => {
+      const { dir } = await stubCountingOpenCode();
+      const gone = join(dir, "removed-worktree");
+      try {
+        const state = await readOpenCodeStateIn("ses_gone", gone);
+        expect(state).not.toBeNull();
+        const cwds = (await readFile(join(dir, "cwds.log"), "utf8")).split("\n").filter(Boolean);
+        expect(cwds).toHaveLength(1);
+        expect(cwds[0]).not.toBe(gone);
+      } finally {
+        vi.unstubAllEnvs();
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    // `opencode export` bootstraps an instance for its cwd; every fallback
+    // export must run in the session's working directory, not the daemon's.
+    it("runs every fallback export in the session working directory", async () => {
+      const { dir, countPath } = await stubCountingOpenCode();
+      const worktree = await realpath(await mkdtemp(join(tmpdir(), "spur-opencode-wt-")));
+      try {
+        await readOpenCodeStateIn("ses_cwd", worktree);
+        await readOpenCodeConversationIn("ses_cwd", worktree);
+        await waitForOpenCodeLaunchMessage("ses_cwd", worktree, 0);
+        const baseline = { sessionId: "ses_cwd", after: null };
+        await scanOpenCodeForTypedMessage(baseline, "hello", worktree);
+        await captureOpenCodeSubmitBaseline("ses_cwd", worktree);
+
+        const cwds = (await readFile(join(dir, "cwds.log"), "utf8")).split("\n").filter(Boolean);
+        expect(await spawnCount(countPath)).toBe(5);
+        expect(cwds).toEqual(Array(5).fill(worktree));
+      } finally {
+        vi.unstubAllEnvs();
+        await rm(worktree, { recursive: true, force: true });
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
 
     it("shares one export across concurrent reads of the same session", async () => {
       const { dir, countPath } = await stubCountingOpenCode();
@@ -912,7 +996,9 @@ describe("OpenCode adapter", () => {
     // No opencode.db under this data home: the check answers from the CLI export.
     vi.stubEnv("XDG_DATA_HOME", join(binDir, "no-data"));
     try {
-      await expect(waitForOpenCodeLaunchMessage("ses_launch", 5_000)).resolves.toBe(true);
+      await expect(waitForOpenCodeLaunchMessage("ses_launch", SESSION_CWD, 5_000)).resolves.toBe(
+        true,
+      );
     } finally {
       vi.unstubAllEnvs();
       await rm(binDir, { recursive: true, force: true });
@@ -980,11 +1066,11 @@ describe("OpenCode adapter", () => {
       vi.stubEnv("SPUR_OPENCODE_BIN", binPath);
       vi.stubEnv("XDG_DATA_HOME", dataHome);
       try {
-        const baseline = await captureOpenCodeSubmitBaseline("ses_1");
+        const baseline = await captureOpenCodeSubmitBaseline("ses_1", SESSION_CWD);
         if (!baseline) throw new Error("expected a baseline");
-        await expect(scanOpenCodeForNewUserMessage(baseline)).resolves.toBe(false);
+        await expect(scanOpenCodeForNewUserMessage(baseline, SESSION_CWD)).resolves.toBe(false);
         insert(database, "msg_u2", "ses_1", "user");
-        await expect(scanOpenCodeForNewUserMessage(baseline)).resolves.toBe(true);
+        await expect(scanOpenCodeForNewUserMessage(baseline, SESSION_CWD)).resolves.toBe(true);
         await expect(readFile(spawnedMarker, "utf8")).rejects.toThrow();
       } finally {
         database.close();
@@ -1009,19 +1095,21 @@ describe("OpenCode adapter", () => {
       addPart("prt_1", "msg_u1", "Marker QA1: reply ok");
       vi.stubEnv("XDG_DATA_HOME", dataHome);
       try {
-        const baseline = await captureOpenCodeSubmitBaseline("ses_1");
+        const baseline = await captureOpenCodeSubmitBaseline("ses_1", SESSION_CWD);
         if (!baseline) throw new Error("expected a baseline");
         insert(database, "msg_u2", "ses_1", "user", 200);
         addPart("prt_2", "msg_u2", "Reply with the single word pong.");
-        await expect(scanOpenCodeForTypedMessage(baseline, "Marker QA1: reply ok")).resolves.toBe(
-          false,
-        );
-        await expect(scanOpenCodeForTypedMessage(baseline, "/review 986")).resolves.toBe(true);
+        await expect(
+          scanOpenCodeForTypedMessage(baseline, "Marker QA1: reply ok", SESSION_CWD),
+        ).resolves.toBe(false);
+        await expect(
+          scanOpenCodeForTypedMessage(baseline, "/review 986", SESSION_CWD),
+        ).resolves.toBe(true);
         insert(database, "msg_u3", "ses_1", "user", 300);
         addPart("prt_3", "msg_u3", "Marker   QA1:\r\nreply ok");
-        await expect(scanOpenCodeForTypedMessage(baseline, "Marker QA1: reply ok")).resolves.toBe(
-          true,
-        );
+        await expect(
+          scanOpenCodeForTypedMessage(baseline, "Marker QA1: reply ok", SESSION_CWD),
+        ).resolves.toBe(true);
       } finally {
         database.close();
         vi.unstubAllEnvs();
