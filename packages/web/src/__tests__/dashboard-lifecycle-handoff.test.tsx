@@ -28,6 +28,7 @@ const source: SpurSessionView = {
   lastActivityAt: "2026-08-01",
   runtimeAlive: false,
   workspaceExists: true,
+  worktreePath: "/tmp/handoff-one",
   services: [],
   slots: { title: "Handoff session", links: [] },
   lifecycle: { instanceId: "epoch-one", revision: 0, operation: null },

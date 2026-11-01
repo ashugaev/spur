@@ -11,11 +11,13 @@ import { getBuildId } from "../../src/build-identity.js";
 import { mcpFixture, session } from "./mcp-fixture.js";
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
   for (const close of cleanups.splice(0).reverse()) await close();
 });
 async function setup() {
   const fixture = await mcpFixture();
+  vi.stubEnv("SPUR_MCP_TUNNEL_ENV_FILE", join(fixture.root, "absent-tunnel.env"));
   cleanups.push(fixture.close);
   const reservation = createServer();
   await new Promise<void>((resolve) => reservation.listen(0, "127.0.0.1", resolve));

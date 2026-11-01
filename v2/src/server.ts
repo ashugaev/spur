@@ -9,11 +9,22 @@ import {
   RestoreOperationError,
 } from "./session-lifecycle.js";
 import { parseAgentName } from "./agents/index.js";
-import { AgentReasoningEffortError, listAgentModelCatalog } from "./agents/models.js";
+import {
+  AgentModelError,
+  AgentReasoningEffortError,
+  listAgentModelCatalog,
+} from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { AutoPingError, AutoPingService, redactAutoPingHandles } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
 import { projectConversationPage } from "./conversation-page.js";
+import { readCronJobs, UnknownCronProjectError } from "./cron-jobs.js";
+import {
+  CronJobEditError,
+  cronJobIdentity,
+  readCronJobDraft,
+  saveCronJobDraft,
+} from "./cron-job-editor.js";
 import type { ProcSnapshot } from "./sidecars/reap.js";
 import {
   clearFailedDeploySwitchRecord,
@@ -76,6 +87,7 @@ import {
   SessionStartingError,
   SidecarPortConflictError,
   SidecarProbeUnresponsiveError,
+  SpawnBatchConflictError,
   WakeDispatchConflictError,
   WakeTargetMissingError,
 } from "./session-service.js";
@@ -197,7 +209,10 @@ export async function sourceSessionById(
 }
 
 export function createSourceWorkbench(
-  service: Pick<SessionService, "listProjects" | "launchOptions" | "list" | "get" | "restore">,
+  service: Pick<
+    SessionService,
+    "listProjects" | "launchOptions" | "list" | "get" | "restore" | "complete" | "kill"
+  >,
 ): SourceWorkbench {
   const assertSpawnableProject = (project: string): void => {
     if (!spawnableProjects(service.listProjects()).some((entry) => entry.id === project)) {
@@ -216,6 +231,18 @@ export function createSourceWorkbench(
     },
     async getSession(sessionId) {
       return projectSourceSession(await service.get(sessionId));
+    },
+    async completeSession(sessionId) {
+      await service.complete(
+        sessionId,
+        { prAction: "leave_open" },
+        {
+          todoActor: { kind: "human", origin: "telegram" },
+        },
+      );
+    },
+    async killSession(sessionId) {
+      await service.kill(sessionId, { prAction: "leave_open" });
     },
     async restoreSession({ sessionId, expectedProject }) {
       const current = await service.get(sessionId);
@@ -851,6 +878,9 @@ export async function startServer(
   const bus = new EventBus();
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
+  service.setTelegramBotIdentityReader(
+    (projectId, sourceId) => sources?.telegramBotIdentity(projectId, sourceId) ?? null,
+  );
   // Closure over the reassignable `sources` above, so this stays correct
   // across reloadAutomation recreating sources — registered once, not
   // re-registered per (re)start.
@@ -906,7 +936,13 @@ export async function startServer(
         listSessions: async () =>
           (await service.list({ view: "dashboard" })).map(projectSourceSession),
         getSession: (sessionId) => sourceSessionById(service, sessionId),
+        prepareSessionMessage: async (sessionId, request) =>
+          service.prepareSourceMessage(sessionId, request),
         workbench: createSourceWorkbench(service),
+        telegramConversations: {
+          ensureTopic: (sessionId, origin) => service.ensureTelegramTopic(sessionId, origin),
+          unwatch: (sessionId, origin) => service.unwatchTelegramTopic(sessionId, origin),
+        },
         spawnSession: async (request) => {
           const { telegramOrigin, ...spawnRequest } = request;
           const session = await service.spawn(
@@ -1289,6 +1325,61 @@ export async function startServer(
 
       if (method === "GET" && path === "/projects") {
         sendJson(response, 200, service.listProjects());
+        return;
+      }
+
+      if ((method === "GET" || method === "PATCH") && path === "/projects/cron/edit") {
+        try {
+          const identity = cronJobIdentity(url.searchParams);
+          const context = {
+            running: service.config,
+            bootstrapConfigPath: service.bootstrapConfigPath,
+            registryPaths: service.getRegistryPaths(),
+          };
+          let body: unknown;
+          if (method === "PATCH") {
+            try {
+              body = await readJsonBody<unknown>(request);
+            } catch {
+              throw new CronJobEditError(400, "invalid_body", "Invalid editor JSON body.");
+            }
+          }
+          sendJson(
+            response,
+            200,
+            method === "GET"
+              ? readCronJobDraft(context, identity)
+              : saveCronJobDraft(context, identity, body),
+          );
+        } catch (error) {
+          if (!(error instanceof CronJobEditError)) throw error;
+          sendJson(response, error.status, {
+            error: error.message,
+            code: error.code,
+            ...(error.field !== undefined ? { field: error.field } : {}),
+          });
+        }
+        return;
+      }
+
+      if (method === "GET" && path === "/projects/cron") {
+        const projectId = url.searchParams.get("project")?.trim() || undefined;
+        try {
+          sendJson(
+            response,
+            200,
+            await readCronJobs({
+              config: service.config,
+              bootstrapConfigPath: service.bootstrapConfigPath,
+              registryPaths: service.getRegistryPaths(),
+              knownProjectIds: new Set(service.listProjects().map((entry) => entry.id)),
+              ...(projectId !== undefined ? { projectId } : {}),
+            }),
+          );
+        } catch (error) {
+          if (!(error instanceof UnknownCronProjectError)) throw error;
+          sendError(response, 404, error.message);
+        }
         return;
       }
 
@@ -2025,9 +2116,15 @@ export async function startServer(
         return;
       }
 
+      const sourceInfoSessionId = path.match(/^\/sessions\/([^/]+)\/source-info$/)?.[1];
+      if (method === "GET" && sourceInfoSessionId) {
+        sendJson(response, 200, service.sourceInfo(sourceInfoSessionId));
+        return;
+      }
+
       const sourceReplySessionId = path.match(/^\/sessions\/([^/]+)\/source-reply$/)?.[1];
       if (method === "POST" && sourceReplySessionId) {
-        const body = await readJsonBody<SourceReplyRequest>(request);
+        const body = await readJsonBody<SourceReplyRequest>(request, 15_000_000);
         sendJson(response, 200, await service.replyToSource(sourceReplySessionId, body));
         return;
       }
@@ -2225,6 +2322,10 @@ export async function startServer(
 
       const switchAuthSessionId = path.match(/^\/sessions\/([^/]+)\/switch-auth$/)?.[1];
       if (method === "POST" && switchAuthSessionId) {
+        if (!service.config.authRotation.switchAuth) {
+          sendError(response, 404, "switch-auth is disabled; set authRotation.switchAuth: true");
+          return;
+        }
         const body = await readJsonBody<{ accountId?: unknown; force?: unknown }>(request);
         const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
         if (!accountId) {
@@ -2353,6 +2454,7 @@ export async function startServer(
       }
       if (
         error instanceof AgentReasoningEffortError ||
+        error instanceof AgentModelError ||
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidConfigPathError ||
@@ -2381,7 +2483,8 @@ export async function startServer(
         error instanceof SidecarPortConflictError ||
         error instanceof OpenPrActionRequiredError ||
         error instanceof GithubPrCheckUnavailableError ||
-        error instanceof SessionNotRestorableError
+        error instanceof SessionNotRestorableError ||
+        error instanceof SpawnBatchConflictError
       ) {
         failRequest(response, error.statusCode, message, {
           method,

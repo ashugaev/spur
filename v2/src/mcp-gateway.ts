@@ -5,6 +5,7 @@ import { getDaemonOperation } from "./daemon-contracts.js";
 import { SPUR_DAEMON_API_VERSION } from "./types.js";
 import { McpResults } from "./mcp-results.js";
 import { getBuildId } from "./build-identity.js";
+import { resolveWebBaseUrl } from "./ports.js";
 import { McpDaemonControl, type DaemonIdentity } from "./mcp-daemon-control.js";
 import { readDaemonLogs } from "./mcp-daemon-logs.js";
 
@@ -349,11 +350,23 @@ export class McpGateway {
       };
     const instance = createHash("sha256").update(this.configIdentity).digest("hex");
     const query = new URLSearchParams({ instance, url, cacheOnly: "1" });
+    const baseUrl = await resolveWebBaseUrl(this.config.config.ui.port);
+    if (!baseUrl) {
+      return {
+        sessionId,
+        url,
+        status: "unavailable",
+        source: "spur-web-pr-status-cache",
+        reason: "selected_web_cache_unavailable",
+        refreshed: false,
+        observedAt: Date.now(),
+      };
+    }
     try {
-      const response = await fetch(
-        `http://127.0.0.1:${this.config.config.ui.port}/api/pr-status?${query}`,
-        { signal, redirect: "manual" },
-      );
+      const response = await fetch(`${baseUrl}/api/pr-status?${query}`, {
+        signal,
+        redirect: "manual",
+      });
       // Cache responses are small; refuse unexpected services/large output before parsing.
       const reader = response.body?.getReader();
       if (!reader) throw new Error("Empty cache response");

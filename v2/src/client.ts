@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
-import { isDefaultInstanceConfigPath, loadConfig } from "./config.js";
+import { isDefaultInstanceConfigPath, loadConfig, loadInstanceConfigReadOnly } from "./config.js";
 import { resolveSystemdScope } from "./host-install.js";
 import { SPUR_SIDECAR_NAME_ENV } from "./sidecar-runtime.js";
 import {
@@ -553,6 +553,19 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
   }
 
   throw new Error(`Timed out waiting for daemon at ${baseUrl}`);
+}
+
+export async function getExistingJson<T>(path: string, configPath?: string): Promise<T> {
+  const loaded = loadInstanceConfigReadOnly(configPath);
+  if (loaded.status !== "ok") {
+    throw new Error(loaded.status === "invalid" ? loaded.error : "Instance config not found");
+  }
+  const baseUrl = `http://${loaded.config.server.host}:${loaded.config.server.port}`;
+  const probe = await probeDaemon(baseUrl);
+  if (probe.state !== "ready") {
+    throw new Error(`Existing daemon is ${probe.state}`);
+  }
+  return requestJson<T>(baseUrl, path);
 }
 
 export async function getJson<T>(

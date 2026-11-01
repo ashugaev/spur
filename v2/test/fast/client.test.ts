@@ -72,6 +72,65 @@ describe("client.ensureServer", () => {
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
+  it.each(["ready", "http-error", "unreachable", "starting", "incompatible", "absent", "invalid"])(
+    "getExistingJson reads %s without lifecycle or config effects",
+    async (state) => {
+      const root = await mkdtemp(join(tmpdir(), "spur-existing-client-"));
+      tempDirs.push(root);
+      const configPath = join(root, "config.yaml");
+      if (state !== "absent")
+        await writeFile(
+          configPath,
+          state === "invalid" ? "[invalid" : "server: {host: 127.0.0.1, port: 54321}\n",
+        );
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+      if (state === "unreachable") vi.mocked(fetch).mockRejectedValue(new Error("offline"));
+      else
+        vi.mocked(fetch)
+          .mockResolvedValueOnce(
+            new Response(
+              JSON.stringify(runtimeInfo(state === "incompatible" ? -1 : SPUR_DAEMON_API_VERSION)),
+              { status: state === "starting" ? 503 : 200 },
+            ),
+          )
+          .mockResolvedValueOnce(
+            new Response(
+              JSON.stringify(
+                state === "http-error"
+                  ? { error: "Session not found" }
+                  : { sessionId: "api-1", source: null },
+              ),
+              { status: state === "http-error" ? 404 : 200 },
+            ),
+          );
+      const { getExistingJson } = await loadClientModule();
+      if (state === "ready")
+        expect(await getExistingJson("/sessions/api-1/source-info", configPath)).toEqual({
+          sessionId: "api-1",
+          source: null,
+        });
+      else
+        await expect(getExistingJson("/sessions/api-1/source-info", configPath)).rejects.toThrow(
+          state === "http-error" ? "Session not found" : undefined,
+        );
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(kill).not.toHaveBeenCalled();
+      expect(loadConfigMock).not.toHaveBeenCalled();
+      expect(sleepMock).not.toHaveBeenCalled();
+      expect(
+        vi
+          .mocked(fetch)
+          .mock.calls.every(
+            ([url, init]) =>
+              typeof url === "string" &&
+              (url.endsWith("/info") || url.endsWith("/sessions/api-1/source-info")) &&
+              !init?.method,
+          ),
+      ).toBe(true);
+      if (state === "absent" || state === "invalid") expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
   it("reuses a compatible daemon without spawning a new one", async () => {
     vi.mocked(fetch).mockResolvedValue(
       new Response(JSON.stringify(runtimeInfo()), { status: 200 }),
@@ -731,6 +790,35 @@ describe("client deadlines", () => {
     expect(settled).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     await expect(result).resolves.toEqual({ state: "unresponsive" });
+  });
+
+  it("getExistingJson rejects an unresponsive initial probe without lifecycle effects", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-existing-unresponsive-"));
+    const configPath = join(root, "config.yaml");
+    try {
+      await writeFile(configPath, "server: {host: 127.0.0.1, port: 54321}\n");
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+      vi.mocked(fetch).mockImplementation((_input, init) => pendingUntilAbort(init));
+      const { getExistingJson } = await loadClientModule();
+      const result = track(getExistingJson("/sessions/api-1/source-info", configPath));
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(result.state.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await result.done();
+      expect(result.state.error?.message).toBe("Existing daemon is unresponsive");
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenCalledWith(
+        "http://127.0.0.1:54321/info",
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(kill).not.toHaveBeenCalled();
+      expect(loadConfigMock).not.toHaveBeenCalled();
+      expect(sleepMock).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("probe reports unreachable on a connection error", async () => {

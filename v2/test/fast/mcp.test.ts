@@ -1,16 +1,19 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { afterEach, expect, it } from "vitest";
+import { join } from "node:path";
+import { afterEach, expect, it, vi } from "vitest";
 import { createMcpServer } from "../../src/mcp.js";
 import { DAEMON_OPERATIONS } from "../../src/daemon-contracts.js";
 import { McpGateway } from "../../src/mcp-gateway.js";
 import { mcpFixture, session } from "./mcp-fixture.js";
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const close of cleanups.splice(0).reverse()) await close();
 });
 async function setup() {
   const fixture = await mcpFixture();
+  vi.stubEnv("SPUR_MCP_TUNNEL_ENV_FILE", join(fixture.root, "absent-tunnel.env"));
   cleanups.push(fixture.close);
   const server = await createMcpServer(fixture.configPath);
   const client = new Client({ name: "test", version: "1" });
@@ -83,6 +86,70 @@ it("preserves daemon status/message and never follows redirects or replays mutat
     expect(fixture.calls.slice(before).filter((request) => request.method === "POST")).toHaveLength(
       1,
     );
+  }
+});
+it("discovers and invokes scoped Cron editor operations with nullable overrides and preserved errors", async () => {
+  const { fixture, call } = await setup();
+  const query = { project: "project space", source: "nightly/name", trigger: "audit&review" };
+  const path = `/projects/cron/edit?${new URLSearchParams(query)}`;
+  for (const operationId of ["get_cron_job_draft", "save_cron_job_draft"]) {
+    const description = await call("describe_operations", { operationId });
+    expect(description.structuredContent).toMatchObject({
+      total: 1,
+      operations: [
+        {
+          operationId,
+          path: "/projects/cron/edit",
+          query: [
+            { name: "project", required: true },
+            { name: "source", required: true },
+            { name: "trigger", required: true },
+          ],
+        },
+      ],
+    });
+  }
+  const blocks = [{ prompt: "Inspect task", agent: null, model: null, reasoningEffort: null }];
+  const draft = {
+    projectId: query.project,
+    sourceId: query.source,
+    triggerId: query.trigger,
+    ownerPath: "spur.yaml",
+    revision: "a".repeat(64),
+    schedule: "0 4 * * *",
+    sourceTriggerIds: [query.trigger],
+    blocks,
+  };
+  fixture.state.override = (url, method) =>
+    url === path
+      ? {
+          status: 200,
+          value: method === "PATCH" ? { ...draft, saved: true, activation: "pending" } : draft,
+        }
+      : undefined;
+  expect(
+    (await call("daemon_request", { operationId: "get_cron_job_draft", query })).structuredContent,
+  ).toMatchObject({ ok: true, status: 200, body: draft });
+  expect(fixture.calls.at(-1)).toMatchObject({ method: "GET", path, body: undefined });
+  const body = { revision: draft.revision, schedule: draft.schedule, blocks };
+  expect(
+    (await call("daemon_request", { operationId: "save_cron_job_draft", query, body }))
+      .structuredContent,
+  ).toMatchObject({ ok: true, status: 200, body: { saved: true, activation: "pending", blocks } });
+  expect(fixture.calls.at(-1)).toMatchObject({ method: "PATCH", path, body });
+  for (const status of [409, 422]) {
+    const error = {
+      error: "Config cannot be saved",
+      code: status === 409 ? "config_changed" : "invalid_schedule",
+      field: "schedule",
+    };
+    fixture.state.override = (url) => (url === path ? { status, value: error } : undefined);
+    const before = fixture.calls.filter((request) => request.method === "PATCH").length;
+    expect(
+      (await call("daemon_request", { operationId: "save_cron_job_draft", query, body }))
+        .structuredContent,
+    ).toMatchObject({ ok: false, status, body: error });
+    expect(fixture.calls.filter((request) => request.method === "PATCH")).toHaveLength(before + 1);
   }
 });
 it("forwards every catalog example to a fixed method/template preserving fields", async () => {

@@ -1,6 +1,6 @@
 "use client";
 
-import { SessionRow } from "@/components/SessionRow";
+import { SessionRow, type SessionRowAction } from "@/components/SessionRow";
 import { Zone } from "@/components/Zone";
 import {
   ATTENTION_LANE_META,
@@ -20,6 +20,7 @@ interface AttentionZoneProps {
   // session actually completed, which only its own dialogs consume.
   onCompleteSession: (session: DashboardSession) => Promise<unknown>;
   onRestoreSession: (session: DashboardSession) => Promise<void>;
+  onSessionAction: (session: DashboardSession, action: SessionRowAction) => Promise<unknown>;
 }
 
 export function AttentionZone({
@@ -31,6 +32,7 @@ export function AttentionZone({
   onOpenTerminal,
   onCompleteSession,
   onRestoreSession,
+  onSessionAction,
 }: AttentionZoneProps) {
   const config = ATTENTION_LANE_META[level];
 
@@ -43,6 +45,7 @@ export function AttentionZone({
       onOpenTerminal={onOpenTerminal}
       onCompleteSession={onCompleteSession}
       onRestoreSession={onRestoreSession}
+      onSessionAction={onSessionAction}
     />
   ));
 

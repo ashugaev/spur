@@ -6,8 +6,8 @@ import { setTimeout, clearTimeout } from "node:timers";
 export const STAGES = Object.freeze({
   quality: { workflow: "ci.yml", seconds: 150, predecessor: null },
   playwright: { workflow: "ci.yml", seconds: 150, predecessor: "Quality" },
-  "runtime-integration": { workflow: "ci.yml", seconds: 150, predecessor: "Playwright E2E" },
-  "real-agent-smoke": { workflow: "ci.yml", seconds: 150, predecessor: "Runtime Integration" },
+  "runtime-integration": { workflow: "ci.yml", seconds: 150, predecessor: "Quality" },
+  "real-agent-smoke": { workflow: "ci.yml", seconds: 150, predecessor: "Quality" },
   gitleaks: { workflow: "security.yml", seconds: 300, predecessor: null },
   "npm-audit": { workflow: "security.yml", seconds: 300, predecessor: null },
   "onboarding-test": { workflow: "onboarding-test.yml", seconds: 600, predecessor: null },

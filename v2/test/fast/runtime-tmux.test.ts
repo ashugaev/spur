@@ -803,6 +803,61 @@ describe("runtime-tmux", () => {
       expect(respawnCommand().startsWith(`exec sh '${envFile}' env -u `)).toBe(true);
     });
 
+    it("exports DISABLE_AUTO_UPDATE=true in the agent pane env unless the per-call env sets it", async () => {
+      execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+      const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+      const defaultDir = mkdtempSync(join(tmpdir(), "spur-launch-omz-default-"));
+      const overrideDir = mkdtempSync(join(tmpdir(), "spur-launch-omz-override-"));
+      const readEnvFile = (dir: string): string =>
+        readFileSync(join(dir, paneEnvFiles(dir)[0] ?? "missing"), "utf8");
+      const saved = process.env["DISABLE_AUTO_UPDATE"];
+      Reflect.deleteProperty(process.env, "DISABLE_AUTO_UPDATE");
+      try {
+        await createTmuxSession({
+          sessionName: "api-1",
+          cwd: "/tmp/worktree",
+          launchCommand: "claude",
+          launchScriptDir: defaultDir,
+        });
+        await createTmuxSession({
+          sessionName: "api-2",
+          cwd: "/tmp/worktree",
+          launchCommand: "claude",
+          launchScriptDir: overrideDir,
+          env: { DISABLE_AUTO_UPDATE: "false" },
+        });
+      } finally {
+        if (saved !== undefined) process.env["DISABLE_AUTO_UPDATE"] = saved;
+      }
+
+      expect(readEnvFile(defaultDir)).toContain("command export DISABLE_AUTO_UPDATE='true'");
+      const overridden = readEnvFile(overrideDir);
+      expect(overridden).toContain("command export DISABLE_AUTO_UPDATE='false'");
+      expect(overridden).not.toContain("DISABLE_AUTO_UPDATE='true'");
+    });
+
+    it("does not add DISABLE_AUTO_UPDATE to command pane env", async () => {
+      execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+      const { createTmuxCommandSession } = await import("../../src/runtime-tmux.js");
+      const saved = process.env["DISABLE_AUTO_UPDATE"];
+      Reflect.deleteProperty(process.env, "DISABLE_AUTO_UPDATE");
+      try {
+        await createTmuxCommandSession({
+          sessionName: "api-1--dev",
+          cwd: "/tmp/worktree",
+          launchCommand: "pnpm dev",
+        });
+      } finally {
+        if (saved !== undefined) process.env["DISABLE_AUTO_UPDATE"] = saved;
+      }
+
+      const files = paneEnvFiles(TEST_TMP_DIR);
+      expect(files).toHaveLength(1);
+      expect(readFileSync(join(TEST_TMP_DIR, files[0] ?? "missing"), "utf8")).not.toContain(
+        "DISABLE_AUTO_UPDATE",
+      );
+    });
+
     it("delivers the agent pane env exactly, keeps tmux's SHELL, and drops identity, tmux-managed, and invalid keys", async () => {
       execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
       const home = mkdtempSync(join(tmpdir(), "spur-launch-home-"));
@@ -2169,26 +2224,98 @@ describe("runtime-tmux", () => {
     });
   });
 
-  it("R1 lookupTmuxPanePid carries the dead flag from the same pane row", async () => {
+  it("ownership lookup retains cached active metadata until a fresh active or all-live read", async () => {
+    let output = "api-1 1 1 0 100 /dev/pts/1";
+    execFileAsyncMock.mockImplementation(async () => ({ stdout: output, stderr: "" }));
+    const { lookupTmuxPanePid, lookupTmuxSessionPanePids } =
+      await import("../../src/runtime-tmux.js");
+    expect(await lookupTmuxPanePid("api-1")).toEqual({
+      status: "ok",
+      panePid: 100,
+      paneDead: false,
+    });
+    output = "api-1 1 1 1 200 /dev/pts/2\napi-1 0 0 0 300 /dev/pts/3";
+    expect(await lookupTmuxPanePid("api-1")).toEqual({
+      status: "ok",
+      panePid: 100,
+      paneDead: false,
+    });
+    expect(await lookupTmuxPanePid("api-1", { fresh: true })).toEqual({
+      status: "ok",
+      panePid: 200,
+      paneDead: true,
+    });
+    output = "api-1 1 1 0 400 /dev/pts/4";
+    expect(await lookupTmuxSessionPanePids("api-1", { fresh: true })).toEqual({
+      status: "ok",
+      panePids: [400],
+    });
+    expect(await lookupTmuxPanePid("api-1")).toEqual({
+      status: "ok",
+      panePid: 400,
+      paneDead: false,
+    });
+  });
+
+  it("R1 lookupTmuxSessionPanePids leaves dead panes out, per pane row, so a recycled pid never roots capture", async () => {
     execFileAsyncMock.mockImplementation(async (_file, args) => {
       if (args[0] === "list-panes") {
-        return { stdout: "api-1 1 1 1 4242 /dev/pts/1\nlive-1 1 1 0 4243 /dev/pts/2", stderr: "" };
+        return {
+          stdout:
+            "api-1 1 1 1 4242 /dev/pts/1\napi-1 0 0 0 4244 /dev/pts/3\nlive-1 1 1 0 4243 /dev/pts/2",
+          stderr: "",
+        };
       }
       return { stdout: "", stderr: "" };
     });
 
-    const { lookupTmuxPanePid } = await import("../../src/runtime-tmux.js");
+    const { lookupTmuxSessionPanePids } = await import("../../src/runtime-tmux.js");
 
-    expect(await lookupTmuxPanePid("api-1", { fresh: true })).toEqual({
+    expect(await lookupTmuxSessionPanePids("api-1", { fresh: true })).toEqual({
       status: "ok",
-      panePid: 4242,
-      paneDead: true,
+      panePids: [4244],
     });
-    expect(await lookupTmuxPanePid("live-1", { fresh: true })).toEqual({
+    expect(await lookupTmuxSessionPanePids("live-1", { fresh: true })).toEqual({
       status: "ok",
-      panePid: 4243,
-      paneDead: false,
+      panePids: [4243],
     });
+  });
+
+  it("lookupTmuxSessionPanePids returns every pane pid of the session, not only the active pane", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "list-panes") {
+        return {
+          stdout: [
+            "api-1 0 0 0 4242 /dev/pts/1",
+            "api-1 1 1 0 4343 /dev/pts/2",
+            "other-1 1 1 0 5000 /dev/pts/3",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { lookupTmuxSessionPanePids } = await import("../../src/runtime-tmux.js");
+
+    expect(await lookupTmuxSessionPanePids("api-1")).toEqual({
+      status: "ok",
+      panePids: [4242, 4343],
+    });
+    expect(await lookupTmuxSessionPanePids("absent-1")).toEqual({ status: "ok", panePids: [] });
+  });
+
+  it("lookupTmuxSessionPanePids reports unavailable when the tmux probe fails", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "list-panes") {
+        throw new Error("no server running on /tmp/tmux-1000/spur");
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { lookupTmuxSessionPanePids } = await import("../../src/runtime-tmux.js");
+
+    expect(await lookupTmuxSessionPanePids("api-1")).toEqual({ status: "unavailable" });
   });
 
   it("passes an explicit maxBuffer above the 1 MiB execFile default to the ps snapshot", async () => {
