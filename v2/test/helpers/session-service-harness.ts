@@ -2011,6 +2011,7 @@ export {
   killTmuxSessionTreeMock,
   sendMessageToTmuxMock,
   sendInterruptKeysToTmuxMock,
+  sendSensitiveMessageToTmuxMock,
   sendSubmitKeyToTmuxMock,
   sendMenuSelectionKeysMock,
   tmuxPaneDeadMock,
