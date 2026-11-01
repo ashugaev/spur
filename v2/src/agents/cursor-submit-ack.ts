@@ -289,7 +289,8 @@ export async function scanCursorJsonlForMessage(
     return { found: false, scannedFile: baseline.file };
   }
 
-  if (baseline.file === null) {
+  let activeFile = baseline.file;
+  if (activeFile === null) {
     // Pending baseline: no chat existed at send time (cursor writes store.db
     // before the first transcript record), so the own chat holds only
     // post-send records and is scanned from 0. Resolved in place so later
@@ -305,13 +306,12 @@ export async function scanCursorJsonlForMessage(
     }
     baseline.file = resolved;
     baseline.size = 0;
+    activeFile = resolved;
   }
-  const pinnedId = agentSessionId ?? cursorChatIdFromTranscriptPath(baseline.file);
+  const pinnedId = agentSessionId ?? cursorChatIdFromTranscriptPath(activeFile);
 
-  if (
-    await scanFileForUserText(baseline.file, baseline.size, normalizedTarget, baseline.deliveryId)
-  ) {
-    return { found: true, scannedFile: baseline.file };
+  if (await scanFileForUserText(activeFile, baseline.size, normalizedTarget, baseline.deliveryId)) {
+    return { found: true, scannedFile: activeFile };
   }
 
   if (options?.cursorConfigDir) {

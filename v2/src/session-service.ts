@@ -11662,8 +11662,8 @@ export class SessionService {
     const durationMs = Date.now() - new Date(session.createdAt).getTime();
     const from = options?.from;
 
-    const readFullEntries = (): Promise<TranscriptEntry[]> =>
-      readAgentConversation(session.agent, {
+    const readFullEntries = async (): Promise<TranscriptEntry[]> => {
+      return readAgentConversation(session.agent, {
         worktreePath: session.worktreePath,
         ...(session.agent === "codex"
           ? { codexSessionsDir: this.codexSessionsDir(session.id) }
@@ -11673,6 +11673,7 @@ export class SessionService {
           : {}),
         ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
       }).then((result) => result ?? []);
+    };
 
     if (session.agent === "claude") {
       // Classification always comes from the tail reader, on every request
@@ -12608,6 +12609,20 @@ export class SessionService {
         ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
         : {}),
     };
+  }
+
+  // Cursor transcript id: the record's pinned chat id, else the newest chat in
+  // this session's private config dir. Never the global ~/.cursor (#890).
+  private async cursorTranscriptId(
+    session: Pick<SessionRecord, "id" | "worktreePath" | "agentSessionId">,
+  ): Promise<string | null> {
+    return (
+      session.agentSessionId ??
+      (await findAgentSessionId("cursor", session.worktreePath, {
+        cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id),
+      })) ??
+      null
+    );
   }
 
   // Settles submitUnconfirmedAt once the agent shows activity at or after it.
@@ -20755,10 +20770,11 @@ export class SessionService {
         details: { sessionId, message },
       });
     }
-    const cursorRestoreBoundary: CursorRestoreBoundary | null =
-      current.agent === "cursor"
-        ? await captureCursorRestoreBoundary(current.worktreePath, current.agentSessionId)
-        : null;
+    const cursorRestoreChatId =
+      current.agent === "cursor" ? await this.cursorTranscriptId(current) : null;
+    const cursorRestoreBoundary: CursorRestoreBoundary | null = cursorRestoreChatId
+      ? await captureCursorRestoreBoundary(current.worktreePath, cursorRestoreChatId)
+      : null;
     operation?.assertActive();
     if (current.agent === "cursor") this.cursorJsonlReaders.delete(sessionId);
     const codexRestoreStartedAt = current.agent === "codex" ? nowIso() : null;
@@ -24967,17 +24983,15 @@ export class SessionService {
           classifiedDetail = `State: ${state} (no hook/jsonl)`;
         }
       } else if (strategy === "cursor_jsonl") {
-        const jsonlResult = await readCursorJsonlState(
-          session.worktreePath,
-          this.cursorJsonlReaders.get(session.id),
-          session.agentSessionId,
-          {
-            minMtimeMs: session.agentSessionId
-              ? undefined
-              : Math.max(0, new Date(session.createdAt).getTime() - 60_000),
-            ...(session.cursorRestoreBoundary ? { after: session.cursorRestoreBoundary } : {}),
-          },
-        );
+        const cursorChatId = await this.cursorTranscriptId(session);
+        const jsonlResult = cursorChatId
+          ? await readCursorJsonlState(
+              session.worktreePath,
+              this.cursorJsonlReaders.get(session.id),
+              cursorChatId,
+              session.cursorRestoreBoundary ? { after: session.cursorRestoreBoundary } : {},
+            )
+          : null;
         if (jsonlResult) {
           this.cursorJsonlReaders.set(session.id, jsonlResult.reader);
           rateLimit = jsonlResult.rateLimit;

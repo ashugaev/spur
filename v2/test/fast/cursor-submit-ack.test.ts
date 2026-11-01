@@ -811,7 +811,7 @@ describe("scanCursorJsonlForMessage", () => {
 
   // Regression: a symlinked worktree resolves to two candidates. The WAITING
   // baseline is built from the LAST candidate (cursor-jsonl-state.ts:155-156)
-  // while findLatestCursorTranscriptFile returns the FIRST candidate whose
+  // while findPinnedCursorTranscriptFile returns the FIRST candidate whose
   // pinned file actually exists (cursor-jsonl-state.ts:100-107). No chat-id
   // rotation happens here (findCursorSessionId agrees with the pin), so the
   // fix must fall through to the pre-existing pinned-file re-resolve instead
