@@ -56,7 +56,7 @@ import { Spinner } from "@/components/icons/Spinner";
 import { TrashIcon } from "@/components/icons/TrashIcon";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { SessionTodo } from "@/components/SessionTodo";
-import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS, STATUS_CARD_CLASS } from "@/design/classes";
+import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
 import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
   formatAbsoluteTime,
