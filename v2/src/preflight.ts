@@ -618,7 +618,7 @@ async function runOpenCodePreflight(prompt: string, cwd: string): Promise<SpawnP
       let exportError: unknown;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
-          sample = parseOpenCodeTokenUsage(await exportOpenCodeSession(sessionId));
+          sample = parseOpenCodeTokenUsage(await exportOpenCodeSession(sessionId, cwd));
           exportError = undefined;
           break;
         } catch (error) {

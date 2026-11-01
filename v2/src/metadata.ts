@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { isCursorDeliveryId } from "./agents/cursor-submit-ack.js";
+import { appendEventLog } from "./event-log.js";
 import { parseConsent, type InterfaceConsent } from "./review-interface-consent.js";
 import {
   isSessionState,
@@ -289,20 +290,44 @@ function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch
   return batch["kind"] === "review" || batch["kind"] === "service" || batch["kind"] === "telegram";
 }
 
+const SESSION_RECORD_STRING_FIELDS = [
+  "id",
+  "project",
+  "agent",
+  "prompt",
+  "branch",
+  "worktreePath",
+  "tmuxSession",
+  "launchCommand",
+  "status",
+  "createdAt",
+  "updatedAt",
+] as const;
+
 function isSessionRecord(value: unknown): value is SessionRecord {
-  return isRecord(value) && typeof value["id"] === "string" && typeof value["project"] === "string";
+  return (
+    isRecord(value) &&
+    SESSION_RECORD_STRING_FIELDS.every((field) => typeof value[field] === "string") &&
+    typeof value["worktree"] === "boolean"
+  );
 }
 
+// A session file whose bytes are not valid JSON or lack the SessionRecord
+// shape. Distinct from I/O failures so listSessions can skip exactly these.
+class InvalidSessionMetadataError extends Error {}
+
 // Distinguishes "file vanished between readdir and read" (a benign race with
-// a concurrent GC archive) from every other read failure, which must still
-// surface — a corrupt record on disk is a real problem, not a race.
+// a concurrent GC archive) from every other read failure. listSessions skips
+// an invalid record (bad JSON or shape) with one warn per file version;
+// readSession throws; other I/O errors throw.
 function isEnoent(error: unknown): boolean {
   return isRecord(error) && error["code"] === "ENOENT";
 }
 
-// readSessionFile wraps every failure from its inner try (including a
-// readFileSync ENOENT) in a fresh Error with `cause: error`, so the original
-// error code only survives on `cause`, never on the thrown error itself.
+// readSessionFile wraps a readFileSync failure (including ENOENT) in a fresh
+// Error with `cause: error`, so the original error code only survives on
+// `cause`, never on the thrown error itself. Parse and shape failures throw
+// InvalidSessionMetadataError instead.
 function isEnoentCause(error: unknown): boolean {
   return isEnoent(error instanceof Error ? error.cause : undefined);
 }
@@ -324,11 +349,46 @@ function readJsonNames(dir: string): string[] | null {
   );
 }
 
-function tryReadSessionFile(path: string): SessionRecord | null {
+// Path -> "ino:mtimeMs:size" of the invalid file version last logged.
+const loggedInvalidSessionFiles = new Map<string, string>();
+
+function logInvalidSessionFile(dataDir: string, path: string, error: Error): void {
+  const stat = statFingerprint(path);
+  const version = stat ? `${stat.ino}:${stat.mtimeMs}:${stat.size}` : "gone";
+  if (loggedInvalidSessionFiles.get(path) === version) return;
+  loggedInvalidSessionFiles.set(path, version);
   try {
-    return readSessionFileCached(path);
+    appendEventLog(dataDir, {
+      event: "session.record.invalid",
+      level: "warn",
+      path,
+      message: error.message,
+    });
+  } catch {
+    // Logging must never block listing.
+  }
+}
+
+function pruneInvalidSessionLogEntries(rootDir: string, visited: Set<string>): void {
+  const rootPrefix = rootDir + sep;
+  for (const loggedPath of loggedInvalidSessionFiles.keys()) {
+    if (loggedPath.startsWith(rootPrefix) && !visited.has(loggedPath)) {
+      loggedInvalidSessionFiles.delete(loggedPath);
+    }
+  }
+}
+
+function tryReadSessionFile(dataDir: string, path: string): SessionRecord | null {
+  try {
+    const record = readSessionFileCached(path);
+    loggedInvalidSessionFiles.delete(path);
+    return record;
   } catch (error) {
     if (isEnoentCause(error)) {
+      return null;
+    }
+    if (error instanceof InvalidSessionMetadataError) {
+      logInvalidSessionFile(dataDir, path, error);
       return null;
     }
     throw error;
@@ -336,17 +396,26 @@ function tryReadSessionFile(path: string): SessionRecord | null {
 }
 
 function readSessionFile(path: string): SessionRecord {
-  let rawSession: unknown;
+  let text: string;
   try {
-    rawSession = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    text = readFileSync(path, "utf-8");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Invalid session metadata JSON at ${path}: ${message}`, {
       cause: error,
     });
   }
+  let rawSession: unknown;
+  try {
+    rawSession = JSON.parse(text) as unknown;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new InvalidSessionMetadataError(`Invalid session metadata JSON at ${path}: ${message}`, {
+      cause: error,
+    });
+  }
   if (!isSessionRecord(rawSession)) {
-    throw new Error(`Invalid session metadata shape at ${path}`);
+    throw new InvalidSessionMetadataError(`Invalid session metadata shape at ${path}`);
   }
   const normalizedSession = normalizeSessionRecord(rawSession);
   if ((!rawSession.pr && normalizedSession.pr) || hasLegacyPrSlotAlias(rawSession)) {
@@ -1194,6 +1263,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     Number.isFinite(Date.parse(normalizedSession.codexRestoreStartedAt))
       ? { codexRestoreStartedAt: normalizedSession.codexRestoreStartedAt }
       : {}),
+    ...(typeof normalizedSession.restoredAt === "string" &&
+    Number.isFinite(Date.parse(normalizedSession.restoredAt))
+      ? { restoredAt: normalizedSession.restoredAt }
+      : {}),
     prompt: normalizedSession.prompt,
     ...(normalizedSession.originalTaskPrompt
       ? { originalTaskPrompt: normalizedSession.originalTaskPrompt }
@@ -1411,7 +1484,7 @@ export function listSessions(dataDir: string): SessionRecord[] {
     for (const fileName of listSessionDirJsonNames(projectDir)) {
       const filePath = join(projectDir, fileName);
       visited.add(filePath);
-      const session = tryReadSessionFile(filePath);
+      const session = tryReadSessionFile(dataDir, filePath);
       if (session) {
         sessions.push(session);
       }
@@ -1419,6 +1492,7 @@ export function listSessions(dataDir: string): SessionRecord[] {
   }
 
   pruneStaleSessionFileCacheEntries(rootDir, visited);
+  pruneInvalidSessionLogEntries(rootDir, visited);
   pruneStaleSessionDirListingEntries(rootDir, visitedDirs);
 
   sessions.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
@@ -1438,13 +1512,29 @@ export function readSession(dataDir: string, sessionId: string): SessionRecord |
 // indexed-but-missing entry on its next lookup). Un-archiving is `mv` back
 // into sessions/<project>/<id>.json; the next findSessionFilePath scan or
 // writeSession repairs the index.
+//
+// A member that is workspaceIdOf() of any record staying in sessions/ (any
+// project) is not moved: archiving a desk anchor strands its dependents.
+// Those ids come back in retainedAnchorIds. Invalid record files are skipped
+// by listSessions and hold no anchor.
 export function archiveSessions(
   dataDir: string,
   members: readonly Pick<SessionRecord, "id" | "project">[],
-): { archivedIds: string[]; archiveDir: string } {
+): { archivedIds: string[]; retainedAnchorIds: string[]; archiveDir: string } {
   const archiveDir = join(dataDir, "sessions-archive");
   const archivedIds: string[] = [];
+  const retainedAnchorIds: string[] = [];
+  const memberIds = new Set(members.map((member) => member.id));
+  const heldAnchorIds = new Set(
+    listSessions(dataDir)
+      .filter((record) => !memberIds.has(record.id))
+      .map(workspaceIdOf),
+  );
   for (const member of members) {
+    if (heldAnchorIds.has(member.id)) {
+      retainedAnchorIds.push(member.id);
+      continue;
+    }
     const sourcePath = sessionFilePath(dataDir, member.project, member.id);
     if (!existsSync(sourcePath)) {
       continue;
@@ -1471,7 +1561,7 @@ export function archiveSessions(
     writeSessionIndexFile(dataDir, nextIndex);
   }
 
-  return { archivedIds, archiveDir };
+  return { archivedIds, retainedAnchorIds, archiveDir };
 }
 
 export function writeServiceInstance(dataDir: string, service: ServiceInstanceRecord): void {
@@ -2582,16 +2672,25 @@ function writeTelegramChoices(
  * Records one offer for a session in a chat, retiring that session's previous
  * offer there. Empty `choices` retires without recording: two live questions
  * would let a click answer the wrong one, since the reply carries the value
- * alone.
+ * alone. `keepInterfaceConsent` spares interface-approval choices: their click
+ * is bound to a challenge, not to the latest question.
  */
 export function writeTelegramOffer(
   dataDir: string,
   projectId: string,
   sourceId: string,
-  offer: { sessionId: string; chatId: number; choices: TelegramChoice[] },
+  offer: {
+    sessionId: string;
+    chatId: number;
+    choices: TelegramChoice[];
+    keepInterfaceConsent: boolean;
+  },
 ): void {
   const kept = readTelegramChoices(dataDir, projectId, sourceId).filter(
-    (choice) => choice.sessionId !== offer.sessionId || choice.chatId !== offer.chatId,
+    (choice) =>
+      choice.sessionId !== offer.sessionId ||
+      choice.chatId !== offer.chatId ||
+      (offer.keepInterfaceConsent && choice.interfaceConsent !== undefined),
   );
   writeTelegramChoices(dataDir, projectId, sourceId, [...kept, ...offer.choices]);
 }
@@ -2685,17 +2784,47 @@ export function deleteTelegramReplyTarget(dataDir: string, sessionId: string): v
   rmSync(telegramReplyTargetFilePath(dataDir, sessionId), { force: true });
 }
 
+export function retireTelegramLegacyState(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  assigned?: Pick<TelegramBinding, "chatId" | "messageThreadId">,
+): void {
+  const bindings = readTelegramBindings(dataDir, projectId, sourceId);
+  const originalSize = bindings.size;
+  for (const [key, binding] of bindings) {
+    if (
+      binding.sessionId === sessionId &&
+      (binding.chatId > 0 || (binding.messageThreadId ?? 1) <= 1)
+    )
+      bindings.delete(key);
+  }
+  if (bindings.size !== originalSize) {
+    writeTelegramBindings(dataDir, projectId, sourceId, bindings.values());
+  }
+  const choices = readTelegramChoices(dataDir, projectId, sourceId);
+  const kept = choices.filter(
+    (choice) =>
+      choice.sessionId !== sessionId ||
+      (assigned !== undefined &&
+        choice.chatId === assigned.chatId &&
+        choice.messageThreadId === assigned.messageThreadId),
+  );
+  if (kept.length !== choices.length) writeTelegramChoices(dataDir, projectId, sourceId, kept);
+}
+
 export function deleteTelegramSourceStateForSession(
   dataDir: string,
   projectId: string,
   sessionId: string,
-): { heldBinding: boolean } {
+): { removedBindings: { sourceId: string; binding: TelegramBinding }[] } {
   const dir = join(dataDir, "source-state", "telegram", projectId);
   if (!existsSync(dir)) {
     deleteTelegramReplyTarget(dataDir, sessionId);
-    return { heldBinding: false };
+    return { removedBindings: [] };
   }
-  let heldBinding = false;
+  const removedBindings: { sourceId: string; binding: TelegramBinding }[] = [];
 
   const choiceDir = join(dir, "choices");
   if (existsSync(choiceDir)) {
@@ -2714,9 +2843,11 @@ export function deleteTelegramSourceStateForSession(
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     const sourceId = entry.name.slice(0, -".json".length);
     const bindings = readTelegramBindings(dataDir, projectId, sourceId);
+    for (const binding of bindings.values()) {
+      if (binding.sessionId === sessionId) removedBindings.push({ sourceId, binding });
+    }
     const remaining = [...bindings.values()].filter((binding) => binding.sessionId !== sessionId);
     if (remaining.length !== bindings.size) {
-      heldBinding = true;
       const lastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
       writeTelegramBindings(
         dataDir,
@@ -2728,7 +2859,7 @@ export function deleteTelegramSourceStateForSession(
     }
   }
   deleteTelegramReplyTarget(dataDir, sessionId);
-  return { heldBinding };
+  return { removedBindings };
 }
 
 export function listActiveServiceProblems(

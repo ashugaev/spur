@@ -1,10 +1,12 @@
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import {
-  findCursorAckTranscriptFile,
+  cursorChatIdFromTranscriptPath,
+  findLatestCursorTranscriptFile,
   readCursorStableOffset,
   resolveCursorPinnedTranscriptPath,
 } from "../cursor-jsonl-state.js";
+import type { SubmitAckFileScanResult } from "./claude-submit-ack.js";
 import { findCursorSessionId } from "./cursor.js";
 
 export type CursorSubmitBaseline = CursorPersistedSubmitBaseline & {
@@ -21,12 +23,12 @@ export type CursorSubmitBaseline = CursorPersistedSubmitBaseline & {
 
 // Persisted form (queuedMessageTyped.ackBaseline): the rotated chat file's
 // send-time offset rides along so a restart's scan starts where the live one did.
-export type CursorPersistedSubmitBaseline = (
-  | { file: string; size: number; deliveryId?: string }
-  | { file: null; size: 0; deliveryId: string }
-) & {
+export interface CursorPersistedSubmitBaseline {
+  file: string | null;
+  size: number;
+  deliveryId?: string;
   rotated?: { file: string; size: number };
-};
+}
 
 export function isCursorDeliveryId(value: unknown): value is string {
   return (
@@ -48,13 +50,9 @@ export function persistCursorSubmitBaseline(
 ): CursorPersistedSubmitBaseline {
   const rotated = baseline.rotationOffsets?.entries().next().value;
   return {
-    ...(baseline.file === null
-      ? { file: null, size: 0, deliveryId: baseline.deliveryId }
-      : {
-          file: baseline.file,
-          size: baseline.size,
-          ...(baseline.deliveryId ? { deliveryId: baseline.deliveryId } : {}),
-        }),
+    file: baseline.file,
+    size: baseline.size,
+    ...(baseline.deliveryId ? { deliveryId: baseline.deliveryId } : {}),
     ...(rotated ? { rotated: { file: rotated[0], size: rotated[1] } } : {}),
   };
 }
@@ -64,13 +62,9 @@ export function restoreCursorSubmitBaseline(
 ): CursorSubmitBaseline {
   const { rotated } = persisted;
   return {
-    ...(persisted.file === null
-      ? { file: null, size: 0, deliveryId: persisted.deliveryId }
-      : {
-          file: persisted.file,
-          size: persisted.size,
-          ...(persisted.deliveryId ? { deliveryId: persisted.deliveryId } : {}),
-        }),
+    file: persisted.file,
+    size: persisted.size,
+    ...(persisted.deliveryId ? { deliveryId: persisted.deliveryId } : {}),
     ...(rotated ? { rotationOffsets: new Map([[rotated.file, rotated.size]]) } : {}),
   };
 }
@@ -85,7 +79,7 @@ async function findRotatedCursorTranscript(
 ): Promise<string | null> {
   const resolvedId = await findCursorSessionId(worktreePath, { configDir: cursorConfigDir });
   if (!resolvedId || resolvedId === agentSessionId) return null;
-  return findCursorAckTranscriptFile(worktreePath, resolvedId);
+  return findLatestCursorTranscriptFile(worktreePath, resolvedId);
 }
 
 export interface CursorSubmitAckScanResult {
@@ -93,19 +87,38 @@ export interface CursorSubmitAckScanResult {
   scannedFile: string | null;
 }
 
+// The pinned id wins; otherwise the newest chat in the session-private config
+// dir. Never the shared project transcripts dir (#889): every transcript lookup
+// in this file must pass a chat id, or findLatestCursorTranscriptFile falls back
+// to newest-by-mtime over that shared dir.
+async function resolveCursorChatId(
+  worktreePath: string,
+  agentSessionId: string | undefined,
+  cursorConfigDir: string | undefined,
+): Promise<string | null> {
+  if (agentSessionId) return agentSessionId;
+  return cursorConfigDir ? findCursorSessionId(worktreePath, { configDir: cursorConfigDir }) : null;
+}
+
 export async function captureCursorSubmitBaseline(
   worktreePath: string,
   agentSessionId?: string,
   options?: { cursorConfigDir?: string; deliveryId?: string },
 ): Promise<CursorSubmitBaseline | null> {
-  const captured = await capturePinnedCursorBaseline(worktreePath, agentSessionId);
-  const baseline: CursorSubmitBaseline | null = captured
-    ? { ...captured, ...(options?.deliveryId ? { deliveryId: options.deliveryId } : {}) }
-    : options?.deliveryId
+  const chatId = await resolveCursorChatId(worktreePath, agentSessionId, options?.cursorConfigDir);
+  if (!chatId) {
+    return options?.deliveryId
       ? { file: null, size: 0, deliveryId: options.deliveryId }
-      : null;
-  if (!baseline || (!agentSessionId && !baseline.deliveryId) || !options?.cursorConfigDir)
-    return baseline;
+      : options?.cursorConfigDir
+        ? { file: null, size: 0 }
+        : null;
+  }
+  const captured = await capturePinnedCursorBaseline(worktreePath, chatId);
+  const baseline: CursorSubmitBaseline = {
+    ...captured,
+    ...(options?.deliveryId ? { deliveryId: options.deliveryId } : {}),
+  };
+  if ((!agentSessionId && !baseline.deliveryId) || !options?.cursorConfigDir) return baseline;
   // An already-rotated chat: offset its file at send time, as the pinned one.
   const rotated = await findRotatedCursorTranscript(
     worktreePath,
@@ -158,15 +171,10 @@ export async function markCursorWriteStart(
 
 async function capturePinnedCursorBaseline(
   worktreePath: string,
-  agentSessionId?: string,
-): Promise<CursorSubmitBaseline | null> {
-  const file = await findCursorAckTranscriptFile(worktreePath, agentSessionId);
+  agentSessionId: string,
+): Promise<CursorSubmitBaseline> {
+  const file = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
   if (!file) {
-    if (!agentSessionId) {
-      // No id to pin on and nothing resolved: today's behavior, unchanged. A
-      // fresh launch with no project dir at all has no baseline to wait on.
-      return null;
-    }
     // A pinned id with nothing on disk yet must still yield a WAITING baseline,
     // never null — session-service.ts treats a null binding as an unconditional,
     // un-waited "submitted", so this is the anti-regression path for a send that
@@ -176,7 +184,7 @@ async function capturePinnedCursorBaseline(
   try {
     return { file, size: await readCursorStableOffset(file) };
   } catch {
-    return agentSessionId ? { file, size: 0 } : null;
+    return { file, size: 0 };
   }
 }
 
@@ -275,23 +283,41 @@ export async function scanCursorJsonlForMessage(
   worktreePath: string,
   agentSessionId?: string,
   options?: { cursorConfigDir?: string },
-): Promise<CursorSubmitAckScanResult> {
+): Promise<SubmitAckFileScanResult> {
   const normalizedTarget = submitAckMatchText(text);
   if (!normalizedTarget) {
     return { found: false, scannedFile: baseline.file };
   }
 
+  if (baseline.file === null) {
+    // Pending baseline: no chat existed at send time (cursor writes store.db
+    // before the first transcript record), so the own chat holds only
+    // post-send records and is scanned from 0. Resolved in place so later
+    // polls and the rotation floor below treat it as the pinned file.
+    const chatId = await resolveCursorChatId(
+      worktreePath,
+      agentSessionId,
+      options?.cursorConfigDir,
+    );
+    const resolved = chatId ? await findLatestCursorTranscriptFile(worktreePath, chatId) : null;
+    if (!resolved) {
+      return { found: false, scannedFile: null };
+    }
+    baseline.file = resolved;
+    baseline.size = 0;
+  }
+  const pinnedId = agentSessionId ?? cursorChatIdFromTranscriptPath(baseline.file);
+
   if (
-    baseline.file !== null &&
-    (await scanFileForUserText(baseline.file, baseline.size, normalizedTarget, baseline.deliveryId))
+    await scanFileForUserText(baseline.file, baseline.size, normalizedTarget, baseline.deliveryId)
   ) {
     return { found: true, scannedFile: baseline.file };
   }
 
-  if ((agentSessionId || baseline.deliveryId) && options?.cursorConfigDir) {
+  if (options?.cursorConfigDir) {
     const rotated = await findRotatedCursorTranscript(
       worktreePath,
-      agentSessionId,
+      pinnedId,
       options.cursorConfigDir,
     );
     if (rotated) {
@@ -326,7 +352,7 @@ export async function scanCursorJsonlForMessage(
     // rescan must still run even when the chat id itself never rotated.
   }
 
-  const latest = await findCursorAckTranscriptFile(worktreePath, agentSessionId);
+  const latest = await findLatestCursorTranscriptFile(worktreePath, pinnedId);
   if (!latest || latest === baseline.file) {
     return { found: false, scannedFile: baseline.file };
   }

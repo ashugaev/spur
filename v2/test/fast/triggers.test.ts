@@ -952,7 +952,7 @@ describe("startConfiguredTriggers", () => {
             expect(pending()?.admissionCapDenials).toBe(1);
             expect(refreshSignalsMock).toHaveBeenCalledTimes(1);
             expect(deliver).toHaveBeenCalledTimes(1);
-            expect(updatePendingSendBatchConditionalMock).toHaveBeenCalledTimes(claims);
+            expect(updatePendingSendBatchConditionalMock).toHaveBeenCalledTimes(claims + 1);
             expect(pending()?.retryAccounting?.every((entry) => entry.deliveryAttempts === 0)).toBe(
               true,
             );
@@ -1402,7 +1402,13 @@ describe("startConfiguredTriggers", () => {
           expect(deliver.mock.calls[0]?.[1]).not.toContain("- failed\n");
           const record = pending();
           expect(record?.batch).toMatchObject({
-            signals: signals.filter((signal) => signal.key !== "comment:2"),
+            signals: signals
+              .filter((signal) => signal.key !== "comment:2")
+              .map((signal) =>
+                ["comment:3", "comment:4"].includes(signal.key)
+                  ? { ...signal, text: "current" }
+                  : signal,
+              ),
           });
           if (reason === "cap") {
             expect(record?.admissionCapRetryAt).toBeGreaterThan(Date.now());
@@ -1485,8 +1491,11 @@ describe("startConfiguredTriggers", () => {
           })),
         );
         await vi.advanceTimersByTimeAsync(10_000);
-        expect(pending()?.retryAccounting?.[0]).toMatchObject({ deliveryAttempts: 2, fingerprint });
-        expect(pending()?.batch).toMatchObject({ signals });
+        expect(pending()?.retryAccounting?.[0]?.deliveryAttempts).toBe(1);
+        expect(pending()?.retryAccounting?.[0]?.fingerprint).not.toBe(fingerprint);
+        expect(pending()?.batch).toMatchObject({
+          signals: [{ ...signals[0], text: "edited remotely" }],
+        });
         emit(
           bus,
           signals.map((signal) => ({ ...signal, text: "separately enqueued edit" })),
@@ -2126,7 +2135,12 @@ describe("startConfiguredTriggers", () => {
           signals: [{ key: "comment:2", kind: "comment", text: "Concurrent live sibling" }],
         },
       });
-      await vi.waitFor(() => expect(recordPendingSendBatchMock).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => {
+        const state = readPendingSendBatchesMock().get("api:send:api-1")?.batch;
+        expect(state?.kind === "review" && state.signals).toEqual(
+          expect.arrayContaining([expect.objectContaining({ key: "comment:2" })]),
+        );
+      });
       readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot("comment:2"));
       release();
       await ticking;
@@ -2376,6 +2390,214 @@ describe("startConfiguredTriggers", () => {
       await replacement?.stop();
       autoPing.dispose();
       rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists a new comment while an earlier delivery waits for acknowledgement", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "spur-trigger-held-intake-"));
+    const autoPing = new AutoPingService(dataDir);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const deliver = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        started();
+        await held;
+        throw new Error("submit acknowledgement failed");
+      })
+      .mockResolvedValue(undefined);
+    const get = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: { ...config(), dataDir } as never,
+      bus,
+      autoPing,
+      sessionService: { get, deliver } as never,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      bus.emit(githubEvent());
+      const advancing = vi.advanceTimersByTimeAsync(35_000);
+      await entered;
+      const before = readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch;
+      expect(before.claim).toBeDefined();
+      readGitHubSourceSnapshotMock.mockReturnValue(
+        storedSnapshot([
+          { key: "comment:1", kind: "comment", text: "A new comment arrived." },
+          { key: "comment:2", kind: "comment", text: "Second comment." },
+        ]),
+      );
+      bus.emit({
+        ...githubEvent("comment:2"),
+        data: {
+          ...githubEvent("comment:2").data,
+          signals: [{ key: "comment:2", kind: "comment", text: "Second comment." }],
+        },
+      });
+      for (let i = 0; i < 12; i++) await Promise.resolve();
+      const during = readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch;
+      expect(
+        during.batch.kind === "review" && during.batch.signals.map((item) => item.key),
+      ).toContain("comment:2");
+      expect(during.claim?.claimId).toBe(before.claim?.claimId);
+      expect(deliver).toHaveBeenCalledTimes(1);
+      const completedAt = Date.now();
+      release();
+      await advancing;
+      expect(
+        (
+          readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch
+        ).retryAccounting?.find((entry) => entry.itemKey.includes("comment:1"))?.nextAttemptAt,
+      ).toBe(completedAt + 10_000);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(deliver.mock.calls[1]?.[1]).toContain("Second comment.");
+    } finally {
+      release();
+      await controller.stop();
+      autoPing.dispose();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a newer fingerprint for the same comment after the old delivery succeeds", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "spur-trigger-same-key-"));
+    const autoPing = new AutoPingService(dataDir);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const deliver = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        started();
+        await held;
+      })
+      .mockResolvedValue(undefined);
+    const get = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: { ...config(), dataDir } as never,
+      bus,
+      autoPing,
+      sessionService: { get, deliver } as never,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      bus.emit(githubEvent());
+      const advancing = vi.advanceTimersByTimeAsync(35_000);
+      await entered;
+      const changed = { key: "comment:1", kind: "comment" as const, text: "Edited after submit." };
+      readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot([changed]));
+      bus.emit({
+        ...githubEvent(),
+        occurrenceId: "newer-edit",
+        data: {
+          ...githubEvent().data,
+          signals: [changed],
+        },
+      });
+      for (let i = 0; i < 12; i++) await Promise.resolve();
+      const during = readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch;
+      expect(during.batch.kind === "review" && during.batch.signals[0]?.text).toBe(changed.text);
+      expect(deliver).toHaveBeenCalledTimes(1);
+      release();
+      for (let i = 0; i < 100 && readPendingSendBatchesMock().get("api:send:api-1")?.claim; i++) {
+        await Promise.resolve();
+      }
+      const after = readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch;
+      expect(after.batch.kind === "review" && after.batch.signals[0]?.text).toBe(changed.text);
+      expect(after.retryAccounting?.[0]).toMatchObject({ deliveryAttempts: 0, nextAttemptAt: 0 });
+      await advancing;
+      await vi.advanceTimersByTimeAsync(35_000);
+      expect(deliver.mock.calls[1]?.[1]).toContain(changed.text);
+    } finally {
+      release();
+      await controller.stop();
+      autoPing.dispose();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a newer merged event when an older session lookup rejects", async () => {
+    let rejectOld!: (error: Error) => void;
+    const oldLookup = new Promise<never>((_, reject) => {
+      rejectOld = reject;
+    });
+    const get = vi
+      .fn()
+      .mockImplementationOnce(() => oldLookup)
+      .mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        lastActivityAt: staleActivity(),
+        workspaceExists: true,
+      });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: { get, deliver } as never,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      bus.emit(githubEvent());
+      await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(1));
+      readGitHubSourceSnapshotMock.mockReturnValue(
+        storedSnapshot([
+          { key: "comment:1", kind: "comment", text: "A new comment arrived." },
+          { key: "comment:2", kind: "comment", text: "Second comment." },
+        ]),
+      );
+      bus.emit({
+        ...githubEvent("comment:2"),
+        data: {
+          ...githubEvent("comment:2").data,
+          signals: [{ key: "comment:2", kind: "comment", text: "Second comment." }],
+        },
+      });
+      await vi.waitFor(() =>
+        expect(readPendingSendBatchesMock().get("api:send:api-1")?.revision).toBe(2),
+      );
+      rejectOld(new Error("stale lookup failed"));
+      for (let i = 0; i < 12; i++) await Promise.resolve();
+      const remaining = readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch;
+      expect(
+        remaining.batch.kind === "review" && remaining.batch.signals.map((item) => item.key),
+      ).toContain("comment:2");
+      expect(deliver).not.toHaveBeenCalled();
+    } finally {
+      rejectOld(new Error("cleanup"));
+      await controller.stop();
     }
   });
 
@@ -7141,7 +7363,7 @@ describe("startConfiguredTriggers", () => {
           });
         }
         await vi.advanceTimersByTimeAsync(0);
-        expect(getMock).toHaveBeenCalledTimes(1);
+        expect(getMock).toHaveBeenCalledTimes(3);
         held.resolve(sessionIn("working", new Date().toISOString()));
         await vi.advanceTimersByTimeAsync(0);
         expect(deliverMock).not.toHaveBeenCalled();

@@ -21,10 +21,14 @@ const {
   captureCursorSubmitBaselineMock,
   scanCursorJsonlForMessageMock,
   readClaudeSessionStatusMock,
-  readCursorStableOffsetMock,
   findCursorSessionIdMock,
-  findCursorAckTranscriptFileMock,
+  findLatestCursorTranscriptFileMock,
+  readCursorTranscriptEntriesMock,
+  readCursorStableOffsetMock,
 } = vi.hoisted(() => ({
+  findCursorSessionIdMock: vi.fn(),
+  findLatestCursorTranscriptFileMock: vi.fn(),
+  readCursorTranscriptEntriesMock: vi.fn(),
   readClaudeSessionStatusMock: vi.fn(),
   ensureCodexHooksConfigMock: vi.fn(),
   ensureClaudeRestrictWritesSettingsMock: vi.fn(),
@@ -37,9 +41,9 @@ const {
   captureCursorSubmitBaselineMock: vi.fn(),
   scanCursorJsonlForMessageMock: vi.fn(),
   readCursorStableOffsetMock: vi.fn(),
-  findCursorSessionIdMock: vi.fn(),
-  findCursorAckTranscriptFileMock: vi.fn(),
 }));
+
+const findCursorAckTranscriptFileMock = findLatestCursorTranscriptFileMock;
 
 vi.mock("node:fs/promises", () => ({
   writeFile: writeFileMock,
@@ -70,6 +74,18 @@ vi.mock("../../src/agents/codex.js", () => ({
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
 }));
 
+vi.mock("../../src/agents/cursor.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof CursorModule>()),
+  findCursorSessionId: findCursorSessionIdMock,
+}));
+
+vi.mock("../../src/cursor-jsonl-state.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof CursorJsonlStateModule>()),
+  readCursorTranscriptEntries: readCursorTranscriptEntriesMock,
+  readCursorStableOffset: readCursorStableOffsetMock,
+  findLatestCursorTranscriptFile: findLatestCursorTranscriptFileMock,
+}));
+
 vi.mock("../../src/agents/claude-submit-ack.js", () => ({
   captureClaudeSubmitBaseline: captureClaudeSubmitBaselineMock,
   scanClaudeJsonlForMessage: scanClaudeJsonlForMessageMock,
@@ -85,12 +101,6 @@ vi.mock("../../src/agents/cursor-submit-ack.js", async (importOriginal) => ({
   scanCursorJsonlForMessage: scanCursorJsonlForMessageMock,
 }));
 
-vi.mock("../../src/cursor-jsonl-state.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof CursorJsonlStateModule>()),
-  readCursorStableOffset: readCursorStableOffsetMock,
-  findCursorAckTranscriptFile: findCursorAckTranscriptFileMock,
-}));
-
 vi.mock("../../src/agents/cursor.js", async (importOriginal) => ({
   ...(await importOriginal<typeof CursorModule>()),
   findCursorSessionId: findCursorSessionIdMock,
@@ -103,6 +113,7 @@ import {
   buildAgentLaunchPlan,
   buildAgentResumePlan,
   createAgentSubmitAckBinding,
+  readAgentConversation,
   resumeAgentSubmitAckBinding,
   setupAgentHooks,
 } from "../../src/agents/index.js";
@@ -120,9 +131,56 @@ beforeEach(() => {
     .mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
   captureCursorSubmitBaselineMock.mockReset();
   scanCursorJsonlForMessageMock.mockReset();
+  findCursorSessionIdMock.mockReset().mockResolvedValue(null);
+  readCursorTranscriptEntriesMock.mockReset().mockResolvedValue(null);
   readCursorStableOffsetMock.mockReset().mockRejectedValue(new Error("ENOENT"));
-  findCursorSessionIdMock.mockReset();
   findCursorAckTranscriptFileMock.mockReset();
+});
+
+describe("readAgentConversation cursor", () => {
+  const entries = [{ kind: "tool", name: "Grep" }];
+
+  it("reads the pinned id as-is without discovery", async () => {
+    readCursorTranscriptEntriesMock.mockResolvedValue(entries);
+    const result = await readAgentConversation("cursor", {
+      worktreePath: "/repo",
+      agentSessionId: "pinned",
+      cursorConfigDir: "/data/cursor/s1",
+    });
+    expect(result).toEqual(entries);
+    expect(findCursorSessionIdMock).not.toHaveBeenCalled();
+    expect(readCursorTranscriptEntriesMock).toHaveBeenCalledWith("/repo", "pinned");
+  });
+
+  it("discovers the own chat id from the private config dir when unpinned", async () => {
+    findCursorSessionIdMock.mockResolvedValue("own-chat");
+    readCursorTranscriptEntriesMock.mockResolvedValue(entries);
+    const result = await readAgentConversation("cursor", {
+      worktreePath: "/repo",
+      cursorConfigDir: "/data/cursor/s1",
+    });
+    expect(result).toEqual(entries);
+    expect(findCursorSessionIdMock).toHaveBeenCalledWith("/repo", {
+      configDir: "/data/cursor/s1",
+    });
+    expect(readCursorTranscriptEntriesMock).toHaveBeenCalledWith("/repo", "own-chat");
+  });
+
+  it("returns null without reading when no own chat exists", async () => {
+    const result = await readAgentConversation("cursor", {
+      worktreePath: "/repo",
+      cursorConfigDir: "/data/cursor/s1",
+    });
+    expect(result).toBeNull();
+    expect(readCursorTranscriptEntriesMock).not.toHaveBeenCalled();
+  });
+
+  it("returns null without discovery or read when no config dir is given", async () => {
+    const result = await readAgentConversation("cursor", { worktreePath: "/repo" });
+    expect(result).toBeNull();
+    expect(findCursorSessionIdMock).not.toHaveBeenCalled();
+    expect(readCursorTranscriptEntriesMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("setupAgentHooks", () => {
@@ -514,12 +572,15 @@ describe("createAgentSubmitAckBinding", () => {
 
   it("returns a binding for claude that scans the captured baseline", async () => {
     captureClaudeSubmitBaselineMock.mockResolvedValue({ file: "/some/file.jsonl", size: 42 });
-    scanClaudeJsonlForMessageMock.mockResolvedValue(true);
+    scanClaudeJsonlForMessageMock.mockResolvedValue({
+      found: true,
+      scannedFile: "/some/rotated.jsonl",
+    });
 
     const binding = await createAgentSubmitAckBinding("claude", ctx);
     expect(binding).not.toBeNull();
     const result = await binding?.scan("hello");
-    expect(result).toEqual({ found: true, lastScannedFile: "/some/file.jsonl" });
+    expect(result).toEqual({ found: true, lastScannedFile: "/some/rotated.jsonl" });
     expect(scanClaudeJsonlForMessageMock).toHaveBeenCalledWith(
       { file: "/some/file.jsonl", size: 42 },
       "hello",
@@ -530,7 +591,10 @@ describe("createAgentSubmitAckBinding", () => {
 
   it("threads the pinned agentSessionId into claude baseline and scan", async () => {
     captureClaudeSubmitBaselineMock.mockResolvedValue({ file: "/some/file.jsonl", size: 42 });
-    scanClaudeJsonlForMessageMock.mockResolvedValue(true);
+    scanClaudeJsonlForMessageMock.mockResolvedValue({
+      found: true,
+      scannedFile: "/some/file.jsonl",
+    });
 
     const pinnedCtx = { ...ctx, agentSessionId: "pinned-uuid" };
     const binding = await createAgentSubmitAckBinding("claude", pinnedCtx);
@@ -683,6 +747,21 @@ describe("createAgentSubmitAckBinding", () => {
       { cursorConfigDir: "/tmp/spur-data/cursor/session-1" },
     );
   });
+
+  it("binds a pending cursor baseline and reports no scanned file until a chat resolves", async () => {
+    captureCursorSubmitBaselineMock.mockResolvedValue({ file: null, size: 0 });
+    scanCursorJsonlForMessageMock.mockResolvedValue({ found: false, scannedFile: null });
+
+    const cursorCtx = { ...ctx, cursorConfigDir: "/tmp/spur-data/cursor/session-1" };
+    const binding = await createAgentSubmitAckBinding("cursor", cursorCtx);
+    expect(binding).not.toBeNull();
+    const result = await binding?.scan("hello");
+
+    expect(captureCursorSubmitBaselineMock).toHaveBeenCalledWith(ctx.worktreePath, undefined, {
+      cursorConfigDir: "/tmp/spur-data/cursor/session-1",
+    });
+    expect(result).toEqual({ found: false, lastScannedFile: null });
+  });
 });
 
 describe("agentSubmitAckPacing", () => {
@@ -716,6 +795,26 @@ describe("agentSubmitAckPacing", () => {
     await expect(agentEarlySubmitResendAllowed("claude", ctx)).resolves.toBe(false);
     readClaudeSessionStatusMock.mockResolvedValueOnce(null);
     await expect(agentEarlySubmitResendAllowed("claude", ctx)).resolves.toBe(false);
+  });
+
+  it("refuses the claude early Enter for a slash command without reading the status file", async () => {
+    const ctx = { worktreePath: "/tmp/wt", agentSessionId: "sid-1" };
+    readClaudeSessionStatusMock.mockReset().mockResolvedValue({ state: "waiting" });
+
+    await expect(
+      agentEarlySubmitResendAllowed("claude", { ...ctx, slashCommand: true }),
+    ).resolves.toBe(false);
+    expect(readClaudeSessionStatusMock).not.toHaveBeenCalled();
+    await expect(
+      agentEarlySubmitResendAllowed("claude", { ...ctx, slashCommand: false }),
+    ).resolves.toBe(true);
+  });
+
+  it("keeps the early Enter allowed for agents without a gate, slash or not", async () => {
+    const ctx = { worktreePath: "/tmp/wt", agentSessionId: "sid-1", slashCommand: true };
+    for (const agent of ["codex", "cursor", "opencode"] as const) {
+      await expect(agentEarlySubmitResendAllowed(agent, ctx)).resolves.toBe(true);
+    }
   });
 
   it("reports launch-send pacing for claude and codex only", () => {

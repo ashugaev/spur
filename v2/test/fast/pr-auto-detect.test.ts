@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as claudeJsonlStateModule from "../../src/claude-jsonl-state.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as prLookupModule from "../../src/pr-lookup.js";
+import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
 import type { AppConfig, ProjectConfig, SessionRecord, SessionSlots } from "../../src/types.js";
 
 const { existsSyncMock } = vi.hoisted(() => ({
@@ -47,7 +49,8 @@ vi.mock("../../src/gh.js", async (importOriginal) => ({
 vi.mock("../../src/glab.js", () => ({
   glab: glabMock,
 }));
-vi.mock("../../src/claude-jsonl-state.js", () => ({
+vi.mock("../../src/claude-jsonl-state.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof claudeJsonlStateModule>()),
   readClaudeJsonlState: readClaudeJsonlStateMock,
   hasTrailingClaudeAuthenticationFailure: vi.fn(() => false),
 }));
@@ -126,7 +129,8 @@ vi.mock("../../src/agent-hook-state.js", () => ({
   deleteAgentHookState: vi.fn(),
   readAgentHookState: vi.fn(),
 }));
-vi.mock("../../src/runtime-tmux.js", () => ({
+vi.mock("../../src/runtime-tmux.js", async (importOriginal) => ({
+  TmuxProbeUnknownError: (await importOriginal<typeof RuntimeTmuxModule>()).TmuxProbeUnknownError,
   createTmuxSession: vi.fn(),
   createTmuxCommandSession: vi.fn(),
   createTmuxSidecarSession: vi.fn(),
@@ -256,6 +260,7 @@ function baseConfig(): AppConfig {
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+      switchAuth: false,
     },
     diskRetention: { warnFreeGb: 10 },
     sessionGc: {

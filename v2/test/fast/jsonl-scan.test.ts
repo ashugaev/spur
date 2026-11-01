@@ -1,4 +1,5 @@
 import type * as FsPromises from "node:fs/promises";
+import { appendFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -180,6 +181,71 @@ describe("scanJsonlLines", () => {
     expect(result?.consumedBytes).toBe(Buffer.byteLength(body));
     expect(Math.max(...readLengths)).toBeLessThanOrEqual(SCAN_CHUNK_BYTES);
     expect(readLengths.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("uses a per-scan chunk size without changing the default read bound", async () => {
+    const path = join(dir, "large-chunks.jsonl");
+    const raw = Buffer.from(`${"x".repeat(1023)}\n`.repeat(9 * 1024));
+    await writeFile(path, raw);
+    for (const chunkBytes of [undefined, 8 * SCAN_CHUNK_BYTES]) {
+      readLengths.length = 0;
+      const result = await scanJsonlLines(path, 0, () => true, raw.length, undefined, chunkBytes);
+      const bound = chunkBytes ?? SCAN_CHUNK_BYTES;
+      expect(result?.consumedBytes).toBe(raw.length);
+      expect(readLengths).toHaveLength(Math.ceil(raw.length / bound));
+      expect(Math.max(...readLengths)).toBe(bound);
+      expect(liveHandles).toBe(0);
+    }
+  });
+
+  it.each([true, false])(
+    "preserves raw tails and UTF-8 across custom chunks, accept=%s",
+    async (accept) => {
+      const path = join(dir, "custom-tail.jsonl");
+      const raw = Buffer.from(' \t{"a":"é🙂"}\r\n{"b":2}\n{"trailing":"🙂"}');
+      await writeFile(path, raw);
+      const scans = [];
+      for (const chunkBytes of [SCAN_CHUNK_BYTES, 7]) {
+        const lines: string[] = [];
+        const observed: Buffer[] = [];
+        const result = await scanJsonlLines(
+          path,
+          0,
+          (line, terminated) => {
+            lines.push(`${terminated}:${line}`);
+            return accept;
+          },
+          raw.length,
+          (bytes) => observed.push(Buffer.from(bytes)),
+          chunkBytes,
+        );
+        scans.push({ result, lines, consumed: Buffer.concat(observed) });
+      }
+      expect(scans[1]).toEqual(scans[0]);
+      expect(liveHandles).toBe(0);
+    },
+  );
+
+  it("keeps the captured snapshot end when a custom-chunk scan appends", async () => {
+    const path = join(dir, "snapshot.jsonl");
+    const body = '{"a":1}\n{"b":2}\n';
+    await writeFile(path, body);
+    const lines: string[] = [];
+    const result = await scanJsonlLines(
+      path,
+      0,
+      (line) => {
+        lines.push(line);
+        if (lines.length === 1) appendFileSync(path, '{"new":3}\n');
+        return true;
+      },
+      Buffer.byteLength(body),
+      undefined,
+      8,
+    );
+    expect(lines).toEqual(['{"a":1}', '{"b":2}']);
+    expect(result?.consumedBytes).toBe(Buffer.byteLength(body));
+    expect(liveHandles).toBe(0);
   });
 
   it("handles a line longer than one chunk", async () => {

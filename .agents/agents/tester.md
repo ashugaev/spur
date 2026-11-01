@@ -29,6 +29,8 @@ OUTPUT
   Verdict: PASS | FAIL
 
 RULES
+  - Await original fixture spawn response; verify returned ID, submitted unique nonce/project and dataDir before mutation, evidence capture or cleanup.
+  - Never choose first list/pane result or guess while spawn pending; unknown ownership: stop, no foreign cleanup.
   - Never PASS with failing required targeted tests or changed-flow scenarios.
   - Never PASS when an actual runtime-flow change skipped required CLI validation.
   - Never PASS with missing, failed or skipped required manual/real-agent scenarios; dependency/auth skips remain FAIL.

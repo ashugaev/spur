@@ -132,6 +132,7 @@ import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor
 import {
   resolveAgentReasoningEffort,
   resolveCursorLaunchModel,
+  validateCodexModel,
   validateOpenCodeModel,
 } from "./agents/models.js";
 import {
@@ -233,11 +234,15 @@ import {
 import { readProcessCwd } from "./process-tree.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
-  closeTelegramTopic,
+  claimTelegramTopicDeletion,
+  createTelegramTopic,
+  deleteTelegramTopic,
   editTelegramTopic,
   formatTelegramSessionLabel,
   sendTelegramChatAction,
   sendTelegramReply,
+  type TelegramPhoto,
+  telegramTopicIsDeleting,
   type TelegramReplySendResult,
 } from "./telegram-source-state.js";
 import { telegramStatusEmoji } from "./telegram-status-emoji.js";
@@ -259,6 +264,7 @@ import {
   listServiceInstancesForSession,
   listSessions,
   readTelegramBindings,
+  retireTelegramLegacyState,
   readServiceInstance,
   readSession,
   readInterfaceConsent,
@@ -296,6 +302,7 @@ import {
   getTmuxPanePresence,
   getTmuxSessionPresence,
   lookupTmuxPanePid,
+  lookupTmuxSessionPanePids,
   probeTmuxProcessMatch,
   killTmuxSession,
   killTmuxSessionTree,
@@ -314,6 +321,7 @@ import {
   TmuxProbeUnknownError,
   isHistoricalPsProbeDiagnostic,
   type TmuxPanePidLookup,
+  type TmuxSessionPanesLookup,
 } from "./runtime-tmux.js";
 import {
   isSystemdOomdPresent,
@@ -432,6 +440,7 @@ import {
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
 import { reconcileTokenUsage, type ProviderTokenUsageSample } from "./token-usage.js";
 import {
+  PreflightBatchClaimedError,
   PreflightUsageStore,
   aggregatePreflightAttempts,
   preflightUsageView,
@@ -467,6 +476,8 @@ import {
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
+  type PreflightTokenUsageRecord,
+  type SpawnBatchConflictPayload,
   type SessionPrBinding,
   type ProjectListEntry,
   type SpawnDefaultsResponse,
@@ -489,6 +500,8 @@ import {
   type ServiceInstanceView,
   type SelfDestructConfig,
   type SendMessageAttachment,
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS,
   type SendMessageRequest,
   type SidecarConfig,
   type SidecarMcpBinding,
@@ -508,6 +521,7 @@ import {
   type SessionMemoryRecordResponse,
   type SessionModeConfig,
   type TelegramChoice,
+  type TelegramConversation,
   type TelegramReplyTarget,
   type TelegramSourceConfig,
   type TelegramSpawnOrigin,
@@ -684,6 +698,8 @@ const PANE_WRITE_FENCE_MS = 30_000;
 // any realistic single inference. 300s makes a false flip on a live inference highly unlikely while
 // still clearing an indefinite-"working" hang.
 const CODEX_HUNG_AFTER_TOOLS_MS = 300_000;
+// Hookless turns have no hook to rule out a running tool, so require longer rollout silence (pure inference observed to ~312s).
+const CODEX_HOOKLESS_HUNG_MS = 600_000;
 const RESTORE_WARMUP_MS = 30_000;
 const RESTORE_SETTLE_MS = 2_000;
 const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
@@ -704,8 +720,6 @@ export function getIdleWaitBeforeFlushMs(): number {
 }
 
 const NAME_RE = /^[\w.-]+$/;
-const MAX_DECODED_SIZE = 5 * 1024 * 1024;
-const MAX_ATTACHMENTS = 10;
 const STATE_HISTORY_LIMIT = 100;
 const RESTORE_PLAN_WAIT_MS = 5_000;
 const RESTORE_PLAN_POLL_MS = 250;
@@ -793,9 +807,7 @@ const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
 const CURSOR_PANE_READY_OVERRIDE_TTL_MS = 15_000;
 // Ceiling on how far past its own parsed resetAtMs a live usage-limit menu can
 // still re-confirm rate_limited. parseRateLimitResetAtMs (rate-limit-detect.ts)
-// only encodes a time-of-day and rolls at most a full day (DAY_MS) forward
-// when the parsed clock already looks past — so any genuine session-limit
-// reset is always within one day of the record that reported it. Once nowMs
+// yields the instant the reporting record named for the reset. Once nowMs
 // is a full day past resetAtMs with no fresh rate-limit record to refresh it,
 // an entire reset cycle has elapsed uncorroborated: a menu still sitting on
 // the pane is a stuck render, not a live limit, so re-confirmation stops and
@@ -889,7 +901,12 @@ type MemoryGuardConfig = AppConfig["admission"]["memoryGuard"];
 // `enforceFloors` nor `admission.enabled` has been applied — every caller
 // (assertAdmissible, updateMemoryHold) applies its own gates so a condition
 // never counts toward a denial or a hold unless its own flag says it can.
-type MemoryDenialCause = "legacy_available" | "legacy_swap" | "context_floor" | "pressure";
+type MemoryDenialCause =
+  | "legacy_available"
+  | "legacy_swap"
+  | "context_floor"
+  | "pressure"
+  | "cgroup_max_headroom";
 
 interface MemoryDenialSample {
   legacyDetail?: string | undefined;
@@ -930,6 +947,16 @@ function createMemoryShedEpisode(): MemoryShedEpisode {
 
 function memoryShedEmergencyBytes(guard: MemoryGuardConfig): number {
   return Math.min(MEMORY_SHED_EMERGENCY_CAP_BYTES, Math.floor(guard.shedCriticalFloorBytes / 2));
+}
+
+// One latch truth table for the shed and the admission gate: set at
+// headroom <= E, clear above 2E, keep the prior value in between.
+function nextCgroupMaxLatched(
+  headroomBytes: number,
+  emergencyBytes: number,
+  latched: boolean,
+): boolean {
+  return headroomBytes <= emergencyBytes || (latched && headroomBytes <= 2 * emergencyBytes);
 }
 const DEFAULT_DAILY_WAKE_MESSAGE = "Scheduled daily wake-up. Review current state.";
 
@@ -1049,6 +1076,25 @@ export class SessionNotRestorableError extends Error {
       reason,
       availableActions,
     };
+  }
+}
+
+const SPAWN_BATCH_CONFLICT_MESSAGES: Record<SpawnBatchConflictPayload["code"], string> = {
+  spawn_in_progress:
+    "is still being created from this submission; wait, then check the session list",
+  spawn_committed:
+    "was already created from this submission; submit again to start another session",
+  spawn_failed: "from this submission did not start; submit again to start a new session",
+};
+
+export class SpawnBatchConflictError extends Error {
+  readonly statusCode = 409;
+  readonly payload: SpawnBatchConflictPayload;
+
+  constructor(code: SpawnBatchConflictPayload["code"], sessionId: string) {
+    const message = `Session ${sessionId} ${SPAWN_BATCH_CONFLICT_MESSAGES[code]}`;
+    super(message);
+    this.payload = { code, sessionId, error: message };
   }
 }
 
@@ -1976,6 +2022,10 @@ function withAgentModeOptions(
   };
 }
 
+class AgentProcessProbeUnknownError extends TmuxProbeUnknownError {
+  retentionAttempted = false;
+}
+
 function sessionProcessMatchers(session: Pick<SessionRecord, "agent" | "launchCommand">): string[] {
   return agentProcessMatchers(session.agent, session.launchCommand);
 }
@@ -1995,7 +2045,7 @@ async function agentProcessAlive(
     ...(options?.fresh ? { fresh: true } : {}),
     ...(foreign ? { paneChildFallback: true } : {}),
   });
-  if (result.diagnostic) throw new TmuxProbeUnknownError(result.diagnostic);
+  if (result.diagnostic) throw new AgentProcessProbeUnknownError(result.diagnostic);
   return result.alive;
 }
 
@@ -2182,6 +2232,129 @@ function parseSourceReplyButtons(raw: unknown): SourceReplyButton[] {
   return buttons;
 }
 
+const MAX_SOURCE_REPLY_IMAGES = 4;
+const MAX_SOURCE_REPLY_IMAGE_BYTES = 10_000_000;
+const MAX_SOURCE_REPLY_IMAGE_SIDES = 10_000;
+const MAX_SOURCE_REPLY_IMAGE_RATIO = 20;
+const SOURCE_REPLY_IMAGE_TYPES = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+} as const satisfies Record<string, TelegramPhoto["contentType"]>;
+
+/** Width and height from the format header, or null when the bytes are not that format. */
+function imageDimensions(
+  bytes: Buffer,
+  contentType: TelegramPhoto["contentType"],
+): { width: number; height: number } | null {
+  const ascii = (start: number, end: number): string => bytes.toString("latin1", start, end);
+  if (contentType === "image/png") {
+    if (bytes.length < 24 || ascii(0, 8) !== "\x89PNG\r\n\x1a\n" || ascii(12, 16) !== "IHDR") {
+      return null;
+    }
+    return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  }
+  if (contentType === "image/webp") {
+    if (bytes.length < 30 || ascii(0, 4) !== "RIFF" || ascii(8, 12) !== "WEBP") return null;
+    const chunk = ascii(12, 16);
+    if (chunk === "VP8 " && bytes.readUIntBE(23, 3) === 0x9d012a) {
+      return { width: bytes.readUInt16LE(26) & 0x3fff, height: bytes.readUInt16LE(28) & 0x3fff };
+    }
+    if (chunk === "VP8L" && bytes[20] === 0x2f) {
+      const bits = bytes.readUInt32LE(21);
+      return { width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1 };
+    }
+    if (chunk === "VP8X") {
+      return { width: bytes.readUIntLE(24, 3) + 1, height: bytes.readUIntLE(27, 3) + 1 };
+    }
+    return null;
+  }
+  if (bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  // JPEG: walk the marker segments to the first start-of-frame.
+  let offset = 2;
+  while (offset + 4 <= bytes.length) {
+    if (bytes[offset] !== 0xff) return null;
+    const marker = bytes[offset + 1] as number;
+    if (marker === 0xff) {
+      offset += 1;
+      continue;
+    }
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) {
+      offset += 2;
+      continue;
+    }
+    if (marker === 0xd9 || marker === 0xda) return null;
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      if (offset + 9 > bytes.length) return null;
+      return { height: bytes.readUInt16BE(offset + 5), width: bytes.readUInt16BE(offset + 7) };
+    }
+    const length = bytes.readUInt16BE(offset + 2);
+    if (length < 2) return null;
+    offset += 2 + length;
+  }
+  return null;
+}
+
+// Reached straight from the HTTP body, so every field is validated here.
+function parseSourceReplyImages(raw: unknown): TelegramPhoto[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    throw new InvalidSourceReplyInputError("images must be an array");
+  }
+  if (raw.length > MAX_SOURCE_REPLY_IMAGES) {
+    throw new InvalidSourceReplyInputError(
+      `images must hold at most ${MAX_SOURCE_REPLY_IMAGES} entries`,
+    );
+  }
+  const photos: TelegramPhoto[] = [];
+  let totalBytes = 0;
+  for (const entry of raw) {
+    const record = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
+    const name = typeof record["name"] === "string" ? record["name"].trim() : "";
+    const extension = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
+    const contentType = Object.hasOwn(SOURCE_REPLY_IMAGE_TYPES, extension)
+      ? SOURCE_REPLY_IMAGE_TYPES[extension as keyof typeof SOURCE_REPLY_IMAGE_TYPES]
+      : undefined;
+    if (!name.includes(".") || !contentType) {
+      throw new InvalidSourceReplyInputError(
+        `image name must end in .png, .jpg, .jpeg or .webp: ${name}`,
+      );
+    }
+    const data = record["data"];
+    if (
+      typeof data !== "string" ||
+      !data ||
+      data.length % 4 !== 0 ||
+      !/^[A-Za-z0-9+/]*={0,2}$/u.test(data)
+    ) {
+      throw new InvalidSourceReplyInputError(`image data must be non-empty base64: ${name}`);
+    }
+    const bytes = Buffer.from(data, "base64");
+    totalBytes += bytes.length;
+    if (totalBytes > MAX_SOURCE_REPLY_IMAGE_BYTES) {
+      throw new InvalidSourceReplyInputError(
+        `images must total at most ${MAX_SOURCE_REPLY_IMAGE_BYTES} bytes`,
+      );
+    }
+    const size = imageDimensions(bytes, contentType);
+    if (!size || size.width === 0 || size.height === 0) {
+      throw new InvalidSourceReplyInputError(`image is not a readable ${extension} file: ${name}`);
+    }
+    if (
+      size.width + size.height > MAX_SOURCE_REPLY_IMAGE_SIDES ||
+      Math.max(size.width, size.height) / Math.min(size.width, size.height) >
+        MAX_SOURCE_REPLY_IMAGE_RATIO
+    ) {
+      throw new InvalidSourceReplyInputError(
+        `image ${name} is ${size.width}x${size.height}; width+height must be at most ${MAX_SOURCE_REPLY_IMAGE_SIDES} and the side ratio at most ${MAX_SOURCE_REPLY_IMAGE_RATIO}`,
+      );
+    }
+    photos.push({ name, contentType, data: bytes });
+  }
+  return photos;
+}
+
 function buildTelegramChoices(
   sessionId: string,
   target: Pick<TelegramReplyTarget, "chatId" | "messageThreadId">,
@@ -2211,15 +2384,26 @@ function buildTelegramChoices(
  * `telegram:message` send trigger on that same source) — otherwise an agent
  * would offer buttons whose clicks reach nobody.
  */
+function configuredTelegramSource(
+  project: ProjectConfig | undefined,
+  sourceId?: string,
+): [string, TelegramSourceConfig] | undefined {
+  return Object.entries(project?.sources ?? {}).find(
+    (entry): entry is [string, TelegramSourceConfig] =>
+      entry[1].type === "telegram" &&
+      (sourceId !== undefined ? entry[0] === sourceId : entry[1].chatId !== undefined),
+  );
+}
+
 function telegramAgentInstructions(
   project: ProjectConfig | undefined,
   hasInbound: boolean,
+  originSourceId?: string,
 ): string | undefined {
   if (!project) return undefined;
-  const sourceId = Object.entries(project.sources).find(
-    ([, source]) => source.type === "telegram" && source.chatId !== undefined,
-  )?.[0];
-  if (!sourceId) return undefined;
+  const selected = configuredTelegramSource(project, originSourceId);
+  if (!selected || selected[1].chatId === undefined || selected[1].chatId >= 0) return undefined;
+  const [sourceId] = selected;
   const delivers = Object.values(project.triggers).some(
     (trigger) =>
       trigger.source === sourceId && trigger.event === TELEGRAM_MESSAGE_EVENT && "send" in trigger,
@@ -2295,7 +2479,7 @@ function buildInitialMessage(
   }
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
-  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Read a running sidecar's reserved port with \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports\` (tab-separated: sidecar, port id, env name, port, alive|dead; add \`--json\` for JSON). Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies when the main session spawns, restores, or recovers. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`docs/commands.md\` for sidecar usage. Available: ${names}.`;
+  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Read a running sidecar's reserved port with \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports\` (tab-separated: sidecar, port id, env name, port, alive|dead, listening|not-listening|unknown; add \`--json\` for JSON). Do not start long-running app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. One-shot test, lint, or type-check commands may run directly. Auto-start applies when the main session spawns, restores, or recovers. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`docs/commands.md\` for sidecar usage. Available: ${names}.`;
 }
 
 function buildAttachmentReferenceLines(attachmentIds: string[]): string[] {
@@ -2555,7 +2739,7 @@ function buildSessionEnv(args: {
     // Pins agent self-update (`npm install -g ...`) to `~/.local` even when
     // `~/.npmrc` has been clobbered down to just a registry `_authToken`
     // line. Points at the Spur-owned globalconfig file (`ensureNpmPinFile` in
-    // npm-prefix.ts writes it on every daemon boot) rather than setting
+    // npm-prefix.ts writes it on every default-instance daemon boot) rather than setting
     // npm's plain (non-globalconfig) prefix env var directly:
     // nvm refuses to load whenever it sees that var set (any casing) or a
     // `prefix=`/`globalconfig=` line in `~/.npmrc`, and a session pane that
@@ -2602,13 +2786,14 @@ function sidecarViewPorts(
   session: Pick<SessionRecord, "sidecarPorts">,
   sidecarName: string,
   sidecar?: ProjectConfig["sidecars"][string],
+  listeners?: ListenerSnapshot,
 ): SidecarPortView[] {
   const entries = Object.entries(session.sidecarPorts?.[sidecarName] ?? {});
   return entries.map(([env, port]) => {
     const id =
       Object.entries(sidecar?.ports ?? {}).find(([, portConfig]) => portConfig.env === env)?.[0] ??
       env;
-    return { id, env, port };
+    return { id, env, port, listening: listeners?.ok ? listeners.byPort.has(port) : null };
   });
 }
 
@@ -2853,19 +3038,23 @@ function buildLastActivityAt(
 // past expiry. rateLimitExpiredAtMs is only ever later than or equal to
 // agentActivityAt (the reset instant is always after the record that carried
 // it), but the max is taken explicitly rather than assumed.
+// Successful restore is also operator activity: its persisted timestamp grants
+// a full idle window even when resuming produces no new transcript activity.
 export function resolveParkActivityAt(
   classified: Pick<SessionStateResult, "agentActivityAt" | "rateLimitExpiredAtMs">,
+  restoredAt?: string,
 ): Date | null {
   if (classified.agentActivityAt === null) {
     return null;
   }
-  if (classified.rateLimitExpiredAtMs === undefined) {
-    return classified.agentActivityAt;
+  let activityAt = classified.agentActivityAt;
+  for (const baseline of [classified.rateLimitExpiredAtMs, restoredAt]) {
+    if (baseline !== undefined) {
+      const baselineAt = new Date(baseline);
+      if (baselineAt > activityAt) activityAt = baselineAt;
+    }
   }
-  const rateLimitExpiredAt = new Date(classified.rateLimitExpiredAtMs);
-  return rateLimitExpiredAt > classified.agentActivityAt
-    ? rateLimitExpiredAt
-    : classified.agentActivityAt;
+  return activityAt;
 }
 
 // A terminating record's sidecarPorts can hold BOTH desk-shared (anchor-
@@ -3014,6 +3203,10 @@ async function resolveSpawnRequestLaunchSelection(
   codexHomePath: string,
   preserveModel = false,
 ): Promise<AgentLaunchSelection> {
+  const explicitModel = preserveModel ? undefined : request.model;
+  if (agent === "codex" && explicitModel !== undefined) {
+    await validateCodexModel(explicitModel, codexHomePath, project.codexArgs ?? []);
+  }
   const effort =
     request.reasoningEffort !== undefined
       ? request.reasoningEffort
@@ -3029,11 +3222,7 @@ async function resolveSpawnRequestLaunchSelection(
       ...(selection.variantNames ? { reasoningVariantNames: selection.variantNames } : {}),
     };
   }
-  const resolvedModel = await resolveAgentLaunchModel(
-    agent,
-    model,
-    preserveModel ? undefined : request.model,
-  );
+  const resolvedModel = await resolveAgentLaunchModel(agent, model, explicitModel);
   return resolvedModel !== undefined ? { model: resolvedModel } : {};
 }
 
@@ -3380,9 +3569,7 @@ function telegramSessionLabel(session: Pick<SessionView, "id" | "slots">): strin
 interface TelegramReplyTargetChanges {
   /** The placeholder this send edited; cleared only while it is still the recorded one. */
   sentStatusMessageId?: number;
-  /** Topic created by the send; applies only while the target is still in that chat with no thread. */
-  createdThread?: { chatId: number; messageThreadId: number };
-  /** Topic name now applied; with `createdThread` it applies only if the thread does. */
+  /** Topic name applied to the existing assignment. */
   topicName?: string;
   lastReplyAt?: string;
 }
@@ -3396,9 +3583,6 @@ function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" |
   const emoji = telegramStatusEmoji(session.state);
   const identity = `${session.id} ${session.agent}`;
   const title = sessionTitle(session);
-  if (!title) return `${emoji} ${identity}`;
-  const suffix = ` — ${identity}`;
-  const titleLimit = TELEGRAM_TOPIC_NAME_MAX - emoji.length - 1 - suffix.length;
   const truncate = (value: string, limit: number): string =>
     value.length > limit
       ? value
@@ -3406,6 +3590,9 @@ function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" |
           .replace(/[\uD800-\uDBFF]$/u, "")
           .trimEnd() + "…"
       : value;
+  if (!title) return truncate(`${emoji} ${identity}`, TELEGRAM_TOPIC_NAME_MAX);
+  const suffix = ` — ${identity}`;
+  const titleLimit = TELEGRAM_TOPIC_NAME_MAX - emoji.length - 1 - suffix.length;
   if (titleLimit < 1) return truncate(`${emoji} ${title}${suffix}`, TELEGRAM_TOPIC_NAME_MAX);
   return `${emoji} ${truncate(title, titleLimit)}${suffix}`;
 }
@@ -3634,10 +3821,14 @@ export class SessionService {
   // (never-reaped) sidecar would otherwise warn every SIDECAR_REAPER_INTERVAL_MS
   // tick forever. Keyed on `${ownerId}::${sidecarName}`.
   private readonly sidecarAgeWarnLastLoggedAt = new Map<string, number>();
+  // `${session.id}\0${ownerId}` keys already warned by
+  // session.sidecar.owner_missing: one warn per (session, anchor) per process.
+  private readonly sidecarOwnerMissingWarned = new Set<string>();
   // Session ids this process is actively spawning. A spawning session tracked
   // here still has its spawn pipeline running (worktree/tools/tmux setup), so
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
+  private readonly spawnsPreparing = new Set<string>();
   // Session ids this process is launching in place: dead-agent recovery
   // (relaunchSessionInPlace) and restore()/reopen(). Each writes `running`
   // before the agent reaches its prompt and settles the record itself, so a
@@ -3722,6 +3913,7 @@ export class SessionService {
     SessionSidecarView,
     { ownerId: string; generation: number; signature: string }
   >();
+  private readonly sidecarViewObservationRevisions = new WeakMap<SessionSidecarView, number>();
   private sidecarObservation: { value: SidecarObservation; completedAt: number } | undefined;
   private sidecarObservationRun: Promise<SidecarObservation> | undefined;
   private sidecarObservationRevision = 0;
@@ -4234,12 +4426,12 @@ export class SessionService {
         episode.exhaustedEdges.delete("cgroup-max:emergency");
       } else {
         cgroupMaxHeadroomBytes = Math.max(0, cgroup.maxBytes - cgroup.currentBytes);
-        if (cgroupMaxHeadroomBytes <= emergencyBytes) {
-          episode.cgroupMaxLatched = true;
-        } else if (cgroupMaxHeadroomBytes > 2 * emergencyBytes) {
-          episode.cgroupMaxLatched = false;
-          episode.exhaustedEdges.delete("cgroup-max:emergency");
-        }
+        episode.cgroupMaxLatched = nextCgroupMaxLatched(
+          cgroupMaxHeadroomBytes,
+          emergencyBytes,
+          episode.cgroupMaxLatched,
+        );
+        if (!episode.cgroupMaxLatched) episode.exhaustedEdges.delete("cgroup-max:emergency");
       }
     }
 
@@ -6353,6 +6545,15 @@ export class SessionService {
     );
   }
 
+  private logListEnrichFailed(sessionId: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.logEvent("session.list.enrich_failed", {
+      level: "warn",
+      sessionId,
+      message: `Session list dropped ${sessionId}: ${message}`,
+    });
+  }
+
   private async finalizeLifecycleRows<T extends { id: string; slots?: SessionSlots }>(
     rows: {
       view: T;
@@ -6385,6 +6586,12 @@ export class SessionService {
           !readSession(this.config.dataDir, record.id)
         )
           return undefined;
+        // List callers (lastBuild) drop the one row that cannot be rebuilt
+        // instead of failing the whole listing; refuse callers keep the throw.
+        if (options.onExhausted === "lastBuild" && !(error instanceof SessionLifecycleError)) {
+          this.logListEnrichFailed(record.id, error);
+          return undefined;
+        }
         throw error;
       }
     };
@@ -7022,6 +7229,7 @@ export class SessionService {
 
   private holdBudgetLimitedLaunch(session: SessionRecord): SessionRecord | undefined {
     if (!this.tokenBudgetActivationError(session)) return undefined;
+    this.assertSpawnNotKilled(session.id);
     const limited: SessionRecord = {
       ...session,
       status: "budget_limited",
@@ -7059,7 +7267,7 @@ export class SessionService {
     }
     const classified = await this.classifySessionRecord(candidate);
     const latest = classified.session;
-    const parkActivityAt = resolveParkActivityAt(classified);
+    const parkActivityAt = resolveParkActivityAt(classified, latest.restoredAt);
     const deliveryPending: boolean = this.shouldRunDelivery(latest);
     if (
       latest.project === SHEPHERD_PROJECT_ID ||
@@ -7302,7 +7510,7 @@ export class SessionService {
           // anything (see resolveParkActivityAt's own comment). A null result
           // means no transcript signal exists at all — fail safe and never
           // park rather than fall back to the tmux attach clock.
-          const parkActivityAt = resolveParkActivityAt(classified);
+          const parkActivityAt = resolveParkActivityAt(classified, classified.session.restoredAt);
           if (
             session.project !== SHEPHERD_PROJECT_ID &&
             !this.spawnsInFlight.has(session.id) &&
@@ -7580,6 +7788,11 @@ export class SessionService {
           this.historyCaptureStamps.delete(stampKey);
         }
       }
+      for (const key of this.sidecarOwnerMissingWarned) {
+        if (!includedIds.has(key.slice(0, key.indexOf("\0")))) {
+          this.sidecarOwnerMissingWarned.delete(key);
+        }
+      }
 
       // A session is due for enrichment when it can still change on its own
       // (isLiveSessionRecord), when its on-disk record object changed since
@@ -7627,22 +7840,33 @@ export class SessionService {
       }
 
       const enriched = await Promise.all(
-        due.map((session) =>
-          this.enrichDashboard(session).catch((error: unknown) => {
+        due.map(async (session) => {
+          try {
+            return await this.enrichDashboard(session);
+          } catch (error) {
             if (
               error instanceof SessionResourceNotFoundError &&
               !readSession(this.config.dataDir, session.id)
             ) {
               return undefined;
             }
-            throw error;
-          }),
-        ),
+            // One failing record keeps its prior cache entry and stays due;
+            // it must not abort the tick for every other record.
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.dashboard_cache.refresh_failed", {
+              level: "warn",
+              sessionId: session.id,
+              message: `Dashboard cache refresh failed for ${session.id}: ${message}`,
+            });
+            return "failed" as const;
+          }
+        }),
       );
       if (this.isDeliveryStopped()) return;
       for (const [index, session] of due.entries()) {
         if (refreshedDuringTick(session.id)) continue;
         const view = enriched[index];
+        if (view === "failed") continue;
         if (!view) {
           this.dashboardCache.delete(session.id);
           this.dashboardEnrichedRecords.delete(session.id);
@@ -8483,11 +8707,132 @@ export class SessionService {
   }
 
   private resolveTelegramNotice(sessionId: string): ResolvedTelegramNotice | null {
-    const target = readTelegramReplyTarget(this.config.dataDir, sessionId);
+    const session = readSession(this.config.dataDir, sessionId);
+    const target = session ? this.telegramReplyTarget(session) : null;
     if (!target) return null;
     const source = this.config.projects[target.projectId]?.sources[target.sourceId];
     if (!source || source.type !== "telegram") return null;
     return { target, source };
+  }
+
+  private telegramTopicHasOtherOwner(session: SessionRecord, target: TelegramReplyTarget): boolean {
+    const projects = new Set([
+      ...Object.keys(this.config.projects),
+      session.project,
+      target.projectId,
+    ]);
+    for (const projectId of projects) {
+      const sourceIds = new Set([
+        ...Object.keys(this.config.projects[projectId]?.sources ?? {}),
+        ...(projectId === target.projectId ? [target.sourceId] : []),
+      ]);
+      for (const sourceId of sourceIds) {
+        const owner = readTelegramBindings(this.config.dataDir, projectId, sourceId).get(
+          telegramBindingKey(target.chatId, target.messageThreadId),
+        );
+        if (owner && owner.sessionId !== session.id) return true;
+      }
+    }
+    return false;
+  }
+
+  private async retireTelegramTopics(
+    session: SessionRecord,
+    targets: { target: TelegramReplyTarget; owned: boolean }[],
+    publicationFailure = false,
+  ): Promise<void> {
+    const groups = new Map<number, { source: TelegramSourceConfig; results: string[] }>();
+    const seen = new Set<string>();
+    for (const { target, owned } of targets) {
+      const key = telegramBindingKey(target.chatId, target.messageThreadId);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const source = this.config.projects[target.projectId]?.sources[target.sourceId];
+      if (!source || source.type !== "telegram") {
+        this.logTelegramNoticeFailure(
+          session.id,
+          "cleanup",
+          new Error("Telegram source is not configured"),
+        );
+        continue;
+      }
+      const group =
+        source.chatId !== undefined && source.chatId < 0
+          ? (groups.get(source.chatId) ?? { source, results: [] as string[] })
+          : undefined;
+      if (group && source.chatId !== undefined) groups.set(source.chatId, group);
+      const topicId = target.messageThreadId;
+      if (target.chatId > 0 || topicId === undefined || topicId === 1) continue;
+      if (!owned || this.telegramTopicHasOtherOwner(session, target)) {
+        group?.results.push(
+          `Topic ${topicId} retained: ${owned ? "another agent owns it" : "no longer bound to this agent"}.`,
+        );
+        continue;
+      }
+      const release = claimTelegramTopicDeletion(this.config.dataDir, target.chatId, topicId);
+      if (!release) continue;
+      try {
+        const result = await deleteTelegramTopic(source, target.chatId, topicId);
+        group?.results.push(
+          `Topic ${topicId} ${result === "deleted" ? "deleted with the agent" : "already deleted"}.`,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Telegram request failed";
+        group?.results.push(`Topic ${topicId} could not be deleted: ${message}.`);
+        this.logTelegramNoticeFailure(session.id, "topic deletion", error);
+      } finally {
+        release();
+      }
+    }
+    for (const [chatId, { source, results }] of groups) {
+      try {
+        await sendTelegramReply(
+          source,
+          { chatId },
+          `Session ${telegramSessionLabel(session)} ${publicationFailure ? "topic cleanup after binding failure" : `finished (${session.status})`}.${results.length ? `\n${results.join("\n")}` : ""}`,
+          { lifecycle: true },
+        );
+      } catch {
+        this.logTelegramNoticeFailure(
+          session.id,
+          "lifecycle notice",
+          new Error("Telegram notice failed or timed out"),
+        );
+      }
+    }
+  }
+
+  private async cleanupTerminalTelegram(session: SessionRecord): Promise<void> {
+    const latest = readTelegramReplyTarget(this.config.dataDir, session.id);
+    const targets: { target: TelegramReplyTarget; owned: boolean }[] = [];
+    const projectIds = new Set([
+      ...Object.keys(this.config.projects),
+      session.project,
+      ...(latest ? [latest.projectId] : []),
+    ]);
+    for (const projectId of projectIds) {
+      const { removedBindings } = deleteTelegramSourceStateForSession(
+        this.config.dataDir,
+        projectId,
+        session.id,
+      );
+      for (const { sourceId, binding } of removedBindings) {
+        targets.push({
+          target: { ...binding, projectId, sourceId, updatedAt: nowIso() },
+          owned: true,
+        });
+      }
+    }
+    if (
+      latest &&
+      !targets.some(
+        ({ target }) =>
+          target.chatId === latest.chatId && target.messageThreadId === latest.messageThreadId,
+      )
+    ) {
+      targets.push({ target: latest, owned: false });
+    }
+    await this.retireTelegramTopics(session, targets);
   }
 
   private logTelegramNoticeFailure(sessionId: string, context: string, error: unknown): void {
@@ -8505,32 +8850,44 @@ export class SessionService {
     text: string,
     options: {
       updateTopicName?: boolean;
-      closeTopic?: boolean;
       /** Raw pane tail, shown verbatim in a code block after the text. */
       preformatted?: string;
-      /** Target resolved before its state was deleted; omit to resolve now. */
-      resolved?: ResolvedTelegramNotice | null;
+      onlyUnanswered?: boolean;
     } = {},
   ): Promise<void> {
     try {
-      const resolved =
-        options.resolved !== undefined ? options.resolved : this.resolveTelegramNotice(sessionId);
+      const assignment = await this.ensureTelegramTopic(sessionId);
+      if (assignment.kind === "disabled") return;
+      const resolved = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+        const current = this.resolveTelegramNotice(sessionId);
+        if (!current || !this.telegramAssignmentMatches(sessionId, assignment)) return null;
+        const { target } = current;
+        if (
+          options.onlyUnanswered &&
+          ((target.lastReplyAt !== undefined &&
+            (target.lastInboundAt === undefined || target.lastReplyAt >= target.lastInboundAt)) ||
+            hasPendingTelegramSend(this.config.dataDir, sessionId, { unclaimedOnly: true }))
+        )
+          return null;
+        this.claimTelegramPlaceholder(sessionId, target);
+        return current;
+      });
       if (!resolved) return;
       const { target, source } = resolved;
-      this.claimTelegramPlaceholder(sessionId, target);
-      const result = await sendTelegramReply(source, target, text, {
-        topicName: telegramTopicName(topicSession),
-        ...(options.preformatted ? { preformatted: options.preformatted } : {}),
-      });
-      this.recordTelegramSend(sessionId, target, result, {
-        createIfMissing: false,
-        topicName: telegramTopicName(topicSession),
-      });
-      if (options.closeTopic) {
-        if (target.messageThreadId !== undefined && target.chatId < 0) {
-          await closeTelegramTopic(source, target.chatId, target.messageThreadId);
-        }
-      } else if (options.updateTopicName) {
+      let result: TelegramReplySendResult | undefined;
+      try {
+        result = await sendTelegramReply(source, target, text, {
+          ...(options.preformatted ? { preformatted: options.preformatted } : {}),
+        });
+      } finally {
+        await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+          if (!this.telegramAssignmentMatches(sessionId, target)) return;
+          if (result) this.recordTelegramSend(sessionId, target, result);
+          if (options.onlyUnanswered)
+            this.patchTelegramReplyTarget(sessionId, { lastReplyAt: nowIso() });
+        });
+      }
+      if (options.updateTopicName) {
         await this.syncTelegramTopicName(sessionId, topicSession);
       }
     } catch (error) {
@@ -8556,7 +8913,7 @@ export class SessionService {
       if (target.topicName === name) return;
       // Recorded only when Telegram accepted it, so a failed rename retries.
       if (await editTelegramTopic(source, target.chatId, target.messageThreadId, name)) {
-        this.patchTelegramReplyTarget(sessionId, null, { topicName: name });
+        this.patchTelegramReplyTarget(sessionId, { topicName: name });
       }
     } catch (error) {
       this.logTelegramNoticeFailure(sessionId, "topic rename", error);
@@ -8566,62 +8923,25 @@ export class SessionService {
   /**
    * Re-reads the reply target and merges into it: an inbound that landed a
    * new placeholder while the send was in flight must survive. Only the
-   * placeholder that was sent is cleared. A target deleted meanwhile is
-   * recreated from `fallback` alone; without one nothing is written.
+   * placeholder that was sent is cleared. Removed routing stays removed.
    */
   private patchTelegramReplyTarget(
     sessionId: string,
-    fallback: TelegramReplyTarget,
-    changes: TelegramReplyTargetChanges,
-  ): TelegramReplyTarget;
-  private patchTelegramReplyTarget(
-    sessionId: string,
-    fallback: null,
-    changes: TelegramReplyTargetChanges,
-  ): TelegramReplyTarget | null;
-  private patchTelegramReplyTarget(
-    sessionId: string,
-    fallback: TelegramReplyTarget | null,
     changes: TelegramReplyTargetChanges,
   ): TelegramReplyTarget | null {
-    const stored = readTelegramReplyTarget(this.config.dataDir, sessionId);
-    const current = stored ?? fallback;
+    const current = readTelegramReplyTarget(this.config.dataDir, sessionId);
     if (!current) return null;
     const { updatedAt: _updatedAt, statusMessageId, ...rest } = current;
     const keptStatus =
       statusMessageId !== changes.sentStatusMessageId ? statusMessageId : undefined;
-    const appliesThread =
-      changes.createdThread !== undefined &&
-      current.chatId === changes.createdThread.chatId &&
-      current.messageThreadId === undefined;
     const merged = {
       ...rest,
       ...(keptStatus !== undefined ? { statusMessageId: keptStatus } : {}),
-      ...(appliesThread && changes.createdThread
-        ? { messageThreadId: changes.createdThread.messageThreadId }
-        : {}),
-      ...(changes.topicName !== undefined && (changes.createdThread === undefined || appliesThread)
-        ? { topicName: changes.topicName }
-        : {}),
+      ...(changes.topicName !== undefined ? { topicName: changes.topicName } : {}),
       ...(changes.lastReplyAt !== undefined ? { lastReplyAt: changes.lastReplyAt } : {}),
     };
-    // A target rebuilt from the fallback never lands on a chat and thread that
-    // another session's binding already owns.
-    if (stored === null && this.telegramThreadBoundToOther(merged, sessionId)) {
-      return { ...merged, updatedAt: nowIso() };
-    }
     writeTelegramReplyTarget(this.config.dataDir, merged);
     return { ...merged, updatedAt: nowIso() };
-  }
-
-  private telegramThreadBoundToOther(
-    target: Pick<TelegramReplyTarget, "projectId" | "sourceId" | "chatId" | "messageThreadId">,
-    sessionId: string,
-  ): boolean {
-    const bound = readTelegramBindings(this.config.dataDir, target.projectId, target.sourceId).get(
-      telegramBindingKey(target.chatId, target.messageThreadId),
-    );
-    return bound !== undefined && bound.sessionId !== sessionId;
   }
 
   /**
@@ -8632,31 +8952,18 @@ export class SessionService {
    */
   private claimTelegramPlaceholder(sessionId: string, target: TelegramReplyTarget): void {
     if (target.statusMessageId === undefined) return;
-    this.patchTelegramReplyTarget(sessionId, null, { sentStatusMessageId: target.statusMessageId });
+    this.patchTelegramReplyTarget(sessionId, { sentStatusMessageId: target.statusMessageId });
   }
 
   /**
    * The one post-send writer: remembers the sent message ids for reply
-   * routing, then settles the reply target (placeholder consumed, created
-   * topic, reply stamp). A notice never recreates a deleted target.
+   * routing, then settles the existing placeholder and reply stamp.
    */
   private recordTelegramSend(
     sessionId: string,
     target: TelegramReplyTarget,
     result: TelegramReplySendResult,
-    options: { lastReplyAt?: string; topicName?: string; createIfMissing: true },
-  ): TelegramReplyTarget;
-  private recordTelegramSend(
-    sessionId: string,
-    target: TelegramReplyTarget,
-    result: TelegramReplySendResult,
-    options: { lastReplyAt?: string; topicName?: string; createIfMissing: false },
-  ): TelegramReplyTarget | null;
-  private recordTelegramSend(
-    sessionId: string,
-    target: TelegramReplyTarget,
-    result: TelegramReplySendResult,
-    options: { lastReplyAt?: string; topicName?: string; createIfMissing: boolean },
+    options: { lastReplyAt?: string } = {},
   ): TelegramReplyTarget | null {
     recordTelegramMessages(
       this.config.dataDir,
@@ -8669,18 +8976,9 @@ export class SessionService {
       ...(result.statusMessageIdConsumed && target.statusMessageId !== undefined
         ? { sentStatusMessageId: target.statusMessageId }
         : {}),
-      ...(result.messageThreadId !== undefined
-        ? { createdThread: { chatId: target.chatId, messageThreadId: result.messageThreadId } }
-        : {}),
-      // A topic the send just created carries the name it was created with.
-      ...(result.messageThreadId !== undefined && options.topicName !== undefined
-        ? { topicName: options.topicName }
-        : {}),
       ...(options.lastReplyAt !== undefined ? { lastReplyAt: options.lastReplyAt } : {}),
     };
-    return options.createIfMissing
-      ? this.patchTelegramReplyTarget(sessionId, target, changes)
-      : this.patchTelegramReplyTarget(sessionId, null, changes);
+    return this.patchTelegramReplyTarget(sessionId, changes);
   }
 
   private async buildPaneTail(tmuxSession: string): Promise<string> {
@@ -8721,13 +9019,6 @@ export class SessionService {
     view: Pick<SessionView, "id" | "agent" | "state" | "slots">,
   ): Promise<void> {
     try {
-      const resolved = this.resolveTelegramNotice(view.id);
-      if (!resolved) return;
-      const { target } = resolved;
-      const alreadyReplied =
-        target.lastReplyAt !== undefined &&
-        (target.lastInboundAt === undefined || target.lastReplyAt >= target.lastInboundAt);
-      if (alreadyReplied) return;
       // The user's message has not reached the agent yet: "waiting" would be a
       // lie. No stamp either, so the first edge after delivery still nudges.
       if (hasPendingTelegramSend(this.config.dataDir, view.id, { unclaimedOnly: true })) return;
@@ -8735,10 +9026,8 @@ export class SessionService {
         view.id,
         view,
         `${telegramStatusEmoji("waiting")} ${telegramSessionLabel(view)} is waiting.`,
-        { updateTopicName: true, resolved },
+        { updateTopicName: true, onlyUnanswered: true },
       );
-      // Stamped on every attempt, sent or failed: one nudge per inbound.
-      this.patchTelegramReplyTarget(view.id, null, { lastReplyAt: nowIso() });
     } catch (error) {
       this.logTelegramNoticeFailure(view.id, "forgotten-reply nudge", error);
     }
@@ -10188,6 +10477,9 @@ export class SessionService {
       ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
     });
 
+    sessionEnv.SPUR_PROJECT_CONFIG_PATH =
+      this.resolveConfiguredProjectConfigPath(reservedSession.project) ?? "";
+
     // Ownership of the tmux name for the catch below: set the instant
     // `new-session` creates the session, so a failure in any later step is
     // still a failure on a pane that is ours to reap. Held on an object, not
@@ -10444,7 +10736,8 @@ export class SessionService {
     const name = normalizeSlotLabel(link.label);
     const sidecar = this.resolveProjectForSession(session)?.sidecars[name];
     if (!sidecar) return false;
-    const owner = this.resolveSidecarOwnerRecord(session, sidecar);
+    const owner = this.findSidecarOwnerRecord(session, sidecar);
+    if (!owner) return false;
     const current = this.resolveSidecarUrlLink(owner, name, sidecar);
     return (
       current !== undefined && normalizeSlotUrl(link.url) === normalizeSlotUrl(current.linkUrl)
@@ -10491,7 +10784,10 @@ export class SessionService {
       if (this.sidecarOwnerIdForName(record, project, name) !== ownerId) continue;
       const cached = this.dashboardCache.get(record.id);
       for (const view of cached?.sidecars ?? []) {
-        if (view.name === name) delete view.url;
+        if (view.name === name) {
+          delete view.url;
+          for (const port of view.ports) port.listening = null;
+        }
       }
     }
   }
@@ -10518,14 +10814,12 @@ export class SessionService {
         this.sidecarEndpoints.delete(key);
     }
     const rootPids = new Set<number>();
-    const urlPorts = new Set<number>();
+    let hasReservedPorts = false;
     for (const session of listSessions(this.config.dataDir)) {
-      const project = this.resolveProjectForSession(session);
-      for (const [name, identity] of Object.entries(session.sidecarProcs ?? {})) {
-        const sidecar = project?.sidecars[name];
-        const link = sidecar ? this.resolveSidecarUrlLink(session, name, sidecar) : undefined;
+      if (Object.values(session.sidecarPorts ?? {}).some((ports) => Object.keys(ports).length > 0))
+        hasReservedPorts = true;
+      for (const identity of Object.values(session.sidecarProcs ?? {})) {
         rootPids.add(identity.pid);
-        if (link) urlPorts.add(link.reservedPort);
       }
     }
     const run = Promise.all(
@@ -10533,7 +10827,7 @@ export class SessionService {
     ).then(async (roots) => {
       const starttimes = new Map(roots);
       const [listeners, processes] = await Promise.all([
-        urlPorts.size ? snapshotListeners() : Promise.resolve({ ok: false as const }),
+        hasReservedPorts ? snapshotListeners() : Promise.resolve({ ok: false as const }),
         snapshotProcesses(),
       ]);
       const value = { listeners, processes, starttimes, revision };
@@ -10589,16 +10883,20 @@ export class SessionService {
   ): Promise<SessionSidecarView[]> {
     const names = sessionSidecarNames(session, project);
     if (names.length === 0) return [];
-    const hasIdentity = names.some((name) => {
+    const needsObservation = names.some((name) => {
       const sidecar = project?.sidecars[name];
-      const owner = sidecar ? this.resolveSidecarOwnerRecord(session, sidecar) : session;
-      return owner.sidecarProcs?.[name] !== undefined;
+      const owner = sidecar ? this.findSidecarOwnerRecord(session, sidecar) : session;
+      return (
+        owner?.sidecarProcs?.[name] !== undefined ||
+        Object.keys(owner?.sidecarPorts?.[name] ?? {}).length > 0
+      );
     });
     const claims = new Map(
       await Promise.all(
         names.map(async (name) => {
           const sidecar = project?.sidecars[name];
-          const owner = sidecar ? this.resolveSidecarOwnerRecord(session, sidecar) : session;
+          const owner = sidecar ? this.findSidecarOwnerRecord(session, sidecar) : session;
+          if (!owner) return [name, { signature: undefined, starttime: null }] as const;
           const identity = owner.sidecarProcs?.[name];
           return [
             name,
@@ -10610,7 +10908,7 @@ export class SessionService {
         }),
       ),
     );
-    const observation: SidecarObservation = hasIdentity
+    const observation: SidecarObservation = needsObservation
       ? await this.observeSidecars()
       : {
           listeners: { ok: false },
@@ -10622,7 +10920,8 @@ export class SessionService {
     for (const name of names) {
       const sidecar = project?.sidecars[name];
       const current = readSession(this.config.dataDir, session.id) ?? session;
-      const owner = sidecar ? this.resolveSidecarOwnerRecord(current, sidecar) : current;
+      const owner = sidecar ? this.findSidecarOwnerRecord(current, sidecar) : current;
+      if (!owner) continue;
       const identity = owner.sidecarProcs?.[name];
       const ageSeconds = identity
         ? observation.processes.byPid.get(identity.pid)?.etimes
@@ -10631,7 +10930,14 @@ export class SessionService {
       const view: SessionSidecarView = {
         name,
         alive: exists && !paneDead,
-        ports: sidecarViewPorts(owner, name, sidecar),
+        ports: sidecarViewPorts(
+          owner,
+          name,
+          sidecar,
+          observation.revision === this.sidecarObservationRevision
+            ? observation.listeners
+            : { ok: false },
+        ),
         tmuxSession: sidecarTmuxSession(owner.id, name),
         ...(ageSeconds !== undefined ? { ageSeconds } : {}),
         ...(ageSeconds !== undefined && ageSeconds >= this.config.sidecarGc.maxAgeWarnMinutes * 60
@@ -10639,6 +10945,7 @@ export class SessionService {
           : {}),
         ...(paneDead ? { deadPane: true } : {}),
       };
+      this.sidecarViewObservationRevisions.set(view, observation.revision);
       views.push(view);
       if (
         this.deliveryStopped ||
@@ -10708,11 +11015,13 @@ export class SessionService {
     const session = readSession(this.config.dataDir, sessionId);
     const project = session ? this.resolveProjectForSession(session) : undefined;
     for (const view of views ?? []) {
+      if (this.sidecarViewObservationRevisions.get(view) !== this.sidecarObservationRevision) {
+        for (const port of view.ports) port.listening = null;
+      }
       if (!view.url) continue;
       const claim = this.sidecarViewClaims.get(view);
       const sidecar = project?.sidecars[view.name];
-      const owner =
-        session && sidecar ? this.resolveSidecarOwnerRecord(session, sidecar) : undefined;
+      const owner = session && sidecar ? this.findSidecarOwnerRecord(session, sidecar) : undefined;
       const entry = claim
         ? this.sidecarEndpoints.get(this.sidecarEndpointKey(claim.ownerId, view.name))
         : undefined;
@@ -10737,24 +11046,33 @@ export class SessionService {
   // Resolves the record that owns a sidecar's tmux pane and reserved ports:
   // the in-hand record itself for a per-session (mcp) sidecar or a non-desk
   // session (zero extra IO — sidecarOwnerId returns session.id unchanged),
-  // else a fresh read of the desk anchor's own record. Session records are
-  // never deleted from the store, so a missing anchor is an invariant break,
-  // not a fallback case.
-  private resolveSidecarOwnerRecord(
+  // else a fresh read of the desk anchor's own record. archiveSessions can
+  // remove an anchor record, so readers must tolerate absence: undefined,
+  // warned once per (session, anchor) per process.
+  private findSidecarOwnerRecord(
     session: SessionRecord,
     sidecar: Pick<SidecarConfig, "mcp">,
-  ): SessionRecord {
+  ): SessionRecord | undefined {
     const ownerId = sidecarOwnerId(session, sidecar);
     if (ownerId === session.id) {
       return session;
     }
+    const key = `${session.id}\0${ownerId}`;
     const anchor = readSession(this.config.dataDir, ownerId);
-    if (!anchor) {
-      throw new Error(
-        `Desk anchor session ${ownerId} not found (owner of sidecar for ${session.id})`,
-      );
+    if (anchor) {
+      this.sidecarOwnerMissingWarned.delete(key);
+      return anchor;
     }
-    return anchor;
+    if (!this.sidecarOwnerMissingWarned.has(key)) {
+      this.sidecarOwnerMissingWarned.add(key);
+      this.logEvent("session.sidecar.owner_missing", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Desk anchor session ${ownerId} not found (owner of sidecar for ${session.id}); desk-shared sidecar views omitted.`,
+        details: { ownerId },
+      });
+    }
+    return undefined;
   }
 
   // Owner id for a sidecar known only by name. A name with no config entry
@@ -10832,7 +11150,12 @@ export class SessionService {
       // this function returns, persisted onto the caller's own record by
       // every call site) get updated — a sibling starting an anchor-owned
       // sidecar must get its own record back unchanged, never the anchor's.
-      const owner = this.resolveSidecarOwnerRecord(currentSession, sidecar);
+      const owner = this.findSidecarOwnerRecord(currentSession, sidecar);
+      if (!owner) {
+        throw new Error(
+          `Desk anchor session ${sidecarOwnerId(currentSession, sidecar)} not found (owner of sidecar for ${currentSession.id})`,
+        );
+      }
       const updated = await this.startSidecarInternal({
         session: owner,
         project: args.project,
@@ -10973,19 +11296,22 @@ export class SessionService {
         if (this.dashboardCache.has(id) || receipt.revision === 0) continue;
         const record = readSession(this.config.dataDir, id);
         if (!record) continue;
+        let assembled: Awaited<ReturnType<typeof this.assembleDashboard>>;
         try {
-          const assembled = await this.assembleDashboard(record);
-          if (assembled) rows.push({ ...assembled, receipt, identity: false });
-          else if (readSession(this.config.dataDir, record.id))
-            throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(record.id));
+          assembled = await this.assembleDashboard(record);
         } catch (error) {
           if (
             error instanceof SessionResourceNotFoundError &&
             !readSession(this.config.dataDir, record.id)
           )
             continue;
-          throw error;
+          if (error instanceof SessionLifecycleError) throw error;
+          this.logListEnrichFailed(record.id, error);
+          continue;
         }
+        if (assembled) rows.push({ ...assembled, receipt, identity: false });
+        else if (readSession(this.config.dataDir, record.id))
+          throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(record.id));
       }
       const views = await this.finalizeLifecycleRows(
         rows,
@@ -11015,7 +11341,9 @@ export class SessionService {
             !readSession(this.config.dataDir, session.id)
           )
             return undefined;
-          throw error;
+          if (error instanceof SessionLifecycleError) throw error;
+          this.logListEnrichFailed(session.id, error);
+          return undefined;
         }
       }),
     );
@@ -11340,6 +11668,9 @@ export class SessionService {
         ...(session.agent === "codex"
           ? { codexSessionsDir: this.codexSessionsDir(session.id) }
           : {}),
+        ...(session.agent === "cursor"
+          ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
+          : {}),
         ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
       }).then((result) => result ?? []);
 
@@ -11466,7 +11797,7 @@ export class SessionService {
   async getSessionSuggestions(sessionId: string): Promise<AgentSuggestionsResponse> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     return loadSessionSuggestions({
       agent: session.agent,
@@ -11850,7 +12181,7 @@ export class SessionService {
   async listServices(sessionId: string): Promise<ServiceInstanceView[]> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
 
     const services = listServiceInstancesForSession(this.config.dataDir, sessionId);
@@ -11864,7 +12195,7 @@ export class SessionService {
   async getService(sessionId: string, serviceId: string): Promise<ServiceInstanceView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const service = readServiceInstance(this.config.dataDir, sessionId, serviceId);
     if (!service) {
@@ -11880,7 +12211,7 @@ export class SessionService {
   ): Promise<ServiceInstanceView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (session.status !== "running") {
       throw new Error(`Session is not running: ${sessionId}`);
@@ -11890,7 +12221,9 @@ export class SessionService {
     }
     const project = this.getProject(session.project);
     if (!projectHasService(project, serviceId)) {
-      throw new Error(`Unknown service for ${session.project}: ${serviceId}`);
+      throw new Error(
+        `Unknown service for ${session.project}: ${serviceId}. Declare a source with type: service and service: ${serviceId} under projects.${session.project}.sources (docs/configuration.md#field-reference).`,
+      );
     }
     if (typeof request.command !== "string" || !request.command.trim()) {
       throw new Error("service command must be a non-empty string");
@@ -11919,10 +12252,22 @@ export class SessionService {
 
     const existing = readServiceInstance(this.config.dataDir, sessionId, serviceId);
     if (existing) {
-      const existingRuntimeAlive = await tmuxSessionExists(existing.tmuxSession);
-      const existingPaneDead = existingRuntimeAlive
-        ? await tmuxPaneDead(existing.tmuxSession)
-        : true;
+      const presence = await getTmuxSessionPresence(existing.tmuxSession);
+      if (presence.unresponsive || presence.diagnostic) {
+        throw new SidecarProbeUnresponsiveError(
+          `Service ${serviceId} tmux state is unreadable (tmux did not answer); retry shortly`,
+        );
+      }
+      const panePresence = presence.present
+        ? await getTmuxPanePresence(existing.tmuxSession)
+        : null;
+      if (panePresence?.unresponsive || panePresence?.diagnostic) {
+        throw new SidecarProbeUnresponsiveError(
+          `Service ${serviceId} pane state is unreadable (tmux did not answer); retry shortly`,
+        );
+      }
+      const existingRuntimeAlive = presence.present;
+      const existingPaneDead = panePresence?.dead ?? true;
       if (existingRuntimeAlive && !existingPaneDead) {
         throw new Error(`Service is already running: ${sessionId}/${serviceId}`);
       }
@@ -12077,6 +12422,8 @@ export class SessionService {
         ),
       };
     } catch (error) {
+      if (error instanceof PreflightBatchClaimedError)
+        throw this.spawnBatchConflict(error.claimedBy);
       throw new PreflightPreviewError(
         error,
         preflightBatchId,
@@ -12210,14 +12557,17 @@ export class SessionService {
     return withQueuedMessages(record, queuedMessages(persisted), true);
   }
 
-  // A kill that lands mid-spawn wins: the spawn never writes over it.
+  // A terminal transition during birth wins over every later spawn write.
   private spawnWasKilled(sessionId: string): boolean {
-    return readSession(this.config.dataDir, sessionId)?.status === "killed";
+    const current = readSession(this.config.dataDir, sessionId);
+    return current !== null && isTerminalSessionStatus(current.status);
   }
 
   private assertSpawnNotKilled(sessionId: string): void {
     if (this.spawnWasKilled(sessionId)) {
-      throw new Error(`Session ${sessionId} was killed while spawning`);
+      throw new Error(
+        `Session ${sessionId} was ${readSession(this.config.dataDir, sessionId)?.status} while spawning`,
+      );
     }
   }
 
@@ -12770,9 +13120,14 @@ export class SessionService {
       if (options?.telegramOrigin) {
         writeTelegramReplyTarget(this.config.dataDir, {
           sessionId,
-          ...options.telegramOrigin,
-          lastInboundAt: nowIso(),
+          projectId: options.telegramOrigin.projectId,
+          sourceId: options.telegramOrigin.sourceId,
+          chatId: options.telegramOrigin.chatId,
         });
+        await this.ensureTelegramTopic(sessionId, options.telegramOrigin);
+        await this.withWorkspaceLifecycleLocks(sessionId, async () =>
+          this.assertSpawnNotKilled(placeholder.id),
+        );
       }
       this.admissionReservations.delete(admissionReservation);
       admissionReserved = false;
@@ -12864,7 +13219,13 @@ export class SessionService {
             this.config.tags,
             project.branchNaming?.regex,
             selfDestruct,
-            telegramAgentInstructions(project, options?.telegramOrigin !== undefined),
+            telegramAgentInstructions(
+              options?.telegramOrigin
+                ? this.config.projects[options.telegramOrigin.projectId]
+                : project,
+              options?.telegramOrigin !== undefined,
+              options?.telegramOrigin?.sourceId,
+            ),
             githubPostInstructions(project, sessionId),
           );
       const budgetLimited = this.holdBudgetLimitedLaunch({
@@ -12986,7 +13347,9 @@ export class SessionService {
             : undefined;
 
         stage = "tmux.create";
-        this.assertSpawnNotKilled(launchSessionId);
+        await this.withWorkspaceLifecycleLocks(launchSessionId, async () =>
+          this.assertSpawnNotKilled(launchSessionId),
+        );
         launchCandidate = runningRecord;
         await createTmuxSession({
           sessionName: tmuxSession,
@@ -12994,13 +13357,17 @@ export class SessionService {
           launchCommand: launchPlan.launchCommand,
           launchScriptDir: sessionToolDir,
           env: sessionEnv,
+          beforeLaunch: () => this.assertSpawnNotKilled(launchSessionId),
         });
+        await this.withWorkspaceLifecycleLocks(launchSessionId, async () =>
+          this.assertSpawnNotKilled(launchSessionId),
+        );
         const current = readSession(this.config.dataDir, runningRecord.id);
         if (current && hasQueuedMessages(current)) {
           runningRecord = withQueuedMessages(runningRecord, queuedMessages(current), true);
         }
         launchedRecord = runningRecord;
-        writeSession(this.config.dataDir, { ...runningRecord, status: "spawning" });
+        this.writeSpawnRecord({ ...runningRecord, status: "spawning" });
         this.logEvent("session.spawn.tmux_created", {
           level: "info",
           sessionId: launchSessionId,
@@ -13015,6 +13382,7 @@ export class SessionService {
         await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers, undefined, {
           agent: launchAgent,
         });
+        this.assertSpawnNotKilled(launchSessionId);
         this.logEvent("session.spawn.ready", {
           level: "info",
           sessionId: launchSessionId,
@@ -13077,7 +13445,10 @@ export class SessionService {
         if (
           agent === "opencode" &&
           (!runningRecord.agentSessionId ||
-            !(await waitForOpenCodeLaunchMessage(runningRecord.agentSessionId)))
+            !(await waitForOpenCodeLaunchMessage(
+              runningRecord.agentSessionId,
+              runningRecord.worktreePath,
+            )))
         ) {
           throw new Error("OpenCode did not persist the launch prompt");
         }
@@ -13153,9 +13524,6 @@ export class SessionService {
       if (options?.receiptToken) {
         this.foregroundSpawnReceipts.delete(options.receiptToken);
       }
-      if (sessionId && options?.telegramOrigin) {
-        deleteTelegramReplyTarget(this.config.dataDir, sessionId);
-      }
       const killedBeforeRetention = sessionId ? this.spawnWasKilled(sessionId) : false;
       if (
         !killedBeforeRetention &&
@@ -13167,7 +13535,7 @@ export class SessionService {
       }
       if (launchedRecord && !failureReceipt && !(sessionId && this.spawnWasKilled(sessionId))) {
         const retained = await this.retainLaunchedError(launchedRecord, error);
-        if (retained.status !== "killed") throw error;
+        if (!isTerminalSessionStatus(retained.status)) throw error;
       }
       if (sessionId && project && placeholderWritten && agent) {
         const failedSessionId = sessionId;
@@ -13667,6 +14035,29 @@ export class SessionService {
     );
   }
 
+  private async claimSpawnPreflightBatch(
+    batchId: string,
+    projectId: string,
+    sessionId: string,
+  ): Promise<PreflightTokenUsageRecord> {
+    try {
+      return await this.preflightUsageStore.claim(batchId, projectId, sessionId);
+    } catch (error) {
+      if (!(error instanceof PreflightBatchClaimedError)) throw error;
+      throw this.spawnBatchConflict(error.claimedBy);
+    }
+  }
+
+  private spawnBatchConflict(owner: string): SpawnBatchConflictError {
+    if (this.spawnsPreparing.has(owner))
+      return new SpawnBatchConflictError("spawn_in_progress", owner);
+    const ownerRecord = readSession(this.config.dataDir, owner);
+    return new SpawnBatchConflictError(
+      ownerRecord && ownerRecord.status !== "errored" ? "spawn_committed" : "spawn_failed",
+      owner,
+    );
+  }
+
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
     request = normalizeShepherdSpawnRequest(request);
     const admissionReservation = this.reserveAdmission(request.project, "spawn");
@@ -13678,6 +14069,7 @@ export class SessionService {
     let worktree = false;
     let createdAt: string | undefined;
     let placeholderWritten = false;
+    let ownedClaimBatchId: string | undefined;
     let prompt = "";
     let steps: string[] | undefined;
     let mode: ResolvedSessionMode | undefined;
@@ -13722,14 +14114,10 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      this.spawnsPreparing.add(sessionId);
       const preflightBatchId = await this.preflightUsageStore.resolve(
         request.project,
         request.preflightBatchId,
-      );
-      const preflightTokenUsage = await this.preflightUsageStore.claim(
-        preflightBatchId,
-        request.project,
-        sessionId,
       );
       if (reuseCtx) {
         resolvedBranch = reuseCtx.resolvedBranch;
@@ -13759,6 +14147,12 @@ export class SessionService {
         worktree,
         reusesWorkspace: reuseCtx !== null,
       });
+      const preflightTokenUsage = await this.claimSpawnPreflightBatch(
+        preflightBatchId,
+        request.project,
+        sessionId,
+      );
+      ownedClaimBatchId = preflightBatchId;
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
@@ -13795,6 +14189,7 @@ export class SessionService {
       };
       this.assertReuseAnchorPresent(reuseCtx);
       writeSession(this.config.dataDir, placeholder);
+      ownedClaimBatchId = undefined;
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
       placeholderWritten = true;
@@ -13889,6 +14284,15 @@ export class SessionService {
           errorSource: "other",
         });
       }
+      if (ownedClaimBatchId !== undefined && sessionId) {
+        try {
+          if (readSession(this.config.dataDir, sessionId) === null) {
+            await this.preflightUsageStore.release(ownedClaimBatchId, request.project, sessionId);
+          }
+        } catch {
+          // Cleanup must not mask the spawn failure; an unreadable record keeps the claim.
+        }
+      }
       this.logEvent("session.spawn.failed", {
         level: "error",
         ...(sessionId ? { sessionId } : {}),
@@ -13903,6 +14307,7 @@ export class SessionService {
       });
       throw error;
     } finally {
+      if (sessionId) this.spawnsPreparing.delete(sessionId);
       if (admissionReserved) {
         this.admissionReservations.delete(admissionReservation);
       }
@@ -14305,7 +14710,10 @@ export class SessionService {
         if (
           agent === "opencode" &&
           (!runningRecord.agentSessionId ||
-            !(await waitForOpenCodeLaunchMessage(runningRecord.agentSessionId)))
+            !(await waitForOpenCodeLaunchMessage(
+              runningRecord.agentSessionId,
+              runningRecord.worktreePath,
+            )))
         ) {
           throw new Error("OpenCode did not persist the launch prompt");
         }
@@ -14570,6 +14978,9 @@ export class SessionService {
       },
       updatedAt: nowIso(),
     };
+    if (request.target === "interval" && updated.intervalWake) {
+      delete updated.intervalWake.dispatchClaimId;
+    }
     writeSession(this.config.dataDir, updated);
     if (request.target === "scheduled") {
       this.scheduledWakeClaims.delete(sessionId);
@@ -14757,7 +15168,7 @@ export class SessionService {
       );
     }
     const nextDueAt = new Date(Date.now() + intervalWake.intervalMs).toISOString();
-    await this.withWorkspaceLifecycleLocks(session.id, async () => {
+    const claim = await this.withWorkspaceLifecycleLocks(session.id, async () => {
       const current = readSession(this.config.dataDir, session.id);
       if (current === null || !isRestorableStatus(current.status)) {
         throw new WakeDispatchConflictError(`Wake target "interval" unavailable for ${session.id}`);
@@ -14770,11 +15181,20 @@ export class SessionService {
       if (!claimed) {
         throw new WakeDispatchConflictError(`Wake target "interval" changed for ${session.id}`);
       }
-      writeSession(this.config.dataDir, {
+      const claimedSession = {
         ...current,
-        intervalWake: { ...intervalWake, nextDueAt },
+        intervalWake: { ...intervalWake, nextDueAt, dispatchClaimId: randomUUID() },
         updatedAt: nowIso(),
-      });
+      };
+      writeSession(this.config.dataDir, claimedSession);
+      return {
+        session: claimedSession,
+        stamp: this.lifecycleStamp(claimedSession),
+        lifecycle: this.lifecycleIdsFor(claimedSession).map((id) => ({
+          id,
+          snapshot: this.lifecycle.snapshot(id),
+        })),
+      };
     });
     try {
       await this.send(session.id, {
@@ -14793,10 +15213,30 @@ export class SessionService {
         details: { nextDueAt, intervalMs: intervalWake.intervalMs, manual: true },
       });
     } catch (error) {
-      if (error instanceof SessionAdmissionDeniedError) {
+      if (
+        error instanceof SessionAdmissionDeniedError ||
+        error instanceof LaunchPromptPendingError
+      ) {
         await this.withWorkspaceLifecycleLocks(session.id, async () => {
           const afterDenial = readSession(this.config.dataDir, session.id);
-          if (afterDenial?.intervalWake?.nextDueAt === nextDueAt) {
+          if (
+            afterDenial &&
+            afterDenial.intervalWake &&
+            afterDenial.intervalWake.dispatchClaimId ===
+              claim.session.intervalWake.dispatchClaimId &&
+            isDeepStrictEqual(afterDenial.intervalWake, claim.session.intervalWake) &&
+            sameSessionRuntimeOwner(afterDenial, claim.session) &&
+            afterDenial.agentLaunchId === claim.session.agentLaunchId &&
+            this.lifecycleStateMatches(afterDenial, claim.stamp) &&
+            claim.lifecycle.every(({ id, snapshot }) => {
+              const latest = this.lifecycle.snapshot(id);
+              return (
+                latest.instanceId === snapshot.instanceId &&
+                latest.revision === snapshot.revision &&
+                latest.operation?.phase !== "pending"
+              );
+            })
+          ) {
             writeSession(this.config.dataDir, {
               ...afterDenial,
               intervalWake: {
@@ -15045,7 +15485,209 @@ export class SessionService {
     session: SessionRecord,
     storedTarget = readTelegramReplyTarget(this.config.dataDir, session.id),
   ): TelegramReplyTarget | null {
-    return storedTarget ?? this.configuredTelegramReplyTarget(session);
+    if (!storedTarget || isTerminalSessionStatus(session.status)) return null;
+    const source = this.config.projects[storedTarget.projectId]?.sources[storedTarget.sourceId];
+    if (
+      !source ||
+      source.type !== "telegram" ||
+      source.chatId === undefined ||
+      source.chatId >= 0 ||
+      storedTarget.chatId !== source.chatId ||
+      (storedTarget.messageThreadId ?? 1) <= 1 ||
+      telegramTopicIsDeleting(
+        this.config.dataDir,
+        storedTarget.chatId,
+        storedTarget.messageThreadId,
+      )
+    )
+      return null;
+    return readTelegramBindings(
+      this.config.dataDir,
+      storedTarget.projectId,
+      storedTarget.sourceId,
+    ).get(telegramBindingKey(storedTarget.chatId, storedTarget.messageThreadId))?.sessionId ===
+      session.id
+      ? storedTarget
+      : null;
+  }
+
+  async ensureTelegramTopic(
+    sessionId: string,
+    origin?: TelegramSpawnOrigin,
+  ): Promise<TelegramConversation> {
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.ensureTelegramTopicLocked(sessionId, origin),
+    );
+  }
+
+  private telegramAssignmentMatches(
+    sessionId: string,
+    target: Pick<TelegramReplyTarget, "projectId" | "sourceId" | "chatId" | "messageThreadId">,
+  ): boolean {
+    const current = this.resolveTelegramNotice(sessionId)?.target;
+    return (
+      current !== undefined &&
+      current.projectId === target.projectId &&
+      current.sourceId === target.sourceId &&
+      current.chatId === target.chatId &&
+      current.messageThreadId === target.messageThreadId
+    );
+  }
+
+  private async ensureTelegramTopicLocked(
+    sessionId: string,
+    origin?: TelegramSpawnOrigin,
+  ): Promise<TelegramConversation> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    if (isTerminalSessionStatus(session.status))
+      throw new InvalidSourceReplyInputError(`Session ${sessionId} is ${session.status}`);
+    const stored = readTelegramReplyTarget(this.config.dataDir, sessionId);
+    if (
+      origin &&
+      stored &&
+      (origin.projectId !== stored.projectId || origin.sourceId !== stored.sourceId)
+    ) {
+      throw new InvalidSourceReplyInputError("Telegram source differs from session origin");
+    }
+    const provenance =
+      stored ??
+      (origin
+        ? { ...origin, sessionId, updatedAt: nowIso() }
+        : this.configuredTelegramReplyTarget(session));
+    if (!provenance) return { kind: "disabled" };
+    const { projectId, sourceId } = provenance;
+    const source = this.config.projects[projectId]?.sources[sourceId];
+    if (
+      !source ||
+      source.type !== "telegram" ||
+      source.chatId === undefined ||
+      source.chatId >= 0
+    ) {
+      retireTelegramLegacyState(this.config.dataDir, projectId, sourceId, sessionId);
+      writeTelegramReplyTarget(this.config.dataDir, {
+        sessionId,
+        projectId,
+        sourceId,
+        chatId: provenance.chatId,
+      });
+      return { kind: "disabled" };
+    }
+    const existing = this.telegramReplyTarget(session, stored);
+    if (
+      existing &&
+      existing.messageThreadId !== undefined &&
+      !this.telegramTopicHasOtherOwner(session, existing)
+    ) {
+      retireTelegramLegacyState(this.config.dataDir, projectId, sourceId, sessionId, existing);
+      return {
+        kind: "topic",
+        projectId,
+        sourceId,
+        chatId: existing.chatId,
+        messageThreadId: existing.messageThreadId,
+      };
+    }
+    const name = telegramTopicName({
+      id: session.id,
+      agent: session.agent,
+      state: session.status === "errored" ? "error" : "working",
+      ...(session.slots ? { slots: session.slots } : {}),
+    });
+    const chatId = source.chatId;
+    const creationSource = { token: source.token };
+    const topicId = await createTelegramTopic(creationSource, chatId, name);
+    const target: TelegramReplyTarget = {
+      sessionId,
+      projectId,
+      sourceId,
+      chatId,
+      messageThreadId: topicId,
+      topicName: name,
+      updatedAt: nowIso(),
+    };
+    try {
+      const current = readSession(this.config.dataDir, sessionId);
+      const currentSource = this.config.projects[projectId]?.sources[sourceId];
+      if (
+        !current ||
+        isTerminalSessionStatus(current.status) ||
+        !currentSource ||
+        currentSource.type !== "telegram" ||
+        currentSource.chatId !== chatId ||
+        currentSource.token !== creationSource.token ||
+        this.telegramTopicHasOtherOwner(current, target) ||
+        telegramTopicIsDeleting(this.config.dataDir, target.chatId, topicId)
+      )
+        throw new InvalidSourceReplyInputError("Telegram conversation changed during creation");
+      this.bindTelegramChatIfFree(target, sessionId);
+      writeTelegramReplyTarget(this.config.dataDir, target);
+      retireTelegramLegacyState(this.config.dataDir, projectId, sourceId, sessionId, target);
+      return {
+        kind: "topic",
+        projectId,
+        sourceId,
+        chatId: target.chatId,
+        messageThreadId: topicId,
+      };
+    } catch (error) {
+      try {
+        const bindings = readTelegramBindings(this.config.dataDir, projectId, sourceId);
+        const key = telegramBindingKey(target.chatId, topicId);
+        if (bindings.get(key)?.sessionId === sessionId) {
+          bindings.delete(key);
+          writeTelegramBindings(this.config.dataDir, projectId, sourceId, bindings.values());
+        }
+        if (readTelegramReplyTarget(this.config.dataDir, sessionId)?.messageThreadId === topicId)
+          deleteTelegramReplyTarget(this.config.dataDir, sessionId);
+      } catch (cleanupError) {
+        this.logTelegramNoticeFailure(sessionId, "unpublished topic metadata", cleanupError);
+      }
+      try {
+        if (!this.telegramTopicHasOtherOwner(session, target))
+          await deleteTelegramTopic(creationSource, target.chatId, topicId);
+      } catch (cleanupError) {
+        this.logTelegramNoticeFailure(sessionId, "unpublished topic deletion", cleanupError);
+      }
+      throw error;
+    }
+  }
+
+  async unwatchTelegramTopic(sessionId: string, origin: TelegramSpawnOrigin): Promise<boolean> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const bindings = readTelegramBindings(this.config.dataDir, origin.projectId, origin.sourceId);
+      const key = telegramBindingKey(origin.chatId, origin.messageThreadId);
+      if (bindings.get(key)?.sessionId !== sessionId) return false;
+      bindings.delete(key);
+      writeTelegramBindings(
+        this.config.dataDir,
+        origin.projectId,
+        origin.sourceId,
+        bindings.values(),
+      );
+      writeTelegramOffer(this.config.dataDir, origin.projectId, origin.sourceId, {
+        sessionId,
+        chatId: origin.chatId,
+        choices: [],
+        keepInterfaceConsent: false,
+      });
+      const target = readTelegramReplyTarget(this.config.dataDir, sessionId);
+      if (
+        target &&
+        target.projectId === origin.projectId &&
+        target.sourceId === origin.sourceId &&
+        target.chatId === origin.chatId &&
+        target.messageThreadId === origin.messageThreadId
+      ) {
+        writeTelegramReplyTarget(this.config.dataDir, {
+          sessionId,
+          projectId: target.projectId,
+          sourceId: target.sourceId,
+          chatId: target.chatId,
+        });
+      }
+      return true;
+    });
   }
 
   async replyToSource(
@@ -15056,11 +15698,20 @@ export class SessionService {
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
+    if (isTerminalSessionStatus(session.status)) {
+      throw new InvalidSourceReplyInputError(`Session ${sessionId} is ${session.status}`);
+    }
     const message = typeof request.message === "string" ? request.message.trim() : "";
     if (!message) {
       throw new InvalidSourceReplyInputError("message must be a non-empty string");
     }
     let buttons = parseSourceReplyButtons(request.buttons);
+    const images = parseSourceReplyImages(request.images);
+    const assignment = await this.ensureTelegramTopic(sessionId);
+    if (assignment.kind === "disabled")
+      throw new InvalidSourceReplyInputError(
+        `Telegram conversation unavailable for ${sessionId}: configure a forum chatId`,
+      );
     await reconcileInterfaceConsent(this.config.dataDir, sessionId).catch(() => {
       this.logEvent("source.interface-consent.blocked", {
         level: "warn",
@@ -15070,8 +15721,7 @@ export class SessionService {
       });
     });
 
-    const storedTarget = readTelegramReplyTarget(this.config.dataDir, sessionId);
-    const target = this.telegramReplyTarget(session, storedTarget);
+    const target = this.telegramReplyTarget(session);
     if (!target) {
       throw new InvalidSourceReplyInputError(`No Telegram reply target for ${sessionId}`);
     }
@@ -15114,7 +15764,6 @@ export class SessionService {
         { text: "Reject interface", value: "rejected" },
         { text: "Revoke interface approval", value: "revoked" },
       ];
-      writeInterfaceConsent(this.config.dataDir, consent);
     }
     const view = await this.enrich(session);
     const choices = buildTelegramChoices(sessionId, target, buttons);
@@ -15126,21 +15775,25 @@ export class SessionService {
         };
     // Persisted before the send: a click can only arrive once Telegram has the
     // keyboard, and the row must already be there when it does.
-    if (choices.length > 0) {
-      writeTelegramOffer(this.config.dataDir, target.projectId, target.sourceId, {
-        sessionId,
-        chatId: target.chatId,
-        choices,
-      });
-    }
-    this.claimTelegramPlaceholder(sessionId, target);
+    await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      if (!this.telegramAssignmentMatches(sessionId, target))
+        throw new InvalidSourceReplyInputError("Telegram conversation changed before reply");
+      if (consent) writeInterfaceConsent(this.config.dataDir, consent);
+      if (choices.length > 0)
+        writeTelegramOffer(this.config.dataDir, target.projectId, target.sourceId, {
+          sessionId,
+          chatId: target.chatId,
+          choices,
+          keepInterfaceConsent: consent === undefined,
+        });
+      this.claimTelegramPlaceholder(sessionId, target);
+    });
     const result = await sendTelegramReply(
       source,
       target,
       `${message}${consent ? `\n\n${presentConsent(consent)}` : ""}`,
       {
         sessionLabel: telegramSessionLabel(view),
-        topicName: telegramTopicName(view),
         ...(choices.length > 0
           ? {
               buttons: choices.map((choice) => ({
@@ -15149,6 +15802,7 @@ export class SessionService {
               })),
             }
           : {}),
+        ...(images.length > 0 ? { images } : {}),
       },
     ).catch((error: unknown) => {
       if (consent) {
@@ -15158,32 +15812,30 @@ export class SessionService {
       }
       throw error;
     });
-    if (consent) {
-      const current = readInterfaceConsent(this.config.dataDir, sessionId);
-      if (current?.challenge === consent.challenge)
-        writeInterfaceConsent(this.config.dataDir, { ...current, delivery: "sent" });
-    }
-    // A buttonless reply supersedes the question it answers, so it retires the
-    // pending offer — after the send, since a throw leaves the keyboard up.
-    if (choices.length === 0) {
-      writeTelegramOffer(this.config.dataDir, target.projectId, target.sourceId, {
-        sessionId,
-        chatId: target.chatId,
-        choices: [],
-      });
-    }
-    // A target that existed when the send began is never re-created: it was
-    // removed mid-send (a spawn took the thread over), and writing it back
-    // would keep this session posting into a thread it no longer owns.
-    const sent = { lastReplyAt: nowIso(), topicName: telegramTopicName(view) };
-    const settledTarget =
-      storedTarget === null
-        ? this.recordTelegramSend(sessionId, target, result, { ...sent, createIfMissing: true })
-        : this.recordTelegramSend(sessionId, target, result, { ...sent, createIfMissing: false });
+    const settledTarget = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      if (!this.telegramAssignmentMatches(sessionId, target)) return null;
+      if (consent) {
+        const current = readInterfaceConsent(this.config.dataDir, sessionId);
+        if (current?.challenge === consent.challenge)
+          writeInterfaceConsent(this.config.dataDir, { ...current, delivery: "sent" });
+      }
+      // A buttonless reply supersedes the question it answers, so it retires the
+      // pending offer — after the send, since a throw leaves the keyboard up. A
+      // pending interface approval stays: its click is bound to its challenge.
+      if (choices.length === 0) {
+        writeTelegramOffer(this.config.dataDir, target.projectId, target.sourceId, {
+          sessionId,
+          chatId: target.chatId,
+          choices: [],
+          keepInterfaceConsent: true,
+        });
+      }
+      // Never recreate published routing removed mid-send by unwatch or takeover.
+      return this.recordTelegramSend(sessionId, target, result, { lastReplyAt: nowIso() });
+    });
     const replyTarget = settledTarget ?? target;
     // Covers a freshly created forum topic too: its key cannot already be taken.
-    if (settledTarget) this.bindTelegramChatIfFree(settledTarget, sessionId);
-    await this.syncTelegramTopicName(sessionId, view);
+    if (settledTarget) await this.syncTelegramTopicName(sessionId, view);
     this.logEvent("source.reply.sent", {
       level: "info",
       sessionId,
@@ -15209,6 +15861,7 @@ export class SessionService {
         ? { messageThreadId: replyTarget.messageThreadId }
         : {}),
       ...(choices.length > 0 ? { buttons: choices.length } : {}),
+      ...(images.length > 0 ? { images: images.length } : {}),
     };
   }
 
@@ -15267,19 +15920,16 @@ export class SessionService {
    * project's own Telegram source with a configured `chatId`.
    */
   private configuredTelegramReplyTarget(session: SessionRecord): TelegramReplyTarget | null {
-    const project = this.config.projects[session.project];
-    if (!project) return null;
-    for (const [sourceId, source] of Object.entries(project.sources)) {
-      if (source.type !== "telegram" || source.chatId === undefined) continue;
-      return {
-        sessionId: session.id,
-        projectId: session.project,
-        sourceId,
-        chatId: source.chatId,
-        updatedAt: new Date().toISOString(),
-      };
-    }
-    return null;
+    const selected = configuredTelegramSource(this.config.projects[session.project]);
+    if (!selected || selected[1].chatId === undefined) return null;
+    const [sourceId] = selected;
+    return {
+      sessionId: session.id,
+      projectId: session.project,
+      sourceId,
+      chatId: selected[1].chatId,
+      updatedAt: new Date().toISOString(),
+    };
   }
 
   /**
@@ -15290,6 +15940,7 @@ export class SessionService {
     target: Pick<TelegramReplyTarget, "projectId" | "sourceId" | "chatId" | "messageThreadId">,
     sessionId: string,
   ): void {
+    if (telegramTopicIsDeleting(this.config.dataDir, target.chatId, target.messageThreadId)) return;
     const bindings = readTelegramBindings(this.config.dataDir, target.projectId, target.sourceId);
     const key = telegramBindingKey(target.chatId, target.messageThreadId);
     if (bindings.has(key)) return;
@@ -15360,7 +16011,7 @@ export class SessionService {
   ): Promise<{ view: SessionView; attempt: Promise<boolean> | null }> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     this.assertTokenBudgetAllowsActivation(session);
     if (!hasMessageContent(request)) {
@@ -15749,7 +16400,7 @@ export class SessionService {
   async answerQuestion(sessionId: string, optionIndex: number): Promise<void> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (session.agent !== "claude") {
       throw new Error("Interactive answering is only supported for claude sessions");
@@ -15803,7 +16454,7 @@ export class SessionService {
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (typeof message !== "string" || !message.trim()) {
       throw new Error("message must be a non-empty string");
@@ -15818,8 +16469,18 @@ export class SessionService {
     });
     if (options?.sensitivePromptSuffix) {
       const current = readSession(this.config.dataDir, sessionId);
-      if (!current) throw new Error(`Session not found: ${sessionId}`);
-      await this.sendDeferredSensitiveInitialMessage(current, options.sensitivePromptSuffix);
+      if (!current) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      // The body leg has landed: a controls failure must not reject deliver(),
+      // or the trigger retry re-pastes the landed digest.
+      try {
+        await this.sendDeferredSensitiveInitialMessage(current, options.sensitivePromptSuffix);
+      } catch (error) {
+        this.logEvent("session.controls.delivery_failed", {
+          level: "warn",
+          sessionId,
+          message: `Deferred controls send failed for ${sessionId} after the message landed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
     }
     return result;
   }
@@ -16482,15 +17143,15 @@ export class SessionService {
       wakeClaim?: ScheduledWakeClaim;
     },
   ): Promise<SessionView> {
-    // send and flush are user-driven: short ack pacing, and a live-process ack
-    // timeout means the pane write landed, so it is recovered, not failed.
-    // deliver() (triggers) keeps the agent's long pacing and throws, which
-    // drives its own retry.
+    // send and flush are user-driven: short ack pacing. deliver() (triggers)
+    // keeps the agent's long pacing. Every entry point treats a live-process
+    // ack timeout as recovered (the pane write landed); a dead process throws.
     const interactive = options.entryPoint !== "deliver";
     const initialSession = readSession(this.config.dataDir, sessionId);
     const probeRevision = this.lifecycle.snapshot(sessionId).revision;
     try {
-      if (!initialSession) throw new Error(`Session not found: ${sessionId}`);
+      if (!initialSession)
+        throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       if (this.isLiveStateRateLimited(initialSession)) {
         this.logEvent("session.message.suppressed_rate_limited", {
           level: "info",
@@ -16512,7 +17173,7 @@ export class SessionService {
         { kind: "direct" },
         {
           ...(options.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
-          recoverOnLiveAckTimeout: interactive,
+          recoverOnLiveAckTimeout: true,
           interactive,
           ...(options.allowDelivery ? { allowDelivery: options.allowDelivery } : {}),
           ...(options.observeDelivery ? { observeDelivery: options.observeDelivery } : {}),
@@ -16619,9 +17280,7 @@ export class SessionService {
       throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
     }
 
-    const attachDir = ensureSessionArtifactsDir(this.config.dataDir, sessionId);
-    const stored: StoredImageAttachment[] = [];
-    for (const [index, att] of attachments.entries()) {
+    const decoded = attachments.map((att) => {
       if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
         throw new Error(`Invalid attachment name: ${String(att.name)}`);
       }
@@ -16629,16 +17288,24 @@ export class SessionService {
         throw new Error("Attachment data must be a non-empty base64 string");
       }
       const buf = Buffer.from(att.data, "base64");
-      if (buf.length > MAX_DECODED_SIZE) {
+      if (buf.length === 0 || buf.toString("base64") !== att.data) {
+        throw new Error("Attachment data must be non-empty valid base64");
+      }
+      if (buf.length > MAX_ATTACHMENT_BYTES) {
         throw new Error(`Attachment ${att.name} exceeds 5MB`);
       }
+      return { name: att.name, buf };
+    });
+    const attachDir = ensureSessionArtifactsDir(this.config.dataDir, sessionId);
+    const stored: StoredImageAttachment[] = [];
+    for (const [index, att] of decoded.entries()) {
       let filename = `${Date.now()}-${att.name}`;
       const initialPath = join(attachDir, filename);
       if (existsSync(initialPath)) {
         filename = `${Date.now()}-${index}-${att.name}`;
       }
       const filePath = join(attachDir, filename);
-      writeFileSync(filePath, buf, { mode: 0o644 });
+      writeFileSync(filePath, att.buf, { mode: 0o644 });
       setSessionArtifactOrigin(this.config.dataDir, sessionId, filename, "intentional");
       setSessionArtifactUserAdded(this.config.dataDir, sessionId, filename, true);
       stored.push({ id: filename, path: filePath, name: att.name });
@@ -16765,6 +17432,19 @@ export class SessionService {
         ...(historyArtifactId ? { historyArtifactId } : {}),
       },
     });
+  }
+
+  prepareSourceMessage(
+    sessionId: string,
+    request: Pick<SendMessageRequest, "message" | "attachments">,
+  ): string {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    assertSendableStatus(session);
+    if (!session.worktreePath || !existsSync(session.worktreePath)) {
+      throw new Error(`Session workspace missing: ${sessionId}`);
+    }
+    return this.prepareSendMessage(session, request);
   }
 
   private prepareSendMessage(
@@ -16974,9 +17654,11 @@ export class SessionService {
 
   private async earlySubmitResendAllowed(
     session: Pick<SessionRecord, "agent" | "tmuxSession" | "worktreePath" | "agentSessionId">,
+    message: string,
   ): Promise<boolean> {
     const panePid = await getTmuxPanePid(session.tmuxSession);
     return agentEarlySubmitResendAllowed(session.agent, {
+      slashCommand: message.trimStart().startsWith("/"),
       worktreePath: session.worktreePath,
       ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
       ...(panePid !== null ? { panePid } : {}),
@@ -17186,7 +17868,10 @@ export class SessionService {
             break;
           }
         }
-        if (earlyWindow && !(await this.earlySubmitResendAllowed(session))) {
+        // Interactive windows are all short, so each resend is an early Enter.
+        // Launch sends stay ungated: claude has no status file yet.
+        const gated = earlyWindow || (interactive && !freshLaunch);
+        if (gated && !(await this.earlySubmitResendAllowed(session, message))) {
           continue;
         }
         const resend = () => {
@@ -17440,7 +18125,7 @@ export class SessionService {
   ): Promise<CompleteDeskResponse> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const candidates = this.listDeskSessions(session);
 
@@ -17665,7 +18350,7 @@ export class SessionService {
     const sidecarDepth = nextSidecarDepth(caller);
     let session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     // An `errored` record can outlive the blip that wrote it while the agent
     // keeps working, and this path otherwise never reconciles. Probe the
@@ -17892,7 +18577,7 @@ export class SessionService {
   ): Promise<SidecarStopView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const project = this.resolveProjectForSession(session);
     const sidecarNames = sessionSidecarNames(session, project);
@@ -18251,17 +18936,47 @@ export class SessionService {
   // probe failure must not replace the error that actually matters (a spawn
   // failure, for one). A thrown lookup reads as "unavailable", the same
   // fail-safe answer a failed `list-panes` produces.
-  private async lookupPanePidQuietly(
-    tmuxSession: string,
-    options?: { fresh?: boolean },
-  ): Promise<TmuxPanePidLookup> {
+  private async readPaneLookupQuietly<T>(
+    read: () => Promise<T>,
+  ): Promise<T | { status: "unavailable" }> {
     try {
-      return options
-        ? await lookupTmuxPanePid(tmuxSession, options)
-        : await lookupTmuxPanePid(tmuxSession);
+      return await read();
     } catch {
       return { status: "unavailable" };
     }
+  }
+
+  private lookupPanePidQuietly(
+    tmuxSession: string,
+    options?: { fresh?: boolean },
+  ): Promise<TmuxPanePidLookup> {
+    return this.readPaneLookupQuietly(() =>
+      options ? lookupTmuxPanePid(tmuxSession, options) : lookupTmuxPanePid(tmuxSession),
+    );
+  }
+
+  // Every live pane for Codex ownership.
+  private lookupSessionPanePidsQuietly(
+    tmuxSession: string,
+    options?: { fresh?: boolean },
+  ): Promise<TmuxSessionPanesLookup> {
+    return this.readPaneLookupQuietly(() =>
+      options
+        ? lookupTmuxSessionPanePids(tmuxSession, options)
+        : lookupTmuxSessionPanePids(tmuxSession),
+    );
+  }
+
+  private async lookupOwnershipExclusions(
+    session: Pick<SessionRecord, "agent" | "tmuxSession">,
+  ): Promise<TmuxSessionPanesLookup> {
+    if (session.agent === "codex") {
+      return this.lookupSessionPanePidsQuietly(session.tmuxSession, { fresh: true });
+    }
+    const lookup = await this.lookupPanePidQuietly(session.tmuxSession);
+    return lookup.status === "unavailable"
+      ? lookup
+      : { status: "ok", panePids: lookup.panePid === null ? [] : [lookup.panePid] };
   }
 
   private async killAgentPaneAndConfirmExit(
@@ -18282,7 +18997,11 @@ export class SessionService {
     };
     assertActive();
     const wait = <T>(pending: Promise<T>): Promise<T> => operation?.wait(pending) ?? pending;
-    const paneLookup = await wait(this.lookupPanePidQuietly(session.tmuxSession, { fresh: true }));
+    const paneLookup = await wait<TmuxSessionPanesLookup | TmuxPanePidLookup>(
+      session.agent === "codex"
+        ? this.lookupSessionPanePidsQuietly(session.tmuxSession, { fresh: true })
+        : this.lookupPanePidQuietly(session.tmuxSession, { fresh: true }),
+    );
     assertActive();
     if (paneLookup.status === "unavailable") {
       // tmux could not be read, so P1 has nothing to verify against. Record
@@ -18294,13 +19013,20 @@ export class SessionService {
         message: `Session ${session.id}: tmux pane pid unreadable; cannot confirm the prior agent process exited`,
       });
     }
+    const paneTarget:
+      | { panePids: readonly number[] }
+      | { panePid: number | null; paneDead: boolean } =
+      paneLookup.status !== "ok"
+        ? { panePids: [] }
+        : "panePids" in paneLookup
+          ? { panePids: paneLookup.panePids }
+          : { panePid: paneLookup.panePid, paneDead: paneLookup.paneDead };
     const capture = await wait(
       capturePaneAgentProcesses({
         sessionId: session.id,
         agentLaunchId: session.agentLaunchId,
-        panePid: paneLookup.status === "ok" ? paneLookup.panePid : null,
-        paneDead: paneLookup.status === "ok" ? paneLookup.paneDead : false,
         processMatchers: sessionProcessMatchers(session),
+        ...paneTarget,
       }),
     );
     assertActive();
@@ -18385,7 +19111,7 @@ export class SessionService {
   // bypasses killAgentPaneAndConfirmExit's own P1 survivor check.
   private async assertNoForeignAgentForSession(
     session: Pick<SessionRecord, "id" | "agent" | "launchCommand" | "tmuxSession">,
-    paneLookup: TmuxPanePidLookup,
+    paneLookup: TmuxSessionPanesLookup,
     force: boolean,
   ): Promise<void> {
     if (force) {
@@ -18394,7 +19120,7 @@ export class SessionService {
     // An unreadable tmux would leave the exclusion set empty, so the session's
     // OWN live agent would read as foreign. That joins the "unavailable"
     // branch: this guard must never block on a scan it could not perform.
-    // "ok" with a null pane pid is a real answer (no pane, nothing to
+    // "ok" with no pane pids is a real answer (no pane, nothing to
     // exclude) and is safe to scan on.
     if (paneLookup.status === "unavailable") {
       this.logEvent("session.agent_process.scan_skipped", {
@@ -18407,7 +19133,7 @@ export class SessionService {
     const scan = await findForeignAgentProcessesForSession({
       sessionId: session.id,
       processMatchers: sessionProcessMatchers(session),
-      excludePanePid: paneLookup.panePid,
+      excludePanePids: paneLookup.panePids,
     });
     if (scan.status !== "ok") {
       return;
@@ -18530,7 +19256,7 @@ export class SessionService {
     const pauseReason = options?.stopReason ?? "manual_pause";
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     let session = currentSession;
     if (targetStatus === "stopped" && session.status === "paused") {
@@ -18609,23 +19335,6 @@ export class SessionService {
         // missing forever. A skipped cleanup (a still-live desk sibling)
         // means the files are untouched, so the ids stay.
         startupAttachmentsCleaned = ranCleanup;
-        const resolvedNotice = this.resolveTelegramNotice(sessionId);
-        const { heldBinding } = deleteTelegramSourceStateForSession(
-          this.config.dataDir,
-          resolvedNotice?.target.projectId ?? session.project,
-          sessionId,
-        );
-        await this.pushTelegramNotice(
-          sessionId,
-          {
-            id: session.id,
-            agent: session.agent,
-            state: "stopped",
-            ...(session.slots ? { slots: session.slots } : {}),
-          },
-          `Session ${telegramSessionLabel(session)} finished (${targetStatus}).${heldBinding ? " This chat is unbound." : ""}`,
-          { closeTopic: session.selfDestruct?.enabled !== true, resolved: resolvedNotice },
-        );
       }
     } catch (error) {
       this.logManualStatusFailure(eventAction, targetStatus, sessionId, session.project, error);
@@ -18655,6 +19364,7 @@ export class SessionService {
       delete record.startupAttachmentIds;
     }
     writeSession(this.config.dataDir, record);
+    if (targetStatus === "completed") await this.cleanupTerminalTelegram(record);
     if (targetStatus === "completed" && this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
       await removeWorktree(cleanup.repoPath, record.worktreePath);
@@ -18702,7 +19412,7 @@ export class SessionService {
   private async killLocked(sessionId: string, request: KillSessionRequest): Promise<SessionView> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     let session = currentSession;
     if (session.status === "completed") {
@@ -18727,23 +19437,6 @@ export class SessionService {
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
       await this.cleanupSessionServices(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
-      const resolvedNotice = this.resolveTelegramNotice(sessionId);
-      const { heldBinding } = deleteTelegramSourceStateForSession(
-        this.config.dataDir,
-        resolvedNotice?.target.projectId ?? session.project,
-        sessionId,
-      );
-      await this.pushTelegramNotice(
-        sessionId,
-        {
-          id: session.id,
-          agent: session.agent,
-          state: "killed",
-          ...(session.slots ? { slots: session.slots } : {}),
-        },
-        `Session ${telegramSessionLabel(session)} finished (killed).${heldBinding ? " This chat is unbound." : ""}`,
-        { closeTopic: session.selfDestruct?.enabled !== true, resolved: resolvedNotice },
-      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.kill.failed", {
@@ -18758,6 +19451,7 @@ export class SessionService {
     this.stateCache.delete(sessionId);
 
     if (session.status === "killed") {
+      await this.cleanupTerminalTelegram(session);
       this.logEvent("session.kill.noop", {
         level: "info",
         sessionId,
@@ -18785,6 +19479,7 @@ export class SessionService {
     delete record.submitRequeuedMessage;
     delete record.submitFailedMessage;
     writeSession(this.config.dataDir, record);
+    await this.cleanupTerminalTelegram(record);
     if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
       try {
@@ -19296,7 +19991,7 @@ export class SessionService {
     }
     await this.assertNoForeignAgentForSession(
       session,
-      await this.lookupPanePidQuietly(session.tmuxSession),
+      await this.lookupOwnershipExclusions(session),
       false,
     );
     assertActive();
@@ -19529,7 +20224,7 @@ export class SessionService {
       try {
         if (
           !recoveredAgentSessionId ||
-          !(await waitForOpenCodeLaunchMessage(recoveredAgentSessionId))
+          !(await waitForOpenCodeLaunchMessage(recoveredAgentSessionId, session.worktreePath))
         ) {
           throw new Error("OpenCode did not persist the launch prompt");
         }
@@ -19858,7 +20553,7 @@ export class SessionService {
     const wait = <T>(pending: Promise<T>): Promise<T> => operation?.wait(pending) ?? pending;
     let session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const reopenInvalidated = (): boolean => {
       operation?.assertActive();
@@ -20035,7 +20730,7 @@ export class SessionService {
     });
     await this.assertNoForeignAgentForSession(
       current,
-      await this.lookupPanePidQuietly(current.tmuxSession),
+      await this.lookupOwnershipExclusions(current),
       request.force === true,
     );
     operation?.assertActive();
@@ -20516,6 +21211,7 @@ export class SessionService {
             operation,
           );
           operation?.assertActive();
+          persistedRecovered.restoredAt = nowIso();
           writeSession(this.config.dataDir, persistedRecovered);
           await this.refreshDashboardCacheEntry(persistedRecovered);
           operation?.assertActive();
@@ -20644,13 +21340,19 @@ export class SessionService {
       );
       operation?.assertActive();
       writeSession(this.config.dataDir, persistedRestored);
-      const restoredWithSidecars = await this.startAutoStartSidecars(
+      await this.startAutoStartSidecars(
         persistedRestored,
         this.getProject(current.project),
         undefined,
         operation,
       );
       operation?.assertActive();
+      // Best-effort auto-start can persist dependency starts or cleanup before
+      // throwing. Its returned snapshot can predate those writes.
+      const latestAfterSidecars = readSession(this.config.dataDir, sessionId);
+      if (!latestAfterSidecars) throw new Error(`Session ${sessionId} disappeared during restore`);
+      const restoredWithSidecars = { ...latestAfterSidecars, restoredAt: nowIso() };
+      writeSession(this.config.dataDir, restoredWithSidecars);
       await this.refreshDashboardCacheEntry(restoredWithSidecars);
       operation?.assertActive();
       requestGitHubMergeConflictRestoreReplays(
@@ -20891,7 +21593,7 @@ export class SessionService {
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (!this.lifecycleStampMatches(session, claim)) {
       throw new Error(`Session ${sessionId} changed before auth migration`);
@@ -21215,7 +21917,7 @@ export class SessionService {
   async respawn(sessionId: string, request: RespawnSessionRequest = {}): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (!isRespawnableStatus(session.status)) {
       throw new Error(
@@ -21406,7 +22108,7 @@ export class SessionService {
   ): Promise<PreparedHandoff> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (
       session.status !== "running" &&
@@ -22552,10 +23254,11 @@ export class SessionService {
     // in-content rollout timestamp (rollout mtime is unusable — `codex resume`'s
     // poison-id heal rewrites every file at once) and the hook state. 0 means
     // neither source exists yet. The single derivation for both the hung-turn
-    // check below and the caller's activity/idle-gate signal.
+    // check below and the caller's activity/idle-gate signal. Hookless, rollout
+    // progress after task_started also counts.
     const activityMs = Math.max(
       rolloutState?.timestampMs ?? 0,
-      hookState ? new Date(hookState.updatedAt).getTime() : 0,
+      hookState ? new Date(hookState.updatedAt).getTime() : (rolloutRead.lastProgressMs ?? 0),
     );
 
     // Without hooks, a quiet rollout cannot rule out a tool still running.
@@ -22564,6 +23267,19 @@ export class SessionService {
         state = "waiting";
         source = "codex_stale";
       }
+    }
+
+    // Hookless: a bare task_started (no open tool call) with a silent rollout
+    // for the hookless threshold is a hung turn.
+    if (
+      !hookState &&
+      state === "working" &&
+      rolloutState?.reason === "task_started" &&
+      rolloutRead.lastProgressMs !== undefined &&
+      Date.now() - activityMs >= CODEX_HOOKLESS_HUNG_MS
+    ) {
+      state = "waiting";
+      source = "codex_stale";
     }
 
     return {
@@ -22768,7 +23484,24 @@ export class SessionService {
         (1024 * 1024)
       ).toFixed(0)}MB ${context} floor`;
       floorCause = "context_floor";
-    } else {
+    }
+    if (floorDetail === undefined) {
+      const cgroup = readCgroupMemorySnapshot();
+      if (cgroup !== null && cgroup.maxBytes !== null) {
+        const emergencyBytes = memoryShedEmergencyBytes(admission.memoryGuard);
+        const headroomBytes = Math.max(0, cgroup.maxBytes - cgroup.currentBytes);
+        const latched = this.memoryShedEpisode.cgroupMaxLatched;
+        if (nextCgroupMaxLatched(headroomBytes, emergencyBytes, latched)) {
+          const bandBytes = latched ? 2 * emergencyBytes : emergencyBytes;
+          floorDetail = `cgroup ${cgroup.path} memory.max headroom ${(
+            headroomBytes /
+            (1024 * 1024)
+          ).toFixed(0)}MB is within the ${(bandBytes / (1024 * 1024)).toFixed(0)}MB shed band`;
+          floorCause = "cgroup_max_headroom";
+        }
+      }
+    }
+    if (floorDetail === undefined) {
       const pressure = readCgroupPressure();
       if (pressure !== null) {
         someAvg10 = pressure.someAvg10;
@@ -23598,6 +24331,7 @@ export class SessionService {
     if (session.agent === "opencode") {
       const result = await readOpenCodeStructuredState(
         session.agentSessionId,
+        session.worktreePath,
         runtime.tmuxActivityAt?.getTime() ?? null,
         true,
       ).catch<Awaited<ReturnType<typeof readOpenCodeStructuredState>>>(() => ({ state: null }));
@@ -23704,11 +24438,40 @@ export class SessionService {
     operation?: RestoreOperationContext,
   ): Promise<SessionRecord> {
     operation?.assertActive();
-    const message = error instanceof Error ? error.message : String(error);
+    const processProbe = error instanceof AgentProcessProbeUnknownError;
+    const current = processProbe ? readSession(this.config.dataDir, session.id) : null;
+    const probeRevision = this.lifecycle.snapshot(session.id).revision;
+    // An outer launch catch must not recapture a replacement rejected by the first attempt.
+    if (processProbe && error.retentionAttempted) return current ?? session;
+    if (processProbe) error.retentionAttempted = true;
+    if (
+      processProbe &&
+      (!current ||
+        (current.status !== "running" && current.status !== "spawning") ||
+        !sameSessionRuntimeOwner(current, session) ||
+        current.agentLaunchId !== session.agentLaunchId ||
+        current.serverErrorAt ||
+        (hasSessionErrorEvidence(current) && !recoverableRuntimeError(current)))
+    )
+      return current ?? session;
+    const diagnostic = error instanceof Error ? error.message : String(error);
+    const message = processProbe ? STATUS_DETECTION_ERROR_PREFIX + diagnostic : diagnostic;
     const runtime = await this.readRuntimeSnapshot(session).catch(() => null);
     operation?.assertActive();
     const latest = readSession(this.config.dataDir, session.id);
-    if (latest?.status === "killed") return latest;
+    if (
+      current &&
+      (!latest ||
+        !sameSessionRuntimeOwner(latest, current) ||
+        latest.agentLaunchId !== current.agentLaunchId ||
+        latest.error !== current.error ||
+        latest.errorSource !== current.errorSource ||
+        latest.serverErrorAt !== current.serverErrorAt ||
+        !this.lifecycleStateMatches(latest, this.lifecycleStamp(current)) ||
+        this.lifecycle.snapshot(session.id).revision !== probeRevision)
+    )
+      return latest ?? current;
+    if (latest && isTerminalSessionStatus(latest.status)) return latest;
     const retained: SessionRecord = {
       ...withQueuedMessages(
         { ...session, ...latest, launchCommand: session.launchCommand },
@@ -23718,7 +24481,7 @@ export class SessionService {
       status:
         runtime && !runtime.probeUnresponsive && !runtime.processAlive ? "errored" : "running",
       error: message,
-      errorSource: "other",
+      errorSource: processProbe ? "runtime_probe" : "other",
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, retained);
@@ -24230,6 +24993,7 @@ export class SessionService {
       } else {
         const structured = await readOpenCodeStructuredState(
           session.agentSessionId,
+          session.worktreePath,
           runtime.tmuxActivityAt?.getTime() ?? null,
         );
         const structuredState = structured.state;
@@ -24622,6 +25386,7 @@ export class SessionService {
       preflightTokenUsage: _preflightTokenUsage,
       cursorRestoreBoundary: _cursorRestoreBoundary,
       codexRestoreStartedAt: _codexRestoreStartedAt,
+      restoredAt: _restoredAt,
       launchCommand: _launchCommand,
       stateSubscriptions: _stateSubscriptions,
       allowedTriggers: _allowedTriggers,
@@ -24833,7 +25598,9 @@ export class SessionService {
   // Snapshot of authenticated claude accounts for SessionView.claudeAccounts.
   // Computed once per listSessions() batch and threaded into every enrich so a
   // batch of N claude sessions does one listAccounts read instead of N.
+  // Empty when authRotation.switchAuth is off: the web hides Switch auth on it.
   private computeClaudeAccountsView(): { id: string; label?: string; authenticated: boolean }[] {
+    if (!this.config.authRotation.switchAuth) return [];
     return listAccounts(this.config.dataDir).map((account) => ({
       id: account.id,
       ...(account.label ? { label: account.label } : {}),
@@ -24994,6 +25761,7 @@ export class SessionService {
       preflightTokenUsage: _preflightTokenUsage,
       cursorRestoreBoundary: _cursorRestoreBoundary,
       codexRestoreStartedAt: _codexRestoreStartedAt,
+      restoredAt: _restoredAt,
       // The record's queue state is internal; the view carries queuedMessagesView.
       queuedMessages: _queuedMessages,
       errorSource: _errorSource,

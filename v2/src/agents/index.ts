@@ -124,7 +124,8 @@ export const DEFERRED_CONTROLS_MAX_RESENDS = 2;
 // agent records the submit within seconds, so a miss means a swallowed Enter,
 // not a slow agent; short windows resend it fast and bound the lock hold to
 // 4 x 5s. The long default windows stay for deliver() into a busy agent,
-// which records the message only when its turn ends.
+// which records the message only when its turn ends. Each resent Enter still
+// passes the agent's early-resend gate, so a menu or prompt never gets one.
 export const INTERACTIVE_SUBMIT_ACK_PACING: SubmitAckPacing = {
   windowMs: 5_000,
   maxResends: 3,
@@ -180,6 +181,8 @@ export interface AgentEarlyResendContext {
   worktreePath: string;
   agentSessionId?: string;
   panePid?: number;
+  /** The text being sent is a slash command; a gated agent refuses the resend. */
+  slashCommand?: boolean;
 }
 
 export interface SubmitAckBinding {
@@ -194,6 +197,7 @@ export interface ConversationReadContext {
   worktreePath: string;
   codexSessionsDir?: string;
   agentSessionId?: string;
+  cursorConfigDir?: string;
 }
 
 interface AgentAdapter {
@@ -544,13 +548,13 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       return {
         baseline: { agent: "claude", ...baseline },
         async scan(text) {
-          const found = await scanClaudeJsonlForMessage(
+          const result = await scanClaudeJsonlForMessage(
             baseline,
             text,
             ctx.worktreePath,
             ctx.agentSessionId,
           );
-          return { found, lastScannedFile: baseline.file };
+          return { found: result.found, lastScannedFile: result.scannedFile };
         },
       };
     },
@@ -630,7 +634,14 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         worktreePath,
         options?.cursorConfigDir ? { configDir: options.cursorConfigDir } : undefined,
       ),
-    readConversation: (ctx) => readCursorTranscriptEntries(ctx.worktreePath, ctx.agentSessionId),
+    readConversation: async (ctx) => {
+      const chatId =
+        ctx.agentSessionId ??
+        (ctx.cursorConfigDir
+          ? await findCursorSessionId(ctx.worktreePath, { configDir: ctx.cursorConfigDir })
+          : null);
+      return chatId ? readCursorTranscriptEntries(ctx.worktreePath, chatId) : null;
+    },
     setup: async ({ worktreePath, restrictWrites, cursorConfigDir }) => {
       await ensureCursorWorkspaceTrust(worktreePath);
       if (cursorConfigDir) {
@@ -727,7 +738,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     buildResumePlan: (agentSessionId, binary, options) =>
       buildOpenCodeResumePlan(agentSessionId, binary, openCodePlanOptions(options)),
     findSessionId: (worktreePath) => findOpenCodeSessionId(worktreePath),
-    readConversation: (ctx) => readOpenCodeConversation(ctx.agentSessionId),
+    readConversation: (ctx) => readOpenCodeConversation(ctx.agentSessionId, ctx.worktreePath),
     setup: async ({
       mcpBindings,
       restrictWrites,
@@ -761,7 +772,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       const baseline =
         persisted?.agent === "opencode"
           ? { sessionId: persisted.sessionId, after: persisted.after }
-          : await captureOpenCodeSubmitBaseline(ctx.agentSessionId);
+          : await captureOpenCodeSubmitBaseline(ctx.agentSessionId, ctx.worktreePath);
       if (!baseline) {
         throw new Error("OpenCode submit acknowledgment requires a pinned native session");
       }
@@ -773,7 +784,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         },
         async scan(text) {
           return {
-            found: await scanOpenCodeForTypedMessage(baseline, text),
+            found: await scanOpenCodeForTypedMessage(baseline, text, ctx.worktreePath),
             lastScannedFile: null,
           };
         },
@@ -1015,7 +1026,9 @@ export async function agentEarlySubmitResendAllowed(
   ctx: AgentEarlyResendContext,
 ): Promise<boolean> {
   const gate = agentAdapter(agent).earlySubmitResendAllowed;
-  return gate ? gate(ctx) : true;
+  if (!gate) return true;
+  if (ctx.slashCommand) return false;
+  return gate(ctx);
 }
 
 /**

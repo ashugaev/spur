@@ -22,7 +22,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { readJson } from "./github-app.js";
-import { join, relative, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -50,6 +50,7 @@ import {
   ensureInstanceConfig,
   findProjectConfigPath,
   findProjectConfigPathInDirectory,
+  isDefaultInstanceConfigPath,
   loadConfig,
   loadInstanceConfigReadOnly,
   loadProjectConfig,
@@ -128,7 +129,11 @@ import {
 } from "./disk-gc.js";
 import { findBuildCacheDirs } from "./build-cache-scan.js";
 import { snapshotProcesses } from "./process-tree.js";
-import { readdir as readdirAsync, lstat as lstatAsync } from "node:fs/promises";
+import {
+  readdir as readdirAsync,
+  lstat as lstatAsync,
+  readFile as readFileAsync,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { startServer } from "./server.js";
 import {
@@ -465,8 +470,12 @@ function renderSourceInfo(response: SourceInfoResponse): string {
 }
 
 function renderSourceReplyResponse(response: SourceReplyResponse): string {
-  const buttons = response.buttons ? ` with ${response.buttons} button(s)` : "";
-  return `Sent ${response.source} reply for ${response.sessionId}${buttons}.`;
+  const parts = [
+    ...(response.buttons ? [`${response.buttons} button(s)`] : []),
+    ...(response.images ? [`${response.images} image(s)`] : []),
+  ];
+  const extras = parts.length > 0 ? ` with ${parts.join(" and ")}` : "";
+  return `Sent ${response.source} reply for ${response.sessionId}${extras}.`;
 }
 
 /** `<label>` or `<label>=<value>`; the value defaults to the label. */
@@ -1110,7 +1119,9 @@ function renderDoctorResult(result: DoctorResult): string {
       dimText(
         `Project config already exists: ${displayPathFromCwd(result.existingProjectConfigPath)}`,
       ),
-      dimText("Next: `spur connect --config spur.yaml` or `spur list` from the repo."),
+      dimText(
+        `Next: \`spur connect ${displayPathFromCwd(result.existingProjectConfigPath)}\` or \`spur list\` from the repo.`,
+      ),
     );
     return lines.join("\n");
   }
@@ -1270,6 +1281,7 @@ interface SidecarPortRow {
   env: string;
   port: number;
   alive: boolean;
+  listening: boolean | null;
 }
 
 // Flattens a session's per-sidecar reserved ports into rows for the `sidecar
@@ -1288,6 +1300,7 @@ function sidecarPortRows(view: SessionView, name?: string): SidecarPortRow[] {
       env: port.env,
       port: port.port,
       alive: sidecar.alive,
+      listening: port.listening ?? null,
     })),
   );
   // Plain string comparison, not localeCompare: this output is machine-read
@@ -4337,7 +4350,10 @@ export function createProgram(cliEntrypoint: string): Command {
   service
     .command("run")
     .description("Run a service command bound to the current Spur session.")
-    .argument("<serviceId>", "Logical service id")
+    .argument(
+      "<serviceId>",
+      "Logical service id declared as a project source with type: service and service: <id>",
+    )
     .argument("<command...>", "Shell command to run")
     .option("--port <number>", "Port held by this service")
     .option("--json", "Print raw JSON")
@@ -4636,7 +4652,7 @@ export function createProgram(cliEntrypoint: string): Command {
       );
       for (const row of rows) {
         writeStdout(
-          `${row.sidecar}\t${row.id}\t${row.env}\t${row.port}\t${row.alive ? "alive" : "dead"}`,
+          `${row.sidecar}\t${row.id}\t${row.env}\t${row.port}\t${row.alive ? "alive" : "dead"}\t${row.listening === null ? "unknown" : row.listening ? "listening" : "not-listening"}`,
         );
       }
     });
@@ -4743,6 +4759,11 @@ export function createProgram(cliEntrypoint: string): Command {
       "Inline choice button; repeatable. A click arrives as a user message carrying the value.",
       parseButtonOption,
     )
+    .option(
+      "--image <path>",
+      "PNG/JPEG/WebP posted as a photo before the text; repeatable, up to 4, 10 MB total",
+      collectOptionValue,
+    )
     .option("--json", "Print raw JSON")
     .action(
       async (
@@ -4751,6 +4772,7 @@ export function createProgram(cliEntrypoint: string): Command {
           session?: string;
           json?: boolean;
           button?: SourceReplyButton[];
+          image?: string[];
           requestInterfaceApproval?: string;
         },
         command: Command,
@@ -4763,12 +4785,19 @@ export function createProgram(cliEntrypoint: string): Command {
           throw new Error("source reply requires --session or SPUR_SESSION");
         }
         const buttons = options.button ?? [];
+        const images = await Promise.all(
+          (options.image ?? []).map(async (path) => ({
+            name: basename(path),
+            data: (await readFileAsync(path)).toString("base64"),
+          })),
+        );
         const payload: SourceReplyRequest = {
           message: messageParts.join(" "),
           ...(buttons.length > 0 ? { buttons } : {}),
           ...(options.requestInterfaceApproval
             ? { requestInterfaceApproval: await readJson(options.requestInterfaceApproval) }
             : {}),
+          ...(images.length > 0 ? { images } : {}),
         };
         await outputResult({
           json: Boolean(options.json),
@@ -4830,16 +4859,20 @@ export function createProgram(cliEntrypoint: string): Command {
       // MUST FIX 1: a source-install / main-deploy host that never runs
       // `spur init`/`update`/`reinit` (`runNpmInit`) never gets the pin file
       // every agent session's `NPM_CONFIG_GLOBALCONFIG` points at, and npm
-      // silently ignores a missing globalconfig file. Every real daemon boot
-      // writes it instead (see npm-prefix.ts). A read-only filesystem or a
+      // silently ignores a missing globalconfig file. Every default-instance
+      // daemon boot writes it instead (see npm-prefix.ts). A read-only filesystem or a
       // permissions error writing into `<home>/.spur/` must never abort
       // daemon boot, so failures are reported and swallowed, not thrown.
-      try {
-        ensureNpmPinFile();
-      } catch (error) {
-        writeStderr(
-          `spur: failed to write npm global-prefix pin file: ${error instanceof Error ? error.message : String(error)}`,
-        );
+      // Default instance config only: a non-default `--config` (isolated
+      // daemon, sidecar, worktree daemon) must not touch the host pin file.
+      if (isDefaultInstanceConfigPath(configPath)) {
+        try {
+          ensureNpmPinFile();
+        } catch (error) {
+          writeStderr(
+            `spur: failed to write npm global-prefix pin file: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
       // Own try/catch, kept separate from the pin-file one above: a skill
       // failure must stay distinguishable in stderr from a pin-file failure,

@@ -19,9 +19,11 @@ INTERFACES
   `$SPUR_SESSION_TOOL_DIR` holds the session-bound wrappers; `ls "$SPUR_SESSION_TOOL_DIR"` enumerates them. Call each as `"$SPUR_SESSION_TOOL_DIR/<tool>"`, never bare.
   Session variables: `env | grep '^SPUR_'`.
   Agent launch identity contract: `docs/commands.md#session-tools-and-environment`.
+  Manual-wake response fields: `docs/daemon-api.md`.
   Automatic reminder limits: `docs/configuration.md#automatic-reminders`.
+  Edit scheduled jobs through footer Cron viewer or MCP; config behavior: docs/configuration.md; operations: docs/daemon-api.md.
   Spur ToDo: ledger starts empty, no code path seeds an item; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses an agent's own completion, self-destruct, and handoff — `todo_ledger_empty`/`todo_open_work` (409); a human `complete`/`handoff` from the CLI or UI is never blocked. Contract: `docs/commands.md#todo`.
-  Telegram: discover associated chat/bot through `docs/commands.md#source`; send with `"$SPUR_SESSION_TOOL_DIR/spur" source reply`; users launch, inspect, close topic sessions. Binding, topic identity: `docs/configuration.md#telegram-binding`; replies: `docs/commands.md#source-reply`.
+  Telegram: bot DM for commands/spawn; agent communication in assigned forum topics; completion deletes owned topics. Source identity: `docs/commands.md#source`; attachments/binding: `docs/configuration.md#telegram-binding`; sends: `docs/commands.md#source-reply`.
   Native Telegram calls to sandbox Shepherd: docs/telegram-calls.md.
   Stop unwanted auto-pings with `spur auto-ping unsubscribe`. A thread that keeps coming back takes `--thread`; `--event` binds to one emitted occurrence only. Scopes and resume: `docs/commands.md#auto-ping`; API: `docs/daemon-api.md`.
 
@@ -37,8 +39,9 @@ SAFETY
   Token budgets, session overrides, and installed Cursor hook: docs/configuration.md. Unknown usage never blocks execution.
   Treat project `spur.yaml` as code: `script` commands run as daemon user.
   Start dev servers with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, never a bare dev-server command.
-  Isolated source selection/TEST attachment: docs/configuration.md; retained owner control/UI rebind: docs/commands.md Sidecars and Session tools.
+  Isolated source selection/TEST attachment: docs/configuration.md; retained owner control, managed project input and stand readiness: docs/commands.md Sidecars and Session tools.
   Read ports with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`; Open contract: docs/commands.md#sidecars. Never grep `/proc` or session state for ports.
+  Use per-port `listening` for a TCP listener; `alive` describes the pane. Contract: docs/commands.md#sidecars.
 
 DOCS
 
@@ -46,7 +49,7 @@ DOCS
   Any path under `docs/` resolves as https://raw.githubusercontent.com/ashugaev/spur/main/<path>
   Commands, session tools and variables: docs/commands.md
   Cursor send correlation and retained acknowledgement baselines: docs/commands.md, docs/daemon-api.md.
-  Reviewer publication evidence: docs/commands.md
+  Reviewer publication evidence and trusted legacy receipt recovery: docs/commands.md
   Routes, bounded conversation pages, pre-flight batches, lifecycle receipts, restore cancellation: docs/daemon-api.md
   Config, admission, trigger-spawn retry, reviewer App/consent: docs/configuration.md; events: docs/configuration.md#events
   GitHub PR feedback ownership, quotes and post marker: docs/configuration.md#field-reference
