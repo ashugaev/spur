@@ -3,7 +3,8 @@ import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { isDefaultInstanceConfigPath, loadInstanceConfigReadOnly } from "./config.js";
 import { readLiveProcessStarttime } from "./sidecars/reap.js";
-import { SPUR_DAEMON_API_VERSION } from "./types.js";
+import { isCompatibleRuntimeInfo } from "./client.js";
+import { SPUR_DAEMON_API_VERSION, type AppConfig, type RuntimeInfo } from "./types.js";
 
 interface UiEndpoint {
   version: 1;
@@ -26,27 +27,49 @@ export interface IsolatedDaemonCandidate {
 export async function captureIsolatedDaemonStarttime(pid: number): Promise<number | null> {
   return Number.isSafeInteger(pid) && pid > 0 ? readLiveProcessStarttime(pid) : null;
 }
+export async function loadIsolatedDaemonConfig(
+  configPath: string,
+  filePath = join(dirname(configPath), "ui-endpoint.json"),
+): Promise<{ configPath: string; config: AppConfig }> {
+  const canonical = await ownEndpointPath(configPath, filePath);
+  const loaded = loadInstanceConfigReadOnly(canonical);
+  if (
+    loaded.status !== "ok" ||
+    loaded.config.server.host !== "127.0.0.1" ||
+    loaded.config.server.port > 65535 ||
+    loaded.config.dataDir !== join(dirname(canonical), "data")
+  )
+    throw new Error("Invalid isolated daemon configuration");
+  return { configPath: canonical, config: loaded.config };
+}
 
 export async function validateIsolatedDaemonReady(
   candidate: IsolatedDaemonCandidate,
   expectedLifecycleInstanceId?: string,
 ): Promise<string | null> {
+  return (
+    (await readIsolatedDaemonReady(candidate, expectedLifecycleInstanceId))?.lifecycleInstanceId ??
+    null
+  );
+}
+
+export async function readIsolatedDaemonReady(
+  candidate: IsolatedDaemonCandidate,
+  expectedLifecycleInstanceId?: string,
+): Promise<RuntimeInfo | null> {
   try {
-    const canonical = await ownEndpointPath(candidate.configPath, candidate.filePath);
+    const { configPath: canonical, config } = await loadIsolatedDaemonConfig(
+      candidate.configPath,
+      candidate.filePath,
+    );
     if (
       !Number.isSafeInteger(candidate.starttime) ||
       candidate.starttime < 0 ||
       (await captureIsolatedDaemonStarttime(candidate.pid)) !== candidate.starttime
     )
       return null;
-    const loaded = loadInstanceConfigReadOnly(canonical);
-    if (loaded.status !== "ok") return null;
-    const config = loaded.config;
     if (
-      config.server.host !== "127.0.0.1" ||
-      config.server.port > 65535 ||
       candidate.baseUrl !== `http://127.0.0.1:${config.server.port}` ||
-      config.dataDir !== join(dirname(canonical), "data") ||
       candidate.dataDir !== config.dataDir ||
       candidate.socketName !== config.tmux.socketName
     )
@@ -79,13 +102,13 @@ export async function validateIsolatedDaemonReady(
       (await captureIsolatedDaemonStarttime(candidate.pid)) !== candidate.starttime
     )
       return null;
-    return info["lifecycleInstanceId"];
+    return isCompatibleRuntimeInfo(payload) ? payload : null;
   } catch {
     return null;
   }
 }
 
-async function ownEndpointPath(configPath: string, filePath: string): Promise<string> {
+export async function ownEndpointPath(configPath: string, filePath: string): Promise<string> {
   if (!isAbsolute(configPath) || !isAbsolute(filePath) || isDefaultInstanceConfigPath(configPath))
     throw new Error("Invalid isolated UI instance");
   const canonical = await realpath(configPath);

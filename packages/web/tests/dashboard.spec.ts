@@ -338,14 +338,7 @@ test("token counts preserve exhaustion, rounding, and meaningful keyboard stops"
   await expect(page.getByRole("tooltip")).toContainText("Token budget reached");
   await expect(page.getByRole("tooltip")).not.toContainText("Stopped by token budget");
   await page.screenshot({ path: testInfo.outputPath("conflicting-exhaustion.png") });
-  const dashes = page.getByLabel("Tokens: unavailable", { exact: true });
-  await expect(dashes).toHaveCount(2);
-  const unknown = page.locator('[aria-label="Tokens: unavailable"][tabindex="0"]');
-  await expect(unknown).toHaveCount(1);
-  await unknown.focus();
-  await expect(page.getByRole("tooltip")).toContainText("Unknown attempts");
-  await page.screenshot({ path: testInfo.outputPath("unknown-preflight-focus.png") });
-  await expect(page.locator('[aria-label="Tokens: unavailable"]:not([tabindex])')).toHaveCount(1);
+  await expect(page.getByLabel("Tokens: unavailable", { exact: true })).toHaveCount(0);
   for (const status of ["stopped", "budget_limited"] as const) {
     await mockSessions(page, [
       {

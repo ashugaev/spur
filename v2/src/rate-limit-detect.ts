@@ -299,7 +299,7 @@ export const CLAUDE_BOOKKEEPING_RECORD_TYPES: ReadonlySet<string> = new Set([
 // exits, `last-prompt` alongside prompts. Kept out of
 // CLAUDE_BOOKKEEPING_RECORD_TYPES because classifyClaudeJsonlState maps that set
 // to "waiting", while it already walks past these as unknown types.
-const CLAUDE_SESSION_META_RECORD_TYPES: ReadonlySet<string> = new Set([
+export const CLAUDE_SESSION_META_RECORD_TYPES: ReadonlySet<string> = new Set([
   "cost-state",
   "last-prompt",
 ]);

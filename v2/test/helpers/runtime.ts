@@ -681,7 +681,13 @@ $extra"
   done
   ${cursorEmitBuffered}
   touch_chat_store "$chat_id"
-  case "$line" in
+  dispatch_line="$line"
+  cursor_marker='^\\[Spur delivery: [0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\\]$'
+  if [[ "$line" =~ $cursor_marker && "$full_msg" == "$line"$'\\n\\n'* ]]; then
+    logical_msg="\${full_msg#"$line"$'\\n\\n'}"
+    dispatch_line="\${logical_msg%%$'\\n'*}"
+  fi
+  case "$dispatch_line" in
     show-waiting-menu)
       ${signalNeedsInput}
       printf '%s\\n' "Entered plan mode"
@@ -701,7 +707,7 @@ $extra"
       exit 0
       ;;
     *)
-      printf '%s\\n' "ack: $line"
+      printf '%s\\n' "ack: $dispatch_line"
       printf '%s\\n' "${prompt}"
       ${signalWaiting}
       ;;
@@ -953,6 +959,19 @@ if (args[0] === "api" && args.includes("graphql")) {
 }
 
 if (args[0] === "api" && typeof args[1] === "string") {
+  const issueCommentMatch = args[1].match(/issues\\/comments\\/(\\d+)$/);
+  if (issueCommentMatch) {
+    const comment = Object.values(state.commentsByPr || {}).flat().find(
+      (value) => String(value.id) === issueCommentMatch[1],
+    );
+    if (!comment) {
+      process.stderr.write("HTTP 404: comment not found\\n");
+      process.exit(1);
+    }
+    print(comment);
+    process.exit(0);
+  }
+
   const reviewCommentMatch = args[1].match(/pulls\\/(\\d+)\\/comments/);
   if (reviewCommentMatch) {
     print(state.reviewCommentsByPr?.[reviewCommentMatch[1]] || []);

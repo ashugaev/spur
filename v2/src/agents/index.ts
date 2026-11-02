@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import {
@@ -35,6 +36,8 @@ import {
 import { ensureCursorTokenUsageHook } from "../cursor-token-usage.js";
 import {
   captureCursorSubmitBaseline,
+  cursorDeliveryInput,
+  markCursorWriteStart,
   persistCursorSubmitBaseline,
   restoreCursorSubmitBaseline,
   scanCursorJsonlForMessage,
@@ -148,6 +151,7 @@ const CODEX_LAUNCH_SUBMIT_ACK_WINDOW_MS = 10_000;
 const CODEX_LAUNCH_SUBMIT_MAX_RESENDS = 2;
 
 export interface AgentSubmitAckContext {
+  message?: string;
   worktreePath: string;
   codexSessionsDir: string;
   /** Pinned native session id, used to bind claude ack scanning by id. */
@@ -182,8 +186,11 @@ export interface AgentEarlyResendContext {
 }
 
 export interface SubmitAckBinding {
+  inputText?: string;
   baseline: SubmitAckBaseline;
   scan(text: string): Promise<SubmitAckScanResult>;
+  /** Called once per send right before the pane write; mutates `baseline` in place. Cursor only. */
+  markWriteStart?(): Promise<void>;
 }
 
 export interface ConversationReadContext {
@@ -667,29 +674,58 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     busyQueuedSendAwaitsPrompt: true,
     queuedSendPromptGraceMs: 5_000,
     submitAck: async (ctx, persisted) => {
+      const deliveryId =
+        persisted?.agent === "cursor"
+          ? persisted.deliveryId
+          : ctx.message && !ctx.message.trimStart().startsWith("/")
+            ? randomUUID()
+            : undefined;
       const baseline =
         persisted?.agent === "cursor"
           ? restoreCursorSubmitBaseline(persisted)
           : await captureCursorSubmitBaseline(
               ctx.worktreePath,
               ctx.agentSessionId,
-              ctx.cursorConfigDir ? { cursorConfigDir: ctx.cursorConfigDir } : undefined,
+              ctx.cursorConfigDir || deliveryId
+                ? {
+                    ...(ctx.cursorConfigDir ? { cursorConfigDir: ctx.cursorConfigDir } : {}),
+                    ...(deliveryId ? { deliveryId } : {}),
+                  }
+                : undefined,
             );
       if (!baseline) {
         return null;
       }
+      const cursorOptions = ctx.cursorConfigDir
+        ? { cursorConfigDir: ctx.cursorConfigDir }
+        : undefined;
+      const persistedBaseline: Extract<SubmitAckBaseline, { agent: "cursor" }> = {
+        agent: "cursor",
+        ...persistCursorSubmitBaseline(baseline),
+      };
       return {
-        baseline: { agent: "cursor", ...persistCursorSubmitBaseline(baseline) },
+        baseline: persistedBaseline,
+        ...(deliveryId && ctx.message
+          ? { inputText: cursorDeliveryInput(deliveryId, ctx.message) }
+          : {}),
         async scan(text) {
           const result = await scanCursorJsonlForMessage(
             baseline,
             text,
             ctx.worktreePath,
             ctx.agentSessionId,
-            ctx.cursorConfigDir ? { cursorConfigDir: ctx.cursorConfigDir } : undefined,
+            cursorOptions,
           );
           return { found: result.found, lastScannedFile: result.scannedFile };
         },
+        markWriteStart: () =>
+          markCursorWriteStart(
+            baseline,
+            persistedBaseline,
+            ctx.worktreePath,
+            ctx.agentSessionId,
+            cursorOptions,
+          ),
       };
     },
   },

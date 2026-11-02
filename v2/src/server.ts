@@ -1,6 +1,7 @@
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { URL } from "node:url";
 import {
   lifecycleErrorReceipt,
@@ -16,7 +17,7 @@ import {
   listAgentModelCatalog,
 } from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
-import { AutoPingError, AutoPingService } from "./auto-ping.js";
+import { AutoPingError, AutoPingService, redactAutoPingHandles } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
 import { projectConversationPage } from "./conversation-page.js";
 import { readCronJobs, UnknownCronProjectError } from "./cron-jobs.js";
@@ -37,6 +38,7 @@ import { startDeploySwitch } from "./deploy-switch.js";
 import { EventBus } from "./event-bus.js";
 import {
   DEFAULT_EVENT_LOG_CONFIG,
+  appendEventLog,
   flushEventLogCollapse,
   logSpurEvent,
   setEventLogConfig,
@@ -179,6 +181,8 @@ export function projectSourceSession(session: SessionListView): SourceWorkSessio
   };
 }
 
+const SOURCE_SESSION_RETRY_DELAYS_MS = [250, 750];
+
 function isSnapshotChanged(error: unknown): boolean {
   return (
     error instanceof SessionLifecycleError &&
@@ -192,12 +196,15 @@ export async function sourceSessionById(
   sessionId: string,
 ): Promise<SourceWorkSessionItem | null> {
   try {
-    let view: SessionView;
-    try {
-      view = await service.get(sessionId);
-    } catch (error) {
-      if (!isSnapshotChanged(error)) throw error;
-      view = await service.get(sessionId);
+    let view: SessionView | undefined;
+    for (let attempt = 0; view === undefined; attempt += 1) {
+      try {
+        view = await service.get(sessionId);
+      } catch (error) {
+        const delay = SOURCE_SESSION_RETRY_DELAYS_MS[attempt];
+        if (!isSnapshotChanged(error) || delay === undefined) throw error;
+        await sleep(delay);
+      }
     }
     return isListedSessionView(view, view.lifecycle.operation, false)
       ? projectSourceSession(view)
@@ -836,11 +843,6 @@ export async function startServer(
   testOverrides?: { sidecarSnapshot?: () => Promise<ProcSnapshot> },
 ): Promise<StartedServer> {
   const ghPathState = await initializeGhPath();
-  if (ghPathState.status === "unavailable") {
-    (logger.warn ?? writeStderr)(
-      `${ghPathState.message}; GitHub automation disabled until gh is available`,
-    );
-  }
   assertConfigMayUseProdSlot(configPath);
   for (const agent of ["claude", "codex", "cursor", "opencode"] as const) {
     agentPaneChildFallbackEnabled(agent);
@@ -849,6 +851,27 @@ export async function startServer(
     deferBackgroundLoops: true,
     ...(testOverrides?.sidecarSnapshot ? { sidecarSnapshot: testOverrides.sidecarSnapshot } : {}),
   });
+  const runtimeLog =
+    (level: "info" | "warn", output: ((message: string) => void) | undefined) =>
+    (message: string): void => {
+      try {
+        appendEventLog(service.config.dataDir, {
+          event: "daemon.diagnostic",
+          level,
+          message: redactAutoPingHandles(message),
+        });
+      } catch {
+        // Retention cannot block existing logger output.
+      }
+      output?.(message);
+    };
+  logger = {
+    info: runtimeLog("info", logger.info),
+    warn: runtimeLog("warn", logger.warn ?? writeStderr),
+  };
+  if (ghPathState.status === "unavailable") {
+    logger.warn?.(`${ghPathState.message}; GitHub automation disabled until gh is available`);
+  }
   const autoPing = new AutoPingService(service.config.dataDir);
   let ready = false;
   const switchStatePath = deploySwitchStatePath(service.config.dataDir);
@@ -2663,7 +2686,7 @@ export async function startServer(
       message,
       details: memoryCeilingWarning,
     });
-    process.stderr.write(`${message}\n`);
+    runtimeLog("warn", writeStderr)(message);
   }
 
   ready = true;

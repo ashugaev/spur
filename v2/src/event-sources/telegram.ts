@@ -675,16 +675,16 @@ async function editOrReply(
   chatId: number,
   statusMessageId: number | undefined,
   text: string,
-): Promise<void> {
+): Promise<number | undefined> {
   if (statusMessageId !== undefined && ctx.api) {
     try {
       await ctx.api.editMessageText(chatId, statusMessageId, text);
-      return;
+      return statusMessageId;
     } catch {
       // fall through to reply
     }
   }
-  await ctx.reply(text);
+  return extractMessageId(await ctx.reply(text));
 }
 
 type TelegramSpawnOutcome =
@@ -2061,7 +2061,7 @@ async function routeTelegramPrompt(
       await ctx.reply(`Spur session ${ownerId} is gone. Message not delivered.`);
       return;
     }
-    await deliverRoutedPrompt(runtime, ctx, message, owner, text);
+    await deliverRoutedPrompt(runtime, ctx, message, owner, text, undefined, attachments);
     return;
   }
 
@@ -2098,18 +2098,42 @@ async function routeTelegramPrompt(
     await ctx.reply("No Spur session bound here. Use /watch or /spawn.");
     return;
   }
-  const session = await findSession(deps, binding.sessionId);
+  const isTopic = message.chat.id < 0 && message.message_thread_id !== undefined;
+  const ackId = isTopic ? await postDeliveryAck(deps, ctx, binding.sessionId) : undefined;
+  let session: SourceSessionListItem | null;
+  try {
+    session = await findSession(deps, binding.sessionId);
+  } catch (error) {
+    if (ackId === undefined || isAborted(deps)) throw error;
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram update failed: ${redactedErrorText(deps, error)}`,
+    );
+    await editOrReply(ctx, message.chat.id, ackId, UNDELIVERED_TEXT);
+    return;
+  }
   if (!session) {
     if (hasAwaitingProject) {
-      await ctx.reply("Pick a project for the pending /spawn, or run /spawn again.");
+      await editOrReply(
+        ctx,
+        message.chat.id,
+        ackId,
+        "Pick a project for the pending /spawn, or run /spawn again.",
+      );
       return;
     }
     const acquireResult = tryAcquireAutoSpawn(runtime, key);
     switch (acquireResult.status) {
       case "busy":
-        await ctx.reply("Spawn already in progress here.");
+        await editOrReply(ctx, message.chat.id, ackId, "Spawn already in progress here.");
         return;
       case "acquired":
+        if (ackId !== undefined && ctx.api) {
+          try {
+            await ctx.api.editMessageText(message.chat.id, ackId, "Received.");
+          } catch {
+            // Best-effort: the ack stays readable either way.
+          }
+        }
         await unbindTelegramThread(runtime, message.chat.id, message.message_thread_id);
         await runAutoSpawn(
           runtime,
@@ -2126,10 +2150,31 @@ async function routeTelegramPrompt(
         break;
     }
     await unbindTelegramThread(runtime, message.chat.id, message.message_thread_id);
-    await ctx.reply(`Spur session ${binding.sessionId} is gone. Unbound. Use /watch or /spawn.`);
+    await editOrReply(
+      ctx,
+      message.chat.id,
+      ackId,
+      `Spur session ${binding.sessionId} is gone. Unbound. Use /watch or /spawn.`,
+    );
     return;
   }
-  await deliverRoutedPrompt(runtime, ctx, message, session, text);
+  await deliverRoutedPrompt(runtime, ctx, message, session, text, ackId, attachments);
+}
+
+/** Forum-topic ack posted before the session lookup; edited to its final text afterwards. */
+async function postDeliveryAck(
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  ctx: Pick<TelegramTextContext, "reply">,
+  sessionId: string,
+): Promise<number | undefined> {
+  try {
+    return extractMessageId(await ctx.reply(`Received. Delivering to ${sessionId}...`));
+  } catch (error) {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${redactedErrorText(deps, error)}`,
+    );
+    return undefined;
+  }
 }
 
 function telegramReplyOwner(
@@ -2173,6 +2218,7 @@ async function deliverRoutedPrompt(
   message: TelegramTextMessage,
   session: SourceSessionListItem,
   text: string,
+  ackMessageId?: number | undefined,
   attachments?: SendMessageAttachment[],
   stillCurrent?: () => boolean,
 ): Promise<void> {
@@ -2183,7 +2229,12 @@ async function deliverRoutedPrompt(
   if (!conversation || !current()) return;
   const label = formatTelegramSessionLabel(session.id, session.title?.trim() || undefined);
   if (session.inactive) {
-    await ctx.reply(`${label} is not active. Message not delivered.`);
+    await editOrReply(
+      ctx,
+      message.chat.id,
+      ackMessageId,
+      `${label} is not active. Message not delivered.`,
+    );
     return;
   }
   if (attachments?.length) {
@@ -2214,7 +2265,12 @@ async function deliverRoutedPrompt(
   }
   let statusMessageId: number | undefined;
   try {
-    statusMessageId = extractMessageId(await ctx.reply(placeholderText(label, session.state)));
+    statusMessageId = await editOrReply(
+      ctx,
+      message.chat.id,
+      ackMessageId,
+      placeholderText(label, session.state),
+    );
   } catch (error) {
     deps.logger.warn?.(
       `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${redactedErrorText(deps, error)}`,
@@ -2667,7 +2723,16 @@ async function runMediaTask(
       const session = await findSession(deps, intake.sessionId);
       await requireCurrent();
       if (session)
-        await deliverRoutedPrompt(runtime, ctx, message, session, text, attachments, current);
+        await deliverRoutedPrompt(
+          runtime,
+          ctx,
+          message,
+          session,
+          text,
+          undefined,
+          attachments,
+          current,
+        );
       return;
     }
     if (intake.pending !== null) {
