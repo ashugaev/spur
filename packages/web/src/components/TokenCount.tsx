@@ -13,10 +13,12 @@ export function TokenCount({
   session,
   sidebar = false,
   align = "right",
+  hideEmpty = false,
 }: {
   session: TokenSession;
   sidebar?: boolean;
   align?: "left" | "right";
+  hideEmpty?: boolean;
 }) {
   const id = useId();
   const [hovered, setHovered] = useState(false);
@@ -94,6 +96,7 @@ export function TokenCount({
   const reportedRows = rows.filter(
     ([, pre, current]) => pre !== undefined || current !== undefined,
   );
+  if (hideEmpty && !hasDetails) return null;
   return (
     <span
       className="relative inline-block tabular-nums"

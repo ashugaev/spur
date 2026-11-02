@@ -4,6 +4,16 @@ import { TokenCount } from "@/components/TokenCount";
 import type { SpurSessionView } from "@/lib/types";
 
 afterEach(cleanup);
+it("renders nothing without token data when hideEmpty", () => {
+  const { container } = render(<TokenCount session={{ status: "running" }} hideEmpty />);
+  expect(container).toBeEmptyDOMElement();
+});
+
+it("keeps the dash without token data by default", () => {
+  render(<TokenCount session={{ status: "running" }} />);
+  expect(screen.getByLabelText("Tokens: unavailable")).toHaveTextContent("—");
+});
+
 const usage: SpurSessionView["tokenUsageView"] = {
   status: "available",
   provider: "codex",
