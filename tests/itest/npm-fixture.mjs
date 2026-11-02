@@ -11,6 +11,9 @@ import { tmpdir } from "node:os";
 import { dirname, resolve, basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+// Harness observation budget, not an upper bound on production reinit.
+export const ROLLBACK_WAIT_MS = 1_500_000;
+
 const hash = (bytes, algorithm = "sha256") => createHash(algorithm).update(bytes).digest("hex");
 function parseJson(text) {
   try {
@@ -251,7 +254,7 @@ export class McpBindFault {
     // never rollback proof; failed runs cannot hold a VM port indefinitely.
     this.timer = setTimeout(() => {
       void this.close("deadline-expired");
-    }, 300_000);
+    }, ROLLBACK_WAIT_MS + 30_000);
     this.timer.unref();
   }
 }

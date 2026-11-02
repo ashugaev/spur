@@ -101,6 +101,28 @@ describe("startConfiguredSources", () => {
     expect(await deps.resolveWebBaseUrl()).toBe("http://127.0.0.1:5643");
     await controller.stop();
   });
+  it("looks up cached bot identity by source and controller generation", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const identity = { id: 44, username: "testbot" };
+    cronStartMock.mockResolvedValueOnce({ stop: vi.fn(), telegramBotIdentity: identity });
+    const deps = {
+      config: buildConfig(tmpDir, {
+        api: { path: tmpDir, sources: { test: { type: "cron" } } },
+      }) as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+      getSession: vi.fn().mockResolvedValue(null),
+    };
+    const controller = await startConfiguredSources(deps);
+    expect(controller.telegramBotIdentity("api", "test")).toEqual(identity);
+    expect(controller.telegramBotIdentity("other", "test")).toBeNull();
+    expect(controller.telegramBotIdentity("api", "missing")).toBeNull();
+    await controller.stop();
+    const replacement = await startConfiguredSources(deps);
+    expect(replacement.telegramBotIdentity("api", "test")).toBeNull();
+    await replacement.stop();
+  });
+
   it("preserves cached successful production endpoint", async () => {
     const { startConfiguredSources } = await loadStartConfiguredSources();
     vi.stubEnv("SPUR_SESSION_TOOL_DIR", undefined);
@@ -151,6 +173,28 @@ describe("startConfiguredSources", () => {
 
     await controller.stop();
   });
+
+  it.each([true, false])(
+    "forwards source attachment preparation only when present: %s",
+    async (present) => {
+      const { startConfiguredSources } = await loadStartConfiguredSources();
+      const prepareSessionMessage = vi.fn().mockResolvedValue("prepared text");
+      const controller = await startConfiguredSources({
+        config: buildConfig(tmpDir, {
+          api: { path: tmpDir, sources: { nightly: { type: "cron" } } },
+        }) as never,
+        bus: new EventBus(),
+        listSessions: vi.fn().mockResolvedValue([]),
+        getSession: vi.fn().mockResolvedValue(null),
+        ...(present ? { prepareSessionMessage } : {}),
+      });
+      const deps = cronStartMock.mock.calls[0]?.[0] as {
+        prepareSessionMessage?: typeof prepareSessionMessage;
+      };
+      expect(deps.prepareSessionMessage).toBe(present ? prepareSessionMessage : undefined);
+      await controller.stop();
+    },
+  );
 
   it("adds a unique occurrence id to each emitted source event", async () => {
     const { startConfiguredSources } = await loadStartConfiguredSources();
@@ -354,6 +398,8 @@ describe("startConfiguredSources", () => {
       listSessions: vi.fn(),
       getSession: vi.fn(),
       restoreSession: vi.fn(),
+      completeSession: vi.fn(),
+      killSession: vi.fn(),
     };
     const controller = await startConfiguredSources({
       config: buildConfig(tmpDir, {
@@ -365,6 +411,22 @@ describe("startConfiguredSources", () => {
       workbench,
     });
     expect(cronStartMock.mock.calls[0]?.[0].workbench).toBe(workbench);
+    await controller.stop();
+  });
+
+  it("forwards runtime Telegram conversation assignment and unwatch", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const telegramConversations = { ensureTopic: vi.fn(), unwatch: vi.fn() };
+    const controller = await startConfiguredSources({
+      config: buildConfig(tmpDir, {
+        api: { path: tmpDir, sources: { nightly: { type: "cron" } } },
+      }) as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+      getSession: vi.fn().mockResolvedValue(null),
+      telegramConversations,
+    });
+    expect(cronStartMock.mock.calls[0]?.[0].telegramConversations).toBe(telegramConversations);
     await controller.stop();
   });
 

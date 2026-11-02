@@ -6,12 +6,15 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
+import { syncBuiltinESMExports } from "node:module";
+import { setImmediate } from "node:timers/promises";
 import {
   validateManifest,
   startFixture,
   McpBindFault,
   refreshMembership,
   prepareCandidates,
+  ROLLBACK_WAIT_MS,
 } from "./npm-fixture.mjs";
 import { createServer as createTcpServer } from "node:net";
 const { fetch } = globalThis;
@@ -253,7 +256,9 @@ test("registry serves only exact candidate payloads and rejects checksum/version
   }
 });
 
-test("bind fault arms on target artifact, releases only for rollback artifact, never invokes real systemctl", async () => {
+test("bind fault survives slow reinit and releases only for rollback artifact without stale expiry", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  syncBuiltinESMExports();
   const dir = await mkdtemp(join(tmpdir(), "spur-bind-fault-test-"));
   const reservation = createTcpServer();
   await new Promise((ready) => reservation.listen(0, "127.0.0.1", ready));
@@ -280,6 +285,7 @@ test("bind fault arms on target artifact, releases only for rollback artifact, n
     assert.equal(stops, 0);
     await fault.beforeServe("2.0.1", ["2.0.0", "2.0.1"]);
     assert.equal(stops, 1);
+    t.mock.timers.tick(300_001);
     const conflicting = createTcpServer();
     await assert.rejects(
       new Promise((ready, reject) => {
@@ -298,6 +304,12 @@ test("bind fault arms on target artifact, releases only for rollback artifact, n
     const restored = createTcpServer();
     await new Promise((ready) => restored.listen(port, "127.0.0.1", ready));
     await new Promise((done) => restored.close(done));
+    t.mock.timers.tick(ROLLBACK_WAIT_MS + 30_000);
+    await setImmediate();
+    assert.deepEqual(
+      fault.events.map((event) => event.event),
+      ["armed-before-target-artifact", "rollback-artifact-requested"],
+    );
     await writeFile(
       configPath,
       JSON.stringify({
@@ -310,6 +322,63 @@ test("bind fault arms on target artifact, releases only for rollback artifact, n
     await assert.rejects(fault.beforeServe("9.0.0", ["2.0.0", "2.0.1"]), /verified candidates/);
   } finally {
     await fault.close();
+    t.mock.timers.reset();
+    syncBuiltinESMExports();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("fault deadline releases the listener without claiming rollback", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  syncBuiltinESMExports();
+  const dir = await mkdtemp(join(tmpdir(), "spur-bind-fault-expiry-"));
+  const reservation = createTcpServer();
+  await new Promise((ready) => reservation.listen(0, "127.0.0.1", ready));
+  const port = reservation.address().port;
+  await new Promise((done) => reservation.close(done));
+  const configPath = join(dir, "fault.json");
+  const evidencePath = join(dir, "evidence.json");
+  const fault = new McpBindFault(configPath, evidencePath, () => {});
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        nonce: "expires",
+        targetVersion: "2.0.1",
+        previousVersion: "2.0.0",
+        mcpPort: port,
+      }),
+    );
+    await fault.beforeServe("2.0.1", ["2.0.0", "2.0.1"]);
+    t.mock.timers.tick(ROLLBACK_WAIT_MS + 30_000);
+    for (let attempt = 0; attempt < 100 && fault.events.length < 2; attempt += 1)
+      await setImmediate();
+    assert.deepEqual(
+      fault.events.map((event) => event.event),
+      ["armed-before-target-artifact", "deadline-expired"],
+    );
+    const restored = createTcpServer();
+    await new Promise((ready) => restored.listen(port, "127.0.0.1", ready));
+    await new Promise((done) => restored.close(done));
+    // Wait for the timer's asynchronous evidence write before removing its directory.
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      let events;
+      try {
+        events = JSON.parse(await readFile(evidencePath, "utf8"));
+      } catch {
+        /* Write in progress. */
+      }
+      if (events?.length === 2) break;
+      await setImmediate();
+    }
+    assert.deepEqual(
+      JSON.parse(await readFile(evidencePath, "utf8")).map((event) => event.event),
+      ["armed-before-target-artifact", "deadline-expired"],
+    );
+  } finally {
+    await fault.close();
+    t.mock.timers.reset();
+    syncBuiltinESMExports();
     await rm(dir, { recursive: true, force: true });
   }
 });

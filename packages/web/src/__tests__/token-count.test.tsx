@@ -4,6 +4,56 @@ import { TokenCount } from "@/components/TokenCount";
 import type { SpurSessionView } from "@/lib/types";
 
 afterEach(cleanup);
+it("renders nothing without token data when hideEmpty", () => {
+  const { container } = render(<TokenCount session={{ status: "running" }} hideEmpty />);
+  expect(container).toBeEmptyDOMElement();
+});
+
+it("renders nothing with unknown-only preflight usage when hideEmpty", () => {
+  const { container } = render(
+    <TokenCount
+      session={{
+        status: "running",
+        preflightTokenUsageView: {
+          status: "unknown",
+          attemptCount: 0,
+          unknownAttemptCount: 0,
+          providerIterationCount: 0,
+        },
+      }}
+      hideEmpty
+    />,
+  );
+  expect(container).toBeEmptyDOMElement();
+});
+
+it("renders nothing with zero measured preflight usage when hideEmpty", () => {
+  const { container } = render(
+    <TokenCount
+      session={{
+        status: "running",
+        preflightTokenUsageView: {
+          status: "measured",
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          attemptCount: 0,
+          unknownAttemptCount: 0,
+          providerIterationCount: 0,
+          byProvider: {},
+        },
+      }}
+      hideEmpty
+    />,
+  );
+  expect(container).toBeEmptyDOMElement();
+});
+
+it("keeps the dash without token data by default", () => {
+  render(<TokenCount session={{ status: "running" }} />);
+  expect(screen.getByLabelText("Tokens: unavailable")).toHaveTextContent("—");
+});
+
 const usage: SpurSessionView["tokenUsageView"] = {
   status: "available",
   provider: "codex",
