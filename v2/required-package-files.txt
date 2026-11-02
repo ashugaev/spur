@@ -1,6 +1,16 @@
 deploy/spur-daemon.npm.service
 deploy/spur-web.npm.service
+deploy/spur-mcp.npm.service
+deploy/spur-mcp-tunnel.npm.service
 dist/cli.js
+dist/mcp.js
+dist/mcp-gateway.js
+dist/mcp-http.js
+dist/mcp-results.js
+dist/mcp-tunnel.js
+dist/installed-instance.js
+dist/build-identity.js
+dist/daemon-contracts.js
 web/dist-server/web-server.js
 spur.yaml.reference
 skills/spur/SKILL.md

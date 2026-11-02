@@ -240,6 +240,7 @@ describe("createWorktree", () => {
     mockGitFailure("missing local main");
     mockGitFailure("missing local branch");
     mockGitFailure("missing remote branch");
+    mockGitSuccess(); // rev-parse base
     mockGitSuccess();
 
     await createWorktree(baseInput);
@@ -274,6 +275,7 @@ describe("createWorktree", () => {
     mockGitSuccess(" M DIRTY.txt");
     mockGitFailure("missing local branch");
     mockGitFailure("missing remote branch");
+    mockGitSuccess(); // rev-parse base
     mockGitSuccess();
 
     await createWorktree(baseInput);
@@ -304,6 +306,7 @@ describe("createWorktree", () => {
     mockGitSuccess();
     mockGitFailure("missing local branch");
     mockGitFailure("missing remote branch");
+    mockGitSuccess(); // rev-parse base
     mockGitSuccess();
 
     await createWorktree(baseInput);
@@ -402,6 +405,36 @@ describe("createWorktree", () => {
     ).toBe(false);
   });
 
+  it("fails fast naming the project and defaultBranch when the base ref does not resolve", async () => {
+    mockWorkspaceLockResolution();
+    mockGitSuccess(); // worktree prune
+    mockGitSuccess(); // remote get-url origin
+    mockGitSuccess(); // fetch origin
+    mockGitFailure("missing remote renamed"); // refExists origin/renamed
+    mockGitFailure("missing local branch"); // refExists heads/api-1
+    mockGitFailure("missing remote branch"); // refExists origin/api-1
+    mockGitFailure("bad object renamed^{commit}", 1); // rev-parse --verify base
+
+    await expect(createWorktree({ ...baseInput, defaultBranch: "renamed" })).rejects.toThrow(
+      /defaultBranch "renamed" does not exist in \/repo\/api \(project api\).*--worktree <branch>.*projects\.api\.defaultBranch/,
+    );
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["rev-parse", "--verify", "--quiet", "renamed^{commit}"],
+      gitProbeOpts("/repo/api"),
+    );
+    expect(
+      mockExecFileAsync.mock.calls.some(
+        (call) =>
+          call[0] === "git" &&
+          Array.isArray(call[1]) &&
+          call[1][0] === "worktree" &&
+          call[1][1] === "add",
+      ),
+    ).toBe(false);
+  });
+
   it("skips the origin fetch and resolves the local branch when the repo has no origin remote", async () => {
     mockWorkspaceLockResolution();
     mockGitSuccess(); // worktree prune
@@ -409,6 +442,7 @@ describe("createWorktree", () => {
     mockGitFailure("missing remote main"); // refExists origin/main
     mockGitFailure("missing local branch"); // refExists heads/api-1
     mockGitFailure("missing remote branch"); // refExists origin/api-1
+    mockGitSuccess(); // rev-parse base
     mockGitSuccess(); // worktree add
 
     await createWorktree(baseInput);

@@ -111,7 +111,13 @@ function actorValid(actor: unknown): actor is TodoActor {
       nonblank(value.sessionId)
     );
   }
-  if (value.kind === "human") return value.origin === "cli" || value.origin === "ui";
+  if (value.kind === "human")
+    return (
+      value.origin === "cli" ||
+      value.origin === "ui" ||
+      value.origin === "mcp" ||
+      value.origin === "telegram"
+    );
   return (
     value.kind === "system" &&
     (value.source === "spawn" || value.source === "legacy_migration" || value.source === "handoff")

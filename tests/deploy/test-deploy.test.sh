@@ -27,6 +27,10 @@ bad() {
 
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
+RUNTIME_ENTRIES=()
+while IFS= read -r entry || [[ -n "$entry" ]]; do
+  case "$entry" in dist/*) RUNTIME_ENTRIES+=("$entry") ;; esac
+done <"$repo_root/v2/required-package-files.txt"
 
 make_tarball() {
   local name="$1"
@@ -53,7 +57,9 @@ make_large_tarball() {
   mkdir -p "$pkg_dir/deploy" "$pkg_dir/dist" "$pkg_dir/web/dist-server" "$pkg_dir/filler" "$pkg_dir/skills/spur"
   touch "$pkg_dir/deploy/spur-daemon.npm.service"
   touch "$pkg_dir/deploy/spur-web.npm.service"
-  touch "$pkg_dir/dist/cli.js"
+  touch "$pkg_dir/deploy/spur-mcp.npm.service"
+  touch "$pkg_dir/deploy/spur-mcp-tunnel.npm.service"
+  for entry in "${RUNTIME_ENTRIES[@]}"; do touch "$pkg_dir/$entry"; done
   touch "$pkg_dir/web/dist-server/web-server.js"
   touch "$pkg_dir/spur.yaml.reference"
   touch "$pkg_dir/skills/spur/SKILL.md"
@@ -84,7 +90,9 @@ fi
 tgz_a1="$(make_tarball a1 \
   deploy/spur-daemon.npm.service \
   deploy/spur-web.npm.service \
-  dist/cli.js)"
+  deploy/spur-mcp.npm.service \
+  deploy/spur-mcp-tunnel.npm.service \
+  "${RUNTIME_ENTRIES[@]}")"
 
 set +e
 out_a1="$(bash "$verify_script" "$tgz_a1" 2>&1)"
@@ -103,7 +111,9 @@ fi
 tgz_a1b="$(make_tarball a1b \
   deploy/spur-daemon.npm.service \
   deploy/spur-web.npm.service \
-  dist/cli.js \
+  deploy/spur-mcp.npm.service \
+  deploy/spur-mcp-tunnel.npm.service \
+  "${RUNTIME_ENTRIES[@]}" \
   "web/dist-server/web-server.js.map")"
 
 set +e
@@ -123,7 +133,9 @@ fi
 tgz_a2="$(make_tarball a2 \
   deploy/spur-daemon.npm.service \
   deploy/spur-web.npm.service \
-  dist/cli.js \
+  deploy/spur-mcp.npm.service \
+  deploy/spur-mcp-tunnel.npm.service \
+  "${RUNTIME_ENTRIES[@]}" \
   web/dist-server/web-server.js \
   spur.yaml.reference \
   skills/spur/SKILL.md)"
@@ -225,6 +237,17 @@ elif echo "$c_out" | grep -q "onboarding-test: refusing production npm prefix"; 
   ok "c-slash: onboarding-test.sh refuses trailing-slash production prefix"
 else
   bad "c-slash: refusal marker line not found (got: $c_out)"
+fi
+
+cp -R "$WORK_DIR/a2" "$WORK_DIR/a-mcp"
+rm "$WORK_DIR/a-mcp/package/dist/mcp-http.js"
+tar -czf "$WORK_DIR/a-mcp.tgz" -C "$WORK_DIR/a-mcp" package
+if out_mcp="$(bash "$verify_script" "$WORK_DIR/a-mcp.tgz" 2>&1)"; then
+  bad "a-mcp: incomplete MCP runtime accepted"
+elif [[ "$out_mcp" == *"dist/mcp-http.js"* ]]; then
+  ok "a-mcp: shared package manifest rejects missing MCP HTTP module"
+else
+  bad "a-mcp: missing MCP module not identified"
 fi
 
 echo ""

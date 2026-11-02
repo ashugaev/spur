@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
 
 const getJsonMock = vi.fn();
 const postJsonMock = vi.fn();
@@ -36,7 +37,8 @@ vi.mock("../../src/io.js", () => ({
   writeStdout: writeStdoutMock,
 }));
 
-vi.mock("../../src/runtime-tmux.js", () => ({
+vi.mock("../../src/runtime-tmux.js", async (importOriginal) => ({
+  TmuxProbeUnknownError: (await importOriginal<typeof RuntimeTmuxModule>()).TmuxProbeUnknownError,
   setTmuxSocketName: setTmuxSocketNameMock,
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   withTmuxSocketArgs: vi.fn((args: string[]) => args),
@@ -56,15 +58,15 @@ const sessionView = {
     {
       name: "web",
       alive: true,
-      ports: [{ id: "http", env: "SPUR_RESERVED_PORT_WEB", port: 4100 }],
+      ports: [{ id: "http", env: "SPUR_RESERVED_PORT_WEB", port: 4100, listening: true }],
       tmuxSession: "api-1--web",
     },
     {
       name: "echo",
       alive: false,
       ports: [
-        { id: "ws", env: "SPUR_RESERVED_PORT_ECHO_WS", port: 8931 },
-        { id: "http", env: "SPUR_RESERVED_PORT_ECHO", port: 8930 },
+        { id: "ws", env: "SPUR_RESERVED_PORT_ECHO_WS", port: 8931, listening: null },
+        { id: "http", env: "SPUR_RESERVED_PORT_ECHO", port: 8930, listening: false },
       ],
       tmuxSession: "api-1--echo",
     },
@@ -101,9 +103,9 @@ describe("sidecar ports CLI", () => {
     await parseCli(["sidecar", "ports", "--session", "api-1"]);
 
     expect(writeStdoutMock.mock.calls.map((call) => call[0] as string)).toEqual([
-      "echo\thttp\tSPUR_RESERVED_PORT_ECHO\t8930\tdead",
-      "echo\tws\tSPUR_RESERVED_PORT_ECHO_WS\t8931\tdead",
-      "web\thttp\tSPUR_RESERVED_PORT_WEB\t4100\talive",
+      "echo\thttp\tSPUR_RESERVED_PORT_ECHO\t8930\tdead\tnot-listening",
+      "echo\tws\tSPUR_RESERVED_PORT_ECHO_WS\t8931\tdead\tunknown",
+      "web\thttp\tSPUR_RESERVED_PORT_WEB\t4100\talive\tlistening",
     ]);
   });
 
@@ -123,6 +125,28 @@ describe("sidecar ports CLI", () => {
     expect(writeStdoutMock).toHaveBeenCalledWith("[]");
   });
 
+  it("reports unknown listener state from an older daemon in text and JSON", async () => {
+    getJsonMock.mockResolvedValue({
+      id: "api-1",
+      sidecars: [
+        {
+          name: "web",
+          alive: true,
+          ports: [{ id: "http", env: "WEB_PORT", port: 4100 }],
+          tmuxSession: "api-1--web",
+        },
+      ],
+    });
+
+    await parseCli(["sidecar", "ports", "--session", "api-1"]);
+    expect(writeStdoutMock).toHaveBeenLastCalledWith("web\thttp\tWEB_PORT\t4100\talive\tunknown");
+
+    await parseCli(["sidecar", "ports", "--session", "api-1", "--json"]);
+    expect(JSON.parse(writeStdoutMock.mock.lastCall?.[0] as string)).toEqual([
+      { sidecar: "web", id: "http", env: "WEB_PORT", port: 4100, alive: true, listening: null },
+    ]);
+  });
+
   it("prints sidecar/id/env/port/alive objects in --json mode", async () => {
     getJsonMock.mockResolvedValue(sessionView);
 
@@ -131,15 +155,30 @@ describe("sidecar ports CLI", () => {
     expect(writeStdoutMock).toHaveBeenCalledWith(
       JSON.stringify(
         [
-          { sidecar: "echo", id: "http", env: "SPUR_RESERVED_PORT_ECHO", port: 8930, alive: false },
+          {
+            sidecar: "echo",
+            id: "http",
+            env: "SPUR_RESERVED_PORT_ECHO",
+            port: 8930,
+            alive: false,
+            listening: false,
+          },
           {
             sidecar: "echo",
             id: "ws",
             env: "SPUR_RESERVED_PORT_ECHO_WS",
             port: 8931,
             alive: false,
+            listening: null,
           },
-          { sidecar: "web", id: "http", env: "SPUR_RESERVED_PORT_WEB", port: 4100, alive: true },
+          {
+            sidecar: "web",
+            id: "http",
+            env: "SPUR_RESERVED_PORT_WEB",
+            port: 4100,
+            alive: true,
+            listening: true,
+          },
         ],
         null,
         2,
@@ -153,7 +192,7 @@ describe("sidecar ports CLI", () => {
     await parseCli(["sidecar", "ports", "--session", "api-1", "--name", "web"]);
 
     expect(writeStdoutMock.mock.calls.map((call) => call[0] as string)).toEqual([
-      "web\thttp\tSPUR_RESERVED_PORT_WEB\t4100\talive",
+      "web\thttp\tSPUR_RESERVED_PORT_WEB\t4100\talive\tlistening",
     ]);
   });
 
@@ -192,7 +231,7 @@ describe("sidecar ports CLI", () => {
         {
           name: "daemon",
           alive: true,
-          ports: [{ id: "http", env: "SPUR_RESERVED_PORT_DAEMON", port: 4100 }],
+          ports: [{ id: "http", env: "SPUR_RESERVED_PORT_DAEMON", port: 4100, listening: true }],
           tmuxSession: "api-1--daemon",
         },
       ],
@@ -202,7 +241,7 @@ describe("sidecar ports CLI", () => {
     await parseCli(["sidecar", "ports", "--session", "api-2"]);
 
     expect(writeStdoutMock).toHaveBeenCalledWith(
-      "daemon\thttp\tSPUR_RESERVED_PORT_DAEMON\t4100\talive",
+      "daemon\thttp\tSPUR_RESERVED_PORT_DAEMON\t4100\talive\tlistening",
     );
   });
 });

@@ -10,6 +10,7 @@ service_home="${MAIN_DEPLOY_SERVICE_HOME:-$HOME}"
 # Command seams. Defaults match prod behavior; tests override them with stubs.
 CURL="${SPUR_DEPLOY_CURL:-curl}"
 SS="${SPUR_DEPLOY_SS:-sudo ss}"
+NODE="${SPUR_DEPLOY_NODE:-node}"
 LOCKFILE="${SPUR_DEPLOY_LOCKFILE:-$HOME/.spur/main-deploy.lock}"
 # Default matches deploy/spur-web.service: ExecStart runs `pnpm ui:start`,
 # which is `pnpm --dir packages/web start` -> serves $deploy_root/packages/web/.next.
@@ -19,6 +20,11 @@ LOCKFILE="${SPUR_DEPLOY_LOCKFILE:-$HOME/.spur/main-deploy.lock}"
 web_next_dir="${SPUR_DEPLOY_WEB_NEXT_DIR:-$deploy_root/packages/web/.next}"
 daemon_env_file="${MAIN_DEPLOY_DAEMON_ENV_FILE:-/etc/spur/daemon.env}"
 systemd_unit_dir="${MAIN_DEPLOY_SYSTEMD_DIR:-/etc/systemd/system}"
+tunnel_env_file="${MAIN_DEPLOY_MCP_TUNNEL_ENV_FILE:-/etc/spur/mcp-tunnel.env}"
+required_units=(spur-daemon.service spur-web.service spur-mcp.service)
+[[ ! -f "$tunnel_env_file" ]] || required_units+=(spur-mcp-tunnel.service)
+selected_config=""
+daemon_port=""
 
 # Refuse on a host served by the npm-package user units. This script owns the
 # SOURCE deploy: it installs system-scope units and kill_rogue_daemon_on_port
@@ -39,8 +45,8 @@ Update an npm host with:
   spur update
 
 To migrate this host to a source deploy, remove the npm units first:
-  systemctl --user disable --now spur-daemon.service spur-web.service
-  rm $service_home/.config/systemd/user/spur-daemon.service $service_home/.config/systemd/user/spur-web.service
+  systemctl --user disable --now spur-daemon.service spur-web.service spur-mcp.service spur-mcp-tunnel.service
+  rm $service_home/.config/systemd/user/spur-{daemon,web,mcp,mcp-tunnel}.service
 EOF
   exit 1
 fi
@@ -68,6 +74,7 @@ systemctl_cmd() {
 # hold the lock mid-build with web deliberately stopped — starting it there
 # would serve a half-written .next.
 web_restore_armed=false
+mcp_restore_units=()
 arm_web_restore() { web_restore_armed=true; }
 
 # Set by web_chunks_consistent; false means the body fetch failed so
@@ -95,6 +102,11 @@ restore_web_on_exit() {
     systemctl_cmd start spur-web.service \
       || echo "main:deploy WARNING: could not start spur-web on exit" >&2
   fi
+  for unit in "${mcp_restore_units[@]}"; do
+    if ! systemctl_cmd is-active --quiet "$unit"; then
+      systemctl_cmd start "$unit" || echo "main:deploy WARNING: could not restore $unit" >&2
+    fi
+  done
   exit "$rc"
 }
 trap restore_web_on_exit EXIT
@@ -102,7 +114,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 listener_pid_on_daemon_port() {
-  local port=4310
+  local port="${daemon_port:?selected daemon port is required}"
   local match pid
   match=$($SS -tlnpH "sport = :$port" 2>/dev/null \
     | grep -oE 'pid=[0-9]+' | head -n1) || true
@@ -170,8 +182,22 @@ wait_for_port_release() {
 }
 
 services_are_active() {
-  systemctl_cmd is-active --quiet spur-daemon.service
-  systemctl_cmd is-active --quiet spur-web.service
+  for unit in "${required_units[@]}"; do
+    systemctl_cmd is-active --quiet "$unit" || return 1
+  done
+}
+
+mcp_is_healthy() {
+  sudo -u "$service_user" env HOME="$service_home" SPUR_CONFIG="$selected_config" SPUR_MCP_TUNNEL_ENV_FILE="$tunnel_env_file" "$NODE" --input-type=module - "$deploy_root" <<'NODE'
+import { pathToFileURL } from 'node:url';
+const root = process.argv[2];
+const { createRealUpdateDeps } = await import(pathToFileURL(`${root}/v2/dist/update.js`));
+const { makeTargets } = await import(pathToFileURL(`${root}/v2/dist/update-health.js`));
+const deps = createRealUpdateDeps(`${root}/v2/dist/cli.js`);
+const targets = makeTargets({ daemon: deps.readDaemonPort(), web: deps.readWebPort(), mcp: deps.readMcpPort() });
+const results = await Promise.all(deps.requiredServices().filter(id => id !== 'web').map(id => deps.probe(targets[id])));
+process.exitCode = results.every(result => result.ok) ? 0 : 1;
+NODE
 }
 
 web_build_exists() {
@@ -179,7 +205,7 @@ web_build_exists() {
 }
 
 web_is_healthy() {
-  services_are_active && web_build_exists && web_is_serving && web_chunks_consistent
+  services_are_active && web_build_exists && web_is_serving && web_chunks_consistent && mcp_is_healthy
 }
 
 # Poll for the web terminal actually serving on :3012. Returns 0 when a listener
@@ -337,8 +363,43 @@ print_build_id_mismatch_diagnostic() {
 # the deploy lock so two runs can never interleave a stop-after-start.
 restart_and_verify() {
   kill_rogue_daemon_on_port
-  systemctl_cmd restart spur-daemon.service spur-web.service
+  systemctl_cmd enable "${required_units[@]}"
+  systemctl_cmd restart "${required_units[@]}"
   verify_and_heal
+  for _ in $(seq 1 60); do
+    services_are_active && mcp_is_healthy && return 0
+    sleep 1
+  done
+  echo "main:deploy FATAL: MCP or daemon identity/readiness failed" >&2
+  return 1
+}
+
+select_instance_config() {
+  selected_config="$(HOME="$service_home" "$NODE" --input-type=module - select-instance "$deploy_root" "$service_home" "$service_user" "$daemon_env_file" "$systemd_unit_dir" <<'NODE'
+import { pathToFileURL } from 'node:url';
+const [root, home, serviceUser, daemonEnvFile, unitDir] = process.argv.slice(3);
+const { resolveInstallationConfig } = await import(pathToFileURL(`${root}/v2/dist/installed-instance.js`));
+process.stdout.write(resolveInstallationConfig({ home, workingDirectory: root, scope: 'system',
+  daemonEnvFile, daemonUnitPath: `${unitDir}/spur-daemon.service`, configModulePath: `${root}/v2/dist/config.js`, serviceUser }));
+NODE
+)" || { echo "main:deploy selected instance configuration failed" >&2; return 1; }
+  [[ -n "$selected_config" ]] || return 1
+  local selection
+  selection="$(sudo -u "$service_user" env HOME="$service_home" "$NODE" --input-type=module - prepare-instance "$deploy_root" "$selected_config" <<'NODE'
+import { pathToFileURL } from 'node:url';
+const [root, path] = process.argv.slice(3);
+const { prepareInstallationConfig } = await import(pathToFileURL(`${root}/v2/dist/installed-instance.js`));
+const config = prepareInstallationConfig(path, 3012);
+if (!Number.isInteger(config.server.port) || config.server.port < 1 || config.server.port > 65535) throw new Error('Invalid persistent daemon port');
+process.stdout.write(`${config.configPath}\n${config.server.port}`);
+NODE
+)" || return 1
+  local lines
+  mapfile -t lines <<<"$selection"
+  selected_config="${lines[0]:-}"
+  daemon_port="${lines[1]:-}"
+  [[ -n "$selected_config" && "$daemon_port" =~ ^[0-9]+$ ]] || return 1
+  export SPUR_CONFIG="$selected_config"
 }
 
 # Install deploy/*.service with deploy root and service account placeholders.
@@ -379,6 +440,13 @@ install_service_files() {
     content="${content//\{\{SPUR_ROOT\}\}/$root}"
     content="${content//\{\{SPUR_SERVICE_USER\}\}/$service_user}"
     content="${content//\{\{SPUR_SERVICE_HOME\}\}/$service_home}"
+    content="$("$NODE" --input-type=module -e '
+import { pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
+const [root, path, name] = process.argv.slice(1);
+const { renderPinnedUnit } = await import(pathToFileURL(`${root}/v2/dist/installed-instance.js`));
+process.stdout.write(renderPinnedUnit(readFileSync(0, "utf8"), path, name === "spur-web.service"));
+' "$root" "$selected_config" "$name" <<<"$content")"
 
     # Fail fast on unsubstituted placeholders. Writing a unit with literal
     # `{{...}}` would put systemd into a status=217/USER restart loop.
@@ -399,6 +467,15 @@ install_service_files() {
   if [[ "$SERVICES_CHANGED" == true ]]; then
     systemctl_cmd daemon-reload
   fi
+  if [[ ! -f "$tunnel_env_file" ]]; then
+    systemctl_cmd disable --now spur-mcp-tunnel.service
+  fi
+  sudo -u "$service_user" env HOME="$service_home" "$NODE" --input-type=module - record-instance "$root" "$selected_config" "$service_home" <<'NODE'
+import { pathToFileURL } from 'node:url';
+const [root, path, home] = process.argv.slice(3);
+const { writeInstalledInstance } = await import(pathToFileURL(`${root}/v2/dist/installed-instance.js`));
+writeInstalledInstance(path, home);
+NODE
 }
 
 print_cli_install_hint() {
@@ -465,7 +542,23 @@ if [[ -f "$deployed_sha_file" ]]; then
   deployed_head="$(<"$deployed_sha_file")"
 fi
 
-if [[ "$deployed_head" == "$remote_head" ]]; then
+runtime_files_exist() {
+  local manifest="$deploy_root/v2/required-package-files.txt"
+  [[ -f "$manifest" ]] || return 1
+  local entry found=false
+  while IFS= read -r entry || [[ -n "$entry" ]]; do
+    case "$entry" in
+      dist/*)
+        found=true
+        [[ -f "$deploy_root/v2/$entry" ]] || return 1
+        ;;
+    esac
+  done <"$manifest"
+  [[ "$found" == true ]]
+}
+
+if [[ "$deployed_head" == "$remote_head" ]] && runtime_files_exist; then
+  select_instance_config
   install_service_files "$deploy_root"
   if [[ "$SERVICES_CHANGED" == true ]]; then
     echo "Service files updated — restarting"
@@ -492,10 +585,21 @@ if systemctl_cmd is-active --quiet spur-web.service; then
   arm_web_restore
   systemctl_cmd stop spur-web.service
 fi
+for unit in spur-mcp-tunnel.service spur-mcp.service; do
+  if systemctl_cmd is-active --quiet "$unit"; then
+    mcp_restore_units+=("$unit")
+    systemctl_cmd stop "$unit"
+  fi
+done
 pnpm -C "$deploy_root" install --frozen-lockfile
 # The build never restarts a daemon on its own (SPUR_BUILD_RESTART is unset
 # here); this deploy's own systemd restart below is the authoritative one.
-pnpm -C "$deploy_root" build
+SPUR_BUILD_RESTART=0 pnpm -C "$deploy_root" build
+if ! runtime_files_exist; then
+  echo "main:deploy FATAL: built runtime is incomplete; required-package-files.txt entries missing" >&2
+  exit 1
+fi
+select_instance_config
 install_service_files "$deploy_root"
 # Safe to restart: the systemd unit uses KillMode=process, so only the
 # daemon's node process is stopped. Tmux sessions and agents survive.

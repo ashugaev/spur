@@ -37,6 +37,7 @@ function session(overrides: Partial<SessionView>): SessionView {
 function runtimeInfo(overrides: Partial<RuntimeInfo> = {}): RuntimeInfo {
   return {
     lifecycleInstanceId: "test-instance",
+    buildId: "test-build",
     ok: true,
     apiVersion: SPUR_DAEMON_API_VERSION,
     version: "0.1.0",

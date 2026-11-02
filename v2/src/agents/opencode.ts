@@ -1,9 +1,11 @@
 import { execFile, spawn } from "node:child_process";
+import { statSync } from "node:fs";
 import { mkdtemp, open, readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { shellEscape } from "./shell-escape.js";
+import { createConcurrencyGate } from "../concurrency-gate.js";
 import { resolveTempDir } from "../temp-dir.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type { ProviderReasoningEffort, SidecarMcpBinding, TranscriptEntry } from "../types.js";
@@ -18,6 +20,16 @@ const execFileAsync = promisify(execFile);
 
 const OPENCODE_SESSION_LIST_TIMEOUT_MS = 20_000;
 const OPENCODE_EXPORT_TIMEOUT_MS = 30_000;
+
+// A cwd that is no longer a directory (session worktree removed) is dropped:
+// spawn would fail with ENOENT, and the CLI's output does not depend on it.
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
 
 // `opencode` truncates its own stdout at 128 KB when stdout is a pipe: it exits
 // before the pipe drains, so a piped `export` of any session with real history
@@ -34,7 +46,7 @@ export async function readOpenCodeJson(
     try {
       await new Promise<void>((resolve, reject) => {
         const child = spawn(opencodeCommand(), args, {
-          ...(options.cwd ? { cwd: options.cwd } : {}),
+          ...(options.cwd && isDirectory(options.cwd) ? { cwd: options.cwd } : {}),
           stdio: ["ignore", handle.fd, "ignore"],
         });
         const timer = setTimeout(() => {
@@ -171,6 +183,7 @@ export async function assertOpenCodeCompatibility(): Promise<void> {
     ({ stdout } = await execFileAsync(opencodeCommand(), ["--version"], {
       encoding: "utf8",
       timeout: 5_000,
+      killSignal: "SIGKILL",
     }));
   } catch (error) {
     throw new Error(`OpenCode ${MIN_OPENCODE_VERSION}+ is required`, { cause: error });
@@ -524,38 +537,19 @@ export function parseOpenCodeTokenUsage(value: unknown): ProviderTokenUsageSampl
 // mean of 4 and a peak of 17 concurrent exports, 3.7 GB resident at the peak.
 // The limit sits at that mean; over it, callers queue rather than fan out.
 export const OPENCODE_EXPORT_MAX_CONCURRENCY = 4;
-let openCodeExportActive = 0;
-const openCodeExportQueue: Array<() => void> = [];
+const openCodeExportGate = createConcurrencyGate(OPENCODE_EXPORT_MAX_CONCURRENCY);
 
-async function acquireOpenCodeExportSlot(): Promise<void> {
-  if (openCodeExportActive < OPENCODE_EXPORT_MAX_CONCURRENCY) {
-    openCodeExportActive += 1;
-    return;
-  }
-  await new Promise<void>((resolve) => openCodeExportQueue.push(resolve));
-}
-
-function releaseOpenCodeExportSlot(): void {
-  // Hand the slot straight to the next waiter; the count only drops when the
-  // queue is empty, so a burst never opens a gap above the limit.
-  const next = openCodeExportQueue.shift();
-  if (next) next();
-  // Clamped for the test seam only: it zeroes the counter under waiters that
-  // release afterwards. The export path releases exactly once, in `finally`,
-  // so nothing here is guarding against a double release in production.
-  else openCodeExportActive = Math.max(0, openCodeExportActive - 1);
-}
-
-export async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
-  await acquireOpenCodeExportSlot();
-  try {
+// `cwd` is the session's working directory: opencode bootstraps an instance
+// (config, project, plugins) for the directory it runs in, so an export run
+// from the daemon's own cwd would bootstrap against the wrong tree.
+export async function exportOpenCodeSession(sessionId: string, cwd: string): Promise<unknown> {
+  return openCodeExportGate.run(async () => {
     const stdout = await readOpenCodeJson(["export", sessionId], {
+      cwd,
       timeoutMs: OPENCODE_EXPORT_TIMEOUT_MS,
     });
     return JSON.parse(stdout) as unknown;
-  } finally {
-    releaseOpenCodeExportSlot();
-  }
+  });
 }
 
 export async function deleteOpenCodeSession(sessionId: string): Promise<void> {
@@ -662,20 +656,22 @@ export async function readOpenCodeLatestUserMessageFromDatabase(
 
 async function readOpenCodeLatestUserMessage(
   sessionId: string,
+  cwd: string,
 ): Promise<OpenCodeUserMessageMark | null> {
   try {
     return await readOpenCodeLatestUserMessageFromDatabase(sessionId);
   } catch {
-    return parseOpenCodeLatestUserMessage(await exportOpenCodeSession(sessionId));
+    return parseOpenCodeLatestUserMessage(await exportOpenCodeSession(sessionId, cwd));
   }
 }
 
 export async function captureOpenCodeSubmitBaseline(
-  sessionId?: string,
+  sessionId: string | undefined,
+  cwd: string,
 ): Promise<OpenCodeSubmitBaseline | null> {
   if (!sessionId) return null;
   try {
-    return { sessionId, after: await readOpenCodeLatestUserMessage(sessionId) };
+    return { sessionId, after: await readOpenCodeLatestUserMessage(sessionId, cwd) };
   } catch {
     return null;
   }
@@ -683,9 +679,10 @@ export async function captureOpenCodeSubmitBaseline(
 
 export async function scanOpenCodeForNewUserMessage(
   baseline: OpenCodeSubmitBaseline,
+  cwd: string,
 ): Promise<boolean> {
   try {
-    const latest = await readOpenCodeLatestUserMessage(baseline.sessionId);
+    const latest = await readOpenCodeLatestUserMessage(baseline.sessionId, cwd);
     return hasOpenCodeUserMessageAfter(baseline, latest);
   } catch {
     return false;
@@ -752,9 +749,10 @@ export function parseOpenCodeUserTextsAfter(
 export async function scanOpenCodeForTypedMessage(
   baseline: OpenCodeSubmitBaseline,
   typed: string,
+  cwd: string,
 ): Promise<boolean> {
   if (typed.trimStart().startsWith("/")) {
-    return scanOpenCodeForNewUserMessage(baseline);
+    return scanOpenCodeForNewUserMessage(baseline, cwd);
   }
   const target = normalizeTypedText(typed);
   try {
@@ -763,7 +761,7 @@ export async function scanOpenCodeForTypedMessage(
       texts = await readOpenCodeUserTextsAfterFromDatabase(baseline);
     } catch {
       texts = parseOpenCodeUserTextsAfter(
-        await exportOpenCodeSession(baseline.sessionId),
+        await exportOpenCodeSession(baseline.sessionId, cwd),
         baseline.after,
       );
     }
@@ -780,12 +778,13 @@ const OPENCODE_LAUNCH_MESSAGE_WAIT_MS = 60_000;
 
 export async function waitForOpenCodeLaunchMessage(
   sessionId: string,
+  cwd: string,
   timeoutMs = OPENCODE_LAUNCH_MESSAGE_WAIT_MS,
 ): Promise<boolean> {
   const baseline: OpenCodeSubmitBaseline = { sessionId, after: null };
   const deadline = Date.now() + timeoutMs;
   do {
-    if (await scanOpenCodeForNewUserMessage(baseline)) return true;
+    if (await scanOpenCodeForNewUserMessage(baseline, cwd)) return true;
     await new Promise((resolve) => setTimeout(resolve, 100));
   } while (Date.now() <= deadline);
   return false;
@@ -847,8 +846,7 @@ export function resetOpenCodeExportState(): void {
   // ends shifts the peak concurrency every later test observes, so clear them
   // here as well — resuming queued waiters rather than dropping them, so a
   // caller left mid-acquire cannot hang.
-  for (const resume of openCodeExportQueue.splice(0)) resume();
-  openCodeExportActive = 0;
+  openCodeExportGate.reset();
 }
 
 function shouldServeCachedOpenCodeState(
@@ -932,7 +930,8 @@ async function readOpenCodeStructuredStateFromDatabase(
 }
 
 export async function readOpenCodeStructuredState(
-  sessionId?: string,
+  sessionId: string | undefined,
+  cwd: string,
   activityAtMs?: number | null,
   force = false,
 ): Promise<OpenCodeStructuredRead> {
@@ -955,7 +954,7 @@ export async function readOpenCodeStructuredState(
       return await readOpenCodeStructuredStateFromDatabase(sessionId);
     } catch {
       try {
-        const exported = await exportOpenCodeSession(sessionId);
+        const exported = await exportOpenCodeSession(sessionId, cwd);
         const tokenUsage = parseOpenCodeTokenUsage(exported);
         return {
           state: parseOpenCodeState(exported),
@@ -1044,21 +1043,23 @@ export async function readOpenCodeConversationFromDatabase(
 }
 
 export async function readOpenCodeState(
-  sessionId?: string,
+  sessionId: string | undefined,
+  cwd: string,
   activityAtMs?: number | null,
 ): Promise<OpenCodeStructuredState | null> {
-  return (await readOpenCodeStructuredState(sessionId, activityAtMs)).state;
+  return (await readOpenCodeStructuredState(sessionId, cwd, activityAtMs)).state;
 }
 
 export async function readOpenCodeConversation(
-  sessionId?: string,
+  sessionId: string | undefined,
+  cwd: string,
 ): Promise<TranscriptEntry[] | null> {
   if (!sessionId) return null;
   try {
     return await readOpenCodeConversationFromDatabase(sessionId);
   } catch {
     try {
-      return parseOpenCodeExport(await exportOpenCodeSession(sessionId));
+      return parseOpenCodeExport(await exportOpenCodeSession(sessionId, cwd));
     } catch {
       return null;
     }

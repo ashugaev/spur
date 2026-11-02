@@ -4,7 +4,7 @@ import { redactAutoPingHandles } from "./auto-ping.js";
 import { join } from "node:path";
 import { iterArchivedThenLive, iterLiveLines, parseJsonLine, tryRotate } from "./jsonl-log-io.js";
 
-export type UserActionOrigin = "cli" | "ui" | "unknown";
+export type UserActionOrigin = "cli" | "ui" | "mcp" | "unknown";
 
 export interface UserActionRecord {
   ts: string;

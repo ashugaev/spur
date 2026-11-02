@@ -58,6 +58,37 @@ describe("planSidecarReap: decision table", () => {
     expect(plan.reap).toEqual([]);
   });
 
+  it.each([
+    { overrides: { ownerExists: false }, reason: "owner_missing" },
+    { overrides: { worktreeExists: false }, reason: "worktree_missing" },
+    { overrides: { workspaceRunning: false }, reason: "workspace_not_running" },
+    { overrides: { lastActivityAtMs: NOW_MS - 200 * 60_000 }, reason: "idle_ttl" },
+  ] satisfies { overrides: Partial<SidecarReapCandidate>; reason: SidecarReapReason }[])(
+    "row 6: retained error with workspaceRuntime dead falls through to $reason",
+    ({ overrides, reason }) => {
+      const plan = planOne({
+        ...overrides,
+        workspaceRetainedError: true,
+        workspaceRuntime: "dead",
+      });
+      expect(plan.reap[0]?.reason).toBe(reason);
+      expect(plan.keep).toEqual([]);
+    },
+  );
+
+  it.each(["live", "unknown", undefined] as const)(
+    "row 6: retained error keeps when workspaceRuntime is %s",
+    (workspaceRuntime) => {
+      const plan = planOne({
+        workspaceRetainedError: true,
+        ...(workspaceRuntime ? { workspaceRuntime } : {}),
+        lastActivityAtMs: NOW_MS - 200 * 60_000,
+      });
+      expect(plan.keep[0]?.reason).toBe("retained_error");
+      expect(plan.reap).toEqual([]);
+    },
+  );
+
   it("row 1: config.enabled === false -> keep disabled, regardless of everything else", () => {
     const plan = planOne(
       { ownerExists: false, connections: "none", lastActivityAtMs: null },

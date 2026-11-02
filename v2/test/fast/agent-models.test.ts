@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -38,10 +38,17 @@ import {
   parseOpenCodeVerboseModelsOutput,
   resolveAgentReasoningEffort,
   AgentReasoningEffortError,
+  AgentModelError,
+  validateCodexModel,
 } from "../../src/agents/models.js";
 import type { ProviderReasoningEffort } from "../../src/types.js";
 
+let openCodeBinSeq = 0;
+
 beforeEach(() => {
+  // OpenCode discovery is cached per command; a fresh command per test keeps
+  // tests that mock different catalogs from sharing a cache entry.
+  process.env["SPUR_OPENCODE_BIN"] = `opencode-model-test-${++openCodeBinSeq}`;
   execFileMock.mockReset();
   readOpenCodeJsonMock.mockReset();
   claudeCapabilitiesMock.mockReset().mockResolvedValue([
@@ -628,7 +635,7 @@ describe("parseOpenCodeModelsOutput", () => {
   });
 
   it("rejects an explicit model absent from the discovered catalog", async () => {
-    process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test";
+    process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-absent";
     readOpenCodeJsonMock.mockResolvedValue('openai/gpt-5\n{"id":"gpt-5","providerID":"openai"}\n');
 
     await expect(validateOpenCodeModel("openai/missing")).rejects.toThrow(
@@ -637,7 +644,7 @@ describe("parseOpenCodeModelsOutput", () => {
   });
 
   it("accepts an explicit model present in the discovered catalog", async () => {
-    process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test";
+    process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-present";
     readOpenCodeJsonMock.mockResolvedValue('openai/gpt-5\n{"id":"gpt-5","providerID":"openai"}\n');
 
     await expect(validateOpenCodeModel("openai/gpt-5")).resolves.toBe("openai/gpt-5");
@@ -666,4 +673,174 @@ describe("parseOpenCodeModelsOutput", () => {
       "not available",
     );
   });
+
+  describe("discovery cache", () => {
+    const stdout = 'provider/plain\n{"id":"plain","providerID":"provider"}\n';
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("serves sequential calls within the TTL from one launch", async () => {
+      process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-cache-seq";
+      readOpenCodeJsonMock.mockResolvedValue(stdout);
+
+      await listAgentModels("opencode");
+      await listAgentModels("opencode");
+      await validateOpenCodeModel("provider/plain");
+
+      expect(readOpenCodeJsonMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("dedupes concurrent calls onto one launch", async () => {
+      process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-cache-concurrent";
+      let resolveJson!: (value: string) => void;
+      readOpenCodeJsonMock.mockImplementation(
+        () => new Promise<string>((resolve) => (resolveJson = resolve)),
+      );
+
+      const first = listAgentModels("opencode");
+      const second = validateOpenCodeModel("provider/plain");
+      await Promise.resolve();
+      expect(readOpenCodeJsonMock).toHaveBeenCalledTimes(1);
+      resolveJson(stdout);
+      await expect(first).resolves.toHaveLength(1);
+      await expect(second).resolves.toBe("provider/plain");
+      expect(readOpenCodeJsonMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("relaunches after the TTL expires", async () => {
+      process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-cache-ttl";
+      vi.useFakeTimers({ toFake: ["Date"] });
+      readOpenCodeJsonMock.mockResolvedValue(stdout);
+
+      await listAgentModels("opencode");
+      vi.advanceTimersByTime(5 * 60 * 1000 - 1);
+      await listAgentModels("opencode");
+      expect(readOpenCodeJsonMock).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(2);
+      await listAgentModels("opencode");
+      expect(readOpenCodeJsonMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not cache a failed launch", async () => {
+      process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-cache-fail";
+      readOpenCodeJsonMock.mockRejectedValueOnce(new Error("models failed"));
+      await expect(listAgentModels("opencode")).rejects.toThrow();
+
+      readOpenCodeJsonMock.mockResolvedValue(stdout);
+      await expect(listAgentModels("opencode")).resolves.toHaveLength(1);
+      expect(readOpenCodeJsonMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not cache an empty catalog", async () => {
+      process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-cache-empty";
+      readOpenCodeJsonMock.mockResolvedValueOnce("");
+      await expect(listAgentModels("opencode")).resolves.toEqual([]);
+
+      readOpenCodeJsonMock.mockResolvedValue(stdout);
+      await expect(listAgentModels("opencode")).resolves.toHaveLength(1);
+      expect(readOpenCodeJsonMock).toHaveBeenCalledTimes(2);
+    });
+  });
+});
+
+describe("validateCodexModel", () => {
+  const originalHome = process.env["HOME"];
+  const cache = JSON.stringify({
+    models: [
+      { slug: "gpt-5", visibility: "list" },
+      { slug: "secret", visibility: "hidden" },
+    ],
+  });
+
+  async function setup(config?: string, cacheText: string | null = cache): Promise<string> {
+    const home = await mkdtemp(join(tmpdir(), "spur-codex-home-"));
+    const codexHome = join(home, "cache");
+    await mkdir(codexHome);
+    if (cacheText !== null) await writeFile(join(codexHome, "models_cache.json"), cacheText);
+    if (config !== undefined) {
+      await mkdir(join(home, ".codex"));
+      await writeFile(join(home, ".codex", "config.toml"), config);
+    }
+    process.env["HOME"] = home;
+    return codexHome;
+  }
+
+  afterEach(() => {
+    process.env["HOME"] = originalHome;
+  });
+
+  it.each(["gpt-5", "secret"])("accepts cached slug %s", async (slug) => {
+    const dir = await setup();
+    await expect(validateCodexModel(slug, dir)).resolves.toBe(slug);
+  });
+
+  it("rejects an absent slug with a 400 error listing available slugs", async () => {
+    const dir = await setup();
+    const error: unknown = await validateCodexModel("auto", dir).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(AgentModelError);
+    expect((error as AgentModelError).statusCode).toBe(400);
+    expect((error as AgentModelError).message).toBe(
+      'Codex model "auto" is not available; available: gpt-5, secret',
+    );
+  });
+
+  it.each([
+    ["missing cache", null],
+    ["malformed cache", "{broken"],
+    ["empty cache", JSON.stringify({ models: [] })],
+  ])("passes through for %s", async (_label, cacheText) => {
+    const dir = await setup(undefined, cacheText);
+    await expect(validateCodexModel("auto", dir)).resolves.toBe("auto");
+  });
+
+  it.each([
+    ["double-quoted azure", 'model_provider = "azure"\n'],
+    ["single-quoted azure", "model_provider = 'azure'\n"],
+    ["top-level profile", 'profile = "x"\n'],
+  ])("passes through when config.toml has %s", async (_label, config) => {
+    const dir = await setup(config);
+    await expect(validateCodexModel("auto", dir)).resolves.toBe("auto");
+  });
+
+  it.each([
+    ["double-quoted openai", 'model_provider = "openai"\n'],
+    ["single-quoted openai", "model_provider = 'openai'\n"],
+    ["table-scoped provider", '[profiles.x]\nmodel_provider = "azure"\n'],
+    ["comment only", '# model_provider = "azure"\n'],
+  ])("still validates when config.toml has %s", async (_label, config) => {
+    const dir = await setup(config);
+    await expect(validateCodexModel("auto", dir)).rejects.toBeInstanceOf(AgentModelError);
+  });
+
+  it("validates when config.toml is absent", async () => {
+    const dir = await setup();
+    await expect(validateCodexModel("auto", dir, [])).rejects.toBeInstanceOf(AgentModelError);
+  });
+
+  it.each([
+    [["--oss"]],
+    [["--local-provider", "ollama"]],
+    [["-p", "work"]],
+    [["--profile", "work"]],
+    [["--config", "profile=x"]],
+    [["--local-provider=ollama"]],
+    [["--profile=work"]],
+    [["-c", 'model_provider="azure"']],
+    [["--config=model_provider=azure"]],
+    [["-c=profile=work"]],
+    [["-cmodel_provider=azure"]],
+  ])("passes through for codexArgs %j", async (args) => {
+    const dir = await setup();
+    await expect(validateCodexModel("auto", dir, args)).resolves.toBe("auto");
+  });
+
+  it.each([[["-c", "model_reasoning_effort=high"]], [["--sandbox", "read-only"]]])(
+    "still validates for unrelated codexArgs %j",
+    async (args) => {
+      const dir = await setup();
+      await expect(validateCodexModel("auto", dir, args)).rejects.toBeInstanceOf(AgentModelError);
+    },
+  );
 });

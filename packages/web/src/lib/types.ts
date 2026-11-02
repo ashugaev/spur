@@ -59,6 +59,97 @@ export interface SpawnDefaultsResponse {
   reasoningEffort?: ProviderReasoningEffort | null;
 }
 
+// Mirrors the GET /projects/cron DTOs in v2/src/types.ts.
+export type CronDiskState = "same" | "changed" | "added" | "removed" | "unknown";
+
+export type CronOwnerState =
+  | { state: "loaded"; path: string; revision: string; changed: boolean }
+  | { state: "invalid"; path: string; revision: string; error: string }
+  | { state: "ambiguous"; failedFiles: CronFailedConfigFile[] }
+  | { state: "project_removed" };
+
+export interface CronFailedConfigFile {
+  file: string;
+  reason: "parse_error" | "unreadable";
+  message: string;
+}
+
+export type CronActionEventName =
+  | "trigger.spawn.completed"
+  | "trigger.spawn.failed"
+  | "trigger.spawn.suppressed"
+  | "trigger.send.ignored";
+
+export interface CronActionEvent {
+  at: string;
+  event: CronActionEventName;
+  sessionId: string | null;
+  message: string | null;
+}
+
+export interface CronSpawnBlockView {
+  prompt: string;
+  agent: AgentName | null;
+  model: string | null;
+  reasoningEffort: ProviderReasoningEffort | null;
+  mode: string | null;
+}
+
+export interface CronTriggerView {
+  triggerId: string;
+  event: string;
+  disk: CronDiskState;
+  action: { kind: "spawn"; blocks: CronSpawnBlockView[] } | { kind: "send"; prompt: string | null };
+  recentActions: CronActionEvent[];
+}
+
+export interface CronSourceView {
+  sourceId: string;
+  schedule: string;
+  runOnStart: boolean;
+  disk: CronDiskState;
+  recentTicks: string[];
+  triggers: CronTriggerView[];
+}
+
+export interface CronProjectView {
+  projectId: string;
+  projectName: string;
+  owner: CronOwnerState;
+  sources: CronSourceView[];
+}
+
+export interface CronJobsResponse {
+  projects: CronProjectView[];
+  eventsSince: string | null;
+}
+
+export interface CronJobEditBlock {
+  prompt: string;
+  agent: AgentName | null;
+  model: string | null;
+  reasoningEffort: ProviderReasoningEffort | null;
+}
+
+export interface CronJobEditUpdate {
+  revision: string;
+  schedule: string;
+  blocks: CronJobEditBlock[];
+}
+
+export interface CronJobEditDraft extends CronJobEditUpdate {
+  projectId: string;
+  sourceId: string;
+  triggerId: string;
+  ownerPath: string;
+  sourceTriggerIds: string[];
+}
+
+export interface CronJobEditResult extends CronJobEditDraft {
+  saved: true;
+  activation: "pending";
+}
+
 export interface SpurServiceView {
   serviceId: string;
   status: "running" | "stopped" | "errored";
@@ -120,6 +211,7 @@ export interface SpurSidecarPort {
   id: string;
   env: string;
   port: number;
+  listening: boolean | null;
 }
 
 // `tmuxSession` is the daemon's own name for the sidecar's pane — for a
@@ -404,6 +496,8 @@ export type SpurSidecarStopReport =
   | { outcome: "nothing-to-stop" };
 
 export type LifecycleAction = "complete" | "restore" | "reopen";
+/** Daemon lifecycle operation, or a client-only transition held until a read confirms it. */
+export type SessionTransition = LifecycleAction | "pause" | "kill";
 export type LifecyclePhase = "pending" | "succeeded" | "failed";
 export interface LifecycleOperation {
   operationId: string;
@@ -420,7 +514,7 @@ export interface SessionLifecycleSnapshot {
 
 export interface SpurSessionView {
   lifecycle: SessionLifecycleSnapshot;
-  lifecyclePending?: LifecycleAction;
+  lifecyclePending?: SessionTransition;
   id: string;
   project: string;
   agent: AgentName;
@@ -799,7 +893,7 @@ export interface DashboardRunningSidecar {
 
 export interface DashboardSession {
   lifecycle?: SessionLifecycleSnapshot;
-  lifecyclePending?: LifecycleAction;
+  lifecyclePending?: SessionTransition;
   id: string;
   projectId: string;
   projectName: string;
@@ -990,7 +1084,8 @@ export function isRestorable(session: DashboardSession): boolean {
   if (
     session.status === "paused" ||
     session.status === "stopped" ||
-    session.status === "budget_limited"
+    session.status === "budget_limited" ||
+    (session.status === "errored" && session.state === "error")
   )
     return true;
   return !session.runtimeAlive;
@@ -1015,6 +1110,17 @@ export function canRespawn(session: DashboardSession): boolean {
       session.status === "errored") &&
     !session.runtimeAlive
   );
+}
+
+export function canSwitchAuth(session: DashboardSession): boolean {
+  return (
+    session.agent === "claude" &&
+    (session.claudeAccounts?.some((account) => account.authenticated) ?? false)
+  );
+}
+
+export function canUseDeskCheckout(session: DashboardSession): boolean {
+  return Boolean(session.workspaceExists && session.worktreePath.trim());
 }
 
 export function canReopen(session: DashboardSession): boolean {
@@ -1078,7 +1184,9 @@ export interface ConversationResponse {
 }
 
 export function getAttentionLevel(session: DashboardSession): AttentionLevel {
-  if (session.lifecyclePending) return session.lifecyclePending === "complete" ? "done" : "working";
+  if (session.lifecyclePending === "complete" || session.lifecyclePending === "kill") return "done";
+  if (session.lifecyclePending === "restore" || session.lifecyclePending === "reopen")
+    return "working";
   if (session.status === "budget_limited") return "respond";
   if (isTerminalSession(session)) {
     return "done";
