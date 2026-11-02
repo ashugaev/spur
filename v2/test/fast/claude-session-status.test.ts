@@ -52,6 +52,19 @@ describe("classifyClaudeSessionStatus", () => {
 });
 
 describe("readClaudeSessionStatus", () => {
+  it("keeps the state timestamp separate from a later metadata update", async () => {
+    const sessionsDir = await makeSessionsDir();
+    await writeStatus(sessionsDir, "native.json", {
+      cwd: "/tmp/shared",
+      status: "busy",
+      statusUpdatedAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:05:00.000Z",
+    });
+    const result = await readClaudeSessionStatus("/tmp/shared", undefined, sessionsDir);
+    expect(result?.statusUpdatedMs).toBe(Date.parse("2026-03-18T10:00:00.000Z"));
+    expect(result?.updatedMs).toBe(Date.parse("2026-03-18T10:05:00.000Z"));
+  });
+
   it("reads the latest matching status by cwd", async () => {
     const sessionsDir = await makeSessionsDir();
     await writeStatus(sessionsDir, "old.json", {
@@ -75,6 +88,7 @@ describe("readClaudeSessionStatus", () => {
       state: "working",
       status: "busy",
       filePath: join(sessionsDir, "new.json"),
+      statusUpdatedMs: Date.parse("2026-03-18T10:05:00.000Z"),
     });
   });
 
@@ -160,7 +174,7 @@ describe("readClaudeSessionStatus", () => {
       readPpid,
     });
 
-    expect(result).toMatchObject({ state: "waiting", status: "idle", pid: 200 });
+    expect(result).toMatchObject({ state: "waiting", status: "idle", pid: 200, paneOwned: true });
   });
 
   it("returns null rather than a stranger's file when the pane owns nothing", async () => {
@@ -205,6 +219,8 @@ describe("readClaudeSessionStatus", () => {
     });
 
     expect(result).toMatchObject({ state: "waiting", status: "idle" });
+    expect(result?.paneOwned).toBeUndefined();
+    expect(result?.statusUpdatedMs).toBeUndefined();
   });
 
   it("keeps an own status file whose process just exited (unresolvable) over a confirmed stranger", async () => {
@@ -232,6 +248,7 @@ describe("readClaudeSessionStatus", () => {
     });
 
     expect(result).toMatchObject({ state: "waiting", status: "idle", pid: 200 });
+    expect(result?.paneOwned).toBeUndefined();
   });
 
   it("falls back to weaker keys when process ancestry is unreadable", async () => {
@@ -251,6 +268,7 @@ describe("readClaudeSessionStatus", () => {
     });
 
     expect(result).toMatchObject({ state: "working", status: "busy" });
+    expect(result?.paneOwned).toBeUndefined();
   });
 
   it("returns null for malformed JSON, non-matching sessions, and unknown status values", async () => {

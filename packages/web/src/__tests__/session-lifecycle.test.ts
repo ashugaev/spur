@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { readLifecycleSnapshot, SessionLifecycleConsumer } from "@/lib/session-lifecycle";
+import {
+  CLIENT_TRANSITION_HOLD_MS,
+  readLifecycleSnapshot,
+  SessionLifecycleConsumer,
+} from "@/lib/session-lifecycle";
 import type {
   LifecycleAction,
   LifecyclePhase,
@@ -258,5 +262,65 @@ describe("session lifecycle ownership", () => {
     expect(() => accept(consumer, [row(receipt("different-target", 1), { id: "two" })])).toThrow(
       "Invalid session lifecycle snapshot",
     );
+  });
+});
+
+describe("client-only pause and kill transitions", () => {
+  const running = () => row(undefined, { status: "running", state: "working", runtimeAlive: true });
+
+  it.each([
+    ["pause", "stopped", "stopped"],
+    ["kill", "killed", "killed"],
+  ] as const)("%s projects at once and holds through a stale poll", (action, status, state) => {
+    const consumer = new SessionLifecycleConsumer();
+    accept(consumer, [running()]);
+    consumer.reserve([running()], action);
+    accept(consumer, [running()]);
+    expect(consumer.pending("one")).toBe(action);
+    expect(consumer.project([running()])[0]).toMatchObject({
+      status,
+      state,
+      lifecyclePending: action,
+    });
+  });
+
+  it.each([
+    ["pause", "stopped"],
+    ["kill", "killed"],
+  ] as const)("%s settles when a read confirms the status", (action, status) => {
+    const consumer = new SessionLifecycleConsumer();
+    accept(consumer, [running()]);
+    consumer.reserve([running()], action);
+    const confirmed = row(undefined, { status, state: "stopped", runtimeAlive: false });
+    accept(consumer, [confirmed]);
+    expect(consumer.pending("one")).toBeNull();
+    expect(consumer.project([confirmed])[0]).toEqual(confirmed);
+  });
+
+  it("rolls back to server state when the request fails", () => {
+    const consumer = new SessionLifecycleConsumer();
+    accept(consumer, [running()]);
+    const owner = consumer.reserve([running()], "pause")!;
+    accept(consumer, [running()]);
+    consumer.releaseUnmatched(owner);
+    expect(consumer.pending("one")).toBeNull();
+    expect(consumer.project([running()])[0]).toEqual(running());
+  });
+
+  it("holds an accepted request through stale reconcile reads until the hold expires", () => {
+    let now = 1_000;
+    const consumer = new SessionLifecycleConsumer(() => now);
+    accept(consumer, [running()]);
+    const owner = consumer.reserve([running()], "pause")!;
+    consumer.hold(owner);
+    accept(consumer, [running()]);
+    consumer.releaseUnmatched(owner);
+    expect(consumer.pending("one")).toBe("pause");
+    expect(consumer.takeExpired()).toEqual([]);
+    now += CLIENT_TRANSITION_HOLD_MS;
+    accept(consumer, [running()]);
+    expect(consumer.pending("one")).toBeNull();
+    expect(consumer.takeExpired()).toEqual(["one"]);
+    expect(consumer.takeExpired()).toEqual([]);
   });
 });

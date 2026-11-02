@@ -35,6 +35,14 @@ export function agentExecutableCommand(agent: AgentName): string {
   return process.env[executable.env] || executable.command;
 }
 
+export function agentPaneChildFallbackEnabled(agent: AgentName): boolean {
+  const env = `SPUR_${agent.toUpperCase()}_PANE_CHILD_FALLBACK`;
+  const value = process.env[env];
+  if (value === undefined || value === "auto") return true;
+  if (value === "off") return false;
+  throw new Error(`Invalid ${env}: expected auto or off`);
+}
+
 // The canonical binary name(s) an agent's own process is known to run as,
 // independent of any SPUR_*_BIN override — the fixed point defaultProcessMatchers
 // appends to the launchCommand-derived basename so an exec'ing wrapper does not

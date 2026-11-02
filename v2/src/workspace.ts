@@ -565,11 +565,27 @@ export async function createWorktree(input: CreateWorktreeInput): Promise<string
       await git(input.repoPath, "worktree", "add", worktreePath, input.branch);
     } else {
       let baseRef = defaultBranchRef;
+      let baseIsDefaultBranch = true;
       if (input.branch !== input.defaultBranch) {
         const branchRef = await resolveFreshBranchRef(input.repoPath, input.branch);
         if (branchRef !== input.branch) {
           baseRef = branchRef;
+          baseIsDefaultBranch = false;
         }
+      }
+      if (
+        baseIsDefaultBranch &&
+        (await gitExitCode(
+          input.repoPath,
+          "rev-parse",
+          "--verify",
+          "--quiet",
+          `${baseRef}^{commit}`,
+        )) !== 0
+      ) {
+        throw new Error(
+          `defaultBranch "${input.defaultBranch}" does not exist in ${input.repoPath} (project ${input.projectId}): spawn with --worktree <branch>, or fix projects.${input.projectId}.defaultBranch (an isolated stand regenerates it on restart)`,
+        );
       }
       await git(input.repoPath, "worktree", "add", "-b", input.branch, worktreePath, baseRef);
     }

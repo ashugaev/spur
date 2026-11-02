@@ -885,7 +885,7 @@ describe("runSpawnPreflight", () => {
       "--auto",
       expect.stringContaining("Account for preflight tokens"),
     ]);
-    expect(mockExportOpenCodeSession).toHaveBeenCalledWith("session-sanitized");
+    expect(mockExportOpenCodeSession).toHaveBeenCalledWith("session-sanitized", PROJECT.path);
     expect(mockDeleteOpenCodeSession).toHaveBeenCalledWith("session-sanitized");
   });
 

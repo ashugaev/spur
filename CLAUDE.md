@@ -26,7 +26,7 @@ Autonomous workers invoked via the `Task` tool. Source: .claude/agents/
   developer             .claude/agents/developer.md             Implement, fix-after-review, fix-after-test
   reviewer              .claude/agents/reviewer.md              Changed-code/direct-caller review and named targeted checks
   designer              .claude/agents/designer.md              UI review for visible web changes
-  design-author         .claude/agents/design-author.md         Author and export a UI design before implementation (Claude Design); drive approval; hand a runtime-neutral design-spec to any coding agent
+  design-author         .claude/agents/design-author.md         Prepare proposed UI screenshot and design-spec for approval; any runtime
   tester                .claude/agents/tester.md                Validation gate at the cheapest crossing tier
   curator               .claude/agents/curator.md               Maintain the task's append-only structured memory and refresh the compact handoff between gates (Tier 2/3)
 
@@ -40,12 +40,12 @@ Capabilities loaded by description match. Source: .claude/skills/
   frontend-codestyle  .claude/skills/frontend-codestyle/SKILL.md  Task touches packages/web
   skill-writer        .claude/skills/skill-writer/SKILL.md        Edit SKILL.md, agent definitions, or orchestrator instructions
   context-audit       .claude/skills/context-audit/SKILL.md       Audit agent context surface: skills, rules, MCP config, tool budget
-  design              .claude/skills/design/SKILL.md              Producing or exporting a design via Claude Design, or defining the design export contract
+  design              .claude/skills/design/SKILL.md              Prepare proposed UI screenshots and approval handoff
   code-simplifier     .claude/skills/code-simplifier/SKILL.md     Reduce diff overhead before review
   github              .claude/skills/github/SKILL.md              Use gh CLI for PRs, issues, checks, or releases
   shallow-scoring     .claude/skills/shallow-scoring/SKILL.md     Route a task to a deliberation tier by ambiguity × blast radius
   self-verify         .claude/skills/self-verify/SKILL.md         Final close-out gate validation
-  telegram            .claude/skills/telegram/SKILL.md            Send Telegram notification or fetch updates
+  telegram            .claude/skills/telegram/SKILL.md            Send Telegram notification
   telegram-e2e        .claude/skills/telegram-e2e/SKILL.md        Live test the Telegram source on a test bot before close-out of any Telegram change
   pr-comments-fix     .claude/skills/pr-comments-fix/SKILL.md     Fix and resolve PR review comments
   docs                .claude/skills/docs/SKILL.md                Task touches published docs under docs/ or the root doc files

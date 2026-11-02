@@ -1,10 +1,29 @@
-import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import type * as fs from "node:fs";
+import { type Mode, type PathLike, existsSync } from "node:fs";
+import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Simulates a dir owned by another uid: chmod fails with EPERM, so it stays locked.
+const chmodState = vi.hoisted(() => ({ lockedPath: null as string | null }));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof fs>();
+  return {
+    ...actual,
+    chmodSync: (path: PathLike, mode: Mode) => {
+      if (chmodState.lockedPath !== null && String(path) === chmodState.lockedPath) {
+        throw Object.assign(new Error(`EPERM: operation not permitted, chmod '${path}'`), {
+          code: "EPERM",
+        });
+      }
+      actual.chmodSync(path, mode);
+    },
+  };
+});
 import {
   MAX_NESTED_ARTIFACT_ROWS,
   deleteSessionArtifactById,
+  deleteSessionArtifactsDir,
   deleteSessionArtifactsExcept,
   listSessionArtifacts,
   parseArtifactRelativePath,
@@ -383,6 +402,54 @@ describe("session artifact cleanup", () => {
     expect(existsSync(join(dir, "design", "design-spec.md"))).toBe(true);
     expect(existsSync(join(dir, "design", "scratch.md"))).toBe(false);
     expect(existsSync(join(dir, "notes"))).toBe(false);
+  });
+});
+
+describe.skipIf(process.getuid?.() === 0)("session artifact cleanup with read-only dirs", () => {
+  async function seedReadOnlyTree(dataDir: string, sessionId: string): Promise<string> {
+    const dir = sessionArtifactsDir(dataDir, sessionId);
+    const cache = join(dir, "handoff", "back", ".pytest_cache");
+    await mkdir(join(cache, "v"), { recursive: true });
+    await writeFile(join(cache, ".gitignore"), "*\n", "utf8");
+    await writeFile(join(cache, "v", "lastfailed"), "{}", "utf8");
+    await writeFile(join(dir, "shot.png"), "png", "utf8");
+    await chmod(join(cache, "v"), 0o500);
+    await chmod(cache, 0o555);
+    return dir;
+  }
+
+  it("removes the whole dir despite a read-only nested dir (EACCES on unlink)", async () => {
+    const dataDir = await newDataDir();
+    const dir = await seedReadOnlyTree(dataDir, "ro-1");
+
+    expect(() => deleteSessionArtifactsDir(dataDir, "ro-1")).not.toThrow();
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it("removes non-kept files under a read-only nested dir", async () => {
+    const dataDir = await newDataDir();
+    const dir = await seedReadOnlyTree(dataDir, "ro-2");
+
+    expect(() => deleteSessionArtifactsExcept(dataDir, "ro-2", ["shot.png"])).not.toThrow();
+    expect(existsSync(join(dir, "shot.png"))).toBe(true);
+    expect(existsSync(join(dir, "handoff"))).toBe(false);
+  });
+
+  it("removes what it can and does not throw when a locked dir cannot be chmod'd", async () => {
+    const dataDir = await newDataDir();
+    const dir = await seedReadOnlyTree(dataDir, "ro-3");
+    const cache = join(dir, "handoff", "back", ".pytest_cache");
+    await writeFile(join(dir, "handoff", "back", "conftest.py"), "x", "utf8");
+    chmodState.lockedPath = cache;
+    try {
+      expect(() => deleteSessionArtifactsDir(dataDir, "ro-3")).not.toThrow();
+    } finally {
+      chmodState.lockedPath = null;
+      await chmod(cache, 0o755);
+    }
+    expect(existsSync(join(dir, "shot.png"))).toBe(false);
+    expect(existsSync(join(dir, "handoff", "back", "conftest.py"))).toBe(false);
+    expect(existsSync(join(cache, ".gitignore"))).toBe(true);
   });
 });
 

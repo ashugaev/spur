@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -19,8 +19,12 @@ vi.mock("../../src/agents/claude.js", () => ({
 
 import {
   captureClaudeSubmitBaseline,
-  scanClaudeJsonlForMessage,
+  scanClaudeJsonlForMessage as scanClaudeJsonlForResult,
 } from "../../src/agents/claude-submit-ack.js";
+
+const scanClaudeJsonlForMessage = async (
+  ...args: Parameters<typeof scanClaudeJsonlForResult>
+): Promise<boolean> => (await scanClaudeJsonlForResult(...args)).found;
 
 const tempDirs: string[] = [];
 
@@ -252,6 +256,52 @@ describe("scanClaudeJsonlForMessage", () => {
     expect(found).toBe(true);
   });
 
+  it("reports the re-resolved file, not the baseline file, as scannedFile", async () => {
+    const baselineFile = await makeJsonl("baseline.jsonl", [
+      { type: "user", message: { role: "user", content: "old" } },
+    ]);
+    const rotatedFile = await makeJsonl("rotated.jsonl", [
+      { type: "user", message: { role: "user", content: "new" } },
+    ]);
+    findLatestSessionFileMock.mockResolvedValue(rotatedFile);
+
+    const hit = await scanClaudeJsonlForResult(
+      { file: baselineFile, size: 0 },
+      "new",
+      "/tmp/worktree",
+    );
+    expect(hit).toEqual({ found: true, scannedFile: rotatedFile });
+    const miss = await scanClaudeJsonlForResult(
+      { file: baselineFile, size: 0 },
+      "absent",
+      "/tmp/worktree",
+    );
+    expect(miss).toEqual({ found: false, scannedFile: rotatedFile });
+  });
+
+  it("reports the baseline file on a baseline hit and when no other file resolves", async () => {
+    const baselineFile = await makeJsonl("baseline.jsonl", [
+      { type: "user", message: { role: "user", content: "here" } },
+    ]);
+    const baseline = { file: baselineFile, size: 0 };
+
+    findLatestSessionFileMock.mockResolvedValue(null);
+    expect(await scanClaudeJsonlForResult(baseline, "here", "/tmp/worktree")).toEqual({
+      found: true,
+      scannedFile: baselineFile,
+    });
+    expect(await scanClaudeJsonlForResult(baseline, "absent", "/tmp/worktree")).toEqual({
+      found: false,
+      scannedFile: baselineFile,
+    });
+
+    findLatestSessionFileMock.mockResolvedValue(baselineFile);
+    expect(await scanClaudeJsonlForResult(baseline, "absent", "/tmp/worktree")).toEqual({
+      found: false,
+      scannedFile: baselineFile,
+    });
+  });
+
   it("resolves the pinned id when the constructed baseline file never appears", async () => {
     const realFile = await makeJsonl("pinned.jsonl", [
       { type: "user", message: { role: "user", content: "step one" } },
@@ -456,6 +506,23 @@ describe("scanClaudeJsonlForMessage", () => {
           await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, longText, "/tmp/worktree"),
         ).toBe(false);
       }
+    });
+
+    // Issue #1015: a resumed claude appends the wrapped restore prompt to the
+    // pinned transcript that already holds the wrapped launch prompt.
+    it("acks a wrapped restore prompt appended after a resumed transcript baseline", async () => {
+      const filePath = await makeJsonl("resume.jsonl", [record(wrapPaste(longText, "0a1b"))]);
+      sessionFileForIdMock.mockResolvedValue(filePath);
+      const baseline = { file: filePath, size: (await stat(filePath)).size };
+      expect(await scanClaudeJsonlForMessage(baseline, longText, "/tmp/worktree", "pinned")).toBe(
+        false,
+      );
+
+      await appendJsonl(filePath, [record(wrapPaste(longText, "2c3d"))]);
+
+      expect(await scanClaudeJsonlForMessage(baseline, longText, "/tmp/worktree", "pinned")).toBe(
+        true,
+      );
     });
 
     it("acks a send that is itself a pasted_content block, recorded raw", async () => {

@@ -445,10 +445,13 @@ function latestChecksByName(checks: GitHubRunCheck[]): GitHubRunCheck[] {
     .map(({ check }) => check);
 }
 
-export function summarizeFailingCi(checks: GitHubRunCheck[]): string | null {
+export function summarizeFailingCi(
+  checks: GitHubRunCheck[],
+  ignoreChecks: readonly string[] = [],
+): string | null {
   const failing = latestChecksByName(checks).filter((check) => {
     const state = normalizeReviewState(check.conclusion ?? check.state);
-    return FAILING_GITHUB_CI_STATES.has(state);
+    return FAILING_GITHUB_CI_STATES.has(state) && !ignoreChecks.includes(check.name);
   });
   return failing.length > 0
     ? `CI is failing: ${failing.map((check) => check.name).join(", ")}.`
@@ -512,7 +515,7 @@ const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName headRepos
   reviewThreads(last:100){nodes{${GITHUB_REVIEW_THREAD_FIELDS}} pageInfo{hasPreviousPage startCursor}}
   reviews(last:100){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}
   latestOpinionatedReviews(last:100){nodes{state author{login}} pageInfo{hasPreviousPage}}
-  comments(last:100){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}
+  comments(last:100){nodes{databaseId body author{__typename login}} pageInfo{hasPreviousPage startCursor}}
   reviewRequests(last:${GITHUB_REVIEW_REQUEST_COUNT}){nodes{requestedReviewer{... on User{login}}}}`;
 
 function reviewBatchTargetLimit(bound: boolean): number {
@@ -644,6 +647,9 @@ function issueCommentsFromPrNode(value: Record<string, unknown>): IssueComment[]
     const id = readNumber(raw.databaseId);
     const body = readString(raw.body);
     if (id === null || body === null) return [];
+    // GitHub App and Actions posts (`__typename: "Bot"`) are status chatter, not
+    // PR feedback; dropping them here keeps them from waking the bound session.
+    if (isRecord(raw.author) && raw.author.__typename === "Bot") return [];
     const author = isRecord(raw.author) ? readString(raw.author.login) : null;
     return [{ id, body, user: { login: author } }];
   });
@@ -1041,6 +1047,11 @@ async function refreshSignals(
   );
 }
 
+/** Renders a source `selfMarker` template for one session; `{session}` is the only placeholder. */
+export function renderSelfMarker(template: string, sessionId: string): string {
+  return template.replaceAll("{session}", sessionId);
+}
+
 function hasUnquotedMarker(body: string, marker: string): boolean {
   let spanStart = 0;
   let lineStart = 0;
@@ -1075,10 +1086,12 @@ function collectSignalsFromNode(
   sourceId: string,
   viewerLogin: string | null,
   selfMarker?: string,
+  ignoreChecks?: readonly string[],
 ): GitHubCollectedSignals {
   const ignored = readIgnoredGitHubFeedback(dataDir, projectId, sourceId, session.id, pr.number);
   const newlyIgnored: string[] = [];
-  const renderedMarker = selfMarker?.replaceAll("{session}", session.id);
+  const renderedMarker =
+    selfMarker !== undefined ? renderSelfMarker(selfMarker, session.id) : undefined;
   const isOwnFeedback = (key: string, body: string, login: string | null | undefined): boolean => {
     if (ignored.has(key)) return true;
     const own =
@@ -1122,7 +1135,7 @@ function collectSignalsFromNode(
   const ciText =
     normalizeReviewState(pr.statusCheckRollupState) === "SUCCESS"
       ? null
-      : summarizeFailingCi(checks);
+      : summarizeFailingCi(checks, ignoreChecks);
   const headRepository = isRecord(node.headRepository)
     ? readString(node.headRepository.nameWithOwner)
     : null;
@@ -1670,7 +1683,7 @@ function signalPageField(index: number, page: PullRequestSignalPage): string {
       ? `commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100,before:$before${index}){nodes{${GITHUB_CHECK_CONTEXT_FIELDS}} pageInfo{hasPreviousPage startCursor}}}}}}`
       : page.kind === "reviews"
         ? `reviews(last:100,before:$before${index}){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}`
-        : `comments(last:100,before:$before${index}){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}`;
+        : `comments(last:100,before:$before${index}){nodes{databaseId body author{__typename login}} pageInfo{hasPreviousPage startCursor}}`;
   return `s${index}:node(id:$id${index}){... on PullRequest{${connection}}}`;
 }
 
@@ -1769,6 +1782,7 @@ async function runReviewRepoBatch(
   maxTargets: number,
   expectedHeads: Map<string, Promise<PrRepoSlug | null>>,
   selfMarker?: string,
+  ignoreChecks?: readonly string[],
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
   const slug = targets[0]?.slug;
@@ -2021,6 +2035,7 @@ async function runReviewRepoBatch(
             sourceId,
             viewerLogin,
             selfMarker,
+            ignoreChecks,
           ),
         });
       } catch (error) {
@@ -2038,6 +2053,7 @@ export async function collectGitHubSignalsBatch(
   sourceId: string,
   maxTargets?: number,
   selfMarker?: string,
+  ignoreChecks?: readonly string[],
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
   const expectedHeads = new Map<string, Promise<PrRepoSlug | null>>();
@@ -2137,6 +2153,7 @@ export async function collectGitHubSignalsBatch(
             limit,
             expectedHeads,
             selfMarker,
+            ignoreChecks,
           ),
         );
         if (admission.status === "blocked") {

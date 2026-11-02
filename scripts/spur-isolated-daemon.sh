@@ -13,9 +13,20 @@ source "$SCRIPT_DIR/spur-sidecar-common.sh"
 # one node binary — see ensure_workspace_deps below, and the invariant this
 # guards in scripts/spur-sidecar-common.sh.
 ensure_node_ready
+NODE_BIN="$(command -v node)"
+
+ISOLATED_TELEGRAM="${SPUR_ISOLATED_TELEGRAM-test}"
+case "$ISOLATED_TELEGRAM" in
+  test|off) ;;
+  *) echo "SPUR_ISOLATED_TELEGRAM must be test or off" >&2; exit 1 ;;
+esac
 
 TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}"
 : "${SPUR_PROJECT:?SPUR_PROJECT not set}"
+case "${SPUR_ISOLATED_WITHOUT_TELEGRAM:-0}" in
+  0|1) ;;
+  *) echo "SPUR_ISOLATED_WITHOUT_TELEGRAM must be 0 or 1" >&2; exit 1 ;;
+esac
 
 PORT_START=${SPUR_SIDECAR_DAEMON_PORT_START:-4320}
 PORT_END=${SPUR_SIDECAR_DAEMON_PORT_END:-4399}
@@ -37,6 +48,8 @@ cleanup() {
   rm -rf "$CONFIG_DIR"
 }
 trap cleanup EXIT
+
+"$NODE_BIN" "$V2_DIR/bin/isolated-daemon-owner.mjs" preflight "$(realpath "$CONFIG_DIR")/owner.sock"
 
 # Reclaims stale spur-isolated-daemon.* dirs this same script leaks on every
 # successful start (the trailing `exec` at the bottom of this file replaces
@@ -131,7 +144,8 @@ prune_stale_config_dirs() {
   while IFS= read -r -d '' dir; do
     [[ "$dir" == "$CONFIG_DIR" ]] && continue
 
-    if printf '%s' "$ps_output" | grep -qF -- "$dir"; then
+    # Match in Bash: pipelines can SIGPIPE and large here-strings need temp files.
+    if [[ "$ps_output" == *"$dir"* ]]; then
       continue
     fi
 
@@ -170,7 +184,6 @@ export SPUR_ISOLATED_UI_ENDPOINT_FILE="$CONFIG_DIR/ui-endpoint.json"
 CLI_PATH="$V2_DIR/dist/cli.js"
 WRITE_CONFIG_PATH="$V2_DIR/bin/write-isolated-project-config.mjs"
 WRITE_INSTANCE_CONFIG_PATH="$V2_DIR/bin/write-isolated-instance-config.mjs"
-NODE_BIN="$(command -v node)"
 CURRENT_BRANCH="$(git -C "$CURRENT_WORKTREE" branch --show-current 2>/dev/null || true)"
 REQUIRED_BUILD_OUTPUTS=(
   "$CLI_PATH"
@@ -178,6 +191,7 @@ REQUIRED_BUILD_OUTPUTS=(
   "$V2_DIR/dist/isolated-project-config.js"
   "$V2_DIR/dist/isolated-telegram.js"
   "$V2_DIR/dist/isolated-web-endpoint.js"
+  "$V2_DIR/dist/isolated-daemon-owner.js"
 )
 BUILD_INPUT_DIRS=(
   "$V2_DIR/src"
@@ -191,6 +205,9 @@ WRITE_CONFIG_ARGS=(
 )
 if [[ -n "$CURRENT_BRANCH" ]]; then
   WRITE_CONFIG_ARGS+=(--branch "$CURRENT_BRANCH")
+fi
+if [[ "$ISOLATED_TELEGRAM" == off ]]; then
+  WRITE_CONFIG_ARGS+=(--without-telegram)
 fi
 
 ensure_v2_build() {
@@ -238,6 +255,36 @@ YAML
 cat > "$ISOLATED_WRAPPER" <<WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
+arguments=("\$@")
+command_index=0
+while [[ \$command_index -lt \$# ]]; do
+  case "\${arguments[command_index]}" in
+    --config) command_index=\$((command_index + 2)) ;;
+    --config=*|-h|--help|-V|--version|--) command_index=\$((command_index + 1)) ;;
+    *) break ;;
+  esac
+done
+if [[ "\${arguments[command_index]:-}" == daemon ]]; then
+  subcommand_index=\$((command_index + 1))
+  while [[ \$subcommand_index -lt \$# ]]; do
+    case "\${arguments[subcommand_index]}" in
+      --config) subcommand_index=\$((subcommand_index + 2)) ;;
+      --config=*|-h|--help|--) subcommand_index=\$((subcommand_index + 1)) ;;
+      *) break ;;
+    esac
+  done
+  if [[ ( "\${arguments[subcommand_index]:-}" == restart || "\${arguments[subcommand_index]:-}" == stop ) && !( \$command_index -eq 0 && \$subcommand_index -eq 1 ) ]]; then
+    echo "Invalid isolated daemon control arguments" >&2
+    exit 1
+  fi
+fi
+if [[ "\${1:-}" == daemon && ( "\${2:-}" == restart || "\${2:-}" == stop ) ]]; then
+  if [[ \$# -ne 2 && !( \$# -eq 3 && "\${3:-}" == --json ) ]]; then
+    echo "Invalid isolated daemon control arguments" >&2
+    exit 1
+  fi
+  exec "$NODE_BIN" "$V2_DIR/bin/isolated-daemon-owner.mjs" request "$CONFIG_DIR/config.yaml" "\${@:2}"
+fi
 mkdir -p "$CONFIG_DIR/data"
 registry_tmp="$CONFIG_DIR/data/config-registry.json.tmp.\$\$"
 cat > "\$registry_tmp" <<JSON
@@ -266,6 +313,9 @@ fi
   --output "$CONFIG_DIR/config.yaml"
 
 # Hold the bot lock across both execs for the daemon's lifetime.
+if [[ "${SPUR_ISOLATED_WITHOUT_TELEGRAM:-0}" == 1 ]]; then
+  WRITE_CONFIG_ARGS+=(--without-telegram)
+fi
 "$NODE_BIN" "$WRITE_CONFIG_PATH" "${WRITE_CONFIG_ARGS[@]}" \
   --telegram-lock-output "$CONFIG_DIR/telegram-lock"
 TELEGRAM_LOCK_PATH="$(<"$CONFIG_DIR/telegram-lock")"
@@ -278,21 +328,13 @@ if [[ -n "$TELEGRAM_LOCK_PATH" ]]; then
   fi
 fi
 
-# Advertise only final configs/lock outcome. This PID survives both execs.
-DAEMON_STARTTIME="$("$NODE_BIN" "$V2_DIR/bin/isolated-web-endpoint.mjs" --owner-starttime "$$")"
-cat > "$RUNTIME_TMP_FILE" <<ENVFILE
-SPUR_ISOLATED_CONFIG="$CONFIG_DIR/config.yaml"
-SPUR_ISOLATED_UI_ENDPOINT_FILE="$SPUR_ISOLATED_UI_ENDPOINT_FILE"
-SPUR_ISOLATED_DATA_DIR="$CONFIG_DIR/data"
-SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:$AGENT_PORT"
-SPUR_ISOLATED_TMUX_SOCKET_NAME="spur-$AGENT_PORT"
-SPUR_ISOLATED_PROJECT_CONFIG="$PROJECT_CONFIG_RUNTIME_PATH"
-SPUR_ISOLATED_SOURCE_WORKTREE="$CURRENT_WORKTREE"
-SPUR_ISOLATED_DAEMON_PID="$$"
-SPUR_ISOLATED_DAEMON_STARTTIME="$DAEMON_STARTTIME"
-ENVFILE
-chmod 600 "$RUNTIME_TMP_FILE"
-mv "$RUNTIME_TMP_FILE" "$RUNTIME_FILE"
+# Advertise only final configs/lock outcome through the retained owner.
+mkdir -p "$CONFIG_DIR/data"
+cat > "$CONFIG_DIR/data/config-registry.json" <<JSON
+{"configPaths":["$PROJECT_CONFIG_RUNTIME_PATH"]}
+JSON
 
 echo "Isolated daemon starting on port $AGENT_PORT"
-exec "$ISOLATED_WRAPPER" daemon start
+exec "$NODE_BIN" "$V2_DIR/bin/isolated-daemon-owner.mjs" serve \
+  "$CONFIG_DIR/config.yaml" "$CLI_PATH" "$RUNTIME_FILE" \
+  "$PROJECT_CONFIG_RUNTIME_PATH" "$CURRENT_WORKTREE"
