@@ -516,6 +516,11 @@ describe("session slots", () => {
       );
       return holder;
     };
+    // flock exits only after its bash child sees the go file, so exit means no loop is left behind.
+    const releaseHolder = async (holder: ChildProcess, go: string): Promise<void> => {
+      writeFileSync(go, "");
+      await waitFor(() => holder.exitCode !== null || holder.signalCode !== null, "holder exit");
+    };
     const setup = async (): Promise<{ toolDir: string; lock: string; go: string }> => {
       const dataDir = await createTempDir("spur-slots-lock-");
       tempDirs.push(dataDir);
@@ -556,9 +561,8 @@ describe("session slots", () => {
         expect(await exited).toBe(0);
         expect(stdout.trim()).not.toBe("");
       } finally {
-        writeFileSync(go, "");
-        holder.kill();
         wrapper.kill();
+        await releaseHolder(holder, go);
       }
     });
 
@@ -592,8 +596,7 @@ describe("session slots", () => {
 
         expect(result.status).toBe(0);
       } finally {
-        writeFileSync(go, "");
-        holder.kill();
+        await releaseHolder(holder, go);
       }
     });
 
