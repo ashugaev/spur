@@ -2803,6 +2803,7 @@ describe("SessionDetail voice input", () => {
   it(
     "keeps the loading row when an accepted older-page response batches with an older-page request",
     async () => {
+      vi.useFakeTimers();
       const acceptedIndex = 100;
       const acceptedUrl = "/api/sessions/api-a1/conversation?from=100";
       const olderUrl = `/api/sessions/api-a1/conversation?from=${acceptedIndex - 100}`;
@@ -2847,49 +2848,68 @@ describe("SessionDetail voice input", () => {
         throw new Error(`Unexpected fetch: ${url}`);
       });
 
-      render(<SessionDetail sessionId="api-a1" />);
-      await screen.findByText("Original prompt");
-      const scrollEl = screen.getByTestId("conversation-scroll");
-      Object.defineProperty(scrollEl, "scrollTop", {
-        configurable: true,
-        writable: true,
-        value: 0,
-      });
-      Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
-      Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
-      fireEvent.scroll(scrollEl);
-      await waitFor(() =>
-        expect(fetchMock).toHaveBeenCalledWith(acceptedUrl, expect.any(Object)),
-      );
-      await waitFor(() => expect(readTail).toHaveBeenCalledOnce(), { timeout: 6_000 });
+      try {
+        await act(async () => {
+          render(<SessionDetail sessionId="api-a1" />);
+        });
+        expect(screen.getByText("Original prompt")).toBeInTheDocument();
+        const scrollEl = screen.getByTestId("conversation-scroll");
+        Object.defineProperty(scrollEl, "scrollTop", {
+          configurable: true,
+          writable: true,
+          value: 0,
+        });
+        Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
+        Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
+        await act(async () => {
+          fireEvent.scroll(scrollEl);
+        });
+        expect(fetchMock).toHaveBeenCalledWith(acceptedUrl, expect.any(Object));
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expect(readTail).toHaveBeenCalledOnce();
 
-      // Accept the prior page before the scroll, but commit both state updates
-      // together. That response does not own the new older-page spinner.
-      await act(async () => {
-        resolveTail(
-          conversationFixture({ startIndex: acceptedIndex, totalEntries: 500, hasMore: true }),
-        );
-        await tailPayload;
-        fireEvent.scroll(scrollEl);
-      });
-      expect(fetchMock).toHaveBeenCalledWith(olderUrl, expect.any(Object));
-      expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+        // Accept the prior page before the scroll, but commit both state updates
+        // together. That response does not own the new older-page spinner.
+        await act(async () => {
+          resolveTail(
+            conversationFixture({ startIndex: acceptedIndex, totalEntries: 500, hasMore: true }),
+          );
+          await tailPayload;
+          fireEvent.scroll(scrollEl);
+        });
+        expect(fetchMock).toHaveBeenCalledWith(olderUrl, expect.any(Object));
+        expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
 
-      await act(async () => {
-        resolveOlder(
-          new Response(
-            JSON.stringify(
-              conversationFixture({
-                startIndex: acceptedIndex - 100,
-                totalEntries: 500,
-                hasMore: true,
-              }),
+        await act(async () => {
+          resolveOlder(
+            new Response(
+              JSON.stringify(
+                conversationFixture({
+                  startIndex: acceptedIndex - 100,
+                  totalEntries: 500,
+                  hasMore: true,
+                }),
+              ),
+              { status: 200 },
             ),
-            { status: 200 },
-          ),
-        );
-      });
-      expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+          );
+        });
+        expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+      } finally {
+        await act(async () => {
+          resolveTail(
+            conversationFixture({ startIndex: acceptedIndex, totalEntries: 500, hasMore: true }),
+          );
+          resolveOlder(
+            new Response(JSON.stringify(conversationFixture({ startIndex: acceptedIndex - 100 })), {
+              status: 200,
+            }),
+          );
+        });
+        vi.useRealTimers();
+      }
     },
   );
 
