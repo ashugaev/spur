@@ -26,6 +26,7 @@ for arg in "$@"; do
     ;;
   esac
 done
+printf '%s\n' "$port" >>"$state.ports"
 
 web_serving() {
   local last=""
@@ -44,11 +45,11 @@ web_serving() {
   return 0
 }
 
-if [[ "$port" == "4310" ]]; then
+if [[ "$port" == "${SPUR_DEPLOY_TEST_DAEMON_PORT:-4310}" ]]; then
   if [[ -n "${SPUR_DEPLOY_DAEMON_PORT_PID:-}" ]] && kill -0 "$SPUR_DEPLOY_DAEMON_PORT_PID" 2>/dev/null; then
-    echo "LISTEN 0 511 127.0.0.1:4310 0.0.0.0:* users:((\"node\",pid=$SPUR_DEPLOY_DAEMON_PORT_PID,fd=21))"
+    echo "LISTEN 0 511 127.0.0.1:$port 0.0.0.0:* users:((\"node\",pid=$SPUR_DEPLOY_DAEMON_PORT_PID,fd=21))"
   elif [[ -n "${SPUR_DEPLOY_DAEMON_REBIND_PID:-}" ]]; then
-    echo "LISTEN 0 511 127.0.0.1:4310 0.0.0.0:* users:((\"node\",pid=$SPUR_DEPLOY_DAEMON_REBIND_PID,fd=21))"
+    echo "LISTEN 0 511 127.0.0.1:$port 0.0.0.0:* users:((\"node\",pid=$SPUR_DEPLOY_DAEMON_REBIND_PID,fd=21))"
   fi
 fi
 

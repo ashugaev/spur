@@ -1,0 +1,10 @@
+{
+  "cursor": {
+    "sent": "Isolated MCP provider validation. Do not use manager workflow, subagents, GitHub, Telegram, or external services except your model provider. Use Spur ToDo helper: add an item for this check, then complete it. Run a shell command printf 'MCP_CURSOR_FOLLOWUP_TOOL\\n' to produce real tool output. Your final answer must be exactly MCP_CURSOR_FOLLOWUP. No source edits.",
+    "observed": "<timestamp>Saturday, Oct 17, 2026, 10:09 AM (UTC)</timestamp>\n<user_query>\nIsolated MCP provider validation. Do not use manager workflow, subagents, GitHub, Telegram, or external services except your model provider. Use Spur ToDo helper: add an item for this check, then complete it. Run a shell command printf 'MCP_CURSOR_FOLLOWUP_TOOL\\n' to produce real tool output. Your final answer must be exactly MCP_CURSOR_FOLLOWUP. No source edits.\n</user_query>"
+  },
+  "opencode": {
+    "sent": "Isolated MCP provider validation. Do not use manager workflow, subagents, GitHub, Telegram, or external services except your model provider. Use Spur ToDo helper: add an item for this check, then complete it. Run a shell command printf 'MCP_OPENCODE_FOLLOWUP_TOOL\\n' to produce real tool output. Your final answer must be exactly MCP_OPENCODE_FOLLOWUP. No source edits.",
+    "observed": "Isolated MCP provider validation. Do not use manager workflow, subagents, GitHub, Telegram, or external services except your model provider. Use Spur ToDo helper: add an item for this check, then complete it. Run a shell command printf 'MCP_OPENCODE_FOLLOWUP_TOOL\\n' to produce real tool output. Your final answer must be exactly MCP_OPENCODE_FOLLOWUP. No source edits. "
+  }
+}

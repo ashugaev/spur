@@ -1,6 +1,83 @@
 import { randomUUID } from "node:crypto";
 import type { LifecycleAction, LifecycleOperation, SessionLifecycleSnapshot } from "./types.js";
 
+const RESTORE_OPERATION_TIMEOUT_MS = 20 * 60_000;
+
+export class RestoreOperationError extends Error {
+  readonly statusCode: number;
+  readonly code: "restore_deadline" | "restore_cancelled";
+
+  constructor(deadline = false) {
+    super(deadline ? "Restore operation timed out" : "Restore operation cancelled");
+    this.name = "RestoreOperationError";
+    this.statusCode = deadline ? 504 : 499;
+    this.code = deadline ? "restore_deadline" : "restore_cancelled";
+  }
+}
+
+export interface RestoreOperationContext {
+  readonly signal: AbortSignal;
+  readonly deadlineAt: number;
+  assertActive(): void;
+  wait<T>(promise: Promise<T>): Promise<T>;
+}
+
+export function createRestoreOperation(
+  signal?: AbortSignal,
+  permission: () => boolean = () => true,
+): RestoreOperationContext & { dispose(): void } {
+  const controller = new AbortController();
+  const deadlineAt = Date.now() + RESTORE_OPERATION_TIMEOUT_MS;
+  const cancel = (): void => controller.abort(new RestoreOperationError());
+  const timer = setTimeout(
+    () => controller.abort(new RestoreOperationError(true)),
+    RESTORE_OPERATION_TIMEOUT_MS,
+  );
+  timer.unref();
+  signal?.addEventListener("abort", cancel, { once: true });
+  if (signal?.aborted) cancel();
+  const assertActive = (): void => {
+    if (controller.signal.aborted) throw controller.signal.reason;
+    if (!permission()) throw new RestoreOperationError();
+  };
+  return {
+    signal: controller.signal,
+    deadlineAt,
+    assertActive,
+    async wait<T>(promise: Promise<T>): Promise<T> {
+      try {
+        assertActive();
+      } catch (error) {
+        void promise.catch(() => undefined);
+        throw error;
+      }
+      return new Promise<T>((resolve, reject) => {
+        const abort = (): void => reject(controller.signal.reason);
+        controller.signal.addEventListener("abort", abort, { once: true });
+        promise.then(
+          (value) => {
+            controller.signal.removeEventListener("abort", abort);
+            try {
+              assertActive();
+              resolve(value);
+            } catch (error) {
+              reject(error);
+            }
+          },
+          (error: unknown) => {
+            controller.signal.removeEventListener("abort", abort);
+            reject(error);
+          },
+        );
+      });
+    },
+    dispose() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", cancel);
+    },
+  };
+}
+
 export class SessionLifecycleError extends Error {
   constructor(
     message: string,
@@ -47,6 +124,10 @@ export class SessionLifecycleRegister {
 
   snapshot(id: string): SessionLifecycleSnapshot {
     return this.entries.get(id) ?? { instanceId: this.instanceId, revision: 0, operation: null };
+  }
+
+  owns(owner: SessionLifecycleSnapshot): boolean {
+    return owner.operation?.targetIds.every((id) => this.entries.get(id) === owner) ?? false;
   }
 
   begin(

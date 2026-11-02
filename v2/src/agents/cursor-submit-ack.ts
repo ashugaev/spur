@@ -1,11 +1,16 @@
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
+import { open } from "node:fs/promises";
+import { basename } from "node:path";
 import { createInterface } from "node:readline";
+import { iterNativeJsonlLines } from "../jsonl-log-io.js";
 import {
   findCursorAckTranscriptFile,
   readCursorStableOffset,
   resolveCursorPinnedTranscriptPath,
 } from "../cursor-jsonl-state.js";
 import { findCursorSessionId } from "./cursor.js";
+import type { NativeUserObservation } from "./index.js";
 
 export interface CursorSubmitBaseline {
   file: string;
@@ -143,6 +148,9 @@ function extractUserMessageText(parsed: Record<string, unknown>): string | null 
 }
 
 const normalize = (s: string) => s.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+export function cursorNativeInputDigest(text: string): string {
+  return createHash("sha256").update(normalize(text)).digest("hex");
+}
 const SUBMIT_ACK_MATCH_PREFIX_LEN = 512;
 
 function submitAckMatchText(text: string): string {
@@ -166,30 +174,96 @@ function submitAckMatchText(text: string): string {
 async function scanFileForUserText(
   filePath: string,
   startOffset: number,
-  normalizedTarget: string,
+  normalizedTarget: string | null,
+  native?: {
+    sessionId: string;
+    bodyDigest: string;
+    matches: NativeUserObservation[];
+  },
 ): Promise<boolean> {
   try {
-    const input = createReadStream(filePath, { encoding: "utf-8", start: startOffset });
-    const reader = createInterface({ input, crlfDelay: Infinity });
+    if (native && startOffset > 0) {
+      const file = await open(filePath, "r");
+      try {
+        const boundary = Buffer.alloc(1);
+        const read = await file.read(boundary, 0, 1, startOffset - 1);
+        if (read.bytesRead !== 1 || boundary[0] !== 10) return false;
+      } finally {
+        await file.close();
+      }
+    }
+    const input = createReadStream(filePath, { start: startOffset });
+    let byteOffset = startOffset;
+    const reader = native ? null : createInterface({ input, crlfDelay: Infinity });
     try {
-      for await (const rawLine of reader) {
+      for await (const record of reader ?? iterNativeJsonlLines(input)) {
+        const rawLine = typeof record === "string" ? record : record.toString("utf8");
+        const rowOffset = byteOffset;
+        const rowBytes = typeof record === "string" ? Buffer.byteLength(record) : record.length;
+        byteOffset += rowBytes + 1;
         const trimmed = rawLine.trim();
         if (!trimmed) continue;
         const parsed = tryParseJson(trimmed);
         if (!parsed) continue;
         const text = extractUserMessageText(parsed);
-        if (text !== null && normalize(text).includes(normalizedTarget)) {
-          reader.close();
+        if (
+          native &&
+          text !== null &&
+          (parsed["type"] === undefined || parsed["type"] === "user") &&
+          parsed["isMeta"] !== true
+        ) {
+          const normalized = normalize(text);
+          const wrapped =
+            /^<timestamp>[^<]*<\/timestamp>\n<user_query>\n([\s\S]*)\n<\/user_query>$/.exec(
+              normalized,
+            );
+          const fullBody = wrapped?.[1] ?? normalized;
+          if (cursorNativeInputDigest(fullBody) === native.bodyDigest) {
+            native.matches.push({
+              nativeSessionId: native.sessionId,
+              source: filePath,
+              recordId: `bytes:${rowOffset}:${rowBytes}`,
+              recordDigest: createHash("sha256").update(record).digest("hex"),
+              bodyDigest: native.bodyDigest,
+            });
+          }
+        }
+        if (
+          normalizedTarget !== null &&
+          text !== null &&
+          normalize(text).includes(normalizedTarget)
+        ) {
+          reader?.close();
           return true;
         }
       }
     } finally {
-      reader.close();
+      reader?.close();
     }
   } catch {
+    if (native) native.matches.length = 0;
     return false;
   }
   return false;
+}
+
+export async function observeCursorNativeUsers(
+  baseline: CursorSubmitBaseline,
+  bodyDigest: string,
+  agentSessionId: string,
+): Promise<NativeUserObservation[]> {
+  const matches: NativeUserObservation[] = [];
+  const sources = new Map(baseline.rotationOffsets);
+  sources.set(baseline.file, baseline.size);
+  for (const [file, offset] of sources) {
+    if (basename(file) !== `${agentSessionId}.jsonl`) continue;
+    await scanFileForUserText(file, offset, null, {
+      sessionId: agentSessionId,
+      bodyDigest,
+      matches,
+    });
+  }
+  return matches;
 }
 
 export async function scanCursorJsonlForMessage(

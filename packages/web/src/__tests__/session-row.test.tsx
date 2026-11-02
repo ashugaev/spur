@@ -66,6 +66,30 @@ const onRestoreSession = vi.fn().mockResolvedValue(undefined);
 const onCompleteSession = vi.fn().mockResolvedValue(undefined);
 
 describe("SessionRow", () => {
+  it.each(["errored", "running"] as const)(
+    "offers Restore only for an exited agent, with status %s and a live pane",
+    async (status) => {
+      useSessionLinkPrInfoMock.mockReturnValue({ state: "none" });
+      render(
+        <SessionRow
+          session={makeSession({ status, state: "error", runtimeAlive: true })}
+          onCompleteSession={onCompleteSession}
+          onRestoreSession={onRestoreSession}
+        />,
+      );
+
+      const restore = screen.queryByRole("button", { name: "Restore session api-a1" });
+      if (status === "errored") {
+        expect(restore).toBeInTheDocument();
+        fireEvent.click(restore!);
+        await waitFor(() => expect(onRestoreSession).toHaveBeenCalledOnce());
+      } else {
+        expect(restore).not.toBeInTheDocument();
+        expect(onRestoreSession).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   it("links budget-limited sessions to their approval action", () => {
     useSessionLinkPrInfoMock.mockReturnValue({ state: "none" });
     render(

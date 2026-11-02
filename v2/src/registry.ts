@@ -10,6 +10,7 @@ import {
 import { basename, dirname, join, resolve, sep } from "node:path";
 import {
   expandHome,
+  carryProjectConfigSource,
   loadConfig,
   loadInstanceConfigReadOnly,
   loadProjectConfig,
@@ -98,6 +99,7 @@ function materializeProjectDefaults(config: AppConfig): AppConfig {
       ...project,
       defaultAgent: project.defaultAgent ?? config.defaultAgent,
     };
+    carryProjectConfigSource(project, projects[projectId]);
   }
   return {
     ...config,

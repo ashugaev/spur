@@ -13,15 +13,24 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  gitleaks-admission:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/ci-ready-admission.yml
+    with:
+      stage: gitleaks
+
   gitleaks:
     name: Scan for Secrets
     runs-on: self-hosted
+    needs: gitleaks-admission
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.gitleaks-admission.result == 'success') }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -34,9 +43,17 @@ jobs:
         # that pulls in unrelated stale branches and their commits.
         run: gitleaks detect --source . --log-opts=HEAD --redact --log-level warn
 
+  npm-audit-admission:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/ci-ready-admission.yml
+    with:
+      stage: npm-audit
+
   npm-audit:
     name: NPM Audit
     runs-on: self-hosted
+    needs: npm-audit-admission
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.npm-audit-admission.result == 'success') }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v5

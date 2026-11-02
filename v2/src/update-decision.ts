@@ -33,11 +33,14 @@ export function initialDecisionState(startMs: number): DecisionState {
 }
 
 function allHealthy(sample: PollSample): boolean {
-  return (["daemon", "web"] as const).every((id) => sample.health[id].ok);
+  return (
+    Object.values(sample.health).length > 0 &&
+    Object.values(sample.health).every((probe) => probe.ok)
+  );
 }
 
 function refusedThisSample(sample: PollSample): boolean {
-  return (["daemon", "web"] as const).some((id): boolean => probeRefused(sample.health[id]));
+  return Object.values(sample.health).some(probeRefused);
 }
 
 function probeRefused(probe: ProbeResult): boolean {
@@ -45,11 +48,11 @@ function probeRefused(probe: ProbeResult): boolean {
 }
 
 function anyUnitFailed(sample: PollSample): boolean {
-  return (["daemon", "web"] as const).some((id) => sample.units[id] === "failed");
+  return Object.values(sample.units).some((state) => state === "failed");
 }
 
 function anyUnitActivating(sample: PollSample): boolean {
-  return (["daemon", "web"] as const).some((id) => sample.units[id] === "activating");
+  return Object.values(sample.units).some((state) => state === "activating");
 }
 
 export interface EvaluateResult {

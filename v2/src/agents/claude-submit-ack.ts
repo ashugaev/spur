@@ -1,8 +1,11 @@
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { open, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { findLatestSessionFile, sessionFileForId, sessionFilePathForId } from "./claude.js";
 import { extractTextContent } from "../claude-jsonl-state.js";
+import { iterNativeJsonlLines } from "../jsonl-log-io.js";
+import type { NativeUserObservation } from "./index.js";
 
 export interface ClaudeSubmitBaseline {
   file: string;
@@ -119,39 +122,106 @@ function stripLeadingCtrlU(value: string): string {
 const normalize = (s: string) =>
   stripLeadingCtrlU(s).replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
 
+export function claudeNativeInputDigest(text: string): string {
+  return createHash("sha256").update(normalize(text)).digest("hex");
+}
+
 async function scanFileForDeliveredText(
   filePath: string,
   startOffset: number,
-  normalizedTarget: string,
+  normalizedTarget: string | null,
+  native?: {
+    sessionId: string;
+    bodyDigest: string;
+    matches: NativeUserObservation[];
+  },
 ): Promise<boolean> {
   try {
-    const input = createReadStream(filePath, { encoding: "utf-8", start: startOffset });
-    const reader = createInterface({ input, crlfDelay: Infinity });
+    if (native && startOffset > 0) {
+      const file = await open(filePath, "r");
+      try {
+        const boundary = Buffer.alloc(1);
+        const read = await file.read(boundary, 0, 1, startOffset - 1);
+        if (read.bytesRead !== 1 || boundary[0] !== 10) return false;
+      } finally {
+        await file.close();
+      }
+    }
+    const input = createReadStream(filePath, { start: startOffset });
+    let byteOffset = startOffset;
+    const reader = native ? null : createInterface({ input, crlfDelay: Infinity });
     try {
-      for await (const rawLine of reader) {
+      for await (const record of reader ?? iterNativeJsonlLines(input)) {
+        const rawLine = typeof record === "string" ? record : record.toString("utf8");
+        const rowOffset = byteOffset;
+        const rowBytes = typeof record === "string" ? Buffer.byteLength(record) : record.length;
+        byteOffset += rowBytes + 1;
         const trimmed = rawLine.trim();
         if (!trimmed) continue;
         const parsed = tryParseJson(trimmed);
         if (!parsed) continue;
         const text = extractDeliveredText(parsed);
+        if (
+          native &&
+          parsed["type"] === "user" &&
+          parsed["sessionId"] === native.sessionId &&
+          parsed["isMeta"] !== true &&
+          parsed["isCompactSummary"] !== true &&
+          parsed["isSidechain"] !== true
+        ) {
+          const userText = extractUserMessageText(parsed);
+          if (userText !== null) {
+            const bodyDigests = [userText, unwrapPastedContent(userText)].map(
+              claudeNativeInputDigest,
+            );
+            if (bodyDigests.includes(native.bodyDigest)) {
+              native.matches.push({
+                nativeSessionId: native.sessionId,
+                source: filePath,
+                recordId:
+                  typeof parsed["uuid"] === "string"
+                    ? parsed["uuid"]
+                    : `bytes:${rowOffset}:${rowBytes}`,
+                recordDigest: createHash("sha256").update(record).digest("hex"),
+                bodyDigest: native.bodyDigest,
+              });
+            }
+          }
+        }
         // Raw first: a short send that is itself a pasted_content block is
         // recorded as typed, so unwrapping alone would miss it.
         if (
+          normalizedTarget !== null &&
           text !== null &&
           (normalize(text) === normalizedTarget ||
             normalize(unwrapPastedContent(text)) === normalizedTarget)
         ) {
-          reader.close();
+          reader?.close();
           return true;
         }
       }
     } finally {
-      reader.close();
+      reader?.close();
     }
   } catch {
+    if (native) native.matches.length = 0;
     return false;
   }
   return false;
+}
+
+export async function observeClaudeNativeUsers(
+  baseline: ClaudeSubmitBaseline,
+  bodyDigest: string,
+  agentSessionId: string,
+): Promise<NativeUserObservation[]> {
+  const matches: NativeUserObservation[] = [];
+  await scanFileForDeliveredText(baseline.file, baseline.size, null, {
+    sessionId: agentSessionId,
+    bodyDigest,
+    matches,
+  });
+  return matches;
 }
 
 export async function scanClaudeJsonlForMessage(

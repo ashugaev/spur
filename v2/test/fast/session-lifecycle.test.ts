@@ -1,10 +1,53 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   parseLifecycleOperationId,
   SessionLifecycleRegister,
+  createRestoreOperation,
 } from "../../src/session-lifecycle.js";
 
 describe("session lifecycle register", () => {
+  it("revokes a cancelled restore wait and fences a replaced owner by identity", async () => {
+    const register = new SessionLifecycleRegister();
+    const owner = register.begin("restore", ["a"]);
+    const controller = new AbortController();
+    const operation = createRestoreOperation(controller.signal, () => register.owns(owner));
+    const wait = operation.wait(new Promise<void>(() => undefined));
+    controller.abort();
+    await expect(wait).rejects.toThrow("cancelled");
+    register.settle(
+      owner,
+      false,
+      () => "failed",
+      () => true,
+    );
+    const successor = register.begin("restore", ["a"]);
+    expect(() => operation.assertActive()).toThrow("cancelled");
+    register.settle(
+      owner,
+      true,
+      () => "succeeded",
+      () => true,
+    );
+    expect(register.owns(successor)).toBe(true);
+    operation.dispose();
+  });
+
+  it("times out a restore wait after the finite restore budget", async () => {
+    vi.useFakeTimers();
+    const operation = createRestoreOperation();
+    try {
+      const wait = operation.wait(new Promise<void>(() => undefined));
+      const rejection = expect(wait).rejects.toMatchObject({
+        statusCode: 504,
+        code: "restore_deadline",
+      });
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      await rejection;
+    } finally {
+      operation.dispose();
+      vi.useRealTimers();
+    }
+  });
   it("reserves an entire group atomically and retains the incumbent on overlap", () => {
     const register = new SessionLifecycleRegister();
     const owner = register.begin("complete", ["a", "b"], "one");

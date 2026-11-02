@@ -76,6 +76,8 @@ function makeFake(overrides: {
     },
     readWebPort: () => 4311,
     readDaemonPort: () => 4310,
+    readMcpPort: () => 4311,
+    requiredServices: () => ["daemon", "web", "mcp"],
     launch: () => {
       counts.launch += 1;
       return { kind: "process", pid: 1 };
