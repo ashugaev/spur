@@ -10,6 +10,7 @@ Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|
 ## Session tools and environment
 
 `$SPUR_SESSION_TOOL_DIR` on `PATH`: `spur`, `spur-slots`, `spur-sidecar`, `spur-self-destruct`, `spur-todo` (+ `spur-branch`, `spur-agent-state`, `spur-isolated` when applicable). Identity env: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SESSION_TOOL_DIR`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`. Commands: `$SPUR_SLOT_COMMAND`, `$SPUR_TODO_COMMAND` (+ `$SPUR_AGENT_STATE_COMMAND`, `$SPUR_AGENT_STATE_FILE` for hook-state agents). `$SPUR_CLOSEOUT_OWNER=1` marks the closeout owner; `0` skips git/PR closeout in the Stop hook. Launcher exports `$SPUR_ISOLATED_CONFIG`, `$SPUR_ISOLATED_UI_ENDPOINT_FILE`; private runtime-file fields `SPUR_ISOLATED_DAEMON_PID`, `SPUR_ISOLATED_DAEMON_STARTTIME` consumed by UI: current-generation readiness/receipt contract, UI wait budget 30s, `/info` timeout 1s, timeout exits nonzero; `v2/src/isolated-web-endpoint.ts`, `scripts/spur-isolated-ui.sh`.
+`spur` and `spur-sidecar` wrappers (and tools exec'ing `spur`) wait up to 90s while an update holds the install lock, then run; no wait when the lock file or `flock` is absent; `v2/src/session-slots.ts`.
 `$SPUR_AGENT_LAUNCH_ID`: opaque, fresh per agent process generation; agent config cannot override; never persist/reuse; additional live-pane orphan cleanup requires readable exact `$SPUR_SESSION` and attempted-launch markers; missing/mismatched/unreadable markers skipped, baseline matched descendants unchanged — `v2/src/agent-processes.ts`, `v2/src/session-service.ts`. Agent panes also get `DISABLE_AUTO_UPDATE=true` (suppresses the oh-my-zsh update prompt); agent `env` config overrides it.
 
 ## doctor
@@ -46,7 +47,7 @@ Read-only host/config/daemon health check; `--scaffold` writes local `spur.yaml`
 
 ## update
 
-`spur update [version] [--force]`: install/monitor/rollback in `v2/src/update.ts`; install/reinit failures clear the active attempt and retain `lastFailure` in `~/.spur/rollback-state.json`; daemon version/PID readiness in `v2/src/update-health.ts` (shared with `reinit`).
+`spur update [version] [--force]`: install/monitor/rollback in `v2/src/update.ts`; waits up to 5s for the install lock (rollback too), then fails `another Spur update is already running`; install/reinit failures clear the active attempt and retain `lastFailure` in `~/.spur/rollback-state.json`; daemon version/PID readiness in `v2/src/update-health.ts` (shared with `reinit`).
 
 ## spawn
 
