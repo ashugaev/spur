@@ -9,6 +9,24 @@ it("renders nothing without token data when hideEmpty", () => {
   expect(container).toBeEmptyDOMElement();
 });
 
+it("renders nothing with unknown-only preflight usage when hideEmpty", () => {
+  const { container } = render(
+    <TokenCount
+      session={{
+        status: "running",
+        preflightTokenUsageView: {
+          status: "unknown",
+          attemptCount: 0,
+          unknownAttemptCount: 0,
+          providerIterationCount: 0,
+        },
+      }}
+      hideEmpty
+    />,
+  );
+  expect(container).toBeEmptyDOMElement();
+});
+
 it("keeps the dash without token data by default", () => {
   render(<TokenCount session={{ status: "running" }} />);
   expect(screen.getByLabelText("Tokens: unavailable")).toHaveTextContent("—");
