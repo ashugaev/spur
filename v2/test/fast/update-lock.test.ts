@@ -1,4 +1,5 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -41,7 +42,25 @@ describe("acquireUpdateLock", () => {
     const home = await lockDir();
     releases.push(acquireUpdateLock(home));
 
-    expect(() => acquireUpdateLock(home)).toThrow("another Spur update is already running");
+    expect(() => acquireUpdateLock(home, 0.2)).toThrow("another Spur update is already running");
+  });
+
+  it("waits out a short shared hold instead of failing at once", async () => {
+    const home = await lockDir();
+    const lockPath = join(home, ".spur", "install-and-restart.lock");
+    mkdirSync(join(home, ".spur"), { recursive: true });
+    const holder = spawn("flock", ["-s", lockPath, "sleep", "0.5"], { stdio: "ignore" });
+    try {
+      const deadline = Date.now() + 10_000;
+      while (spawnSync("flock", ["-n", "-x", lockPath, "true"]).status === 0) {
+        if (Date.now() > deadline) throw new Error("holder never took the lock");
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+
+      releases.push(acquireUpdateLock(home, 5));
+    } finally {
+      holder.kill();
+    }
   });
 
   it("makes a bounded waiter give up instead of hanging", async () => {

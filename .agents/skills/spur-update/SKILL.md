@@ -14,7 +14,7 @@ LAYOUT
   units         spur-daemon.service, spur-web.service, user scope
   helper        <install>/scripts/install-and-restart.sh <version>, the script the UI version switch spawns
   helper log    ~/.spur/logs/install-and-restart.log, the helper's only output sink
-  lock          ~/.spur/install-and-restart.lock, shared with `spur update`, waits 600s
+  lock          ~/.spur/install-and-restart.lock, shared with `spur update`, waits 600s; session `spur`/`spur-sidecar` wrappers wait up to 90s on a shared hold before running
   update state  ~/.spur/rollback-state.json
   switch state  deploy-switch.json in the Spur data dir
 
