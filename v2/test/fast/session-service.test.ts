@@ -1149,10 +1149,19 @@ describe("SessionService", () => {
 
   beforeEach(async () => {
     testAccounts = [];
+    for (const agent of ["CLAUDE", "CODEX", "CURSOR", "OPENCODE"]) {
+      vi.stubEnv(`SPUR_${agent}_PANE_CHILD_FALLBACK`, undefined);
+    }
     await resetSessionServiceHarness(() => testAccounts);
   });
 
-  afterEach(disposeSessionServiceHarness);
+  afterEach(async () => {
+    try {
+      await disposeSessionServiceHarness();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 
   describe("config registry lifecycle", () => {
     it("boot worktree-internal filter keeps a worktree config out of the merged registry and its next persisted write", async () => {
@@ -22963,6 +22972,34 @@ describe("SessionService", () => {
     // foreign to the agent.
     for (const call of isProcessRunningInTmuxMock.mock.calls) {
       expect(call[2]).toEqual(expect.objectContaining({ paneChildFallback: true }));
+    }
+  });
+
+  it("disables pane-child liveness for a name-matchable wrapper when configured off", async () => {
+    vi.stubEnv("SPUR_CODEX_PANE_CHILD_FALLBACK", "off");
+    agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+    probeTmuxProcessMatchMock.mockImplementation(async (_session, _matchers, options) => ({
+      alive: options?.paneChildFallback === true,
+      matchedByName: false,
+      unresponsive: false,
+    }));
+    const service = await createDisposedSessionService();
+    try {
+      const snapshot = await sessionServiceInternals(service).readRuntimeSnapshot(
+        runningSession({ agent: "codex", launchCommand: "/tmp/codex-wrapper --model x" }),
+        { fresh: true },
+      );
+      expect(snapshot.processAlive).toBe(false);
+      expect(probeTmuxProcessMatchMock).toHaveBeenCalledWith("api-1", expect.any(Array), {
+        fresh: true,
+      });
+      expect(agentLaunchUsesForeignBinaryMock).toHaveBeenCalledWith(
+        "codex",
+        "/tmp/codex-wrapper --model x",
+      );
+    } finally {
+      service.dispose();
+      vi.unstubAllEnvs();
     }
   });
 
@@ -61769,8 +61806,16 @@ describe("SessionService", () => {
         return { status: "ok", panePid: null, paneDead: false };
       });
       isProcessRunningInTmuxMock.mockImplementation(
-        async (_tmuxSession: string, _matchers: string[], opts?: { fresh?: boolean }) => {
-          return opts?.fresh === true && capturePaneAgentProcessesMock.mock.calls.length > 0;
+        async (
+          _tmuxSession: string,
+          _matchers: string[],
+          opts?: { fresh?: boolean; paneChildFallback?: boolean },
+        ) => {
+          return (
+            opts?.fresh === true &&
+            opts?.paneChildFallback === true &&
+            capturePaneAgentProcessesMock.mock.calls.length > 0
+          );
         },
       );
 
@@ -61787,6 +61832,47 @@ describe("SessionService", () => {
           details: { tmuxSession: "api-1", agent: "claude" },
         }),
       );
+    });
+
+    it("keeps the foreign capture-blind check separate from pane-child opt-out", async () => {
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      createSessionStore(runningSession({ id: "api-1" }));
+      agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+      vi.stubEnv("SPUR_CLAUDE_PANE_CHILD_FALLBACK", "off");
+      let launched = false;
+      createTmuxSessionMock.mockImplementation(async () => {
+        launched = true;
+      });
+      let freshLookups = 0;
+      lookupTmuxPanePidMock.mockImplementation(async (_name, options) => {
+        if (options?.fresh) {
+          freshLookups += 1;
+          if (freshLookups === 1) return { status: "unavailable" };
+        }
+        return { status: "ok", panePid: null, paneDead: false };
+      });
+      isProcessRunningInTmuxMock.mockImplementation(
+        async (_session, _matchers, options) =>
+          launched ||
+          (options?.fresh === true &&
+            options?.paneChildFallback === true &&
+            capturePaneAgentProcessesMock.mock.calls.length > 0),
+      );
+
+      const service = await createDisposedSessionService();
+      try {
+        expect((await service.restore("api-1")).status).toBe("running");
+        expect(capturePaneAgentProcessesMock).toHaveBeenCalled();
+        expect(agentLaunchUsesForeignBinaryMock).toHaveBeenCalledWith(
+          "claude",
+          "claude --dangerously-skip-permissions",
+        );
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+      } finally {
+        service.dispose();
+        vi.unstubAllEnvs();
+      }
     });
 
     it("does not refuse a replacement when the ownership-blind probe reads dead — a genuinely exited foreign agent", async () => {

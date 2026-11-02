@@ -50,7 +50,7 @@ DOCS
   Commands, session tools and variables: docs/commands.md
   Reviewer publication evidence and trusted legacy receipt recovery: docs/commands.md
   Routes, bounded conversation pages, pre-flight batches, lifecycle receipts, restore cancellation: docs/daemon-api.md
-  Config, admission, trigger-spawn retry, reviewer App/consent: docs/configuration.md; events: docs/configuration.md#events
+  Config, admission, trigger-spawn retry, reviewer App/consent, pane-child fallback: docs/configuration.md; events: docs/configuration.md#events
   GitHub PR feedback ownership, quotes and post marker: docs/configuration.md#field-reference
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
