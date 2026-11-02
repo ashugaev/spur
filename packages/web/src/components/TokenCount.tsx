@@ -96,7 +96,7 @@ export function TokenCount({
   const reportedRows = rows.filter(
     ([, pre, current]) => pre !== undefined || current !== undefined,
   );
-  if (hideEmpty && !available && !measured) return null;
+  if (hideEmpty && !available && !(measured && measured.totalTokens > 0)) return null;
   return (
     <span
       className="relative inline-block tabular-nums"
