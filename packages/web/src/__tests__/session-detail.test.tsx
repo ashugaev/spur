@@ -2719,6 +2719,87 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("keeps the older-page loading row when a tail response commits in the scroll batch", async () => {
+    vi.useFakeTimers();
+    const tailPage = conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true });
+    let resolveTailBody!: (value: typeof tailPage) => void;
+    const tailBody = new Promise<typeof tailPage>((resolve) => {
+      resolveTailBody = resolve;
+    });
+    let resolveOlderPage!: (value: Response) => void;
+    const olderPage = new Promise<Response>((resolve) => {
+      resolveOlderPage = resolve;
+    });
+    let tailCalls = 0;
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation?from=100") return olderPage;
+      if (url === "/api/sessions/api-a1/conversation") {
+        tailCalls += 1;
+        const response = new Response(JSON.stringify(tailPage), { status: 200 });
+        if (tailCalls > 1) vi.spyOn(response, "json").mockReturnValue(tailBody);
+        return response;
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    try {
+      await act(async () => {
+        render(<SessionDetail sessionId="api-a1" />);
+      });
+      expect(screen.getByText("Original prompt")).toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_000);
+      });
+      expect(tailCalls).toBe(2);
+
+      const scrollEl = screen.getByTestId("conversation-scroll");
+      Object.defineProperty(scrollEl, "scrollTop", {
+        configurable: true,
+        writable: true,
+        value: 0,
+      });
+      Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
+      Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
+      await act(async () => {
+        // The old tail read has already subscribed to this body. Commit its
+        // response before scrolling, while React still batches both updates.
+        resolveTailBody(tailPage);
+        await tailBody;
+        fireEvent.scroll(scrollEl);
+      });
+
+      expect(
+        fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/conversation?from=100")),
+      ).toHaveLength(1);
+      expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+
+      await act(async () => {
+        resolveOlderPage(
+          new Response(
+            JSON.stringify(
+              conversationFixture({ startIndex: 100, totalEntries: 500, hasMore: true }),
+            ),
+            { status: 200 },
+          ),
+        );
+      });
+      expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+    } finally {
+      await act(async () => {
+        resolveTailBody(tailPage);
+        resolveOlderPage(new Response(JSON.stringify(tailPage), { status: 200 }));
+      });
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps the loading row when a tail poll issued before the scroll resolves mid-flight", async () => {
     // Regression: a no-from poll in flight when the user scrolls to the top
     // used to win the race and overwrite `conversation`, which cleared the
