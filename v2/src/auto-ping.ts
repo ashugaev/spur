@@ -468,7 +468,7 @@ export class AutoPingService {
     input: AutoPingMuteRequest,
   ): Promise<{ record: AutoPingMuteView; created: boolean }> {
     const { mode } = input;
-    if (mode !== "until_change" && mode !== "for" && mode !== "forever") {
+    if (!["until_change", "for", "forever"].includes(mode)) {
       throw new AutoPingError("invalid_request", 400, "Auto-ping mute mode is invalid");
     }
     const reason = input.reason?.trim();

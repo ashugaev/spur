@@ -297,7 +297,11 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
       case "merged":
       case "closed":
         return "until it changes";
-      default:
+      case "changes_requested":
+      case "ci_failed":
+      case "ready_for_review":
+      case "approved":
+      case "review_requested":
         return "until next commit";
     }
   }

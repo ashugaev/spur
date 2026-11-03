@@ -727,7 +727,7 @@ describe("automatic ping mute footer", () => {
     keyless.attachHandle(HANDLE);
     expect(keyless.muteGrant().untilChange).toBe(false);
     const lines = keyless.format().split("\n");
-    expect(lines.slice(-2).every((line) => /^  (for a while|forever) {3}/.test(line))).toBe(true);
+    expect(lines.slice(-2).every((line) => /^ {2}(for a while|forever) {3}/.test(line))).toBe(true);
     expect(keyless.format()).not.toContain("until next commit   ");
   });
 
