@@ -1,137 +1,23 @@
-# Base dir for projects created without an explicit path. Unset falls back to <dataDir>/projects.
-projectsRoot: ~/projects
-
 projects:
-  sp:
-    path: ~/projects/spur
-    defaultBranch: main
-    sessionPrefix: spur
+  probe:
+    path: /tmp/claude-1001/-home-alek--spur-worktrees-sp-spur-328b/8a317425-937b-4a3a-aac3-9b66c7d38882/scratchpad/fixture
+    defaultBranch: feature/conflict-probe-head
+    sessionPrefix: probe
     defaultAgent: claude
     defaultModels:
-      claude: sonnet
-      cursor: auto
-    symlinks:
-      - .env
-      - node_modules
-      - v2/node_modules
-    branchNaming:
-      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
-    workspaceAccess:
-      items:
-        - label: Cursor
-          kind: copy
-          value: "cursor --remote ssh-remote+${SPUR_SIDECAR_PUBLIC_HOST} ${worktreePathShell}"
-        - label: Web IDE
-          kind: link
-          value: "${SPUR_VSCODE_WEB_URL}/?folder=${worktreePathUrl}"
-    reasoningEffort:
-      claude: medium
-      codex: medium
-    codexArgs:
-      - -c
-      - 'service_tier="default"'
-    preflight: {}
-    sidecars:
-      voice-daemon:
-        command: ./scripts/telegram-call/run-daemon.sh
-        ports:
-          daemon:
-            env: SPUR_RESERVED_PORT_DAEMON
-            start: 4320
-            end: 4399
-      voice-call:
-        command: ./scripts/telegram-call/run-call.sh
-        dependsOn:
-          - voice-daemon
-      isolated-daemon:
-        command: ./scripts/spur-isolated-daemon.sh
-        ports:
-          daemon:
-            env: SPUR_RESERVED_PORT_DAEMON
-            start: 4320
-            end: 4399
-      isolated-ui:
-        command: ./scripts/spur-isolated-ui.sh
-        dependsOn:
-          - isolated-daemon
-        ports:
-          ui:
-            env: SPUR_RESERVED_PORT_UI
-            start: 5600
-            end: 5699
-            url: "https://{port}.${SPUR_SIDECAR_PUBLIC_HOST_SUFFIX}"
-        env:
-          SPUR_SIDECAR_PUBLIC_HOST: "*.${SPUR_SIDECAR_PUBLIC_HOST_SUFFIX}"
-          SPUR_SIDECAR_PUBLIC_URL: "https://{port}.${SPUR_SIDECAR_PUBLIC_HOST_SUFFIX}"
-    modes:
-      manager:
-        skill: manager
-        default: true
+      claude: haiku
     sources:
       gh:
         type: github
-      tg:
-        type: telegram
-        token: ${TELEGRAM_BOT_TOKEN}
-        chatId: ${TELEGRAM_CHAT_ID}
-        allowedUsers: ${TELEGRAM_ALLOWED_USERS}
-        allowedChats: ${TELEGRAM_ALLOWED_CHATS}
-        autoSpawn:
-          agent: opencode
-          model: google/gemini-3.8-flash
-      itest-schedule:
-        type: cron
-        schedule: "0 3 */3 * *"
-        runOnStart: false
+        intervalMs: 20000
     triggers:
-      gh-approved:
-        source: gh
-        event: github:approved
-        send:
-          prompt: "Run $manager and $github. Resume user-authorized review workflow with initial caller-supplied trusted external contract path/digest and receipt root; missing trust/query authority blocks aggregate reads. Continue authorized fixes/review responses while CI pending/failing. Apply owner gate to merge/release/deploy readiness using current receipts, paginated reviews, required checks and blocking threads. Correlated affirmation replies resume existing invocation; human merges."
-      gh-changes-requested:
-        source: gh
-        event: github:changes_requested
-        send:
-          prompt: "Run $manager and $github. Address requested changes on the active PR."
-      gh-ci-failed:
+      probe-ci:
         source: gh
         event: github:ci_failed
         send:
-          prompt: "Run $manager and $github. Fix failing CI on the active PR — own change or another agent's — then rerun checks and push. If not fixable, say why."
-      gh-comment:
-        source: gh
-        event: github:comment
-        send:
-          prompt: "/pr-comments-fix"
-      gh-merge-conflict:
+          prompt: "Probe ping: ci failed. Reply with one word: ack. Do nothing else."
+      probe-conflict:
         source: gh
         event: github:merge_conflict
         send:
-          prompt: "Resolve merge conflicts on the active PR. Rebase or merge fresh main into the branch. Push."
-      gh-merged:
-        source: gh
-        event: github:merged
-        send:
-          prompt: "If your task prompt defines self-destruct conditions, recheck them now and self-destruct if satisfied. Otherwise ignore."
-      # PR lifecycle events on a github source:
-      #   github:ready_for_review - PR left draft state
-      #   github:approved         - an approving review (once per reviewer)
-      #   github:merged           - PR merged
-      #   github:closed           - PR closed without merging
-      # Terminal events (merged/closed) fire only while the owning session still runs.
-      gh-ready-for-review:
-        source: gh
-        event: github:ready_for_review
-        send:
-          prompt: "Run $manager and $github. Active PR is ready for review."
-      tg-message:
-        source: tg
-        event: telegram:message
-        send:
-          interrupt: false
-      itest-run:
-        source: itest-schedule
-        event: cron:tick
-        spawn:
-          prompt: "/clean-install-test"
+          prompt: "Probe ping: merge conflict. Reply with one word: ack. Do nothing else."
