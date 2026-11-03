@@ -733,7 +733,7 @@ export interface ServiceProblemEventData {
   ruleId: string;
 }
 
-export type PersistedSendBatch = (
+export type PersistedSendBatch =
   | {
       kind: "review";
       providerId: ReviewProviderId;
@@ -760,8 +760,7 @@ export type PersistedSendBatch = (
       prompt?: string;
       sessionId: string;
       messages: TelegramMessageEventData[];
-    }
-);
+    };
 
 export interface PersistedPendingBatch {
   queueKey: string;

@@ -2077,13 +2077,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             );
             return;
           }
-          const task = handleSendEvent(
-            projectId,
-            triggerId,
-            event.name,
-            trigger,
-            sendBatch,
-          );
+          const task = handleSendEvent(projectId, triggerId, event.name, trigger, sendBatch);
           inFlight.add(task);
           void task.then(
             () => inFlight.delete(task),

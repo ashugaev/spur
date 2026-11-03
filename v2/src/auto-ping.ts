@@ -190,7 +190,10 @@ function parseRoutes(raw: unknown): PersistedRoute[] {
   if (raw === undefined) return [];
   if (!Array.isArray(raw)) throw new Error("Invalid auto-ping policy state");
   return raw
-    .filter((value) => !(isRecord(value) && isRecord(value.descriptor) && value.descriptor.actionKind === "spawn"))
+    .filter(
+      (value) =>
+        !(isRecord(value) && isRecord(value.descriptor) && value.descriptor.actionKind === "spawn"),
+    )
     .map((value) => {
       if (
         !isRecord(value) ||
@@ -551,7 +554,10 @@ export class AutoPingService {
         "Auto-ping resume needs exactly one of handle or suppressionId",
       );
     }
-    const locate = (): { routeFingerprint: string; match: (entry: PersistedSuppression) => boolean } => {
+    const locate = (): {
+      routeFingerprint: string;
+      match: (entry: PersistedSuppression) => boolean;
+    } => {
       if (target.handle !== undefined) {
         const grant = this.findGrant(actorSessionId, target.handle);
         return {
@@ -703,11 +709,13 @@ export class AutoPingService {
       );
     this.state.grants = this.state.grants.filter(
       (grant) =>
-        liveRoute(grant.routeFingerprint) && now - Date.parse(grant.createdAt) < CREDENTIAL_RETENTION_MS,
+        liveRoute(grant.routeFingerprint) &&
+        now - Date.parse(grant.createdAt) < CREDENTIAL_RETENTION_MS,
     );
     this.state.suppressions = this.state.suppressions.filter((suppression) => {
       if (!liveRoute(suppression.routeFingerprint)) return false;
-      if (suppression.endedAt) return now - Date.parse(suppression.endedAt) < CREDENTIAL_RETENTION_MS;
+      if (suppression.endedAt)
+        return now - Date.parse(suppression.endedAt) < CREDENTIAL_RETENTION_MS;
       return true;
     });
     this.state.mergeConflicts = this.state.mergeConflicts.filter((entry) =>

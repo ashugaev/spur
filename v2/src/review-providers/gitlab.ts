@@ -238,7 +238,9 @@ async function collectSignals(
       key: "ci_failed",
       kind: "ci_failed",
       text: ciText,
-      ...(sha ? { changeKey: sha, revision: `${sha}:${failingPipelineIds(pipelines).join(",")}` } : {}),
+      ...(sha
+        ? { changeKey: sha, revision: `${sha}:${failingPipelineIds(pipelines).join(",")}` }
+        : {}),
     });
   }
   if (hasMergeConflict(request)) {

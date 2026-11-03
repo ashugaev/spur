@@ -57,13 +57,16 @@ describe("published interface contracts", () => {
     const autoPing = commands.split("## auto-ping")[1]?.split("\n## ")[0] ?? "";
     for (const name of ["auto-ping mute", "auto-ping list", "auto-ping resume"])
       expect(autoPing).toContain(`spur ${name}`);
-    for (const flag of ["--for", "--forever", "--reason", "--all"]) expect(autoPing).toContain(flag);
+    for (const flag of ["--for", "--forever", "--reason", "--all"])
+      expect(autoPing).toContain(flag);
     expect(autoPing).not.toContain("unsubscribe");
     expect(commands).toContain("SPUR_SESSION");
     expect(commands).toContain("--session");
     expect(daemonApi).toContain("GET /sessions/:id/auto-ping-suppressions");
     expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/mute");
-    expect(daemonApi).toMatch(/POST \/sessions\/:id\/auto-ping-suppressions\/resume`[^\n]*`400\|403\|404`/);
+    expect(daemonApi).toMatch(
+      /POST \/sessions\/:id\/auto-ping-suppressions\/resume`[^\n]*`400\|403\|404`/,
+    );
     expect(daemonApi).not.toContain("auto-ping-suppressions/unsubscribe");
     expect(daemonApi).toContain("POST /projects/:id/preflight-batches");
     expect(configuration).toContain("projects.<id>.tokenBudget");

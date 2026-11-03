@@ -52719,7 +52719,6 @@ describe("SessionService", () => {
         service.dispose();
       },
     );
-
   });
 
   describe("session memory", () => {

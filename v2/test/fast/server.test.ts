@@ -418,9 +418,15 @@ describe("startServer", () => {
       );
       // Another session cannot use the handle.
       expect(
-        (await post("mute", { handle: grant.handle, mode: "until_change" }, {
-          "x-spur-caller-session": "other",
-        })).status,
+        (
+          await post(
+            "mute",
+            { handle: grant.handle, mode: "until_change" },
+            {
+              "x-spur-caller-session": "other",
+            },
+          )
+        ).status,
       ).toBe(403);
 
       const muted = await post("mute", { handle: grant.handle, mode: "until_change" });
@@ -442,9 +448,7 @@ describe("startServer", () => {
       const resume = await post("resume", { handle: grant.handle });
       expect(resume.status).toBe(200);
       await expect(resume.json()).resolves.toMatchObject({ records: [], removed: true });
-      expect((await post("resume", { handle: grant.handle, suppressionId: "x" })).status).toBe(
-        400,
-      );
+      expect((await post("resume", { handle: grant.handle, suppressionId: "x" })).status).toBe(400);
 
       const withHistory = await fetch(`${base}?all=1`, { headers });
       await expect(withHistory.json()).resolves.toMatchObject({
@@ -545,7 +549,10 @@ describe("startServer", () => {
     await expect(fetch(`http://127.0.0.1:${port}/info`)).rejects.toThrow();
   });
 
-  it("mutes, lists, resumes and records history for an actor-bound auto-ping handle", autoPingServerTest);
+  it(
+    "mutes, lists, resumes and records history for an actor-bound auto-ping handle",
+    autoPingServerTest,
+  );
 
   it("POST /sidecars/sweep defaults to report-only — reap absent kills nothing", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));

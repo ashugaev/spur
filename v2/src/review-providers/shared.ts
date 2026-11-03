@@ -1,9 +1,4 @@
-import type {
-  ReviewCheck,
-  ReviewDecision,
-  ReviewRequestSummary,
-  ReviewSignal,
-} from "../types.js";
+import type { ReviewCheck, ReviewDecision, ReviewRequestSummary, ReviewSignal } from "../types.js";
 
 const FAILING_CI_STATES = new Set([
   "FAILURE",
@@ -45,10 +40,7 @@ export function summarizeFailingCi(checks: ReviewCheck[]): string | null {
 // A signal is new when it was absent, its text moved, or its occurrence
 // revision moved. A prior without a revision (legacy snapshot) with the same
 // text is unchanged: the next snapshot adopts the revision without an emit.
-export function reviewSignalChanged(
-  prior: ReviewSignal | undefined,
-  next: ReviewSignal,
-): boolean {
+export function reviewSignalChanged(prior: ReviewSignal | undefined, next: ReviewSignal): boolean {
   if (!prior || prior.text !== next.text) return true;
   return prior.revision !== undefined && prior.revision !== next.revision;
 }

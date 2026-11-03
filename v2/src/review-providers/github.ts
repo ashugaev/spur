@@ -1340,7 +1340,9 @@ function annotateChangeKeys(
     } else if (signal.kind === "comment") {
       const target = signal.providerThreadTarget;
       const changeKey =
-        target?.kind === "github-review-thread" ? threadKeys.get(target.threadId) : latestCommentKey;
+        target?.kind === "github-review-thread"
+          ? threadKeys.get(target.threadId)
+          : latestCommentKey;
       if (changeKey !== undefined) annotated = { ...signal, changeKey };
     } else if (signal.kind !== "merged" && signal.kind !== "closed" && head) {
       annotated = { ...signal, changeKey: head };

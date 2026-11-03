@@ -1480,7 +1480,11 @@ describe("github source", () => {
       const emit = vi.fn();
       let previous = storedSnapshot([]);
       const revisions: Array<string | undefined> = [];
-      for (const url of ["https://x/runs/1/job/1", "https://x/runs/1/job/1", "https://x/runs/1/job/2"]) {
+      for (const url of [
+        "https://x/runs/1/job/1",
+        "https://x/runs/1/job/1",
+        "https://x/runs/1/job/2",
+      ]) {
         readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", previous]]));
         mockLifecyclePoll(failing(url));
         const handle = await startLifecycle(emit);

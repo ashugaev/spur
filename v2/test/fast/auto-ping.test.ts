@@ -220,9 +220,9 @@ describe("AutoPingService mute", () => {
   it("binds a handle to its destination session", async () => {
     const { service, grant } = setup();
     const { handle } = grant([ciItem()]);
-    await expect(service.mute("intruder", { handle, mode: "until_change" })).rejects.toMatchObject(
-      { status: 403 },
-    );
+    await expect(service.mute("intruder", { handle, mode: "until_change" })).rejects.toMatchObject({
+      status: 403,
+    });
     await expect(service.resume("intruder", { handle })).rejects.toMatchObject({ status: 403 });
     await expect(
       service.mute("owner", { handle: `ap1_${"z".repeat(43)}`, mode: "until_change" }),
@@ -302,7 +302,9 @@ describe("AutoPingService state", () => {
       }),
     );
     const logs: Array<{ event: string; details: unknown }> = [];
-    const service = new AutoPingService(dir, { log: (event, _id, details) => logs.push({ event, details }) });
+    const service = new AutoPingService(dir, {
+      log: (event, _id, details) => logs.push({ event, details }),
+    });
     service.dispose();
 
     const persisted = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;

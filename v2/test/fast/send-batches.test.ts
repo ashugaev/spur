@@ -744,7 +744,11 @@ describe("automatic ping mute footer", () => {
     expect(telegramLines.slice(-2).every((line) => line.includes(TOOL))).toBe(true);
 
     const service = requireBatch(
-      createSendBatchParser("service", "proj", "src-1")({
+      createSendBatchParser(
+        "service",
+        "proj",
+        "src-1",
+      )({
         sessionId: "api-1",
         serviceId: "web",
         ruleId: "crash",
