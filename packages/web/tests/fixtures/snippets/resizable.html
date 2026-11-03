@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8">
+<script type="application/spur-snippet+json">
+{
+  "protocolVersion": 1,
+  "snippetId": "resizable",
+  "ownerSessionId": "{{SESSION}}",
+  "instanceId": "{{INSTANCE}}",
+  "revision": {{REVISION}}{{RESPONDS}},
+  "title": "Resizable",
+  "actions": [
+    {
+      "id": "act",
+      "label": "Act",
+      "payload": { "type": "object", "properties": { "x": { "type": "string", "maxLength": 10 } } }
+    }
+  ]
+}
+</script>
+<div id="block" style="height:600px;background:var(--spur-bg-elevated)">tall block</div>
+<spur-text-input id="field" name="x" label="Field"></spur-text-input>
+<spur-button action="act" payload='{"x":"y"}'>Act</spur-button>
+<spur-status></spur-status>
+<script>
+  window.spur.ready().then(function () {
+    document.body.setAttribute("data-ready", "1");
+  });
+  window.spur.on("fullscreen", function (event) {
+    document.body.setAttribute("data-fullscreen", String(event.fullscreen));
+  });
+  window.spur.on("theme", function () {});
+  document.getElementById("block").addEventListener("click", function () {
+    window.spur.requestFullscreen().then(function (granted) {
+      document.body.setAttribute("data-fs-granted", String(granted));
+    });
+  });
+</script>

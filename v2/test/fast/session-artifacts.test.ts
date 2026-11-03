@@ -31,6 +31,7 @@ import {
   setSessionArtifactOrigin,
   setSessionArtifactUserAdded,
   sessionArtifactsDir,
+  withSessionArtifactInstructions,
 } from "../../src/session-artifacts.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -506,5 +507,25 @@ describe("deleteSessionArtifactById", () => {
 
     expect(deleteSessionArtifactById(dataDir, sessionId, "agent-history-link.jsonl")).toBe(false);
     expect(existsSync(join(dataDir, "secret.txt"))).toBe(true);
+  });
+});
+
+describe("withSessionArtifactInstructions snippet bullet", () => {
+  const SNIPPET_BULLET_PATH = "snippet.$SPUR_SESSION.<id>.html";
+
+  it("adds the interactive snippet bullet once, after the existing artifact bullets", () => {
+    const text = withSessionArtifactInstructions("Do the task.");
+    expect(text.startsWith("Do the task.\n\nSession artifacts:\n")).toBe(true);
+    expect(text.split(SNIPPET_BULLET_PATH)).toHaveLength(2);
+    expect(text.split("[spur-snippet-action v1]")).toHaveLength(2);
+    expect(text).toContain("https://raw.githubusercontent.com/ashugaev/spur/main/docs/snippets.md");
+    const lines = text.split("\n");
+    expect(lines[lines.length - 1]).toContain(SNIPPET_BULLET_PATH);
+    expect(lines.filter((line) => line.includes("snippet."))).toHaveLength(1);
+  });
+
+  it("is idempotent on a prompt that already carries the block", () => {
+    const once = withSessionArtifactInstructions("Do the task.");
+    expect(withSessionArtifactInstructions(once)).toBe(once);
   });
 });

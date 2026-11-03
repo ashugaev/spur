@@ -56,6 +56,7 @@ DOCS
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
   Full-access daemon MCP, backend controls, logs and cached attached PR status; connection/setup: docs/mcp.md
+  Interactive session snippets: docs/snippets.md
 
 EDITING THIS FILE
 

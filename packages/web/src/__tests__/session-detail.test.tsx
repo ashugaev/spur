@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState, type ReactElement, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SessionDetail } from "@/components/SessionDetail";
+import { buildSnippetActionPrompt } from "@/lib/snippets/snippet-protocol";
 import type { SpurSessionView } from "@/lib/types";
 
 // SessionDetail now reads the tag catalog via react-query (useTagCatalog), so
@@ -8838,5 +8839,233 @@ describe("SessionDetail header wrap", () => {
     expect(taskParagraph).toHaveClass("min-w-0");
     expect(taskParagraph).toHaveClass("whitespace-pre-wrap");
     expect(taskParagraph).toHaveClass("[overflow-wrap:anywhere]");
+  });
+});
+
+describe("SessionDetail snippets", () => {
+  const SID = "api-a1b2";
+  const artifact = (name: string, updatedAt = "2026-04-02T10:00:00.000Z", size = 400) => ({
+    id: name,
+    name,
+    size,
+    mimeType: name.endsWith(".html") ? "text/html; charset=utf-8" : "image/png",
+    kind: name.endsWith(".html") ? ("download" as const) : ("image" as const),
+    origin: "intentional" as const,
+    createdAt: updatedAt,
+    updatedAt,
+  });
+  const manifestHtml = (snippetId: string, title: string) =>
+    `<script type="application/spur-snippet+json">${JSON.stringify({
+      protocolVersion: 1,
+      snippetId,
+      ownerSessionId: SID,
+      instanceId: `inst-${snippetId}-0001`.slice(0, 20),
+      revision: 1,
+      title,
+      actions: [
+        {
+          id: "go",
+          label: "Go",
+          payload: { type: "object", properties: { note: { type: "string", maxLength: 20 } } },
+        },
+      ],
+    })}</script><p>body</p>`;
+
+  function mockSession(options: {
+    artifacts: ReturnType<typeof artifact>[];
+    queued?: string[];
+    files?: Record<string, string>;
+    onQueueRemove?: (message: string) => void;
+  }) {
+    return vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === `/api/sessions/${SID}`) {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              id: SID,
+              artifacts: options.artifacts,
+              queuedMessages: { messages: options.queued ?? [], awaitingPrompt: false },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === `/api/sessions/${SID}/conversation`) {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/snippets/spur-snippet-sdk.v1.js") return new Response("/* sdk */");
+      if (url.startsWith("/fonts/")) return new Response(new ArrayBuffer(4));
+      if (url === `/api/sessions/${SID}/queue/remove` && init?.method === "POST") {
+        options.onQueueRemove?.((JSON.parse(init.body as string) as { message: string }).message);
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      const prefix = `/api/sessions/${SID}/artifacts/`;
+      if (url.startsWith(prefix)) {
+        const body = options.files?.[decodeURIComponent(url.slice(prefix.length))];
+        if (body !== undefined) return new Response(body, { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    window.localStorage.clear();
+  });
+
+  it("keeps snippet files out of the Artifacts grid and counts, and keeps non-reserved snippet.* names", async () => {
+    mockSession({
+      artifacts: [
+        artifact(`snippet.${SID}.picker.html`),
+        artifact("snippet.sp-cd34.other.html"),
+        artifact(`snippet.${SID}.picker.html.tmp`),
+        artifact("snippet.png"),
+        artifact("shot.png"),
+      ],
+      files: { [`snippet.${SID}.picker.html`]: manifestHtml("picker", "Picker") },
+    });
+    render(<SessionDetail sessionId={SID} />);
+    await screen.findByAltText("shot.png");
+    expect(screen.getByAltText("snippet.png")).toBeInTheDocument();
+    const artifactsHeading = screen.getByRole("heading", { name: /^Artifacts/ });
+    expect(artifactsHeading).toHaveTextContent("2");
+    expect(screen.queryByText(`snippet.${SID}.picker.html`)).not.toBeInTheDocument();
+    expect(screen.queryByText("snippet.sp-cd34.other.html")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preview snippet.png" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: `Preview snippet.${SID}.picker.html` })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Preview snippet.sp-cd34.other.html" })).toBeNull();
+  });
+
+  it("renders the Snippets block between Dialog and Queued messages with the Dialog header classes", async () => {
+    mockSession({
+      artifacts: [artifact(`snippet.${SID}.picker.html`)],
+      queued: ["follow-up"],
+      files: { [`snippet.${SID}.picker.html`]: manifestHtml("picker", "Picker") },
+    });
+    render(<SessionDetail sessionId={SID} />);
+    const snippets = await screen.findByRole("heading", { name: /^Snippets/ });
+    const dialogHeading = screen.getByRole("heading", { name: /dialog/i });
+    const queued = screen.getByRole("heading", { name: /queued messages/i });
+    expect(
+      dialogHeading.compareDocumentPosition(snippets) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      snippets.compareDocumentPosition(queued) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(snippets.className).toBe(dialogHeading.className);
+    expect(snippets).toHaveTextContent("1");
+    const frame = await screen.findByTitle("Picker");
+    expect(frame.tagName).toBe("IFRAME");
+    expect(frame).toHaveAttribute("sandbox", "allow-scripts");
+  });
+
+  it("prunes snippet records older than 7 days on mount and keeps budget keys", async () => {
+    const day = 24 * 60 * 60 * 1000;
+    const record = (updatedAt: number) =>
+      JSON.stringify({
+        instanceId: "inst-0000001",
+        lastRevision: 1,
+        unconfirmedRevision: null,
+        state: { app: null, controls: [] },
+        action: null,
+        updatedAt,
+      });
+    window.localStorage.setItem("spur:snippet:v1:other-0000:old", record(Date.now() - 8 * day));
+    window.localStorage.setItem("spur:snippet:v1:other-0000:fresh", record(Date.now() - day));
+    window.localStorage.setItem(
+      "spur:snippet-budget:v1:other-0000",
+      JSON.stringify({ unconfirmed: 3, updatedAt: Date.now() - 30 * day }),
+    );
+    mockSession({ artifacts: [artifact("shot.png")] });
+    render(<SessionDetail sessionId={SID} />);
+    await screen.findByAltText("shot.png");
+    expect(window.localStorage.getItem("spur:snippet:v1:other-0000:old")).toBeNull();
+    expect(window.localStorage.getItem("spur:snippet:v1:other-0000:fresh")).not.toBeNull();
+    expect(window.localStorage.getItem("spur:snippet-budget:v1:other-0000")).not.toBeNull();
+  });
+
+  it("has no Snippets block without owned files", async () => {
+    mockSession({
+      artifacts: [artifact("snippet.sp-cd34.other.html"), artifact("shot.png")],
+    });
+    render(<SessionDetail sessionId={SID} />);
+    await screen.findByAltText("shot.png");
+    expect(screen.queryByRole("heading", { name: /^Snippets/ })).not.toBeInTheDocument();
+  });
+
+  it("mounts four snippets, lists the rest, and shows too_large and invalid manifest cards", async () => {
+    const names = ["a", "b", "c", "d", "e", "big", "bad"];
+    const updated = (index: number) => `2026-04-02T10:0${index}:00.000Z`;
+    mockSession({
+      artifacts: names.map((id, index) =>
+        artifact(`snippet.${SID}.${id}.html`, updated(9 - index), id === "big" ? 300 * 1024 : 400),
+      ),
+      files: {
+        [`snippet.${SID}.a.html`]: manifestHtml("a", "Alpha"),
+        [`snippet.${SID}.b.html`]: manifestHtml("b", "Bravo"),
+        [`snippet.${SID}.c.html`]: manifestHtml("c", "Charlie"),
+        [`snippet.${SID}.d.html`]: manifestHtml("d", "Delta"),
+      },
+    });
+    render(<SessionDetail sessionId={SID} />);
+    await screen.findByTitle("Alpha");
+    expect(screen.getByTitle("Delta")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^Snippets/ })).toHaveTextContent("7");
+    expect(screen.getByText(/Not mounted · limit 4/)).toBeInTheDocument();
+    expect(screen.getByText(/snippet\.api-a1b2\.big\.html · updated/)).toBeInTheDocument();
+    expect(screen.queryByTitle("Echo")).not.toBeInTheDocument();
+  });
+
+  it("shows a too_large card without fetching and a manifest card for a bad manifest", async () => {
+    const fetchMock = mockSession({
+      artifacts: [
+        artifact(`snippet.${SID}.big.html`, "2026-04-02T10:02:00.000Z", 300 * 1024),
+        artifact(`snippet.${SID}.bad.html`, "2026-04-02T10:01:00.000Z"),
+      ],
+      files: {
+        [`snippet.${SID}.bad.html`]: `<script type="application/spur-snippet+json">{"x":1}</script>`,
+      },
+    });
+    render(<SessionDetail sessionId={SID} />);
+    expect(await screen.findByText("Too large")).toBeInTheDocument();
+    expect(screen.getByText("File over 256 KiB. Not loaded.")).toBeInTheDocument();
+    expect(await screen.findByText("Manifest invalid")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reload" })).not.toBeInTheDocument();
+    const fetched = fetchMock.mock.calls.map(([input]) =>
+      typeof input === "string" ? input : (input as Request).url,
+    );
+    expect(fetched.some((url) => url.endsWith("snippet.api-a1b2.big.html"))).toBe(false);
+  });
+
+  it("renders a queued snippet prompt as a summary and removes the raw text", async () => {
+    const prompt = buildSnippetActionPrompt({
+      requestId: "11111111-2222-3333-4444-555555555555",
+      sessionId: SID,
+      snippetId: "picker",
+      instanceId: "inst-picker-0001",
+      revision: 3,
+      actionId: "go",
+      label: "Choose selected",
+      payload: { note: "hi" },
+    });
+    const removed: string[] = [];
+    mockSession({
+      artifacts: [],
+      queued: [prompt, "plain follow-up"],
+      onQueueRemove: (message) => removed.push(message),
+    });
+    render(<SessionDetail sessionId={SID} />);
+    await screen.findByText("plain follow-up");
+    const summary = document.querySelector("[data-snippet-action-summary]") as HTMLElement;
+    expect(summary.textContent).toBe("Snippet action Choose selected · picker r3");
+    const details = summary.parentElement?.querySelector("details") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    expect(details.textContent).toContain("[spur-snippet-action v1]");
+    fireEvent.click(screen.getByLabelText("Remove queued message #1"));
+    await waitFor(() => expect(removed).toEqual([prompt]));
   });
 });
