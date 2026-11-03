@@ -528,6 +528,7 @@ export function SnippetPanel({
       state && running && state.sdkSource !== null
         ? buildSnippetSrcdoc(state.html, state.sdkSource, state.nonce, theme)
         : null,
+    // `theme` is left out on purpose: runtime switches go through the SDK theme message, and a remount would reload the snippet.
     // mountKey changes with every nonce; the other fields are inputs of that mount
     [running, state?.sdkSource, state?.html, state?.nonce],
   );

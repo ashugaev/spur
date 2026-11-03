@@ -540,3 +540,20 @@ describe("loading state", () => {
     expect(document.querySelector('[aria-busy="true"]')).not.toBeNull();
   });
 });
+
+describe("apply results", () => {
+  it("reports ignored, conflict and mounted for the same, changed-in-place and higher file", async () => {
+    const s = setup();
+    const results: string[] = [];
+    const ui = (m: ReturnType<typeof manifest>, html: string) => (
+      <SnippetPanel {...s.props} html={html} manifest={m} onApplyResult={(r) => results.push(r)} />
+    );
+    const { rerender } = render(ui(manifest(), "<p>a</p>"));
+    await screen.findByTitle("Picker");
+    expect(results).toEqual(["ignored"]);
+    rerender(ui(manifest(), "<p>changed</p>"));
+    await waitFor(() => expect(results).toContain("conflict"));
+    rerender(ui(manifest({ revision: 2 }), "<p>b</p>"));
+    await waitFor(() => expect(results).toContain("mounted"));
+  });
+});

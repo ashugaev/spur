@@ -224,7 +224,9 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
                   onApplyResult={(result) => {
                     const lower = result === "lower_revision";
                     const title = entry.loaded?.manifest.title;
-                    if (!lower && title) {
+                    // Only a file the controller mounted (or already holds: "ignored" is the
+                    // first mount's result) names the mounted title; a conflict or a refusal does not.
+                    if ((result === "mounted" || result === "ignored") && title) {
                       setMountedTitle((previous) =>
                         previous[snippetId] === title
                           ? previous
