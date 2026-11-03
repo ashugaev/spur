@@ -266,13 +266,13 @@ describe("constants", () => {
       ...Object.values(SNIPPET_TO_FRAME),
     ];
     for (const value of strings) expect(sdkSource).toContain(`"${value}"`);
-    const msgBlock = /var MSG = \{([\s\S]*?)\};/.exec(sdkSource)?.[1] ?? "";
+    const msgBlock = /const MSG = \{([\s\S]*?)\};/.exec(sdkSource)?.[1] ?? "";
     const declared = [...msgBlock.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
     expect([...declared].sort()).toEqual([...new Set(strings)].sort());
   });
 
   it("status labels equal the host labels (error without the HTTP suffix)", () => {
-    const block = /var STATUS_LABELS = \{([\s\S]*?)\};/.exec(sdkSource)?.[1] ?? "";
+    const block = /const STATUS_LABELS = \{([\s\S]*?)\};/.exec(sdkSource)?.[1] ?? "";
     const declared = Object.fromEntries(
       [...block.matchAll(/(\w+): "([^"]+)"/g)].map((match) => [match[1], match[2]]),
     );

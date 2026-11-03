@@ -1,7 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider, useTheme } from "@/lib/theme-context";
-import { ThemeProvider, useTheme } from "@/lib/theme-context";
 import { SnippetPanel, type SnippetPanelProps } from "@/components/snippets/SnippetPanel";
 import type { SnippetChannel, SnippetPort } from "@/lib/snippets/snippet-host";
 import type { SnippetManifest } from "@/lib/snippets/snippet-manifest";

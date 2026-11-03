@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  var MSG = {
+  const MSG = {
     hello: "spur:hello",
     connect: "spur:connect",
     invoke: "invoke",
@@ -20,14 +20,14 @@
     theme: "theme",
     availability: "availability",
   };
-  var PROTOCOL_VERSION = 1;
-  var HELLO_INTERVAL_MS = 200;
-  var HELLO_MAX = 25;
-  var STATE_WINDOW_MS = 500;
-  var STATE_MAX_BYTES = 64 * 1024;
-  var TERMINAL = ["completed", "replaced", "error", "delivery_unknown", "timeout"];
-  var RETRYABLE = ["error", "delivery_unknown", "timeout"];
-  var STATUS_LABELS = {
+  const PROTOCOL_VERSION = 1;
+  const HELLO_INTERVAL_MS = 200;
+  const HELLO_MAX = 25;
+  const STATE_WINDOW_MS = 500;
+  const STATE_MAX_BYTES = 64 * 1024;
+  const TERMINAL = ["completed", "replaced", "error", "delivery_unknown", "timeout"];
+  const RETRYABLE = ["error", "delivery_unknown", "timeout"];
+  const STATUS_LABELS = {
     awaiting_confirm: "Confirm to send",
     submitting: "Sent",
     accepted: "Sent",
@@ -39,7 +39,7 @@
     delivery_unknown: "Delivery unknown",
     timeout: "No reply in 15 min",
   };
-  var REJECTION_TEXT = {
+  const REJECTION_TEXT = {
     not_connected: "Snippet is not connected.",
     revision_conflict:
       "This revision changed in place. Actions are blocked until the next revision.",
@@ -51,7 +51,7 @@
     declined: "Action discarded.",
     stale: "Snippet was replaced before the action was sent.",
   };
-  var ISSUE_WORDS = {
+  const ISSUE_WORDS = {
     type: "wrong type",
     required: "required",
     unknown_property: "unknown property",
@@ -66,31 +66,31 @@
     selection_mismatch: "selection mismatch",
     depth: "nested too deep",
   };
-  var FIELD_TAGS = "spur-choice-list, spur-text-input, spur-textarea";
-  var BOUND_SELECTOR =
+  const FIELD_TAGS = "spur-choice-list, spur-text-input, spur-textarea";
+  const BOUND_SELECTOR =
     "[data-spur-action], spur-button, spur-choice-list, spur-choice, spur-text-input, spur-textarea";
-  var SPINNER =
+  const SPINNER =
     '<svg class="spur-spin" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"></path></svg>';
 
-  var boot = window.__SPUR_SNIPPET_BOOT__;
-  var port = null;
-  var context = null;
-  var action = null;
-  var availability = { canInvoke: true, reason: null };
-  var rejection = null;
-  var invokingEl = null;
-  var listeners = { action: [], theme: [], fullscreen: [], availability: [] };
-  var calls = new Map();
-  var callCounter = 0;
-  var appState = null;
-  var stateTimer = null;
-  var lastHeight = null;
-  var resizeFrame = 0;
-  var readyResolve = null;
-  var readyPromise = new Promise(function (resolve) {
+  const boot = window.__SPUR_SNIPPET_BOOT__;
+  let port = null;
+  let context = null;
+  let action = null;
+  let availability = { canInvoke: true, reason: null };
+  let rejection = null;
+  let invokingEl = null;
+  const listeners = { action: [], theme: [], fullscreen: [], availability: [] };
+  const calls = new Map();
+  let callCounter = 0;
+  let appState = null;
+  let stateTimer = null;
+  let lastHeight = null;
+  let resizeFrame = 0;
+  let readyResolve = null;
+  const readyPromise = new Promise(function (resolve) {
     readyResolve = resolve;
   });
-  var encoder = new TextEncoder();
+  const encoder = new TextEncoder();
 
   // ---------------------------------------------------------------- helpers
 
@@ -117,7 +117,7 @@
   }
 
   function formatRejection(result) {
-    var text = REJECTION_TEXT[result.reason] || "Action rejected.";
+    const text = REJECTION_TEXT[result.reason] || "Action rejected.";
     if (result.reason !== "invalid_payload" || !result.issues || result.issues.length === 0) {
       return text;
     }
@@ -131,7 +131,7 @@
   }
 
   function el(tag, className, text) {
-    var node = document.createElement(tag);
+    const node = document.createElement(tag);
     if (className) node.className = className;
     if (text !== undefined) node.textContent = text;
     return node;
@@ -147,7 +147,7 @@
 
   // --------------------------------------------------------------- styles
 
-  var STYLE = [
+  const STYLE = [
     "html{height:auto}",
     "html,body{background:transparent;color:var(--spur-text-primary);font-family:var(--spur-font);font-size:12px;letter-spacing:.02em}",
     "*{box-sizing:border-box}",
@@ -199,7 +199,7 @@
   ].join("\n");
 
   function installStyles() {
-    var style = document.createElement("style");
+    const style = document.createElement("style");
     style.setAttribute("data-spur-sdk", "");
     style.textContent = STYLE;
     document.head.insertBefore(style, document.head.firstChild);
@@ -222,8 +222,8 @@
   // Controls only. The mutation observer calls this; spur-status renders in
   // refreshControls, so its own DOM writes cannot re-trigger the observer.
   function applyControlState() {
-    var busy = isBusy();
-    var blocked = busy || !availability.canInvoke;
+    const busy = isBusy();
+    const blocked = busy || !availability.canInvoke;
     document.querySelectorAll(BOUND_SELECTOR).forEach(function (node) {
       setDisabledMarker(node, blocked);
       if (busy) node.setAttribute("aria-busy", "true");
@@ -250,7 +250,7 @@
 
   function request(message) {
     return new Promise(function (resolve) {
-      var callId = nextCallId();
+      const callId = nextCallId();
       calls.set(callId, resolve);
       message.callId = callId;
       post(message);
@@ -258,9 +258,9 @@
   }
 
   function invalidFieldPaths(issues) {
-    var names = {};
+    const names = {};
     (issues || []).forEach(function (issue) {
-      var name = String(issue.path || "").split("/")[1];
+      const name = String(issue.path || "").split("/")[1];
       if (name)
         names[name] =
           (names[name] ? names[name] + ", " : "") + (ISSUE_WORDS[issue.code] || issue.code);
@@ -278,9 +278,9 @@
     rejection = result;
     clearFieldIssues();
     if (result.reason === "invalid_payload") {
-      var names = invalidFieldPaths(result.issues);
+      const names = invalidFieldPaths(result.issues);
       document.querySelectorAll(FIELD_TAGS).forEach(function (node) {
-        var name = node.getAttribute("name");
+        const name = node.getAttribute("name");
         if (name && names[name] !== undefined) node.setIssue(names[name]);
       });
     }
@@ -289,13 +289,13 @@
   }
 
   function updateFallback(show) {
-    var existing = document.querySelector("[data-spur-fallback]");
-    var hasStatus = document.querySelector("spur-status") !== null;
+    const existing = document.querySelector("[data-spur-fallback]");
+    const hasStatus = document.querySelector("spur-status") !== null;
     if (!show || rejection === null || hasStatus) {
       if (existing) existing.remove();
       return;
     }
-    var node = existing || document.createElement("spur-error");
+    const node = existing || document.createElement("spur-error");
     node.setAttribute("data-spur-fallback", "");
     node.setAttribute("role", "alert");
     node.textContent = formatRejection(rejection);
@@ -316,8 +316,8 @@
 
   function invoke(actionId, payload, retryOf) {
     if (!port) return Promise.resolve({ ok: false, reason: "not_connected" });
-    var before = action;
-    var message = { type: MSG.invoke, actionId: actionId };
+    const before = action;
+    const message = { type: MSG.invoke, actionId: actionId };
     if (payload !== undefined) message.payload = payload;
     if (retryOf) message.retryOf = retryOf;
     return request(message).then(function (result) {
@@ -334,6 +334,10 @@
     });
   }
 
+  function setInvokingEl(node) {
+    invokingEl = node;
+  }
+
   function retry() {
     if (!action || RETRYABLE.indexOf(action.status) < 0) {
       return Promise.resolve({ ok: false, reason: "busy" });
@@ -344,9 +348,9 @@
   // ------------------------------------------------------------------ state
 
   function collectControls() {
-    var controls = [];
+    const controls = [];
     document.querySelectorAll(FIELD_TAGS).forEach(function (node) {
-      var id = node.getAttribute("id");
+      const id = node.getAttribute("id");
       if (id) controls.push({ id: id, value: node.value });
     });
     return controls;
@@ -374,29 +378,29 @@
   // ----------------------------------------------------------- selection
 
   function selectionFromDocument(sourceId) {
-    var sel = document.getSelection();
+    const sel = document.getSelection();
     if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
-    var range = sel.getRangeAt(0);
-    var start = range.startContainer;
-    var source = (start.nodeType === 1 ? start : start.parentElement).closest(
+    const range = sel.getRangeAt(0);
+    const start = range.startContainer;
+    const source = (start.nodeType === 1 ? start : start.parentElement).closest(
       "spur-selectable-text",
     );
     if (!source || !source.contains(range.endContainer)) return null;
-    var id = source.getAttribute("source-id");
+    const id = source.getAttribute("source-id");
     if (!id || (sourceId !== undefined && sourceId !== id)) return null;
-    var pre = document.createRange();
+    const pre = document.createRange();
     pre.selectNodeContents(source);
     pre.setEnd(range.startContainer, range.startOffset);
-    var text = source.textContent || "";
-    var from = pre.toString().length;
-    var to = from + range.toString().length;
+    const text = source.textContent || "";
+    const from = pre.toString().length;
+    const to = from + range.toString().length;
     if (to <= from || to > text.length) return null;
     return { sourceId: id, text: text, start: from, end: to, quote: text.slice(from, to) };
   }
 
   // --------------------------------------------------------------- public API
 
-  var sdk = {
+  const sdk = {
     protocolVersion: PROTOCOL_VERSION,
     ready: function () {
       return readyPromise;
@@ -408,12 +412,12 @@
     on: function (event, handler) {
       listeners[event].push(handler);
       return function () {
-        var index = listeners[event].indexOf(handler);
+        const index = listeners[event].indexOf(handler);
         if (index >= 0) listeners[event].splice(index, 1);
       };
     },
     once: function (event, handler) {
-      var off = sdk.on(event, function (data) {
+      const off = sdk.on(event, function (data) {
         off();
         handler(data);
       });
@@ -452,7 +456,7 @@
   // -------------------------------------------------------------- port + host
 
   function applyTheme(theme) {
-    var root = document.documentElement;
+    const root = document.documentElement;
     // Without it Chromium paints an opaque light canvas under a dark host.
     root.style.colorScheme = theme.mode;
     Object.keys(theme.tokens).forEach(function (token) {
@@ -461,9 +465,9 @@
   }
 
   function registerFonts(fonts) {
-    var added = false;
+    let added = false;
     fonts.forEach(function (font) {
-      var face = new FontFace(font.family, font.data, { weight: font.weight });
+      const face = new FontFace(font.family, font.data, { weight: font.weight });
       document.fonts.add(face);
       face.load().catch(function () {});
       added = true;
@@ -479,19 +483,19 @@
   function restoreControls(saved) {
     whenParsed(function () {
       saved.forEach(function (entry) {
-        var node = document.getElementById(entry.id);
+        const node = document.getElementById(entry.id);
         if (node && typeof node.restore === "function") node.restore(entry.value);
       });
     });
   }
 
   function onPortMessage(event) {
-    var data = event.data;
+    const data = event.data;
     if (!data || typeof data.type !== "string") return;
     switch (data.type) {
       case MSG.invokeResult:
       case MSG.stateAck: {
-        var resolve = calls.get(data.callId);
+        const resolve = calls.get(data.callId);
         if (resolve) {
           calls.delete(data.callId);
           resolve(data);
@@ -513,7 +517,7 @@
         return;
       case MSG.fullscreen: {
         if (typeof data.callId === "string") {
-          var pending = calls.get(data.callId);
+          const pending = calls.get(data.callId);
           if (pending) {
             calls.delete(data.callId);
             pending(data.granted === true);
@@ -532,7 +536,7 @@
   function reportHeight() {
     resizeFrame = 0;
     if (!port) return;
-    var height = Math.ceil(document.documentElement.getBoundingClientRect().height);
+    const height = Math.ceil(document.documentElement.getBoundingClientRect().height);
     if (height === lastHeight) return;
     lastHeight = height;
     post({ type: MSG.resize, height: height });
@@ -544,7 +548,7 @@
   }
 
   function onConnect(event) {
-    var data = event.data;
+    const data = event.data;
     if (port || event.source !== window.parent) return;
     if (!data || data.type !== MSG.connect || !event.ports || !event.ports[0]) return;
     port = event.ports[0];
@@ -569,7 +573,7 @@
 
   window.addEventListener("message", onConnect);
 
-  var hellos = 0;
+  let hellos = 0;
   function hello() {
     if (port || hellos >= HELLO_MAX) return;
     hellos += 1;
@@ -592,11 +596,11 @@
   // ----------------------------------------------------------------- library
 
   function gatherForm(formEl) {
-    var payload = {};
+    const payload = {};
     formEl.querySelectorAll(FIELD_TAGS).forEach(function (node) {
-      var name = node.getAttribute("name");
+      const name = node.getAttribute("name");
       if (!name) return;
-      var value = node.value;
+      const value = node.value;
       if (value === "" || value === null) return;
       payload[name] = value;
     });
@@ -606,9 +610,9 @@
   function parseJsonObject(text) {
     if (!text) return {};
     try {
-      var value = JSON.parse(text);
+      const value = JSON.parse(text);
       return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
-    } catch (error) {
+    } catch {
       return {};
     }
   }
@@ -619,18 +623,18 @@
 
   // Field base: label, control, issue message.
   function mountField(host, labelText, control, withCounter, max) {
-    var wrap = el("div", "spur-field");
-    var head = el("div", "spur-field-label");
-    var label = el("span", "", labelText || "");
+    const wrap = el("div", "spur-field");
+    const head = el("div", "spur-field-label");
+    const label = el("span", "", labelText || "");
     head.appendChild(label);
-    var counter = null;
+    let counter = null;
     if (withCounter) {
       counter = el("span", "", "");
       head.appendChild(counter);
     }
     if (labelText) wrap.appendChild(head);
     wrap.appendChild(control);
-    var message = el("div", "spur-field-error");
+    const message = el("div", "spur-field-error");
     message.hidden = true;
     wrap.appendChild(message);
     host.appendChild(wrap);
@@ -641,51 +645,50 @@
     return { message: message, updateCounter: updateCounter };
   }
 
-  var fieldSeq = 0;
+  let fieldSeq = 0;
 
   function defineTextField(tag, controlTag) {
     define(
       tag,
       class extends HTMLElement {
         connectedCallback() {
-          var self = this;
-          whenParsed(function () {
-            if (self._ready) return;
-            self._ready = true;
-            var control = document.createElement(controlTag);
+          whenParsed(() => {
+            if (this._ready) return;
+            this._ready = true;
+            const control = document.createElement(controlTag);
             if (controlTag === "input") control.type = "text";
-            if (controlTag === "textarea") control.rows = Number(self.getAttribute("rows")) || 3;
-            var max = Number(self.getAttribute("maxlength")) || 0;
+            if (controlTag === "textarea") control.rows = Number(this.getAttribute("rows")) || 3;
+            const max = Number(this.getAttribute("maxlength")) || 0;
             if (max) control.maxLength = max;
-            if (self.hasAttribute("placeholder"))
-              control.placeholder = self.getAttribute("placeholder");
+            if (this.hasAttribute("placeholder"))
+              control.placeholder = this.getAttribute("placeholder");
             fieldSeq += 1;
-            var messageId = "spur-field-msg-" + fieldSeq;
-            var parts = mountField(
-              self,
-              self.getAttribute("label"),
+            const messageId = "spur-field-msg-" + fieldSeq;
+            const parts = mountField(
+              this,
+              this.getAttribute("label"),
               control,
               controlTag === "textarea",
               max,
             );
             parts.message.id = messageId;
-            self._control = control;
-            self._updateCounter = parts.updateCounter;
-            self._message = parts.message;
-            self._messageId = messageId;
-            control.addEventListener("input", function () {
+            this._control = control;
+            this._updateCounter = parts.updateCounter;
+            this._message = parts.message;
+            this._messageId = messageId;
+            control.addEventListener("input", () => {
               parts.updateCounter();
-              noteControlChange(self);
-              self.dispatchEvent(new CustomEvent("change"));
+              noteControlChange(this);
+              this.dispatchEvent(new CustomEvent("change"));
             });
             if (controlTag === "input") {
-              control.addEventListener("keydown", function (keyEvent) {
+              control.addEventListener("keydown", (keyEvent) => {
                 if (keyEvent.key !== "Enter") return;
-                var form = self.closest("spur-form");
+                const form = this.closest("spur-form");
                 if (form) form.submit();
               });
             }
-            self.syncDisabled();
+            this.syncDisabled();
           });
         }
         static get observedAttributes() {
@@ -736,25 +739,24 @@
     "spur-choice",
     class extends HTMLElement {
       connectedCallback() {
-        var self = this;
-        whenParsed(function () {
-          if (self._ready) return;
-          self._ready = true;
-          self.setAttribute("role", "option");
-          self.setAttribute("tabindex", "0");
-          if (!self.hasAttribute("aria-selected")) self.setAttribute("aria-selected", "false");
-          var box = el("span", "spur-choice-box");
+        whenParsed(() => {
+          if (this._ready) return;
+          this._ready = true;
+          this.setAttribute("role", "option");
+          this.setAttribute("tabindex", "0");
+          if (!this.hasAttribute("aria-selected")) this.setAttribute("aria-selected", "false");
+          const box = el("span", "spur-choice-box");
           box.setAttribute("aria-hidden", "true");
-          self.insertBefore(box, self.firstChild);
-          self.addEventListener("click", function () {
-            if (self.hasAttribute("disabled")) return;
-            var list = self.closest("spur-choice-list");
-            if (list) list.toggle(self);
+          this.insertBefore(box, this.firstChild);
+          this.addEventListener("click", () => {
+            if (this.hasAttribute("disabled")) return;
+            const list = this.closest("spur-choice-list");
+            if (list) list.toggle(this);
           });
-          self.addEventListener("keydown", function (keyEvent) {
+          this.addEventListener("keydown", (keyEvent) => {
             if (keyEvent.key !== " " && keyEvent.key !== "Enter") return;
             keyEvent.preventDefault();
-            self.click();
+            this.click();
           });
         });
       }
@@ -768,28 +770,27 @@
     "spur-choice-list",
     class extends HTMLElement {
       connectedCallback() {
-        var self = this;
         this.setAttribute("role", "listbox");
         if (this.getAttribute("mode") === "multiple")
           this.setAttribute("aria-multiselectable", "true");
-        whenParsed(function () {
-          var text = self.getAttribute("label");
-          if (!text || self._head) return;
-          self.setAttribute("aria-label", text);
-          var head = el("div", "spur-list-label");
+        whenParsed(() => {
+          const text = this.getAttribute("label");
+          if (!text || this._head) return;
+          this.setAttribute("aria-label", text);
+          const head = el("div", "spur-list-label");
           head.setAttribute("aria-hidden", "true");
           head.appendChild(el("span", "", text));
           head.appendChild(el("i", ""));
-          self._count = el("span", "");
-          head.appendChild(self._count);
-          self._head = head;
-          self.parentNode.insertBefore(head, self);
-          self.updateCount();
+          this._count = el("span", "");
+          head.appendChild(this._count);
+          this._head = head;
+          this.parentNode.insertBefore(head, this);
+          this.updateCount();
         });
       }
       updateCount() {
         if (!this._count) return;
-        var picked = this.choices().filter(function (choice) {
+        const picked = this.choices().filter(function (choice) {
           return choice.getAttribute("aria-selected") === "true";
         }).length;
         this._count.textContent = picked + " of " + this.choices().length + " selected";
@@ -798,8 +799,8 @@
         return Array.from(this.querySelectorAll("spur-choice"));
       }
       toggle(choice) {
-        var multiple = this.getAttribute("mode") === "multiple";
-        var selected = choice.getAttribute("aria-selected") === "true";
+        const multiple = this.getAttribute("mode") === "multiple";
+        const selected = choice.getAttribute("aria-selected") === "true";
         if (!multiple) {
           this.choices().forEach(function (other) {
             other.setAttribute("aria-selected", "false");
@@ -813,7 +814,7 @@
         this.dispatchEvent(new CustomEvent("change"));
       }
       get value() {
-        var picked = this.choices()
+        const picked = this.choices()
           .filter(function (choice) {
             return choice.getAttribute("aria-selected") === "true";
           })
@@ -824,7 +825,7 @@
         return picked.length > 0 ? picked[0] : null;
       }
       set value(next) {
-        var wanted = Array.isArray(next) ? next : next === null ? [] : [next];
+        const wanted = Array.isArray(next) ? next : next === null ? [] : [next];
         this.choices().forEach(function (choice) {
           choice.setAttribute(
             "aria-selected",
@@ -834,11 +835,11 @@
         this.updateCount();
       }
       restore(value) {
-        var known = this.choices().map(function (choice) {
+        const known = this.choices().map(function (choice) {
           return choice.value;
         });
-        var wanted = Array.isArray(value) ? value : value === null ? [] : [value];
-        var kept = wanted.filter(function (item) {
+        const wanted = Array.isArray(value) ? value : value === null ? [] : [value];
+        const kept = wanted.filter(function (item) {
           return known.indexOf(item) >= 0;
         });
         if (kept.length !== wanted.length) return;
@@ -865,17 +866,16 @@
     "spur-selection-toolbar",
     class extends HTMLElement {
       connectedCallback() {
-        var self = this;
-        whenParsed(function () {
-          if (self._ready) return;
-          self._ready = true;
-          self._count = el("span", "spur-toolbar-count", "");
-          self.insertBefore(self._count, self.firstChild);
-          self.addEventListener("mousedown", function (mouseEvent) {
+        whenParsed(() => {
+          if (this._ready) return;
+          this._ready = true;
+          this._count = el("span", "spur-toolbar-count", "");
+          this.insertBefore(this._count, this.firstChild);
+          this.addEventListener("mousedown", function (mouseEvent) {
             mouseEvent.preventDefault();
           });
-          document.addEventListener("selectionchange", function () {
-            self.update();
+          document.addEventListener("selectionchange", () => {
+            this.update();
           });
         });
       }
@@ -886,8 +886,8 @@
         return this._selection || null;
       }
       update() {
-        var ids = (this.getAttribute("for") || "").split(/\s+/).filter(Boolean);
-        var found = selectionFromDocument();
+        const ids = (this.getAttribute("for") || "").split(/\s+/).filter(Boolean);
+        const found = selectionFromDocument();
         if (!found || ids.indexOf(found.sourceId) < 0) {
           if (!this._selection || !this.contains(document.activeElement)) {
             this._selection = null;
@@ -897,7 +897,7 @@
         }
         this._selection = found;
         this._count.textContent = found.end - found.start + " chars";
-        var rect = document.getSelection().getRangeAt(0).getBoundingClientRect();
+        const rect = document.getSelection().getRangeAt(0).getBoundingClientRect();
         this.setAttribute("data-visible", "");
         this.style.top = Math.max(0, rect.top + window.scrollY - this.offsetHeight - 4) + "px";
         this.style.left = Math.max(0, rect.left + window.scrollX) + "px";
@@ -912,20 +912,19 @@
         return ["disabled", "aria-busy"];
       }
       connectedCallback() {
-        var self = this;
-        whenParsed(function () {
-          if (self._ready) return;
-          self._ready = true;
-          var button = document.createElement("button");
+        whenParsed(() => {
+          if (this._ready) return;
+          this._ready = true;
+          const button = document.createElement("button");
           button.type = "button";
           button.className = "spur-btn";
-          while (self.firstChild) button.appendChild(self.firstChild);
-          self.appendChild(button);
-          self._button = button;
-          button.addEventListener("click", function () {
-            self.press();
+          while (this.firstChild) button.appendChild(this.firstChild);
+          this.appendChild(button);
+          this._button = button;
+          button.addEventListener("click", () => {
+            this.press();
           });
-          self.syncDisabled();
+          this.syncDisabled();
         });
       }
       attributeChangedCallback() {
@@ -939,25 +938,25 @@
       }
       syncSpinner(show) {
         if (!this._button) return;
-        var existing = this._button.querySelector(".spur-spin");
+        const existing = this._button.querySelector(".spur-spin");
         if (show && !existing) this._button.insertAdjacentHTML("afterbegin", SPINNER);
         if (!show && existing) existing.remove();
       }
       press() {
         if (this.hasAttribute("disabled")) return;
-        var toolbar = this.closest("spur-selection-toolbar");
-        var form = this.getAttribute("form")
+        const toolbar = this.closest("spur-selection-toolbar");
+        const form = this.getAttribute("form")
           ? document.getElementById(this.getAttribute("form"))
           : this.closest("spur-form");
-        var payload = parseJsonObject(this.getAttribute("payload"));
+        const payload = parseJsonObject(this.getAttribute("payload"));
         if (form && typeof form.collect === "function") Object.assign(payload, form.collect());
         if (toolbar) {
-          var picked = toolbar.current || selectionFromDocument();
+          const picked = toolbar.current || selectionFromDocument();
           if (picked) payload[toolbar.field] = picked;
         }
-        var id = this.getAttribute("action") || (form && form.getAttribute("action"));
+        const id = this.getAttribute("action") || (form && form.getAttribute("action"));
         if (!id) return;
-        invokingEl = this;
+        setInvokingEl(this);
         invoke(id, payload);
       }
     },
@@ -970,7 +969,7 @@
         return gatherForm(this);
       }
       submit() {
-        var id = this.getAttribute("action");
+        const id = this.getAttribute("action");
         if (!id || this.hasAttribute("disabled")) return;
         invokingEl = this.querySelector('spur-button[type="submit"]');
         invoke(id, this.collect());
@@ -982,9 +981,8 @@
     "spur-status",
     class extends HTMLElement {
       connectedCallback() {
-        var self = this;
-        whenParsed(function () {
-          self.render();
+        whenParsed(() => {
+          this.render();
         });
         this.addEventListener("click", function (clickEvent) {
           if (clickEvent.target.closest && clickEvent.target.closest("[data-spur-retry]")) retry();
@@ -993,23 +991,23 @@
       render() {
         if (!this.isConnected) return;
         this.textContent = "";
-        var tone = "";
-        var head = el("div", "spur-status-head");
+        let tone = "";
+        const head = el("div", "spur-status-head");
         if (rejection !== null) {
           tone = "error";
           head.appendChild(el("span", "", "Not sent"));
           this.appendChild(head);
           this.appendChild(el("div", "spur-status-note", formatRejection(rejection)));
         } else if (action !== null) {
-          var status = action.status;
+          const status = action.status;
           if (!isTerminal(status)) head.insertAdjacentHTML("beforeend", SPINNER);
-          var label = STATUS_LABELS[status] || status;
+          let label = STATUS_LABELS[status] || status;
           if (status === "error" && action.httpStatus !== undefined)
             label += " · HTTP " + action.httpStatus;
           if (status === "error" || status === "delivery_unknown") tone = "error";
           head.appendChild(el("span", "", label));
           if (RETRYABLE.indexOf(status) >= 0) {
-            var again = el("button", "spur-btn", "Retry");
+            const again = el("button", "spur-btn", "Retry");
             again.type = "button";
             again.setAttribute("data-spur-retry", "");
             head.appendChild(again);
@@ -1061,8 +1059,8 @@
 
   // Elements with data-spur-action are clickable action triggers.
   document.addEventListener("click", function (clickEvent) {
-    var target = clickEvent.target;
-    var node = target && target.closest ? target.closest("[data-spur-action]") : null;
+    const target = clickEvent.target;
+    const node = target && target.closest ? target.closest("[data-spur-action]") : null;
     if (!node || node.hasAttribute("disabled")) return;
     invokingEl = node;
     invoke(
