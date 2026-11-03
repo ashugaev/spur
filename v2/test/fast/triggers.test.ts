@@ -6672,6 +6672,47 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("rewrites a restored batch that still carries the retired autoPing field", async () => {
+    const persisted = {
+      queueKey: "api:send:api-1",
+      workId: "work-1",
+      revision: 3,
+      autoPing: { handle: `ap1_${"a".repeat(43)}` },
+      projectId: "api",
+      triggerId: "send",
+      sourceId: "pr-watch",
+      batch: {
+        kind: "review",
+        providerId: "github",
+        projectId: "api",
+        sourceId: "pr-watch",
+        sessionId: "api-1",
+        prUrl: "https://github.com/acme/api/pull/42",
+        prNumber: 42,
+        prTitle: "Tighten coverage",
+        signals: [{ key: "comment:1", kind: "comment", text: "A new comment arrived." }],
+      },
+    } as unknown as PersistedPendingBatch;
+    readPendingSendBatchesMock.mockReturnValue(new Map([[persisted.queueKey, persisted]]));
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus: new EventBus(),
+      sessionService: { get: vi.fn(), deliver: vi.fn() } as never,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      const rewrites = recordPendingSendBatchMock.mock.calls.map(([, record]) => record);
+      expect(rewrites).toHaveLength(1);
+      expect(JSON.stringify(rewrites)).not.toContain("ap1_");
+      expect(rewrites[0]).toMatchObject({ workId: "work-1", revision: 3 });
+      expect("autoPing" in rewrites[0]).toBe(false);
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("delivers a persisted ci_failed batch restored on startup once", async () => {
     const persisted: PersistedPendingBatch = {
       queueKey: "api:send:api-1",

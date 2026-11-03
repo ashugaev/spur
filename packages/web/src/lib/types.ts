@@ -757,7 +757,7 @@ export interface AutoPingMute {
   createdAt: string;
   expiresAt?: string;
   endedAt?: string;
-  endReason?: "resumed" | "changed" | "expired";
+  endReason?: "resumed" | "changed" | "expired" | "route_removed";
 }
 
 export interface AutoPingMuteProjection {
@@ -785,7 +785,8 @@ function isAutoPingMute(value: unknown): value is AutoPingMute {
     (value.endReason === undefined ||
       value.endReason === "resumed" ||
       value.endReason === "changed" ||
-      value.endReason === "expired")
+      value.endReason === "expired" ||
+      value.endReason === "route_removed")
   );
 }
 

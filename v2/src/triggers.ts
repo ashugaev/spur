@@ -1981,12 +1981,20 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         continue;
       }
       const routeLeaseId = leaseForRoute(routeFingerprint, route);
-      const needsMigration = record.workId === undefined || record.revision === undefined;
+      // `autoPing` is a retired field that held plaintext handles; rewrite the file without it.
+      const { autoPing: _legacyAutoPing, ...current } = record as PersistedPendingBatch & {
+        autoPing?: unknown;
+      };
+      const needsMigration =
+        record.workId === undefined || record.revision === undefined || "autoPing" in record;
       const workId = record.workId ?? randomUUID();
-      const revision = needsMigration ? (record.revision ?? 0) + 1 : (record.revision ?? 1);
+      const revision =
+        record.workId === undefined || record.revision === undefined
+          ? (record.revision ?? 0) + 1
+          : record.revision;
       if (needsMigration) {
         recordPendingSendBatch(deps.config.dataDir, {
-          ...record,
+          ...current,
           workId,
           revision,
           batch: batch.serialize(),

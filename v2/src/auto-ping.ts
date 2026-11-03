@@ -713,7 +713,10 @@ export class AutoPingService {
         now - Date.parse(grant.createdAt) < CREDENTIAL_RETENTION_MS,
     );
     this.state.suppressions = this.state.suppressions.filter((suppression) => {
-      if (!liveRoute(suppression.routeFingerprint)) return false;
+      if (!liveRoute(suppression.routeFingerprint)) {
+        if (!suppression.endedAt) this.endMute(suppression, "route_removed");
+        return false;
+      }
       if (suppression.endedAt)
         return now - Date.parse(suppression.endedAt) < CREDENTIAL_RETENTION_MS;
       return true;

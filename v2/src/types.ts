@@ -618,7 +618,7 @@ export interface AutoPingRouteDescriptor {
 }
 
 export type AutoPingMuteMode = "until_change" | "for" | "forever";
-export type AutoPingMuteEndReason = "resumed" | "changed" | "expired";
+export type AutoPingMuteEndReason = "resumed" | "changed" | "expired" | "route_removed";
 
 export interface AutoPingMuteItem {
   subject: string;

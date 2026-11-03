@@ -115,4 +115,39 @@ describe("auto-ping mute history", () => {
     expect(file).not.toContain(first.handleHash);
     service.dispose();
   });
+
+  it("closes an active mute in history when gc drops its route", async () => {
+    const dir = createDir();
+    const descriptor = {
+      version: 1 as const,
+      projectId: "p",
+      triggerId: "t",
+      sourceId: "s",
+      sourceType: "github" as const,
+      eventName: "github:review",
+      actionKind: "send" as const,
+      destination: { kind: "session" as const, sessionId: "s1" },
+      spawnDeskGroup: false,
+    };
+    const fingerprint = autoPingRouteFingerprint(descriptor);
+    const service = new AutoPingService(dir);
+    const lease = service.registerRoute(fingerprint, descriptor);
+    const grant = service.createGrant({
+      routeFingerprint: fingerprint,
+      destination: descriptor.destination,
+      actorSessionId: "s1",
+      items: [{ subject: "review:github:o/r#1", kind: "ci_failed", label: "x", changeKey: "a" }],
+      untilChange: true,
+    });
+    await service.mute("s1", { handle: grant.handle, mode: "forever", reason: "r" });
+    expect(service.history("s1")[0]?.endedAt).toBeUndefined();
+
+    service.releaseRoute(lease);
+
+    const history = readMuteHistory(dir, "s1");
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({ endReason: "route_removed" });
+    expect(history[0]?.endedAt).toBeDefined();
+    service.dispose();
+  });
 });
