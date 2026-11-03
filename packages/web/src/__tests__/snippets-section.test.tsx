@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SnippetsSection } from "@/components/snippets/SnippetsSection";
+import { SNIPPET_FETCH_TIMEOUT_MS } from "@/lib/snippets/snippet-protocol";
 
 vi.mock("@/components/snippets/SnippetPanel", () => ({
   SnippetErrorCard: ({ chip }: { chip: string }) => <div>{chip}</div>,
@@ -55,7 +56,58 @@ function renderSection(revision: number) {
 }
 
 describe("SnippetsSection stale loads", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  const restores: Array<() => void> = [];
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    for (const restore of restores.splice(0)) restore();
+  });
+
+  // Safari 15.4 to 17.3 lacks AbortSignal.any, and Safari < 16 lacks AbortSignal.timeout.
+  function removeSignalStatics() {
+    for (const name of ["any", "timeout"] as const) {
+      const original = Object.getOwnPropertyDescriptor(AbortSignal, name);
+      Object.defineProperty(AbortSignal, name, { value: undefined, configurable: true });
+      restores.push(() => {
+        if (original) Object.defineProperty(AbortSignal, name, original);
+      });
+    }
+  }
+
+  it("loads without AbortSignal.any or AbortSignal.timeout", async () => {
+    removeSignalStatics();
+    expect(AbortSignal.any).toBeUndefined();
+    expect(AbortSignal.timeout).toBeUndefined();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(html(1))),
+    );
+    render(renderSection(1));
+    await waitFor(() => expect(screen.getByText("loaded revision 1")).toBeInTheDocument());
+  });
+
+  it("times out a hung fetch after SNIPPET_FETCH_TIMEOUT_MS", async () => {
+    removeSignalStatics();
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+          }),
+      ),
+    );
+    render(renderSection(1));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SNIPPET_FETCH_TIMEOUT_MS - 1);
+    });
+    expect(screen.queryByText("Not loaded")).not.toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(screen.getByText("Not loaded")).toBeInTheDocument();
+  });
 
   it("ignores an older fetch that resolves after a newer valid one", async () => {
     let resolveFirst!: (value: Response) => void;

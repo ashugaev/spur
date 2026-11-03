@@ -82,14 +82,24 @@ async function loadFile(
   signal: AbortSignal,
 ): Promise<{ html: string } | { problem: FileProblem }> {
   if (file.artifact.size > SNIPPET_MAX_FILE_BYTES) return { problem: { code: "too_large" } };
-  const timeout = AbortSignal.timeout(SNIPPET_FETCH_TIMEOUT_MS);
-  const response = await fetch(artifactUrl(sessionId, file.artifact.id), {
-    cache: "no-store",
-    signal: AbortSignal.any([signal, timeout]),
-  });
-  if (!response.ok) return { problem: { code: "fetch_failed" } };
-  const html = await readCapped(response, signal);
-  return html === null ? { problem: { code: "too_large" } } : { html };
+  // Caller abort and timeout share one controller: AbortSignal.any/timeout are missing on Safari < 17.4 / 16.
+  const local = new AbortController();
+  const abort = () => local.abort();
+  if (signal.aborted) abort();
+  signal.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(abort, SNIPPET_FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(artifactUrl(sessionId, file.artifact.id), {
+      cache: "no-store",
+      signal: local.signal,
+    });
+    if (!response.ok) return { problem: { code: "fetch_failed" } };
+    const html = await readCapped(response, local.signal);
+    return html === null ? { problem: { code: "too_large" } } : { html };
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", abort);
+  }
 }
 
 // Settled entry for one fetch result. A rejected file keeps the panel already loaded.
@@ -155,7 +165,9 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
       inflight.current[snippetId]?.abort();
       const fetchController = new AbortController();
       inflight.current[snippetId] = fetchController;
-      const signal = AbortSignal.any([controller.signal, fetchController.signal]);
+      const { signal } = fetchController;
+      const abortFetch = () => fetchController.abort();
+      controller.signal.addEventListener("abort", abortFetch, { once: true });
       setEntries((previous) => ({
         ...previous,
         [snippetId]: {
@@ -166,6 +178,7 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
         },
       }));
       const settle = (result: { html: string } | { problem: FileProblem }) => {
+        controller.signal.removeEventListener("abort", abortFetch);
         if (signal.aborted) return;
         if ("problem" in result && result.problem.code === "fetch_failed") {
           launched.current[snippetId] = "";
