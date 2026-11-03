@@ -1,6 +1,8 @@
-Interactive session snippets. Agent writes one HTML file; the session page renders it as a sandboxed panel; user actions return to the agent as queued messages.
+# Session snippets
 
-Reference. Limits live in `packages/web/src/lib/snippets/snippet-protocol.ts`; SDK source in `packages/web/public/snippets/spur-snippet-sdk.v1.js`.
+> Scope: interactive session snippet authoring contract, SDK, components. Caveman, no overhead.
+
+Agent writes one HTML file; the session page renders it as a sandboxed panel; user actions return to the agent as queued messages. Limits: `packages/web/src/lib/snippets/snippet-protocol.ts`. SDK: `packages/web/public/snippets/spur-snippet-sdk.v1.js`.
 
 ## Publish
 
@@ -12,43 +14,21 @@ Reference. Limits live in `packages/web/src/lib/snippets/snippet-protocol.ts`; S
 
 ## Manifest
 
-First `<script type="application/spur-snippet+json">` in the file. Unknown keys rejected at every level.
+First `<script type="application/spur-snippet+json">` in the file. Unknown keys rejected at every level. Full shape: [Example](#example).
 
-```json
-{
-  "protocolVersion": 1,
-  "snippetId": "candidate-picker",
-  "ownerSessionId": "<session id>",
-  "instanceId": "inst-0001",
-  "revision": 1,
-  "respondsToRequestId": "<requestId>",
-  "title": "Text variants",
-  "actions": [
-    {
-      "id": "regenerate",
-      "label": "Regenerate",
-      "confirm": "always",
-      "payload": {
-        "type": "object",
-        "properties": { "instruction": { "type": "string", "maxLength": 2000 } }
-      }
-    }
-  ]
-}
-```
-
+- Keys: `protocolVersion` (`1`), `snippetId`, `ownerSessionId` (this session's id), `instanceId`, `revision`, `respondsToRequestId` (optional), `title`, `actions`.
 - `instanceId`: `[A-Za-z0-9-]{8,64}`, fixed for the snippet's life. New value = new snippet, state dropped.
 - `revision`: integer 1..2147483647, strictly increasing within an `instanceId`.
-- `respondsToRequestId`: optional; the `requestId` this revision answers.
+- `respondsToRequestId`: the `requestId` this revision answers.
 - `title` 1..120 chars, action `label` 1..80 chars. Banned: control characters, `"`, `\`, `[`, `]`, bidi controls, U+061C, U+2028, U+2029.
-- `actions`: 1..32, ids unique `[a-z0-9-]{1,64}`. `confirm: "always"`: every invoke asks the user first.
+- `actions`: 1..32 of `{id, label, payload, confirm?}`; ids unique `[a-z0-9-]{1,64}`. `"confirm": "always"`: every invoke asks the user first.
 
 ## Payload schema
 
 Root is an object schema. Every string needs `maxLength` 1..20000; every array needs `maxItems` 1..100. Undeclared properties are rejected. Nesting depth 4 (root object = 1).
 
 - `object`: `properties` 1..32 keys `^[a-zA-Z][a-zA-Z0-9_]{0,31}$`, `required` (subset).
-- `string`: `maxLength`, `minLength`, `enum` (1..100 values, each up to 200 chars).
+- `string`: `maxLength`, `minLength`, `enum` (1..100 values, each up to 200 chars and `maxLength`).
 - `number`: `minimum`, `maximum`, `integer: true`.
 - `boolean`.
 - `array`: `items`, `maxItems`, `minItems`.
@@ -62,7 +42,7 @@ Root is an object schema. Every string needs `maxLength` 1..20000; every array n
 - `reason`: `not_connected`, `revision_conflict`, `unknown_action`, `payload_too_large`, `invalid_payload`, `session_unavailable`, `busy`, `declined`, `stale`.
 - `issues`: up to 20 `{path, code}`; `path` is a JSON Pointer; `code`: `type`, `required`, `unknown_property`, `min_length`, `max_length`, `enum`, `minimum`, `maximum`, `integer`, `min_items`, `max_items`, `selection_mismatch`, `depth`.
 - One action in flight per snippet. Stopped or terminal sessions reject.
-- Host asks the user before sending when: the action declares `confirm`, no click inside the snippet was observed, second action on the same revision, 10 unconfirmed sends in a row, or browser storage is unavailable. The count resets only on the user's Send or Retry click.
+- Host asks the user before sending when: the action declares `confirm`, the snippet never had focus, second action on the same revision, 10 unconfirmed sends in a row, or browser storage is unavailable. The count resets only on the user's Send or Retry click.
 - Payload up to 48 KiB, whole prompt up to 64 KiB, port message up to 128 KiB, state up to 64 KiB. Unit: UTF-8 bytes of the JSON text.
 
 ## Prompt envelope
@@ -78,7 +58,7 @@ Answer by replacing $SPUR_SESSION_ARTIFACTS_DIR/snippet.<session>.<snippetId>.ht
 [/spur-snippet-action]
 ```
 
-Answer: publish a higher `revision` with `respondsToRequestId` set. Panel status: Done. Higher revision without the id: Replaced. No answer in 15 min: No reply in 15 min. A chat answer without a new revision also ends the action once the agent is waiting.
+`retryOf` appears on retries only. Answer: publish a higher `revision` with `respondsToRequestId` set. Panel status: Done. Higher revision without the id: Replaced. No answer in 15 min: No reply in 15 min. A chat answer without a new revision also ends the action once the agent is waiting.
 
 ## Revisions
 
@@ -90,8 +70,9 @@ Answer: publish a higher `revision` with `respondsToRequestId` set. Panel status
 
 - Iframe `sandbox="allow-scripts"` only; opaque origin: no dashboard cookies, storage or DOM.
 - CSP in the srcdoc: no network, assets inline or `data:`/`blob:`; no form submit, no popups, no `alert`.
-- Not blocked: WebRTC, DNS prefetch, self-navigation. A second page load stops the panel with Reload.
-- The unconfirmed-send limit is per browser profile and open tab: at most 10 times the open tabs on one session.
+- Not blocked: WebRTC (network egress), DNS prefetch, self-navigation. A second page load stops the panel with Reload.
+- Over 100 port messages in 10 s stops the panel.
+- Unconfirmed-send count is per session per browser profile, no cross-tab lock: racing tabs reach at most 10 x open tabs.
 - Reverse proxy: a CSP header added to Spur pages must allow `'unsafe-inline'` scripts and styles, or snippets do not start.
 
 ## SDK
@@ -103,9 +84,9 @@ Injected as `window.spur`. Host fetches it once per page and inlines it; never l
 - `on(event, handler)`, `once(...)`: `action`, `theme`, `fullscreen`, `availability`. Returns an unsubscribe function.
 - `action`: current `{requestId, actionId, status, ...}` or `null`. Status: `awaiting_confirm`, `submitting`, `accepted`, `queued`, `processing`, `completed`, `replaced`, `error`, `delivery_unknown`, `timeout`.
 - `state.get()`, `state.set(value)`: persisted per browser, up to 64 KiB, throws `RangeError` over it.
-- `requestFullscreen(): Promise<boolean>` (false without a prior click), `exitFullscreen()`.
+- `requestFullscreen(): Promise<boolean>` (false until the snippet had focus), `exitFullscreen()`.
 - `selection(sourceId?)`: current selection in a `spur-selectable-text`.
-- Theme: `--spur-<token>` custom properties on `:root`; font `--spur-font`.
+- Theme: `--spur-<token>` custom properties on `:root`, tokens from `SNIPPET_THEME_TOKENS`; font `--spur-font`.
 - While an action is in flight, or actions are blocked, every library control and `[data-spur-action]` element is disabled.
 
 ## Components
@@ -146,7 +127,8 @@ Ten variants, choose, regenerate with an instruction, modify a selected span. No
               "minItems": 1,
               "maxItems": 10,
               "items": { "type": "string", "maxLength": 40 }
-            }
+            },
+            "instruction": { "type": "string", "maxLength": 2000 }
           }
         }
       },
