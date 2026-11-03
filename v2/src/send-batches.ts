@@ -335,7 +335,9 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
       ...(this.providerId === "github" && signal.kind === "merge_conflict"
         ? { mergeConflict: { prNumber: this.prNumber } }
         : {}),
-      ...(signal.kind === "ci_failed" && signal.ciRun ? { ci: { prNumber: this.prNumber, ...signal.ciRun } } : {}),
+      ...(signal.kind === "ci_failed" && signal.ciRun
+        ? { ci: { prNumber: this.prNumber, ...signal.ciRun } }
+        : {}),
     }));
   }
 
