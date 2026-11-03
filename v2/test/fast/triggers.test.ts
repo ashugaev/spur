@@ -1669,21 +1669,18 @@ describe("startConfiguredTriggers", () => {
               itemKey: item.itemKey,
               fingerprint: item.fingerprint,
               deliveryAttempts: 8,
-              ciAttempts: 0,
               nextAttemptAt: 0,
             },
             {
               itemKey: '["github",420,"comment:1"]',
               fingerprint: item.fingerprint,
               deliveryAttempts: 8,
-              ciAttempts: 0,
               nextAttemptAt: 0,
             },
             {
               itemKey: '["gitlab",42,"comment:1"]',
               fingerprint: item.fingerprint,
               deliveryAttempts: 8,
-              ciAttempts: 0,
               nextAttemptAt: 0,
             },
           );
