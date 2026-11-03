@@ -232,6 +232,23 @@ describe("auto-ping CLI", () => {
     expect(outputText()).toContain("ended expired 2026-09-01T02:00:00.000Z");
   });
 
+  it("labels an ended until-change history row without the item label", async () => {
+    getJsonMock.mockResolvedValue({
+      records: [],
+      history: [
+        mute("old-2", "until_change", {
+          endedAt: "2026-09-01T02:00:00.000Z",
+          endReason: "resumed",
+        }),
+      ],
+    });
+
+    await parseAutoPing(["auto-ping", "list", "--session", "ses-1", "--all"]);
+
+    expect(outputText()).toContain("until it changes");
+    expect(outputText()).not.toContain("until next commit");
+  });
+
   it("resumes by handle and by mute id", async () => {
     postJsonMock.mockResolvedValue({ records: [], removed: true });
 

@@ -906,7 +906,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   // a tick that meets the same suppressed item again stays silent.
   const logSuppressed = (
     batch: PendingBatch,
-    reason: "muted" | "budget_exhausted" | "conflict_already_delivered" | "ci_run_seen",
+    reason: "muted" | "budget_exhausted" | "conflict_already_delivered" | "ci_seen",
     item: { itemKey: string; fingerprint?: string },
     extra: Record<string, unknown> = {},
   ): void => {
@@ -1144,9 +1144,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         }
       }
       submission.filterItems((item) => {
-        if (item.ci && !autoPing.isCiRunNew(batch.routeFingerprint, item.ci.head, item.ci.runIds)) {
+        if (item.ci && !autoPing.isCiNew(batch.routeFingerprint, item.ci.head, item.ci.checks)) {
           batch.batch.filterItems((retained) => retained.itemKey !== item.itemKey);
-          logSuppressed(batch, "ci_run_seen", item);
+          logSuppressed(batch, "ci_seen", item);
           return false;
         }
         if (!item.mergeConflict) return true;
@@ -1272,7 +1272,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
               });
               for (const item of submitted.values()) {
                 if (item.ci)
-                  autoPing.markCiDelivered(batch.routeFingerprint, item.ci.head, item.ci.runIds);
+                  autoPing.markCiDelivered(batch.routeFingerprint, item.ci.head, item.ci.checks);
                 if (item.mergeConflict)
                   autoPing.markMergeConflictDelivered(
                     batch.routeFingerprint,

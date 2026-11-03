@@ -409,9 +409,6 @@ export type GitHubRunProducer =
 
 export interface GitHubRunCheck extends GitHubCheck {
   producer?: GitHubRunProducer;
-  // CheckRun: detailsUrl (new job id per re-run attempt). StatusContext:
-  // `${context}:${createdAt}`.
-  runId?: string;
   // CheckRun: check suite createdAt. StatusContext: context createdAt.
   createdAt?: string;
 }
@@ -523,7 +520,7 @@ function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | 
 }
 
 const GITHUB_REVIEW_THREAD_FIELDS = `id isResolved comments(last:100){nodes{databaseId body path line author{login}} pageInfo{hasPreviousPage startCursor}}`;
-const GITHUB_CHECK_CONTEXT_FIELDS = `... on CheckRun{name conclusion status detailsUrl checkSuite{databaseId createdAt app{databaseId} workflowRun{event workflow{databaseId}}}} ... on StatusContext{context state createdAt creator{login}}`;
+const GITHUB_CHECK_CONTEXT_FIELDS = `... on CheckRun{name conclusion status checkSuite{databaseId createdAt app{databaseId} workflowRun{event workflow{databaseId}}}} ... on StatusContext{context state createdAt creator{login}}`;
 const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName headRefOid baseRefOid headRepository{nameWithOwner} author{login} reviewDecision mergeable mergeStateStatus isDraft state
   commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{
     ${GITHUB_CHECK_CONTEXT_FIELDS}
@@ -588,18 +585,12 @@ export function checksFromPrNode(value: Record<string, unknown>): GitHubRunCheck
         : creator !== null
           ? ({ kind: "status_context", creator } as const)
           : null;
-      const runId = checkName
-        ? (readString(raw.detailsUrl) ?? undefined)
-        : readString(raw.createdAt)
-          ? `${name}:${readString(raw.createdAt)}`
-          : undefined;
       return [
         {
           name,
           state,
           ...(producer ? { producer } : {}),
           ...(createdAt ? { createdAt } : {}),
-          ...(runId ? { runId } : {}),
         },
       ];
     },
@@ -1323,14 +1314,12 @@ function annotateChangeKeys(
     let annotated: ReviewSignal = signal;
     if (signal.kind === "ci_failed") {
       if (head) {
-        const runIds = [
-          ...new Set(failing.flatMap((check) => (check.runId ? [check.runId] : []))),
-        ].sort();
+        const checks = [...new Set(failing.map((check) => check.name))].sort();
         annotated = {
           ...signal,
           changeKey: head,
-          revision: `${head}:${runIds.join(",")}`,
-          ciRun: { head, runIds },
+          revision: `${head}:${checks.join(",")}`,
+          ciRun: { head, checks },
         };
       }
     } else if (signal.kind === "merge_conflict") {

@@ -48,7 +48,7 @@ interface PersistedMergeConflict {
 interface PersistedCiSeen {
   routeFingerprint: string;
   head: string;
-  runIds: string[];
+  checks: string[];
 }
 
 interface AutoPingState {
@@ -289,7 +289,7 @@ function parseState(raw: unknown): ParsedState {
       !isRecord(value) ||
       typeof value.routeFingerprint !== "string" ||
       typeof value.head !== "string" ||
-      !isStringArray(value.runIds)
+      !isStringArray(value.checks)
     )
       throw new Error("Invalid auto-ping ci state");
     return value as unknown as PersistedCiSeen;
@@ -626,9 +626,9 @@ export class AutoPingService {
         result ??= { mode: entry.mode, suppressionId: entry.suppressionId };
         continue;
       }
-      entry.items = entry.items.filter((candidate) => candidate !== covered);
       dirty = true;
-      if (entry.items.length === 0) this.endMute(entry, "changed");
+      if (entry.items.length === 1) this.endMute(entry, "changed");
+      else entry.items = entry.items.filter((candidate) => candidate !== covered);
     }
     if (dirty) this.persist();
     return result;
@@ -676,22 +676,22 @@ export class AutoPingService {
     this.persist();
   }
 
-  // True when `head` is new for the route or any run id was never delivered.
-  isCiRunNew(routeFingerprint: string, head: string, runIds: readonly string[]): boolean {
+  // True when `head` is new for the route or any failing check name was never delivered on it.
+  isCiNew(routeFingerprint: string, head: string, checks: readonly string[]): boolean {
     const seen = this.state.ciSeen.find((entry) => entry.routeFingerprint === routeFingerprint);
     if (!seen || seen.head !== head) return true;
-    return runIds.some((id) => !seen.runIds.includes(id));
+    return checks.some((name) => !seen.checks.includes(name));
   }
 
-  markCiDelivered(routeFingerprint: string, head: string, runIds: readonly string[]): void {
+  markCiDelivered(routeFingerprint: string, head: string, checks: readonly string[]): void {
     const seen = this.state.ciSeen.find((entry) => entry.routeFingerprint === routeFingerprint);
     if (!seen) {
-      this.state.ciSeen.push({ routeFingerprint, head, runIds: [...new Set(runIds)] });
+      this.state.ciSeen.push({ routeFingerprint, head, checks: [...new Set(checks)] });
     } else if (seen.head !== head) {
       seen.head = head;
-      seen.runIds = [...new Set(runIds)];
+      seen.checks = [...new Set(checks)];
     } else {
-      seen.runIds = [...new Set([...seen.runIds, ...runIds])];
+      seen.checks = [...new Set([...seen.checks, ...checks])];
     }
     this.persist();
   }

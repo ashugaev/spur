@@ -90,7 +90,11 @@ describe("AutoPingService mute", () => {
     expect(service.matchMute(fingerprint, destination, ciItem("head-b"))).toBeNull();
     expect(service.list("owner")).toEqual([]);
     expect(service.history("owner")).toMatchObject([
-      { suppressionId: record.suppressionId, endReason: "changed" },
+      {
+        suppressionId: record.suppressionId,
+        endReason: "changed",
+        items: [{ subject: ciItem().subject, kind: ciItem().kind }],
+      },
     ]);
     expect(logs.map((entry) => entry.event)).toEqual(["auto-ping.muted", "auto-ping.unmuted"]);
     service.dispose();
@@ -384,18 +388,18 @@ describe("AutoPingService conflict and CI budgets", () => {
     restored.dispose();
   });
 
-  it("treats a CI run as new only for an unseen head or run id, recorded on delivery", () => {
+  it("treats CI as new only for an unseen head or check name, recorded on delivery", () => {
     const { service } = setup();
-    expect(service.isCiRunNew(fingerprint, "A", ["r1"])).toBe(true);
-    service.markCiDelivered(fingerprint, "A", ["r1"]);
-    expect(service.isCiRunNew(fingerprint, "A", ["r1"])).toBe(false);
-    expect(service.isCiRunNew(fingerprint, "A", ["r1", "r2"])).toBe(true);
-    service.markCiDelivered(fingerprint, "A", ["r1", "r2"]);
-    expect(service.isCiRunNew(fingerprint, "A", ["r1"])).toBe(false);
-    expect(service.isCiRunNew(fingerprint, "A", ["r1", "r2"])).toBe(false);
-    expect(service.isCiRunNew(fingerprint, "B", ["r1"])).toBe(true);
-    service.markCiDelivered(fingerprint, "B", ["r1"]);
-    expect(service.isCiRunNew(fingerprint, "A", ["r2"])).toBe(true);
+    expect(service.isCiNew(fingerprint, "A", ["build"])).toBe(true);
+    service.markCiDelivered(fingerprint, "A", ["build"]);
+    expect(service.isCiNew(fingerprint, "A", ["build"])).toBe(false);
+    expect(service.isCiNew(fingerprint, "A", ["build", "lint"])).toBe(true);
+    service.markCiDelivered(fingerprint, "A", ["build", "lint"]);
+    expect(service.isCiNew(fingerprint, "A", ["build"])).toBe(false);
+    expect(service.isCiNew(fingerprint, "A", ["build", "lint"])).toBe(false);
+    expect(service.isCiNew(fingerprint, "B", ["build"])).toBe(true);
+    service.markCiDelivered(fingerprint, "B", ["build"]);
+    expect(service.isCiNew(fingerprint, "A", ["lint"])).toBe(true);
     service.dispose();
   });
 });

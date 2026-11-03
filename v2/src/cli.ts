@@ -809,6 +809,7 @@ function autoPingSubjectLabel(items: AutoPingMuteItem[]): string {
 function autoPingUntilLabel(record: AutoPingMuteView): string {
   if (record.mode === "forever") return "forever";
   if (record.mode === "for") return `until ${record.expiresAt ?? "expiry"}`;
+  if (record.endedAt) return "until it changes";
   const labels = [...new Set(record.items.map((item) => item.label).filter(Boolean))];
   return labels.length === 1 ? (labels[0] ?? "until it changes") : "until it changes";
 }

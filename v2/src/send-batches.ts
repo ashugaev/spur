@@ -45,7 +45,7 @@ export interface SendBatchItem {
   fingerprint: string;
   refreshComment?: boolean;
   mergeConflict?: { prNumber: number };
-  ci?: { head: string; runIds: string[] };
+  ci?: { head: string; checks: string[] };
 }
 
 function semanticFingerprint(values: readonly unknown[]): string {

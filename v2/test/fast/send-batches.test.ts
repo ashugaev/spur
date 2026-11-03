@@ -809,11 +809,11 @@ describe("automatic ping mute footer", () => {
     expect(a?.fingerprint).not.toBe(b?.fingerprint);
   });
 
-  it("surfaces CI run identity on the retry item", () => {
+  it("surfaces CI head and failing checks on the retry item", () => {
     const item = reviewBatchWith([
-      { key: "ci_failed", kind: "ci_failed", text: "ci", ciRun: { head: "A", runIds: ["r1"] } },
+      { key: "ci_failed", kind: "ci_failed", text: "ci", ciRun: { head: "A", checks: ["build"] } },
     ]).retryItems()[0];
-    expect(item?.ci).toEqual({ head: "A", runIds: ["r1"] });
+    expect(item?.ci).toEqual({ head: "A", checks: ["build"] });
   });
 });
 

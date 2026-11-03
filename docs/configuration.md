@@ -155,7 +155,7 @@ The same pass also runs a detect-only step over one shared process-table snapsho
 
 ## Automatic reminders
 
-Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 attempts for unchanged open work/blockers/empty ledger — see [todo](commands.md#todo). Pending automatic GitHub/Jira sends: 8 attempts per unchanged item. `ci_failed` pings once per head commit, again on a new CI run id for the same commit; no reminder loop. `merge_conflict` pings at most once per head+base pair.
+Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 attempts for unchanged open work/blockers/empty ledger — see [todo](commands.md#todo). Pending automatic GitHub/Jira sends: 8 attempts per unchanged item. `ci_failed` pings once per head commit and failing check name, a re-run of the same check on that commit does not ping again, a new head commit does; no reminder loop. `merge_conflict` pings at most once per head+base pair.
 
 A session bound to a PR GitHub reports as nonexistent stops signal polling after one attempt, logs `source.poll.disabled` once (`warn`), and persists the disable per source under `<dataDir>/source-state/github-poll-disabled/<projectId>/<sourceId>.json` across source reload and daemon restart. Clear via rebind away from that PR, [`spur source poll-enable`](commands.md#source), or `spur restore`/`spur reopen`. Bounded recheck every `pollDisabledRecheckMs` (default 24h); a still-missing PR does not re-emit `source.poll.disabled`. A resolved recheck logs `source.poll.enabled` once.
 

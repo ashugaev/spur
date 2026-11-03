@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionMutes } from "@/components/SessionMutes.js";
 import type { AutoPingMute, AutoPingMuteProjection } from "@/lib/types.js";
@@ -81,6 +81,21 @@ describe("SessionMutes", () => {
     expect(history).toHaveTextContent("Ended resumed");
     expect(history).toHaveTextContent("Ended expired");
     expect(screen.queryByRole("region", { name: "Active" })).not.toBeInTheDocument();
+  });
+
+  it("lists history newest first and drops the stale until label on ended rows", async () => {
+    const older = { ...ended("old", "resumed"), endedAt: "2026-11-03T01:00:00.000Z" };
+    const newer = { ...ended("new", "expired"), endedAt: "2026-11-03T03:00:00.000Z" };
+    mockProjection({ records: [], history: [older, newer] });
+    render(<SessionMutes sessionId="api-1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Mute history" }));
+    const history = screen.getByRole("region", { name: "History" });
+    const rows = within(history).getAllByRole("listitem");
+    expect(rows[0]).toHaveTextContent("Ended expired");
+    expect(rows[1]).toHaveTextContent("Ended resumed");
+    expect(history).not.toHaveTextContent("until next commit");
+    expect(history).toHaveTextContent("until it changes");
   });
 
   it("opens and closes the popover by click and Escape", async () => {

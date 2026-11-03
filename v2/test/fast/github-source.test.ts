@@ -1425,7 +1425,7 @@ describe("github source", () => {
   });
 
   describe("CI run identity", () => {
-    it("carries the head commit and failing detailsUrl run ids on ci_failed", async () => {
+    it("carries the head commit and failing check names on ci_failed", async () => {
       readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
       listSessionsMock.mockReturnValue([makeSession()]);
       ghMock
@@ -1459,15 +1459,12 @@ describe("github source", () => {
       ).signals.get("ci_failed");
       expect(signal?.changeKey).toBe("head-1");
       expect(signal?.ciRun?.head).toBe("head-1");
-      expect(signal?.ciRun?.runIds).toEqual([
-        "https://github.com/acme/api/actions/runs/9/job/91",
-        "lint:2026-01-01T00:00:00Z",
-      ]);
-      expect(signal?.revision).toBe(`head-1:${signal?.ciRun?.runIds.join(",")}`);
+      expect(signal?.ciRun?.checks).toEqual(["build", "lint"]);
+      expect(signal?.revision).toBe("head-1:build,lint");
       handle.stop();
     });
 
-    it("moves the revision on a new job id for the same failing check and head", async () => {
+    it("keeps the revision when the same failing check is re-created with a new job id", async () => {
       const failing = (url: string) =>
         prView({
           headRefOid: "head-1",
@@ -1493,8 +1490,8 @@ describe("github source", () => {
         handle.stop();
       }
       expect(revisions[0]).toBe(revisions[1]);
-      expect(revisions[2]).not.toBe(revisions[1]);
-      expect(emit.mock.calls.filter(([name]) => name === "github:ci_failed")).toHaveLength(2);
+      expect(revisions[2]).toBe(revisions[1]);
+      expect(emit.mock.calls.filter(([name]) => name === "github:ci_failed")).toHaveLength(1);
     });
   });
 

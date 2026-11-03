@@ -3481,7 +3481,7 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("pings CI once per head and again only for a run id never delivered on that head", async () => {
+  it("pings CI once per head and failing check name, never again for a re-created check", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
       status: "running",
@@ -3499,7 +3499,7 @@ describe("startConfiguredTriggers", () => {
       sessionService: { get: getMock, deliver: deliverMock } as never,
       logger: { warn: vi.fn() },
     });
-    const ci = (head: string, runIds: string[]) => {
+    const ci = (head: string, checks: string[], runId = "run") => {
       const event = ciFailedEvent();
       return {
         ...event,
@@ -3511,36 +3511,31 @@ describe("startConfiguredTriggers", () => {
               kind: "ci_failed" as const,
               text: "CI is failing: test suite.",
               changeKey: head,
-              revision: `${head}:${runIds.join(",")}`,
-              ciRun: { head, runIds },
+              revision: `${head}:${checks.join(",")}:${runId}`,
+              ciRun: { head, checks },
             },
           ],
         },
       };
     };
     try {
-      const sequence: Array<[string, string[]]> = [
-        ["A", ["r1"]],
-        ["A", ["r1", "r2"]],
-        ["A", ["r1"]],
-        ["A", ["r1", "r2"]],
-      ];
-      for (const [head, runIds] of sequence) {
-        bus.emit(ci(head, runIds));
+      // Same head, same failing check re-created each poll with a new run id.
+      for (let run = 1; run <= 6; run += 1) {
+        bus.emit(ci("A", ["gate"], `r${String(run)}`));
         await advanceSendWindow();
       }
-      expect(deliverMock).toHaveBeenCalledTimes(2);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(30 * 60_000);
-      expect(deliverMock).toHaveBeenCalledTimes(2);
-      bus.emit(ci("B", ["r1"]));
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      bus.emit(ci("B", ["gate"], "r7"));
       await advanceSendWindow();
-      expect(deliverMock).toHaveBeenCalledTimes(3);
+      expect(deliverMock).toHaveBeenCalledTimes(2);
       expect(
         logSpurEventMock.mock.calls.filter(
           ([, entry]) =>
-            entry.event === "trigger.send.suppressed" && entry.details?.reason === "ci_run_seen",
+            entry.event === "trigger.send.suppressed" && entry.details?.reason === "ci_seen",
         ),
-      ).toHaveLength(2);
+      ).toHaveLength(5);
     } finally {
       await controller.stop();
     }

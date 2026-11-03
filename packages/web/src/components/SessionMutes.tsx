@@ -31,6 +31,7 @@ function untilLabel(mute: AutoPingMute): string {
   if (mute.mode === "for") {
     return mute.expiresAt ? `until ${formatShortTimestamp(mute.expiresAt)}` : "for a while";
   }
+  if (mute.endedAt) return "until it changes";
   const labels = [...new Set(mute.items.map((item) => item.label).filter(Boolean))];
   return labels.length === 1 ? (labels[0] ?? "until it changes") : "until it changes";
 }
@@ -106,7 +107,9 @@ export function SessionMutes({ sessionId }: { sessionId: string }) {
 
   const active = projection?.records ?? [];
   // The daemon's history also lists active mutes; the popover shows them once.
-  const history = (projection?.history ?? []).filter((mute) => mute.endedAt !== undefined);
+  const history = (projection?.history ?? [])
+    .filter((mute) => mute.endedAt !== undefined)
+    .sort((left, right) => (right.endedAt ?? "").localeCompare(left.endedAt ?? ""));
   const { containerRef, buttonRef, menuRef, menuStyle } = useAnchoredMenu({
     open,
     onClose: () => setOpen(false),

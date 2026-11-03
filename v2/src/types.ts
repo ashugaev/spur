@@ -594,8 +594,8 @@ export interface ReviewSignal {
   changeKey?: string;
   /** Occurrence identity: joins the snapshot diff and the retry fingerprint. */
   revision?: string;
-  /** CI run identity of a ci_failed signal. */
-  ciRun?: { head: string; runIds: string[] };
+  /** Head commit and failing check names of a ci_failed signal. */
+  ciRun?: { head: string; checks: string[] };
 }
 
 export type AutoPingDestination = { kind: "session"; sessionId: string };
