@@ -3541,6 +3541,59 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("suppresses a re-submitted ci_failed for the same PR, head and checks after delivery", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockImplementation(() => ciSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ event: "github:ci_failed", interrupt: false }) as never,
+      bus,
+      sessionService: { get: getMock, deliver: deliverMock } as never,
+      logger: { warn: vi.fn() },
+    });
+    const event = ciFailedEvent();
+    const replay = {
+      ...event,
+      data: {
+        ...event.data,
+        signals: [
+          {
+            key: "ci_failed",
+            kind: "ci_failed" as const,
+            text: "CI is failing: test suite.",
+            changeKey: "A",
+            revision: "A:gate",
+            ciRun: { head: "A", checks: ["gate"] },
+          },
+        ],
+      },
+    };
+    try {
+      bus.emit(replay);
+      await advanceSendWindow();
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      bus.emit(structuredClone(replay));
+      await advanceSendWindow();
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) =>
+            entry.event === "trigger.send.suppressed" && entry.details?.reason === "ci_seen",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("does not deliver a ci_failed retry batch with interrupt=true while the session is rate_limited", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",

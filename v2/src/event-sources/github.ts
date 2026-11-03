@@ -831,6 +831,8 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           if (!previous) {
             for (const key of ["merge_conflict", "ci_failed"]) {
               const first = next.get(key);
+              // CI without a head commit has no dedupe key: never replay it unguarded.
+              if (key === "ci_failed" && !first?.ciRun) continue;
               if (first && !candidates.includes(first)) candidates.push(first);
             }
           }

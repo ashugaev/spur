@@ -1484,6 +1484,22 @@ describe("github source", () => {
         handle.stop();
       });
 
+      it("does not emit first-observation failing CI without a head commit", async () => {
+        readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+        listSessionsMock.mockReturnValue([makeSession()]);
+        mockLifecyclePoll(
+          prView({
+            headRefOid: "",
+            baseRefOid: "base-1",
+            statusCheckRollup: [{ name: "build", conclusion: "FAILURE", status: "COMPLETED" }],
+          }),
+        );
+        const emit = vi.fn();
+        const handle = await startLifecycle(emit);
+        expect(ciEmits(emit)).toHaveLength(0);
+        handle.stop();
+      });
+
       it("emits nothing for failing CI already in the persisted snapshot (restart)", async () => {
         readReviewSourceSnapshotsMock.mockReturnValue(new Map());
         listSessionsMock.mockReturnValue([makeSession()]);
