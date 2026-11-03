@@ -752,3 +752,23 @@ describe("theme parity and list label", () => {
     expect(head.textContent).toBe("Variants2 of 2 selected");
   });
 });
+
+describe("spur-status layout", () => {
+  it("puts Retry in the heading row and a message below for error, timeout and delivery_unknown", async () => {
+    const r = await rig("<spur-status></spur-status>");
+    const status = r.doc.querySelector("spur-status") as HTMLElement;
+    for (const [state, note] of [
+      ["error", "Session refused the message. Retry sends a new request."],
+      ["delivery_unknown", "Check Queued messages before retrying."],
+      ["timeout", "A late matching revision still completes the action."],
+    ] as const) {
+      r.fromHost({ type: "action", action: { requestId: "r", actionId: "go", status: state } });
+      const head = status.querySelector(".spur-status-head") as HTMLElement;
+      expect(head.querySelector("[data-spur-retry]")).not.toBeNull();
+      expect(status.querySelector(":scope > [data-spur-retry]")).toBeNull();
+      expect(status.querySelector(".spur-status-note")?.textContent).toBe(note);
+    }
+    r.fromHost({ type: "action", action: { requestId: "r", actionId: "go", status: "completed" } });
+    expect(status.querySelector("[data-spur-retry]")).toBeNull();
+  });
+});

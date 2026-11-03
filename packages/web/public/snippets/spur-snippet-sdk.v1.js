@@ -163,6 +163,7 @@
     "spur-choice:focus-visible,.spur-btn:focus-visible,.spur-field input:focus-visible,.spur-field textarea:focus-visible{outline:2px solid var(--spur-accent);outline-offset:-2px}",
     ".spur-choice-box{width:14px;height:14px;border:1px solid var(--spur-border-default);flex-shrink:0;margin-top:2px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;color:var(--spur-text-inverse)}",
     "spur-choice[aria-selected=true] .spur-choice-box{background:var(--spur-accent);border-color:var(--spur-accent)}",
+    "spur-choice[aria-selected=true] .spur-choice-box::after{content:'';width:7px;height:4px;margin-top:-2px;border-left:1.5px solid var(--spur-text-inverse);border-bottom:1.5px solid var(--spur-text-inverse);transform:rotate(-45deg)}",
     "spur-choice-list[aria-invalid=true]{border-color:var(--spur-status-error)}",
     "spur-selectable-text{display:block;flex:1;line-height:1.5}",
     "spur-selectable-text::selection{background:color-mix(in srgb,var(--spur-status-working) 35%,transparent);color:var(--spur-text-primary)}",
@@ -191,6 +192,7 @@
     ".spur-status-head{display:flex;gap:8px;align-items:center;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--spur-text-primary)}",
     "spur-status[data-tone=error] .spur-status-head{color:var(--spur-status-error)}",
     ".spur-status-note{white-space:pre-line}",
+    ".spur-status-head .spur-btn{margin-left:auto;padding:2px 10px;font-size:10px;letter-spacing:.12em}",
     "spur-loader{display:inline-flex;color:var(--spur-text-secondary)}",
     "spur-empty,spur-error{display:block;border:1px solid var(--spur-border-subtle);padding:8px 10px;color:var(--spur-text-secondary)}",
     "spur-error{border-color:color-mix(in srgb,var(--spur-status-error) 40%,transparent);color:var(--spur-status-error);white-space:pre-line}",
@@ -1006,12 +1008,26 @@
             label += " · HTTP " + action.httpStatus;
           if (status === "error" || status === "delivery_unknown") tone = "error";
           head.appendChild(el("span", "", label));
-          this.appendChild(head);
           if (RETRYABLE.indexOf(status) >= 0) {
             var again = el("button", "spur-btn", "Retry");
             again.type = "button";
             again.setAttribute("data-spur-retry", "");
-            this.appendChild(again);
+            head.appendChild(again);
+          }
+          this.appendChild(head);
+          if (status === "error") {
+            this.appendChild(
+              el(
+                "div",
+                "spur-status-note",
+                "Session refused the message. Retry sends a new request.",
+              ),
+            );
+          }
+          if (status === "timeout") {
+            this.appendChild(
+              el("div", "spur-status-note", "A late matching revision still completes the action."),
+            );
           }
           if (status === "delivery_unknown") {
             this.appendChild(

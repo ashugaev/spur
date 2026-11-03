@@ -526,7 +526,7 @@ export function SnippetPanel({
   const srcDoc = useMemo(
     () =>
       state && running && state.sdkSource !== null
-        ? buildSnippetSrcdoc(state.html, state.sdkSource, state.nonce)
+        ? buildSnippetSrcdoc(state.html, state.sdkSource, state.nonce, theme)
         : null,
     // mountKey changes with every nonce; the other fields are inputs of that mount
     [running, state?.sdkSource, state?.html, state?.nonce],

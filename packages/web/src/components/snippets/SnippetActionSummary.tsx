@@ -13,12 +13,12 @@ export function SnippetActionSummary({ text, fallback }: { text: string; fallbac
   return (
     <div className="min-w-0">
       <div
-        className={`flex min-w-0 items-center gap-1.5 text-[var(--color-text-secondary)] ${HARD_WRAP_TEXT_CLASS}`}
+        className="flex min-w-0 items-start gap-1.5 text-[var(--color-text-secondary)]"
         data-snippet-action-summary=""
       >
         <svg
           aria-hidden="true"
-          className="h-3 w-3 shrink-0 text-[var(--color-text-tertiary)]"
+          className="mt-0.5 h-3 w-3 shrink-0 text-[var(--color-text-tertiary)]"
           fill="none"
           stroke="currentColor"
           strokeLinecap="round"
@@ -28,12 +28,14 @@ export function SnippetActionSummary({ text, fallback }: { text: string; fallbac
         >
           <path d="M6 3 2 8l4 5M10 3l4 5-4 5" />
         </svg>
-        <span className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+        <span className="shrink-0 whitespace-nowrap text-[10px] uppercase leading-[18px] tracking-[0.12em] text-[var(--color-text-tertiary)]">
           Snippet action
         </span>{" "}
-        <span className="font-bold text-[var(--color-text-primary)]">{parsed.label}</span>{" "}
-        <span>
-          · {parsed.snippetId} r{parsed.revision}
+        <span className={`flex-1 ${HARD_WRAP_TEXT_CLASS}`}>
+          <span className="font-bold text-[var(--color-text-primary)]">{parsed.label}</span>{" "}
+          <span>
+            · {parsed.snippetId} r{parsed.revision}
+          </span>
         </span>
       </div>
       <details className="mt-1">

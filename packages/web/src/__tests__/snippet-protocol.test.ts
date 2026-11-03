@@ -403,6 +403,7 @@ describe("snippet-srcdoc", () => {
       "<p id=agent>hi</p><script>agent()</script>",
       "sdk();",
       "abc123",
+      "dark",
     );
     const csp = html.indexOf("Content-Security-Policy");
     expect(csp).toBeGreaterThan(-1);
@@ -413,8 +414,17 @@ describe("snippet-srcdoc", () => {
     expect(html).toContain('nonce:"abc123"');
     expect(html.endsWith("<script>agent()</script>")).toBe(true);
   });
+  it("emits the host's color-scheme before the SDK, never both schemes", () => {
+    for (const mode of ["dark", "light"] as const) {
+      const html = buildSnippetSrcdoc("<p>x</p>", "sdk();", "n", mode);
+      const meta = html.indexOf(`<meta name="color-scheme" content="${mode}">`);
+      expect(meta).toBeGreaterThan(html.indexOf("Content-Security-Policy"));
+      expect(meta).toBeLessThan(html.indexOf("sdk();"));
+      expect(html).not.toContain("light dark");
+    }
+  });
   it("keeps the SDK from closing its own script element", () => {
-    const html = buildSnippetSrcdoc("", 'var s="</script><b>";', "n");
+    const html = buildSnippetSrcdoc("", 'var s="</script><b>";', "n", "dark");
     expect(html.match(/<\/script>/g)).toHaveLength(2);
   });
 });

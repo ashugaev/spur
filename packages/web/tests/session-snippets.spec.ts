@@ -170,12 +170,12 @@ async function activeIsIframe(page: Page): Promise<boolean> {
   return page.evaluate(() => document.activeElement?.tagName === "IFRAME");
 }
 
-async function shot(page: Page, name: string): Promise<void> {
+async function shot(page: Page, name: string, fullPage = true): Promise<void> {
   if (!SHOT_DIR) return;
   mkdirSync(SHOT_DIR, { recursive: true });
   // The Next dev indicator is not part of the product.
   await page.addStyleTag({ content: "nextjs-portal { display: none !important; }" });
-  await page.screenshot({ path: join(SHOT_DIR, `${name}.png`), fullPage: true });
+  await page.screenshot({ path: join(SHOT_DIR, `${name}.png`), fullPage });
 }
 
 function requestIdOf(post: Post): string {
@@ -769,7 +769,10 @@ async function pendingModifyFullscreen(page: Page): Promise<void> {
   await picker.getByRole("button", { name: "Modify selection" }).dispatchEvent("click");
   const strip = page.getByLabel("Confirm snippet action");
   await expect(strip).toContainText("Snippet started this action without a click inside it.");
-  await page.getByRole("button", { name: `Open ${PICKER_TITLE} fullscreen` }).click();
+  // Open by keyboard so the close button's focus ring shows in the shot.
+  await page.getByRole("button", { name: `Open ${PICKER_TITLE} fullscreen` }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Exit fullscreen" })).toBeFocused();
   const dialog = page.locator("dialog.snippet-dialog");
   await expect.poll(() => dialog.evaluate((node) => node.matches(":modal"))).toBe(true);
   const viewport = page.viewportSize();
@@ -789,13 +792,14 @@ test.describe("snippets: fullscreen with a pending confirm", () => {
     page,
   }) => {
     await pendingModifyFullscreen(page);
-    await shot(page, "S8-desktop-dark");
+    await shot(page, "S8-desktop-dark", false);
   });
 
   test.describe("mobile", () => {
     test.use({ viewport: { width: 390, height: 844 } });
     test("same layout at 390x844", async ({ page }) => {
       await pendingModifyFullscreen(page);
+      await shot(page, "S8-mobile-dark", false);
     });
   });
 });
@@ -918,6 +922,15 @@ test.describe("snippets: light theme and mobile", () => {
       expect(widths.scroll).toBeLessThanOrEqual(widths.client);
     }
 
+    test("one idle snippet fits the viewport", async ({ page }) => {
+      const rig = new Rig();
+      rig.publishFixture("candidate-picker", { instance: PICKER_INSTANCE });
+      await open(page, rig);
+      await expect(frameOf(page, PICKER_TITLE).locator("spur-choice")).toHaveCount(10);
+      await noHorizontalScroll(page);
+      await shot(page, "S1-mobile-dark");
+    });
+
     test("idle panel, confirm strip and fullscreen fit the viewport", async ({ page }) => {
       const rig = new Rig();
       rig.publishFixture("auto-invoke", { revision: 1 });
@@ -926,7 +939,6 @@ test.describe("snippets: light theme and mobile", () => {
       const picker = frameOf(page, PICKER_TITLE);
       await expect(picker.locator("spur-choice")).toHaveCount(10);
       await noHorizontalScroll(page);
-      await shot(page, "S1-mobile-dark");
 
       // S3: the auto-invoking snippet leaves a pending confirm
       const strip = page.getByLabel("Confirm snippet action");
@@ -951,7 +963,6 @@ test.describe("snippets: light theme and mobile", () => {
       expect(statusBox!.y + statusBox!.height).toBeLessThanOrEqual(viewport!.height);
       expect(stripBox!.x + stripBox!.width).toBeLessThanOrEqual(viewport!.width);
       await noHorizontalScroll(page);
-      await shot(page, "S8-mobile-dark");
     });
 
     test("compact summary fits the viewport", async ({ page }) => {
