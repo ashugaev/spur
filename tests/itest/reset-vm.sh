@@ -9,6 +9,15 @@ set -uo pipefail
 
 log() { printf 'reset: %s\n' "$1"; }
 
+# Top-level dirs a tested agent made for its smoke project: a git repo, or a
+# plain dir holding a spur.yaml. The box keeps none of its own outside hidden dirs.
+scratch_repos() {
+  for d in "$HOME"/*/; do
+    [ -L "${d%/}" ] && continue
+    if [ -e "${d}.git" ] || [ -e "${d}spur.yaml" ]; then printf '%s\n' "${d%/}"; fi
+  done
+}
+
 log "stopping units"
 systemctl --user stop spur-mcp-tunnel spur-mcp spur-web spur-daemon 2>/dev/null
 systemctl --user disable spur-mcp-tunnel spur-mcp spur-web spur-daemon 2>/dev/null
@@ -101,13 +110,10 @@ rm -rf "$HOME/.npm"
 # deciding what to do with it. ~/projects is whatever a run's smoke project
 # created, ~/spur-smoke the name both tested agents pick for theirs. Both read
 # as install friction; neither is. Agents pick other names too (~/spur-smoke-test),
-# so every top-level git repo goes: the box holds none of its own outside hidden dirs.
+# so every scratch_repos match goes too.
 log "removing source-install clone and run projects"
 rm -rf "$HOME/spur" "$HOME/spur-mirror" "$HOME/projects" "$HOME/spur-smoke"
-for d in "$HOME"/*/; do
-  [ -L "${d%/}" ] && continue
-  if [ -e "${d}.git" ]; then rm -rf "${d%/}"; fi
-done
+scratch_repos | while IFS= read -r d; do rm -rf "$d"; done
 
 # host-skills only creates these two — never `rm -rf "$HOME/.claude"`, that
 # destroys the planted credentials this harness relies on. Both dirs, once
@@ -147,11 +153,8 @@ printf '  %-14s %s\n' "agents"        "$([ -e "$HOME/.local/bin/cursor-agent" ] 
 printf '  %-14s %s\n' "harness"       "$([ -x "$HOME/.itest-harness/bin/claude" ] && echo claude || echo MISSING)"
 printf '  %-14s %s\n' "harness-creds" "$([ -s "$HOME/.claude/.credentials.json" ] && echo present || echo MISSING)"
 printf '  %-14s %s\n' "agent-skills"  "$([ -e "$HOME/.claude/skills" ] || [ -e "$HOME/.codex" ] && echo leftover || echo clean)"
-repo_leftover=""
-for d in "$HOME"/*/; do
-  [ -L "${d%/}" ] && continue
-  if [ -e "${d}.git" ]; then repo_leftover=$d; fi
-done
-printf '  %-14s %s\n' "source-clone"  "$([ -e "$HOME/spur" ] || [ -e "$HOME/spur-mirror" ] || [ -e "$HOME/projects" ] || [ -e "$HOME/spur-smoke" ] || [ -n "$repo_leftover" ] && echo leftover || echo clean)"
+printf '  %-14s %s\n' "source-clone"  "$([ -e "$HOME/spur" ] || [ -e "$HOME/spur-mirror" ] || [ -e "$HOME/projects" ] || [ -e "$HOME/spur-smoke" ] && echo leftover || echo clean)"
+repo_leftover=$(scratch_repos | tr '\n' ' ')
+printf '  %-14s %s\n' "scratch-repos" "$([ -n "$repo_leftover" ] && echo "leftover: $repo_leftover" || echo clean)"
 printf '  %-14s %s\n' "agent-procs"   "$(pgrep -u "$(id -u)" -x 'claude|codex|opencode|tmux: server' >/dev/null && echo leftover || echo clean)"
 log "done"

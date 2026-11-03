@@ -38,7 +38,7 @@ it("serves generic tools through packaged stdio with protocol-only stdout and cl
   client.onerror = (error) => errors.push(error);
   cleanups.push(() => client.close());
   await client.connect(transport);
-  expect((await client.listTools()).tools).toHaveLength(13);
+  expect((await client.listTools()).tools).toHaveLength(17);
   for (const [name, args] of [
     ["list_projects", {}],
     ["list_sessions", {}],

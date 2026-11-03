@@ -15,6 +15,7 @@ import {
   loadConfig,
   loadInstanceConfigReadOnly,
   loadProjectConfig,
+  parseConfigText,
   resolveConfigPath,
   writeProjectConfigScaffold,
 } from "../../src/config.js";
@@ -2747,6 +2748,39 @@ projects:
     }
   });
 
+  it("loads github source ignoreChecks", async () => {
+    const configured = loadConfig(
+      await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        ignoreChecks: [approvals, "Spur Approval Gate"]
+`),
+    );
+    expect(configured.projects.backend?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      ignoreChecks: ["approvals", "Spur Approval Gate"],
+    });
+  });
+
+  it("rejects invalid ignoreChecks", async () => {
+    for (const value of ["approvals", '[""]']) {
+      const path = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        ignoreChecks: ${value}
+`);
+      expect(() => loadConfig(path)).toThrow(/\.ignoreChecks/);
+    }
+  });
+
   describe("signPosts", () => {
     const marker = "[AI-generated, session: {session}]";
     const otherMarker = "[bot {session}]";
@@ -5376,6 +5410,7 @@ authRotation:
   autoRotateOnRateLimit: true
   cooldownMinutes: 30
   maxRotationsPerEpisode: 3
+  switchAuth: true
 projects:
   backend:
     path: $REPO_PATH
@@ -5387,6 +5422,7 @@ projects:
       autoRotateOnRateLimit: true,
       cooldownMinutes: 30,
       maxRotationsPerEpisode: 3,
+      switchAuth: true,
     });
   });
 
@@ -5403,6 +5439,7 @@ projects:
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+      switchAuth: false,
     });
   });
 
@@ -5410,6 +5447,7 @@ projects:
     const configPath = await writeConfig(`
 authRotation:
   autoRotateOnRateLimit: true
+  switchAuth: true
 projects:
   backend:
     path: $REPO_PATH
@@ -5421,6 +5459,7 @@ projects:
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
+      switchAuth: false,
     });
   });
 
@@ -6215,6 +6254,23 @@ describe("isSameInstanceConfigPath", () => {
     await writeFile(b, "server:\n  port: 5556\n", "utf8");
 
     expect(isSameInstanceConfigPath(a, b)).toBe(false);
+  });
+});
+
+describe("captured config text", () => {
+  it("matches instance and project file loading with logical paths and running defaults", async () => {
+    const instancePath = await writeConfig("server: {port: 44557}\nprojects: {}\n");
+    const instance = loadConfig(instancePath);
+    expect(parseConfigText(instancePath, await readFile(instancePath, "utf8"))).toEqual(instance);
+    const projectPath = await writeConfig(
+      "server: {port: 44558}\nprojects:\n  sample:\n    path: ./repo\n",
+    );
+    const text = await readFile(projectPath, "utf8");
+    const fromFile = loadProjectConfig(projectPath, instance);
+    expect(parseConfigText(projectPath, text, instance)).toEqual(fromFile);
+    expect(fromFile.server.port).toBe(instance.server.port);
+    await writeFile(projectPath, "invalid YAML: [");
+    expect(parseConfigText(projectPath, text, instance)).toEqual(fromFile);
   });
 });
 

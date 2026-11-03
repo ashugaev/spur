@@ -92,6 +92,16 @@ export interface InstallationSelection {
   serviceUser?: string;
 }
 
+function probeStderr(error: unknown): string {
+  if (typeof error !== "object" || error === null || !("stderr" in error)) return "";
+  const { stderr } = error;
+  return (typeof stderr === "string" ? stderr : "").trim().slice(-500);
+}
+
+function rejectsExpandEnvironment(error: unknown): boolean {
+  return /(?:unrecognized|unknown) option\b[^\n]*--expand-environment/i.test(probeStderr(error));
+}
+
 export function resolveInstallationConfig(options: InstallationSelection): string {
   let selected = options.configPath?.trim() || process.env["SPUR_CONFIG"]?.trim();
   let allowMissingDefault = false;
@@ -115,35 +125,45 @@ export function resolveInstallationConfig(options: InstallationSelection): strin
           `EnvironmentFile=${options.scope === "user" ? "-" : ""}${options.daemonEnvFile}`,
         ];
         if (options.serviceUser) properties.push(`User=${options.serviceUser}`);
-        const args = [
+        const systemdOptions = [
           "--wait",
           "--pipe",
           "--quiet",
           "--collect",
           "--service-type=exec",
-          "--expand-environment=no",
           ...(options.scope === "user" ? ["--user"] : []),
           ...properties.flatMap((property) => ["--property", property]),
-          "/usr/bin/node",
-          "--input-type=module",
-          "-e",
-          code,
         ];
-        let output: string;
-        try {
-          output = execFileSync(
+        const command = ["/usr/bin/node", "--input-type=module", "-e", code];
+        const runProbe = (probeArgs: string[]): string =>
+          execFileSync(
             options.scope === "system" ? "sudo" : "systemd-run",
-            options.scope === "system" ? ["systemd-run", ...args] : args,
+            options.scope === "system" ? ["systemd-run", ...probeArgs] : probeArgs,
             {
               encoding: "utf8",
               timeout: 10_000,
               maxBuffer: 16_384,
-              stdio: ["ignore", "pipe", "ignore"],
+              stdio: ["ignore", "pipe", "pipe"],
+              env: { ...process.env, LC_ALL: "C" },
             },
           );
-        } catch {
+        let output: string;
+        try {
+          try {
+            output = runProbe(["--expand-environment=no", ...systemdOptions, ...command]);
+          } catch (error) {
+            if (!rejectsExpandEnvironment(error)) throw error;
+            // systemd < 254 always expands $VAR in the command line; $$ keeps it literal.
+            output = runProbe([
+              ...systemdOptions,
+              ...command.map((arg) => arg.replaceAll("$", () => "$$")),
+            ]);
+          }
+        } catch (error) {
+          const stderr = probeStderr(error);
           throw new Error(
-            "Cannot resolve daemon environment through systemd; existing installation was preserved",
+            `Cannot resolve daemon environment through systemd; existing installation was preserved${stderr ? `: ${stderr}` : ""}`,
+            { cause: error },
           );
         }
         let parsed: unknown;
