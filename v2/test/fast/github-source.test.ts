@@ -1999,6 +1999,31 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("moves the PR-wide comment change key for a new review id below an issue comment id", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    ghMock
+      .mockResolvedValueOnce(prView())
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(
+        JSON.stringify([{ id: 9001, body: "first pass please", user: { login: "alice" } }]),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          { id: 601, state: "COMMENTED", body: "please rename the helper", user: { login: "bob" } },
+        ]),
+      );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.get("review:601")?.changeKey).toBe("ic:9001|rv:601");
+    expect(snapshot.signals.get("comment:9001")?.changeKey).toBe("ic:9001|rv:601");
+    handle.stop();
+  });
+
   it("ignores a review with an empty body and no approval", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);

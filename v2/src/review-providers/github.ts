@@ -1305,11 +1305,13 @@ function annotateChangeKeys(
   const head = pr.headRefOid;
   const base = pr.baseRefOid;
   const threadKeys = reviewThreadChangeKeys(node);
-  const commentIds = [
-    ...issueCommentsFromPrNode(node).map((comment) => comment.id),
-    ...reviews.flatMap((review) => (typeof review.id === "number" ? [review.id] : [])),
-  ];
-  const latestCommentKey = commentIds.length > 0 ? String(Math.max(...commentIds)) : undefined;
+  const issueCommentIds = issueCommentsFromPrNode(node).map((comment) => comment.id);
+  const reviewIds = reviews.flatMap((review) => (typeof review.id === "number" ? [review.id] : []));
+  // Issue comment and review ids are separate id spaces: track each maximum.
+  const latestCommentKey =
+    issueCommentIds.length + reviewIds.length > 0
+      ? `ic:${String(Math.max(0, ...issueCommentIds))}|rv:${String(Math.max(0, ...reviewIds))}`
+      : undefined;
   for (const [key, signal] of snapshot) {
     let annotated: ReviewSignal = signal;
     if (signal.kind === "ci_failed") {
