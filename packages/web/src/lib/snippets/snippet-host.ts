@@ -558,6 +558,11 @@ export function createSnippetHost(
     ) {
       return;
     }
+    if (current.instanceId !== state.manifest.instanceId) {
+      // Sent for a replaced instance (D7): never a retryable record under the new one.
+      publishAction({ ...current, status: "replaced" }, true);
+      return;
+    }
     const result = classifySendOutcome(outcome);
     const next: SnippetActionRecord = { ...current, status: result.status };
     if (result.status === "accepted") next.acceptedAt = deps.now();
@@ -610,6 +615,7 @@ export function createSnippetHost(
         !last ||
         !parsed ||
         last.requestId !== retryOf ||
+        last.instanceId !== state.manifest.instanceId ||
         !SNIPPET_RETRY_STATUSES.includes(last.status)
       ) {
         reply({ ok: false, reason: "stale" });
@@ -797,6 +803,7 @@ export function createSnippetHost(
   function retry(trusted: boolean): void {
     const last = state.action;
     if (!trusted || !last || !SNIPPET_RETRY_STATUSES.includes(last.status)) return;
+    if (last.instanceId !== state.manifest.instanceId) return;
     const parsed = parseSnippetActionPrompt(last.prompt);
     if (!parsed) return;
     const { decision, requestId } = decide(last.actionId, parsed.payload, last.requestId, true);

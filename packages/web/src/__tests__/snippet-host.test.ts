@@ -18,6 +18,7 @@ import {
   readSnippetRecord,
   recordKey,
   type SnippetStorage,
+  writeSnippetRecord,
 } from "@/lib/snippets/snippet-store";
 
 class MemoryStorage implements SnippetStorage {
@@ -894,6 +895,58 @@ describe("lifecycle", () => {
       expect(h.sent).toHaveLength(1);
     },
   );
+
+  it.each([[{ kind: "response", status: 409 }], [{ kind: "failure" }]] as const)(
+    "a send settling after a new instance resolves replaced, never retryable: %j (D7)",
+    async (outcome) => {
+      const h = harness();
+      let settle!: () => void;
+      h.sendOutcome.value = () =>
+        new Promise<SnippetSendOutcome>((resolve) => {
+          settle = () => resolve(outcome);
+        });
+      await ready(h);
+      h.invoke("go", { note: "old payload" });
+      expect(h.host.getState().action?.status).toBe("submitting");
+      h.host.applyFile(manifest({ instanceId: "inst-00000002", revision: 1 }), "<html>new</html>");
+      settle();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.host.getState().action?.status).toBe("replaced");
+      expect(readSnippetRecord(h.storage, SID, "picker")).toMatchObject({
+        value: { instanceId: "inst-00000002", action: { status: "replaced" } },
+      });
+      h.connect();
+      h.host.retry(true);
+      expect(h.sent).toHaveLength(1);
+    },
+  );
+
+  it("Retry refuses an action stamped with another instance, restored records included", async () => {
+    const h = harness();
+    h.sendOutcome.value = () => Promise.resolve({ kind: "response", status: 409 });
+    await ready(h);
+    h.invoke("go", { note: "old payload" });
+    await vi.advanceTimersByTimeAsync(0);
+    const stored = readSnippetRecord(h.storage, SID, "picker");
+    if (!stored.ok || !stored.value) throw new Error("no record");
+    const next = manifest({ instanceId: "inst-00000002", revision: 1 });
+    writeSnippetRecord(h.storage, SID, "picker", { ...stored.value, instanceId: "inst-00000002" });
+    const again = h.remount(next);
+    expect(again.host.getState().action).toMatchObject({
+      status: "error",
+      instanceId: "inst-00000001",
+    });
+    await ready(again);
+    again.host.retry(true);
+    expect(again.sent).toHaveLength(0);
+    const requestId = again.host.getState().action!.requestId;
+    again.port().emit({ type: "invoke", callId: "c1", actionId: "go", retryOf: requestId });
+    expect(again.sent).toHaveLength(0);
+    expect(again.port().ofType("invoke-result").at(-1)).toMatchObject({
+      ok: false,
+      reason: "stale",
+    });
+  });
 
   it("a higher revision in the same instance keeps a failed action retryable", async () => {
     const h = harness();
