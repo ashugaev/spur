@@ -1,0 +1,72 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Text variants</title>
+<script type="application/spur-snippet+json">
+{
+  "protocolVersion": 1,
+  "snippetId": "candidate-picker",
+  "ownerSessionId": "{{SESSION}}",
+  "instanceId": "{{INSTANCE}}",
+  "revision": {{REVISION}}{{RESPONDS}},
+  "title": "Text variants",
+  "actions": [
+    {
+      "id": "choose",
+      "label": "Choose selected",
+      "payload": {
+        "type": "object",
+        "required": ["selected"],
+        "properties": {
+          "selected": { "type": "array", "minItems": 1, "maxItems": 10, "items": { "type": "string", "maxLength": 40 } },
+          "instruction": { "type": "string", "maxLength": 2000 }
+        }
+      }
+    },
+    {
+      "id": "regenerate",
+      "label": "Regenerate",
+      "payload": {
+        "type": "object",
+        "properties": {
+          "selected": { "type": "array", "maxItems": 10, "items": { "type": "string", "maxLength": 40 } },
+          "instruction": { "type": "string", "maxLength": 2000 }
+        }
+      }
+    },
+    {
+      "id": "modify-selection",
+      "label": "Modify selection",
+      "payload": {
+        "type": "object",
+        "required": ["selection"],
+        "properties": {
+          "selection": { "type": "selection", "maxLength": 2000 }
+        }
+      }
+    }
+  ]
+}
+</script>
+<spur-form id="f" action="regenerate">
+  <spur-choice-list id="picks" name="selected" mode="multiple">
+    <spur-choice value="v01"><spur-selectable-text source-id="v01">Ship it before the weekend, then sleep.</spur-selectable-text></spur-choice>
+    <spur-choice value="v02"><spur-selectable-text source-id="v02">A small change with a large payoff.</spur-selectable-text></spur-choice>
+    <spur-choice value="v03"><spur-selectable-text source-id="v03">Fewer words, same meaning.</spur-selectable-text></spur-choice>
+    <spur-choice value="v04"><spur-selectable-text source-id="v04">The quiet fix nobody asked for.</spur-selectable-text></spur-choice>
+    <spur-choice value="v05"><spur-selectable-text source-id="v05">Measure twice, merge once.</spur-selectable-text></spur-choice>
+    <spur-choice value="v06"><spur-selectable-text source-id="v06">Start with the boring part, it pays off later.</spur-selectable-text></spur-choice>
+    <spur-choice value="v07"><spur-selectable-text source-id="v07">Release notes are a promise.</spur-selectable-text></spur-choice>
+    <spur-choice value="v08"><spur-selectable-text source-id="v08">Every flaky test is a story.</spur-selectable-text></spur-choice>
+    <spur-choice value="v09"><spur-selectable-text source-id="v09">Cache invalidation, again.</spur-selectable-text></spur-choice>
+    <spur-choice value="v10"><spur-selectable-text source-id="v10">One more thing before you go.</spur-selectable-text></spur-choice>
+  </spur-choice-list>
+  <spur-textarea id="instruction" name="instruction" maxlength="2000" rows="2" label="Instruction" placeholder="Optional. Tell the agent what to change..."></spur-textarea>
+</spur-form>
+<div>
+  <spur-button action="choose" form="f" variant="primary">Choose selected</spur-button>
+  <spur-button action="regenerate" form="f">Regenerate</spur-button>
+</div>
+<spur-selection-toolbar for="v01 v02 v03 v04 v05 v06 v07 v08 v09 v10" field="selection">
+  <spur-button action="modify-selection">Modify selection</spur-button>
+</spur-selection-toolbar>
+<spur-status></spur-status>

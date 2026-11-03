@@ -14,7 +14,7 @@ function artifact(
     name,
     size: 10,
     mimeType: "text/html",
-    kind: "html",
+    kind: "download",
     origin: "agent",
     createdAt: updatedAt,
     updatedAt,

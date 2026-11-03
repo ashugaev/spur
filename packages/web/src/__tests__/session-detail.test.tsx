@@ -8849,7 +8849,7 @@ describe("SessionDetail snippets", () => {
     name,
     size,
     mimeType: name.endsWith(".html") ? "text/html; charset=utf-8" : "image/png",
-    kind: name.endsWith(".html") ? ("html" as const) : ("image" as const),
+    kind: name.endsWith(".html") ? ("download" as const) : ("image" as const),
     origin: "intentional" as const,
     createdAt: updatedAt,
     updatedAt,

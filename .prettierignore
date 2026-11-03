@@ -12,3 +12,4 @@ coverage/
 *.tsbuildinfo
 v2/skills/
 pnpm-lock.yaml
+packages/web/tests/fixtures/snippets/

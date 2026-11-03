@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<script type="application/spur-snippet+json">
+{
+  "protocolVersion": 1,
+  "snippetId": "focus-steal",
+  "ownerSessionId": "{{SESSION}}",
+  "instanceId": "{{INSTANCE}}",
+  "revision": {{REVISION}}{{RESPONDS}},
+  "title": "Focus steal",
+  "actions": [
+    {
+      "id": "ping",
+      "label": "Ping",
+      "payload": { "type": "object", "properties": { "n": { "type": "number" } } }
+    }
+  ]
+}
+</script>
+<p id="note">Calls window.focus() on connect, then invokes without a click.</p>
+<script>
+  // Records whether Chromium lets iframe code take focus without a user gesture.
+  window.spur.ready().then(function () {
+    window.focus();
+    document.body.setAttribute("data-focus-probe", String(document.hasFocus()));
+    window.spur.invoke("ping", { n: {{REVISION}} });
+  });
+</script>
