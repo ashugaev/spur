@@ -183,8 +183,8 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
     <section aria-label="Snippets">
       <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
         Snippets
-        <span className="text-[var(--color-text-secondary)]">{files.length}</span>
         <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+        <span className="font-normal text-[var(--color-text-secondary)]">{files.length}</span>
       </h2>
       <div className="space-y-3">
         {mounted.map((file) => {

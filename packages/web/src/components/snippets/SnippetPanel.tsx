@@ -9,6 +9,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
+import { CheckIcon } from "@/components/icons/CheckIcon";
 import { CloseIcon } from "@/components/icons/CloseIcon";
 import { SendIcon } from "@/components/icons/SendIcon";
 import { Spinner } from "@/components/icons/Spinner";
@@ -114,6 +115,11 @@ function randomNonce(): string {
 // ---------------------------------------------------------------------------
 // shared card chrome
 
+const FOCUS_RING =
+  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]";
+const SECONDARY_BUTTON = `border border-[var(--color-border-strong)] px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] ${FOCUS_RING}`;
+const ICON_BUTTON = `inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] ${FOCUS_RING}`;
+
 const CHIP_ERROR =
   "border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-chip-error-text)]";
 
@@ -181,7 +187,7 @@ export function SnippetErrorCard({
         </div>
         {onReload ? (
           <button
-            className="shrink-0 border border-[var(--color-border-strong)] px-3 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+            className={`shrink-0 ${SECONDARY_BUTTON}`}
             onClick={(event) => onReload(event.nativeEvent.isTrusted)}
             type="button"
           >
@@ -244,7 +250,9 @@ function ConfirmStrip({
         ))}
       </dl>
       <details className="mt-2">
-        <summary className="cursor-pointer text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+        <summary
+          className={`cursor-pointer text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)] ${FOCUS_RING}`}
+        >
           Full payload
         </summary>
         <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2 text-[11px] text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">
@@ -253,14 +261,14 @@ function ConfirmStrip({
       </details>
       <div className="mt-2.5 flex justify-end gap-2 max-sm:[&>button]:flex-1">
         <button
-          className="border border-[var(--color-border-strong)] px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+          className={SECONDARY_BUTTON}
           onClick={(event) => onDiscard(event.nativeEvent.isTrusted)}
           type="button"
         >
           Discard
         </button>
         <button
-          className="inline-flex items-center justify-center gap-1.5 border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-inverse)] transition hover:opacity-90"
+          className={`inline-flex items-center justify-center gap-1.5 border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-inverse)] transition hover:opacity-90 ${FOCUS_RING}`}
           onClick={(event) => onSend(event.nativeEvent.isTrusted)}
           type="button"
         >
@@ -308,9 +316,7 @@ function StatusLine({
       >
         {working ? <Spinner className="h-3 w-3" /> : null}
         {action.status === "completed" ? (
-          <span aria-hidden="true" className="text-[var(--color-status-ready)]">
-            ✓
-          </span>
+          <CheckIcon className="h-3 w-3 text-[var(--color-status-ready)]" strokeWidth={2} />
         ) : null}
         {snippetStatusLabel(action)}
       </span>
@@ -320,7 +326,7 @@ function StatusLine({
       </span>
       {SNIPPET_RETRY_STATUSES.includes(action.status) ? (
         <button
-          className="border border-[var(--color-border-strong)] px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+          className={SECONDARY_BUTTON}
           onClick={(event) => onRetry(event.nativeEvent.isTrusted)}
           type="button"
         >
@@ -336,7 +342,10 @@ function StatusLine({
 
 function FramePlaceholder() {
   return (
-    <div className="flex h-[160px] items-center justify-center text-[var(--color-text-tertiary)]">
+    <div
+      aria-busy="true"
+      className="flex h-[160px] items-center justify-center text-[var(--color-text-tertiary)]"
+    >
       <Spinner className="h-4 w-4" />
     </div>
   );
@@ -525,7 +534,15 @@ export function SnippetPanel({
 
   if (!state || !host) {
     return (
-      <section className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
+      <section
+        aria-labelledby={titleId}
+        className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]"
+      >
+        <PanelHeader
+          meta={`${manifest.snippetId} · r${manifest.revision}`}
+          title={manifest.title}
+          titleId={titleId}
+        />
         <FramePlaceholder />
       </section>
     );
@@ -564,7 +581,7 @@ export function SnippetPanel({
         toggle={
           <button
             aria-label={`Open ${state.manifest.title} fullscreen`}
-            className="inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
+            className={ICON_BUTTON}
             onClick={openFullscreen}
             ref={toggleRef}
             title="Fullscreen"
@@ -611,7 +628,7 @@ export function SnippetPanel({
         <div className="snippet-fs-header flex items-center gap-3 border-b border-[var(--color-border-subtle)] px-3 py-2">
           <button
             aria-label="Exit fullscreen"
-            className="inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]"
+            className={ICON_BUTTON}
             onClick={closeFullscreen}
             ref={closeRef}
             type="button"

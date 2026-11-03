@@ -153,6 +153,8 @@
     "*{box-sizing:border-box}",
     "body{margin:0;padding:12px;display:flex;flex-direction:column;gap:12px}",
     "spur-form{display:flex;flex-direction:column;gap:8px}",
+    ".spur-list-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.14em;color:var(--spur-text-tertiary);display:flex;gap:8px;align-items:center}",
+    ".spur-list-label i{flex:1;border-top:1px solid var(--spur-border-subtle)}",
     "spur-choice-list{display:flex;flex-direction:column;border:1px solid var(--spur-border-default)}",
     "spur-choice{position:relative;display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-bottom:1px solid var(--spur-border-subtle);line-height:1.5;color:var(--spur-text-secondary);cursor:pointer}",
     "spur-choice:last-child{border-bottom:0}",
@@ -449,6 +451,8 @@
 
   function applyTheme(theme) {
     var root = document.documentElement;
+    // Without it Chromium paints an opaque light canvas under a dark host.
+    root.style.colorScheme = theme.mode;
     Object.keys(theme.tokens).forEach(function (token) {
       root.style.setProperty("--spur-" + token, theme.tokens[token]);
     });
@@ -762,9 +766,31 @@
     "spur-choice-list",
     class extends HTMLElement {
       connectedCallback() {
+        var self = this;
         this.setAttribute("role", "listbox");
         if (this.getAttribute("mode") === "multiple")
           this.setAttribute("aria-multiselectable", "true");
+        whenParsed(function () {
+          var text = self.getAttribute("label");
+          if (!text || self._head) return;
+          self.setAttribute("aria-label", text);
+          var head = el("div", "spur-list-label");
+          head.setAttribute("aria-hidden", "true");
+          head.appendChild(el("span", "", text));
+          head.appendChild(el("i", ""));
+          self._count = el("span", "");
+          head.appendChild(self._count);
+          self._head = head;
+          self.parentNode.insertBefore(head, self);
+          self.updateCount();
+        });
+      }
+      updateCount() {
+        if (!this._count) return;
+        var picked = this.choices().filter(function (choice) {
+          return choice.getAttribute("aria-selected") === "true";
+        }).length;
+        this._count.textContent = picked + " of " + this.choices().length + " selected";
       }
       choices() {
         return Array.from(this.querySelectorAll("spur-choice"));
@@ -780,6 +806,7 @@
         } else {
           choice.setAttribute("aria-selected", selected ? "false" : "true");
         }
+        this.updateCount();
         noteControlChange(this);
         this.dispatchEvent(new CustomEvent("change"));
       }
@@ -802,6 +829,7 @@
             wanted.indexOf(choice.value) >= 0 ? "true" : "false",
           );
         });
+        this.updateCount();
       }
       restore(value) {
         var known = this.choices().map(function (choice) {

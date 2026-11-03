@@ -173,6 +173,8 @@ async function activeIsIframe(page: Page): Promise<boolean> {
 async function shot(page: Page, name: string): Promise<void> {
   if (!SHOT_DIR) return;
   mkdirSync(SHOT_DIR, { recursive: true });
+  // The Next dev indicator is not part of the product.
+  await page.addStyleTag({ content: "nextjs-portal { display: none !important; }" });
   await page.screenshot({ path: join(SHOT_DIR, `${name}.png`), fullPage: true });
 }
 
@@ -615,18 +617,27 @@ test.describe("snippets: failure states", () => {
   });
 
   test("five owned files mount four panels and list the rest", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 1700 });
     const rig = new Rig();
     for (const id of ["a", "b", "c", "d", "e"]) {
       rig.publish(
         id,
-        fixtureHtml("resizable", { instance: `inst-${id}-0000001` }).replaceAll(
-          '"snippetId": "resizable"',
-          `"snippetId": "${id}"`,
-        ),
+        fixtureHtml("resizable", { instance: `inst-${id}-0000001` })
+          .replaceAll('"snippetId": "resizable"', `"snippetId": "${id}"`)
+          .replaceAll("height:600px", "height:60px"),
       );
     }
     await open(page, rig);
     await expect(page.locator("[data-snippet-panel]")).toHaveCount(4, { timeout: 15_000 });
+    // every panel connected and painted its document before the shot
+    await expect(page.locator('iframe[title="Resizable"]')).toHaveCount(4);
+    for (let index = 0; index < 4; index += 1) {
+      await expect(
+        page.frameLocator('iframe[title="Resizable"]').nth(index).locator("body[data-ready]"),
+      ).toBeAttached();
+    }
+    // Chromium throttles off-screen cross-origin frames (no paint, no resize
+    // report), so the viewport is tall enough to hold all four panels.
     await expect(page.getByText("Not mounted · limit 4")).toBeVisible();
     await expect(page.getByRole("heading", { name: /^Snippets/ })).toContainText("5");
     await shot(page, "S9-desktop-dark");
@@ -655,7 +666,6 @@ test.describe("snippets: fullscreen", () => {
     await expect(frame.locator("input")).toHaveValue("typed before fullscreen");
     expect(page.frames().length).toBe(frameCount);
     expect(await activeIsIframe(page)).toBe(false);
-    await shot(page, "S8-desktop-dark");
 
     // Escape pressed inside the iframe is forwarded to the host
     await frame.locator("input").click();
@@ -747,6 +757,49 @@ test.describe("snippets: fullscreen", () => {
   });
 });
 
+async function pendingModifyFullscreen(page: Page): Promise<void> {
+  const rig = new Rig();
+  rig.publishFixture("candidate-picker", { instance: PICKER_INSTANCE });
+  await open(page, rig);
+  const picker = frameOf(page, PICKER_TITLE);
+  await expect(picker.locator("spur-choice")).toHaveCount(10);
+  await selectSpan(page, "v06", 0, 25);
+  await expect(picker.locator("spur-selection-toolbar")).toHaveAttribute("data-visible", "");
+  // no real click: the interaction gate asks for a host confirm
+  await picker.getByRole("button", { name: "Modify selection" }).dispatchEvent("click");
+  const strip = page.getByLabel("Confirm snippet action");
+  await expect(strip).toContainText("Snippet started this action without a click inside it.");
+  await page.getByRole("button", { name: `Open ${PICKER_TITLE} fullscreen` }).click();
+  const dialog = page.locator("dialog.snippet-dialog");
+  await expect.poll(() => dialog.evaluate((node) => node.matches(":modal"))).toBe(true);
+  const viewport = page.viewportSize();
+  const frame = await iframeLocator(page, PICKER_TITLE).boundingBox();
+  const stripBox = await strip.boundingBox();
+  const status = await dialog.locator("[data-snippet-status]").boundingBox();
+  expect(frame && stripBox && status && viewport).toBeTruthy();
+  expect(stripBox!.y).toBeGreaterThanOrEqual(frame!.y + frame!.height - 1);
+  expect(status!.y).toBeGreaterThanOrEqual(stripBox!.y + stripBox!.height - 1);
+  expect(status!.y + status!.height).toBeLessThanOrEqual(viewport!.height);
+}
+
+test.describe("snippets: fullscreen with a pending confirm", () => {
+  test.setTimeout(60_000);
+
+  test("header on top, iframe fills the rest, strip and status line pinned below", async ({
+    page,
+  }) => {
+    await pendingModifyFullscreen(page);
+    await shot(page, "S8-desktop-dark");
+  });
+
+  test.describe("mobile", () => {
+    test.use({ viewport: { width: 390, height: 844 } });
+    test("same layout at 390x844", async ({ page }) => {
+      await pendingModifyFullscreen(page);
+    });
+  });
+});
+
 test.describe("snippets: revision, state and chat summary", () => {
   test.setTimeout(90_000);
 
@@ -794,26 +847,41 @@ test.describe("snippets: revision, state and chat summary", () => {
     });
     const rig = new Rig();
     rig.queued = [prompt, "plain follow-up"];
+    const earlier = buildSnippetActionPrompt({
+      requestId: "99999999-2222-3333-4444-555555555555",
+      sessionId: SESSION_ID,
+      snippetId: "candidate-picker",
+      instanceId: PICKER_INSTANCE,
+      revision: 3,
+      actionId: "regenerate",
+      label: "Regenerate",
+      payload: { instruction: "longer" },
+    });
     rig.messages = [
-      { role: "user", text: prompt, timestampMs: 1 },
+      { role: "user", text: earlier, timestampMs: 1 },
       { role: "assistant", text: "On it.", timestampMs: 2 },
+      { role: "user", text: prompt, timestampMs: 3 },
     ];
     await open(page, rig);
+    // two in the Dialog, one in Queued messages
     const summaries = page.locator("[data-snippet-action-summary]");
-    await expect(summaries).toHaveCount(2);
-    for (const index of [0, 1]) {
+    await expect(summaries).toHaveCount(3);
+    for (const index of [0, 1, 2]) {
       await expect(summaries.nth(index)).toHaveText(
         "Snippet action Regenerate · candidate-picker r3",
       );
     }
     await expect(page.getByText("plain follow-up")).toBeVisible();
     const details = page.locator("details", { hasText: "Raw prompt" });
-    await expect(details).toHaveCount(2);
-    for (const index of [0, 1]) {
+    await expect(details).toHaveCount(3);
+    for (const index of [0, 1, 2]) {
       await expect(details.nth(index)).not.toHaveAttribute("open", "");
     }
+    // Dialog: first collapsed, second expanded. Queued: expanded.
     await details.nth(1).locator("summary").click();
+    await details.nth(2).locator("summary").click();
     await expect(details.nth(1).locator("pre")).toHaveText(prompt);
+    await expect(details.nth(2).locator("pre")).toHaveText(prompt);
     await shot(page, "S10-desktop-dark");
   });
 });

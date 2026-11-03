@@ -47,24 +47,30 @@
   ]
 }
 </script>
+<style>
+  .no { font-size: 10px; color: var(--spur-text-tertiary); letter-spacing: 0.12em; padding-top: 2px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .hint { margin-left: auto; font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--spur-text-tertiary); }
+</style>
 <spur-form id="f" action="regenerate">
-  <spur-choice-list id="picks" name="selected" mode="multiple">
-    <spur-choice value="v01"><spur-selectable-text source-id="v01">Ship it before the weekend, then sleep.</spur-selectable-text></spur-choice>
-    <spur-choice value="v02"><spur-selectable-text source-id="v02">A small change with a large payoff.</spur-selectable-text></spur-choice>
-    <spur-choice value="v03"><spur-selectable-text source-id="v03">Fewer words, same meaning.</spur-selectable-text></spur-choice>
-    <spur-choice value="v04"><spur-selectable-text source-id="v04">The quiet fix nobody asked for.</spur-selectable-text></spur-choice>
-    <spur-choice value="v05"><spur-selectable-text source-id="v05">Measure twice, merge once.</spur-selectable-text></spur-choice>
-    <spur-choice value="v06"><spur-selectable-text source-id="v06">Start with the boring part, it pays off later.</spur-selectable-text></spur-choice>
-    <spur-choice value="v07"><spur-selectable-text source-id="v07">Release notes are a promise.</spur-selectable-text></spur-choice>
-    <spur-choice value="v08"><spur-selectable-text source-id="v08">Every flaky test is a story.</spur-selectable-text></spur-choice>
-    <spur-choice value="v09"><spur-selectable-text source-id="v09">Cache invalidation, again.</spur-selectable-text></spur-choice>
-    <spur-choice value="v10"><spur-selectable-text source-id="v10">One more thing before you go.</spur-selectable-text></spur-choice>
+  <spur-choice-list id="picks" name="selected" mode="multiple" label="Variants">
+    <spur-choice value="v01"><span class="no">01</span><spur-selectable-text source-id="v01">Ship it before the weekend, then sleep.</spur-selectable-text></spur-choice>
+    <spur-choice value="v02"><span class="no">02</span><spur-selectable-text source-id="v02">A small change with a large payoff.</spur-selectable-text></spur-choice>
+    <spur-choice value="v03"><span class="no">03</span><spur-selectable-text source-id="v03">Fewer words, same meaning.</spur-selectable-text></spur-choice>
+    <spur-choice value="v04"><span class="no">04</span><spur-selectable-text source-id="v04">The quiet fix nobody asked for.</spur-selectable-text></spur-choice>
+    <spur-choice value="v05"><span class="no">05</span><spur-selectable-text source-id="v05">Measure twice, merge once.</spur-selectable-text></spur-choice>
+    <spur-choice value="v06"><span class="no">06</span><spur-selectable-text source-id="v06">Start with the boring part, it pays off later.</spur-selectable-text></spur-choice>
+    <spur-choice value="v07"><span class="no">07</span><spur-selectable-text source-id="v07">Release notes are a promise.</spur-selectable-text></spur-choice>
+    <spur-choice value="v08"><span class="no">08</span><spur-selectable-text source-id="v08">Every flaky test is a story.</spur-selectable-text></spur-choice>
+    <spur-choice value="v09"><span class="no">09</span><spur-selectable-text source-id="v09">Cache invalidation, again.</spur-selectable-text></spur-choice>
+    <spur-choice value="v10"><span class="no">10</span><spur-selectable-text source-id="v10">One more thing before you go.</spur-selectable-text></spur-choice>
   </spur-choice-list>
   <spur-textarea id="instruction" name="instruction" maxlength="2000" rows="2" label="Instruction" placeholder="Optional. Tell the agent what to change..."></spur-textarea>
 </spur-form>
-<div>
+<div class="actions">
   <spur-button action="choose" form="f" variant="primary">Choose selected</spur-button>
   <spur-button action="regenerate" form="f">Regenerate</spur-button>
+  <span class="hint">Select text in a variant to modify a span</span>
 </div>
 <spur-selection-toolbar for="v01 v02 v03 v04 v05 v06 v07 v08 v09 v10" field="selection">
   <spur-button action="modify-selection">Modify selection</spur-button>

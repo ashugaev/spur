@@ -531,3 +531,12 @@ describe("theme, fullscreen failure and refused files", () => {
     expect(screen.getByTitle("Picker").getAttribute("srcdoc")).not.toContain("<p>old</p>");
   });
 });
+
+describe("loading state", () => {
+  it("shows the panel header with the title and a busy placeholder before the host exists", () => {
+    const s = setup();
+    render(<SnippetPanel {...s.props} />);
+    expect(screen.getByText("Picker", { selector: "div" })).toBeInTheDocument();
+    expect(document.querySelector('[aria-busy="true"]')).not.toBeNull();
+  });
+});

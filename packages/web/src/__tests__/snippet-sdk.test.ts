@@ -730,3 +730,25 @@ describe("fullscreen and escape", () => {
     expect(r.ofType("fullscreen").at(-1)).toMatchObject({ open: false });
   });
 });
+
+describe("theme parity and list label", () => {
+  it("sets color-scheme from the theme mode on connect and on theme messages", async () => {
+    const r = await rig("");
+    expect(r.doc.documentElement.style.colorScheme).toBe("dark");
+    r.fromHost({ type: "theme", theme: { ...THEME, mode: "light" } });
+    expect(r.doc.documentElement.style.colorScheme).toBe("light");
+  });
+
+  it("a labelled choice list shows its label and an n of m selected count", async () => {
+    const r = await rig(
+      `<spur-choice-list name="s" mode="multiple" label="Variants"><spur-choice value="a">a</spur-choice><spur-choice value="b">b</spur-choice></spur-choice-list>`,
+    );
+    const head = r.doc.querySelector(".spur-list-label") as HTMLElement;
+    expect(head.textContent).toBe("Variants0 of 2 selected");
+    expect(head.nextElementSibling?.tagName).toBe("SPUR-CHOICE-LIST");
+    r.click("spur-choice[value=a]");
+    expect(head.textContent).toBe("Variants1 of 2 selected");
+    (r.doc.querySelector("spur-choice-list") as unknown as { value: unknown }).value = ["a", "b"];
+    expect(head.textContent).toBe("Variants2 of 2 selected");
+  });
+});

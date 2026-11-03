@@ -387,6 +387,11 @@ textarea::placeholder {
   height: auto !important;
 }
 
+/* Header, confirm strip and status line keep their height; only the iframe flexes. */
+.snippet-dialog:modal > :not(.snippet-frame) {
+  flex: none;
+}
+
 .snippet-dialog::backdrop {
   background: var(--color-modal-backdrop);
   backdrop-filter: blur(2px);
