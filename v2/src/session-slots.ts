@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentStateStrategy } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
+import { spurInstallLockPath } from "./install-lock.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "./self-destruct.js";
 import type {
   AgentName,
@@ -21,6 +22,8 @@ const DIST_CLI_ENTRYPOINT = resolve(dirname(MODULE_PATH), "../dist/cli.js");
 const CLI_ENTRYPOINT = existsSync(DIST_CLI_ENTRYPOINT)
   ? DIST_CLI_ENTRYPOINT
   : fileURLToPath(new URL("./cli.js", import.meta.url));
+
+const INSTALL_LOCK_WAIT_SECONDS = 90;
 
 export const SLOT_TOOL_NAME = "spur-slots";
 export const AGENT_STATE_TOOL_NAME = "spur-agent-state";
@@ -347,14 +350,19 @@ export function ensureSessionSlotTool(args: {
   projectId?: string;
   branchNamingRegex?: string;
   agent?: AgentName;
+  installLockPath?: string;
 }): string {
   const toolDir = slotToolDir(args.dataDir, args.sessionId);
   const stateFilePath = join(args.dataDir, "session-agent-state", `${args.sessionId}.json`);
+  const lockPath = shellEscape(args.installLockPath ?? spurInstallLockPath());
+  // Shared probe: waits while an update writer holds the exclusive lock. Never creates the lock file.
+  const installLockWait = `if [[ -e ${lockPath} ]] && command -v flock >/dev/null 2>&1; then flock -s -w ${INSTALL_LOCK_WAIT_SECONDS} ${lockPath} true 2>/dev/null || true; fi`;
   mkdirSync(toolDir, { recursive: true });
   writeToolFileAtomic(
     join(toolDir, SPUR_WRAPPER_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
+${installLockWait}
 exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
@@ -619,6 +627,7 @@ exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UP
     join(toolDir, "spur-sidecar"),
     `#!/usr/bin/env bash
 set -euo pipefail
+${installLockWait}
 action="start"
 if [[ "\${1-}" == "start" || "\${1-}" == "stop" || "\${1-}" == "ports" ]]; then
   action="$1"

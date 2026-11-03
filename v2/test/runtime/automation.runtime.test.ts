@@ -15,7 +15,7 @@ import {
 } from "../../src/metadata.js";
 import { SessionService } from "../../src/session-service.js";
 import { startConfiguredTriggers as startTriggerController } from "../../src/triggers.js";
-import type { SessionRecord, SessionView } from "../../src/types.js";
+import type { SessionRecord, SessionView, TodoProjection } from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   captureTmuxPane,
@@ -37,6 +37,7 @@ const activeContexts: Array<{
   sessionPrefix: string;
 }> = [];
 let currentService: SessionService | undefined;
+let restoreRuntimeEnv: (() => void) | undefined;
 
 function startConfiguredTriggers(
   deps: Omit<Parameters<typeof startTriggerController>[0], "autoPing">,
@@ -134,9 +135,10 @@ async function withRuntimeEnv<T>(context: RuntimeTestContext, run: () => Promise
   };
   _resetGhPathCacheForTests();
   Object.assign(process.env, runtimeEnv(context));
-  try {
-    return await run();
-  } finally {
+  let restored = false;
+  const restore = () => {
+    if (restored) return;
+    restored = true;
     // Dispose before env restore so timers cannot fire inside the next env window.
     currentService?.dispose();
     currentService = undefined;
@@ -148,11 +150,19 @@ async function withRuntimeEnv<T>(context: RuntimeTestContext, run: () => Promise
       }
     }
     _resetGhPathCacheForTests();
+    if (restoreRuntimeEnv === restore) restoreRuntimeEnv = undefined;
+  };
+  restoreRuntimeEnv = restore;
+  try {
+    return await run();
+  } finally {
+    restore();
   }
 }
 
 describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
   afterEach(async () => {
+    restoreRuntimeEnv?.();
     while (activeContexts.length > 0) {
       const current = popActiveContext();
       if (current.daemonPid) {
@@ -164,6 +174,80 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       }
       await killTmuxSessionsByPrefix(current.sessionPrefix, current.context.tmuxSocketName);
       await current.context.cleanup();
+    }
+  });
+
+  it("restores owned runtime environment without a stale finally changing the next window", async () => {
+    const firstContext = await createRuntimeTestContext(await findFreePort());
+    activeContexts.push({ context: firstContext, sessionPrefix: "rt-env-first" });
+    const secondContext = await createRuntimeTestContext(await findFreePort());
+    activeContexts.push({ context: secondContext, sessionPrefix: "rt-env-second" });
+    const baseline = Object.fromEntries(
+      Object.keys(runtimeEnv(firstContext)).map((key) => [key, process.env[key]]),
+    );
+    const firstService = Object.create(SessionService.prototype) as SessionService;
+    const firstDispose = vi.spyOn(firstService, "dispose").mockImplementation(() => {});
+    const secondService = Object.create(SessionService.prototype) as SessionService;
+    const secondDispose = vi.spyOn(secondService, "dispose").mockImplementation(() => {});
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = withRuntimeEnv(firstContext, async () => {
+      currentService = firstService;
+      await firstGate;
+    });
+    restoreRuntimeEnv?.();
+    expect(firstDispose).toHaveBeenCalledOnce();
+    for (const [key, value] of Object.entries(baseline)) {
+      expect(process.env[key]).toBe(value);
+    }
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const second = withRuntimeEnv(secondContext, async () => {
+      currentService = secondService;
+      await secondGate;
+    });
+    const secondRestore = restoreRuntimeEnv;
+    try {
+      releaseFirst();
+      await first;
+      for (const [key, value] of Object.entries(runtimeEnv(secondContext))) {
+        expect(process.env[key]).toBe(value);
+      }
+      expect(restoreRuntimeEnv).toBe(secondRestore);
+      expect(currentService).toBe(secondService);
+      expect(secondDispose).not.toHaveBeenCalled();
+    } finally {
+      releaseFirst();
+      releaseSecond();
+      await first;
+      await second;
+    }
+    expect(secondDispose).toHaveBeenCalledOnce();
+    expect(restoreRuntimeEnv).toBeUndefined();
+    for (const [key, value] of Object.entries(baseline)) {
+      expect(process.env[key]).toBe(value);
+    }
+  });
+
+  it("restores owned runtime environment after a rejected callback", async () => {
+    const context = await createRuntimeTestContext(await findFreePort());
+    activeContexts.push({ context, sessionPrefix: "rt-env-rejected" });
+    const baseline = Object.fromEntries(
+      Object.keys(runtimeEnv(context)).map((key) => [key, process.env[key]]),
+    );
+    const failure = new Error("runtime callback rejected");
+    await expect(
+      withRuntimeEnv(context, async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    expect(restoreRuntimeEnv).toBeUndefined();
+    for (const [key, value] of Object.entries(baseline)) {
+      expect(process.env[key]).toBe(value);
     }
   });
 
@@ -438,9 +522,11 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     });
   });
 
-  it.each(["during acknowledgement", "before acknowledgement"] as const)(
+  it.for(["during acknowledgement", "before acknowledgement"] as const)(
     "persists a changed GitHub CI signal %s in an isolated runtime",
-    async (ordering) => {
+    { timeout: 120_000 },
+    async (ordering, { signal }) => {
+      console.info(`[GitHub acknowledgement: ${ordering}] setup`);
       const port = await findFreePort();
       const context = await createRuntimeTestContext(port);
       const sessionPrefix = `rt-gh-ack-${port}`;
@@ -501,6 +587,17 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         ).stdout,
       ) as SessionView;
 
+      console.info(`[GitHub acknowledgement: ${ordering}] completed fixture ledger`);
+      await pollUntil(() => context.fetchJson<TodoProjection>(`/sessions/${session.id}/todo`), {
+        timeoutMs: 20_000,
+        accept: (projection) =>
+          projection.items.some(
+            (item) => item.text === "Fixture step" && item.status === "completed",
+          ),
+        label: "fixture agent to complete startup ToDo item",
+        signal,
+      });
+
       await withRuntimeEnv(context, async () => {
         const service = new SessionService(triggerConfig, "2026-03-18T10:00:00.000Z");
         currentService = service;
@@ -560,35 +657,51 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           return batch?.kind === "review" ? batch.signals[0]?.text : undefined;
         };
         try {
+          console.info(`[GitHub acknowledgement: ${ordering}] baseline`);
           await waitForSourceBaseline(context, session.id);
+          console.info(`[GitHub acknowledgement: ${ordering}] waiting state`);
           await pollUntil(async () => (await service.get(session.id)).state, {
             timeoutMs: 20_000,
             accept: (value) => value === "waiting",
+            label: "acknowledgement session waiting state",
+            signal,
           });
+          console.info(`[GitHub acknowledgement: ${ordering}] first persisted signal`);
           await context.writeGhState(state("first check"));
           await pollUntil(async () => signalText(), {
             timeoutMs: 15_000,
             accept: (text) => text?.includes("first check") === true,
+            label: "first persisted GitHub signal",
+            signal,
           });
           if (ordering === "before acknowledgement") {
+            console.info(`[GitHub acknowledgement: ${ordering}] changed signal`);
             await context.writeGhState(state("second check"));
             await pollUntil(async () => signalText(), {
               timeoutMs: 15_000,
               accept: (text) => text?.includes("second check") === true,
+              label: "changed GitHub signal before acknowledgement",
+              signal,
             });
             releaseLookup();
           }
+          console.info(`[GitHub acknowledgement: ${ordering}] first delivery`);
           await pollUntil(async () => messages.length, {
             timeoutMs: 45_000,
             accept: (count) => count > 0,
+            label: "first GitHub signal delivery",
+            signal,
           });
           const claimId = pending()?.claim?.claimId;
           expect(claimId).toBeDefined();
           if (ordering === "during acknowledgement") {
+            console.info(`[GitHub acknowledgement: ${ordering}] changed signal`);
             await context.writeGhState(state("second check"));
             await pollUntil(async () => signalText(), {
               timeoutMs: 15_000,
               accept: (text) => text?.includes("second check") === true,
+              label: "changed GitHub signal during acknowledgement",
+              signal,
             });
             expect(pending()?.claim?.claimId).toBe(claimId);
             expect(messages[0]).toContain("first check");
@@ -599,9 +712,12 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           expect(messages).toHaveLength(1);
           release();
           if (ordering === "during acknowledgement") {
+            console.info(`[GitHub acknowledgement: ${ordering}] second delivery`);
             await pollUntil(async () => messages.length, {
               timeoutMs: 20_000,
               accept: (count) => count === 2,
+              label: "second GitHub signal delivery",
+              signal,
             });
             expect(messages[1]).toContain("second check");
           } else {
@@ -614,11 +730,12 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           release();
           abortController.abort();
           source.stop();
+          console.info(`[GitHub acknowledgement: ${ordering}] controller drain`);
           await controller.stop();
+          console.info(`[GitHub acknowledgement: ${ordering}] drained`);
         }
       });
     },
-    120_000,
   );
 
   it.each(["claude", "codex"] as const)(

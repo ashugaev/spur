@@ -1181,10 +1181,19 @@ describe("SessionService", () => {
 
   beforeEach(async () => {
     testAccounts = [];
+    for (const agent of ["CLAUDE", "CODEX", "CURSOR", "OPENCODE"]) {
+      vi.stubEnv(`SPUR_${agent}_PANE_CHILD_FALLBACK`, undefined);
+    }
     await resetSessionServiceHarness(() => testAccounts);
   });
 
-  afterEach(disposeSessionServiceHarness);
+  afterEach(async () => {
+    try {
+      await disposeSessionServiceHarness();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 
   describe("config registry lifecycle", () => {
     it("boot worktree-internal filter keeps a worktree config out of the merged registry and its next persisted write", async () => {
@@ -4683,6 +4692,88 @@ describe("SessionService", () => {
       "B1",
     ]);
   });
+
+  it.each(["resolve", "reject"] as const)(
+    "dispatches one background executor before response enrichment can %s",
+    async (viewOutcome) => {
+      const sessions = createSessionStore();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      const internals = service as unknown as {
+        enrich(record: SessionRecord): Promise<SessionView>;
+        runBackgroundSpawnAttempt(prepared: unknown, attempt: number): Promise<"completed">;
+        spawnsInFlight: Set<string>;
+        backgroundSpawnRuns: Set<Promise<void>>;
+      };
+      let releaseView: () => void = () => {};
+      const viewGate = new Promise<void>((resolve) => {
+        releaseView = resolve;
+      });
+      let releaseWorker: () => void = () => {};
+      const workerGate = new Promise<void>((resolve) => {
+        releaseWorker = resolve;
+      });
+      let enteredView: () => void = () => {};
+      const viewing = new Promise<void>((resolve) => {
+        enteredView = resolve;
+      });
+      const enrich = internals.enrich.bind(service);
+      vi.spyOn(internals, "enrich").mockImplementationOnce(async (record) => {
+        enteredView();
+        await viewGate;
+        if (viewOutcome === "reject") throw new Error("response projection unavailable");
+        return enrich(record);
+      });
+      const worker = vi
+        .spyOn(internals, "runBackgroundSpawnAttempt")
+        .mockImplementation(async () => {
+          await workerGate;
+          return "completed";
+        });
+      const response = service.spawnInBackground({ project: "api", prompt: "hello" }).then(
+        (view) => ({ ok: true as const, view }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      await viewing;
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        expect(sessions.get("api-1")).toMatchObject({ status: "spawning", prompt: "hello" });
+        expect(worker).toHaveBeenCalledTimes(1);
+        expect(internals.backgroundSpawnRuns.size).toBe(1);
+        expect(internals.spawnsInFlight.has("api-1")).toBe(true);
+        releaseView();
+        const result = await response;
+        if (viewOutcome === "resolve") {
+          expect(result).toMatchObject({
+            ok: true,
+            view: { id: "api-1", prompt: "hello", launchCommand: "", artifacts: [] },
+          });
+        } else {
+          expect(result).toMatchObject({
+            ok: false,
+            error: { message: "response projection unavailable" },
+          });
+        }
+        expect(worker).toHaveBeenCalledTimes(1);
+        expect(internals.backgroundSpawnRuns.size).toBe(1);
+        expect(internals.spawnsInFlight.has("api-1")).toBe(true);
+        expect(sessions.get("api-1")?.status).toBe("spawning");
+        expect(
+          logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.spawn.failed"),
+        ).toHaveLength(0);
+      } finally {
+        releaseView();
+        releaseWorker();
+        await response;
+        await service.settleBackgroundSpawns();
+        service.dispose();
+      }
+      expect(internals.backgroundSpawnRuns.size).toBe(0);
+      expect(internals.spawnsInFlight.has("api-1")).toBe(false);
+    },
+  );
 
   it("returns a spawning placeholder immediately for background spawn and completes later", async () => {
     mockClaudeJsonlState("waiting");
@@ -10919,6 +11010,43 @@ describe("SessionService", () => {
     ).rejects.toBeInstanceOf(SubmitAckTimeoutError);
     expect(waitForAckMock).toHaveBeenCalledWith(expect.anything(), "ship the task", 300_000);
     expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps resending the codex launch Enter until codex leaves its startup composer", async () => {
+    // Codex <0.156 ignores Enter in its startup composer, which can last 30s+
+    // past the ready markers; the submit lands on the first Enter after it.
+    // Codex launch pacing, pinned against the adapter in agents-index.test.ts.
+    agentSubmitAckPacingMock.mockImplementation(() => ({ windowMs: 10_000, maxResends: 9 }));
+    agentHasLaunchSubmitAckMock.mockImplementation(
+      (agent: string) => agent === "claude" || agent === "codex",
+    );
+    captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
+
+    const service = await createDisposedSessionService();
+    const waitForAckMock = vi
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+      .mockResolvedValueOnce({ found: false, lastScannedFile: null })
+      .mockResolvedValueOnce({ found: false, lastScannedFile: null })
+      .mockResolvedValueOnce({ found: false, lastScannedFile: null })
+      .mockResolvedValueOnce({ found: false, lastScannedFile: null })
+      .mockResolvedValue({ found: true, lastScannedFile: "/some/rollout.jsonl" });
+
+    await expect(
+      sessionServiceInternals(service).sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "codex",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        },
+        "ship the task",
+        { freshLaunch: true },
+      ),
+    ).resolves.toBe("submitted");
+    expect(waitForAckMock).toHaveBeenCalledTimes(5);
+    expect(waitForAckMock).toHaveBeenCalledWith(expect.anything(), "ship the task", 10_000);
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(4);
   });
 
   it("throws on an exhausted launch send when the agent process is gone", async () => {
@@ -23401,6 +23529,34 @@ describe("SessionService", () => {
     }
   });
 
+  it("disables pane-child liveness for a name-matchable wrapper when configured off", async () => {
+    vi.stubEnv("SPUR_CODEX_PANE_CHILD_FALLBACK", "off");
+    agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+    probeTmuxProcessMatchMock.mockImplementation(async (_session, _matchers, options) => ({
+      alive: options?.paneChildFallback === true,
+      matchedByName: false,
+      unresponsive: false,
+    }));
+    const service = await createDisposedSessionService();
+    try {
+      const snapshot = await sessionServiceInternals(service).readRuntimeSnapshot(
+        runningSession({ agent: "codex", launchCommand: "/tmp/codex-wrapper --model x" }),
+        { fresh: true },
+      );
+      expect(snapshot.processAlive).toBe(false);
+      expect(probeTmuxProcessMatchMock).toHaveBeenCalledWith("api-1", expect.any(Array), {
+        fresh: true,
+      });
+      expect(agentLaunchUsesForeignBinaryMock).toHaveBeenCalledWith(
+        "codex",
+        "/tmp/codex-wrapper --model x",
+      );
+    } finally {
+      service.dispose();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("leaves a canonical-binary session's liveness options untouched", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", runningSession());
@@ -27239,6 +27395,118 @@ describe("SessionService", () => {
       "root-thread",
     );
   });
+
+  it.each([0, 1])(
+    "Codex quota expiry restores retained native queue flush at reset +%sms and reblocks fresh rejection",
+    async (afterResetMs) => {
+      const resetAtMs = Date.now();
+      const session = runningSession({
+        agent: "codex",
+        launchCommand: agentLaunchCommand("codex"),
+        agentSessionId: "quota-root",
+        codexRestoreStartedAt: new Date(resetAtMs - 5_000).toISOString(),
+        rateLimitedAt: new Date(resetAtMs - 10_000).toISOString(),
+        queuedMessages: { messages: ["probe quota", "retained next"], awaitingPrompt: false },
+      });
+      const sessions = createSessionStore(session);
+      readAgentHookStateMock.mockReturnValue(null);
+      const actualCodex = await vi.importActual<typeof CodexModule>("../../src/agents/codex.js");
+      readCodexRolloutStateMock.mockImplementation(actualCodex.readCodexRolloutState);
+      const sessionsDir = join(TEST_DATA_DIR, "session-tools", "api-1", "codex-home", "sessions");
+      mkdirSync(sessionsDir, { recursive: true });
+      const record = (timestampMs: number, type: string, payload: Record<string, unknown>) =>
+        JSON.stringify({ timestamp: new Date(timestampMs).toISOString(), type, payload });
+      const filePath = join(sessionsDir, "rollout-root.jsonl");
+      writeFileSync(
+        filePath,
+        [
+          record(resetAtMs - 10_000, "session_meta", { id: "quota-root" }),
+          record(resetAtMs - 9_000, "event_msg", { type: "task_started", turn_id: "old-turn" }),
+          record(resetAtMs - 8_000, "event_msg", {
+            type: "token_count",
+            rate_limits: {
+              primary: { used_percent: 100, window_minutes: 10080, resets_at: resetAtMs / 1000 },
+              secondary: null,
+              rate_limit_reached_type: null,
+            },
+          }),
+          record(resetAtMs - 2_000, "event_msg", {
+            type: "thread_settings_applied",
+            thread_id: "quota-root",
+          }),
+        ].join("\n"),
+      );
+      const { SessionService, SessionRateLimitedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", new Date(resetAtMs).toISOString(), {
+        deferBackgroundLoops: true,
+      });
+      vi.setSystemTime(resetAtMs - 5_000);
+      expect((await service.get("api-1")).state).toBe("rate_limited");
+      await expect(service.flushQueuedMessage("api-1", "probe quota")).rejects.toBeInstanceOf(
+        SessionRateLimitedError,
+      );
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual([
+        "probe quota",
+        "retained next",
+      ]);
+      vi.setSystemTime(resetAtMs + afterResetMs);
+      expect((await service.get("api-1")).state).toBe("waiting");
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      let pasted: () => void = () => {};
+      const paste = new Promise<void>((resolve) => {
+        pasted = resolve;
+      });
+      sendMessageToTmuxMock.mockImplementation(async () => {
+        pasted();
+      });
+      let releaseAck: () => void = () => {};
+      const ackGate = new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(
+        async () => {
+          await ackGate;
+          return { found: true, lastScannedFile: filePath };
+        },
+      );
+      const flush = service.flushQueuedMessage("api-1", "probe quota");
+      await paste;
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "probe quota", {
+        agent: "codex",
+        interrupt: false,
+      });
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual([
+        "probe quota",
+        "retained next",
+      ]);
+      releaseAck();
+      await flush;
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["retained next"]);
+      expect(sessions.get("api-1")?.agentSessionId).toBe("quota-root");
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(0);
+      expect(sessionServiceInternals(service).queueDeliveryInFlight.size).toBe(0);
+      appendFileSync(
+        filePath,
+        `\n${record(resetAtMs + 1_000, "event_msg", {
+          type: "token_count",
+          rate_limits: { rate_limit_reached_type: "weekly" },
+        })}`,
+      );
+      vi.setSystemTime(resetAtMs + 1_000);
+      expect((await service.get("api-1")).state).toBe("rate_limited");
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeDefined();
+      sendMessageToTmuxMock.mockClear();
+      await expect(service.flushQueuedMessage("api-1", "retained next")).rejects.toBeInstanceOf(
+        SessionRateLimitedError,
+      );
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["retained next"]);
+      expect(sessions.get("api-1")?.agentSessionId).toBe("quota-root");
+      service.dispose();
+    },
+  );
 
   it("detects needs_input for Cursor from AskUserQuestion JSONL", async () => {
     readSessionMock.mockReturnValue({
@@ -56416,18 +56684,51 @@ describe("SessionService", () => {
       });
       mockClaudeJsonlState("waiting");
       const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
       reserveNextSessionIdMock.mockResolvedValue("shp-2");
-
-      const result = await service.spawnShepherd({
-        prompt: "Restart Shepherd",
+      const stopped = structuredClone(sessions.get("shp-stopped"));
+      let releaseSend: () => void = () => {};
+      const sendGate = new Promise<void>((resolve) => {
+        releaseSend = resolve;
+      });
+      let enteredSend: () => void = () => {};
+      const sending = new Promise<void>((resolve) => {
+        enteredSend = resolve;
+      });
+      sendMessageToTmuxMock.mockImplementationOnce(async () => {
+        enteredSend();
+        await sendGate;
       });
 
-      expect(result.disposition).toBe("spawned");
-      expect(result.session.id).toBe("shp-2");
-      expect(result.session.status).toBe("spawning");
-      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-      service.dispose();
+      try {
+        const result = await service.spawnShepherd({ prompt: "Restart Shepherd" });
+        await sending;
+        expect(result.disposition).toBe("spawned");
+        expect(result.session.id).toBe("shp-2");
+        expect(result.session.status).toBe("spawning");
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(createTmuxSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({ sessionName: "shp-2" }),
+        );
+        expect(sendMessageToTmuxMock).toHaveBeenCalledExactlyOnceWith(
+          "shp-2",
+          expect.stringContaining("Restart Shepherd"),
+          { agent: "claude" },
+        );
+        expect(sessions.get("shp-stopped")).toEqual(stopped);
+
+        releaseSend();
+        await service.settleBackgroundSpawns();
+        expect(sessions.get("shp-2")?.status).toBe("running");
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(sessions.get("shp-stopped")).toEqual(stopped);
+      } finally {
+        releaseSend();
+        await service.settleBackgroundSpawns();
+        service.dispose();
+      }
     });
 
     function seedRunningShepherdSession(sessions: Map<string, SessionRecord>): void {
@@ -62465,8 +62766,16 @@ describe("SessionService", () => {
         return { status: "ok", panePid: null, paneDead: false };
       });
       isProcessRunningInTmuxMock.mockImplementation(
-        async (_tmuxSession: string, _matchers: string[], opts?: { fresh?: boolean }) => {
-          return opts?.fresh === true && capturePaneAgentProcessesMock.mock.calls.length > 0;
+        async (
+          _tmuxSession: string,
+          _matchers: string[],
+          opts?: { fresh?: boolean; paneChildFallback?: boolean },
+        ) => {
+          return (
+            opts?.fresh === true &&
+            opts?.paneChildFallback === true &&
+            capturePaneAgentProcessesMock.mock.calls.length > 0
+          );
         },
       );
 
@@ -62483,6 +62792,47 @@ describe("SessionService", () => {
           details: { tmuxSession: "api-1", agent: "claude" },
         }),
       );
+    });
+
+    it("keeps the foreign capture-blind check separate from pane-child opt-out", async () => {
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      createSessionStore(runningSession({ id: "api-1" }));
+      agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+      vi.stubEnv("SPUR_CLAUDE_PANE_CHILD_FALLBACK", "off");
+      let launched = false;
+      createTmuxSessionMock.mockImplementation(async () => {
+        launched = true;
+      });
+      let freshLookups = 0;
+      lookupTmuxPanePidMock.mockImplementation(async (_name, options) => {
+        if (options?.fresh) {
+          freshLookups += 1;
+          if (freshLookups === 1) return { status: "unavailable" };
+        }
+        return { status: "ok", panePid: null, paneDead: false };
+      });
+      isProcessRunningInTmuxMock.mockImplementation(
+        async (_session, _matchers, options) =>
+          launched ||
+          (options?.fresh === true &&
+            options?.paneChildFallback === true &&
+            capturePaneAgentProcessesMock.mock.calls.length > 0),
+      );
+
+      const service = await createDisposedSessionService();
+      try {
+        expect((await service.restore("api-1")).status).toBe("running");
+        expect(capturePaneAgentProcessesMock).toHaveBeenCalled();
+        expect(agentLaunchUsesForeignBinaryMock).toHaveBeenCalledWith(
+          "claude",
+          "claude --dangerously-skip-permissions",
+        );
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+      } finally {
+        service.dispose();
+        vi.unstubAllEnvs();
+      }
     });
 
     it("does not refuse a replacement when the ownership-blind probe reads dead — a genuinely exited foreign agent", async () => {

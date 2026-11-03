@@ -141,11 +141,29 @@ export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | 
   if (isRecord(credits) && credits["has_credits"] === true) {
     return NOT_LIMITED;
   }
-  if (usedPercentExhausted(rateLimits["primary"])) {
-    return { limited: true, reason: "codex 5h window exhausted" };
-  }
-  if (usedPercentExhausted(rateLimits["secondary"])) {
-    return { limited: true, reason: "codex weekly window exhausted" };
+  const exhaustedWindows = [rateLimits["primary"], rateLimits["secondary"]].filter(
+    usedPercentExhausted,
+  );
+  if (exhaustedWindows.length > 0) {
+    const detection: RateLimitDetection = {
+      limited: true,
+      reason: usedPercentExhausted(rateLimits["primary"])
+        ? "codex 5h window exhausted"
+        : "codex weekly window exhausted",
+    };
+    let latestResetAtMs = 0;
+    for (const window of exhaustedWindows) {
+      const reset = isRecord(window) ? window["resets_at"] : undefined;
+      if (typeof reset !== "number" || !Number.isSafeInteger(reset) || reset <= 0) {
+        return detection;
+      }
+      const resetAtMs = reset * 1000;
+      if (!Number.isSafeInteger(resetAtMs) || !Number.isFinite(new Date(resetAtMs).getTime())) {
+        return detection;
+      }
+      latestResetAtMs = Math.max(latestResetAtMs, resetAtMs);
+    }
+    return { ...detection, resetAtMs: latestResetAtMs };
   }
   return NOT_LIMITED;
 }
@@ -299,7 +317,7 @@ export const CLAUDE_BOOKKEEPING_RECORD_TYPES: ReadonlySet<string> = new Set([
 // exits, `last-prompt` alongside prompts. Kept out of
 // CLAUDE_BOOKKEEPING_RECORD_TYPES because classifyClaudeJsonlState maps that set
 // to "waiting", while it already walks past these as unknown types.
-const CLAUDE_SESSION_META_RECORD_TYPES: ReadonlySet<string> = new Set([
+export const CLAUDE_SESSION_META_RECORD_TYPES: ReadonlySet<string> = new Set([
   "cost-state",
   "last-prompt",
 ]);

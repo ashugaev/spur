@@ -585,7 +585,7 @@ import {
   resolveCursorBuild,
   type CursorJsonlReaderState,
 } from "./cursor-jsonl-state.js";
-import { resolveAgentExecutable } from "./agents/executable.js";
+import { agentPaneChildFallbackEnabled, resolveAgentExecutable } from "./agents/executable.js";
 import {
   formatNestedSidecarStartError,
   MAX_SIDECAR_DEPTH,
@@ -2031,6 +2031,12 @@ function sessionProcessMatchers(session: Pick<SessionRecord, "agent" | "launchCo
   return agentProcessMatchers(session.agent, session.launchCommand);
 }
 
+function paneChildFallbackForLaunch(agent: AgentName, launchCommand: string): boolean {
+  const foreign = agentLaunchUsesForeignBinary(agent, launchCommand);
+  const enabled = agentPaneChildFallbackEnabled(agent);
+  return foreign && enabled;
+}
+
 // Single point through which every liveness read of isProcessRunningInTmux
 // passes, so the pane-child fallback gate (issue #806) cannot drift from the
 // matcher list: it depends on the SAME (agent, launchCommand) pair used to
@@ -2041,10 +2047,10 @@ async function agentProcessAlive(
   options?: { fresh?: boolean },
 ): Promise<boolean> {
   const matchers = agentProcessMatchers(input.agent, input.launchCommand);
-  const foreign = agentLaunchUsesForeignBinary(input.agent, input.launchCommand);
+  const paneChildFallback = paneChildFallbackForLaunch(input.agent, input.launchCommand);
   const result = await probeTmuxProcessMatch(input.tmuxSession, matchers, {
     ...(options?.fresh ? { fresh: true } : {}),
-    ...(foreign ? { paneChildFallback: true } : {}),
+    ...(paneChildFallback ? { paneChildFallback: true } : {}),
   });
   if (result.diagnostic) throw new AgentProcessProbeUnknownError(result.diagnostic);
   return result.alive;
@@ -2072,10 +2078,10 @@ async function probeAgentProcess(
   options?: { fresh?: boolean },
 ): Promise<AgentProcessProbe> {
   const matchers = agentProcessMatchers(input.agent, input.launchCommand);
-  const foreign = agentLaunchUsesForeignBinary(input.agent, input.launchCommand);
+  const paneChildFallback = paneChildFallbackForLaunch(input.agent, input.launchCommand);
   const result = await probeTmuxProcessMatch(input.tmuxSession, matchers, {
     ...(options?.fresh ? { fresh: true } : {}),
-    ...(foreign ? { paneChildFallback: true } : {}),
+    ...(paneChildFallback ? { paneChildFallback: true } : {}),
   });
   if (!result.alive) {
     return {
@@ -14892,7 +14898,7 @@ export class SessionService {
   async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
     const prepared = await this.prepareBackgroundSpawn(request);
     this.spawnsInFlight.add(prepared.placeholder.id);
-    const placeholder = await this.enrich(prepared.placeholder);
+    const placeholder = this.enrich(prepared.placeholder);
     const run = new Promise<void>((resolve) => {
       queueMicrotask(() => {
         void (async () => {

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   agentExecutableCommand,
+  agentPaneChildFallbackEnabled,
   agentProcessNames,
   missingAgentExecutableMessage,
   resolveAgentExecutable,
@@ -11,6 +12,12 @@ import {
 import { checkOpenCodeExecutable } from "../../src/host-install.js";
 
 const cleanupPaths: string[] = [];
+const fallbackPolicies = [
+  ["claude", "SPUR_CLAUDE_PANE_CHILD_FALLBACK"],
+  ["codex", "SPUR_CODEX_PANE_CHILD_FALLBACK"],
+  ["cursor", "SPUR_CURSOR_PANE_CHILD_FALLBACK"],
+  ["opencode", "SPUR_OPENCODE_PANE_CHILD_FALLBACK"],
+] as const;
 
 afterEach(async () => {
   vi.unstubAllEnvs();
@@ -20,6 +27,22 @@ afterEach(async () => {
 });
 
 describe("agent executable resolution", () => {
+  it.each(fallbackPolicies)("reads %s pane-child fallback policy independently", (agent, env) => {
+    for (const [, key] of fallbackPolicies) vi.stubEnv(key, undefined);
+    expect(agentPaneChildFallbackEnabled(agent)).toBe(true);
+    vi.stubEnv(env, "auto");
+    expect(agentPaneChildFallbackEnabled(agent)).toBe(true);
+    vi.stubEnv(env, "off");
+    expect(agentPaneChildFallbackEnabled(agent)).toBe(false);
+    for (const [other] of fallbackPolicies) {
+      if (other !== agent) expect(agentPaneChildFallbackEnabled(other)).toBe(true);
+    }
+    vi.stubEnv(env, "");
+    expect(() => agentPaneChildFallbackEnabled(agent)).toThrow(env);
+    vi.stubEnv(env, "invalid");
+    expect(() => agentPaneChildFallbackEnabled(agent)).toThrow(env);
+  });
+
   it("keeps established command and environment contracts for every agent", () => {
     expect(agentExecutableCommand("claude")).toBe(process.env["SPUR_CLAUDE_BIN"] || "claude");
     expect(agentExecutableCommand("codex")).toBe(process.env["SPUR_CODEX_BIN"] || "codex");

@@ -10,6 +10,7 @@ import {
   RestoreOperationError,
 } from "./session-lifecycle.js";
 import { parseAgentName } from "./agents/index.js";
+import { agentPaneChildFallbackEnabled } from "./agents/executable.js";
 import {
   AgentModelError,
   AgentReasoningEffortError,
@@ -844,6 +845,9 @@ export async function startServer(
 ): Promise<StartedServer> {
   const ghPathState = await initializeGhPath();
   assertConfigMayUseProdSlot(configPath);
+  for (const agent of ["claude", "codex", "cursor", "opencode"] as const) {
+    agentPaneChildFallbackEnabled(agent);
+  }
   const service = new SessionService(configPath, undefined, {
     deferBackgroundLoops: true,
     ...(testOverrides?.sidecarSnapshot ? { sidecarSnapshot: testOverrides.sidecarSnapshot } : {}),

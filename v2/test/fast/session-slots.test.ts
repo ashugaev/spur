@@ -1,5 +1,6 @@
 import {
   closeSync,
+  existsSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -10,8 +11,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { rm } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ensureSessionSlotTool,
@@ -34,6 +36,27 @@ const PARAM_EXPANSION_OPEN = "$" + "{";
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
+
+// Dir with only bash and dirname symlinked (what the wrapper needs), plus an optional fake real git.
+const makeToolStub = async (withGit: boolean): Promise<string> => {
+  const dir = await createTempDir("spur-slots-stub-");
+  tempDirs.push(dir);
+  const resolved = execFileSync("bash", ["-c", "command -v bash dirname"], {
+    encoding: "utf8",
+  })
+    .trim()
+    .split("\n");
+  for (const target of resolved) {
+    symlinkSync(target, join(dir, basename(target)));
+  }
+  if (withGit) {
+    writeFileSync(join(dir, "git"), `#!/usr/bin/env bash\necho "git version fake-real"\n`, {
+      encoding: "utf8",
+      mode: 0o755,
+    });
+  }
+  return dir;
+};
 
 describe("session slots", () => {
   it("normalizes and merges title and named links", () => {
@@ -443,6 +466,7 @@ describe("session slots", () => {
       dataDir,
       sessionId: "api-2",
       configPath: "/tmp/spur.yaml",
+      installLockPath: join(dataDir, "install-and-restart.lock"),
     });
 
     const out = execFileSync(join(toolDir, "spur-sidecar"), ["ports", "--help"], {
@@ -451,6 +475,159 @@ describe("session slots", () => {
 
     expect(out).toContain("Print this session's reserved sidecar ports.");
     expect(out).not.toContain("--clear-port");
+  });
+
+  describe("install lock wait", () => {
+    const waitFor = async (check: () => boolean, what: string): Promise<void> => {
+      const deadline = Date.now() + 10_000;
+      while (!check()) {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    };
+    const childComms = (pid: number): string[] => {
+      let children: string;
+      try {
+        children = readFileSync(`/proc/${pid}/task/${pid}/children`, "utf8");
+      } catch {
+        return [];
+      }
+      return children
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((child) => {
+          try {
+            return readFileSync(`/proc/${child}/comm`, "utf8").trim();
+          } catch {
+            return "";
+          }
+        });
+    };
+    // Exclusive holder that keeps the lock until the go file exists.
+    const holdExclusive = async (lock: string, go: string): Promise<ChildProcess> => {
+      const holder = spawn(
+        "flock",
+        ["-x", lock, "bash", "-c", `until [ -e ${JSON.stringify(go)} ]; do sleep 0.05; done`],
+        { stdio: "ignore" },
+      );
+      await waitFor(
+        () => spawnSync("flock", ["-n", lock, "true"]).status !== 0,
+        "holder to own the lock",
+      );
+      return holder;
+    };
+    // flock exits only after its bash child sees the go file, so exit means no loop is left behind.
+    const releaseHolder = async (holder: ChildProcess, go: string): Promise<void> => {
+      writeFileSync(go, "");
+      await waitFor(() => holder.exitCode !== null || holder.signalCode !== null, "holder exit");
+    };
+    const setup = async (): Promise<{ toolDir: string; lock: string; go: string }> => {
+      const dataDir = await createTempDir("spur-slots-lock-");
+      tempDirs.push(dataDir);
+      const lock = join(dataDir, "install-and-restart.lock");
+      writeFileSync(lock, "");
+      const toolDir = ensureSessionSlotTool({
+        dataDir,
+        sessionId: "api-lock",
+        configPath: join(dataDir, "spur.yaml"),
+        installLockPath: lock,
+      });
+      return { toolDir, lock, go: join(dataDir, "go") };
+    };
+
+    it("blocks the spur wrapper while an exclusive holder owns the lock", async () => {
+      const { toolDir, lock, go } = await setup();
+      const holder = await holdExclusive(lock, go);
+      const wrapper = spawn(join(toolDir, "spur"), ["--version"], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      try {
+        let stdout = "";
+        wrapper.stdout.on("data", (chunk: Buffer) => {
+          stdout += chunk.toString();
+        });
+        const exited = new Promise<number | null>((resolve) => wrapper.on("exit", resolve));
+        let early: number | null | undefined;
+        void exited.then((code) => {
+          early = code;
+        });
+        await waitFor(
+          () => early !== undefined || childComms(wrapper.pid ?? 0).includes("flock"),
+          "wrapper to wait on flock",
+        );
+        expect(early).toBeUndefined();
+
+        writeFileSync(go, "");
+        expect(await exited).toBe(0);
+        expect(stdout.trim()).not.toBe("");
+      } finally {
+        wrapper.kill();
+        await releaseHolder(holder, go);
+      }
+    });
+
+    it("does not create the lock file when absent", async () => {
+      const dataDir = await createTempDir("spur-slots-lock-");
+      tempDirs.push(dataDir);
+      const lock = join(dataDir, "install-and-restart.lock");
+      const toolDir = ensureSessionSlotTool({
+        dataDir,
+        sessionId: "api-lock",
+        configPath: join(dataDir, "spur.yaml"),
+        installLockPath: lock,
+      });
+
+      const result = spawnSync(join(toolDir, "spur"), ["--version"], { timeout: 10_000 });
+
+      expect(result.status).toBe(0);
+      expect(existsSync(lock)).toBe(false);
+    });
+
+    it("runs at once without flock on PATH while the lock is held", async () => {
+      const { toolDir, lock, go } = await setup();
+      const holder = await holdExclusive(lock, go);
+      try {
+        const stub = await makeToolStub(false);
+
+        const result = spawnSync(join(toolDir, "spur"), ["--version"], {
+          timeout: 10_000,
+          env: { ...process.env, PATH: stub },
+        });
+
+        expect(result.status).toBe(0);
+      } finally {
+        await releaseHolder(holder, go);
+      }
+    });
+
+    it("bakes the wait into spur and spur-sidecar with the default lock path", async () => {
+      const dataDir = await createTempDir("spur-slots-lock-");
+      tempDirs.push(dataDir);
+      const injected = ensureSessionSlotTool({
+        dataDir,
+        sessionId: "api-lock",
+        configPath: "/tmp/spur.yaml",
+        installLockPath: "/tmp/x/install-and-restart.lock",
+      });
+      const baked = (path: string): string =>
+        `if [[ -e '${path}' ]] && command -v flock >/dev/null 2>&1; then flock -s -w 90 '${path}' true 2>/dev/null || true; fi`;
+
+      for (const name of ["spur", "spur-sidecar"]) {
+        expect(readFileSync(join(injected, name), "utf8")).toContain(
+          baked("/tmp/x/install-and-restart.lock"),
+        );
+      }
+
+      const defaulted = ensureSessionSlotTool({
+        dataDir,
+        sessionId: "api-lock-default",
+        configPath: "/tmp/spur.yaml",
+      });
+      const defaultPath = join(homedir(), ".spur", "install-and-restart.lock");
+      for (const name of ["spur", "spur-sidecar"]) {
+        expect(readFileSync(join(defaulted, name), "utf8")).toContain(baked(defaultPath));
+      }
+    });
   });
 
   it("blocks git push with global options when the current branch is invalid", async () => {
@@ -507,26 +684,6 @@ exit 42
         projectId: "api",
         branchNamingRegex: "^feature/[a-z]+$",
       });
-    };
-    // Dir with only bash and dirname symlinked (what the wrapper needs), plus an optional fake real git.
-    const makeToolStub = async (withGit: boolean): Promise<string> => {
-      const dir = await createTempDir("spur-slots-stub-");
-      tempDirs.push(dir);
-      const resolved = execFileSync("bash", ["-c", "command -v bash dirname"], {
-        encoding: "utf8",
-      })
-        .trim()
-        .split("\n");
-      for (const target of resolved) {
-        symlinkSync(target, join(dir, basename(target)));
-      }
-      if (withGit) {
-        writeFileSync(join(dir, "git"), `#!/usr/bin/env bash\necho "git version fake-real"\n`, {
-          encoding: "utf8",
-          mode: 0o755,
-        });
-      }
-      return dir;
     };
     const runGit = (inner: string, pathValue: string) =>
       spawnSync(join(inner, "git"), ["--version"], {
@@ -730,6 +887,7 @@ printf '%s\\n' "$@" > ${JSON.stringify(capturedArgsPath)}
       dataDir,
       sessionId: "api-3",
       configPath,
+      installLockPath: join(dataDir, "install-and-restart.lock"),
     });
 
     const captureFile = join(dataDir, "captured-args.txt");
