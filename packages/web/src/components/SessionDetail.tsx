@@ -47,6 +47,10 @@ import { ArtifactDownloadIcon } from "@/components/icons/ArtifactDownloadIcon";
 import { ArtifactOpenExternalIcon } from "@/components/icons/ArtifactOpenExternalIcon";
 import { ArtifactPreviewIcon } from "@/components/icons/ArtifactPreviewIcon";
 import { ConversationView } from "@/components/ConversationView";
+import { SnippetActionSummary } from "@/components/snippets/SnippetActionSummary";
+import { browserSnippetStorage } from "@/components/snippets/SnippetPanel";
+import { SnippetsSection } from "@/components/snippets/SnippetsSection";
+import { pruneSnippetRecords } from "@/lib/snippets/snippet-store";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
 import { IconActionButton } from "@/components/IconActionButton";
@@ -119,6 +123,7 @@ import {
   isTokenBudgetBlocked,
   isTerminalSession,
   toDashboardSession,
+  type ConversationMessage,
   type ConversationResponse,
   type DashboardSession,
   type GithubPrCheckUnavailablePayload,
@@ -130,6 +135,7 @@ import {
   type SpurSessionView,
   type SpurUpdateSessionSlotsResponse,
 } from "@/lib/types";
+import { partitionSnippetArtifacts } from "@/lib/snippets/snippet-manifest";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 import { resolveActivityStatus } from "@/lib/terminal-status";
 
@@ -379,6 +385,8 @@ function ArtifactZoomResetIcon() {
 }
 
 const POLL_INTERVAL_MS = 4_000;
+// Stable identity so the snippet panels' session effect does not re-run on an empty conversation.
+const EMPTY_CONVERSATION_MESSAGES: ConversationMessage[] = [];
 
 // Daemon answers 503 while starting; the Next route answers 502 when it can't reach it.
 const TRANSIENT_LOAD_STATUSES: ReadonlySet<number> = new Set([502, 503]);
@@ -1970,16 +1978,40 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setShowAllDeskMembers(false);
   }, [sessionId]);
 
+  // Drop snippet records untouched for 7 days (budget keys are never pruned).
+  useEffect(() => {
+    pruneSnippetRecords(browserSnippetStorage(), Date.now());
+  }, []);
+
+  // Reserved snippet files leave every artifact surface; only generic
+  // artifacts reach categories, counts, grid, list, lightbox and navigation.
+  const snippetPartition = useMemo(
+    () => partitionSnippetArtifacts(session?.artifacts ?? [], session?.id ?? ""),
+    [session?.artifacts, session?.id],
+  );
+  const genericArtifacts = snippetPartition.generic;
+  const snippetSessionView = useMemo(
+    () =>
+      session
+        ? {
+            canSend: canSendMessage(session),
+            state: session.state,
+            queuedMessages: session.queuedMessages.messages,
+          }
+        : null,
+    [session],
+  );
+
   useEffect(() => {
     if (!session) return;
     setArtifactPreviewStates((current) => {
       const next: Record<string, ArtifactPreviewState> = {};
-      for (const artifact of session.artifacts) {
+      for (const artifact of genericArtifacts) {
         next[artifact.id] = current[artifact.id] ?? "loading";
       }
       return next;
     });
-  }, [session]);
+  }, [session, genericArtifacts]);
 
   // Send now / flush to an agent with no interrupt key while it works: the
   // daemon queued the message at the head instead of typing it.
@@ -2460,24 +2492,24 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
   );
-  const allArtifacts = session?.artifacts ?? [];
+  const allArtifacts = genericArtifacts;
   const agentArtifacts = useMemo(
     () =>
-      session?.artifacts.filter(
+      genericArtifacts.filter(
         (artifact) => artifact.origin !== "automatic" && artifact.addedByUser !== true,
-      ) ?? [],
-    [session],
+      ),
+    [genericArtifacts],
   );
   const attachedArtifacts = useMemo(
     () =>
-      session?.artifacts.filter(
+      genericArtifacts.filter(
         (artifact) => artifact.origin !== "automatic" && artifact.addedByUser === true,
-      ) ?? [],
-    [session],
+      ),
+    [genericArtifacts],
   );
   const systemArtifacts = useMemo(
-    () => session?.artifacts.filter((artifact) => artifact.origin === "automatic") ?? [],
-    [session],
+    () => genericArtifacts.filter((artifact) => artifact.origin === "automatic"),
+    [genericArtifacts],
   );
   const visibleArtifacts = useMemo(
     () =>
@@ -3084,6 +3116,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 onAnswer={handleAnswer}
               />
 
+              {snippetSessionView && snippetPartition.owned.length > 0 ? (
+                <SnippetsSection
+                  files={snippetPartition.owned}
+                  messages={conversation?.messages ?? EMPTY_CONVERSATION_MESSAGES}
+                  session={snippetSessionView}
+                  sessionId={session.id}
+                />
+              ) : null}
+
               {/* Queued messages */}
               {session.queuedMessages.messages.length > 0 ||
               (session.queuedMessages.pipelineMessages?.length ?? 0) > 0 ? (
@@ -3142,7 +3183,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             <div
                               className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
                             >
-                              {queuedMessage}
+                              <SnippetActionSummary text={queuedMessage} fallback={queuedMessage} />
                             </div>
                           </li>
                         );
@@ -3322,7 +3363,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </section>
               ) : null}
 
-              {session.artifacts.length > 0 || session.artifactsTruncated ? (
+              {genericArtifacts.length > 0 || session.artifactsTruncated ? (
                 <section>
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                     Artifacts

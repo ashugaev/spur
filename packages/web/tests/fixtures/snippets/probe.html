@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8">
+<script type="application/spur-snippet+json">
+{
+  "protocolVersion": 1,
+  "snippetId": "probe",
+  "ownerSessionId": "{{SESSION}}",
+  "instanceId": "{{INSTANCE}}",
+  "revision": {{REVISION}}{{RESPONDS}},
+  "title": "Sandbox probe",
+  "actions": [
+    {
+      "id": "noop",
+      "label": "Noop",
+      "payload": { "type": "object", "properties": { "x": { "type": "string", "maxLength": 10 } } }
+    }
+  ]
+}
+</script>
+<p id="font">font pending</p>
+<form id="form" action="/api/probe-form" method="post"><button id="submit" type="submit">submit</button></form>
+<script>
+  var results = {};
+  function done(key, value) {
+    results[key] = value;
+    document.body.setAttribute("data-probe-" + key, String(value));
+  }
+  fetch("/api/probe-fetch").then(function () { done("fetch", "allowed"); }, function () { done("fetch", "blocked"); });
+  try { void window.parent.document.title; done("parent", "readable"); } catch (e) { done("parent", "blocked"); }
+  try { void window.localStorage; done("storage", "readable"); } catch (e) { done("storage", "blocked"); }
+  document.addEventListener("securitypolicyviolation", function (event) { done("csp-" + event.violatedDirective.split("-")[0], "violation"); });
+  window.spur.ready().then(function () {
+    return document.fonts.load('12px "Spur Mono"');
+  }).then(function () {
+    done("font", document.fonts.check('12px "Spur Mono"'));
+  });
+  document.getElementById("submit").addEventListener("click", function () {
+    done("submit", "clicked");
+  });
+</script>

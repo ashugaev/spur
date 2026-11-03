@@ -844,5 +844,6 @@ Session artifacts:
 - Both directories are tied to this Spur session and are not committed from the repo workspace. Never leave either kind of file in the repo worktree.
 - Images, videos, and text files (including .txt, .md, .json) in \`$SPUR_SESSION_ARTIFACTS_DIR\` appear inline in Spur UI. Other files appear as download links.
 - HTML files render as a live preview in Spur UI, with a button that opens the page standalone at its artifact URL.
-- A file in a subfolder of \`$SPUR_SESSION_ARTIFACTS_DIR\` is listed under its path relative to that directory (for example \`design/design-spec.md\`).`;
+- A file in a subfolder of \`$SPUR_SESSION_ARTIFACTS_DIR\` is listed under its path relative to that directory (for example \`design/design-spec.md\`).
+- To give the user an interactive panel in Spur UI, write \`$SPUR_SESSION_ARTIFACTS_DIR/snippet.$SPUR_SESSION.<id>.html\`. User actions arrive as \`[spur-snippet-action v1]\` messages. Contract: https://raw.githubusercontent.com/ashugaev/spur/main/docs/snippets.md`;
 }
