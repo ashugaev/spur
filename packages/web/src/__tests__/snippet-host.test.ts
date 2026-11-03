@@ -1115,3 +1115,41 @@ describe("fullscreen, theme and focus on the controller", () => {
     expect(port.ofType("invoke-result")[0]?.issues).toBeUndefined();
   });
 });
+
+describe("SDK load failure while fullscreen", () => {
+  it("routes through fail(): the exit path runs, the flag clears and the toggle works after Reload", async () => {
+    let rejectSdk: (error: Error) => void = () => undefined;
+    const storage = new MemoryStorage();
+    const fullscreen: boolean[] = [];
+    const host = createSnippetHost(
+      {
+        sessionId: SID,
+        postToFrame: () => undefined,
+        createChannel: () => ({ hostPort: new FakePort(), framePort: {} }),
+        send: () => Promise.resolve({ kind: "response", status: 200 }),
+        loadSdk: () => new Promise<string>((_resolve, reject) => (rejectSdk = reject)),
+        getFonts: () => [],
+        getTheme: () => THEME,
+        storage,
+        now: () => Date.now(),
+        uuid: () => "req-00000001",
+        nonce: () => "nonce-x",
+        isFrameFocused: () => false,
+        onFullscreenRequest: (open) => fullscreen.push(open),
+      },
+      { manifest: manifest(), html: "<html>a</html>" },
+    );
+    expect(host.getState().phase).toBe("loading");
+    host.setFullscreen(true);
+    rejectSdk(new Error("sdk"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.getState()).toMatchObject({
+      phase: "error",
+      error: "hello_timeout",
+      fullscreen: false,
+    });
+    expect(fullscreen).toEqual([false]);
+    host.setFullscreen(true);
+    expect(host.getState().fullscreen).toBe(true);
+  });
+});

@@ -384,7 +384,7 @@ export function createSnippetHost(
       },
       () => {
         if (disposed || attempt !== sdkAttempt) return;
-        set({ phase: "error", error: "hello_timeout" });
+        fail("hello_timeout");
       },
     );
   }

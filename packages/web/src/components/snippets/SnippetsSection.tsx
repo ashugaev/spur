@@ -124,6 +124,8 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
   const [entries, setEntries] = useState<Record<string, FileEntry>>({});
   // Snippets whose newest file the panel's controller refused as a lower revision.
   const [refused, setRefused] = useState<Record<string, boolean>>({});
+  // Title of the file the controller actually mounted, for the refusal card.
+  const [mountedTitle, setMountedTitle] = useState<Record<string, string>>({});
   // Listing key each file was last fetched for. A poll that brings a new key
   // starts one fetch; polls with the same key start none.
   const launched = useRef<Record<string, string>>({});
@@ -201,7 +203,11 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
                   : PROBLEM_CARD[problem.code].message
               }
               meta={`${snippetId} · ${artifact.size} B`}
-              title={entry?.loaded?.manifest.title ?? artifact.name}
+              title={
+                (problem.code === "lower_revision" ? mountedTitle[snippetId] : undefined) ??
+                entry?.loaded?.manifest.title ??
+                artifact.name
+              }
               titleId={titleId}
             />
           ) : null;
@@ -217,6 +223,14 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
                   messages={messages}
                   onApplyResult={(result) => {
                     const lower = result === "lower_revision";
+                    const title = entry.loaded?.manifest.title;
+                    if (!lower && title) {
+                      setMountedTitle((previous) =>
+                        previous[snippetId] === title
+                          ? previous
+                          : { ...previous, [snippetId]: title },
+                      );
+                    }
                     setRefused((previous) =>
                       Boolean(previous[snippetId]) === lower
                         ? previous
