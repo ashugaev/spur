@@ -3,6 +3,7 @@
 // reported as `ok: false`; nothing is ever served from memory.
 
 import {
+  isRecord,
   SNIPPET_MAX_RECORD_BYTES,
   SNIPPET_RECORD_TTL_MS,
   snippetByteLength,
@@ -65,10 +66,6 @@ const CONFIRM_REASONS: readonly SnippetConfirmReason[] = [
   "storage_unavailable",
 ];
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 function isInt(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
@@ -109,6 +106,16 @@ function parseAction(value: unknown): SnippetActionRecord | null {
   return action;
 }
 
+export function parseControls(value: unknown): SnippetControlValue[] | null {
+  if (!Array.isArray(value)) return null;
+  const controls: SnippetControlValue[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || typeof entry.id !== "string" || entry.value === undefined) return null;
+    controls.push({ id: entry.id, value: entry.value as JsonValue });
+  }
+  return controls;
+}
+
 function parseRecord(raw: string): SnippetRecord | null {
   let value: unknown;
   try {
@@ -121,13 +128,8 @@ function parseRecord(raw: string): SnippetRecord | null {
   const { app, controls } = value.state;
   if (typeof instanceId !== "string" || !isInt(lastRevision) || !isInt(updatedAt)) return null;
   if (unconfirmedRevision !== null && !isInt(unconfirmedRevision)) return null;
-  if (!Array.isArray(controls)) return null;
-  const parsedControls: SnippetControlValue[] = [];
-  for (const control of controls) {
-    if (!isRecord(control) || typeof control.id !== "string" || control.value === undefined)
-      return null;
-    parsedControls.push({ id: control.id, value: control.value as JsonValue });
-  }
+  const parsedControls = parseControls(controls);
+  if (!parsedControls) return null;
   let action: SnippetActionRecord | null = null;
   if (value.action !== null) {
     action = parseAction(value.action);

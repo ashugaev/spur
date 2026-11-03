@@ -4,6 +4,7 @@
 
 import type { SpurSessionArtifact } from "@/lib/types";
 import {
+  isRecord,
   SNIPPET_ACTION_ID_RE,
   SNIPPET_ID_RE,
   SNIPPET_INSTANCE_ID_RE,
@@ -97,10 +98,6 @@ const ACTION_KEYS = ["id", "label", "payload", "confirm"];
 
 function invalid(path: string, message: string): ParsedSnippetManifest {
   return { ok: false, error: { code: "manifest_invalid", path, message } };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function validText(value: unknown, max: number): value is string {

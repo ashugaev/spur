@@ -9,6 +9,7 @@ import {
   buildSnippetActionPrompt,
   classifySendOutcome,
   deriveActionStatus,
+  isRecord,
   isTerminalSnippetStatus,
   parseSnippetActionPrompt,
   SNIPPET_BUDGET_LIMIT,
@@ -38,11 +39,11 @@ import {
   type SnippetTheme,
 } from "./snippet-protocol";
 import {
+  parseControls,
   readSnippetBudget,
   readSnippetRecord,
   writeSnippetBudget,
   writeSnippetRecord,
-  type SnippetControlValue,
   type SnippetRecord,
   type SnippetStorage,
 } from "./snippet-store";
@@ -223,10 +224,6 @@ export interface SnippetHost {
   dispose(): void;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 function eventOf(action: SnippetActionRecord): SnippetActionEvent {
   return {
     requestId: action.requestId,
@@ -236,16 +233,6 @@ function eventOf(action: SnippetActionRecord): SnippetActionEvent {
     ...(action.retryOf ? { retryOf: action.retryOf } : {}),
     ...(action.httpStatus !== undefined ? { httpStatus: action.httpStatus } : {}),
   };
-}
-
-function parseControls(value: unknown): SnippetControlValue[] | null {
-  if (!Array.isArray(value)) return null;
-  const controls: SnippetControlValue[] = [];
-  for (const entry of value) {
-    if (!isRecord(entry) || typeof entry.id !== "string" || entry.value === undefined) return null;
-    controls.push({ id: entry.id, value: entry.value as JsonValue });
-  }
-  return controls;
 }
 
 export function createSnippetHost(
@@ -404,7 +391,7 @@ export function createSnippetHost(
       snippetId: manifest.snippetId,
       instanceId: manifest.instanceId,
       revision: manifest.revision,
-      previousRevision: previousRevision,
+      previousRevision,
       state: record?.state.app ?? null,
       controls: record?.state.controls ?? [],
       action: state.action ? eventOf(state.action) : null,
@@ -420,11 +407,7 @@ export function createSnippetHost(
     const { manifest } = state;
     const read = readSnippetRecord(deps.storage, sessionId, manifest.snippetId);
     const stored = read.ok ? read.value : null;
-    if (stored && stored.instanceId === manifest.instanceId) {
-      previousRevision = stored.lastRevision;
-    } else {
-      previousRevision = null;
-    }
+    previousRevision = stored?.instanceId === manifest.instanceId ? stored.lastRevision : null;
     updateRecord((record) => void (record.lastRevision = manifest.revision));
   }
 

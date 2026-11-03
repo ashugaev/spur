@@ -84,23 +84,18 @@ function readTheme(): SnippetTheme {
 
 // Storage that throws on every call: the gates fail closed when the browser
 // denies localStorage.
+const deny = (): never => {
+  throw new Error("storage unavailable");
+};
 const DENIED_STORAGE: SnippetStorage = {
   length: 0,
-  key: () => {
-    throw new Error("storage unavailable");
-  },
-  getItem: () => {
-    throw new Error("storage unavailable");
-  },
-  setItem: () => {
-    throw new Error("storage unavailable");
-  },
-  removeItem: () => {
-    throw new Error("storage unavailable");
-  },
+  key: deny,
+  getItem: deny,
+  setItem: deny,
+  removeItem: deny,
 };
 
-export function browserSnippetStorage(): SnippetStorage {
+function browserSnippetStorage(): SnippetStorage {
   try {
     return window.localStorage;
   } catch {
@@ -289,7 +284,7 @@ function StatusLine({
   }
   const failed = action.status === "error" || action.status === "delivery_unknown";
   const attention = action.status === "timeout" || action.status === "awaiting_confirm";
-  const busy = !isTerminalSnippetStatus(action.status);
+  const working = !isTerminalSnippetStatus(action.status) && action.status !== "awaiting_confirm";
   const label = manifest.actions.find((candidate) => candidate.id === action.actionId)?.label;
   const tone = failed
     ? "text-[var(--color-status-error)]"
@@ -303,13 +298,13 @@ function StatusLine({
       data-snippet-status={action.status}
       role={failed ? "alert" : "status"}
     >
-      {busy && action.status !== "awaiting_confirm" ? (
+      {working ? (
         <LoadingBar className="absolute inset-x-0 top-0" label="Action in progress" />
       ) : null}
       <span
         className={`inline-flex items-center gap-1.5 font-bold uppercase tracking-[0.1em] ${tone}`}
       >
-        {busy && action.status !== "awaiting_confirm" ? <Spinner className="h-3 w-3" /> : null}
+        {working ? <Spinner className="h-3 w-3" /> : null}
         {action.status === "completed" ? (
           <span aria-hidden="true" className="text-[var(--color-status-ready)]">
             ✓
@@ -336,6 +331,14 @@ function StatusLine({
 
 // ---------------------------------------------------------------------------
 // panel
+
+function FramePlaceholder() {
+  return (
+    <div className="flex h-[160px] items-center justify-center text-[var(--color-text-tertiary)]">
+      <Spinner className="h-4 w-4" />
+    </div>
+  );
+}
 
 const noopSubscribe = () => () => undefined;
 const getNullState = (): null => null;
@@ -503,9 +506,7 @@ export function SnippetPanel({
   if (!state || !host) {
     return (
       <section className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
-        <div className="flex h-[160px] items-center justify-center text-[var(--color-text-tertiary)]">
-          <Spinner className="h-4 w-4" />
-        </div>
+        <FramePlaceholder />
       </section>
     );
   }
@@ -617,9 +618,7 @@ export function SnippetPanel({
             title={state.manifest.title}
           />
         ) : (
-          <div className="flex h-[160px] items-center justify-center text-[var(--color-text-tertiary)]">
-            <Spinner className="h-4 w-4" />
-          </div>
+          <FramePlaceholder />
         )}
         {state.confirm ? (
           <ConfirmStrip

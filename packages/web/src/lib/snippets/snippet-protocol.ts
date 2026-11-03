@@ -21,9 +21,6 @@ export const SNIPPET_TIMEOUT_MS = 15 * 60 * 1000;
 export const SNIPPET_RECORD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const SNIPPET_HELLO_TIMEOUT_MS = 10_000;
 export const SNIPPET_FETCH_TIMEOUT_MS = 10_000;
-export const SNIPPET_HELLO_INTERVAL_MS = 200;
-export const SNIPPET_HELLO_MAX = 25;
-export const SNIPPET_STATE_DEBOUNCE_MS = 500;
 export const SNIPPET_HEIGHT_MIN = 120;
 export const SNIPPET_HEIGHT_MAX = 800;
 export const SNIPPET_PROTOCOL_VERSION = 1;
@@ -238,7 +235,7 @@ export function buildSnippetActionPrompt(fields: SnippetPromptFields): string {
   ].join("\n");
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 

@@ -40,9 +40,7 @@ export function SnippetActionSummary({ text, fallback }: { text: string; fallbac
         <summary className="cursor-pointer text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
           Raw prompt
         </summary>
-        <pre
-          className={`mt-1 whitespace-pre-wrap border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2 text-[11px] text-[var(--color-text-secondary)] [overflow-wrap:anywhere]`}
-        >
+        <pre className="mt-1 whitespace-pre-wrap border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2 text-[11px] text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">
           {text}
         </pre>
       </details>

@@ -27,7 +27,7 @@ type FileProblem =
   | { code: "fetch_failed" }
   | { code: "manifest_invalid"; path: string; message: string }
   | { code: "owner_mismatch" }
-  | { code: "lower_revision"; revision: number };
+  | { code: "lower_revision" };
 
 interface FileEntry {
   key: string;
@@ -92,6 +92,26 @@ async function loadFile(
   return html === null ? { problem: { code: "too_large" } } : { html };
 }
 
+// Settled entry for one fetch result. A rejected file keeps the panel already loaded.
+function resolveLoad(
+  result: { html: string } | { problem: FileProblem },
+  keep: LoadedSnippet | null,
+  expected: { sessionId: string; snippetId: string },
+): Pick<FileEntry, "loaded" | "problem"> {
+  if ("problem" in result) return { loaded: keep, problem: result.problem };
+  const parsed = parseSnippetManifest(result.html, expected);
+  if (!parsed.ok) return { loaded: keep, problem: parsed.error };
+  const { manifest } = parsed;
+  if (
+    keep &&
+    keep.manifest.instanceId === manifest.instanceId &&
+    manifest.revision < keep.manifest.revision
+  ) {
+    return { loaded: keep, problem: { code: "lower_revision" } };
+  }
+  return { loaded: { manifest, html: result.html }, problem: null };
+}
+
 const PROBLEM_CARD: Record<FileProblem["code"], { chip: string; message: string }> = {
   too_large: { chip: "Too large", message: "File over 256 KiB. Not loaded." },
   fetch_failed: { chip: "Not loaded", message: "File could not be fetched." },
@@ -139,76 +159,23 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
           fetching: true,
         },
       }));
-      void loadFile(sessionId, file, controller.signal)
-        .then((result) => {
-          if (controller.signal.aborted) return;
-          if ("problem" in result && result.problem.code === "fetch_failed") {
-            launched.current[snippetId] = "";
-          }
-          setEntries((previous) => {
-            const before = previous[snippetId];
-            const keep = before?.loaded ?? null;
-            if ("problem" in result) {
-              return {
-                ...previous,
-                [snippetId]: { key, loaded: keep, problem: result.problem, fetching: false },
-              };
-            }
-            const parsed = parseSnippetManifest(result.html, { sessionId, snippetId });
-            if (!parsed.ok) {
-              const problem: FileProblem =
-                parsed.error.code === "owner_mismatch"
-                  ? { code: "owner_mismatch" }
-                  : {
-                      code: "manifest_invalid",
-                      path: parsed.error.path,
-                      message: parsed.error.message,
-                    };
-              return {
-                ...previous,
-                [snippetId]: { key, loaded: keep, problem, fetching: false },
-              };
-            }
-            const { manifest } = parsed;
-            if (
-              keep &&
-              keep.manifest.instanceId === manifest.instanceId &&
-              manifest.revision < keep.manifest.revision
-            ) {
-              return {
-                ...previous,
-                [snippetId]: {
-                  key,
-                  loaded: keep,
-                  problem: { code: "lower_revision", revision: manifest.revision },
-                  fetching: false,
-                },
-              };
-            }
-            return {
-              ...previous,
-              [snippetId]: {
-                key,
-                loaded: { manifest, html: result.html },
-                problem: null,
-                fetching: false,
-              },
-            };
-          });
-        })
-        .catch(() => {
-          if (controller.signal.aborted) return;
+      const settle = (result: { html: string } | { problem: FileProblem }) => {
+        if (controller.signal.aborted) return;
+        if ("problem" in result && result.problem.code === "fetch_failed") {
           launched.current[snippetId] = "";
-          setEntries((previous) => ({
-            ...previous,
-            [snippetId]: {
-              key,
-              loaded: previous[snippetId]?.loaded ?? null,
-              problem: { code: "fetch_failed" },
-              fetching: false,
-            },
-          }));
-        });
+        }
+        setEntries((previous) => ({
+          ...previous,
+          [snippetId]: {
+            key,
+            ...resolveLoad(result, previous[snippetId]?.loaded ?? null, { sessionId, snippetId }),
+            fetching: false,
+          },
+        }));
+      };
+      void loadFile(sessionId, file, controller.signal).then(settle, () =>
+        settle({ problem: { code: "fetch_failed" } }),
+      );
     }
   }, [mounted, sessionId]);
 
