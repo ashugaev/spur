@@ -747,7 +747,18 @@ export function createSnippetHost(
       if (manifest.revision < current.revision) return "lower_revision";
     }
     staleConfirm();
-    set({ manifest, html, conflict: false, availability: availabilityFor(false) });
+    // A new instance is a new snippet (D8): its predecessor's retryable action must not be re-sent.
+    const retired =
+      manifest.instanceId !== current.instanceId &&
+      state.action !== null &&
+      SNIPPET_RETRY_STATUSES.includes(state.action.status);
+    set({
+      manifest,
+      html,
+      conflict: false,
+      availability: availabilityFor(false),
+      ...(retired ? { action: null } : {}),
+    });
     recordMount();
     beginMount(false);
     updateSession(

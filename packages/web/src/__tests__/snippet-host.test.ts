@@ -871,6 +871,59 @@ describe("lifecycle", () => {
     expect(readSnippetBudget(h.storage, SID)).toMatchObject({ value: { unconfirmed: 0 } });
   });
 
+  it.each([
+    [{ kind: "response", status: 409 }, "error"],
+    [{ kind: "failure" }, "delivery_unknown"],
+  ] as const)(
+    "a new instance retires the prior %j action: no Retry, zero POSTs (D8)",
+    async (outcome, status) => {
+      const h = harness();
+      h.sendOutcome.value = () => Promise.resolve(outcome);
+      await ready(h);
+      h.invoke("go", { note: "old payload" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.host.getState().action?.status).toBe(status);
+      expect(h.sent).toHaveLength(1);
+      h.host.applyFile(manifest({ instanceId: "inst-00000002", revision: 1 }), "<html>new</html>");
+      expect(h.host.getState().action).toBeNull();
+      expect(readSnippetRecord(h.storage, SID, "picker")).toMatchObject({
+        value: { instanceId: "inst-00000002", action: null },
+      });
+      h.connect();
+      h.host.retry(true);
+      expect(h.sent).toHaveLength(1);
+    },
+  );
+
+  it("a higher revision in the same instance keeps a failed action retryable", async () => {
+    const h = harness();
+    h.sendOutcome.value = () => Promise.resolve({ kind: "response", status: 409 });
+    await ready(h);
+    h.invoke("go", { note: "a" });
+    await vi.advanceTimersByTimeAsync(0);
+    h.host.applyFile(manifest({ revision: 2 }), "<html>2</html>");
+    expect(h.host.getState().action?.status).toBe("error");
+    h.connect();
+    h.host.retry(true);
+    expect(h.sent).toHaveLength(2);
+  });
+
+  it("a new instance voids a pending confirm and leaves no action to retry", async () => {
+    const h = harness();
+    h.sendOutcome.value = () => Promise.resolve({ kind: "response", status: 409 });
+    await ready(h);
+    h.invoke("go", { note: "a" });
+    await vi.advanceTimersByTimeAsync(0);
+    h.invoke("go", { note: "b" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.host.getState().confirm).not.toBeNull();
+    h.host.applyFile(manifest({ instanceId: "inst-00000002", revision: 1 }), "<html>new</html>");
+    expect(h.host.getState()).toMatchObject({ confirm: null, action: null });
+    h.connect();
+    h.host.retry(true);
+    expect(h.sent).toHaveLength(1);
+  });
+
   it("SDK retry re-enters the gates as a new invoke with retryOf", async () => {
     const h = harness();
     h.sendOutcome.value = () => Promise.resolve({ kind: "response", status: 409 });
