@@ -74,9 +74,9 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 
 ## auto-ping
 
-`spur auto-ping unsubscribe --event <handle> [--session <id>] [--json]`: one occurrence, 24h post-work suppression — `v2/src/auto-ping.ts`. `spur auto-ping unsubscribe --thread <handle> [--session <id>] [--json]`: provider thread — `v2/src/auto-ping.ts`. `spur auto-ping unsubscribe --subscription <handle> [--session <id>] [--json]`: route; exactly one scope required, unredeemed handles expire after 30d — `v2/src/auto-ping.ts`.
-`spur auto-ping list [--session <id>] [--json]`: `SPUR_SESSION` selects the session inside agents — `v2/src/auto-ping.ts`.
-`spur auto-ping resume <suppressionId> [--session <id>] [--json]`: `SPUR_SESSION` supplies session inside agents — `v2/src/auto-ping.ts`.
+`spur auto-ping mute <handle> [--for <dur>] [--forever] [--reason <why>] [--session <id>] [--json]`: one handle per ping, printed in the ping footer. Default holds until the subject changes (github/gitlab pings only); `--for` max 24h and `--forever` (whole trigger route, this session) need `--reason` — `v2/src/auto-ping.ts`.
+`spur auto-ping list [--session <id>] [--all] [--json]`: active mutes; `--all` adds the session's mute history. `SPUR_SESSION` selects the session inside agents — `v2/src/auto-ping.ts`.
+`spur auto-ping resume <handle|id> [--session <id>] [--json]`: `SPUR_SESSION` supplies session inside agents — `v2/src/auto-ping.ts`.
 
 ## send, queue
 
