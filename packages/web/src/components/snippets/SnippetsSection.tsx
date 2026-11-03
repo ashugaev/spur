@@ -129,6 +129,8 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
   // Listing key each file was last fetched for. A poll that brings a new key
   // starts one fetch; polls with the same key start none.
   const launched = useRef<Record<string, string>>({});
+  // Latest fetch per snippet; a superseded one is aborted and its result ignored.
+  const inflight = useRef<Record<string, AbortController>>({});
   const unmount = useRef(new AbortController());
   const mounted = useMemo(() => files.slice(0, SNIPPET_MAX_MOUNTED), [files]);
   const excess = files.slice(SNIPPET_MAX_MOUNTED);
@@ -138,6 +140,7 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
     const controller = new AbortController();
     unmount.current = controller;
     launched.current = {};
+    inflight.current = {};
     return () => controller.abort();
   }, []);
 
@@ -148,6 +151,11 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
       const key = listingKeyOf(file);
       if (launched.current[snippetId] === key) continue;
       launched.current[snippetId] = key;
+      // A newer listing supersedes the in-flight fetch: abort it so its result is dropped.
+      inflight.current[snippetId]?.abort();
+      const fetchController = new AbortController();
+      inflight.current[snippetId] = fetchController;
+      const signal = AbortSignal.any([controller.signal, fetchController.signal]);
       setEntries((previous) => ({
         ...previous,
         [snippetId]: {
@@ -158,7 +166,7 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
         },
       }));
       const settle = (result: { html: string } | { problem: FileProblem }) => {
-        if (controller.signal.aborted) return;
+        if (signal.aborted) return;
         if ("problem" in result && result.problem.code === "fetch_failed") {
           launched.current[snippetId] = "";
         }
@@ -171,7 +179,7 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
           },
         }));
       };
-      void loadFile(sessionId, file, controller.signal).then(settle, () =>
+      void loadFile(sessionId, file, signal).then(settle, () =>
         settle({ problem: { code: "fetch_failed" } }),
       );
     }
