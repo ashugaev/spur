@@ -340,3 +340,60 @@ textarea::placeholder {
 .data-row:hover {
   background: var(--color-row-hover);
 }
+
+/* ── Snippet panel dialog ────────────────────────────────────────────── */
+/* Inline: the dialog is an in-flow block (UA positioning, sizing and chrome
+   reset). Fullscreen: showModal() puts the same element in the top layer. */
+
+.snippet-dialog {
+  position: static;
+  display: block;
+  width: 100%;
+  max-width: none;
+  height: auto;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  overflow: visible;
+}
+
+.snippet-dialog:not([open]) {
+  display: none;
+}
+
+.snippet-dialog:not(:modal) .snippet-fs-header {
+  display: none;
+}
+
+.snippet-dialog:modal {
+  position: fixed;
+  inset: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  width: auto;
+  height: auto;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-bg-base);
+  box-shadow: 0 8px 30px var(--color-shadow-modal-lg);
+  overflow: hidden;
+}
+
+.snippet-dialog:modal .snippet-frame {
+  flex: 1 1 0;
+  min-height: 0;
+  height: auto !important;
+}
+
+.snippet-dialog::backdrop {
+  background: var(--color-modal-backdrop);
+  backdrop-filter: blur(2px);
+}
+
+@media (max-width: 639px) {
+  .snippet-dialog:modal {
+    inset: 0.5rem;
+  }
+}

@@ -44,6 +44,7 @@ export const SNIPPET_SESSION_ID_RE = /^[A-Za-z0-9_-]{1,100}$/;
 export const SNIPPET_RESERVED_RE = /^snippet\.[A-Za-z0-9_-]+-[0-9a-f]{4}\./;
 // No control chars, quote, backslash, brackets, bidi controls, U+061C, U+2028, U+2029.
 export const SNIPPET_TEXT_RE =
+  // eslint-disable-next-line no-control-regex -- control characters are the point
   /^[^\u0000-\u001F\u007F-\u009F"\\[\]\u061C\u200E\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069]+$/u;
 
 export function snippetFileName(sessionId: string, snippetId: string): string {
