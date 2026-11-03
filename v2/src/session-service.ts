@@ -16971,9 +16971,10 @@ export class SessionService {
           return true;
         });
       let recovered: SubmitAckTimeoutError | null = null;
-      const pane: { typed: NonNullable<SessionRecord["queuedMessageTyped"]> | null } = {
-        typed: null,
-      };
+      const pane: {
+        typed: NonNullable<SessionRecord["queuedMessageTyped"]> | null;
+        written: boolean;
+      } = { typed: null, written: false };
       try {
         const submission = await this.beginAgentMessage(prepared.session, message, {
           interrupt,
@@ -16981,6 +16982,7 @@ export class SessionService {
           ...(options?.sensitive ? { sensitive: true as const } : {}),
           onPaneWritten: (ackBaseline, pastedAt) => {
             options?.observeDelivery?.("accepted");
+            pane.written = true;
             if (options?.sensitive) return;
             const typed = {
               message,
@@ -17035,9 +17037,9 @@ export class SessionService {
         if (intent.kind === "queued-drain") this.queuedDeliveryAckedAt.set(sessionId, Date.now());
       } catch (error) {
         if (intent.kind === "queued-drain") this.queuedDeliveryAckedAt.delete(sessionId);
-        if (options?.sensitive && error instanceof TmuxProbeUnknownError) {
+        if (options?.sensitive && error instanceof TmuxProbeUnknownError && pane.written) {
           // Written, ack unknown: the text must not be kept to retry, so the
-          // send counts as delivered.
+          // send counts as delivered. A probe failure before the write rejects.
           this.logEvent("session.message.sensitive_probe_unknown", {
             level: "warn",
             sessionId,

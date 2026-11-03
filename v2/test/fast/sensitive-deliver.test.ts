@@ -4,6 +4,7 @@ import {
   disposeSessionServiceHarness,
   createAgentSubmitAckBindingMock,
   isProcessRunningInTmuxMock,
+  probeTmuxProcessMatchMock,
   sendMessageToTmuxMock,
   sendSensitiveMessageToTmuxMock,
   mockTimerPromisesSleepWithFakeTimers,
@@ -93,6 +94,27 @@ describe("SessionService sensitive deliver", () => {
 
     expect(storedText(sessions)).not.toContain("ap1_");
     expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+    service.dispose();
+  });
+
+  it("rejects with zero writes when the liveness probe fails before the paste", async () => {
+    const { sessions, service } = await setup();
+    const { TmuxProbeUnknownError } = await import("../../src/runtime-tmux.js");
+    probeTmuxProcessMatchMock
+      .mockReset()
+      .mockImplementation(async (_name, _matchers, options) =>
+        options?.fresh
+          ? { alive: false, matchedByName: false, unresponsive: false, diagnostic: "tmux down" }
+          : { alive: true, matchedByName: true, unresponsive: false },
+      );
+
+    await expect(service.deliver("api-1", MESSAGE, { sensitive: true })).rejects.toBeInstanceOf(
+      TmuxProbeUnknownError,
+    );
+
+    expect(sendSensitiveMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(storedText(sessions)).not.toContain("ap1_");
     service.dispose();
   });
 
