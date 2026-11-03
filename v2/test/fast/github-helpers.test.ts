@@ -785,6 +785,8 @@ describe("resolveBoundPrSummary", () => {
         statusCheckRollup: { state: "FAILURE" },
         state: "OPEN",
         isDraft: true,
+        headRefOid: "head-sha",
+        baseRefOid: "base-sha",
       }),
     );
 
@@ -804,6 +806,8 @@ describe("resolveBoundPrSummary", () => {
       statusCheckRollupState: "FAILURE",
       draft: true,
       state: "OPEN",
+      headRefOid: "head-sha",
+      baseRefOid: "base-sha",
     });
     expect(ghMock).toHaveBeenCalledWith(
       "/wt",
@@ -811,7 +815,7 @@ describe("resolveBoundPrSummary", () => {
       "view",
       "212",
       "--json",
-      "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft",
+      "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft,headRefOid,baseRefOid",
     );
   });
 
@@ -1000,6 +1004,47 @@ describe("resolvePrSummary", () => {
 
     expect(pr?.number).toBe(21);
     expect(pr?.state).toBe("MERGED");
+  });
+
+  it("returns head and base oids and keeps them through the UNKNOWN mergeability recheck", async () => {
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          {
+            number: 21,
+            title: "t",
+            url: "https://github.com/o/r/pull/21",
+            reviewDecision: null,
+            mergeable: "UNKNOWN",
+            mergeStateStatus: "UNKNOWN",
+            state: "OPEN",
+            isDraft: false,
+            headRefOid: "head-1",
+            baseRefOid: "base-1",
+          },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }),
+      );
+
+    const pr = await resolvePrSummary("/wt", "feature/retry");
+
+    expect(pr).toMatchObject({
+      mergeable: "CONFLICTING",
+      mergeStateStatus: "DIRTY",
+      headRefOid: "head-1",
+      baseRefOid: "base-1",
+    });
+    expect(ghMock).toHaveBeenCalledTimes(2);
+    expect(ghMock.mock.calls[1]).toEqual([
+      "/wt",
+      "pr",
+      "view",
+      "21",
+      "--json",
+      "mergeable,mergeStateStatus,statusCheckRollup",
+    ]);
   });
 });
 

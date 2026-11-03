@@ -28,7 +28,6 @@ import {
   WORK_ITEM_NEW_EVENT_NAMES,
   SCRIPT_ITEM_NEW_EVENT,
   DELIVERY_MAX_ATTEMPTS,
-  CI_FAILED_MAX_ATTEMPTS,
   type AppConfig,
   type AutoPingDestination,
   type AutoPingRouteDescriptor,
@@ -115,7 +114,6 @@ type WorkItemLifecycleBaseDraft = WorkItemEventData & {
 const DEFAULT_TRIGGER_LOGGER: TriggerLogger = {
   warn: writeStderr,
 };
-const CI_FAILED_RETRY_INTERVAL_MS = 10 * 60_000;
 // Bounds for a delivery that keeps throwing (e.g. the target session never
 // acknowledges). Without these, the flush loop would retry every 5s forever.
 // Start short so a session that was only briefly busy stays responsive, then
@@ -767,14 +765,24 @@ function reconcileRetryAccounting(
   batch: SendBatch,
   prior: readonly SendBatchRetryEntry[],
 ): SendBatchRetryEntry[] {
-  const entries = new Map(prior.map((entry) => [entry.itemKey, { ...entry }]));
+  // Explicit fields: a legacy `ciAttempts` key from an older file is dropped here.
+  const entries = new Map(
+    prior.map((entry) => [
+      entry.itemKey,
+      {
+        itemKey: entry.itemKey,
+        fingerprint: entry.fingerprint,
+        deliveryAttempts: entry.deliveryAttempts,
+        nextAttemptAt: entry.nextAttemptAt,
+      },
+    ]),
+  );
   for (const item of batch.retryItems()) {
     if (entries.get(item.itemKey)?.fingerprint === item.fingerprint) continue;
     entries.set(item.itemKey, {
       itemKey: item.itemKey,
       fingerprint: item.fingerprint,
       deliveryAttempts: 0,
-      ciAttempts: 0,
       nextAttemptAt: 0,
     });
   }
@@ -782,9 +790,7 @@ function reconcileRetryAccounting(
 }
 
 function exhausted(entry: SendBatchRetryEntry): boolean {
-  return (
-    entry.deliveryAttempts >= DELIVERY_MAX_ATTEMPTS || entry.ciAttempts >= CI_FAILED_MAX_ATTEMPTS
-  );
+  return entry.deliveryAttempts >= DELIVERY_MAX_ATTEMPTS;
 }
 
 function buildAutoPingRoute(
@@ -844,7 +850,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const serialByKey = new Map<string, Promise<void>>();
   const tickFlushQueued = new Set<string>();
   const routeLeases = new Map<string, string>();
-  const occurrenceReferencesByQueue = new Map<string, Set<string>>();
+  const loggedSuppressions = new Map<string, Set<string>>();
   const autoCompleteChecks: Array<() => void> = [];
   let flushTimer: NodeJS.Timeout | null = null;
   let autoCompleteTimer: NodeJS.Timeout | null = null;
@@ -884,13 +890,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       )
         return false;
     }
-    const references = occurrenceReferencesByQueue.get(queueKey);
-    if (references) {
-      for (const occurrenceId of references) {
-        autoPing.releaseOccurrenceReference(current.routeFingerprint, occurrenceId);
-      }
-    }
-    occurrenceReferencesByQueue.delete(queueKey);
+    loggedSuppressions.delete(batch.workId);
     pendingBatches.delete(queueKey);
     if (!options?.keepInterrupted) {
       interruptedKeys.delete(queueKey);
@@ -902,22 +902,43 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     return true;
   };
 
-  const syncBatchOccurrenceReferences = (queueKey: string, batch: PendingBatch): void => {
-    const next = new Set(
-      Object.values(batch.batch.serialize().autoPing?.items ?? {}).map((item) => item.occurrenceId),
+  // One `trigger.send.suppressed` line per (work, item, reason, fingerprint):
+  // a tick that meets the same suppressed item again stays silent.
+  const logSuppressed = (
+    batch: PendingBatch,
+    reason: "muted" | "budget_exhausted" | "conflict_already_delivered" | "ci_run_seen",
+    item: { itemKey: string; fingerprint?: string },
+    extra: Record<string, unknown> = {},
+  ): void => {
+    const logged = loggedSuppressions.get(batch.workId) ?? new Set<string>();
+    loggedSuppressions.set(batch.workId, logged);
+    const dedupeKey = JSON.stringify([item.itemKey, reason, item.fingerprint ?? null]);
+    if (logged.has(dedupeKey)) return;
+    logged.add(dedupeKey);
+    logTriggerEvent(deps.config.dataDir, "trigger.send.suppressed", {
+      level: "info",
+      sessionId: batch.batch.sessionId,
+      projectId: batch.projectId,
+      sourceId: batch.sourceId,
+      triggerId: batch.triggerId,
+      message: `Suppressed trigger update item for ${batch.batch.sessionId}: ${reason}`,
+      details: { reason, itemKeys: [item.itemKey], ...extra },
+    });
+  };
+
+  const filterMutedItems = (batch: PendingBatch, target: SendBatch): void => {
+    const itemKeys = new Map(target.retryItems().map((item) => [item.key, item]));
+    target.filterMuted(
+      (item) => autoPing.matchMute(batch.routeFingerprint, batch.destination, item),
+      (key, match) => {
+        const item = itemKeys.get(key);
+        if (item)
+          logSuppressed(batch, "muted", item, {
+            mode: match.mode,
+            suppressionId: match.suppressionId,
+          });
+      },
     );
-    const prior = occurrenceReferencesByQueue.get(queueKey) ?? new Set<string>();
-    for (const occurrenceId of next) {
-      if (!prior.has(occurrenceId)) {
-        autoPing.addOccurrenceReference(batch.routeFingerprint, occurrenceId);
-      }
-    }
-    for (const occurrenceId of prior) {
-      if (!next.has(occurrenceId)) {
-        autoPing.releaseOccurrenceReference(batch.routeFingerprint, occurrenceId);
-      }
-    }
-    occurrenceReferencesByQueue.set(queueKey, next);
   };
 
   const deliverBatch = async (
@@ -952,25 +973,19 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         batch.batch,
         persisted.retryAccounting ?? [],
       );
-      batch.batch.filterAutoPing((occurrenceId, threadTarget) =>
-        autoPing.isSuppressed(
-          batch.routeFingerprint,
-          batch.destination,
-          occurrenceId,
-          threadTarget,
-        ),
-      );
-      syncBatchOccurrenceReferences(queueKey, batch);
+      filterMutedItems(batch, batch.batch);
       const beforeAttempt = batch.retryAccounting.map((entry) => ({ ...entry }));
       let accounting = new Map(batch.retryAccounting.map((entry) => [entry.itemKey, entry]));
       const submission = restoreSendBatch(structuredClone(batch.batch.serialize()));
       if (!submission) return { outcome: { status: "suppressed" } as DeliveryOutcome };
       submission.filterItems((item) => {
         const entry = accounting.get(item.itemKey);
-        if (!entry || exhausted(entry)) return false;
-        const delay = item.ciReminder
-          ? CI_FAILED_RETRY_INTERVAL_MS
-          : DELIVERY_RETRY_BASE_MS * 2 ** (entry.deliveryAttempts - 1);
+        if (!entry) return false;
+        if (exhausted(entry)) {
+          logSuppressed(batch, "budget_exhausted", item, { attempts: entry.deliveryAttempts });
+          return false;
+        }
+        const delay = DELIVERY_RETRY_BASE_MS * 2 ** (entry.deliveryAttempts - 1);
         if (
           entry.nextAttemptAt > now &&
           sessionRestartedSince(session, entry.nextAttemptAt - delay)
@@ -1037,12 +1052,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         const entry = accounting.get(item.itemKey);
         if (!entry) return;
         entry.deliveryAttempts += 1;
-        if (item.ciReminder) entry.ciAttempts += 1;
-        entry.nextAttemptAt =
-          now +
-          (item.ciReminder
-            ? CI_FAILED_RETRY_INTERVAL_MS
-            : DELIVERY_RETRY_BASE_MS * 2 ** (entry.deliveryAttempts - 1));
+        entry.nextAttemptAt = now + DELIVERY_RETRY_BASE_MS * 2 ** (entry.deliveryAttempts - 1);
       };
       for (const item of originalItems) {
         if (selectedComments.has(item.itemKey)) charge(item);
@@ -1093,7 +1103,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         if (!updated) return;
         batch.revision = claimedRevision + 1;
         pendingBatches.set(queueKey, batch);
-        syncBatchOccurrenceReferences(queueKey, batch);
       };
       if (selectedComments.size > 0 && submission.refresh) {
         const results = await submission.refresh(deps.config.dataDir, session.pr);
@@ -1121,7 +1130,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           });
           if (recovered) batch.batch = recovered;
         }
-        syncBatchOccurrenceReferences(queueKey, batch);
         for (const result of results) {
           if (result.status !== "failed") continue;
           logTriggerEvent(deps.config.dataDir, "trigger.send.failed", {
@@ -1136,16 +1144,28 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         }
       }
       submission.filterItems((item) => {
+        if (item.ci && !autoPing.isCiRunNew(batch.routeFingerprint, item.ci.head, item.ci.runIds)) {
+          batch.batch.filterItems((retained) => retained.itemKey !== item.itemKey);
+          logSuppressed(batch, "ci_run_seen", item);
+          return false;
+        }
         if (!item.mergeConflict) return true;
-        const accepted = autoPing.claimMergeConflict(
+        const claim = autoPing.claimMergeConflict(
           batch.routeFingerprint,
           item.mergeConflict.prNumber,
           `${item.itemKey}:${item.fingerprint}`,
-          item.mergeConflict.clearId,
         );
-        if (accepted) conflictClaims.push(item.itemKey);
-        else batch.batch.filterItems((retained) => retained.itemKey !== item.itemKey);
-        return accepted;
+        if (claim === "accepted") {
+          conflictClaims.push(item.itemKey);
+          return true;
+        }
+        batch.batch.filterItems((retained) => retained.itemKey !== item.itemKey);
+        logSuppressed(
+          batch,
+          claim === "exhausted" ? "budget_exhausted" : "conflict_already_delivered",
+          item,
+        );
+        return false;
       });
       const submitted = new Map(submission.retryItems().map((item) => [item.itemKey, item]));
       if (submission.isEmpty()) {
@@ -1192,9 +1212,16 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             : entry,
         );
       };
+      const { handle } = autoPing.createGrant({
+        routeFingerprint: batch.routeFingerprint,
+        destination: batch.destination,
+        actorSessionId: submission.sessionId,
+        ...submission.muteGrant(),
+      });
+      submission.attachHandle(handle);
       const delivery = deps.sessionService.deliver(submission.sessionId, submission.format(), {
         interrupt,
-        sensitivePromptSuffix: submission.formatAutoPingControls(),
+        sensitive: true,
       });
       return {
         run: async (): Promise<DeliveryOutcome> => {
@@ -1243,14 +1270,20 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
                   ),
                 },
               });
+              for (const item of submitted.values()) {
+                if (item.ci)
+                  autoPing.markCiDelivered(batch.routeFingerprint, item.ci.head, item.ci.runIds);
+                if (item.mergeConflict)
+                  autoPing.markMergeConflictDelivered(
+                    batch.routeFingerprint,
+                    `${item.itemKey}:${item.fingerprint}`,
+                  );
+              }
               batch.batch.filterItems(
-                (item) =>
-                  submitted.get(item.itemKey)?.fingerprint !== item.fingerprint || item.ciReminder,
+                (item) => submitted.get(item.itemKey)?.fingerprint !== item.fingerprint,
               );
               batch.retryAccounting = batch.retryAccounting.filter(
-                (entry) =>
-                  submitted.get(entry.itemKey)?.fingerprint !== entry.fingerprint ||
-                  submitted.get(entry.itemKey)?.ciReminder,
+                (entry) => submitted.get(entry.itemKey)?.fingerprint !== entry.fingerprint,
               );
               if (allTerminal()) dropTerminal({ revision: claimedRevision, claimId });
               else persistResult();
@@ -1276,12 +1309,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
                 const charged = accounting.get(entry.itemKey);
                 if (!charged) continue;
                 entry.deliveryAttempts = charged.deliveryAttempts;
-                entry.ciAttempts = charged.ciAttempts;
                 entry.nextAttemptAt =
-                  Date.now() +
-                  (entry.ciAttempts > 0 && submitted.get(entry.itemKey)?.ciReminder
-                    ? CI_FAILED_RETRY_INTERVAL_MS
-                    : DELIVERY_RETRY_BASE_MS * 2 ** (entry.deliveryAttempts - 1));
+                  Date.now() + DELIVERY_RETRY_BASE_MS * 2 ** (entry.deliveryAttempts - 1);
               }
               if (error instanceof SessionRateLimitedError) {
                 if (conflictClaims.length > 0) autoPing.refundMergeConflict(batch.routeFingerprint);
@@ -1682,7 +1711,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     projectId: string,
     triggerId: string,
     eventName: string,
-    occurrenceId: string,
     trigger: SendTriggerConfig,
     sendBatch: SendBatch,
   ): Promise<void> => {
@@ -1704,22 +1732,24 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           return;
         }
         merged = pendingBatches.has(queueKey);
-        if (autoPing.isSuppressed(routeFingerprint, destination, occurrenceId)) return;
-        sendBatch.attachAutoPing({
-          occurrenceId,
-          routeFingerprint,
-          destination,
-          createGrant: (scope, target) =>
-            autoPing.createGrant({
-              scope,
-              routeFingerprint,
-              destination,
-              target,
-              actorSessionId: sendBatch.sessionId,
-            }).handle,
-        });
-        sendBatch.filterAutoPing((itemOccurrenceId, threadTarget) =>
-          autoPing.isSuppressed(routeFingerprint, destination, itemOccurrenceId, threadTarget),
+        sendBatch.filterMuted(
+          (item) => autoPing.matchMute(routeFingerprint, destination, item),
+          (itemKey, match) => {
+            logTriggerEvent(deps.config.dataDir, "trigger.send.suppressed", {
+              level: "info",
+              sessionId: sendBatch.sessionId,
+              projectId,
+              sourceId: trigger.source,
+              triggerId,
+              message: `Suppressed trigger update item for ${sendBatch.sessionId}: muted`,
+              details: {
+                reason: "muted",
+                mode: match.mode,
+                suppressionId: match.suppressionId,
+                itemKeys: [itemKey],
+              },
+            });
+          },
         );
         if (sendBatch.isEmpty()) return;
         const prior = pendingBatches.get(queueKey);
@@ -1755,6 +1785,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           projectId,
           triggerId,
           sourceId: trigger.source,
+          routeFingerprint,
           batch: candidate.batch.serialize(),
           retryAccounting: candidate.retryAccounting,
           admissionCapRetryAt:
@@ -1786,7 +1817,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         }
         batch = candidate;
         pendingBatches.set(queueKey, candidate);
-        syncBatchOccurrenceReferences(queueKey, candidate);
         return Boolean(
           persisted?.claim && autoPing.isRouteLeaseActive(persisted.claim.routeLeaseId),
         );
@@ -1937,12 +1967,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         continue;
       }
       const routeFingerprint = autoPingRouteFingerprint(route);
-      const storedPolicy = batch.serialize().autoPing;
-      if (
-        storedPolicy &&
-        (storedPolicy.routeFingerprint !== routeFingerprint ||
-          storedPolicy.destination.sessionId !== batch.sessionId)
-      ) {
+      if (record.routeFingerprint !== undefined && record.routeFingerprint !== routeFingerprint) {
         deletePendingSendBatch(deps.config.dataDir, record.queueKey);
         logTriggerEvent(deps.config.dataDir, "trigger.send.restore_skipped", {
           level: "warn",
@@ -1956,24 +1981,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         continue;
       }
       const routeLeaseId = leaseForRoute(routeFingerprint, route);
-      const needsMigration =
-        !record.batch.autoPing || record.workId === undefined || record.revision === undefined;
-      if (!record.batch.autoPing) {
-        const occurrenceId = randomUUID();
-        batch.attachAutoPing({
-          occurrenceId,
-          routeFingerprint,
-          destination,
-          createGrant: (scope, target) =>
-            autoPing.createGrant({
-              scope,
-              routeFingerprint,
-              destination,
-              target,
-              actorSessionId: batch.sessionId,
-            }).handle,
-        });
-      }
+      const needsMigration = record.workId === undefined || record.revision === undefined;
       const workId = record.workId ?? randomUUID();
       const revision = needsMigration ? (record.revision ?? 0) + 1 : (record.revision ?? 1);
       if (needsMigration) {
@@ -2003,8 +2011,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         admissionCapRetryAt: record.admissionCapRetryAt,
         admissionCapDenials: record.admissionCapDenials,
       });
-      const restored = pendingBatches.get(record.queueKey);
-      if (restored) syncBatchOccurrenceReferences(record.queueKey, restored);
       logTriggerEvent(deps.config.dataDir, "trigger.send.restored", {
         level: "info",
         sessionId: batch.sessionId,
@@ -2075,7 +2081,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             projectId,
             triggerId,
             event.name,
-            event.occurrenceId,
             trigger,
             sendBatch,
           );

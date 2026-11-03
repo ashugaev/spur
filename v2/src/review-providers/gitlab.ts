@@ -17,6 +17,8 @@ type GitLabMergeRequest = {
   has_conflicts?: boolean | null;
   detailed_merge_status?: string | null;
   blocking_discussions_resolved?: boolean | null;
+  sha?: string | null;
+  diff_refs?: { base_sha?: string | null } | null;
 };
 
 type GitLabPipeline = {
@@ -134,18 +136,35 @@ export async function resolveMergeRequestSummary(
     repo: projectPathFromUrl(request.web_url),
     mergeable: request.has_conflicts ? "CONFLICTING" : "MERGEABLE",
     mergeStateStatus: request.detailed_merge_status ?? "",
+    ...(request.sha ? { headSha: request.sha } : {}),
+    ...(request.diff_refs?.base_sha ? { baseSha: request.diff_refs.base_sha } : {}),
   };
+}
+
+function failingPipelineIds(pipelines: GitLabPipeline[]): string[] {
+  return pipelines
+    .filter((pipeline) => summarizeFailingCi([{ name: "pipeline", state: pipeline.status ?? "" }]))
+    .map((pipeline) => String(pipeline.id ?? ""))
+    .sort();
 }
 
 async function collectCommentSignals(
   worktreePath: string,
   projectPath: string,
   mergeRequestIid: number,
-): Promise<{ signals: ReviewSignal[]; unresolvedDiscussions: number }> {
+): Promise<{ signals: ReviewSignal[]; unresolvedDiscussions: number; maxNoteId?: string }> {
   const discussions = await fetchDiscussions(worktreePath, projectPath, mergeRequestIid);
   const signals: ReviewSignal[] = [];
   let unresolvedDiscussions = 0;
+  let maxNote = 0;
   for (const discussion of discussions) {
+    const lastNote = discussion.notes.filter((note) => !note.system).at(-1);
+    const threadChangeKey = lastNote
+      ? `${String(lastNote.id)}:${String(discussion.notes.every((note) => note.resolvable !== true || note.resolved === true))}`
+      : undefined;
+    for (const note of discussion.notes) {
+      if (!note.system) maxNote = Math.max(maxNote, note.id);
+    }
     const unresolved = discussion.notes.some(
       (note) => note.resolvable === true && note.resolved !== true,
     );
@@ -172,12 +191,21 @@ async function collectCommentSignals(
                 mergeRequestIid,
                 discussionId: discussion.id,
               },
+              ...(threadChangeKey !== undefined ? { changeKey: threadChangeKey } : {}),
             }),
       };
       signals.push(signal);
     }
   }
-  return { signals, unresolvedDiscussions };
+  return {
+    signals: signals.map((signal) =>
+      signal.providerThreadTarget || maxNote === 0
+        ? signal
+        : { ...signal, changeKey: String(maxNote) },
+    ),
+    unresolvedDiscussions,
+    ...(maxNote > 0 ? { maxNoteId: String(maxNote) } : {}),
+  };
 }
 
 async function collectSignals(
@@ -201,20 +229,26 @@ async function collectSignals(
       key: "changes_requested",
       kind: "changes_requested",
       text: "Unresolved review discussions need changes.",
+      ...(discussionData.maxNoteId !== undefined ? { changeKey: discussionData.maxNoteId } : {}),
     });
   }
   if (ciText) {
+    const sha = request.headSha;
     snapshot.set("ci_failed", {
       key: "ci_failed",
       kind: "ci_failed",
       text: ciText,
+      ...(sha ? { changeKey: sha, revision: `${sha}:${failingPipelineIds(pipelines).join(",")}` } : {}),
     });
   }
   if (hasMergeConflict(request)) {
+    const revision =
+      request.headSha && request.baseSha ? `${request.headSha}:${request.baseSha}` : undefined;
     snapshot.set("merge_conflict", {
       key: "merge_conflict",
       kind: "merge_conflict",
       text: "Merge conflicts are blocking this merge request.",
+      ...(revision ? { changeKey: revision, revision } : {}),
     });
   }
 

@@ -17,7 +17,6 @@ import {
   isSessionState,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   DELIVERY_MAX_ATTEMPTS,
-  CI_FAILED_MAX_ATTEMPTS,
   type AvailableBacklogItem,
   type PersistedPendingBatch,
   type PersistedSpawnWork,
@@ -277,10 +276,6 @@ function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch
           Number.isInteger(entry["deliveryAttempts"]) &&
           entry["deliveryAttempts"] >= 0 &&
           entry["deliveryAttempts"] <= DELIVERY_MAX_ATTEMPTS &&
-          typeof entry["ciAttempts"] === "number" &&
-          Number.isInteger(entry["ciAttempts"]) &&
-          entry["ciAttempts"] >= 0 &&
-          entry["ciAttempts"] <= CI_FAILED_MAX_ATTEMPTS &&
           typeof entry["nextAttemptAt"] === "number" &&
           Number.isFinite(entry["nextAttemptAt"]) &&
           entry["nextAttemptAt"] >= 0,

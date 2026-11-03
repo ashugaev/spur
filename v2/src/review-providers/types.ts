@@ -34,6 +34,8 @@ export interface ReviewProvider {
     // observing zero active checks). Callers that track CI-active hysteresis across
     // cycles must not count this session as a "clean" observation when true.
     ciCheckFetchFailed?: boolean;
+    // True when mergeability is still UNKNOWN after the provider's recheck.
+    mergeableUnknown?: boolean;
   } | null>;
   refreshSignals?(input: RefreshReviewSignalsInput): Promise<ReviewSignalRefreshResult[]>;
 }

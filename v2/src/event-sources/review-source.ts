@@ -15,6 +15,7 @@ import {
   type ReviewSourceConfig,
 } from "../types.js";
 import { reviewProvider } from "../review-providers/index.js";
+import { reviewSignalChanged } from "../review-providers/shared.js";
 import {
   isEligibleForSourcePoll,
   type SourceHandle,
@@ -97,10 +98,9 @@ export function createReviewSourceModule(
                 collected.data.prNumber,
               );
               const next = collected.snapshot;
-              const changed = [...next.values()].filter((signal) => {
-                const prior = previous?.get(signal.key);
-                return !prior || prior.text !== signal.text;
-              });
+              const changed = [...next.values()].filter((signal) =>
+                reviewSignalChanged(previous?.get(signal.key), signal),
+              );
 
               // Built once, handed to both the in-memory map and the on-disk write
               // so the two copies cannot desync.

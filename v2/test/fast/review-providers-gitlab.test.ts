@@ -185,4 +185,81 @@ describe("gitlabReviewProvider.collectSignals", () => {
     );
     expect(result?.snapshot.get("comment:101")).not.toHaveProperty("providerThreadTarget");
   });
+
+  it("annotates change keys and revisions from sha, base sha, pipelines and notes", async () => {
+    const mr = {
+      iid: 9,
+      title: "feat: x",
+      web_url: "https://gitlab.example.com/group/app/-/merge_requests/9",
+      has_conflicts: true,
+      detailed_merge_status: "broken",
+      blocking_discussions_resolved: true,
+      sha: "head-sha",
+      diff_refs: { base_sha: "base-sha" },
+    };
+    glabMock.mockImplementation(async (_cwd: string, ...args: unknown[]) => {
+      const endpoint = String(args[1] ?? "");
+      if (endpoint.includes("/merge_requests?source_branch=")) return JSON.stringify([mr]);
+      if (endpoint.includes("/pipelines")) {
+        return JSON.stringify([
+          { id: 100, status: "failed" },
+          { id: 101, status: "success" },
+        ]);
+      }
+      if (endpoint.includes("/discussions")) {
+        return JSON.stringify([
+          {
+            id: "disc-1",
+            individual_note: false,
+            notes: [
+              { id: 100, body: "a", resolvable: true, resolved: false },
+              { id: 105, body: "b", resolvable: true, resolved: false },
+            ],
+          },
+          { id: "n1", individual_note: true, notes: [{ id: 120, body: "standalone" }] },
+        ]);
+      }
+      throw new Error(`unexpected endpoint ${endpoint}`);
+    });
+
+    const result = await gitlabReviewProvider.collectSignals(
+      makeSession(),
+      "/tmp/data",
+      "proj",
+      "src",
+    );
+
+    expect(result?.snapshot.get("ci_failed")).toMatchObject({
+      changeKey: "head-sha",
+      revision: "head-sha:100",
+    });
+    expect(result?.snapshot.get("merge_conflict")).toMatchObject({
+      changeKey: "head-sha:base-sha",
+      revision: "head-sha:base-sha",
+    });
+    expect(result?.snapshot.get("discussion:disc-1:100")?.changeKey).toBe("105:false");
+    expect(result?.snapshot.get("comment:120")?.changeKey).toBe("120");
+  });
+
+  it("omits change keys when the merge request carries no sha", async () => {
+    const mr = {
+      iid: 9,
+      title: "feat: x",
+      web_url: "https://gitlab.example.com/group/app/-/merge_requests/9",
+      has_conflicts: true,
+      detailed_merge_status: "broken",
+    };
+    glabMock.mockImplementation(async (_cwd: string, ...args: unknown[]) => {
+      const endpoint = String(args[1] ?? "");
+      if (endpoint.includes("/merge_requests?source_branch=")) return JSON.stringify([mr]);
+      return "[]";
+    });
+    const result = await gitlabReviewProvider.collectSignals(
+      makeSession(),
+      "/tmp/data",
+      "proj",
+      "src",
+    );
+    expect(result?.snapshot.get("merge_conflict")).not.toHaveProperty("changeKey");
+  });
 });

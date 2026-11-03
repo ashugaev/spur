@@ -1,22 +1,14 @@
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  utimesSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  AUTO_PING_MUTE_FOR_MAX_MS,
   AutoPingService,
   autoPingRouteFingerprint,
   redactAutoPingHandles,
-  type AutoPingError,
 } from "../../src/auto-ping.js";
-import type { AutoPingRouteDescriptor } from "../../src/types.js";
+import type { AutoPingMuteItem, AutoPingRouteDescriptor } from "../../src/types.js";
 
 const dirs: string[] = [];
 
@@ -41,424 +33,311 @@ function route(overrides: Partial<AutoPingRouteDescriptor> = {}): AutoPingRouteD
   };
 }
 
+const descriptor = route();
+const fingerprint = autoPingRouteFingerprint(descriptor);
+const destination = descriptor.destination;
+
+function ciItem(changeKey = "head-a"): AutoPingMuteItem {
+  return {
+    subject: "review:github:o/r#7",
+    kind: "ci_failed",
+    label: "until next commit",
+    changeKey,
+  };
+}
+
+function commentItem(): AutoPingMuteItem {
+  return { subject: "review:github:o/r#7", kind: "comment", label: "x", changeKey: "c1" };
+}
+
+function setup(options: { now?: () => number; dir?: string } = {}) {
+  const dir = options.dir ?? createDir();
+  const logs: Array<{ event: string; sessionId: string | undefined; details: unknown }> = [];
+  const service = new AutoPingService(dir, {
+    ...(options.now ? { now: options.now } : {}),
+    log: (event, sessionId, details) => logs.push({ event, sessionId, details }),
+  });
+  service.registerRoute(fingerprint, descriptor);
+  service.setConfiguredRouteAuthorities([descriptor]);
+  const grant = (items: AutoPingMuteItem[], untilChange = true, actor = "owner") =>
+    service.createGrant({
+      routeFingerprint: fingerprint,
+      destination,
+      actorSessionId: actor,
+      items,
+      untilChange,
+    });
+  return { dir, service, logs, grant };
+}
+
 afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   vi.useRealTimers();
 });
 
-describe("AutoPingService", () => {
-  it("retains an empty leased route through startup GC and its later subscription through restart", async () => {
-    const dir = createDir();
-    const descriptor = route({
-      destination: { kind: "session", sessionId: "owner" },
-      sourceType: "cron",
-      eventName: "cron:tick",
+describe("AutoPingService mute", () => {
+  it("until-change holds on the same key and ends with endReason changed on a new key", async () => {
+    const { service, logs, grant } = setup();
+    const { handle } = grant([ciItem()]);
+    const { record, created } = await service.mute("owner", { handle, mode: "until_change" });
+    expect(created).toBe(true);
+    expect(record.mode).toBe("until_change");
+
+    expect(service.matchMute(fingerprint, destination, ciItem())).toMatchObject({
+      mode: "until_change",
+      suppressionId: record.suppressionId,
     });
-    const fingerprint = autoPingRouteFingerprint(descriptor);
-    const service = new AutoPingService(dir);
-    let restored: AutoPingService | undefined;
-    try {
-      const lease = service.registerRoute(fingerprint, descriptor);
-      service.setConfiguredRouteAuthorities([descriptor]);
-      expect(readFileSync(join(dir, "auto-ping.json"), "utf8")).toContain(fingerprint);
-      const grant = service.createGrant({
-        scope: "subscription",
-        routeFingerprint: fingerprint,
-        destination: descriptor.destination,
-        target: { kind: "subscription" },
-      });
-      service.bindGrant(grant.handleHash, "owner");
-      const suppression = await service.unsubscribe("owner", "subscription", grant.handle);
-      service.releaseRoute(lease);
-      expect(service.list("owner")).toEqual([suppression.record]);
-      service.dispose();
-      restored = new AutoPingService(dir);
-      restored.setConfiguredRouteAuthorities([descriptor]);
-      expect(restored.list("owner")).toEqual([suppression.record]);
-      restored.setConfiguredRouteAuthorities([]);
-      expect(restored.list("owner")).toEqual([]);
-      expect(readFileSync(join(dir, "auto-ping.json"), "utf8")).not.toContain(fingerprint);
-    } finally {
-      service.dispose();
-      restored?.dispose();
-    }
-  });
-
-  it("collects an unused route descriptor after its last lease is released", () => {
-    const dir = createDir();
-    const descriptor = route();
-    const fingerprint = autoPingRouteFingerprint(descriptor);
-    const service = new AutoPingService(dir);
-    try {
-      const lease = service.registerRoute(fingerprint, descriptor);
-      service.setConfiguredRouteAuthorities([descriptor]);
-      service.releaseRoute(lease);
-      expect(readFileSync(join(dir, "auto-ping.json"), "utf8")).not.toContain(fingerprint);
-    } finally {
-      service.dispose();
-    }
-  });
-  it("reloads pending grants invalidated by resume before actor binding", async () => {
-    const dir = createDir();
-    const service = new AutoPingService(dir);
-    const descriptor = route();
-    const routeFingerprint = autoPingRouteFingerprint(descriptor);
-    service.registerRoute(routeFingerprint, descriptor);
-    const input = {
-      scope: "subscription" as const,
-      routeFingerprint,
-      destination: descriptor.destination,
-      target: { kind: "subscription" as const },
-    };
-    const bound = service.createGrant({ ...input, actorSessionId: "owner" });
-    service.createGrant(input);
-    const suppression = await service.unsubscribe("owner", "subscription", bound.handle);
-    await service.resume("owner", suppression.record.suppressionId);
-    service.dispose();
-    const restored = new AutoPingService(dir);
-    expect(restored.list("owner")).toEqual([]);
-    restored.dispose();
-  });
-  it("caps unchanged conflict claims across reload and resets only on proven change", () => {
-    const dir = createDir();
-    const descriptor = route();
-    const fingerprint = autoPingRouteFingerprint(descriptor);
-    let service = new AutoPingService(dir);
-    service.registerRoute(fingerprint, descriptor);
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      expect(service.claimMergeConflict(fingerprint, 42, "same")).toBe(attempt < 3);
-      service.dispose();
-      service = new AutoPingService(dir);
-      service.setConfiguredRouteAuthorities([descriptor]);
-    }
-    expect(service.claimMergeConflict(fingerprint, 42, "same", "confirmed-clear")).toBe(true);
-    expect(service.claimMergeConflict(fingerprint, 42, "same", "confirmed-clear")).toBe(true);
-    expect(service.claimMergeConflict(fingerprint, 42, "same", "confirmed-clear")).toBe(true);
-    expect(service.claimMergeConflict(fingerprint, 42, "same", "confirmed-clear")).toBe(false);
-    expect(service.claimMergeConflict(fingerprint, 42, "changed")).toBe(true);
-    expect(service.claimMergeConflict(fingerprint, 43, "same")).toBe(true);
-    service.dispose();
-  });
-  it.each([
-    { routes: {} },
-    { grants: [{ scope: "event", target: { kind: "subscription" } }] },
-    { suppressions: [{ createdAt: "invalid" }] },
-  ])("rejects malformed present policy fields before mutation: %j", (fields) => {
-    const dir = createDir();
-    const path = join(dir, "auto-ping.json");
-    const raw = JSON.stringify({ version: 1, routes: [], grants: [], suppressions: [], ...fields });
-    writeFileSync(path, raw);
-    expect(() => new AutoPingService(dir)).toThrow(/Invalid auto-ping/);
-    expect(readFileSync(path, "utf8")).toBe(raw);
-  });
-
-  it("persists only hashed owner-bound grants at mode 0600", async () => {
-    const dir = createDir();
-    const service = new AutoPingService(dir);
-    const fingerprint = autoPingRouteFingerprint(route());
-    service.registerRoute(fingerprint);
-    const grant = service.createGrant({
-      scope: "event",
-      routeFingerprint: fingerprint,
-      destination: { kind: "session", sessionId: "owner" },
-      target: { kind: "occurrence", occurrenceId: "occurrence" },
-      actorSessionId: "owner",
-    });
-
-    const result = await service.unsubscribe("owner", "event", grant.handle);
-    const raw = readFileSync(join(dir, "auto-ping.json"), "utf8");
-    expect(result.created).toBe(true);
-    expect(raw).not.toContain(grant.handle);
-    expect(raw).toContain(grant.handleHash);
-    expect(statSync(join(dir, "auto-ping.json")).mode & 0o777).toBe(0o600);
+    expect(service.matchMute(fingerprint, destination, ciItem("head-b"))).toBeNull();
+    expect(service.list("owner")).toEqual([]);
+    expect(service.history("owner")).toMatchObject([
+      { suppressionId: record.suppressionId, endReason: "changed" },
+    ]);
+    expect(logs.map((entry) => entry.event)).toEqual(["auto-ping.muted", "auto-ping.unmuted"]);
     service.dispose();
   });
 
-  it("returns pending without waiting for the route mutex and binds one actor", async () => {
-    const dir = createDir();
-    const service = new AutoPingService(dir);
-    const fingerprint = autoPingRouteFingerprint(
-      route({ destination: { kind: "session", sessionId: "owner" } }),
-    );
-    service.registerRoute(fingerprint);
-    const grant = service.createGrant({
-      scope: "subscription",
-      routeFingerprint: fingerprint,
-      destination: { kind: "session", sessionId: "owner" },
-      target: { kind: "subscription" },
-    });
-    let release!: () => void;
-    const held = service.withRouteLock(
-      fingerprint,
-      () =>
-        new Promise<void>((resolve) => {
-          release = resolve;
-        }),
-    );
-    await Promise.resolve();
-
-    await expect(service.unsubscribe("owner", "subscription", grant.handle)).rejects.toMatchObject({
-      code: "grant_not_ready",
-      status: 409,
-    } satisfies Partial<AutoPingError>);
-    release();
-    await held;
-    service.bindGrant(grant.handleHash, "owner");
-    await expect(
-      service.unsubscribe("foreign", "subscription", grant.handle),
-    ).rejects.toMatchObject({
-      code: "forbidden",
-      status: 403,
-    });
-    await expect(service.unsubscribe("owner", "subscription", grant.handle)).resolves.toMatchObject(
-      {
-        created: true,
-      },
-    );
-    service.dispose();
-  });
-
-  it("deduplicates canonical targets across grants and invalidates siblings on resume", async () => {
-    const dir = createDir();
-    const service = new AutoPingService(dir);
-    const fingerprint = autoPingRouteFingerprint(route());
-    service.registerRoute(fingerprint);
-    const input = {
-      scope: "thread" as const,
-      routeFingerprint: fingerprint,
-      destination: { kind: "session" as const, sessionId: "owner" },
-      target: { kind: "github-review-thread" as const, threadId: "thread" },
-      actorSessionId: "owner",
-    };
-    const first = service.createGrant(input);
-    const sibling = service.createGrant(input);
-    const one = await service.unsubscribe("owner", "thread", first.handle);
-    const two = await service.unsubscribe("owner", "thread", sibling.handle);
-    expect(two).toEqual({ record: one.record, created: false });
+  it("until-change drops only the changed item and keeps the rest muted", async () => {
+    const { service, grant } = setup();
+    const { handle } = grant([ciItem(), commentItem()]);
+    await service.mute("owner", { handle, mode: "until_change" });
+    expect(service.matchMute(fingerprint, destination, ciItem("head-b"))).toBeNull();
     expect(service.list("owner")).toHaveLength(1);
+    expect(service.matchMute(fingerprint, destination, commentItem())).not.toBeNull();
+    service.dispose();
+  });
 
-    await expect(service.resume("owner", one.record.suppressionId)).resolves.toMatchObject({
-      records: [],
-      removed: true,
+  it("rejects until-change when the grant does not offer it", async () => {
+    const { service, grant } = setup();
+    const { handle } = grant([ciItem()], false);
+    await expect(service.mute("owner", { handle, mode: "until_change" })).rejects.toMatchObject({
+      status: 400,
     });
-    await expect(service.resume("owner", one.record.suppressionId)).resolves.toMatchObject({
+    service.dispose();
+  });
+
+  it("for mutes the ping items until expiry then ends with endReason expired", async () => {
+    let now = Date.parse("2026-11-03T00:00:00.000Z");
+    const { service, grant } = setup({ now: () => now });
+    const { handle } = grant([ciItem()]);
+    const { record } = await service.mute("owner", {
+      handle,
+      mode: "for",
+      durationMs: 2 * 3_600_000,
+      reason: "waiting on infra",
+    });
+    expect(record.expiresAt).toBe("2026-11-03T02:00:00.000Z");
+    expect(service.matchMute(fingerprint, destination, ciItem("head-b"))).not.toBeNull();
+    expect(
+      service.matchMute(fingerprint, destination, { ...ciItem(), kind: "merge_conflict" }),
+    ).toBeNull();
+
+    now += 2 * 3_600_000 + 1;
+    expect(service.matchMute(fingerprint, destination, ciItem())).toBeNull();
+    expect(service.history("owner")).toMatchObject([
+      { endReason: "expired", endedAt: "2026-11-03T02:00:00.000Z", reason: "waiting on infra" },
+    ]);
+    service.dispose();
+  });
+
+  it("validates reason and duration for for and forever", async () => {
+    const { service, grant } = setup();
+    const { handle } = grant([ciItem()]);
+    await expect(
+      service.mute("owner", { handle, mode: "for", durationMs: 3_600_000 }),
+    ).rejects.toThrow(/reason is required/);
+    await expect(service.mute("owner", { handle, mode: "forever" })).rejects.toThrow(
+      /reason is required/,
+    );
+    await expect(
+      service.mute("owner", {
+        handle,
+        mode: "for",
+        durationMs: AUTO_PING_MUTE_FOR_MAX_MS + 1,
+        reason: "x",
+      }),
+    ).rejects.toThrow(/max is 24h/);
+    await expect(
+      service.mute("owner", { handle, mode: "for", durationMs: 1_000, reason: "x" }),
+    ).rejects.toThrow(/duration is invalid/);
+    expect(service.list("owner")).toEqual([]);
+    service.dispose();
+  });
+
+  it("forever covers every item on the route and destination only", async () => {
+    const { service, grant } = setup();
+    const { handle } = grant([ciItem()]);
+    await service.mute("owner", { handle, mode: "forever", reason: "wrong trigger" });
+    expect(
+      service.matchMute(fingerprint, destination, {
+        subject: "thread:x",
+        kind: "comment",
+        label: "",
+      }),
+    ).not.toBeNull();
+    expect(
+      service.matchMute(fingerprint, { kind: "session", sessionId: "other" }, ciItem()),
+    ).toBeNull();
+    expect(service.matchMute("other-route", destination, ciItem())).toBeNull();
+    service.dispose();
+  });
+
+  it("resumes by handle and by suppression id", async () => {
+    const { service, grant } = setup();
+    const first = grant([ciItem()]);
+    await service.mute("owner", { handle: first.handle, mode: "until_change" });
+    const byHandle = await service.resume("owner", { handle: first.handle });
+    expect(byHandle).toEqual({ records: [], removed: true });
+    expect(await service.resume("owner", { handle: first.handle })).toMatchObject({
       removed: false,
     });
-    await expect(service.unsubscribe("owner", "thread", sibling.handle)).rejects.toMatchObject({
-      code: "grant_consumed",
-      status: 409,
-    });
-    service.dispose();
-  });
 
-  it("isolates destination and target matching", async () => {
-    const dir = createDir();
-    const service = new AutoPingService(dir);
-    const fingerprint = autoPingRouteFingerprint(route());
-    service.registerRoute(fingerprint);
-    const grant = service.createGrant({
-      scope: "event",
-      routeFingerprint: fingerprint,
-      destination: { kind: "session", sessionId: "owner" },
-      target: { kind: "occurrence", occurrenceId: "one" },
-      actorSessionId: "owner",
-    });
-    await service.unsubscribe("owner", "event", grant.handle);
-    expect(service.isSuppressed(fingerprint, { kind: "session", sessionId: "owner" }, "one")).toBe(
-      true,
-    );
-    expect(service.isSuppressed(fingerprint, { kind: "session", sessionId: "owner" }, "two")).toBe(
-      false,
-    );
-    expect(
-      service.isSuppressed(fingerprint, { kind: "session", sessionId: "sibling" }, "one"),
-    ).toBe(false);
-    service.dispose();
-  });
-
-  it("retains the persisted occurrence grace clock across reconstruction", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
-    const dir = createDir();
-    const fingerprint = autoPingRouteFingerprint(route());
-    let service = new AutoPingService(dir);
-    service.registerRoute(fingerprint);
-    const grant = service.createGrant({
-      scope: "event",
-      routeFingerprint: fingerprint,
-      destination: { kind: "session", sessionId: "owner" },
-      target: { kind: "occurrence", occurrenceId: "one" },
-      actorSessionId: "owner",
-    });
-    await service.unsubscribe("owner", "event", grant.handle);
-    service.addOccurrenceReference(fingerprint, "one");
-    service.releaseOccurrenceReference(fingerprint, "one");
-    service.dispose();
-    vi.setSystemTime(new Date("2026-01-01T12:00:00.000Z"));
-    service = new AutoPingService(dir);
-    service.registerRoute(fingerprint);
-    expect(service.list("owner")).toHaveLength(1);
-    vi.setSystemTime(new Date("2026-01-01T23:59:00.000Z"));
-    service.gc();
-    expect(service.list("owner")).toHaveLength(1);
-    vi.setSystemTime(new Date("2026-01-02T00:00:00.000Z"));
-    service.gc();
-    expect(service.list("owner")).toEqual([]);
-    service.dispose();
-  });
-
-  it("collects an event suppression created after its occurrence became unreferenced", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
-    const service = new AutoPingService(createDir());
-    const fingerprint = autoPingRouteFingerprint(route());
-    service.registerRoute(fingerprint);
-    const grant = service.createGrant({
-      scope: "event",
-      routeFingerprint: fingerprint,
-      destination: { kind: "session", sessionId: "owner" },
-      target: { kind: "occurrence", occurrenceId: "finished" },
-      actorSessionId: "owner",
-    });
-
-    await service.unsubscribe("owner", "event", grant.handle);
-    vi.setSystemTime(new Date("2026-01-02T00:00:00.000Z"));
-    service.gc();
-
-    expect(service.list("owner")).toEqual([]);
-    service.dispose();
-  });
-
-  it("retains a dormant send destination while its route exists and collects it after removal", async () => {
-    const dir = createDir();
-    const descriptor = route();
-    const fingerprint = autoPingRouteFingerprint(descriptor);
-    let service = new AutoPingService(dir);
-    const lease = service.registerRoute(fingerprint, descriptor);
-    const grant = service.createGrant({
-      scope: "subscription",
-      routeFingerprint: fingerprint,
-      destination: descriptor.destination,
-      target: { kind: "subscription" },
-      actorSessionId: "owner",
-    });
-    await service.unsubscribe("owner", "subscription", grant.handle);
-    service.setConfiguredRouteAuthorities([
-      route({ destination: { kind: "session", sessionId: "*" } }),
+    const second = grant([ciItem()]);
+    const { record } = await service.mute("owner", { handle: second.handle, mode: "until_change" });
+    const byId = await service.resume("owner", { suppressionId: record.suppressionId });
+    expect(byId.removed).toBe(true);
+    expect(service.matchMute(fingerprint, destination, ciItem())).toBeNull();
+    expect(service.history("owner").map((entry) => entry.endReason)).toEqual([
+      "resumed",
+      "resumed",
     ]);
+    await expect(service.resume("owner", {})).rejects.toMatchObject({ status: 400 });
+    service.dispose();
+  });
+
+  it("repeats the same mode idempotently and replaces a different mode", async () => {
+    const { service, grant } = setup();
+    const { handle } = grant([ciItem()]);
+    const first = await service.mute("owner", { handle, mode: "until_change" });
+    const again = await service.mute("owner", { handle, mode: "until_change" });
+    expect(again.created).toBe(false);
+    expect(again.record.suppressionId).toBe(first.record.suppressionId);
+    const forever = await service.mute("owner", { handle, mode: "forever", reason: "broken" });
+    expect(forever.created).toBe(true);
+    expect(service.list("owner")).toHaveLength(1);
+    service.dispose();
+  });
+
+  it("binds a handle to its destination session", async () => {
+    const { service, grant } = setup();
+    const { handle } = grant([ciItem()]);
+    await expect(service.mute("intruder", { handle, mode: "until_change" })).rejects.toMatchObject(
+      { status: 403 },
+    );
+    await expect(service.resume("intruder", { handle })).rejects.toMatchObject({ status: 403 });
+    await expect(
+      service.mute("owner", { handle: `ap1_${"z".repeat(43)}`, mode: "until_change" }),
+    ).rejects.toMatchObject({ status: 404 });
+    service.dispose();
+  });
+
+  it("persists hashed grants at mode 0600 and never the handle", async () => {
+    const { dir, service, grant } = setup();
+    const { handle, handleHash } = grant([ciItem()]);
+    await service.mute("owner", { handle, mode: "until_change" });
+    const path = join(dir, "auto-ping.json");
+    const text = readFileSync(path, "utf8");
+    expect(text).toContain(handleHash);
+    expect(text).not.toContain(handle);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    service.dispose();
+  });
+
+  it("keeps active mutes across restart and drops them with their route", async () => {
+    const { dir, service, grant } = setup();
+    const lease = service.registerRoute(fingerprint, descriptor);
+    const { handle } = grant([ciItem()]);
+    await service.mute("owner", { handle, mode: "forever", reason: "broken" });
     service.releaseRoute(lease);
     service.dispose();
 
-    service = new AutoPingService(dir);
-    service.setConfiguredRouteAuthorities([
-      route({ destination: { kind: "session", sessionId: "*" } }),
-    ]);
-    expect(service.list("owner")).toHaveLength(1);
-    service.setConfiguredRouteAuthorities([
-      route({ triggerId: "replacement", destination: { kind: "session", sessionId: "*" } }),
-    ]);
-    expect(service.list("owner")).toEqual([]);
+    const restored = new AutoPingService(dir);
+    restored.setConfiguredRouteAuthorities([descriptor]);
+    expect(restored.list("owner")).toHaveLength(1);
+    restored.setConfiguredRouteAuthorities([route({ triggerId: "replacement" })]);
+    expect(restored.list("owner")).toEqual([]);
+    restored.dispose();
+  });
+});
+
+describe("AutoPingService state", () => {
+  it("migrates v1 by dropping every grant and suppression and logging counts", () => {
+    const dir = createDir();
+    const path = join(dir, "auto-ping.json");
+    const now = new Date().toISOString();
+    const spawnRoute = {
+      routeFingerprint: "spawnfp",
+      descriptor: { ...route(), actionKind: "spawn", destination: { kind: "trigger" } },
+    };
+    const sendRoute = { routeFingerprint: fingerprint, descriptor };
+    const grants = (["event", "thread", "subscription"] as const).map((scope) => ({
+      handleHash: `hash-${scope}`,
+      scope,
+      routeFingerprint: fingerprint,
+      destination,
+      target: { kind: "subscription" },
+      canonicalKey: `key-${scope}`,
+      createdAt: now,
+      state: "pending",
+    }));
+    const suppressions = (["event", "thread", "subscription"] as const).map((scope) => ({
+      suppressionId: `sup-${scope}`,
+      scope,
+      routeFingerprint: fingerprint,
+      destination,
+      target: { kind: "subscription" },
+      canonicalKey: `key-${scope}`,
+      actorSessionId: "owner",
+      createdAt: now,
+    }));
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 1,
+        routes: [spawnRoute, sendRoute],
+        grants,
+        suppressions,
+        mergeConflicts: [
+          { routeFingerprint: fingerprint, prNumber: 7, fingerprint: "f", attempts: 3 },
+        ],
+      }),
+    );
+    const logs: Array<{ event: string; details: unknown }> = [];
+    const service = new AutoPingService(dir, { log: (event, _id, details) => logs.push({ event, details }) });
     service.dispose();
+
+    const persisted = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    expect(persisted).toMatchObject({
+      version: 2,
+      routes: [sendRoute],
+      grants: [],
+      suppressions: [],
+      mergeConflicts: [],
+      ciSeen: [],
+    });
+    expect(logs).toEqual([
+      { event: "auto-ping.migrated", details: { droppedGrants: 3, droppedSuppressions: 3 } },
+    ]);
   });
 
   it("fails closed on malformed or unknown state", () => {
     const dir = createDir();
     writeFileSync(
       join(dir, "auto-ping.json"),
-      JSON.stringify({ version: 2, grants: [], suppressions: [] }),
+      JSON.stringify({ version: 3, grants: [], suppressions: [] }),
     );
     expect(() => new AutoPingService(dir)).toThrow("Invalid auto-ping policy state");
     expect(existsSync(join(dir, "auto-ping.json"))).toBe(true);
   });
 
-  it("drops legacy spawn-route records on load and persists once", () => {
+  it("collects an unused route descriptor after its last lease is released", () => {
     const dir = createDir();
-    const path = join(dir, "auto-ping.json");
-    const now = new Date().toISOString();
-    const spawnRoute = {
-      routeFingerprint: "spawnfp",
-      descriptor: {
-        version: 1,
-        projectId: "p",
-        triggerId: "spawn-trigger",
-        sourceId: "gh",
-        sourceType: "github",
-        eventName: "github:work_item.new",
-        actionKind: "spawn",
-        destination: { kind: "trigger" },
-        spawnDeskGroup: false,
-      },
-    };
-    const legacyGrant = {
-      handleHash: "legacy-hash",
-      scope: "subscription",
-      routeFingerprint: "spawnfp",
-      destination: { kind: "trigger" },
-      target: { kind: "subscription" },
-      canonicalKey: "legacy-key",
-      createdAt: now,
-      state: "pending",
-    };
-    const legacySuppression = {
-      suppressionId: "legacy-suppression",
-      scope: "subscription",
-      routeFingerprint: "spawnfp",
-      destination: { kind: "trigger" },
-      target: { kind: "subscription" },
-      canonicalKey: "legacy-key",
-      actorSessionId: "owner",
-      createdAt: now,
-    };
-    const sendRoute = {
-      routeFingerprint: "sendfp",
-      descriptor: route(),
-    };
-    const sendGrant = {
-      handleHash: "send-hash",
-      scope: "subscription",
-      routeFingerprint: "sendfp",
-      destination: { kind: "session", sessionId: "owner" },
-      target: { kind: "subscription" },
-      canonicalKey: "send-key",
-      createdAt: now,
-      state: "pending",
-    };
-    const sendSuppression = {
-      suppressionId: "send-suppression",
-      scope: "subscription",
-      routeFingerprint: "sendfp",
-      destination: { kind: "session", sessionId: "owner" },
-      target: { kind: "subscription" },
-      canonicalKey: "send-key",
-      actorSessionId: "owner",
-      createdAt: now,
-    };
-    const raw = {
-      version: 1,
-      routes: [spawnRoute, sendRoute],
-      grants: [legacyGrant, sendGrant],
-      suppressions: [legacySuppression, sendSuppression],
-      mergeConflicts: [],
-    };
-    writeFileSync(path, JSON.stringify(raw));
-
     const service = new AutoPingService(dir);
+    const lease = service.registerRoute(fingerprint, descriptor);
+    service.setConfiguredRouteAuthorities([descriptor]);
+    expect(readFileSync(join(dir, "auto-ping.json"), "utf8")).toContain(fingerprint);
+    service.releaseRoute(lease);
+    expect(readFileSync(join(dir, "auto-ping.json"), "utf8")).not.toContain(fingerprint);
     service.dispose();
-
-    const persisted = JSON.parse(readFileSync(path, "utf8")) as {
-      routes: unknown[];
-      grants: unknown[];
-      suppressions: unknown[];
-    };
-    expect(persisted.routes).toEqual([sendRoute]);
-    expect(persisted.grants).toEqual([sendGrant]);
-    expect(persisted.suppressions).toEqual([sendSuppression]);
-
-    const pinnedMtime = new Date("2020-01-01T00:00:00.000Z");
-    utimesSync(path, pinnedMtime, pinnedMtime);
-    const restored = new AutoPingService(dir);
-    restored.dispose();
-    expect(statSync(path).mtime.getTime()).toBe(pinnedMtime.getTime());
   });
 
   it("clears its GC timer once across repeated disposal", () => {
@@ -468,10 +347,8 @@ describe("AutoPingService", () => {
       setInterval: vi.fn(() => timer) as unknown as typeof globalThis.setInterval,
       clearInterval,
     });
-
     service.dispose();
     service.dispose();
-
     expect(clearInterval).toHaveBeenCalledOnce();
     expect(clearInterval).toHaveBeenCalledWith(timer);
     clearTimeout(timer);
@@ -480,5 +357,43 @@ describe("AutoPingService", () => {
   it("redacts exact handle-shaped strings", () => {
     const handle = `ap1_${"a".repeat(43)}`;
     expect(redactAutoPingHandles(`use ${handle}`)).toBe("use [auto-ping-handle]");
+  });
+});
+
+describe("AutoPingService conflict and CI budgets", () => {
+  it("delivers one merge_conflict per head:base key and caps retries across reload", () => {
+    const { dir, service } = setup();
+    expect(service.claimMergeConflict(fingerprint, 7, "k1")).toBe("accepted");
+    service.markMergeConflictDelivered(fingerprint, "k1");
+    expect(service.claimMergeConflict(fingerprint, 7, "k1")).toBe("already_delivered");
+    expect(service.claimMergeConflict(fingerprint, 7, "k2")).toBe("accepted");
+    service.refundMergeConflict(fingerprint);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(service.claimMergeConflict(fingerprint, 7, "k2")).toBe("accepted");
+    }
+    expect(service.claimMergeConflict(fingerprint, 7, "k2")).toBe("exhausted");
+    service.dispose();
+
+    const restored = new AutoPingService(dir);
+    restored.setConfiguredRouteAuthorities([descriptor]);
+    expect(restored.claimMergeConflict(fingerprint, 7, "k2")).toBe("exhausted");
+    expect(restored.claimMergeConflict(fingerprint, 7, "k1")).toBe("already_delivered");
+    expect(restored.claimMergeConflict(fingerprint, 7, "k3")).toBe("accepted");
+    restored.dispose();
+  });
+
+  it("treats a CI run as new only for an unseen head or run id, recorded on delivery", () => {
+    const { service } = setup();
+    expect(service.isCiRunNew(fingerprint, "A", ["r1"])).toBe(true);
+    service.markCiDelivered(fingerprint, "A", ["r1"]);
+    expect(service.isCiRunNew(fingerprint, "A", ["r1"])).toBe(false);
+    expect(service.isCiRunNew(fingerprint, "A", ["r1", "r2"])).toBe(true);
+    service.markCiDelivered(fingerprint, "A", ["r1", "r2"]);
+    expect(service.isCiRunNew(fingerprint, "A", ["r1"])).toBe(false);
+    expect(service.isCiRunNew(fingerprint, "A", ["r1", "r2"])).toBe(false);
+    expect(service.isCiRunNew(fingerprint, "B", ["r1"])).toBe(true);
+    service.markCiDelivered(fingerprint, "B", ["r1"]);
+    expect(service.isCiRunNew(fingerprint, "A", ["r2"])).toBe(true);
+    service.dispose();
   });
 });

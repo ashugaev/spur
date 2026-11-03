@@ -47,6 +47,7 @@ import {
   GitHubReviewBatchError,
   hasTerminalSignal,
 } from "../review-providers/github.js";
+import { reviewSignalChanged } from "../review-providers/shared.js";
 import { resolveWorkspaceState } from "../workspace-store.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
@@ -774,11 +775,16 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             snapshots.get(session.id),
             collected.data.prNumber,
           );
-          const next = collected.snapshot;
-          const changed = [...next.values()].filter((signal) => {
-            const prior = previous?.get(signal.key);
-            return !prior || prior.text !== signal.text;
-          });
+          const next = new Map(collected.snapshot);
+          // UNKNOWN mergeability is not proof the conflict cleared: keep the prior
+          // signal so the flap neither re-emits it nor mints a clear id.
+          const heldConflict = previous?.get("merge_conflict");
+          if (collected.mergeableUnknown && !next.has("merge_conflict") && heldConflict) {
+            next.set("merge_conflict", heldConflict);
+          }
+          const changed = [...next.values()].filter((signal) =>
+            reviewSignalChanged(previous?.get(signal.key), signal),
+          );
 
           // Built once, handed to both the in-memory map and the on-disk write so
           // the two copies cannot desync.
@@ -819,6 +825,12 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             lifecycleBaselined.add(session.id);
           }
           const candidates = previous ? changed : emitInitial ? [...next.values()] : [];
+          // A conflict present at the first observation (no snapshot, rebind,
+          // dropped snapshot) pings even when the source does not emit initial state.
+          const firstConflict = next.get("merge_conflict");
+          if (!previous && firstConflict && !candidates.includes(firstConflict)) {
+            candidates.push(firstConflict);
+          }
           const toEmit = baselined
             ? candidates
             : candidates.filter((signal) => !LIFECYCLE_KINDS.has(signal.kind));

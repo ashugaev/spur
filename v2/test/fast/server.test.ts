@@ -346,12 +346,25 @@ describe("startServer", () => {
       destination: { kind: "session", sessionId: "demo-1" },
       spawnDeskGroup: false,
     });
+    const item = {
+      subject: "review:github:o/r#7",
+      kind: "ci_failed",
+      label: "until next commit",
+      changeKey: "head-a",
+    };
     const grant = policy.createGrant({
-      scope: "event",
       routeFingerprint,
       destination: { kind: "session", sessionId: "demo-1" },
-      target: { kind: "occurrence", occurrenceId: "occurrence-1" },
       actorSessionId: "demo-1",
+      items: [item],
+      untilChange: true,
+    });
+    const keyless = policy.createGrant({
+      routeFingerprint,
+      destination: { kind: "session", sessionId: "demo-1" },
+      actorSessionId: "demo-1",
+      items: [{ subject: item.subject, kind: item.kind, label: item.label }],
+      untilChange: false,
     });
     policy.dispose();
     const server = await startServer(configPath, {
@@ -363,47 +376,84 @@ describe("startServer", () => {
       "x-spur-origin": "cli",
       "x-spur-caller-session": "demo-1",
     };
+    const base = `http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions`;
+    const post = (path: string, body: unknown, extra: Record<string, string> = {}) =>
+      fetch(`${base}/${path}`, {
+        method: "POST",
+        headers: { ...headers, ...extra },
+        body: typeof body === "string" ? body : JSON.stringify(body),
+      });
 
     try {
-      for (const suffix of ["unsubscribe", "suppression/resume"]) {
-        const malformed = await fetch(
-          `http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions/${suffix}`,
-          { method: "POST", headers, body: "{" },
-        );
+      for (const suffix of ["mute", "resume"]) {
+        const malformed = await post(suffix, "{");
         expect(malformed.status).toBe(400);
         await expect(malformed.json()).resolves.toMatchObject({
           error: { code: "invalid_request", message: expect.any(String) },
         });
       }
-      const unsubscribe = await fetch(
-        `http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions/unsubscribe`,
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ scope: "event", handle: grant.handle }),
-        },
+      // Removed routes are gone.
+      expect((await post("unsubscribe", { scope: "event", handle: grant.handle })).status).toBe(
+        404,
       );
-      expect(unsubscribe.status).toBe(200);
-      const created = (await unsubscribe.json()) as {
+      expect((await post("sup-1/resume", {})).status).toBe(404);
+
+      // Validation: reason required, 24h cap, until-change only when offered.
+      expect((await post("mute", { handle: grant.handle, mode: "forever" })).status).toBe(400);
+      expect(
+        (await post("mute", { handle: grant.handle, mode: "for", durationMs: 3_600_000 })).status,
+      ).toBe(400);
+      expect(
+        (
+          await post("mute", {
+            handle: grant.handle,
+            mode: "for",
+            durationMs: 25 * 3_600_000,
+            reason: "x",
+          })
+        ).status,
+      ).toBe(400);
+      expect((await post("mute", { handle: keyless.handle, mode: "until_change" })).status).toBe(
+        400,
+      );
+      // Another session cannot use the handle.
+      expect(
+        (await post("mute", { handle: grant.handle, mode: "until_change" }, {
+          "x-spur-caller-session": "other",
+        })).status,
+      ).toBe(403);
+
+      const muted = await post("mute", { handle: grant.handle, mode: "until_change" });
+      expect(muted.status).toBe(200);
+      const created = (await muted.json()) as {
         record: { suppressionId: string };
         created: boolean;
       };
       expect(created.created).toBe(true);
 
-      const list = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions`, {
-        headers,
-      });
+      const list = await fetch(base, { headers });
       expect(list.status).toBe(200);
-      await expect(list.json()).resolves.toMatchObject({
-        records: [{ suppressionId: created.record.suppressionId, scope: "event" }],
+      const listed = (await list.json()) as Record<string, unknown>;
+      expect(listed).toMatchObject({
+        records: [{ suppressionId: created.record.suppressionId, mode: "until_change" }],
       });
+      expect(listed).not.toHaveProperty("history");
 
-      const resume = await fetch(
-        `http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions/${created.record.suppressionId}/resume`,
-        { method: "POST", headers, body: "{}" },
-      );
+      const resume = await post("resume", { handle: grant.handle });
       expect(resume.status).toBe(200);
       await expect(resume.json()).resolves.toMatchObject({ records: [], removed: true });
+      expect((await post("resume", { handle: grant.handle, suppressionId: "x" })).status).toBe(
+        400,
+      );
+
+      const withHistory = await fetch(`${base}?all=1`, { headers });
+      await expect(withHistory.json()).resolves.toMatchObject({
+        records: [],
+        history: [{ suppressionId: created.record.suppressionId, endReason: "resumed" }],
+      });
+      const historyDir = join(dataDir, "auto-ping-history");
+      const [historyFile] = fs.readdirSync(historyDir);
+      expect(fs.readFileSync(join(historyDir, historyFile ?? ""), "utf8")).not.toContain("ap1_");
     } finally {
       await server.stop();
       resetEventLogCollapse();
@@ -495,7 +545,7 @@ describe("startServer", () => {
     await expect(fetch(`http://127.0.0.1:${port}/info`)).rejects.toThrow();
   });
 
-  it("redeems, lists, and resumes an actor-bound auto-ping suppression", autoPingServerTest);
+  it("mutes, lists, resumes and records history for an actor-bound auto-ping handle", autoPingServerTest);
 
   it("POST /sidecars/sweep defaults to report-only — reap absent kills nothing", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
