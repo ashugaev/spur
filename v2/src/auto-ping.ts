@@ -47,6 +47,7 @@ interface PersistedMergeConflict {
 
 interface PersistedCiSeen {
   routeFingerprint: string;
+  prNumber: number;
   head: string;
   checks: string[];
 }
@@ -182,6 +183,17 @@ function isStringArray(value: unknown): value is string[] {
 interface ParsedState {
   state: AutoPingState;
   migration?: { grants: number; suppressions: number };
+  droppedCiSeen: number;
+}
+
+function isCiSeen(value: unknown): value is PersistedCiSeen {
+  return (
+    isRecord(value) &&
+    typeof value.routeFingerprint === "string" &&
+    Number.isInteger(value.prNumber) &&
+    typeof value.head === "string" &&
+    isStringArray(value.checks)
+  );
 }
 
 // Routes of daemons that ran an earlier version can carry `actionKind: "spawn"`;
@@ -230,6 +242,7 @@ function parseState(raw: unknown): ParsedState {
         ciSeen: [],
       },
       migration: { grants: raw.grants.length, suppressions: raw.suppressions.length },
+      droppedCiSeen: 0,
     };
   }
   const grants = raw.grants.map((value: unknown) => {
@@ -284,18 +297,12 @@ function parseState(raw: unknown): ParsedState {
       return value as unknown as PersistedMergeConflict;
     },
   );
-  const ciSeen = (Array.isArray(raw.ciSeen) ? raw.ciSeen : []).map((value: unknown) => {
-    if (
-      !isRecord(value) ||
-      typeof value.routeFingerprint !== "string" ||
-      typeof value.head !== "string" ||
-      !isStringArray(value.checks)
-    )
-      throw new Error("Invalid auto-ping ci state");
-    return value as unknown as PersistedCiSeen;
-  });
+  // Dedupe cache: an unreadable entry costs one repeat ping, never a failed start.
+  const rawCiSeen: unknown[] = Array.isArray(raw.ciSeen) ? raw.ciSeen : [];
+  const ciSeen = rawCiSeen.filter(isCiSeen);
   return {
     state: { version: STATE_VERSION, routes, grants, suppressions, mergeConflicts, ciSeen },
+    droppedCiSeen: rawCiSeen.length - ciSeen.length,
   };
 }
 
@@ -327,10 +334,11 @@ export class AutoPingService {
     this.clearIntervalFn = options.clearInterval ?? globalThis.clearInterval;
     this.log = options.log ?? (() => undefined);
     if (existsSync(this.path)) {
-      const { state, migration } = parseState(
+      const { state, migration, droppedCiSeen } = parseState(
         JSON.parse(readFileSync(this.path, "utf8")) as unknown,
       );
       this.state = state;
+      if (droppedCiSeen > 0) this.log("auto-ping.ci_seen_dropped", undefined, { droppedCiSeen });
       if (migration) {
         this.persist();
         this.log("auto-ping.migrated", undefined, {
@@ -677,16 +685,30 @@ export class AutoPingService {
   }
 
   // True when `head` is new for the route or any failing check name was never delivered on it.
-  isCiNew(routeFingerprint: string, head: string, checks: readonly string[]): boolean {
-    const seen = this.state.ciSeen.find((entry) => entry.routeFingerprint === routeFingerprint);
+  isCiNew(
+    routeFingerprint: string,
+    prNumber: number,
+    head: string,
+    checks: readonly string[],
+  ): boolean {
+    const seen = this.state.ciSeen.find(
+      (entry) => entry.routeFingerprint === routeFingerprint && entry.prNumber === prNumber,
+    );
     if (!seen || seen.head !== head) return true;
     return checks.some((name) => !seen.checks.includes(name));
   }
 
-  markCiDelivered(routeFingerprint: string, head: string, checks: readonly string[]): void {
-    const seen = this.state.ciSeen.find((entry) => entry.routeFingerprint === routeFingerprint);
+  markCiDelivered(
+    routeFingerprint: string,
+    prNumber: number,
+    head: string,
+    checks: readonly string[],
+  ): void {
+    const seen = this.state.ciSeen.find(
+      (entry) => entry.routeFingerprint === routeFingerprint && entry.prNumber === prNumber,
+    );
     if (!seen) {
-      this.state.ciSeen.push({ routeFingerprint, head, checks: [...new Set(checks)] });
+      this.state.ciSeen.push({ routeFingerprint, prNumber, head, checks: [...new Set(checks)] });
     } else if (seen.head !== head) {
       seen.head = head;
       seen.checks = [...new Set(checks)];

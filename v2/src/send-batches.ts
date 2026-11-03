@@ -45,7 +45,7 @@ export interface SendBatchItem {
   fingerprint: string;
   refreshComment?: boolean;
   mergeConflict?: { prNumber: number };
-  ci?: { head: string; checks: string[] };
+  ci?: { prNumber: number; head: string; checks: string[] };
 }
 
 function semanticFingerprint(values: readonly unknown[]): string {
@@ -335,7 +335,7 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
       ...(this.providerId === "github" && signal.kind === "merge_conflict"
         ? { mergeConflict: { prNumber: this.prNumber } }
         : {}),
-      ...(signal.kind === "ci_failed" && signal.ciRun ? { ci: signal.ciRun } : {}),
+      ...(signal.kind === "ci_failed" && signal.ciRun ? { ci: { prNumber: this.prNumber, ...signal.ciRun } } : {}),
     }));
   }
 

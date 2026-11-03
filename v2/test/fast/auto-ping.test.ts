@@ -390,16 +390,53 @@ describe("AutoPingService conflict and CI budgets", () => {
 
   it("treats CI as new only for an unseen head or check name, recorded on delivery", () => {
     const { service } = setup();
-    expect(service.isCiNew(fingerprint, "A", ["build"])).toBe(true);
-    service.markCiDelivered(fingerprint, "A", ["build"]);
-    expect(service.isCiNew(fingerprint, "A", ["build"])).toBe(false);
-    expect(service.isCiNew(fingerprint, "A", ["build", "lint"])).toBe(true);
-    service.markCiDelivered(fingerprint, "A", ["build", "lint"]);
-    expect(service.isCiNew(fingerprint, "A", ["build"])).toBe(false);
-    expect(service.isCiNew(fingerprint, "A", ["build", "lint"])).toBe(false);
-    expect(service.isCiNew(fingerprint, "B", ["build"])).toBe(true);
-    service.markCiDelivered(fingerprint, "B", ["build"]);
-    expect(service.isCiNew(fingerprint, "A", ["lint"])).toBe(true);
+    expect(service.isCiNew(fingerprint, 7, "A", ["build"])).toBe(true);
+    service.markCiDelivered(fingerprint, 7, "A", ["build"]);
+    expect(service.isCiNew(fingerprint, 7, "A", ["build"])).toBe(false);
+    expect(service.isCiNew(fingerprint, 7, "A", ["build", "lint"])).toBe(true);
+    service.markCiDelivered(fingerprint, 7, "A", ["build", "lint"]);
+    expect(service.isCiNew(fingerprint, 7, "A", ["build"])).toBe(false);
+    expect(service.isCiNew(fingerprint, 7, "A", ["build", "lint"])).toBe(false);
+    expect(service.isCiNew(fingerprint, 7, "B", ["build"])).toBe(true);
+    service.markCiDelivered(fingerprint, 7, "B", ["build"]);
+    expect(service.isCiNew(fingerprint, 7, "A", ["lint"])).toBe(true);
+    service.dispose();
+  });
+
+  it("keys CI dedupe by pull request: two failing PRs alternate without repeats", () => {
+    const { service } = setup();
+    const poll = (pr: number, head: string): boolean => {
+      const fresh = service.isCiNew(fingerprint, pr, head, ["build"]);
+      if (fresh) service.markCiDelivered(fingerprint, pr, head, ["build"]);
+      return fresh;
+    };
+    const pings = [poll(7, "A"), poll(8, "B"), poll(7, "A"), poll(8, "B"), poll(7, "A")];
+    expect(pings).toEqual([true, true, false, false, false]);
+    service.dispose();
+  });
+
+  it("drops unreadable ciSeen entries at load and logs once, still starting", () => {
+    const dir = createDir();
+    writeFileSync(
+      join(dir, "auto-ping.json"),
+      JSON.stringify({
+        version: 2,
+        routes: [],
+        grants: [],
+        suppressions: [],
+        mergeConflicts: [],
+        ciSeen: [
+          { routeFingerprint: fingerprint, prNumber: 7, head: "A", checks: ["build"] },
+          { routeFingerprint: fingerprint, head: "A", checks: ["build"] },
+          "junk",
+        ],
+      }),
+    );
+    const { service, logs } = setup({ dir });
+    expect(logs.filter((entry) => entry.event === "auto-ping.ci_seen_dropped")).toEqual([
+      { event: "auto-ping.ci_seen_dropped", sessionId: undefined, details: { droppedCiSeen: 2 } },
+    ]);
+    expect(service.isCiNew(fingerprint, 7, "A", ["build"])).toBe(false);
     service.dispose();
   });
 });

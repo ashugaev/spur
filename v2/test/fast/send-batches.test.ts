@@ -813,7 +813,7 @@ describe("automatic ping mute footer", () => {
     const item = reviewBatchWith([
       { key: "ci_failed", kind: "ci_failed", text: "ci", ciRun: { head: "A", checks: ["build"] } },
     ]).retryItems()[0];
-    expect(item?.ci).toEqual({ head: "A", checks: ["build"] });
+    expect(item?.ci).toEqual({ prNumber: 42, head: "A", checks: ["build"] });
   });
 });
 

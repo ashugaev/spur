@@ -1144,7 +1144,10 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         }
       }
       submission.filterItems((item) => {
-        if (item.ci && !autoPing.isCiNew(batch.routeFingerprint, item.ci.head, item.ci.checks)) {
+        if (
+          item.ci &&
+          !autoPing.isCiNew(batch.routeFingerprint, item.ci.prNumber, item.ci.head, item.ci.checks)
+        ) {
           batch.batch.filterItems((retained) => retained.itemKey !== item.itemKey);
           logSuppressed(batch, "ci_seen", item);
           return false;
@@ -1272,7 +1275,12 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
               });
               for (const item of submitted.values()) {
                 if (item.ci)
-                  autoPing.markCiDelivered(batch.routeFingerprint, item.ci.head, item.ci.checks);
+                  autoPing.markCiDelivered(
+                    batch.routeFingerprint,
+                    item.ci.prNumber,
+                    item.ci.head,
+                    item.ci.checks,
+                  );
                 if (item.mergeConflict)
                   autoPing.markMergeConflictDelivered(
                     batch.routeFingerprint,
