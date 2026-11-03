@@ -37,7 +37,7 @@ function record(id: string, overrides: Partial<AutoPingMuteView> = {}): AutoPing
 }
 
 describe("auto-ping mute history", () => {
-  it("folds events by suppression id, oldest first, and stays 0600", () => {
+  it("folds events by suppression id, newest first, and stays 0600", () => {
     const dir = createDir();
     appendMuteHistory(dir, "s1", "muted", record("m1"));
     appendMuteHistory(dir, "s1", "muted", record("m2"));
@@ -52,6 +52,12 @@ describe("auto-ping mute history", () => {
     expect(history.map((entry) => entry.suppressionId)).toEqual(["m1", "m2"]);
     expect(history[0]).toMatchObject({ endReason: "resumed" });
     expect(history[1]?.endedAt).toBeUndefined();
+    appendMuteHistory(dir, "s1", "muted", record("m3"));
+    expect(readMuteHistory(dir, "s1").map((entry) => entry.suppressionId)).toEqual([
+      "m1",
+      "m3",
+      "m2",
+    ]);
     expect(readMuteHistory(dir, "other")).toEqual([]);
     const [file] = readdirSync(join(dir, "auto-ping-history"));
     expect(statSync(join(dir, "auto-ping-history", file ?? "")).mode & 0o777).toBe(0o600);

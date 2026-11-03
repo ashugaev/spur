@@ -825,11 +825,14 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             lifecycleBaselined.add(session.id);
           }
           const candidates = previous ? changed : emitInitial ? [...next.values()] : [];
-          // A conflict present at the first observation (no snapshot, rebind,
-          // dropped snapshot) pings even when the source does not emit initial state.
-          const firstConflict = next.get("merge_conflict");
-          if (!previous && firstConflict && !candidates.includes(firstConflict)) {
-            candidates.push(firstConflict);
+          // A conflict or CI failure present at the first observation (no snapshot,
+          // rebind, dropped snapshot) pings even when the source does not emit initial
+          // state. Auto-ping dedupe bounds replays after restart.
+          if (!previous) {
+            for (const key of ["merge_conflict", "ci_failed"]) {
+              const first = next.get(key);
+              if (first && !candidates.includes(first)) candidates.push(first);
+            }
           }
           const toEmit = baselined
             ? candidates

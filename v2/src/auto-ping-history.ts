@@ -41,7 +41,7 @@ function isHistoryEvent(value: unknown): value is MuteHistoryEvent {
   );
 }
 
-// Folds events by suppressionId: the latest event per id wins. Oldest first.
+// Folds events by suppressionId: the latest event per id wins. Newest first by endedAt, else createdAt.
 export function readMuteHistory(dataDir: string, sessionId: string): AutoPingMuteView[] {
   const path = historyPath(dataDir, sessionId);
   if (!existsSync(path)) return [];
@@ -58,8 +58,8 @@ export function readMuteHistory(dataDir: string, sessionId: string): AutoPingMut
   }
   return [...byId.values()].sort(
     (left, right) =>
-      left.createdAt.localeCompare(right.createdAt) ||
-      left.suppressionId.localeCompare(right.suppressionId),
+      (right.endedAt ?? right.createdAt).localeCompare(left.endedAt ?? left.createdAt) ||
+      right.suppressionId.localeCompare(left.suppressionId),
   );
 }
 

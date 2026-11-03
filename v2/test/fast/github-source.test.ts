@@ -1464,6 +1464,62 @@ describe("github source", () => {
       handle.stop();
     });
 
+    describe("first observation", () => {
+      const failingView = () =>
+        prView({
+          headRefOid: "head-1",
+          baseRefOid: "base-1",
+          statusCheckRollup: [{ name: "build", conclusion: "FAILURE", status: "COMPLETED" }],
+        });
+      const ciEmits = (emit: ReturnType<typeof vi.fn>) =>
+        emit.mock.calls.filter(([name]) => name === "github:ci_failed");
+
+      it("emits failing CI present at the first observation without emitExisting", async () => {
+        readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+        listSessionsMock.mockReturnValue([makeSession()]);
+        mockLifecyclePoll(failingView());
+        const emit = vi.fn();
+        const handle = await startLifecycle(emit);
+        expect(ciEmits(emit)).toHaveLength(1);
+        handle.stop();
+      });
+
+      it("emits nothing for failing CI already in the persisted snapshot (restart)", async () => {
+        readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+        listSessionsMock.mockReturnValue([makeSession()]);
+        mockLifecyclePoll(failingView());
+        const first = await startLifecycle(vi.fn());
+        const persisted = writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+        first.stop();
+        readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", persisted]]));
+        mockLifecyclePoll(failingView());
+        const emit = vi.fn();
+        const handle = await startLifecycle(emit);
+        expect(ciEmits(emit)).toHaveLength(0);
+        handle.stop();
+      });
+
+      it("emits nothing for a legacy snapshot with the same failing text", async () => {
+        readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+        listSessionsMock.mockReturnValue([makeSession()]);
+        mockLifecyclePoll(failingView());
+        const first = await startLifecycle(vi.fn());
+        const persisted = writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+        first.stop();
+        const current = persisted.signals.get("ci_failed");
+        if (!current) throw new Error("expected ci_failed signal");
+        const { revision: _revision, changeKey: _changeKey, ciRun: _ciRun, ...legacy } = current;
+        readReviewSourceSnapshotsMock.mockReturnValue(
+          new Map([["api-a1b2", storedSnapshot([legacy])]]),
+        );
+        mockLifecyclePoll(failingView());
+        const emit = vi.fn();
+        const handle = await startLifecycle(emit);
+        expect(ciEmits(emit)).toHaveLength(0);
+        handle.stop();
+      });
+    });
+
     it("keeps the revision when the same failing check is re-created with a new job id", async () => {
       const failing = (url: string) =>
         prView({
