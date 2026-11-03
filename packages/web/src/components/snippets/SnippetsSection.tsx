@@ -101,15 +101,9 @@ function resolveLoad(
   if ("problem" in result) return { loaded: keep, problem: result.problem };
   const parsed = parseSnippetManifest(result.html, expected);
   if (!parsed.ok) return { loaded: keep, problem: parsed.error };
-  const { manifest } = parsed;
-  if (
-    keep &&
-    keep.manifest.instanceId === manifest.instanceId &&
-    manifest.revision < keep.manifest.revision
-  ) {
-    return { loaded: keep, problem: { code: "lower_revision" } };
-  }
-  return { loaded: { manifest, html: result.html }, problem: null };
+  // A lower revision is refused by the panel's controller (one path), which
+  // reports it through onApplyResult.
+  return { loaded: { manifest: parsed.manifest, html: result.html }, problem: null };
 }
 
 const PROBLEM_CARD: Record<FileProblem["code"], { chip: string; message: string }> = {
@@ -128,6 +122,8 @@ const PROBLEM_CARD: Record<FileProblem["code"], { chip: string; message: string 
 
 export function SnippetsSection({ sessionId, files, session, messages }: SnippetsSectionProps) {
   const [entries, setEntries] = useState<Record<string, FileEntry>>({});
+  // Snippets whose newest file the panel's controller refused as a lower revision.
+  const [refused, setRefused] = useState<Record<string, boolean>>({});
   // Listing key each file was last fetched for. A poll that brings a new key
   // starts one fetch; polls with the same key start none.
   const launched = useRef<Record<string, string>>({});
@@ -193,7 +189,8 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
           const { snippetId, artifact } = file;
           const entry = entries[snippetId];
           const titleId = `snippet-card-${sessionId}-${snippetId}`;
-          const problem = entry?.problem ?? null;
+          const problem: FileProblem | null =
+            entry?.problem ?? (refused[snippetId] ? { code: "lower_revision" } : null);
           const card = problem ? (
             <SnippetErrorCard
               chip={PROBLEM_CARD[problem.code].chip}
@@ -218,6 +215,14 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
                   listingKey={listingKeyOf(file)}
                   manifest={entry.loaded.manifest}
                   messages={messages}
+                  onApplyResult={(result) => {
+                    const lower = result === "lower_revision";
+                    setRefused((previous) =>
+                      Boolean(previous[snippetId]) === lower
+                        ? previous
+                        : { ...previous, [snippetId]: lower },
+                    );
+                  }}
                   session={session}
                   sessionId={sessionId}
                   updatedAt={files.length > 1 ? artifact.updatedAt : undefined}

@@ -14,6 +14,7 @@ import { SendIcon } from "@/components/icons/SendIcon";
 import { Spinner } from "@/components/icons/Spinner";
 import { LoadingBar } from "@/components/LoadingBar";
 import { formatRelativeTime } from "@/lib/format";
+import { useTheme } from "@/lib/theme-context";
 import {
   createSdkLoader,
   createSnippetHost,
@@ -21,6 +22,7 @@ import {
   type PendingConfirm,
   type PanelRuntimeError,
   type SnippetFontBuffer,
+  type ApplyFileResult,
   type SnippetHost,
   type SnippetHostDeps,
   type SnippetPort,
@@ -95,7 +97,7 @@ const DENIED_STORAGE: SnippetStorage = {
   removeItem: deny,
 };
 
-function browserSnippetStorage(): SnippetStorage {
+export function browserSnippetStorage(): SnippetStorage {
   try {
     return window.localStorage;
   } catch {
@@ -355,6 +357,8 @@ export interface SnippetPanelProps {
   messages: readonly ConversationMessage[];
   // Bridge seam: tests replace the browser-backed deps (channel, send, storage, clocks).
   bridge?: Partial<SnippetHostDeps>;
+  // Outcome of each file handed to the controller (a lower revision is refused there).
+  onApplyResult?: (result: ApplyFileResult) => void;
 }
 
 export function SnippetPanel({
@@ -367,7 +371,12 @@ export function SnippetPanel({
   session,
   messages,
   bridge,
+  onApplyResult,
 }: SnippetPanelProps) {
+  const onApplyResultRef = useRef(onApplyResult);
+  useEffect(() => {
+    onApplyResultRef.current = onApplyResult;
+  }, [onApplyResult]);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
@@ -461,6 +470,15 @@ export function SnippetPanel({
     // arrive through applyFile below.
   }, [sessionId]);
 
+  // Runtime theme switch: tell the snippet once the provider has applied it.
+  const { theme } = useTheme();
+  const seenTheme = useRef(theme);
+  useEffect(() => {
+    if (seenTheme.current === theme) return;
+    seenTheme.current = theme;
+    queueMicrotask(() => hostRef.current?.themeChanged());
+  }, [theme]);
+
   const state = useSyncExternalStore(
     host ? host.subscribe : noopSubscribe,
     host ? host.getState : getNullState,
@@ -474,7 +492,9 @@ export function SnippetPanel({
   }, []);
 
   useEffect(() => {
-    host?.applyFile(manifest, html);
+    if (!host) return;
+    const result = host.applyFile(manifest, html);
+    onApplyResultRef.current?.(result);
   }, [host, manifest, html]);
 
   useEffect(() => {

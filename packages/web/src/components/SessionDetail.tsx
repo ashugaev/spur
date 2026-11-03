@@ -48,7 +48,9 @@ import { ArtifactOpenExternalIcon } from "@/components/icons/ArtifactOpenExterna
 import { ArtifactPreviewIcon } from "@/components/icons/ArtifactPreviewIcon";
 import { ConversationView } from "@/components/ConversationView";
 import { SnippetActionSummary } from "@/components/snippets/SnippetActionSummary";
+import { browserSnippetStorage } from "@/components/snippets/SnippetPanel";
 import { SnippetsSection } from "@/components/snippets/SnippetsSection";
+import { pruneSnippetRecords } from "@/lib/snippets/snippet-store";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
 import { IconActionButton } from "@/components/IconActionButton";
@@ -1959,6 +1961,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setArtifactCategory("agent");
     setShowAllDeskMembers(false);
   }, [sessionId]);
+
+  // Drop snippet records untouched for 7 days (budget keys are never pruned).
+  useEffect(() => {
+    pruneSnippetRecords(browserSnippetStorage(), Date.now());
+  }, []);
 
   // Reserved snippet files leave every artifact surface; only generic
   // artifacts reach categories, counts, grid, list, lightbox and navigation.

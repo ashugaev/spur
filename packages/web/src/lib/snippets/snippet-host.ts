@@ -215,6 +215,7 @@ export interface SnippetHost {
   onWindowMessage(data: unknown, fromFrame: boolean): void;
   frameLoaded(): void;
   noteFrameFocus(): void;
+  themeChanged(): void;
   // trusted host chrome
   confirmSend(trusted: boolean): void;
   confirmDiscard(trusted: boolean): void;
@@ -330,10 +331,22 @@ export function createSnippetHost(
     clearTimeout(helloTimer);
   }
 
+  // A pending confirm belongs to one document in one session state. Any change
+  // that voids it resolves the snippet's invoke as stale and drops the strip.
+  function staleConfirm(): void {
+    if (!state.confirm) return;
+    resolvePending({ ok: false, reason: "stale" });
+    set({ confirm: null });
+    if (state.action?.status === "awaiting_confirm") set({ action: actionBeforeConfirm });
+  }
+
   function fail(error: PanelRuntimeError): void {
+    staleConfirm();
     closePort();
     resolvePending({ ok: false, reason: "not_connected" });
-    set({ phase: "error", error });
+    // Hand the dialog back to the shell (exit path), then drop the flag.
+    if (state.fullscreen) deps.onFullscreenRequest(false);
+    set({ phase: "error", error, fullscreen: false });
   }
 
   function startHelloTimer(): void {
@@ -344,6 +357,7 @@ export function createSnippetHost(
   }
 
   function beginMount(refetchSdk: boolean): void {
+    staleConfirm();
     closePort();
     mountCount += 1;
     blurObserved = false;
@@ -557,6 +571,7 @@ export function createSnippetHost(
     session = update;
     if (canSend !== update.canSend) {
       canSend = update.canSend;
+      if (!canSend) staleConfirm();
       setAvailability(state.conflict);
     }
     const { action } = state;
@@ -597,11 +612,7 @@ export function createSnippetHost(
         last.requestId !== retryOf ||
         !SNIPPET_RETRY_STATUSES.includes(last.status)
       ) {
-        reply({
-          ok: false,
-          reason: "invalid_payload",
-          issues: [{ path: "/retryOf", code: "required" }],
-        });
+        reply({ ok: false, reason: "stale" });
         return;
       }
       actionId = last.actionId;
@@ -729,14 +740,14 @@ export function createSnippetHost(
     if (manifest.instanceId === current.instanceId) {
       if (manifest.revision === current.revision) {
         if (html === state.html) return "ignored";
+        staleConfirm();
         setAvailability(true);
         return "conflict";
       }
       if (manifest.revision < current.revision) return "lower_revision";
     }
-    resolvePending({ ok: false, reason: "stale" });
-    set({ confirm: null, manifest, html, conflict: false, availability: availabilityFor(false) });
-    if (state.action?.status === "awaiting_confirm") set({ action: actionBeforeConfirm });
+    staleConfirm();
+    set({ manifest, html, conflict: false, availability: availabilityFor(false) });
     recordMount();
     beginMount(false);
     updateSession(
@@ -756,6 +767,12 @@ export function createSnippetHost(
   function confirmSend(trusted: boolean): void {
     const pending = state.confirm;
     if (!trusted || !pending) return;
+    // Structural checks again at click time: the session may have stopped, the
+    // document changed or the port closed while the strip was open.
+    if (state.phase !== "connected" || state.conflict || !canSend) {
+      staleConfirm();
+      return;
+    }
     writeSnippetBudget(deps.storage, sessionId, 0, deps.now());
     dispatch(pending.requestId, pending.actionId, pending.prompt, pending.retryOf, pending.reason);
   }
@@ -821,7 +838,11 @@ export function createSnippetHost(
       if (loads >= 2 && state.phase !== "error") fail("navigated");
     },
     noteFrameFocus() {
-      blurObserved = true;
+      // D4: only a blur observed after connect counts.
+      if (state.phase === "connected") blurObserved = true;
+    },
+    themeChanged() {
+      postToSnippet({ type: SNIPPET_TO_FRAME.theme, theme: deps.getTheme() });
     },
     confirmSend,
     confirmDiscard,

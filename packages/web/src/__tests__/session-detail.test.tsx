@@ -8963,6 +8963,31 @@ describe("SessionDetail snippets", () => {
     expect(frame).toHaveAttribute("sandbox", "allow-scripts");
   });
 
+  it("prunes snippet records older than 7 days on mount and keeps budget keys", async () => {
+    const day = 24 * 60 * 60 * 1000;
+    const record = (updatedAt: number) =>
+      JSON.stringify({
+        instanceId: "inst-0000001",
+        lastRevision: 1,
+        unconfirmedRevision: null,
+        state: { app: null, controls: [] },
+        action: null,
+        updatedAt,
+      });
+    window.localStorage.setItem("spur:snippet:v1:other-0000:old", record(Date.now() - 8 * day));
+    window.localStorage.setItem("spur:snippet:v1:other-0000:fresh", record(Date.now() - day));
+    window.localStorage.setItem(
+      "spur:snippet-budget:v1:other-0000",
+      JSON.stringify({ unconfirmed: 3, updatedAt: Date.now() - 30 * day }),
+    );
+    mockSession({ artifacts: [artifact("shot.png")] });
+    render(<SessionDetail sessionId={SID} />);
+    await screen.findByAltText("shot.png");
+    expect(window.localStorage.getItem("spur:snippet:v1:other-0000:old")).toBeNull();
+    expect(window.localStorage.getItem("spur:snippet:v1:other-0000:fresh")).not.toBeNull();
+    expect(window.localStorage.getItem("spur:snippet-budget:v1:other-0000")).not.toBeNull();
+  });
+
   it("has no Snippets block without owned files", async () => {
     mockSession({
       artifacts: [artifact("snippet.sp-cd34.other.html"), artifact("shot.png")],

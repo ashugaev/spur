@@ -1009,3 +1009,109 @@ describe("agent loop bound", () => {
     expect(await loop(true)).toBe(10);
   });
 });
+
+describe("pending confirm is voided with its document and session state", () => {
+  async function pending(h: Harness): Promise<FakePort> {
+    await vi.advanceTimersByTimeAsync(0);
+    const port = h.connect();
+    h.invoke("go", { note: "a" }, "c1");
+    expect(h.host.getState().confirm?.reason).toBe("no_focus");
+    return port;
+  }
+
+  it("a session stop drops the strip as stale and a Send click posts nothing", async () => {
+    const h = harness();
+    const port = await pending(h);
+    h.session({ canSend: false });
+    expect(h.host.getState().confirm).toBeNull();
+    expect(port.ofType("invoke-result")[0]).toMatchObject({
+      callId: "c1",
+      ok: false,
+      reason: "stale",
+    });
+    h.host.confirmSend(true);
+    expect(h.sent).toHaveLength(0);
+  });
+
+  it("an equal-revision conflict drops the strip", async () => {
+    const h = harness();
+    const port = await pending(h);
+    expect(h.host.applyFile(manifest(), "<html>CHANGED</html>")).toBe("conflict");
+    expect(h.host.getState().confirm).toBeNull();
+    expect(port.ofType("invoke-result")[0]).toMatchObject({ reason: "stale" });
+    h.host.confirmSend(true);
+    expect(h.sent).toHaveLength(0);
+  });
+
+  it("flood, navigated and hello_timeout drop the strip; Reload does not bring it back", async () => {
+    for (const cause of ["flood", "navigated"] as const) {
+      const h = harness();
+      const port = await pending(h);
+      if (cause === "flood")
+        for (let i = 0; i < 101; i += 1) port.emit({ type: "resize", height: 200 });
+      else {
+        h.host.frameLoaded();
+        h.host.frameLoaded();
+      }
+      expect(h.host.getState()).toMatchObject({ phase: "error", error: cause, confirm: null });
+      expect(h.host.getState().action).toBeNull();
+      h.host.reload(true);
+      h.hello();
+      expect(h.host.getState().confirm).toBeNull();
+      h.host.confirmSend(true);
+      expect(h.sent).toHaveLength(0);
+    }
+  });
+
+  it("a remount (Reload) clears a strip left by the previous document", async () => {
+    const h = harness();
+    await pending(h);
+    h.host.applyFile(manifest({ revision: 2 }), "<html>2</html>");
+    expect(h.host.getState().confirm).toBeNull();
+    h.host.confirmSend(true);
+    expect(h.sent).toHaveLength(0);
+  });
+});
+
+describe("fullscreen, theme and focus on the controller", () => {
+  it("an error while fullscreen runs the exit path and clears the flag, so the toggle works after Reload", async () => {
+    const h = harness();
+    await ready(h);
+    h.host.setFullscreen(true);
+    h.host.frameLoaded();
+    h.host.frameLoaded();
+    expect(h.fullscreenRequests).toEqual([false]);
+    expect(h.host.getState()).toMatchObject({ phase: "error", fullscreen: false });
+    h.host.reload(true);
+    h.host.setFullscreen(true);
+    expect(h.host.getState().fullscreen).toBe(true);
+  });
+
+  it("themeChanged posts the current theme to a connected snippet only", async () => {
+    const h = harness();
+    h.host.themeChanged();
+    await vi.advanceTimersByTimeAsync(0);
+    h.host.themeChanged();
+    const port = h.connect();
+    h.host.themeChanged();
+    expect(port.ofType("theme")).toEqual([{ type: "theme", theme: THEME }]);
+  });
+
+  it("a window blur before connect does not count toward the interaction gate", async () => {
+    const h = harness();
+    await vi.advanceTimersByTimeAsync(0);
+    h.host.noteFrameFocus();
+    h.connect();
+    h.invoke("go", { note: "a" }, "c1");
+    expect(h.host.getState().confirm?.reason).toBe("no_focus");
+    expect(h.sent).toHaveLength(0);
+  });
+
+  it("a retry that names no retryable action is refused as stale", async () => {
+    const h = harness();
+    const port = await ready(h);
+    port.emit({ type: "invoke", callId: "r", actionId: "go", retryOf: "req-none" });
+    expect(port.ofType("invoke-result")[0]).toMatchObject({ ok: false, reason: "stale" });
+    expect(port.ofType("invoke-result")[0]?.issues).toBeUndefined();
+  });
+});

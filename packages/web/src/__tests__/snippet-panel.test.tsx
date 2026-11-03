@@ -1,5 +1,7 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ThemeProvider, useTheme } from "@/lib/theme-context";
+import { ThemeProvider, useTheme } from "@/lib/theme-context";
 import { SnippetPanel, type SnippetPanelProps } from "@/components/snippets/SnippetPanel";
 import type { SnippetChannel, SnippetPort } from "@/lib/snippets/snippet-host";
 import type { SnippetManifest } from "@/lib/snippets/snippet-manifest";
@@ -454,5 +456,78 @@ describe("error cards and banner", () => {
     expect(follows(alert, frame)).toBe(true);
     expect(frame.getAttribute("srcdoc")).toContain("<p>a</p>");
     expect(frame.getAttribute("srcdoc")).not.toContain("changed");
+  });
+});
+
+describe("theme, fullscreen failure and refused files", () => {
+  it("posts the theme to the snippet when the app theme changes", async () => {
+    const s = setup();
+    function Switch() {
+      const { setMode } = useTheme();
+      return (
+        <button onClick={() => setMode("dark")} type="button">
+          Go dark
+        </button>
+      );
+    }
+    render(
+      <ThemeProvider>
+        <Switch />
+        <SnippetPanel {...s.props} />
+      </ThemeProvider>,
+    );
+    const frame = (await screen.findByTitle("Picker")) as HTMLIFrameElement;
+    const nonce = /nonce:"([^"]+)"/.exec(frame.getAttribute("srcdoc") ?? "")?.[1];
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: "spur:hello", protocolVersion: 1, nonce },
+          source: frame.contentWindow,
+        }),
+      );
+    });
+    const port = s.ports[s.ports.length - 1] as FakePort;
+    expect(port.toFrame.filter((m) => m.type === "theme")).toHaveLength(0);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Go dark" }));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(port.toFrame.filter((m) => m.type === "theme")).toHaveLength(1));
+    document.documentElement.removeAttribute("data-theme");
+  });
+
+  it("an error while fullscreen releases the body scroll lock and runs the dialog exit path", async () => {
+    const s = setup();
+    const { frame } = await mount(s);
+    fireEvent.click(screen.getByRole("button", { name: "Open Picker fullscreen" }));
+    expect(dialog.enterFullscreen).toHaveBeenCalledTimes(1);
+    expect(document.body.style.overflow).toBe("hidden");
+    act(() => {
+      fireEvent.load(frame);
+      fireEvent.load(frame);
+    });
+    expect(screen.getByText("Navigated")).toBeInTheDocument();
+    expect(dialog.exitFullscreen).toHaveBeenCalledTimes(1);
+    expect(document.body.style.overflow).not.toBe("hidden");
+  });
+
+  it("reports a refused lower revision through onApplyResult", async () => {
+    const s = setup();
+    s.props = { ...s.props, manifest: manifest({ revision: 3 }) };
+    const results: string[] = [];
+    const { rerender } = render(
+      <SnippetPanel {...s.props} onApplyResult={(r) => results.push(r)} />,
+    );
+    await screen.findByTitle("Picker");
+    rerender(
+      <SnippetPanel
+        {...s.props}
+        manifest={manifest({ revision: 2 })}
+        html="<p>old</p>"
+        onApplyResult={(r) => results.push(r)}
+      />,
+    );
+    await waitFor(() => expect(results).toContain("lower_revision"));
+    expect(screen.getByTitle("Picker").getAttribute("srcdoc")).not.toContain("<p>old</p>");
   });
 });
