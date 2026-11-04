@@ -2,12 +2,18 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { startRealtimeTranscription } from "@/lib/realtime-voice-client";
+import { holdScreenWakeLock } from "@/lib/screen-wake-lock";
 
 vi.mock("@/lib/realtime-voice-client", () => ({
   startRealtimeTranscription: vi.fn(),
 }));
 
+vi.mock("@/lib/screen-wake-lock", () => ({
+  holdScreenWakeLock: vi.fn(),
+}));
+
 const mockStartRealtime = vi.mocked(startRealtimeTranscription);
+const mockHoldWakeLock = vi.mocked(holdScreenWakeLock);
 
 interface RealtimeHandlers {
   onPartial: (text: string) => void;
@@ -317,6 +323,7 @@ describe("useVoiceInput", () => {
     stubMediaEnvironment();
     stubIndexedDb();
     mockStartRealtime.mockReset();
+    mockHoldWakeLock.mockReset();
   });
 
   afterEach(() => {
@@ -490,6 +497,48 @@ describe("useVoiceInput", () => {
     expect(result.current.voiceBusy).toBe(null);
     expect(result.current.voiceError).toBe("send failed");
     expect(result.current.voiceModalOpen).toBe(true);
+  });
+
+  it("holds the screen wake lock while recording and releases on stop", async () => {
+    buildFetch([{ text: "hi" }]);
+    const releaseLock = vi.fn();
+    mockHoldWakeLock.mockReturnValue(releaseLock);
+    const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:wake-stop" }));
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+    expect(mockHoldWakeLock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      result.current.toggleRecording();
+    });
+    await waitFor(() => expect(result.current.recording).toBe(true));
+    expect(mockHoldWakeLock).toHaveBeenCalledTimes(1);
+    expect(releaseLock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      result.current.stopAndSend(vi.fn());
+    });
+    await waitFor(() => expect(result.current.recording).toBe(false));
+    expect(releaseLock).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases the screen wake lock when recording is cancelled", async () => {
+    buildFetch([{ text: "hi" }]);
+    const releaseLock = vi.fn();
+    mockHoldWakeLock.mockReturnValue(releaseLock);
+    const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:wake-cancel" }));
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+
+    await act(async () => {
+      result.current.toggleRecording();
+    });
+    await waitFor(() => expect(result.current.recording).toBe(true));
+    expect(mockHoldWakeLock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      result.current.cancelRecording();
+    });
+    await waitFor(() => expect(result.current.recording).toBe(false));
+    expect(releaseLock).toHaveBeenCalledTimes(1);
   });
 
   it("cancelRecording preserves modal draft and skips transcription", async () => {

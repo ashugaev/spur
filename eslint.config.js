@@ -142,6 +142,28 @@ export default tseslint.config(
     rules: { "spur-web/no-visible-wait-text": "error" },
   },
 
+  // Browser classic scripts injected into snippet srcdoc
+  {
+    files: ["packages/web/public/**/*.js"],
+    languageOptions: {
+      sourceType: "script",
+      globals: {
+        window: "readonly",
+        document: "readonly",
+        HTMLElement: "readonly",
+        CustomEvent: "readonly",
+        customElements: "readonly",
+        TextEncoder: "readonly",
+        FontFace: "readonly",
+        MutationObserver: "readonly",
+        ResizeObserver: "readonly",
+        setTimeout: "readonly",
+        queueMicrotask: "readonly",
+        requestAnimationFrame: "readonly",
+      },
+    },
+  },
+
   // Scripts directory - Node.js environment
   {
     files: ["scripts/**/*.js", "scripts/**/*.mjs"],

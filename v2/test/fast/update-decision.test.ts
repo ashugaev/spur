@@ -26,10 +26,14 @@ function sample(
     health: {
       daemon: overrides.health?.daemon ?? OK,
       web: overrides.health?.web ?? OK,
+      mcp: overrides.health?.mcp ?? OK,
+      ...(overrides.health?.tunnel ? { tunnel: overrides.health.tunnel } : {}),
     },
     units: {
       daemon: overrides.units?.daemon ?? "active",
       web: overrides.units?.web ?? "active",
+      mcp: overrides.units?.mcp ?? "active",
+      ...(overrides.units?.tunnel ? { tunnel: overrides.units.tunnel } : {}),
     },
   };
 }
@@ -43,6 +47,15 @@ function fold(samples: PollSample[], config: DecisionConfig = cfg): DecisionStat
 }
 
 describe("update-decision", () => {
+  it.each(["mcp", "tunnel"] as const)("prevents commit and rolls back failed %s", (id) => {
+    const result = evaluate(
+      { startMs: 0, consecutiveHealthy: 2, consecutiveRefused: 0 },
+      sample(cfg.deadlineMs, { health: { [id]: REFUSED }, units: { [id]: "failed" } }),
+      cfg,
+    );
+    expect(result.decision.kind).toBe("rollback");
+    expect(result.next.consecutiveHealthy).toBe(0);
+  });
   it("never commits or rolls back during warmup", () => {
     // Warmup is 9000ms; even a failed unit within warmup only accrues counters.
     expect(evaluate(initialDecisionState(0), sample(3000), cfg).decision).toEqual({

@@ -1,7 +1,19 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { rm } from "node:fs/promises";
-import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ensureSessionSlotTool,
@@ -24,6 +36,27 @@ const PARAM_EXPANSION_OPEN = "$" + "{";
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
+
+// Dir with only bash and dirname symlinked (what the wrapper needs), plus an optional fake real git.
+const makeToolStub = async (withGit: boolean): Promise<string> => {
+  const dir = await createTempDir("spur-slots-stub-");
+  tempDirs.push(dir);
+  const resolved = execFileSync("bash", ["-c", "command -v bash dirname"], {
+    encoding: "utf8",
+  })
+    .trim()
+    .split("\n");
+  for (const target of resolved) {
+    symlinkSync(target, join(dir, basename(target)));
+  }
+  if (withGit) {
+    writeFileSync(join(dir, "git"), `#!/usr/bin/env bash\necho "git version fake-real"\n`, {
+      encoding: "utf8",
+      mode: 0o755,
+    });
+  }
+  return dir;
+};
 
 describe("session slots", () => {
   it("normalizes and merges title and named links", () => {
@@ -326,6 +359,63 @@ describe("session slots", () => {
     expect(todoWrapper).not.toContain("delete");
   });
 
+  it("rewrites tool wrappers atomically via rename", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+    const args = {
+      dataDir,
+      sessionId: "api-atomic",
+      configPath: "/tmp/spur-old.yaml",
+      projectId: "api",
+      branchNamingRegex: "^feature/[a-z]+$",
+    };
+    const toolDir = ensureSessionSlotTool(args);
+    const names = readdirSync(toolDir).sort();
+    const before = names.map((name) => {
+      const path = join(toolDir, name);
+      return {
+        name,
+        ino: statSync(path).ino,
+        content: readFileSync(path, "utf8"),
+        fd: openSync(path, "r"),
+      };
+    });
+
+    try {
+      const previousUmask = process.umask(0o077);
+      try {
+        ensureSessionSlotTool({ ...args, configPath: "/tmp/spur-new.yaml" });
+      } finally {
+        process.umask(previousUmask);
+      }
+
+      for (const { name, ino, content, fd } of before) {
+        const path = join(toolDir, name);
+        expect(statSync(path).ino).not.toBe(ino);
+        expect(statSync(path).mode & 0o777).toBe(0o755);
+        expect(readFileSync(fd, "utf8")).toBe(content);
+      }
+      expect(readFileSync(join(toolDir, "spur"), "utf8")).toContain("/tmp/spur-new.yaml");
+      expect(readdirSync(toolDir).sort()).toEqual(names);
+    } finally {
+      for (const { fd } of before) {
+        closeSync(fd);
+      }
+    }
+  });
+
+  it("removes the temp file and rethrows when the rename fails", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+    const args = { dataDir, sessionId: "api-rename-fail", configPath: "/tmp/spur.yaml" };
+    const toolDir = ensureSessionSlotTool(args);
+    rmSync(join(toolDir, TODO_TOOL_NAME));
+    mkdirSync(join(toolDir, TODO_TOOL_NAME));
+
+    expect(() => ensureSessionSlotTool(args)).toThrow();
+    expect(readdirSync(toolDir).filter((name) => name.includes(".tmp."))).toEqual([]);
+  });
+
   it("writes branch helpers when branch naming is configured", async () => {
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
@@ -376,6 +466,7 @@ describe("session slots", () => {
       dataDir,
       sessionId: "api-2",
       configPath: "/tmp/spur.yaml",
+      installLockPath: join(dataDir, "install-and-restart.lock"),
     });
 
     const out = execFileSync(join(toolDir, "spur-sidecar"), ["ports", "--help"], {
@@ -384,6 +475,159 @@ describe("session slots", () => {
 
     expect(out).toContain("Print this session's reserved sidecar ports.");
     expect(out).not.toContain("--clear-port");
+  });
+
+  describe("install lock wait", () => {
+    const waitFor = async (check: () => boolean, what: string): Promise<void> => {
+      const deadline = Date.now() + 10_000;
+      while (!check()) {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    };
+    const childComms = (pid: number): string[] => {
+      let children: string;
+      try {
+        children = readFileSync(`/proc/${pid}/task/${pid}/children`, "utf8");
+      } catch {
+        return [];
+      }
+      return children
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((child) => {
+          try {
+            return readFileSync(`/proc/${child}/comm`, "utf8").trim();
+          } catch {
+            return "";
+          }
+        });
+    };
+    // Exclusive holder that keeps the lock until the go file exists.
+    const holdExclusive = async (lock: string, go: string): Promise<ChildProcess> => {
+      const holder = spawn(
+        "flock",
+        ["-x", lock, "bash", "-c", `until [ -e ${JSON.stringify(go)} ]; do sleep 0.05; done`],
+        { stdio: "ignore" },
+      );
+      await waitFor(
+        () => spawnSync("flock", ["-n", lock, "true"]).status !== 0,
+        "holder to own the lock",
+      );
+      return holder;
+    };
+    // flock exits only after its bash child sees the go file, so exit means no loop is left behind.
+    const releaseHolder = async (holder: ChildProcess, go: string): Promise<void> => {
+      writeFileSync(go, "");
+      await waitFor(() => holder.exitCode !== null || holder.signalCode !== null, "holder exit");
+    };
+    const setup = async (): Promise<{ toolDir: string; lock: string; go: string }> => {
+      const dataDir = await createTempDir("spur-slots-lock-");
+      tempDirs.push(dataDir);
+      const lock = join(dataDir, "install-and-restart.lock");
+      writeFileSync(lock, "");
+      const toolDir = ensureSessionSlotTool({
+        dataDir,
+        sessionId: "api-lock",
+        configPath: join(dataDir, "spur.yaml"),
+        installLockPath: lock,
+      });
+      return { toolDir, lock, go: join(dataDir, "go") };
+    };
+
+    it("blocks the spur wrapper while an exclusive holder owns the lock", async () => {
+      const { toolDir, lock, go } = await setup();
+      const holder = await holdExclusive(lock, go);
+      const wrapper = spawn(join(toolDir, "spur"), ["--version"], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      try {
+        let stdout = "";
+        wrapper.stdout.on("data", (chunk: Buffer) => {
+          stdout += chunk.toString();
+        });
+        const exited = new Promise<number | null>((resolve) => wrapper.on("exit", resolve));
+        let early: number | null | undefined;
+        void exited.then((code) => {
+          early = code;
+        });
+        await waitFor(
+          () => early !== undefined || childComms(wrapper.pid ?? 0).includes("flock"),
+          "wrapper to wait on flock",
+        );
+        expect(early).toBeUndefined();
+
+        writeFileSync(go, "");
+        expect(await exited).toBe(0);
+        expect(stdout.trim()).not.toBe("");
+      } finally {
+        wrapper.kill();
+        await releaseHolder(holder, go);
+      }
+    });
+
+    it("does not create the lock file when absent", async () => {
+      const dataDir = await createTempDir("spur-slots-lock-");
+      tempDirs.push(dataDir);
+      const lock = join(dataDir, "install-and-restart.lock");
+      const toolDir = ensureSessionSlotTool({
+        dataDir,
+        sessionId: "api-lock",
+        configPath: join(dataDir, "spur.yaml"),
+        installLockPath: lock,
+      });
+
+      const result = spawnSync(join(toolDir, "spur"), ["--version"], { timeout: 10_000 });
+
+      expect(result.status).toBe(0);
+      expect(existsSync(lock)).toBe(false);
+    });
+
+    it("runs at once without flock on PATH while the lock is held", async () => {
+      const { toolDir, lock, go } = await setup();
+      const holder = await holdExclusive(lock, go);
+      try {
+        const stub = await makeToolStub(false);
+
+        const result = spawnSync(join(toolDir, "spur"), ["--version"], {
+          timeout: 10_000,
+          env: { ...process.env, PATH: stub },
+        });
+
+        expect(result.status).toBe(0);
+      } finally {
+        await releaseHolder(holder, go);
+      }
+    });
+
+    it("bakes the wait into spur and spur-sidecar with the default lock path", async () => {
+      const dataDir = await createTempDir("spur-slots-lock-");
+      tempDirs.push(dataDir);
+      const injected = ensureSessionSlotTool({
+        dataDir,
+        sessionId: "api-lock",
+        configPath: "/tmp/spur.yaml",
+        installLockPath: "/tmp/x/install-and-restart.lock",
+      });
+      const baked = (path: string): string =>
+        `if [[ -e '${path}' ]] && command -v flock >/dev/null 2>&1; then flock -s -w 90 '${path}' true 2>/dev/null || true; fi`;
+
+      for (const name of ["spur", "spur-sidecar"]) {
+        expect(readFileSync(join(injected, name), "utf8")).toContain(
+          baked("/tmp/x/install-and-restart.lock"),
+        );
+      }
+
+      const defaulted = ensureSessionSlotTool({
+        dataDir,
+        sessionId: "api-lock-default",
+        configPath: "/tmp/spur.yaml",
+      });
+      const defaultPath = join(homedir(), ".spur", "install-and-restart.lock");
+      for (const name of ["spur", "spur-sidecar"]) {
+        expect(readFileSync(join(defaulted, name), "utf8")).toContain(baked(defaultPath));
+      }
+    });
   });
 
   it("blocks git push with global options when the current branch is invalid", async () => {
@@ -429,6 +673,202 @@ exit 42
     expect(() => readFileSync(capturedArgsPath, "utf8")).toThrow();
   });
 
+  describe("git wrapper nested resolution", () => {
+    const makeWrapper = async (sessionId: string): Promise<string> => {
+      const dataDir = await createTempDir("spur-slots-fast-");
+      tempDirs.push(dataDir);
+      return ensureSessionSlotTool({
+        dataDir,
+        sessionId,
+        configPath: "/tmp/spur.yaml",
+        projectId: "api",
+        branchNamingRegex: "^feature/[a-z]+$",
+      });
+    };
+    const runGit = (inner: string, pathValue: string) =>
+      spawnSync(join(inner, "git"), ["--version"], {
+        encoding: "utf8",
+        timeout: 5000,
+        env: { ...process.env, PATH: pathValue },
+      });
+
+    it("resolves real git past a nested wrapper in both PATH orders", async () => {
+      const inner = await makeWrapper("inner");
+      const outer = await makeWrapper("outer");
+      const fakeBin = await makeToolStub(true);
+
+      for (const pathValue of [`${inner}:${outer}:${fakeBin}`, `${outer}:${inner}:${fakeBin}`]) {
+        const result = runGit(inner, pathValue);
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe("git version fake-real\n");
+        expect(result.stderr).toBe("");
+      }
+    });
+
+    it("resolves real git past a legacy-generation outer wrapper", async () => {
+      const inner = await makeWrapper("inner");
+      const legacy = await createTempDir("spur-slots-legacy-");
+      tempDirs.push(legacy);
+      const fakeBin = await makeToolStub(true);
+      writeFileSync(
+        join(legacy, "git"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+path_without_wrapper=""
+IFS=: read -r -a path_parts <<< "\${PATH:-}"
+for path_part in "\${path_parts[@]}"; do
+  if [[ "$path_part" == "$SCRIPT_DIR" ]]; then
+    continue
+  fi
+  path_without_wrapper="\${path_without_wrapper:+$path_without_wrapper:}$path_part"
+done
+REAL_GIT=$(PATH="$path_without_wrapper" command -v git || true)
+if [[ -z "$REAL_GIT" ]]; then
+  echo "Spur git wrapper could not find git outside $SCRIPT_DIR" >&2
+  exit 127
+fi
+exec "$REAL_GIT" "$@"
+`,
+        { encoding: "utf8", mode: 0o755 },
+      );
+
+      const outer = await makeWrapper("outer");
+
+      for (const pathValue of [
+        `${inner}:${legacy}:${fakeBin}`,
+        `${legacy}:${inner}:${fakeBin}`,
+        `${inner}:${outer}:${legacy}:${fakeBin}`,
+        `${inner}:${legacy}:${outer}:${fakeBin}`,
+      ]) {
+        const result = runGit(inner, pathValue);
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe("git version fake-real\n");
+        expect(result.stderr).toBe("");
+      }
+    });
+
+    it("fails with exit 127 when only wrappers are on PATH", async () => {
+      const inner = await makeWrapper("inner");
+      const outer = await makeWrapper("outer");
+      const stub = await makeToolStub(false);
+
+      const result = runGit(inner, `${inner}:${outer}:${stub}`);
+      expect(result.status).toBe(127);
+      expect(result.stderr).toContain("Spur git wrapper could not find git");
+      expect(result.stderr).not.toContain("command not found");
+    });
+
+    it("resolves cwd git at an interior empty PATH component", async () => {
+      const inner = await makeWrapper("inner");
+      const tools = await makeToolStub(false);
+      const cwd = await makeToolStub(true);
+      const later = await makeToolStub(true);
+      writeFileSync(join(cwd, "git"), `#!/usr/bin/env bash\necho "git version cwd"\n`, {
+        encoding: "utf8",
+        mode: 0o755,
+      });
+
+      for (const pathValue of [`${inner}:${tools}::${later}`, `${inner}:${tools}::missing`]) {
+        const result = spawnSync(join(inner, "git"), ["--version"], {
+          cwd,
+          encoding: "utf8",
+          timeout: 5000,
+          env: { ...process.env, PATH: pathValue },
+        });
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe("git version cwd\n");
+        expect(result.stderr).toBe("");
+      }
+    });
+
+    it("preserves cwd lookup, PATH and argv when PATH is empty", async () => {
+      const inner = await makeWrapper("inner");
+      const cwd = await makeToolStub(true);
+      writeFileSync(
+        join(cwd, "git"),
+        `#!/usr/bin/env bash
+printf 'cwd-git\\nPATH=<%s>\\n' "$PATH"
+printf 'arg=<%s>\\n' "$@"
+`,
+        { encoding: "utf8", mode: 0o755 },
+      );
+      const result = spawnSync(join(inner, "git"), ["--version", "", "two words"], {
+        cwd,
+        encoding: "utf8",
+        timeout: 5000,
+        env: { ...process.env, PATH: "" },
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe("cwd-git\nPATH=<>\narg=<--version>\narg=<>\narg=<two words>\n");
+      expect(result.stderr).toBe("");
+    });
+
+    it("retains Bash default lookup when PATH is unset", async () => {
+      const inner = await makeWrapper("inner");
+      const cwd = await makeToolStub(true);
+      const env = { ...process.env };
+      delete env.PATH;
+      const result = spawnSync(join(inner, "git"), ["--version"], {
+        cwd,
+        encoding: "utf8",
+        timeout: 5000,
+        env,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(result.stdout).toMatch(/^git version \d/);
+      expect(result.stderr).toBe("");
+    });
+
+    it("skips cwd wrappers when PATH is empty", async () => {
+      const inner = await makeWrapper("inner");
+      const cwd = await makeToolStub(false);
+      writeFileSync(join(cwd, "git"), readFileSync(join(inner, "git")), { mode: 0o755 });
+      const result = spawnSync(join(inner, "git"), ["--version"], {
+        cwd,
+        encoding: "utf8",
+        timeout: 5000,
+        env: { ...process.env, PATH: "" },
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(127);
+      expect(result.stderr).toBe("Spur git wrapper could not find git outside Spur git wrappers\n");
+    });
+
+    it("blocks a bad-branch push through nested wrappers", async () => {
+      const inner = await makeWrapper("inner");
+      const outer = await makeWrapper("outer");
+      const fakeBin = await makeToolStub(false);
+      const capturedArgsPath = join(fakeBin, "git-args.txt");
+      writeFileSync(
+        join(fakeBin, "git"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == "-C /repo branch --show-current" ]]; then
+  echo "bad-name"
+  exit 0
+fi
+printf '%s\\n' "$@" > ${JSON.stringify(capturedArgsPath)}
+`,
+        { encoding: "utf8", mode: 0o755 },
+      );
+      writeFileSync(join(inner, "spur-branch"), `#!/usr/bin/env bash\nexit 42\n`, {
+        encoding: "utf8",
+        mode: 0o755,
+      });
+
+      const result = spawnSync(join(inner, "git"), ["-C", "/repo", "push"], {
+        encoding: "utf8",
+        timeout: 5000,
+        env: { ...process.env, PATH: `${inner}:${outer}:${fakeBin}` },
+      });
+      expect(result.status).toBe(42);
+      expect(() => readFileSync(capturedArgsPath, "utf8")).toThrow();
+    });
+  });
+
   it("keeps spur-sidecar isolated from an overwritten local spur wrapper", async () => {
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
@@ -447,6 +887,7 @@ exit 42
       dataDir,
       sessionId: "api-3",
       configPath,
+      installLockPath: join(dataDir, "install-and-restart.lock"),
     });
 
     const captureFile = join(dataDir, "captured-args.txt");

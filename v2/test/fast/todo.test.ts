@@ -50,6 +50,31 @@ async function fixture(status: SessionRecord["status"] = "running") {
 }
 
 describe("Spur ToDo ledger", () => {
+  it.each(["cli", "ui", "mcp", "telegram"] as const)("persists human %s actor", async (origin) => {
+    const { dataDir, session } = await fixture();
+    const human: TodoActor = { kind: "human", origin };
+    mutateTodo(dataDir, session, { action: "add", text: "Task", reason: "Human request" }, human);
+    expect(replayTodo(dataDir, session.id).items).toHaveLength(1);
+    expect(readFileSync(join(dataDir, "sessions", session.id, "todo.jsonl"), "utf8")).toContain(
+      JSON.stringify(human),
+    );
+  });
+
+  it("rejects an invalid human origin during disk replay", async () => {
+    const { dataDir, session } = await fixture();
+    mutateTodo(dataDir, session, { action: "add", text: "Task", reason: "Request" }, actor);
+    const path = join(dataDir, "sessions", session.id, "todo.jsonl");
+    const events = replayTodo(dataDir, session.id);
+    expect(events.items).toHaveLength(1);
+    writeFileSync(
+      path,
+      readFileSync(path, "utf8").replace(
+        JSON.stringify(actor),
+        JSON.stringify({ kind: "human", origin: "bot" }),
+      ),
+    );
+    expect(() => replayTodo(dataDir, session.id)).toThrow(TodoLedgerCorruptError);
+  });
   it("starts empty and writes no ledger file until the first real item", async () => {
     const { dataDir, session } = await fixture();
     const first = ensureTodoLedger(dataDir, session);

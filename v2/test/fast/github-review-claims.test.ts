@@ -200,7 +200,7 @@ describe("GitHub review batch claim scoping", () => {
     expect(branchArgs).toEqual(["b0=feature/b3"]);
   });
 
-  it("T4: a throw in the alias loop releases every claim the batch owned", async () => {
+  it("T4: per-session collection errors leave branch claims settled", async () => {
     const dataDir = await makeDataDir();
     const sessions = [
       unboundSession("api-1", "feature/t4-1"),
@@ -231,9 +231,8 @@ describe("GitHub review batch claim scoping", () => {
         }),
       ),
     );
-    // First call (github.ts:913, inside the pagination try/catch) passes
-    // through; the second call (github.ts:502, via the unguarded alias loop
-    // at :1327) throws, leaking every not-yet-settled claim pre-fix.
+    // The pagination read passes; collection reads throw for each session.
+    // Found branch claims settle before collection (github.ts:1947-2005).
     readCommentSeenRegistryMock
       .mockReset()
       .mockImplementationOnce(() => new Set<string>())
@@ -241,9 +240,16 @@ describe("GitHub review batch claim scoping", () => {
         throw new Error("comment registry unavailable");
       });
 
-    await expect(collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch")).rejects.toThrow(
-      "comment registry unavailable",
-    );
+    const results = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+    expect([...results.keys()].sort()).toEqual(["api-1", "api-2", "api-3"]);
+    for (const session of sessions) {
+      const result = results.get(session.id);
+      expect(result?.status).toBe("error");
+      if (result?.status !== "error") throw new Error(`missing error for ${session.id}`);
+      expect(result.error).toBeInstanceOf(Error);
+      if (!(result.error instanceof Error)) throw new Error(`invalid error for ${session.id}`);
+      expect(result.error.message).toBe("comment registry unavailable");
+    }
 
     for (const session of sessions) {
       const claim = claimPollPrLookup({

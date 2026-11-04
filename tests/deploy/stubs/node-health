@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${2:-}" == -e ]]; then cat; exit 0; fi
+case "${3:-}" in
+select-instance)
+  cat >/dev/null
+  [[ "${SPUR_DEPLOY_SELECT_RC:-0}" == 0 ]] || exit 1
+  printf '%s' "${SPUR_CONFIG:-$HOME/.spur/config.yaml}"
+  exit 0
+  ;;
+prepare-instance)
+  cat >/dev/null
+  printf '%s\n%s' "$5" "${SPUR_DEPLOY_TEST_DAEMON_PORT:-4310}"
+  exit 0
+  ;;
+record-instance) cat >/dev/null; exit 0 ;;
+esac
+cat >/dev/null
+printf 'probe mcp\n' >>"${SPUR_DEPLOY_STATE:?}"
+printf 'probe-context %s %s\n' "$HOME" "${SPUR_CONFIG:-}" >>"$SPUR_DEPLOY_STATE"
+exit "${SPUR_DEPLOY_MCP_HEALTH_RC:-0}"

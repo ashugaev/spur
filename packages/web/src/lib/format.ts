@@ -48,6 +48,30 @@ export function formatAbsoluteTime(iso: string): string {
   return new Date(timestamp).toLocaleString();
 }
 
+const SHORT_MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+] as const;
+
+// Locale-independent "Oct 27 03:00:02" in host-local time.
+export function formatShortTimestamp(iso: string): string {
+  const timestamp = Date.parse(iso);
+  if (Number.isNaN(timestamp)) return "unknown";
+  const date = new Date(timestamp);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${SHORT_MONTHS[date.getMonth()]} ${date.getDate()} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 export function truncateMiddle(value: string, maxLength = 64): string {
   if (value.length <= maxLength) return value;
   const keep = Math.max(8, Math.floor((maxLength - 1) / 2));

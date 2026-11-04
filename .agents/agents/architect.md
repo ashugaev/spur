@@ -11,7 +11,7 @@ PROCESS
   1  Recon: read `AGENTS.md`, `CLAUDE.md`, `git log origin/HEAD --oneline -10`, files/patterns the task touches.
   2  Split findings into verified facts (`file:line`), inferences, uncertainties.
   3  Gather requirements: functional, integration points, data flow, non-functional (perf, security, back-compat).
-     Apply .agents/skills/github/references/agent-protocol.md; record interface classification, proposed scope digest and matching user approval evidence/absence before dependent coding.
+     Apply .agents/skills/github/references/agent-protocol.md; record interface classification, proposed scope digest (spec only, never Telegram) and matching user approval evidence/absence before dependent coding; manifest clauses per its clause rule.
   4  Design the smallest change. Per decision: chosen approach, alternative, why it lost.
   5  Read `$SPUR_SESSION_ARTIFACTS_DIR/design/design-spec.md` when it exists; `Approval status` approved binds acceptance criteria to it.
 

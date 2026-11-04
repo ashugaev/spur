@@ -7,7 +7,14 @@ import {
 import { SessionLifecycleError } from "../../src/session-lifecycle.js";
 import { SessionResourceNotFoundError } from "../../src/session-service.js";
 import type { SourceSpawnSessionRequest, SourceWorkbench } from "../../src/event-sources/types.js";
+import type * as TimersPromises from "node:timers/promises";
 import type { ProjectListEntry, SessionView } from "../../src/types.js";
+
+// Route node:timers/promises through the global timer so vi fake timers control it.
+vi.mock("node:timers/promises", async (importOriginal) => ({
+  ...(await importOriginal<typeof TimersPromises>()),
+  setTimeout: (ms: number) => new Promise<void>((resolve) => globalThis.setTimeout(resolve, ms)),
+}));
 
 function session(overrides: Partial<SessionView> = {}): SessionView {
   return {
@@ -51,11 +58,35 @@ function harness(current = session()) {
     list: vi.fn(async () => [current]),
     get: vi.fn(async () => current),
     restore: vi.fn(async () => session()),
+    complete: vi.fn(async () => session()),
+    kill: vi.fn(async () => session()),
   };
   return { service, projects, workbench: createSourceWorkbench(service) };
 }
 
 describe("source workbench projection", () => {
+  it("delegates lifecycle actions with PR preservation and human Telegram provenance", async () => {
+    const { service, workbench } = harness();
+    await workbench.completeSession("demo-1");
+    await workbench.killSession("demo-1");
+    expect(service.complete).toHaveBeenCalledExactlyOnceWith(
+      "demo-1",
+      { prAction: "leave_open" },
+      {
+        todoActor: { kind: "human", origin: "telegram" },
+      },
+    );
+    expect(service.kill).toHaveBeenCalledExactlyOnceWith("demo-1", { prAction: "leave_open" });
+  });
+
+  it.each(["complete", "kill"] as const)("propagates %s rejection", async (action) => {
+    const { service, workbench } = harness();
+    const error = new Error("Dirty workspace");
+    service[action].mockRejectedValue(error);
+    await expect(
+      action === "complete" ? workbench.completeSession("demo-1") : workbench.killSession("demo-1"),
+    ).rejects.toBe(error);
+  });
   it("projects structured fields without exposing prompts or paths", () => {
     expect(
       projectSourceSession(
@@ -285,11 +316,44 @@ describe("sourceSessionById", () => {
     expect(get).toHaveBeenCalledTimes(2);
   });
 
-  it("rethrows a second snapshot change", async () => {
+  it("recovers on the third attempt", async () => {
+    const get = vi
+      .fn()
+      .mockRejectedValueOnce(lifecycleError("session_lifecycle_snapshot_changed"))
+      .mockRejectedValueOnce(lifecycleError("session_lifecycle_snapshot_changed"))
+      .mockResolvedValueOnce(session());
+    expect(await sourceSessionById({ get }, "demo-1")).toMatchObject({ id: "demo-1" });
+    expect(get).toHaveBeenCalledTimes(3);
+  });
+
+  it("waits 250ms then 750ms between snapshot-change retries", async () => {
+    vi.useFakeTimers();
+    try {
+      const get = vi
+        .fn()
+        .mockRejectedValueOnce(lifecycleError("session_lifecycle_snapshot_changed"))
+        .mockRejectedValueOnce(lifecycleError("session_lifecycle_snapshot_changed"))
+        .mockResolvedValueOnce(session());
+      const result = sourceSessionById({ get }, "demo-1");
+      await vi.advanceTimersByTimeAsync(249);
+      expect(get).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(get).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(749);
+      expect(get).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(get).toHaveBeenCalledTimes(3);
+      expect(await result).toMatchObject({ id: "demo-1" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rethrows after three snapshot changes", async () => {
     const error = lifecycleError("session_lifecycle_snapshot_changed");
     const get = vi.fn().mockRejectedValue(error);
     await expect(sourceSessionById({ get }, "demo-1")).rejects.toBe(error);
-    expect(get).toHaveBeenCalledTimes(2);
+    expect(get).toHaveBeenCalledTimes(3);
   });
 
   it("does not retry other lifecycle errors", async () => {
@@ -302,6 +366,10 @@ describe("sourceSessionById", () => {
 
 // Compile-time capability boundaries: neither transport can bypass core admission.
 function requestShapes(workbench: SourceWorkbench): void {
+  // @ts-expect-error completion exposes no lifecycle overrides
+  void workbench.completeSession("s", { skipPrCheck: true });
+  // @ts-expect-error kill exposes no force override
+  void workbench.killSession("s", { force: true });
   void workbench.restoreSession({
     sessionId: "s",
     expectedProject: "p",

@@ -1,0 +1,14 @@
+{"timestamp":"2026-05-10T11:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"run the edge cases"}]}}
+{"timestamp":"2026-05-10T11:00:01.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_early","output":"early output\n"}}
+{"timestamp":"2026-05-10T11:00:02.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"echo early\"}","call_id":"call_early"}}
+{"timestamp":"2026-05-10T11:00:03.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"echo reused-1\"}","call_id":"call_reused"}}
+{"timestamp":"2026-05-10T11:00:04.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_reused","output":"reused first\n"}}
+{"this line is not valid json
+{"timestamp":"2026-05-10T11:00:05.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"echo reused-2\"}","call_id":"call_reused"}}
+
+{"timestamp":"2026-05-10T11:00:06.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_reused","output":"reused second\n"}}
+{"timestamp":"2026-05-10T11:00:07.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"true\"}","call_id":"call_empty"}}
+{"timestamp":"2026-05-10T11:00:08.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_empty","output":"kept output\n"}}
+{"timestamp":"2026-05-10T11:00:09.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_empty","output":""}}
+{"timestamp":"2026-05-10T11:00:10.000Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input","arguments":"{}","call_id":"call_question"}}
+{"timestamp":"2026-05-10T11:00:11.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"edge cases done"}]}}

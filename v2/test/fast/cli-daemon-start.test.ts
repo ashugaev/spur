@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
 
 // Ordering is the property under test: a session must not be able to spawn
 // before the npm global-prefix pin file exists, so `ensureNpmPinFile` must
@@ -31,6 +32,7 @@ const assertConfigMayUseProdSlotMock = vi.fn();
 const restartDaemonIfRunningMock = vi.fn();
 const stopDaemonIfRunningMock = vi.fn();
 const installHostSkillsForDaemonStartMock = vi.fn(() => []);
+const isDefaultInstanceConfigPathMock = vi.fn((_configPath: string) => true);
 
 vi.mock("../../src/npm-prefix.js", () => ({
   ensureNpmPinFile: ensureNpmPinFileMock,
@@ -58,6 +60,7 @@ vi.mock("../../src/config.js", () => ({
   ensureInstanceConfig: ensureInstanceConfigMock,
   findProjectConfigPath: vi.fn(),
   findProjectConfigPathInDirectory: vi.fn(),
+  isDefaultInstanceConfigPath: isDefaultInstanceConfigPathMock,
   loadConfig: vi.fn(() => ({
     tmux: { socketName: "spur-test" },
   })),
@@ -78,7 +81,8 @@ vi.mock("../../src/host-skills.js", () => ({
   renderHostSkillWarnings: vi.fn(() => []),
 }));
 
-vi.mock("../../src/runtime-tmux.js", () => ({
+vi.mock("../../src/runtime-tmux.js", async (importOriginal) => ({
+  TmuxProbeUnknownError: (await importOriginal<typeof RuntimeTmuxModule>()).TmuxProbeUnknownError,
   setTmuxSocketName: vi.fn(),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   withTmuxSocketArgs: vi.fn((args: string[]) => args),
@@ -106,6 +110,8 @@ describe("spur daemon CLI", () => {
     assertConfigMayUseProdSlotMock.mockImplementation(() => {});
     installHostSkillsForDaemonStartMock.mockClear();
     installHostSkillsForDaemonStartMock.mockImplementation(() => []);
+    isDefaultInstanceConfigPathMock.mockReset();
+    isDefaultInstanceConfigPathMock.mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -118,6 +124,39 @@ describe("spur daemon CLI", () => {
     expect(ensureNpmPinFileMock).toHaveBeenCalledTimes(1);
     expect(startServerMock).toHaveBeenCalledTimes(1);
     expect(callOrder).toEqual(["ensureNpmPinFile", "startServer"]);
+  });
+
+  it("skips the npm pin file for a non-default instance config", async () => {
+    isDefaultInstanceConfigPathMock.mockReturnValue(false);
+
+    await parseCli(["daemon", "start", "--json"]);
+
+    expect(isDefaultInstanceConfigPathMock).toHaveBeenCalledWith("/tmp/spur.yaml");
+    expect(ensureNpmPinFileMock).not.toHaveBeenCalled();
+    expect(startServerMock).toHaveBeenCalledTimes(1);
+    expect(callOrder).toEqual(["startServer"]);
+    expect(writeStderrMock).not.toHaveBeenCalledWith(expect.stringContaining("pin file"));
+    expect(installHostSkillsForDaemonStartMock).toHaveBeenCalledTimes(1);
+    expect(installHostSkillsForDaemonStartMock).toHaveBeenCalledWith("/tmp/spur.yaml");
+  });
+
+  it("exports the resolved config path as SPUR_CONFIG so daemon children inherit it", async () => {
+    const previous = process.env["SPUR_CONFIG"];
+    delete process.env["SPUR_CONFIG"];
+    let seen: string | undefined;
+    startServerMock.mockImplementationOnce(async () => {
+      seen = process.env["SPUR_CONFIG"];
+      return {
+        info: () => ({ baseUrl: "http://127.0.0.1:4310", pid: 4242, startedAt: "2026-01-01" }),
+      };
+    });
+    try {
+      await parseCli(["daemon", "start", "--json"]);
+    } finally {
+      if (previous === undefined) delete process.env["SPUR_CONFIG"];
+      else process.env["SPUR_CONFIG"] = previous;
+    }
+    expect(seen).toBe("/tmp/spur.yaml");
   });
 
   it("reports a pin-file write failure via stderr instead of aborting the boot", async () => {

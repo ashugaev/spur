@@ -3,10 +3,12 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { parse } from "yaml";
 import { integer, object, string, ReviewAppError } from "./github-app.js";
+import { requiredCiJobNames } from "./ci-job-definitions.js";
 import {
   GateGitHub,
   readGateSnapshot,
   evaluateSnapshot,
+  changedEvidenceCategories,
   workflowPath,
   type GatePolicy,
 } from "./review-gate.js";
@@ -122,20 +124,41 @@ export async function produceGates(
       active();
       phase = "snapshot-before";
       progress();
-      const before = await readGateSnapshot(api, policy, number);
+      const reviews = await api.pages(`/repos/${policy.repository}/pulls/${number}/reviews`);
       active();
-      const result = evaluateSnapshot(policy, number, before);
-      phase = "snapshot-after";
-      progress();
-      const after = evaluateSnapshot(policy, number, await readGateSnapshot(api, policy, number));
-      active();
-      const fresh =
-        result.fingerprint === after.fingerprint &&
-        result.H === H &&
-        result.B === B &&
-        result.H === after.H &&
-        result.B === after.B;
-      const approved = fresh && result.status === "APPROVED" && after.status === "APPROVED";
+      const mayApprove = [policy.codeActor, policy.browserActor].every((actor) =>
+        reviews.some(
+          (row) =>
+            row.user !== null &&
+            typeof row.user === "object" &&
+            !Array.isArray(row.user) &&
+            object(row.user).id === actor &&
+            row.state === "APPROVED" &&
+            row.commit_id === H,
+        ),
+      );
+      let approved = false;
+      let summary = "native-approval-missing";
+      if (mayApprove) {
+        const before = await readGateSnapshot(api, policy, number);
+        active();
+        const result = evaluateSnapshot(policy, number, before);
+        phase = "snapshot-after";
+        progress();
+        const finalSnapshot = await readGateSnapshot(api, policy, number);
+        const after = evaluateSnapshot(policy, number, finalSnapshot);
+        active();
+        const fresh =
+          result.fingerprint === after.fingerprint &&
+          result.H === H &&
+          result.B === B &&
+          result.H === after.H &&
+          result.B === after.B;
+        approved = fresh && result.status === "APPROVED" && after.status === "APPROVED";
+        summary = fresh
+          ? after.reason
+          : `Evidence changed during evaluation: ${changedEvidenceCategories(before, finalSnapshot)}`;
+      }
       phase = "completion-write";
       progress();
       active();
@@ -144,7 +167,7 @@ export async function produceGates(
         conclusion: approved ? "success" : "failure",
         output: {
           title: approved ? "All approval gates pass" : "Approval blocked",
-          summary: fresh ? after.reason : "Evidence changed during evaluation",
+          summary,
         },
       });
       active();
@@ -196,7 +219,7 @@ export async function runProducer(env: NodeJS.ProcessEnv): Promise<void> {
   const target = await verifyWake(api, repo, string(env.GITHUB_EVENT_NAME), payload);
   const ciPath = resolve(fileURLToPath(new URL("../../.github/workflows/ci.yml", import.meta.url)));
   const definition = object(parse(await readFile(ciPath, "utf8")));
-  const jobs = Object.values(object(definition.jobs)).map((value) => string(object(value).name));
+  const jobs = requiredCiJobNames(definition);
   const workflow = object(await api.request(`/repos/${repo}/actions/workflows/ci.yml`));
   if (workflow.path !== ".github/workflows/ci.yml")
     throw new ReviewAppError("ci-workflow-mismatch");
