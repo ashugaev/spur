@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ghModule from "../../src/gh.js";
 import {
   clearGitHubMergeConflictRestoreReplay,
-  hasGitHubMergeConflictRestoreReplay,
+  readGitHubMergeConflictRestoreReplay,
   readGitHubReviewPagination,
   readGitHubSourceSnapshot,
   requestGitHubMergeConflictRestoreReplay,
@@ -3416,7 +3416,9 @@ describe("github source rearm", () => {
           prNumber: 42,
         },
       });
-      expect(hasGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(false);
+      expect(
+        readGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1"),
+      ).toBeUndefined();
     } finally {
       controller.abort();
       handle.stop();
@@ -3464,7 +3466,9 @@ describe("github source rearm", () => {
 
     try {
       expect(events).toEqual([]);
-      expect(hasGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(false);
+      expect(
+        readGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1"),
+      ).toBeUndefined();
     } finally {
       controller.abort();
       handle.stop();
@@ -3521,7 +3525,9 @@ describe("github source rearm", () => {
 
     try {
       expect(events).toEqual([]);
-      expect(hasGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(false);
+      expect(
+        readGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1"),
+      ).toBeUndefined();
     } finally {
       controller.abort();
       handle.stop();
@@ -3554,11 +3560,39 @@ describe("github source rearm", () => {
     });
 
     try {
-      expect(hasGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(false);
+      expect(
+        readGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1"),
+      ).toBeUndefined();
     } finally {
       controller.abort();
       handle.stop();
       clearGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    }
+  });
+
+  it("stores a fresh restore id per request and rejects malformed markers", async () => {
+    const { dataDir } = await createRuntimeState();
+    requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    const first = readGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    expect(first).toEqual(expect.any(String));
+    expect(readGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(first);
+    requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    const second = readGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    expect(second).toEqual(expect.any(String));
+    expect(second).not.toBe(first);
+    const markerPath = join(
+      dataDir,
+      "source-state",
+      "github",
+      "api",
+      "pr-watch",
+      "api-1.merge-conflict",
+    );
+    for (const content of ["true", "{not json", JSON.stringify({ restoreId: "" })]) {
+      await writeFile(markerPath, content);
+      expect(
+        readGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1"),
+      ).toBeUndefined();
     }
   });
 });

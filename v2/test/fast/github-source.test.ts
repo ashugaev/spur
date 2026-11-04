@@ -8,7 +8,7 @@ const listSessionsMock = vi.fn();
 const readReviewSourceSnapshotsMock = vi.fn();
 const writeReviewSourceSnapshotMock = vi.fn();
 const deleteReviewSourceSnapshotMock = vi.fn();
-const hasGitHubMergeConflictRestoreReplayMock = vi.fn();
+const readGitHubMergeConflictRestoreReplayMock = vi.fn();
 const clearGitHubMergeConflictRestoreReplayMock = vi.fn();
 const readWorkItemRegistryMock = vi.fn();
 const recordWorkItemMock = vi.fn();
@@ -48,7 +48,6 @@ vi.mock("../../src/metadata.js", () => ({
   clearGitHubMergeConflictRestoreReplay: clearGitHubMergeConflictRestoreReplayMock,
   clearGitHubPollDisabledSession: clearGitHubPollDisabledSessionMock,
   deleteReviewSourceSnapshot: deleteReviewSourceSnapshotMock,
-  hasGitHubMergeConflictRestoreReplay: hasGitHubMergeConflictRestoreReplayMock,
   listSessions: listSessionsMock,
   markGitHubPollDisabledChecked: markGitHubPollDisabledCheckedMock,
   readCommentSeenRegistry: readCommentSeenRegistryMock,
@@ -56,6 +55,7 @@ vi.mock("../../src/metadata.js", () => ({
   recordIgnoredGitHubFeedback: recordIgnoredGitHubFeedbackMock,
   listIgnoredGitHubFeedbackSessions: listIgnoredGitHubFeedbackSessionsMock,
   deleteIgnoredGitHubFeedback: deleteIgnoredGitHubFeedbackMock,
+  readGitHubMergeConflictRestoreReplay: readGitHubMergeConflictRestoreReplayMock,
   readGitHubPollDisabled: readGitHubPollDisabledMock,
   readGitHubReviewPagination: readGitHubReviewPaginationMock,
   readLifecycleBaselinedSessions: readLifecycleBaselinedSessionsMock,
@@ -275,7 +275,7 @@ describe("github source", () => {
     vi.clearAllMocks();
     _resetGhUsageForTests();
     ghTransportMock.mockImplementation(legacyGhAdapter);
-    hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(false);
+    readGitHubMergeConflictRestoreReplayMock.mockReturnValue(undefined);
     readWorkItemRegistryMock.mockReturnValue(new Set());
     readCommentSeenRegistryMock.mockReturnValue(new Set());
     readIgnoredGitHubFeedbackMock.mockReturnValue(new Set());
@@ -1281,7 +1281,7 @@ describe("github source", () => {
   it("unions restore replay with new comments and persists confirmed conflict clearance", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
-    hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(true);
+    readGitHubMergeConflictRestoreReplayMock.mockReturnValue("restore-1");
     const emit = vi.fn();
     mockLifecyclePoll(
       prView({ mergeable: "CONFLICTING" }),
@@ -1359,28 +1359,38 @@ describe("github source", () => {
       handle.stop();
     });
 
-    it("replays a persisted conflict on each restore with a fresh revision", async () => {
+    const replayRevisions = async (restoreIds: string[]): Promise<unknown[]> => {
       const stored = conflictSignal({ revision: "h1:b1", changeKey: "h1:b1" });
       readReviewSourceSnapshotsMock.mockReturnValue(
         new Map([["api-a1b2", storedSnapshot([stored])]]),
       );
       listSessionsMock.mockReturnValue([makeSession()]);
-      hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(true);
       const emit = vi.fn();
       const revisions: unknown[] = [];
-      for (let restore = 0; restore < 2; restore += 1) {
+      for (const restoreId of restoreIds) {
+        readGitHubMergeConflictRestoreReplayMock.mockReturnValue(restoreId);
         mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h1", baseRefOid: "b1" }));
         const handle = await startLifecycle(emit);
         const [, data] = conflictEmits(emit).at(-1) ?? [];
         const signal = (data as { signals: ReviewSignal[] }).signals[0];
         expect(signal?.changeKey).toBe("h1:b1");
-        expect(signal?.revision).toMatch(/^h1:b1:restore:/);
+        expect(signal?.revision).toBe(`h1:b1:restore:${restoreId}`);
         revisions.push(signal?.revision);
         expect(lastSnapshot().signals.get("merge_conflict")).toEqual(stored);
         handle.stop();
       }
-      expect(conflictEmits(emit)).toHaveLength(2);
-      expect(revisions[0]).not.toBe(revisions[1]);
+      return revisions;
+    };
+
+    it("replays a persisted conflict on each restore with that restore's revision", async () => {
+      const revisions = await replayRevisions(["restore-1", "restore-2"]);
+      expect(new Set(revisions).size).toBe(2);
+    });
+
+    it("keeps the replay revision stable when the restore marker outlives its emit", async () => {
+      // Same revision lets auto-ping (head, base, revision) dedupe drop the repeat.
+      const revisions = await replayRevisions(["restore-1", "restore-1"]);
+      expect(new Set(revisions).size).toBe(1);
     });
 
     it("rechecks UNKNOWN mergeability once and emits the settled conflict", async () => {

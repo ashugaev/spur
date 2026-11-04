@@ -9,6 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join, relative, sep } from "node:path";
 import { isCursorDeliveryId } from "./agents/cursor-submit-ack.js";
 import { appendEventLog } from "./event-log.js";
@@ -1763,13 +1764,23 @@ export function deleteGitHubSourceSnapshot(
   deleteReviewSourceSnapshot(dataDir, "github", projectId, sourceId, sessionId);
 }
 
-export function hasGitHubMergeConflictRestoreReplay(
+/** Restore id of a pending merge-conflict replay; undefined when absent or malformed. */
+export function readGitHubMergeConflictRestoreReplay(
   dataDir: string,
   projectId: string,
   sourceId: string,
   sessionId: string,
-): boolean {
-  return existsSync(githubMergeConflictRestoreFilePath(dataDir, projectId, sourceId, sessionId));
+): string | undefined {
+  const path = githubMergeConflictRestoreFilePath(dataDir, projectId, sourceId, sessionId);
+  if (!existsSync(path)) return undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object") return undefined;
+    const restoreId = (parsed as { restoreId?: unknown }).restoreId;
+    return typeof restoreId === "string" && restoreId.length > 0 ? restoreId : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function requestGitHubMergeConflictRestoreReplay(
@@ -1778,7 +1789,9 @@ export function requestGitHubMergeConflictRestoreReplay(
   sourceId: string,
   sessionId: string,
 ): void {
-  writeJsonFile(githubMergeConflictRestoreFilePath(dataDir, projectId, sourceId, sessionId), true);
+  writeJsonFile(githubMergeConflictRestoreFilePath(dataDir, projectId, sourceId, sessionId), {
+    restoreId: randomUUID(),
+  });
 }
 
 export function clearGitHubMergeConflictRestoreReplay(

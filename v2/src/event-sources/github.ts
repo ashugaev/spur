@@ -26,7 +26,7 @@ import {
   deleteIgnoredGitHubFeedback,
   clearGitHubPollDisabledSession,
   deleteReviewSourceSnapshot,
-  hasGitHubMergeConflictRestoreReplay,
+  readGitHubMergeConflictRestoreReplay,
   listSessions,
   listIgnoredGitHubFeedbackSessions,
   markGitHubPollDisabledChecked,
@@ -695,7 +695,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       );
       for (const session of pollableSessions) {
         try {
-          const restoreReplayRequested = hasGitHubMergeConflictRestoreReplay(
+          const restoreReplayId = readGitHubMergeConflictRestoreReplay(
             deps.dataDir,
             deps.projectId,
             deps.sourceId,
@@ -740,7 +740,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
               deps.sourceId,
               session.id,
             );
-            if (restoreReplayRequested) {
+            if (restoreReplayId) {
               clearGitHubMergeConflictRestoreReplay(
                 deps.dataDir,
                 deps.projectId,
@@ -839,14 +839,15 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           const toEmit = baselined
             ? candidates
             : candidates.filter((signal) => !LIFECYCLE_KINDS.has(signal.kind));
-          if (restoreReplayRequested) {
+          if (restoreReplayId) {
             const mergeConflictSignal = next.get("merge_conflict");
             if (mergeConflictSignal) {
-              // A restore re-delivers the active conflict once: a per-restore revision
-              // passes the auto-ping (head, base) dedupe that blocks plain repeats.
+              // A restore re-delivers the active conflict once: the stored restore id makes
+              // a per-restore revision that passes the (head, base) dedupe; a marker that
+              // outlives its emit repeats the same revision and stays deduped.
               const replay = {
                 ...mergeConflictSignal,
-                revision: `${mergeConflictSignal.revision ?? ""}:restore:${randomUUID()}`,
+                revision: `${mergeConflictSignal.revision ?? ""}:restore:${restoreReplayId}`,
               };
               const index = toEmit.findIndex((signal) => signal.key === replay.key);
               if (index === -1) toEmit.push(replay);
