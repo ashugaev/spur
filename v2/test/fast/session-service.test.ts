@@ -24145,22 +24145,29 @@ describe("SessionService", () => {
         });
         await first.settleBackgroundSpawns();
         expect(metadata.readSession(TEST_DATA_DIR, accepted.id)?.status).toBe("running");
-        expect(createTmuxSessionMock).toHaveBeenCalledWith(expect.objectContaining({
-          env: expect.objectContaining({
-            CURSOR_CONFIG_DIR: `${TEST_DATA_DIR}/cursor/${accepted.id}`,
-            SPUR_CURSOR_RESTRICT_WRITES: "1",
+        expect(createTmuxSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({
+            env: expect.objectContaining({
+              CURSOR_CONFIG_DIR: `${TEST_DATA_DIR}/cursor/${accepted.id}`,
+              SPUR_CURSOR_RESTRICT_WRITES: "1",
+            }),
           }),
-        }));
-        expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("cursor", expect.any(String),
-          expect.objectContaining({ cursorConfigDir: `${TEST_DATA_DIR}/cursor/${accepted.id}` }));
+        );
+        expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+          "cursor",
+          expect.any(String),
+          expect.objectContaining({ cursorConfigDir: `${TEST_DATA_DIR}/cursor/${accepted.id}` }),
+        );
         expect(createAgentSubmitAckBindingMock).toHaveBeenCalledTimes(1);
         const pending = writeSessionMock.mock.calls.find(
-          ([, record]) => record.id === accepted.id &&
+          ([, record]) =>
+            record.id === accepted.id &&
             record.spawnIntent?.phase === "launching" &&
             record.spawnIntent.submission.state === "pending",
         )?.[1] as SessionRecord | undefined;
         const correlated = writeSessionMock.mock.calls.find(
-          ([, record]) => record.id === accepted.id &&
+          ([, record]) =>
+            record.id === accepted.id &&
             record.spawnIntent?.submission.ackBaseline?.agent === "cursor",
         )?.[1] as SessionRecord | undefined;
         expect(correlated?.spawnIntent?.submission).toMatchObject({
@@ -25254,7 +25261,9 @@ describe("SessionService", () => {
       expect(sessions.get(accepted.id)?.spawnIntent).toBeDefined();
       expect(sessions.get(accepted.id)?.error).toBeDefined();
       expect(waitForOpenCodeLaunchMessageMock).toHaveBeenCalledWith(
-        "ses_trusted", accepted.worktreePath, 0,
+        "ses_trusted",
+        accepted.worktreePath,
+        0,
       );
       waitForOpenCodeLaunchMessageMock.mockResolvedValue(true);
       await queue.runMemoryShedTick();
@@ -27529,8 +27538,9 @@ describe("SessionService", () => {
 
       async function spawnOutcome(service: unknown) {
         try {
-          (service as { assertAdmissible(project: string, context: "spawn"): void })
-            .assertAdmissible("api", "spawn");
+          (
+            service as { assertAdmissible(project: string, context: "spawn"): void }
+          ).assertAdmissible("api", "spawn");
           return null;
         } catch (error) {
           return error;
