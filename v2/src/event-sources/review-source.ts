@@ -104,12 +104,11 @@ export function createReviewSourceModule(
               );
               const next = collected.snapshot;
               const heldConflict = previous?.get("merge_conflict");
-              const conflict = next.get("merge_conflict");
               if (
-                collected.conflictBaseUnknown &&
+                collected.conflictHead &&
+                next.has("merge_conflict") &&
                 heldConflict?.revision &&
-                conflict?.revision &&
-                revisionHead(heldConflict.revision) === revisionHead(conflict.revision)
+                revisionHead(heldConflict.revision) === collected.conflictHead
               ) {
                 next.set("merge_conflict", heldConflict);
               }

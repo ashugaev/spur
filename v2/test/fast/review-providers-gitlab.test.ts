@@ -320,7 +320,10 @@ describe("gitlabReviewProvider.collectSignals", () => {
     expect(endpoints.some((endpoint) => endpoint.includes("/repository/branches/"))).toBe(false);
   });
 
-  function mockBrokenBranchLookup(branchResponse: () => Promise<string>): void {
+  function mockBrokenBranchLookup(
+    branchResponse: () => Promise<string>,
+    withDiffRefs = true,
+  ): void {
     const mr = {
       iid: 9,
       title: "feat: x",
@@ -328,7 +331,7 @@ describe("gitlabReviewProvider.collectSignals", () => {
       has_conflicts: true,
       sha: "head-sha",
       target_branch: "main",
-      diff_refs: { base_sha: "merge-base-sha" },
+      ...(withDiffRefs ? { diff_refs: { base_sha: "merge-base-sha" } } : {}),
     };
     glabMock.mockImplementation(async (_cwd: string, ...args: unknown[]) => {
       const endpoint = String(args[1] ?? "");
@@ -361,7 +364,23 @@ describe("gitlabReviewProvider.collectSignals", () => {
       expect(second?.snapshot.get("merge_conflict")?.revision).toBe(
         first?.snapshot.get("merge_conflict")?.revision,
       );
-      expect(first?.conflictBaseUnknown).toBe(true);
+      expect(first?.conflictHead).toBe("head-sha");
     },
   );
+
+  it("keys the conflict on the head and sets conflictHead when the list omits diff_refs and the branch lookup fails", async () => {
+    mockBrokenBranchLookup(() => Promise.reject(new Error("glab api 404")), false);
+    const poll = () =>
+      gitlabReviewProvider.collectSignals(makeSession(), "/tmp/data", "proj", "src");
+
+    const first = await poll();
+    const second = await poll();
+
+    expect(first?.conflictHead).toBe("head-sha");
+    expect(first?.snapshot.get("merge_conflict")).toMatchObject({
+      changeKey: "head-sha:",
+      revision: "head-sha:",
+    });
+    expect(second?.snapshot.get("merge_conflict")?.changeKey).toBe("head-sha:");
+  });
 });

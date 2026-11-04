@@ -270,17 +270,18 @@ async function collectSignals(
         : {}),
     });
   }
-  let conflictBaseUnknown = false;
+  let conflictHead: string | undefined;
   if (hasMergeConflict(request)) {
     const targetTip =
       request.headSha && mergeRequest.target_branch
         ? await fetchBranchTip(session.worktreePath, request.repo, mergeRequest.target_branch)
         : undefined;
-    // Tip lookup failed: fall back to the merge-base; the review source holds
-    // the prior key for the same head so a flaky lookup cannot flip it.
-    conflictBaseUnknown = Boolean(request.headSha) && !targetTip;
-    const baseKey = targetTip ?? request.baseSha;
-    const revision = request.headSha && baseKey ? `${request.headSha}:${baseKey}` : undefined;
+    // Tip lookup failed: fall back to the merge-base, or `<head>:` when the
+    // list response omits diff_refs; the review source holds the prior key for
+    // the same head so a flaky lookup cannot flip it.
+    if (request.headSha && !targetTip) conflictHead = request.headSha;
+    const baseKey = targetTip ?? request.baseSha ?? "";
+    const revision = request.headSha ? `${request.headSha}:${baseKey}` : undefined;
     snapshot.set("merge_conflict", {
       key: "merge_conflict",
       kind: "merge_conflict",
@@ -301,7 +302,7 @@ async function collectSignals(
       signals: [],
     },
     snapshot,
-    ...(conflictBaseUnknown ? { conflictBaseUnknown } : {}),
+    ...(conflictHead ? { conflictHead } : {}),
   };
 }
 

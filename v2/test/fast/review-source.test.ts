@@ -466,9 +466,9 @@ describe("review source merge_conflict hold on unknown base tip", () => {
     changeKey: revision,
     revision,
   });
-  const poll = (revision: string, conflictBaseUnknown = false) => ({
+  const poll = (revision: string, baseUnknown = false) => ({
     ...collected(42, [conflict(revision)]),
-    ...(conflictBaseUnknown ? { conflictBaseUnknown } : {}),
+    ...(baseUnknown ? { conflictHead: revision.split(":")[0] } : {}),
   });
 
   async function run(stored: ReviewSignal[], polls: ReturnType<typeof poll>[]): Promise<string[]> {
@@ -524,5 +524,21 @@ describe("review source merge_conflict hold on unknown base tip", () => {
       [poll("head-2:merge-base", true), poll("head-2:merge-base", true)],
     );
     expect(pings).toEqual(["head-2:merge-base"]);
+  });
+
+  it("holds the prior key when the lookup fails without diff_refs for the same head", async () => {
+    const pings = await run(
+      [conflict("head-1:tip-1")],
+      [poll("head-1:", true), poll("head-1:", true), poll("head-1:tip-1")],
+    );
+    expect(pings).toEqual([]);
+  });
+
+  it("pings the head-only key once after a head change without diff_refs", async () => {
+    const pings = await run(
+      [conflict("head-1:tip-1")],
+      [poll("head-2:", true), poll("head-2:", true)],
+    );
+    expect(pings).toEqual(["head-2:"]);
   });
 });
