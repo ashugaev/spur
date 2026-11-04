@@ -1325,6 +1325,7 @@ describe("github source", () => {
     const conflictEmits = (emit: ReturnType<typeof vi.fn>) =>
       emit.mock.calls.filter(([name]) => name === "github:merge_conflict");
     const unknownView = { mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" };
+    const baseTip = (oid: string) => ({ baseRef: { target: { oid } } });
     const recheckView = (overrides: Record<string, unknown>) => JSON.stringify(overrides);
     const recheckCalls = () =>
       ghMock.mock.calls.filter(
@@ -1334,7 +1335,7 @@ describe("github source", () => {
     it("emits a conflict present at the first observation without emitExisting", async () => {
       readReviewSourceSnapshotsMock.mockReturnValue(new Map());
       listSessionsMock.mockReturnValue([makeSession()]);
-      mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h1", baseRefOid: "b1" }));
+      mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h1", ...baseTip("b1") }));
       const emit = vi.fn();
       const handle = await startLifecycle(emit);
       expect(conflictEmits(emit)).toHaveLength(1);
@@ -1352,7 +1353,7 @@ describe("github source", () => {
         ]),
       );
       listSessionsMock.mockReturnValue([makeSession()]);
-      mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h1", baseRefOid: "b1" }));
+      mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h1", ...baseTip("b1") }));
       const emit = vi.fn();
       const handle = await startLifecycle(emit);
       expect(conflictEmits(emit)).toHaveLength(0);
@@ -1369,7 +1370,7 @@ describe("github source", () => {
       const revisions: unknown[] = [];
       for (const restoreId of restoreIds) {
         readGitHubMergeConflictRestoreReplayMock.mockReturnValue(restoreId);
-        mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h1", baseRefOid: "b1" }));
+        mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h1", ...baseTip("b1") }));
         const handle = await startLifecycle(emit);
         const [, data] = conflictEmits(emit).at(-1) ?? [];
         const signal = (data as { signals: ReviewSignal[] }).signals[0];
@@ -1396,7 +1397,7 @@ describe("github source", () => {
     it("rechecks UNKNOWN mergeability once and emits the settled conflict", async () => {
       readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
       listSessionsMock.mockReturnValue([makeSession()]);
-      mockLifecyclePoll(prView({ ...unknownView, headRefOid: "h1", baseRefOid: "b1" }));
+      mockLifecyclePoll(prView({ ...unknownView, headRefOid: "h1", ...baseTip("b1") }));
       ghMock.mockResolvedValueOnce(
         recheckView({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }),
       );
@@ -1417,7 +1418,7 @@ describe("github source", () => {
       const emit = vi.fn();
       let snapshot: ReviewSnapshot | undefined;
       for (let poll = 0; poll < 5; poll += 1) {
-        mockLifecyclePoll(prView({ ...unknownView, headRefOid: "h1", baseRefOid: "b1" }));
+        mockLifecyclePoll(prView({ ...unknownView, headRefOid: "h1", ...baseTip("b1") }));
         ghMock.mockResolvedValueOnce(recheckView(unknownView));
         const handle = await startLifecycle(emit);
         snapshot = lastSnapshot();
@@ -1436,7 +1437,7 @@ describe("github source", () => {
         ]),
       );
       listSessionsMock.mockReturnValue([makeSession()]);
-      mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h2", baseRefOid: "b1" }));
+      mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h2", ...baseTip("b1") }));
       const emit = vi.fn();
       const handle = await startLifecycle(emit);
       expect(conflictEmits(emit)).toHaveLength(1);
@@ -1444,12 +1445,40 @@ describe("github source", () => {
       handle.stop();
     });
 
+    it("keys the conflict on the base branch tip, so a base-only push emits once", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(
+        new Map([
+          ["api-a1b2", storedSnapshot([conflictSignal({ revision: "h1:b1", changeKey: "h1:b1" })])],
+        ]),
+      );
+      listSessionsMock.mockReturnValue([makeSession()]);
+      // baseRefOid lags at the merge-base; only baseRef.target.oid moves.
+      const view = prView({
+        mergeable: "CONFLICTING",
+        headRefOid: "h1",
+        baseRefOid: "b1",
+        ...baseTip("b2"),
+      });
+      mockLifecyclePoll(view);
+      const emit = vi.fn();
+      const handle = await startLifecycle(emit);
+      expect(conflictEmits(emit)).toHaveLength(1);
+      expect(lastSnapshot().signals.get("merge_conflict")?.changeKey).toBe("h1:b2");
+      handle.stop();
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", lastSnapshot()]]));
+      mockLifecyclePoll(view);
+      const again = vi.fn();
+      const next = await startLifecycle(again);
+      expect(conflictEmits(again)).toHaveLength(0);
+      next.stop();
+    });
+
     it("adopts a revision on a legacy snapshot with the same text without emitting", async () => {
       readReviewSourceSnapshotsMock.mockReturnValue(
         new Map([["api-a1b2", storedSnapshot([conflictSignal()])]]),
       );
       listSessionsMock.mockReturnValue([makeSession()]);
-      mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h1", baseRefOid: "b1" }));
+      mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h1", ...baseTip("b1") }));
       const emit = vi.fn();
       const handle = await startLifecycle(emit);
       expect(conflictEmits(emit)).toHaveLength(0);

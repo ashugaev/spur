@@ -521,7 +521,7 @@ function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | 
 
 const GITHUB_REVIEW_THREAD_FIELDS = `id isResolved comments(last:100){nodes{databaseId body path line author{login}} pageInfo{hasPreviousPage startCursor}}`;
 const GITHUB_CHECK_CONTEXT_FIELDS = `... on CheckRun{name conclusion status checkSuite{databaseId createdAt app{databaseId} workflowRun{event workflow{databaseId}}}} ... on StatusContext{context state createdAt creator{login}}`;
-const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName headRefOid baseRefOid headRepository{nameWithOwner} author{login} reviewDecision mergeable mergeStateStatus isDraft state
+const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName headRefOid baseRef{target{oid}} headRepository{nameWithOwner} author{login} reviewDecision mergeable mergeStateStatus isDraft state
   commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{
     ${GITHUB_CHECK_CONTEXT_FIELDS}
   } pageInfo{hasPreviousPage startCursor}}}}}}
@@ -687,7 +687,17 @@ function summaryAndNode(
 ): { summary: GitHubPrStatusSummary; node: Record<string, unknown> } | null {
   if (!isRecord(value)) return null;
   const checks = checksFromPrNode(value);
-  const summary = readPrStatusSummary({ ...value, statusCheckRollup: checks });
+  // Current base branch tip, not PullRequest.baseRefOid: that one lags at the
+  // merge-base, so a base-only push would never change the conflict key.
+  const baseTip =
+    isRecord(value.baseRef) && isRecord(value.baseRef.target)
+      ? readString(value.baseRef.target.oid)
+      : undefined;
+  const summary = readPrStatusSummary({
+    ...value,
+    statusCheckRollup: checks,
+    baseRefOid: baseTip,
+  });
   return summary ? { summary, node: value } : null;
 }
 
