@@ -18,6 +18,7 @@ type GitLabMergeRequest = {
   detailed_merge_status?: string | null;
   blocking_discussions_resolved?: boolean | null;
   sha?: string | null;
+  target_branch?: string | null;
   diff_refs?: { base_sha?: string | null } | null;
 };
 
@@ -74,6 +75,24 @@ async function fetchMergeRequestsByBranch(
   return JSON.parse(raw) as GitLabMergeRequest[];
 }
 
+// Current target branch tip. diff_refs.base_sha is the merge-base, which a
+// target-only push never moves, so it cannot key a conflict change.
+async function fetchBranchTip(
+  worktreePath: string,
+  projectPath: string,
+  branch: string,
+): Promise<string | undefined> {
+  const raw = await glab(
+    worktreePath,
+    "api",
+    `projects/${encodeProjectPath(projectPath)}/repository/branches/${encodeURIComponent(branch)}`,
+    "--output",
+    "json",
+  );
+  const parsed = JSON.parse(raw) as { commit?: { id?: string | null } | null };
+  return parsed.commit?.id ?? undefined;
+}
+
 async function fetchPipelines(
   worktreePath: string,
   projectPath: string,
@@ -125,9 +144,11 @@ export async function resolveMergeRequestSummary(
   worktreePath: string,
   branch: string,
 ): Promise<ReviewRequestSummary | null> {
-  const requests = await fetchMergeRequestsByBranch(worktreePath, branch);
-  const request = requests[0];
-  if (!request) return null;
+  const [request] = await fetchMergeRequestsByBranch(worktreePath, branch);
+  return request ? toSummary(request) : null;
+}
+
+function toSummary(request: GitLabMergeRequest): ReviewRequestSummary {
   return {
     number: request.iid,
     title: request.title,
@@ -214,8 +235,10 @@ async function collectSignals(
   _projectId: string,
   _sourceId: string,
 ): Promise<{ data: ReviewEventData; snapshot: Map<string, ReviewSignal> } | null> {
-  const request = await resolveMergeRequestSummary(session.worktreePath, session.branch);
-  if (!request || !request.repo) return null;
+  const [mergeRequest] = await fetchMergeRequestsByBranch(session.worktreePath, session.branch);
+  if (!mergeRequest) return null;
+  const request = toSummary(mergeRequest);
+  if (!request.repo) return null;
 
   const [pipelines, discussionData] = await Promise.all([
     fetchPipelines(session.worktreePath, request.repo, request.number),
@@ -244,8 +267,12 @@ async function collectSignals(
     });
   }
   if (hasMergeConflict(request)) {
+    const targetTip =
+      request.headSha && mergeRequest.target_branch
+        ? await fetchBranchTip(session.worktreePath, request.repo, mergeRequest.target_branch)
+        : undefined;
     const revision =
-      request.headSha && request.baseSha ? `${request.headSha}:${request.baseSha}` : undefined;
+      request.headSha && targetTip ? `${request.headSha}:${targetTip}` : undefined;
     snapshot.set("merge_conflict", {
       key: "merge_conflict",
       kind: "merge_conflict",

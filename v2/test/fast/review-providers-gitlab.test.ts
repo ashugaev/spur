@@ -195,11 +195,15 @@ describe("gitlabReviewProvider.collectSignals", () => {
       detailed_merge_status: "broken",
       blocking_discussions_resolved: true,
       sha: "head-sha",
-      diff_refs: { base_sha: "base-sha" },
+      target_branch: "main",
+      diff_refs: { base_sha: "merge-base-sha" },
     };
     glabMock.mockImplementation(async (_cwd: string, ...args: unknown[]) => {
       const endpoint = String(args[1] ?? "");
       if (endpoint.includes("/merge_requests?source_branch=")) return JSON.stringify([mr]);
+      if (endpoint === "projects/group%2Fapp/repository/branches/main") {
+        return JSON.stringify({ commit: { id: "base-sha" } });
+      }
       if (endpoint.includes("/pipelines")) {
         return JSON.stringify([
           { id: 100, status: "failed" },
@@ -261,5 +265,66 @@ describe("gitlabReviewProvider.collectSignals", () => {
       "src",
     );
     expect(result?.snapshot.get("merge_conflict")).not.toHaveProperty("changeKey");
+  });
+
+  function mockConflictPoll(hasConflicts: boolean, targetTip: () => string): string[] {
+    const endpoints: string[] = [];
+    const mr = {
+      iid: 9,
+      title: "feat: x",
+      web_url: "https://gitlab.example.com/group/app/-/merge_requests/9",
+      has_conflicts: hasConflicts,
+      sha: "head-sha",
+      target_branch: "main",
+      diff_refs: { base_sha: "merge-base-sha" },
+    };
+    glabMock.mockImplementation(async (_cwd: string, ...args: unknown[]) => {
+      const endpoint = String(args[1] ?? "");
+      endpoints.push(endpoint);
+      if (endpoint.includes("/merge_requests?source_branch=")) return JSON.stringify([mr]);
+      if (endpoint.includes("/repository/branches/")) {
+        return JSON.stringify({ commit: { id: targetTip() } });
+      }
+      return "[]";
+    });
+    return endpoints;
+  }
+
+  it("rekeys merge_conflict on a target-only push and keeps the key for the same pair", async () => {
+    let tip = "tip-1";
+    mockConflictPoll(true, () => tip);
+    const poll = async () =>
+      (await gitlabReviewProvider.collectSignals(makeSession(), "/tmp/data", "proj", "src"))
+        ?.snapshot.get("merge_conflict")?.changeKey;
+
+    const first = await poll();
+    const repeat = await poll();
+    tip = "tip-2";
+    const afterPush = await poll();
+
+    expect(first).toBe("head-sha:tip-1");
+    expect(repeat).toBe(first);
+    expect(afterPush).toBe("head-sha:tip-2");
+  });
+
+  it("skips the branch lookup for a non-conflicting merge request", async () => {
+    const endpoints = mockConflictPoll(false, () => "tip-1");
+    const result = await gitlabReviewProvider.collectSignals(
+      makeSession(),
+      "/tmp/data",
+      "proj",
+      "src",
+    );
+    expect(result?.snapshot.has("merge_conflict")).toBe(false);
+    expect(endpoints.some((endpoint) => endpoint.includes("/repository/branches/"))).toBe(false);
+  });
+
+  it("fails the poll when the target branch lookup fails", async () => {
+    mockConflictPoll(true, () => {
+      throw new Error("glab api 404");
+    });
+    await expect(
+      gitlabReviewProvider.collectSignals(makeSession(), "/tmp/data", "proj", "src"),
+    ).rejects.toThrow("glab api 404");
   });
 });
