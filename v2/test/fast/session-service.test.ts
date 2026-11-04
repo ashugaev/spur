@@ -29175,7 +29175,7 @@ describe("SessionService", () => {
       });
       const sessions = createSessionStore(session);
       readAgentHookStateMock.mockReturnValue(null);
-      const actualCodex = await vi.importActual<typeof CodexModule>("../../src/agents/codex.js");
+      const actualCodex = await vi.importActual<typeof codexModule>("../../src/agents/codex.js");
       readCodexRolloutStateMock.mockImplementation(actualCodex.readCodexRolloutState);
       const sessionsDir = join(TEST_DATA_DIR, "session-tools", "api-1", "codex-home", "sessions");
       mkdirSync(sessionsDir, { recursive: true });
