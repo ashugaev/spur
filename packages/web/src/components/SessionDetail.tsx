@@ -59,6 +59,7 @@ import { SendIcon } from "@/components/icons/SendIcon";
 import { Spinner } from "@/components/icons/Spinner";
 import { TrashIcon } from "@/components/icons/TrashIcon";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
+import { SessionMutes } from "@/components/SessionMutes";
 import { SessionTodo } from "@/components/SessionTodo";
 import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
 import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
@@ -471,8 +472,9 @@ function readArtifactViewMode(): ArtifactViewMode {
   }
 }
 
-function artifactTabClass(active: boolean): string {
-  return `border-r border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase tracking-[0.12em] last:border-r-0 ${
+function artifactTabClass(active: boolean, wrapping = false): string {
+  const edge = wrapping ? "-ml-px -mt-px border" : "border-r last:border-r-0";
+  return `${edge} border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase tracking-[0.12em] ${
     active
       ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]"
       : "text-[var(--color-text-secondary)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
@@ -483,6 +485,19 @@ function artifactExtension(name: string): string {
   const base = artifactBasename(name);
   const dotIndex = base.lastIndexOf(".");
   return dotIndex > 0 ? base.slice(dotIndex + 1).toUpperCase() : "FILE";
+}
+
+function artifactFormatOptions(
+  artifacts: readonly SessionArtifact[],
+): Array<{ extension: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const artifact of artifacts) {
+    const extension = artifactExtension(artifact.name);
+    counts.set(extension, (counts.get(extension) ?? 0) + 1);
+  }
+  return [...counts]
+    .map(([extension, count]) => ({ extension, count }))
+    .sort((a, b) => a.extension.localeCompare(b.extension));
 }
 
 function isMarkdownArtifact(artifact: SessionArtifact): boolean {
@@ -1656,6 +1671,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     Record<string, ArtifactPreviewState>
   >({});
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
+  const [artifactFormat, setArtifactFormat] = useState<string | null>(null);
   const [artifactCategory, setArtifactCategory] = useState<ArtifactCategory>("agent");
   const [artifactViewMode, setArtifactViewMode] = useState<ArtifactViewMode>(readArtifactViewMode);
   // Not persisted to localStorage: the list's sort resets to the default on
@@ -1959,6 +1975,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   useEffect(() => {
     setArtifactCategory("agent");
+    setArtifactFormat(null);
     setShowAllDeskMembers(false);
   }, [sessionId]);
 
@@ -2508,6 +2525,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => new Set(visibleArtifacts.map((artifact) => artifact.id)),
     [visibleArtifacts],
   );
+  const formatOptions = useMemo(() => artifactFormatOptions(visibleArtifacts), [visibleArtifacts]);
+  const activeArtifactFormat =
+    formatOptions.length > 1 && formatOptions.some((option) => option.extension === artifactFormat)
+      ? artifactFormat
+      : null;
+  const filteredArtifacts = useMemo(
+    () =>
+      activeArtifactFormat === null
+        ? visibleArtifacts
+        : visibleArtifacts.filter(
+            (artifact) => artifactExtension(artifact.name) === activeArtifactFormat,
+          ),
+    [visibleArtifacts, activeArtifactFormat],
+  );
   // List mode's viewer navigation must step over the same sort the list
   // renders, not the raw payload order. It still walks every category
   // (matching `allArtifacts` below, same as grid mode) — jumping across
@@ -2591,9 +2622,19 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   // The list's sort used to reset via `key={artifactCategory}` remounting
   // ArtifactList's own local state. Lifting that state up here means the
   // remount no longer resets it, so reset it explicitly on category change.
+  // The format filter resets with it.
   useEffect(() => {
     setArtifactListSort(DEFAULT_ARTIFACT_SORT);
+    setArtifactFormat(null);
   }, [artifactCategory]);
+
+  // Clear a stored format the derived value already ignores (ext gone, or
+  // fewer than 2 extensions) so it cannot resurrect on a later poll.
+  useEffect(() => {
+    if (artifactFormat !== null && activeArtifactFormat === null) {
+      setArtifactFormat(null);
+    }
+  }, [artifactFormat, activeArtifactFormat]);
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
@@ -2859,6 +2900,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </span>
                 ) : null}
                 <TagEditor session={session} variant="chips" />
+                <SessionMutes sessionId={session.id} />
               </div>
             </TagsContext.Provider>
           </header>
@@ -3328,7 +3370,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                     Artifacts
                     <span className="text-[var(--color-text-secondary)]">
-                      {visibleArtifacts.length}
+                      {filteredArtifacts.length}
                     </span>
                     <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                   </h2>
@@ -3390,20 +3432,50 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         })}
                       </div>
                     ) : null}
+                    {formatOptions.length > 1 ? (
+                      <div
+                        aria-label="Artifact format"
+                        className="inline-flex flex-wrap pl-px pt-px"
+                        role="tablist"
+                      >
+                        <button
+                          aria-pressed={activeArtifactFormat === null}
+                          className={artifactTabClass(activeArtifactFormat === null, true)}
+                          onClick={() => setArtifactFormat(null)}
+                          type="button"
+                        >
+                          All
+                        </button>
+                        {formatOptions.map(({ extension, count }) => {
+                          const active = activeArtifactFormat === extension;
+                          return (
+                            <button
+                              key={extension}
+                              aria-pressed={active}
+                              className={artifactTabClass(active, true)}
+                              onClick={() => setArtifactFormat(active ? null : extension)}
+                              type="button"
+                            >
+                              {`${extension} (${count})`}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
                   </div>
                   {session.artifactsTruncated ? (
                     <p className="pb-2 text-[var(--color-text-secondary)]">
                       Nested artifacts were truncated; every root-level artifact is still listed.
                     </p>
                   ) : null}
-                  {visibleArtifacts.length > 0 ? (
+                  {filteredArtifacts.length > 0 ? (
                     <div
                       className="max-h-[min(36rem,55dvh)] overflow-y-auto overscroll-y-auto pr-1"
                       data-artifact-collection
                     >
                       {artifactViewMode === "list" ? (
                         <ArtifactList
-                          artifacts={visibleArtifacts}
+                          artifacts={filteredArtifacts}
                           hrefFor={(artifactId) => artifactUrl(session.id, artifactId)}
                           onPreview={setSelectedArtifactId}
                           onSortChange={setArtifactListSort}
@@ -3411,7 +3483,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         />
                       ) : (
                         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                          {visibleArtifacts.map((artifact) => {
+                          {filteredArtifacts.map((artifact) => {
                             const artifactHref = artifactUrl(session.id, artifact.id);
                             const previewState = artifactPreviewStates[artifact.id] ?? "loading";
                             return (

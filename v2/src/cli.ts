@@ -141,11 +141,13 @@ import {
   isRespawnableStatus,
   isSessionState,
   type AppConfig,
+  type AutoPingMuteItem,
+  type AutoPingMuteRequest,
+  type AutoPingMuteResponse,
+  type AutoPingMuteView,
+  type AutoPingResumeRequest,
   type AutoPingResumeResponse,
-  type AutoPingScope,
   type AutoPingSuppressionListResponse,
-  type AutoPingSuppressionView,
-  type AutoPingUnsubscribeResponse,
   type OpenPrAction,
   type ProjectConfigMutationResponse,
   type ProviderReasoningEffort,
@@ -768,52 +770,98 @@ function resolveAutoPingSessionId(explicitSession: string | undefined): string {
   return explicit;
 }
 
-function resolveAutoPingUnsubscribe(args: {
-  event?: string;
-  thread?: string;
-  subscription?: string;
-}): { scope: AutoPingScope; handle: string } {
-  const entries: Array<{ scope: AutoPingScope; handle: string }> = [];
-  if (args.event?.trim()) entries.push({ scope: "event", handle: args.event.trim() });
-  if (args.thread?.trim()) entries.push({ scope: "thread", handle: args.thread.trim() });
-  if (args.subscription?.trim()) {
-    entries.push({ scope: "subscription", handle: args.subscription.trim() });
+const AUTO_PING_FOR_MAX_MS = 24 * 3_600_000;
+const AUTO_PING_FOR_MIN_MS = 60_000;
+
+function resolveAutoPingMute(args: {
+  handle: string;
+  for?: string;
+  forever?: boolean;
+  reason?: string;
+}): AutoPingMuteRequest {
+  const handle = args.handle.trim();
+  const reason = args.reason?.trim();
+  if (args.for !== undefined && args.forever) {
+    throw new Error("Use only one of --for or --forever.");
   }
-  if (entries.length !== 1) {
-    throw new Error("Use exactly one of --event, --thread, or --subscription");
+  if (args.forever) {
+    if (!reason) throw new Error("--reason is required.");
+    return { handle, mode: "forever", reason };
   }
-  const entry = entries[0];
-  if (!entry) {
-    throw new Error("Use exactly one of --event, --thread, or --subscription");
+  if (args.for !== undefined) {
+    const durationMs = parseDurationMs(args.for, "--for");
+    if (durationMs > AUTO_PING_FOR_MAX_MS) throw new Error("--for max is 24h.");
+    if (durationMs < AUTO_PING_FOR_MIN_MS) throw new Error("--for min is 1m.");
+    if (!reason) throw new Error("--reason is required.");
+    return { handle, mode: "for", durationMs, reason };
   }
-  return entry;
+  return { handle, mode: "until_change", ...(reason ? { reason } : {}) };
 }
 
-function renderAutoPingSuppression(record: AutoPingSuppressionView): string {
+function autoPingSubjectLabel(items: AutoPingMuteItem[]): string {
+  const subjects = [...new Set(items.map((item) => item.subject))];
+  if (subjects.length !== 1) return `${subjects.length} subjects`;
+  const [subject = ""] = subjects;
+  const pr = /^review:[^:]+:.*#(\d+)$/.exec(subject);
+  return pr?.[1] ? `PR #${pr[1]}` : subject;
+}
+
+function autoPingUntilLabel(record: AutoPingMuteView): string {
+  if (record.mode === "forever") return "forever";
+  if (record.mode === "for") return `until ${record.expiresAt ?? "expiry"}`;
+  if (record.endedAt) return "until it changes";
+  const labels = [...new Set(record.items.map((item) => item.label).filter(Boolean))];
+  return labels.length === 1 ? (labels[0] ?? "until it changes") : "until it changes";
+}
+
+function renderAutoPingMute(response: AutoPingMuteResponse, request: AutoPingMuteRequest): string {
+  const { record } = response;
+  const kinds = [...new Set(record.items.map((item) => item.kind))].join(", ");
+  const when =
+    request.mode === "for" && request.durationMs !== undefined
+      ? `for ${formatAutoPingDuration(request.durationMs)}`
+      : autoPingUntilLabel(record);
+  const prefix = response.created ? "Muted" : "Already muted";
+  return `${prefix} ${kinds} on ${autoPingSubjectLabel(record.items)} ${when}. Undo: "$SPUR_SESSION_TOOL_DIR/spur" auto-ping resume ${request.handle}`;
+}
+
+function formatAutoPingDuration(durationMs: number): string {
+  return durationMs % 3_600_000 === 0
+    ? `${durationMs / 3_600_000}h`
+    : `${Math.round(durationMs / 60_000)}m`;
+}
+
+function renderAutoPingMuteRecord(record: AutoPingMuteView): string {
+  const kinds = [...new Set(record.items.map((item) => item.kind))].join(",");
+  const subjects = [...new Set(record.items.map((item) => item.subject))].join(",");
   const parts = [
     record.suppressionId,
-    record.scope,
-    record.destination.sessionId,
+    record.mode,
+    kinds,
+    subjects,
+    autoPingUntilLabel(record),
+    record.reason ?? "",
     record.createdAt,
-  ].filter((part): part is string => typeof part === "string" && part.length > 0);
+    ...(record.endedAt ? [`ended ${record.endReason ?? ""} ${record.endedAt}`.trim()] : []),
+  ];
   return parts.join("\t");
 }
 
 function renderAutoPingList(response: AutoPingSuppressionListResponse): string {
-  if (response.records.length === 0) {
-    return dimText("No auto-ping suppressions.");
+  const lines: string[] = [];
+  if (response.records.length === 0) lines.push(dimText("No active auto-ping mutes."));
+  else lines.push(...response.records.map(renderAutoPingMuteRecord));
+  if (response.history) {
+    lines.push("History:");
+    if (response.history.length === 0) lines.push(dimText("No auto-ping mute history."));
+    else lines.push(...response.history.map(renderAutoPingMuteRecord));
   }
-  return response.records.map(renderAutoPingSuppression).join("\n");
+  return lines.join("\n");
 }
 
-function renderAutoPingUnsubscribe(response: AutoPingUnsubscribeResponse): string {
-  const prefix = response.created ? "Created" : "Already active";
-  return `${prefix} auto-ping ${response.record.scope} suppression ${response.record.suppressionId}.`;
-}
-
-function renderAutoPingResume(response: AutoPingResumeResponse, suppressionId: string): string {
+function renderAutoPingResume(response: AutoPingResumeResponse, target: string): string {
   const prefix = response.removed ? "Resumed" : "Already resumed";
-  return `${prefix} auto-ping suppression ${suppressionId}.`;
+  return `${prefix} auto-ping mute ${target}.`;
 }
 
 function parsePrActionOption(value: string): OpenPrAction {
@@ -3811,50 +3859,52 @@ export function createProgram(cliEntrypoint: string): Command {
 
   const autoPingCommand = program
     .command("auto-ping")
-    .description("Manage automatic trigger suppressions for a session.");
+    .description("Mute automatic trigger pings for a session.");
   autoPingCommand
-    .command("unsubscribe")
-    .option("--event <handle>", "Event suppression handle")
-    .option("--thread <handle>", "Thread suppression handle")
-    .option("--subscription <handle>", "Subscription suppression handle")
+    .command("mute")
+    .argument("<handle>", "Handle printed in the ping")
+    .option("--for <duration>", "Mute for a while, max 24h; needs --reason")
+    .option("--forever", "Mute the whole trigger route for this session; needs --reason")
+    .option("--reason <why>", "Why the mute is needed")
     .option("--session <id>", "Session id")
     .option("--json", "Print raw JSON")
-    .action(async (options, command) => {
+    .action(async (handle: string, options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       const sessionId = resolveAutoPingSessionId(options.session as string | undefined);
-      const requestOptions: { event?: string; thread?: string; subscription?: string } = {};
-      if (typeof options.event === "string") requestOptions.event = options.event;
-      if (typeof options.thread === "string") requestOptions.thread = options.thread;
-      if (typeof options.subscription === "string")
-        requestOptions.subscription = options.subscription;
-      const request = resolveAutoPingUnsubscribe(requestOptions);
+      const request = resolveAutoPingMute({
+        handle,
+        ...(typeof options.for === "string" ? { for: options.for } : {}),
+        forever: Boolean(options.forever),
+        ...(typeof options.reason === "string" ? { reason: options.reason } : {}),
+      });
       await outputResult({
         json: Boolean(options.json),
-        label: "updating auto-ping suppressions",
+        label: "muting auto-ping",
         action: () =>
-          postJson<AutoPingUnsubscribeResponse>(
+          postJson<AutoPingMuteResponse>(
             cliEntrypoint,
-            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions/unsubscribe`,
+            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions/mute`,
             request,
             configPath,
           ),
-        render: renderAutoPingUnsubscribe,
+        render: (response) => renderAutoPingMute(response, request),
       });
     });
   autoPingCommand
     .command("list")
     .option("--session <id>", "Session id")
+    .option("--all", "Include mute history")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       const sessionId = resolveAutoPingSessionId(options.session as string | undefined);
       await outputResult({
         json: Boolean(options.json),
-        label: "loading auto-ping suppressions",
+        label: "loading auto-ping mutes",
         action: () =>
           getJson<AutoPingSuppressionListResponse>(
             cliEntrypoint,
-            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions`,
+            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions${options.all ? "?all=1" : ""}`,
             configPath,
           ),
         render: renderAutoPingList,
@@ -3862,25 +3912,27 @@ export function createProgram(cliEntrypoint: string): Command {
     });
   autoPingCommand
     .command("resume")
-    .argument("<suppressionId>", "Suppression id")
+    .argument("<handleOrId>", "Handle printed in the ping, or mute id from list")
     .option("--session <id>", "Session id")
     .option("--json", "Print raw JSON")
-    .action(async (suppressionId: string, options, command) => {
+    .action(async (handleOrId: string, options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       const sessionId = resolveAutoPingSessionId(options.session as string | undefined);
+      const target = handleOrId.trim();
+      const request: AutoPingResumeRequest = target.startsWith("ap1_")
+        ? { handle: target }
+        : { suppressionId: target };
       await outputResult({
         json: Boolean(options.json),
-        label: "resuming auto-ping suppression",
+        label: "resuming auto-ping mute",
         action: () =>
           postJson<AutoPingResumeResponse>(
             cliEntrypoint,
-            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions/${encodeURIComponent(
-              suppressionId,
-            )}/resume`,
-            {},
+            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions/resume`,
+            request,
             configPath,
           ),
-        render: (response) => renderAutoPingResume(response, suppressionId),
+        render: (response) => renderAutoPingResume(response, target),
       });
     });
 

@@ -49,7 +49,7 @@ PROCESS
      Apply .agents/skills/github/references/agent-protocol.md product/interface gates; route independent classification/approval check before dependent coding.
   2  Per-todo plan: score with `shallow-scoring` for a tier. Build the team from tier plus property modifiers. Track each todo in Spur ToDo.
   3  Execute the canonical gate order above, one delegation per step. Critic selects one approach. Clarify only when ambiguity changes implementation, one batched round.
-       - Design (before architect, visible UI only): save proposed UI screenshot to artifacts; send screenshot and current -> proposed change to authorized session Telegram, mirror request in current channel. Reuse matching approval; missing approval stops dependent implementation.
+       - Design (before architect, visible UI only): save proposed UI screenshot to artifacts; send screenshot and one-line request to authorized session Telegram, mirror request in current channel. Reuse matching approval; missing approval stops dependent implementation.
        - Docs: same change as the surface; never stale or missing.
        - Close-out: mandatory after any code change, never without an open PR.
   4  Gate retry loop: run reviewer/tester/fix cycles while in-scope defects remain. `CHANGES_REQUESTED`/`FAIL` -> `developer` fixes -> same gate reruns. `SPEC_CHANGES_REQUESTED`/`SPEC_REJECTED` -> `architect` fixes, never `developer` -> `spec-critic` reruns. No verdict at all — subagent died, returned empty, no parsable verdict — is never a pass: rerun the same gate, no fix cycle first. Downstream gates run only when their input changed. Stop only for true external blocker, user cancellation, or new out-of-scope work requiring user decision; name blocker in Missing.
@@ -64,7 +64,7 @@ RULES
   - Collapse phases for trivial work; do not skip the skill.
   - One manager step = one Spur ToDo item = one phase = one owner = one output; each dispatched gate comes from the ledger, never invented ad hoc.
   - Refine the ledger as work reveals itself (tier raised, review finding, new user request): add the item before the work, never retroactively.
-  - At each stop, state exact blocker, rule/tool source, current -> proposed change and required action in 2–3 lines. Send approval requests in current channel and authorized session Telegram; follow agent-protocol.md for delivery and matching approval.
+  - At each stop except interface approval, state exact blocker, rule/tool source, current -> proposed change and required action in 2–3 lines. Send approval requests in current channel and authorized session Telegram; follow agent-protocol.md for request format, delivery and matching approval.
   - Run only named test files for changed modules/direct callers locally; GitHub CI owns full suites, package/repo build, typecheck, lint and e2e. Enforce for workers, reviewers and testers.
   - Require isolated-sidecar manual/browser proof only for actual runtime/UI-flow changes, limited to affected flows/providers; use static checks for prompt/docs/tooling changes.
   - Block release without required changed-flow proof and required green CI on final revision; owner alone reads CI at authorized merge gate.
@@ -75,7 +75,7 @@ CONTEXT HANDOFF
   - Pass structured artifacts between gates (spec, diff, each gate's structured output), never the raw conversation.
   - Fix cycles (`CHANGES_REQUESTED`/`FAIL` -> developer -> rerun, or `SPEC_CHANGES_REQUESTED`/`SPEC_REJECTED` -> architect -> spec-critic rerun) append new findings to the existing spec/decision record; never re-summarize from scratch.
   - Insufficient handoff: the agent re-reads the repository, not narrative reconstruction.
-  - Tier 2/3: invoke `curator` between gates to append stable facts and a short reflection to `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` and refresh the compact handoff. Curator appends and reflects, never re-summarizes prior entries. Point each receiving gate at that file; it reads it when present.
+  - Tier 2/3: invoke `curator` between gates to append stable facts and a short reflection to `task-memory.md` and refresh the compact handoff. Curator appends and reflects, never re-summarizes prior entries. Resolve work dir once: `${SPUR_SESSION_WORK_DIR:-$SPUR_SESSION_ARTIFACTS_DIR/.spur-work}`, create it, pass the absolute `task-memory.md` path to curator and each receiving gate; gate reads it when present.
   - `architect`, `developer`, `designer` read `$SPUR_SESSION_ARTIFACTS_DIR/design/design-spec.md` directly and honor its Approval status field, at any tier. Tier 2/3 curator can also note an "Accepted design" entry in `task-memory.md`, but the binding never depends on it.
 
 OUTPUT

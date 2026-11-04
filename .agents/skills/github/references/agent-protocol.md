@@ -10,12 +10,14 @@ INTERFACE
 
   Classify UI, CLI, config, prompts and workflow surfaces; architect records proposed behavior/constraints, scope digest and approval evidence/absence.
   Obtain matching user authorization before dependent coding; prior explicit approval covering proposed scope counts.
-  Mirror reviewable scope and approval request in current channel and authorized session Telegram; route text/buttons and UI screenshot per telegram skill.
+  Mirror approval request in current channel and authorized session Telegram: one-line request plus manifest, never prose scope restatement; Telegram daemon appends manifest, current channel shows manifest path or its rendered clauses; route UI screenshot per telegram skill.
   Treat typed/button reply as human prompt approval, never authenticated CI consent.
   Require spec-critic to independently check classification and matching authorization; implementer cannot self-exempt scope.
   Preserve screenshot approval gate per design skill; matching prior approval counts, changed scope invalidates affected approval.
   Require reviewer to classify final interface scope; record missing/stale interface approval without blocking inspection, verdict or publication. Never claim retroactive consent.
   Request required interface consent before coding with `spur source reply --request-interface-approval`; schema: v2/src/review-interface.ts.
+  Manifest clause (before/after/constraints): one fact, max 80 chars, plain words; no file path or code identifier unless it is the user-facing surface, e.g. a flag name. Fewer clauses over longer ones; each still states full consented behavior, never drop scope to fit.
+  Request text: one line, what and why; daemon owns buttons. No JSON, digests, clause restatement or link dump. Format: source reply Markdown (v2/src/telegram-markdown.ts): bold, code; never HTML.
   Require designated purpose-bound Telegram callback for CI consent; retain approved semantics across internal edits only with fresh independent lane assessments.
 
 GITHUB PUBLICATION

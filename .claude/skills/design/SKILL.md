@@ -22,8 +22,9 @@ HANDOFF: $SPUR_SESSION_ARTIFACTS_DIR/design/, never committed.
 
 APPROVAL
 
-  Mirror current -> proposed change and approval request in current channel
-  and authorized session Telegram; follow agent-protocol.md.
+  Mirror approval request in current channel and authorized session Telegram:
+  screenshot plus one-line request, never prose current -> proposed restatement;
+  follow agent-protocol.md.
   Attach screenshot to Telegram through `telegram` skill; never substitute a link.
   Route text/buttons and screenshot to one authorized recipient per `telegram` skill.
   Reuse prior approval matching scope; still save and send screenshot proof.
