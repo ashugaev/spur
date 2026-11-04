@@ -13,6 +13,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   archiveSessions,
+  listTelegramTopicSessionIds,
+  readArchivedSession,
+  readTelegramTopicGcClock,
+  writeTelegramTopicGcClock,
   deletePendingSendBatch,
   deletePendingSendBatchConditional,
   deleteTelegramSourceStateForSession,
@@ -2974,5 +2978,61 @@ describe("hasPendingTelegramSend", () => {
     expect(hasPendingTelegramSend(dataDir, "api-1", { unclaimedOnly: true })).toBe(false);
     recordPendingSendBatch(dataDir, telegramRecord("api:chat:api-1", "api-1"));
     expect(hasPendingTelegramSend(dataDir, "api-1", { unclaimedOnly: true })).toBe(true);
+  });
+});
+
+describe("telegram topic gc state", () => {
+  it("lists binding owners and reply-target-only sessions", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramBindings(dataDir, "api", "tg", [
+      { sessionId: "api-1", chatId: -1001, messageThreadId: 22 },
+    ]);
+    writeTelegramReplyTarget(dataDir, {
+      sessionId: "api-2",
+      projectId: "api",
+      sourceId: "tg",
+      chatId: -1001,
+      messageThreadId: 23,
+    });
+    writeTelegramReplyTarget(dataDir, {
+      sessionId: "a/b",
+      projectId: "api",
+      sourceId: "tg",
+      chatId: -1001,
+      messageThreadId: 24,
+    });
+
+    expect([...listTelegramTopicSessionIds(dataDir, ["api", "absent"])].sort()).toEqual([
+      "a/b",
+      "api-1",
+      "api-2",
+    ]);
+    expect(listTelegramTopicSessionIds(await newDataDir(), ["api"]).size).toBe(0);
+  });
+
+  it("reads an archived record and returns null when none exists", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    archiveSessions(dataDir, [{ id: "api-1", project: "api" }]);
+
+    expect(readArchivedSession(dataDir, "api-1")?.id).toBe("api-1");
+    expect(readArchivedSession(dataDir, "api-2")).toBeNull();
+  });
+
+  it("throws on an invalid archived record", async () => {
+    const dataDir = await newDataDir();
+    await mkdir(join(dataDir, "sessions-archive", "api"), { recursive: true });
+    await writeFile(join(dataDir, "sessions-archive", "api", "api-1.json"), "{not json");
+
+    expect(() => readArchivedSession(dataDir, "api-1")).toThrow();
+  });
+
+  it("round-trips the sweep clock and treats an invalid file as absent", async () => {
+    const dataDir = await newDataDir();
+    expect(readTelegramTopicGcClock(dataDir)).toBeNull();
+    writeTelegramTopicGcClock(dataDir, 1234);
+    expect(readTelegramTopicGcClock(dataDir)).toBe(1234);
+    await writeFile(join(dataDir, "source-state", "telegram-topic-gc.json"), "{nope");
+    expect(readTelegramTopicGcClock(dataDir)).toBeNull();
   });
 });
