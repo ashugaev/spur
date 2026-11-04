@@ -1426,8 +1426,7 @@ function validateDurableSpawnFields(session: SessionRecord): void {
     const validOffset = (value: number): boolean => Number.isSafeInteger(value) && value >= 0;
     if (normalized.agent === "claude" || normalized.agent === "cursor") {
       durableCheck(
-        (durableString(normalized.file) ||
-          (normalized.agent === "cursor" && normalized.file === null)) &&
+        (normalized.file === null || durableString(normalized.file)) &&
           validOffset(normalized.size),
         "submission transcript offset",
       );
