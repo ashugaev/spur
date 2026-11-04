@@ -490,8 +490,8 @@ describe("client.ensureServer", () => {
   });
 
   it.each([
-    [409, "grant_not_ready", "Grant activation is still finishing; retry the same command"],
-    [400, "invalid_request", "Auto-ping scope does not match handle"],
+    [404, "grant_not_found", "Auto-ping grant not found"],
+    [400, "invalid_request", "Auto-ping mute reason is required"],
   ])(
     "surfaces structured auto-ping errors with status %s and code %s",
     async (status, code, message) => {
@@ -504,8 +504,8 @@ describe("client.ensureServer", () => {
       await expect(
         postJson(
           "/tmp/dist/cli.js",
-          "/sessions/test/auto-ping-suppressions/unsubscribe",
-          { scope: "event", handle: "ap1_test" },
+          "/sessions/test/auto-ping-suppressions/mute",
+          { handle: "ap1_test", mode: "forever" },
           "/tmp/spur.yaml",
         ),
       ).rejects.toThrow(message);

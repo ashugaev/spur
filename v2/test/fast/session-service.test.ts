@@ -1975,6 +1975,7 @@ describe("SessionService", () => {
         SPUR_CLOSEOUT_OWNER: "1",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
+        SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
@@ -3839,6 +3840,7 @@ describe("SessionService", () => {
           SPUR_SESSION: "api-2",
           SPUR_CLOSEOUT_OWNER: "0",
           SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
+          SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         }),
       }),
     );
@@ -8183,6 +8185,7 @@ describe("SessionService", () => {
         SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
+        SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
@@ -36468,6 +36471,7 @@ describe("SessionService", () => {
         SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
+        SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
@@ -42874,6 +42878,7 @@ describe("SessionService", () => {
         SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
+        SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
@@ -43347,6 +43352,7 @@ describe("SessionService", () => {
         SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
+        SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
@@ -44769,6 +44775,7 @@ describe("SessionService", () => {
         SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
+        SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
@@ -53351,28 +53358,6 @@ describe("SessionService", () => {
         service.dispose();
       },
     );
-
-    it("deliver() rejects with SessionResourceNotFoundError when the record vanishes before the sensitive suffix", async () => {
-      readSessionMock.mockReturnValue(runningSession({ id: "gone-1" }));
-
-      const { SessionService, SessionResourceNotFoundError } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      const internals = service as unknown as {
-        deliverPrepared: (...args: unknown[]) => Promise<unknown>;
-      };
-      vi.spyOn(internals, "deliverPrepared").mockImplementation(async () => {
-        readSessionMock.mockReturnValue(undefined);
-        return {};
-      });
-
-      const promise = service.deliver("gone-1", "hello", { sensitivePromptSuffix: "suffix" });
-      await expect(promise).rejects.toBeInstanceOf(SessionResourceNotFoundError);
-      await expect(promise).rejects.toMatchObject({
-        statusCode: 404,
-        message: "Session not found: gone-1",
-      });
-      service.dispose();
-    });
   });
 
   describe("session memory", () => {
@@ -72914,11 +72899,7 @@ describe("SessionService", () => {
         found: false,
         lastScannedFile: "/t/claude.jsonl",
       });
-      const controls = `unsubscribe ${"ap1_" + "a".repeat(43)}`;
-
-      await expect(
-        service.deliver("api-1", "DIGEST", { sensitivePromptSuffix: controls }),
-      ).resolves.toBeDefined();
+      await expect(service.deliver("api-1", "DIGEST")).resolves.toBeDefined();
       const held = sessions.get("api-1");
       expect(held?.submitUnconfirmedAt).toBeDefined();
       expect(held?.queuedMessageTyped?.ackBaseline).toEqual(holdBaselines.claude);
@@ -72943,7 +72924,7 @@ describe("SessionService", () => {
 
       const record = sessions.get("api-1");
       expect(tmuxTexts().filter((text) => text === "DIGEST")).toHaveLength(2);
-      expect(sendSensitiveMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendSensitiveMessageToTmuxMock).not.toHaveBeenCalled();
       expect(eventsNamed("session.message.requeued")).toHaveLength(1);
       expect(eventsNamed("session.submit.released")).toHaveLength(1);
       expect(record?.submitFailedMessage?.message).toBe("DIGEST");
