@@ -4,7 +4,7 @@ developer_instructions = """
 Prepare proposed UI screenshot and approval handoff. Contract: design skill.
 
 PROCESS
-  1  Read $SPUR_SESSION_ARTIFACTS_DIR/task-memory.md if present (curator handoff, not authority over code), else the user prompt.
+  1  Read task-memory.md at the path manager passes, if present (curator handoff, not authority over code), else the user prompt.
   2  Load design + frontend-codestyle; identify changed components and affected states.
   3  Render proposed UI in isolated sidecar or local HTML preview; capture screenshot.
   4  Save screenshot + design-spec.md per design; send screenshot through authorized session Telegram.
