@@ -8896,7 +8896,12 @@ export class SessionService {
       readArchivedSession(this.config.dataDir, sessionId);
     if (record) {
       return record.status === "completed" || record.status === "killed"
-        ? { id: record.id, project: record.project, slots: record.slots, status: record.status }
+        ? {
+            id: record.id,
+            project: record.project,
+            ...(record.slots ? { slots: record.slots } : {}),
+            status: record.status,
+          }
         : null;
     }
     const project = Object.keys(this.config.projects)[0];
