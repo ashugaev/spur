@@ -15,7 +15,7 @@ import type * as FileSystem from "node:fs/promises";
 import type * as ReviewState from "../../src/review-state.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, test, vi } from "vitest";
 import {
   parseConfig,
@@ -630,14 +630,15 @@ test.each(["network", "http-403", "http-404"])(
 let sourceLoader: string | undefined;
 async function fifoSourceLoader() {
   if (!sourceLoader) {
+    const webRoot = fileURLToPath(new URL("../../../packages/web", import.meta.url));
     const result = await execFileAsync(
-      resolve("node_modules/.bin/tsx"),
+      resolve(webRoot, "node_modules/.bin/tsx"),
       [
         "--input-type=module",
         "--eval",
         'import { createRequire } from "node:module"; process.stdout.write(createRequire(import.meta.url).resolve("tsx/esm"));',
       ],
-      { timeout: 3_000, killSignal: "SIGKILL" },
+      { cwd: webRoot, timeout: 3_000, killSignal: "SIGKILL" },
     );
     sourceLoader = pathToFileURL(result.stdout.trim()).href;
   }
