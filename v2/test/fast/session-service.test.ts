@@ -31914,6 +31914,290 @@ describe("SessionService", () => {
     }
   });
 
+  describe("Resource readout recovery", () => {
+    async function setup(overrides: Partial<SessionRecord> = {}) {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      const record = runningSession({
+        agentLaunchId: "generation-1",
+        sidecarNames: ["dev"],
+        ...overrides,
+      });
+      const service = await createDisposedSessionService();
+      const sessions = createSessionStore(record);
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      mockClaudeJsonlState("waiting");
+      return { record, sessions, service, internals: sessionServiceInternals(service) };
+    }
+
+    function readSidecar(
+      internals: SessionServiceInternals,
+      record: SessionRecord,
+      readExists: () => Promise<boolean> = async () => false,
+    ) {
+      const reporting = internals as SessionServiceInternals & {
+        readReportingPaneState(
+          tmuxSession: string,
+          session: SessionRecord,
+          readExists: () => Promise<boolean>,
+        ): Promise<{ exists: boolean; paneDead: boolean }>;
+      };
+      return reporting.readReportingPaneState("api-1--dev", record, readExists);
+    }
+
+    it.each([
+      { name: "absent", exists: false, paneDead: false },
+      { name: "dead pane", exists: true, paneDead: true },
+    ])(
+      "clears a timeout on a declared $name sidecar after a successful readout",
+      async (sidecar) => {
+        const { record, sessions, service } = await setup();
+        const { TmuxProbeUnknownError } = await import("../../src/runtime-tmux.js");
+        sidecarTmuxAliveMock
+          .mockRejectedValueOnce(new TmuxProbeUnknownError("sidecar probe timed out"))
+          .mockResolvedValue(sidecar.exists);
+        tmuxPaneDeadMock.mockResolvedValue(sidecar.paneDead);
+        try {
+          const failed = await service.get(record.id);
+          expect(failed.state).toBe("error");
+          expect(sessions.get(record.id)).toMatchObject({
+            error:
+              "Session status detection failed: Resource readout api-1--dev: sidecar probe timed out",
+            errorSource: "other",
+          });
+          const recovered = await service.get(record.id);
+          expect(recovered.sidecars.find((item) => item.name === "dev")?.alive).toBe(false);
+          expect(sessions.get(record.id)?.error).toBeUndefined();
+          expect(sessions.get(record.id)?.errorSource).toBeUndefined();
+        } finally {
+          service.dispose();
+        }
+      },
+    );
+
+    it("delivers a message queued during the timeout after the readout recovers", async () => {
+      const { record, sessions, service, internals } = await setup();
+      const { TmuxProbeUnknownError } = await import("../../src/runtime-tmux.js");
+      sidecarTmuxAliveMock.mockRejectedValue(new TmuxProbeUnknownError("sidecar probe timed out"));
+      const attempt = vi.spyOn(internals, "tryDeliverQueuedMessage");
+      vi.spyOn(internals, "readRuntimeSnapshot").mockResolvedValue({
+        runtimeAlive: true,
+        paneUsable: true,
+        processAlive: true,
+        tmuxActivityAt: null,
+        probeUnresponsive: false,
+      });
+      try {
+        expect((await service.get(record.id)).state).toBe("error");
+        await service.send(record.id, { message: "held during readout error", queue: true });
+        expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual([
+          "held during readout error",
+        ]);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        sidecarTmuxAliveMock.mockResolvedValue(false);
+        await service.get(record.id);
+        expect(sessions.get(record.id)?.error).toBeUndefined();
+        expect(internals.deliveryRuns.has(record.id)).toBe(true);
+        expect(attempt).toHaveBeenCalled();
+        expect(sessions.get(record.id)?.status).toBe("running");
+        await vi.waitFor(
+          () => {
+            vi.setSystemTime(Date.now() + 60_000);
+            expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+            expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+          },
+          { timeout: 3_000 },
+        );
+        expect(sessions.get(record.id)?.error).toBeUndefined();
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("does not clear a replacement launch's error after a deferred readout", async () => {
+      const error = "Session status detection failed: Resource readout api-1--dev: timed out";
+      const { record, sessions, service, internals } = await setup({
+        error,
+        errorSource: "other",
+        queuedMessages: { messages: ["held"], awaitingPrompt: false },
+      });
+      let entered!: () => void;
+      let resume!: () => void;
+      const probing = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const deferred = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      try {
+        const reading = readSidecar(internals, record, async () => {
+          entered();
+          await deferred;
+          return false;
+        });
+        await probing;
+        const replacement = { ...record, agentLaunchId: "generation-2" };
+        sessions.set(record.id, replacement);
+        writeSessionMock.mockClear();
+        resume();
+        await reading;
+        expect(sessions.get(record.id)).toEqual(replacement);
+        expect(writeSessionMock).not.toHaveBeenCalled();
+        expect(internals.deliveryRuns.has(record.id)).toBe(false);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("does not relaunch a dead agent during restore warmup after readout clears", async () => {
+      const { record, sessions, service, internals } = await setup({
+        error: "Session status detection failed: Resource readout api-1--dev: timed out",
+        errorSource: "other",
+        queuedMessages: { messages: ["held"], awaitingPrompt: false },
+      });
+      internals.restoreWarmupUntil.set(record.id, Date.now() + 60_000);
+      const snapshot = vi
+        .spyOn(internals, "readRuntimeSnapshot")
+        .mockImplementation(async (_session, options) => ({
+          runtimeAlive: true,
+          paneUsable: true,
+          processAlive: options?.fresh ? false : true,
+          tmuxActivityAt: null,
+          probeUnresponsive: false,
+        }));
+      try {
+        await readSidecar(internals, record);
+        expect(snapshot).toHaveBeenCalledOnce();
+        expect(snapshot).toHaveBeenCalledWith(expect.objectContaining({ id: record.id }), {
+          fresh: true,
+        });
+        expect(sessions.get(record.id)?.error).toBeUndefined();
+        expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual(["held"]);
+        expect(internals.deliveryRuns.has(record.id)).toBe(false);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("labels a failed secondary runtime probe as runtime_probe and later drains", async () => {
+      const { record, sessions, service, internals } = await setup({
+        error: "Session status detection failed: Resource readout api-1--dev: timed out",
+        errorSource: "other",
+        queuedMessages: { messages: ["held"], awaitingPrompt: false },
+      });
+      const snapshot = vi
+        .spyOn(internals, "readRuntimeSnapshot")
+        .mockResolvedValueOnce({
+          runtimeAlive: false,
+          paneUsable: false,
+          processAlive: false,
+          tmuxActivityAt: null,
+          probeUnresponsive: true,
+          diagnostic: "runtime probe timed out",
+        })
+        .mockResolvedValue({
+          runtimeAlive: true,
+          paneUsable: true,
+          processAlive: true,
+          tmuxActivityAt: null,
+          probeUnresponsive: false,
+        });
+      try {
+        await readSidecar(internals, record);
+        expect(snapshot).toHaveBeenCalledOnce();
+        expect(sessions.get(record.id)).toMatchObject({
+          error: "Session status detection failed: runtime probe timed out",
+          errorSource: "runtime_probe",
+          queuedMessages: record.queuedMessages,
+        });
+        expect(internals.deliveryRuns.has(record.id)).toBe(false);
+        await internals.classifySessionRecord(sessions.get(record.id)!);
+        await vi.waitFor(
+          () => {
+            vi.setSystemTime(Date.now() + 60_000);
+            expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+            expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+          },
+          { timeout: 3_000 },
+        );
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("rearms delivery when live promotion follows the successful readout", async () => {
+      const { record, sessions, service, internals } = await setup({
+        status: "errored",
+        error: "Session status detection failed: Resource readout api-1--dev: timed out",
+        errorSource: "other",
+        queuedMessages: { messages: ["held"], awaitingPrompt: false },
+      });
+      vi.spyOn(internals, "readRuntimeSnapshot").mockResolvedValue({
+        runtimeAlive: true,
+        paneUsable: true,
+        processAlive: true,
+        tmuxActivityAt: null,
+        probeUnresponsive: false,
+      });
+      try {
+        await readSidecar(internals, record);
+        expect(sessions.get(record.id)?.status).toBe("errored");
+        expect(sessions.get(record.id)?.error).toBeUndefined();
+        expect(internals.deliveryRuns.has(record.id)).toBe(false);
+        await internals.classifySessionRecord(sessions.get(record.id)!);
+        await vi.waitFor(
+          () => {
+            vi.setSystemTime(Date.now() + 60_000);
+            expect(sessions.get(record.id)?.status).toBe("running");
+            expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+            expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+          },
+          { timeout: 3_000 },
+        );
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("keeps queued work held when live promotion retains a server error", async () => {
+      const { record, sessions, service, internals } = await setup({
+        status: "errored",
+        serverErrorAt: "2026-03-18T10:04:00.000Z",
+        queuedMessages: { messages: ["held"], awaitingPrompt: false },
+      });
+      vi.spyOn(internals, "readRuntimeSnapshot").mockResolvedValue({
+        runtimeAlive: true,
+        paneUsable: true,
+        processAlive: true,
+        tmuxActivityAt: null,
+        probeUnresponsive: false,
+      });
+      try {
+        await internals.classifySessionRecord(record);
+        expect(sessions.get(record.id)).toMatchObject({
+          status: "running",
+          serverErrorAt: record.serverErrorAt,
+          queuedMessages: record.queuedMessages,
+        });
+        expect(internals.deliveryRuns.has(record.id)).toBe(false);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    });
+  });
+
   it.each(
     [
       "ps failed: malformed process table output",
