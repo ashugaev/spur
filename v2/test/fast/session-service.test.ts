@@ -73698,15 +73698,28 @@ describe("SessionService", () => {
         expect(removeWorktreeMock).not.toHaveBeenCalled();
         expect(deleteServiceInstancesForSessionMock).not.toHaveBeenCalled();
         const retained = sessions.get(record.id) ?? record;
-        const classified = await sessionServiceInternals(service).classifySessionRecord(retained, {
+        const internals = sessionServiceInternals(service) as SessionServiceInternals & {
+          readReportingPaneState(
+            tmuxSession: string,
+            session: SessionRecord,
+            readExists: () => Promise<boolean>,
+          ): Promise<unknown>;
+        };
+        const classified = await internals.classifySessionRecord(retained, {
           scanPane: false,
         });
         expect(classified.state).toBe("error");
         expect(sessions.get(record.id)?.error).toContain(diagnostic);
+        const resourceSession = probe === "registered service" ? "service-web" : "api-1--dev";
         for (const status of ["running", "stopped"] as const) {
           for (const observation of ["absent", "dead"] as const) {
             const current = sessions.get(record.id) ?? record;
-            sessions.set(record.id, { ...current, status });
+            sessions.set(record.id, {
+              ...current,
+              status,
+              error: `Session status detection failed: Resource readout ${resourceSession}: ${diagnostic}`,
+              errorSource: "other",
+            });
             sidecarTmuxAliveMock.mockResolvedValue(observation !== "absent");
             tmuxSessionExistsMock.mockImplementation(async (name: string) =>
               name === "service-web" ? observation !== "absent" : true,
@@ -73715,13 +73728,19 @@ describe("SessionService", () => {
               async (name: string) =>
                 (name.includes("dev") || name === "service-web") && observation === "dead",
             );
+            await internals.readReportingPaneState(
+              resourceSession,
+              sessions.get(record.id) ?? record,
+              async () => observation !== "absent",
+            );
+            expect(sessions.get(record.id)?.status).toBe(status);
+            expect(sessions.get(record.id)?.error).toBeUndefined();
             const view = await service.get(record.id);
-            expect(view.state).toBe("error");
-            expect(view.error).toContain(diagnostic);
+            expect(view.error).toBeUndefined();
             const persisted = sessions.get(record.id) ?? record;
-            expect(hasRetainedSessionError(persisted)).toBe(true);
+            expect(view.status).toBe(persisted.status);
+            expect(hasRetainedSessionError(persisted)).toBe(false);
             expect(persisted).toMatchObject({
-              status,
               sidecarPorts: record.sidecarPorts,
               sidecarProcs: record.sidecarProcs,
               worktreePath: record.worktreePath,
