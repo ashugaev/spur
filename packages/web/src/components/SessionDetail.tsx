@@ -59,6 +59,7 @@ import { SendIcon } from "@/components/icons/SendIcon";
 import { Spinner } from "@/components/icons/Spinner";
 import { TrashIcon } from "@/components/icons/TrashIcon";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
+import { SessionMutes } from "@/components/SessionMutes";
 import { SessionTodo } from "@/components/SessionTodo";
 import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
 import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
@@ -2899,6 +2900,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </span>
                 ) : null}
                 <TagEditor session={session} variant="chips" />
+                <SessionMutes sessionId={session.id} />
               </div>
             </TagsContext.Provider>
           </header>

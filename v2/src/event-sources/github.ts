@@ -26,7 +26,7 @@ import {
   deleteIgnoredGitHubFeedback,
   clearGitHubPollDisabledSession,
   deleteReviewSourceSnapshot,
-  hasGitHubMergeConflictRestoreReplay,
+  readGitHubMergeConflictRestoreReplay,
   listSessions,
   listIgnoredGitHubFeedbackSessions,
   markGitHubPollDisabledChecked,
@@ -47,6 +47,7 @@ import {
   GitHubReviewBatchError,
   hasTerminalSignal,
 } from "../review-providers/github.js";
+import { reviewSignalChanged } from "../review-providers/shared.js";
 import { resolveWorkspaceState } from "../workspace-store.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
@@ -694,7 +695,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       );
       for (const session of pollableSessions) {
         try {
-          const restoreReplayRequested = hasGitHubMergeConflictRestoreReplay(
+          const restoreReplayId = readGitHubMergeConflictRestoreReplay(
             deps.dataDir,
             deps.projectId,
             deps.sourceId,
@@ -739,7 +740,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
               deps.sourceId,
               session.id,
             );
-            if (restoreReplayRequested) {
+            if (restoreReplayId) {
               clearGitHubMergeConflictRestoreReplay(
                 deps.dataDir,
                 deps.projectId,
@@ -774,11 +775,16 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             snapshots.get(session.id),
             collected.data.prNumber,
           );
-          const next = collected.snapshot;
-          const changed = [...next.values()].filter((signal) => {
-            const prior = previous?.get(signal.key);
-            return !prior || prior.text !== signal.text;
-          });
+          const next = new Map(collected.snapshot);
+          // UNKNOWN mergeability is not proof the conflict cleared: keep the prior
+          // signal so the flap neither re-emits it nor mints a clear id.
+          const heldConflict = previous?.get("merge_conflict");
+          if (collected.mergeableUnknown && !next.has("merge_conflict") && heldConflict) {
+            next.set("merge_conflict", heldConflict);
+          }
+          const changed = [...next.values()].filter((signal) =>
+            reviewSignalChanged(previous?.get(signal.key), signal),
+          );
 
           // Built once, handed to both the in-memory map and the on-disk write so
           // the two copies cannot desync.
@@ -819,16 +825,34 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             lifecycleBaselined.add(session.id);
           }
           const candidates = previous ? changed : emitInitial ? [...next.values()] : [];
+          // A conflict or CI failure present at the first observation (no snapshot,
+          // rebind, dropped snapshot) pings even when the source does not emit initial
+          // state. Auto-ping dedupe bounds replays after restart.
+          if (!previous) {
+            for (const key of ["merge_conflict", "ci_failed"]) {
+              const first = next.get(key);
+              // CI without a head commit has no dedupe key: never replay it unguarded.
+              if (key === "ci_failed" && !first?.ciRun) continue;
+              if (first && !candidates.includes(first)) candidates.push(first);
+            }
+          }
           const toEmit = baselined
             ? candidates
             : candidates.filter((signal) => !LIFECYCLE_KINDS.has(signal.kind));
-          if (restoreReplayRequested) {
+          if (restoreReplayId) {
             const mergeConflictSignal = next.get("merge_conflict");
-            if (
-              mergeConflictSignal &&
-              !toEmit.some((signal) => signal.key === mergeConflictSignal.key)
-            )
-              toEmit.push(mergeConflictSignal);
+            if (mergeConflictSignal) {
+              // A restore re-delivers the active conflict once: the stored restore id makes
+              // a per-restore revision that passes the (head, base) dedupe; a marker that
+              // outlives its emit repeats the same revision and stays deduped.
+              const replay = {
+                ...mergeConflictSignal,
+                revision: `${mergeConflictSignal.revision ?? ""}:restore:${restoreReplayId}`,
+              };
+              const index = toEmit.findIndex((signal) => signal.key === replay.key);
+              if (index === -1) toEmit.push(replay);
+              else toEmit[index] = replay;
+            }
             clearGitHubMergeConflictRestoreReplay(
               deps.dataDir,
               deps.projectId,

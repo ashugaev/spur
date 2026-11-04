@@ -721,8 +721,14 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             });
             expect(messages[1]).toContain("second check");
           } else {
+            // The delivered ci_failed item leaves the batch: no reminder copy stays queued.
+            await pollUntil(async () => pending(), {
+              timeoutMs: 10_000,
+              accept: (batch) => batch === undefined,
+              label: "delivered GitHub signal batch drained",
+              signal,
+            });
             await sleep(2_000);
-            expect(signalText()).toContain("second check");
             expect(messages).toHaveLength(1);
           }
         } finally {
@@ -1115,9 +1121,12 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             "session.message.sent",
           ]),
         );
-        const pending = [...readPendingSendBatches(context.dataDir).values()];
+        // A delivered item leaves the batch; ci_failed keeps no reminder entry.
+        await pollUntil(async () => readPendingSendBatches(context.dataDir).size, {
+          timeoutMs: 5_000,
+          accept: (size) => size === 0,
+        });
         if (signal === "comment") {
-          expect(pending).toHaveLength(0);
           await killTmuxSession(session.id, context.tmuxSocketName);
           const closed = await pollUntil(async () => service.get(session.id), {
             timeoutMs: 10_000,
@@ -1144,9 +1153,6 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             accept: (events) => events.some((entry) => entry.event === "trigger.send.dropped"),
           });
           expect(readPendingSendBatches(context.dataDir).size).toBe(0);
-        } else {
-          expect(pending).toHaveLength(1);
-          expect(pending[0]?.retryAccounting?.[0]?.deliveryAttempts).toBe(1);
         }
         await sleep(5_500);
         expect(
