@@ -388,6 +388,18 @@ describe("createSendBatchParser", () => {
 });
 
 describe("Telegram batch", () => {
+  it("preserves attachment references through merge and persistence", () => {
+    const parse = createSendBatchParser("telegram", "proj", "src-1");
+    const first = "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/one.csv]\nread this";
+    const second = "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/two.zip]";
+    const batch = requireBatch(parse(telegramEventData({ text: first })), "first");
+    batch.merge(requireBatch(parse(telegramEventData({ messageId: 100, text: second })), "second"));
+    const restored = requireBatch(restoreSendBatch(structuredClone(batch.serialize())), "restored");
+    expect(restored.format()).toContain(first);
+    expect(restored.format()).toContain(second);
+    expect(restored.serialize()).toEqual(batch.serialize());
+  });
+
   function makeBatch(prompt?: string) {
     const parse = createSendBatchParser("telegram", "proj", "src-1", prompt);
     return requireBatch(parse(telegramEventData()), "expected telegram batch");

@@ -4,6 +4,9 @@ New pull-request stages pass through a GitHub-hosted admission job before enteri
 Existing queued or running jobs keep their GitHub scheduling order.
 Admission reserves no runner and promises no FIFO ordering.
 
+After Quality succeeds, Playwright E2E, Runtime Integration, Real-Agent Smoke, and Install Candidate run independently.
+Each test stage retains its own admission job.
+
 ## Scheduling classes
 
 Ready class requires both designated review Apps' effective native approvals at the observed PR head and base, the pinned contract, complete matching file assessments, and required scope consent.
@@ -21,7 +24,7 @@ Main, tags, release publishing, and the approval writer receive no admission hol
 - Security: 300 seconds before each scan; 600 seconds total allocation.
 - Onboarding: 600 seconds.
 - Source loading, metadata requests, and polling consume the stage allocation.
-- Initial stages use run creation time; later CI stages use the successful predecessor's completion in the same attempt.
+- Initial stages use run creation time; post-Quality CI stages use Quality's successful completion in the same attempt.
 - Retrying an admission job cannot reset its immutable deadline.
 - Each stage makes at most 96 read requests, reads at most eight pages per collection, considers 20 candidate PRs, and polls no faster than 30 seconds.
 

@@ -13,6 +13,7 @@ import {
 } from "./deploy-switch-state.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { isActive, resolveSystemdScope, runNpmInit } from "./host-install.js";
+import { spurInstallLockPath } from "./install-lock.js";
 import { writeStdout } from "./io.js";
 import { getReleases, isReleaseVersion } from "./releases-cache.js";
 import {
@@ -49,6 +50,7 @@ import {
   type MonitorRef,
   type RollbackState,
   type UpdateInProgress,
+  type UpdateFailure,
 } from "./update-state.js";
 import { getVersion, resolvePackageVersion } from "./version.js";
 import { computeBuildId } from "./build-identity.js";
@@ -126,15 +128,20 @@ export function recordManualRollback(dataDir: string, failure: ManualRollbackFai
   });
 }
 
-export function acquireUpdateLock(home = homedir()): () => void {
-  const lockPath = join(home, ".spur", "install-and-restart.lock");
+const UPDATE_LOCK_WAIT_SECONDS = 5;
+
+export function acquireUpdateLock(
+  home = homedir(),
+  waitSeconds = UPDATE_LOCK_WAIT_SECONDS,
+): () => void {
+  const lockPath = spurInstallLockPath(home);
   mkdirSync(dirname(lockPath), { recursive: true });
   const fd = openSync(lockPath, "w");
   try {
     // `flock` locks the open file description, which the child shares through
     // the inherited fd, so the lock outlives the child and is released only
     // when this process closes its own descriptor.
-    execFileSync("flock", ["--nonblock", "3"], {
+    execFileSync("flock", ["--wait", String(waitSeconds), "3"], {
       stdio: ["ignore", "ignore", "ignore", fd],
     });
   } catch (error) {
@@ -450,8 +457,43 @@ export async function runUpdate(
       level: "info",
       details: { from: deps.currentVersion, to: target, force },
     });
-    deps.installVersion(target);
-    deps.reinit();
+    let stage: UpdateFailure["stage"] = "install";
+    try {
+      deps.installVersion(target);
+      stage = "reinit";
+      deps.reinit();
+    } catch (error) {
+      let installedVersion: string | null = null;
+      try {
+        const observed = deps.readInstalledVersion();
+        if (isReleaseVersion(observed)) installedVersion = observed;
+      } catch {
+        // A partial install may leave package metadata unreadable.
+      }
+      const exitCode =
+        typeof error === "object" &&
+        error !== null &&
+        "status" in error &&
+        typeof error.status === "number" &&
+        Number.isInteger(error.status)
+          ? error.status
+          : null;
+      deps.writeState({
+        version: 1,
+        lastKnownGood,
+        inProgress: null,
+        lastFailure: {
+          fromVersion: inProgress.fromVersion,
+          toVersion: inProgress.toVersion,
+          startedAt,
+          finishedAt: new Date(deps.now()).toISOString(),
+          stage,
+          installedVersion,
+          exitCode,
+        },
+      });
+      throw error;
+    }
 
     const monitor = deps.launch();
     deps.writeState({

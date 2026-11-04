@@ -15,6 +15,8 @@ import type * as Workspace from "../../src/workspace.js";
 const {
   execFileSyncMock,
   platformMock,
+  userInfoMock,
+  existsSyncMock,
   probeMock,
   probeInfoMock,
   probeHeadroomMock,
@@ -27,6 +29,8 @@ const {
 } = vi.hoisted(() => ({
   execFileSyncMock: vi.fn(),
   platformMock: vi.fn(),
+  userInfoMock: vi.fn(),
+  existsSyncMock: vi.fn(),
   probeMock: vi.fn(),
   probeInfoMock: vi.fn(),
   probeHeadroomMock: vi.fn(),
@@ -65,7 +69,7 @@ vi.mock("node:child_process", async () => {
 
 vi.mock("node:os", async () => {
   const actual = await vi.importActual<typeof OsModule>("node:os");
-  return { ...actual, platform: platformMock };
+  return { ...actual, platform: platformMock, userInfo: userInfoMock };
 });
 
 // C1: `checkDirWritable`'s write-probe uses the real `writeFileSync` by
@@ -75,7 +79,7 @@ vi.mock("node:os", async () => {
 // uid/permission behavior.
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof FsModule>("node:fs");
-  return { ...actual, writeFileSync: writeFileSyncMock };
+  return { ...actual, writeFileSync: writeFileSyncMock, existsSync: existsSyncMock };
 });
 
 vi.mock("../../src/update-health.js", async () => {
@@ -123,6 +127,7 @@ import {
   resolveSystemdScope,
   satisfiesNodeEngineRange,
   type SystemdScope,
+  type HostInstallCheck,
 } from "../../src/host-install.js";
 import { recordGitHubPollDisabledSession, writeSession } from "../../src/metadata.js";
 import type { LeakedSidecarTree } from "../../src/sidecars/reap.js";
@@ -138,12 +143,15 @@ const version = getVersion();
 // `vi.restoreAllMocks()` (called in `afterEach`) affects a plain `vi.fn()`'s
 // prior implementation.
 const actualFs = await vi.importActual<typeof FsModule>("node:fs");
+const actualOs = await vi.importActual<typeof OsModule>("node:os");
 
 interface ExecState {
   tmuxOk: boolean;
   gitOk: boolean;
   lingerOk: boolean;
   systemctlAvailable: boolean;
+  unitFileState: string;
+  unitFileStateError: boolean;
   daemonActiveState: string;
   webActiveState: string;
   // MainPID systemd reports for each unit ("0" when systemd has no tracked
@@ -191,6 +199,8 @@ beforeEach(() => {
     gitOk: true,
     lingerOk: false,
     systemctlAvailable: false,
+    unitFileState: "enabled",
+    unitFileStateError: false,
     daemonActiveState: "inactive",
     webActiveState: "inactive",
     daemonMainPid: "0",
@@ -250,6 +260,10 @@ beforeEach(() => {
         return "inactive";
       }
       const showIndex = args.indexOf("show");
+      if (showIndex !== -1 && args.includes("--property=UnitFileState")) {
+        if (execState.unitFileStateError) throw new Error("systemctl query timed out");
+        return execState.unitFileState;
+      }
       if (showIndex !== -1 && args.includes("MainPID")) {
         const unit = args[showIndex + 1];
         if (unit === "spur-daemon.service") return execState.daemonMainPid;
@@ -293,6 +307,10 @@ beforeEach(() => {
 
   platformMock.mockReset();
   platformMock.mockReturnValue("linux");
+  userInfoMock.mockReset();
+  userInfoMock.mockImplementation(actualOs.userInfo);
+  existsSyncMock.mockReset();
+  existsSyncMock.mockImplementation(actualFs.existsSync);
 
   probeMock.mockReset();
   probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
@@ -1455,6 +1473,202 @@ async function pinInstanceConfig(content: string): Promise<string> {
 
 const MINIMAL_UNIT_BODY = "[Service]\n";
 
+describe("collectHostInstallChecks: service persistence", () => {
+  let home: string;
+  let unitDir: string;
+  const originalTunnelEnv = process.env["SPUR_MCP_TUNNEL_ENV_FILE"];
+
+  beforeEach(async () => {
+    home = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    unitDir = join(home, ".config", "systemd", "user");
+    await writeFile(join(unitDir, "spur-mcp.service"), MINIMAL_UNIT_BODY);
+    await pinInstanceConfig(`dataDir: ${home}/data\nworktreeDir: ${home}/worktrees\n`);
+    process.env["SPUR_MCP_TUNNEL_ENV_FILE"] = join(home, "mcp-tunnel.env");
+    execState.systemctlAvailable = true;
+    execState.daemonActiveState = "active";
+    execState.webActiveState = "active";
+  });
+
+  afterEach(() => {
+    if (originalTunnelEnv === undefined) delete process.env["SPUR_MCP_TUNNEL_ENV_FILE"];
+    else process.env["SPUR_MCP_TUNNEL_ENV_FILE"] = originalTunnelEnv;
+  });
+
+  function queries() {
+    return execFileSyncMock.mock.calls.filter(([, args]) =>
+      (args as string[]).includes("--property=UnitFileState"),
+    );
+  }
+
+  it.each([
+    "enabled",
+    "disabled",
+    "enabled-runtime",
+    "masked",
+    "masked-runtime",
+    "static",
+    "indirect",
+    "linked",
+    "linked-runtime",
+    "alias",
+    "generated",
+    "transient",
+    "bad",
+    "not-found",
+    "",
+    "unexpected-state",
+  ])("accepts only persistent enabled state: %s", async (state) => {
+    execState.unitFileState = ` ${state}\n`;
+    const checks = await collectHostInstallChecks(home);
+    const persistence = checks.filter((check) => check.id.endsWith("-persistence"));
+    expect(persistence.map((check) => check.id)).toEqual([
+      "spur-daemon-persistence",
+      "spur-web-persistence",
+      "spur-mcp-persistence",
+    ]);
+    for (const check of persistence) {
+      expect(check).toMatchObject({ ok: state === "enabled", severity: "error" });
+      if (state === "enabled") expect(check.fix).toBeUndefined();
+      else {
+        expect(check.fix).toContain("systemctl --user");
+        expect(check.fix).not.toContain("restart");
+        expect(check.fix).not.toContain("--runtime");
+        expect(check.fix).not.toContain("--now");
+      }
+      if (!state || state === "unexpected-state") expect(check.detail).toContain("unverified");
+      else if (state !== "enabled") expect(check.detail).toContain(`UnitFileState=${state}`);
+      if (state.startsWith("masked")) expect(check.fix).toContain("unmask");
+      if (
+        ["static", "indirect", "alias", "generated", "transient", "bad", "not-found"].includes(
+          state,
+        )
+      ) {
+        expect(check.fix).toContain("spur reinit");
+      }
+    }
+    expect(checks.find((check) => check.id === "spur-daemon")?.ok).toBe(true);
+    expect(checks.find((check) => check.id === "spur-web")?.ok).toBe(true);
+    expect(queries()).toHaveLength(3);
+    for (const [index, unit] of [
+      "spur-daemon.service",
+      "spur-web.service",
+      "spur-mcp.service",
+    ].entries()) {
+      expect(queries()[index]).toEqual([
+        "systemctl",
+        ["--user", "show", unit, "--property=UnitFileState", "--value"],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 },
+      ]);
+    }
+    expect(
+      execFileSyncMock.mock.calls.some(
+        ([command, args]) =>
+          command === "sudo" ||
+          (args as string[]).some((arg) =>
+            ["enable", "unmask", "restart", "stop", "start", "disable"].includes(arg),
+          ),
+      ),
+    ).toBe(false);
+  });
+
+  it.each(["unavailable", "timeout"])(
+    "fails verification when systemctl is %s",
+    async (failure) => {
+      execState.systemctlAvailable = failure !== "unavailable";
+      execState.unitFileStateError = failure === "timeout";
+      const checks = await collectHostInstallChecks(home);
+      expect(checks.filter((check) => check.id.endsWith("-persistence"))).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ ok: false, detail: expect.stringContaining("unverified") }),
+        ]),
+      );
+      expect(queries()).toHaveLength(3);
+    },
+  );
+
+  it("preserves unhealthy runtime checks when enablement passes", async () => {
+    execState.daemonActiveState = "inactive";
+    const checks = await collectHostInstallChecks(home);
+    expect(checks.find((check) => check.id === "spur-daemon-persistence")?.ok).toBe(true);
+    expect(checks.find((check) => check.id === "spur-daemon")?.ok).toBe(false);
+    expect(checks.find((check) => check.id === "spur-mcp")?.ok).toBe(false);
+  });
+
+  it.each(["missing-config", "invalid-config", "never-installed", "non-linux"])(
+    "skips %s",
+    async (condition) => {
+      if (condition === "missing-config") process.env["SPUR_CONFIG"] = "/nonexistent/config.yaml";
+      if (condition === "invalid-config") await pinInstanceConfig("server: [\n");
+      if (condition === "never-installed") await rm(join(unitDir, "spur-daemon.service"));
+      if (condition === "non-linux") platformMock.mockReturnValue("darwin");
+      const checks = await collectHostInstallChecks(home);
+      expect(checks.filter((check) => check.id.endsWith("-persistence"))).toEqual([]);
+      expect(queries()).toHaveLength(0);
+    },
+  );
+
+  it("leaves absent MCP unit ownership with the missing-unit check", async () => {
+    await rm(join(unitDir, "spur-mcp.service"));
+    const checks = await collectHostInstallChecks(home);
+    expect(checks.find((check) => check.id === "spur-mcp-persistence")).toBeUndefined();
+    expect(checks.find((check) => check.id === "spur-mcp")).toMatchObject({
+      ok: false,
+      detail: "spur-mcp.service missing",
+    });
+    expect(queries()).toHaveLength(2);
+  });
+
+  it.each([
+    ["user", "masked"],
+    ["user", "enabled"],
+    ["system", "masked"],
+    ["system", "static"],
+    ["system", "disabled"],
+    ["system", "unexpected-state"],
+  ])("selects configured tunnel and remedies in %s scope with %s state", async (kind, state) => {
+    const system = kind === "system";
+    const tunnelEnv = system ? "/etc/spur/mcp-tunnel.env" : process.env["SPUR_MCP_TUNNEL_ENV_FILE"];
+    if (system) userInfoMock.mockReturnValue({ homedir: home });
+    existsSyncMock.mockImplementation((path: FsModule.PathLike) => {
+      if (path === tunnelEnv) return true;
+      if (system && String(path).startsWith("/etc/systemd/system/spur-")) return true;
+      if (system && String(path).startsWith(unitDir)) return false;
+      return actualFs.existsSync(path);
+    });
+    if (system) {
+      vi.spyOn(await import("node:fs"), "readFileSync").mockImplementation((path, ...options) =>
+        String(path).startsWith("/etc/systemd/system/spur-")
+          ? MINIMAL_UNIT_BODY
+          : actualFs.readFileSync(path, ...options),
+      );
+    } else await writeFile(join(unitDir, "spur-mcp-tunnel.service"), MINIMAL_UNIT_BODY);
+    execState.unitFileState = state;
+    const checks = await collectHostInstallChecks(home);
+    const persistence = checks.filter((check) => check.id.endsWith("-persistence"));
+    expect(persistence).toHaveLength(4);
+    for (const check of persistence) {
+      expect(check.ok).toBe(state === "enabled");
+      if (state !== "enabled")
+        expect(check.fix).toContain(system ? "sudo systemctl" : "systemctl --user");
+      if (state === "static") expect(check.fix).toContain("source installer");
+      if (state === "unexpected-state") expect(check.detail).toContain("unverified");
+    }
+    if (state === "masked") {
+      expect(persistence.find((check) => check.id === "spur-tunnel-persistence")?.fix).toBe(
+        `${system ? "sudo systemctl" : "systemctl --user"} unmask spur-mcp-tunnel.service, then ${system ? "sudo systemctl" : "systemctl --user"} enable spur-mcp-tunnel.service`,
+      );
+    }
+    expect(queries()[3]?.[1]).toEqual([
+      ...(system ? [] : ["--user"]),
+      "show",
+      "spur-mcp-tunnel.service",
+      "--property=UnitFileState",
+      "--value",
+    ]);
+    expect(execFileSyncMock.mock.calls.some(([command]) => command === "sudo")).toBe(false);
+  });
+});
+
 describe("collectHostInstallChecks: A1 dist integrity", () => {
   it("reports daemon-dist-integrity error when the ExecStart .js target is missing", async () => {
     const fakeHome = await writeFakeUnits(
@@ -2405,6 +2619,33 @@ describe("spur doctor --json: config-registry per-path listing", () => {
     else process.env["HOME"] = originalHome;
     process.exitCode = originalExitCode;
     resolveDoctorRepoRootMock.mockReset();
+  });
+
+  it("reports active-disabled service persistence as an exit-code-affecting JSON error", async () => {
+    const home = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    process.env["HOME"] = home;
+    await pinInstanceConfig(`dataDir: ${home}/data\nworktreeDir: ${home}/worktrees\n`);
+    execState.systemctlAvailable = true;
+    execState.daemonActiveState = "active";
+    execState.webActiveState = "active";
+    execState.unitFileState = "disabled";
+    resolveDoctorRepoRootMock.mockResolvedValue(home);
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    process.exitCode = 0;
+    await createProgram("/tmp/dist/cli.js").parseAsync(["node", "spur", "doctor", "--json"]);
+    const output = writeSpy.mock.calls.map((call) => String(call[0])).join("");
+    writeSpy.mockRestore();
+    const parsed = JSON.parse(output) as { hostChecks: HostInstallCheck[] };
+    expect(parsed.hostChecks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "spur-daemon", ok: true }),
+        expect.objectContaining({ id: "spur-daemon-persistence", ok: false, severity: "error" }),
+      ]),
+    );
+    expect(
+      hasErrorSeverity(parsed.hostChecks.filter((check) => check.id.endsWith("-persistence"))),
+    ).toBe(true);
+    expect(process.exitCode).toBe(1);
   });
 
   it("carries the config-registry per-path array through to the JSON doctor output", async () => {

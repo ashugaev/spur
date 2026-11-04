@@ -4,6 +4,7 @@ import {
   isPrReady,
   parseReviewDecision,
   prInfosEqual,
+  prStatusIndicator,
   type PrInfo,
 } from "@/lib/pr-status-shape.js";
 
@@ -21,6 +22,19 @@ function makePrInfo(overrides: Partial<PrInfo> = {}): PrInfo {
 }
 
 describe("pr-status-shape", () => {
+  it.each([
+    ["success", "approved", { kind: "review", decision: "approved" }],
+    ["success", "changes_requested", { kind: "review", decision: "changes_requested" }],
+    ["success", "review_required", { kind: "ci", status: "success" }],
+    ["failure", "approved", { kind: "ci", status: "failure" }],
+    ["pending", "changes_requested", { kind: "ci", status: "pending" }],
+    [null, null, { kind: "ci", status: null }],
+  ] as const)(
+    "shares the displayed dot semantics for %s/%s",
+    (ciStatus, reviewDecision, expected) => {
+      expect(prStatusIndicator(makePrInfo({ ciStatus, reviewDecision }))).toEqual(expected);
+    },
+  );
   it("accepts reviewDecision in the PR info shape", () => {
     expect(
       isPrInfoShape({
