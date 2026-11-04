@@ -55,13 +55,11 @@ vi.mock("node:crypto", async (importOriginal) => {
         else update(data);
         return hash;
       });
-      vi.spyOn(hash, "digest").mockImplementation(
-        ((encoding?: Crypto.BinaryToTextEncoding) => {
-          const admitted = admittedBytes.get(Buffer.concat(chunks).toString("base64"));
-          if (args[0] === "sha256" && admitted && encoding === "hex") return admitted;
-          return encoding === undefined ? digest() : digest(encoding);
-        }) as typeof hash.digest,
-      );
+      vi.spyOn(hash, "digest").mockImplementation(((encoding?: Crypto.BinaryToTextEncoding) => {
+        const admitted = admittedBytes.get(Buffer.concat(chunks).toString("base64"));
+        if (args[0] === "sha256" && admitted && encoding === "hex") return admitted;
+        return encoding === undefined ? digest() : digest(encoding);
+      }) as typeof hash.digest);
       return hash;
     },
   };
@@ -643,7 +641,11 @@ test.skipIf(process.platform === "win32").each(["legacy", "pending"])(
     const f = await legacyRecoveryFixture();
     if (mode === "pending") {
       await f.recover();
-      expect(createHash("sha256").update(await readFile(f.archive)).digest("hex")).toBe(f.sha256);
+      expect(
+        createHash("sha256")
+          .update(await readFile(f.archive))
+          .digest("hex"),
+      ).toBe(f.sha256);
       await rm(f.archive);
     }
     await execFileAsync("mkfifo", ["-m", "600", f.archive], { timeout: 2_000 });
@@ -1593,30 +1595,27 @@ test.each([
   "later-page",
   "failed-page",
   "second-fresh",
-])(
-  "mocked-admission preflight %s preserves original and replay bytes",
-  async (mode) => {
-    const f = await registeredFixture();
-    f.controls.mode = mode;
-    await expect(f.recover()).rejects.toThrow();
-    expect(await readFile(f.request.receipt)).toEqual(f.raw);
-    await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(f.comments).toHaveLength(0);
-    if (["later-page", "failed-page"].includes(mode))
-      expect(f.calls.some((row) => row.includes("page=2"))).toBe(true);
-    f.controls.mode = "";
-    await f.recover();
-    const pending = await readFile(f.request.receipt);
-    f.controls.mode = mode === "second-fresh" ? "H" : mode;
-    const writes = faults.writes;
-    await expect(f.recover()).rejects.toThrow();
-    expect(await readFile(f.request.receipt)).toEqual(pending);
-    expect(faults.writes).toBe(writes);
-    expect(await readFile(f.archive)).toEqual(f.raw);
-    expect(f.comments).toHaveLength(1);
-    expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
-  },
-);
+])("mocked-admission preflight %s preserves original and replay bytes", async (mode) => {
+  const f = await registeredFixture();
+  f.controls.mode = mode;
+  await expect(f.recover()).rejects.toThrow();
+  expect(await readFile(f.request.receipt)).toEqual(f.raw);
+  await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+  expect(f.comments).toHaveLength(0);
+  if (["later-page", "failed-page"].includes(mode))
+    expect(f.calls.some((row) => row.includes("page=2"))).toBe(true);
+  f.controls.mode = "";
+  await f.recover();
+  const pending = await readFile(f.request.receipt);
+  f.controls.mode = mode === "second-fresh" ? "H" : mode;
+  const writes = faults.writes;
+  await expect(f.recover()).rejects.toThrow();
+  expect(await readFile(f.request.receipt)).toEqual(pending);
+  expect(faults.writes).toBe(writes);
+  expect(await readFile(f.archive)).toEqual(f.raw);
+  expect(f.comments).toHaveLength(1);
+  expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
+});
 
 test.each(["wrong-bytes", "public-mode", "symlink"])(
   "mocked-admission %s archive rejects before network",
@@ -1714,26 +1713,23 @@ test.each([
   "canonical-write",
   "canonical-sync",
   "readback",
-])(
-  "mocked-admission %s fault retains archive and ownership rules",
-  async (mode) => {
-    const f = await registeredFixture();
-    if (mode === "readback" || mode === "canonical-sync") {
-      if (mode === "readback") f.controls.mode = mode;
-      else faults.recovery = "registered-canonical-sync";
-      expect(await f.recover()).toMatchObject({ status: "BLOCKED", reviewBlocked: true });
-      await expect(f.recover()).rejects.toThrow();
-    } else {
-      faults.recovery = mode;
-      if (mode === "directory-sync") faults.recovery = "registered-sync";
-      await expect(f.recover()).rejects.toThrow();
-      expect(await readFile(f.request.receipt)).toEqual(f.raw);
-      expect(await f.recover()).toMatchObject({ status: "PENDING" });
-    }
-    expect(await readFile(f.archive)).toEqual(f.raw);
-    expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
-  },
-);
+])("mocked-admission %s fault retains archive and ownership rules", async (mode) => {
+  const f = await registeredFixture();
+  if (mode === "readback" || mode === "canonical-sync") {
+    if (mode === "readback") f.controls.mode = mode;
+    else faults.recovery = "registered-canonical-sync";
+    expect(await f.recover()).toMatchObject({ status: "BLOCKED", reviewBlocked: true });
+    await expect(f.recover()).rejects.toThrow();
+  } else {
+    faults.recovery = mode;
+    if (mode === "directory-sync") faults.recovery = "registered-sync";
+    await expect(f.recover()).rejects.toThrow();
+    expect(await readFile(f.request.receipt)).toEqual(f.raw);
+    expect(await f.recover()).toMatchObject({ status: "PENDING" });
+  }
+  expect(await readFile(f.archive)).toEqual(f.raw);
+  expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
+});
 
 test.each(["conversion", "replay"])(
   "mocked-admission %s refuses unsafe configured key",
@@ -1820,8 +1816,7 @@ test.each(["evidence", "verdict", "mutation", "review-id", "lineage", "unknown",
     const raw = Buffer.from(JSON.stringify(current));
     await writeFile(f.request.receipt, raw);
     f.calls.splice(0);
-    const hash =
-      mode === "raw-current" ? createHash("sha256").update(raw).digest("hex") : f.sha256;
+    const hash = mode === "raw-current" ? createHash("sha256").update(raw).digest("hex") : f.sha256;
     await expect(
       recoverReview(f.config, f.request, f.request.session, hash, f.transport),
     ).rejects.toThrow();
