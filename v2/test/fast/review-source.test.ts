@@ -471,10 +471,7 @@ describe("review source merge_conflict hold on unknown base tip", () => {
     ...(conflictBaseUnknown ? { conflictBaseUnknown } : {}),
   });
 
-  async function run(
-    stored: ReviewSignal[],
-    polls: ReturnType<typeof poll>[],
-  ): Promise<string[]> {
+  async function run(stored: ReviewSignal[], polls: ReturnType<typeof poll>[]): Promise<string[]> {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-1", storedSnapshot(stored)]]));
     listSessionsMock.mockReturnValue([makeSession()]);
     let index = 0;

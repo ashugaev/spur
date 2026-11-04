@@ -294,8 +294,9 @@ describe("gitlabReviewProvider.collectSignals", () => {
     let tip = "tip-1";
     mockConflictPoll(true, () => tip);
     const poll = async () =>
-      (await gitlabReviewProvider.collectSignals(makeSession(), "/tmp/data", "proj", "src"))
-        ?.snapshot.get("merge_conflict")?.changeKey;
+      (
+        await gitlabReviewProvider.collectSignals(makeSession(), "/tmp/data", "proj", "src")
+      )?.snapshot.get("merge_conflict")?.changeKey;
 
     const first = await poll();
     const repeat = await poll();
