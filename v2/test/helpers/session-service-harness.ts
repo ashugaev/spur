@@ -548,9 +548,9 @@ vi.mock("node:crypto", async (importOriginal) => {
   };
 });
 
-// Partial mock: unlisted exports (DEFERRED_CONTROLS_ACK_WINDOW_MS and every
-// other constant) stay the real values from agents/index.ts, so a test
-// asserting one checks the source constant, not a test literal.
+// Partial mock: unlisted exports (every constant) stay the real values from
+// agents/index.ts, so a test asserting one checks the source constant, not a
+// test literal.
 vi.mock("../../src/agents/index.js", async (importOriginal) => ({
   ...(await importOriginal<typeof agentsIndexModule>()),
   buildAgentLaunchPlan: buildAgentLaunchPlanMock,

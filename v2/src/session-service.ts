@@ -44,8 +44,6 @@ import {
   buildAgentRestorePlan,
   buildAgentResumePlan,
   createAgentSubmitAckBinding,
-  DEFERRED_CONTROLS_ACK_WINDOW_MS,
-  DEFERRED_CONTROLS_MAX_RESENDS,
   findAgentSessionId,
   invalidateAgentState,
   parseAgentName,
@@ -157,6 +155,7 @@ import {
 } from "./claude-jsonl-state.js";
 import { readClaudeSessionStatus } from "./claude-session-status.js";
 import { redactAutoPingHandles } from "./auto-ping.js";
+import { deleteMuteHistory } from "./auto-ping-history.js";
 import {
   type HistoryCaptureStamp,
   AGENT_HISTORY_ARTIFACT_PREFIX,
@@ -1287,6 +1286,8 @@ type StartedAgentMessage =
 type AgentMessageOptions = AgentMessageWriteOptions & {
   operation?: RestoreOperationContext;
   skipSubmitAck?: boolean;
+  /** Text carries a credential: stdin-loaded, scrubbed buffer, never in argv. */
+  sensitive?: true;
   authorizeInput?: (send: () => Promise<void>) => Promise<boolean>;
 };
 
@@ -3278,7 +3279,6 @@ interface SessionSpawnOptions {
   admissionReservation?: symbol;
   validatedLaunchSelection?: AgentLaunchSelection;
   closeoutOwnerTransfer?: boolean;
-  sensitivePromptSuffix?: string;
   receiptToken?: symbol;
   /** Set by source adapters, never from the HTTP body. */
   telegramOrigin?: TelegramSpawnOrigin;
@@ -16480,7 +16480,7 @@ export class SessionService {
   async deliver(
     sessionId: string,
     message: string,
-    options?: { interrupt?: boolean; sensitivePromptSuffix?: string },
+    options?: { interrupt?: boolean; sensitive?: true },
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -16493,26 +16493,11 @@ export class SessionService {
       throw new Error(`Session is not running: ${sessionId}`);
     }
 
-    const result = await this.deliverPrepared(sessionId, message, {
+    return this.deliverPrepared(sessionId, message, {
       ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
+      ...(options?.sensitive ? { sensitive: true as const } : {}),
       entryPoint: "deliver",
     });
-    if (options?.sensitivePromptSuffix) {
-      const current = readSession(this.config.dataDir, sessionId);
-      if (!current) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-      // The body leg has landed: a controls failure must not reject deliver(),
-      // or the trigger retry re-pastes the landed digest.
-      try {
-        await this.sendDeferredSensitiveInitialMessage(current, options.sensitivePromptSuffix);
-      } catch (error) {
-        this.logEvent("session.controls.delivery_failed", {
-          level: "warn",
-          sessionId,
-          message: `Deferred controls send failed for ${sessionId} after the message landed: ${error instanceof Error ? error.message : String(error)}`,
-        });
-      }
-    }
-    return result;
   }
 
   // Content-keyed: both queue ops locate the exact string in the queue rather
@@ -16782,6 +16767,8 @@ export class SessionService {
       interrupt?: boolean;
       recoverOnLiveAckTimeout?: boolean;
       interactive?: boolean;
+      /** Message text never persists: no queue entry, typed marker, or requeue. */
+      sensitive?: true;
       allowDelivery?: () => boolean;
       observeDelivery?: (stage: "input-started" | "accepted") => void;
       wakeClaim?: ScheduledWakeClaim;
@@ -16791,6 +16778,9 @@ export class SessionService {
     recovered: SubmitAckTimeoutError | null;
     queuedAhead?: boolean;
   }> {
+    if (options?.sensitive && (options.interactive || intent.kind !== "direct")) {
+      throw new Error("Sensitive messages are delivered directly, never queued");
+    }
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     const deliveryRevision = this.lifecycle.snapshot(sessionId).revision;
@@ -16983,15 +16973,19 @@ export class SessionService {
           return true;
         });
       let recovered: SubmitAckTimeoutError | null = null;
-      const pane: { typed: NonNullable<SessionRecord["queuedMessageTyped"]> | null } = {
-        typed: null,
-      };
+      const pane: {
+        typed: NonNullable<SessionRecord["queuedMessageTyped"]> | null;
+        written: boolean;
+      } = { typed: null, written: false };
       try {
         const submission = await this.beginAgentMessage(prepared.session, message, {
           interrupt,
           interactive: options?.interactive === true,
+          ...(options?.sensitive ? { sensitive: true as const } : {}),
           onPaneWritten: (ackBaseline, pastedAt) => {
             options?.observeDelivery?.("accepted");
+            pane.written = true;
+            if (options?.sensitive) return;
             const typed = {
               message,
               typedAt: new Date(pastedAt).toISOString(),
@@ -17045,7 +17039,18 @@ export class SessionService {
         if (intent.kind === "queued-drain") this.queuedDeliveryAckedAt.set(sessionId, Date.now());
       } catch (error) {
         if (intent.kind === "queued-drain") this.queuedDeliveryAckedAt.delete(sessionId);
-        if (options?.recoverOnLiveAckTimeout !== true || !isRecoveredSubmitAckTimeout(error)) {
+        if (options?.sensitive && error instanceof TmuxProbeUnknownError && pane.written) {
+          // Written, ack unknown: the text must not be kept to retry, so the
+          // send counts as delivered. A probe failure before the write rejects.
+          this.logEvent("session.message.sensitive_probe_unknown", {
+            level: "warn",
+            sessionId,
+            message: `Sensitive message to ${sessionId} written; agent liveness unknown, treated as delivered`,
+          });
+        } else if (
+          options?.recoverOnLiveAckTimeout !== true ||
+          !isRecoveredSubmitAckTimeout(error)
+        ) {
           if (error instanceof TmuxProbeUnknownError && pane.typed) {
             const typed = pane.typed;
             await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
@@ -17085,8 +17090,9 @@ export class SessionService {
             });
           }
           throw error;
+        } else {
+          recovered = error;
         }
-        recovered = error;
       } finally {
         this.queuedDeliveryTyped.delete(sessionId);
       }
@@ -17166,6 +17172,7 @@ export class SessionService {
     message: string,
     options: {
       interrupt?: boolean;
+      sensitive?: true;
       entryPoint: "send" | "deliver" | "flush";
       hasAttachments?: boolean;
       allowDelivery?: () => boolean;
@@ -17205,6 +17212,7 @@ export class SessionService {
           ...(options.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
           recoverOnLiveAckTimeout: true,
           interactive,
+          ...(options.sensitive ? { sensitive: true as const } : {}),
           ...(options.allowDelivery ? { allowDelivery: options.allowDelivery } : {}),
           ...(options.observeDelivery ? { observeDelivery: options.observeDelivery } : {}),
           ...(options.wakeClaim ? { wakeClaim: options.wakeClaim } : {}),
@@ -17575,113 +17583,6 @@ export class SessionService {
     });
   }
 
-  private async sendDeferredSensitiveInitialMessage(
-    session: Pick<
-      SessionRecord,
-      "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
-    >,
-    message: string,
-  ): Promise<AgentSendOutcome> {
-    return this.withPaneWriteLock(session.tmuxSession, async () => {
-      const startedAt = Date.now();
-      const binding = agentWaitsForSubmitAck(session.agent)
-        ? await createAgentSubmitAckBinding(session.agent, {
-            ...this.submitAckContext(session),
-            freshLaunch: false,
-            message,
-          })
-        : null;
-      const writeStartedAt = Date.now();
-      await binding?.markWriteStart?.();
-      await sendSensitiveMessageToTmux(session.tmuxSession, binding?.inputText ?? message, {
-        agent: session.agent,
-      });
-      this.recordPaneWrite(session, writeStartedAt);
-      if (!binding) return "submitted" as const;
-      // Bounded resend loop, short window on every agent: this callback holds
-      // withPaneWriteLock, so a long window (claude/codex/opencode pacing is
-      // 300s) starves every other send to this pane. Worst case is
-      // maxResends+1 scans x DEFERRED_CONTROLS_ACK_WINDOW_MS plus maxResends
-      // bare Enters — 3 x 5s = 15s today. Restores the recovery for a
-      // genuinely dropped Enter (agents/index.ts) without reinstating
-      // cursor's old 65s hold.
-      let result: SubmitAckScanResult = { found: false, lastScannedFile: null };
-      // Set only when a mid-loop probe reads not-alive; a dead agent does not
-      // come back inside one send, so the loop stops resending into it instead
-      // of burning the rest of the budget. Keeps unresponsive so an ambiguous
-      // read is not laundered into a plain death verdict. Never set on a
-      // live result — see the probe's own fresh:true comment below.
-      let latchedNotAlive: Extract<AgentProcessProbe, { alive: false }> | null = null;
-      for (let attempt = 0; attempt <= DEFERRED_CONTROLS_MAX_RESENDS; attempt += 1) {
-        result = await this.waitForSubmitAck(binding, message, DEFERRED_CONTROLS_ACK_WINDOW_MS);
-        if (result.found) return "submitted" as const;
-        if (attempt < DEFERRED_CONTROLS_MAX_RESENDS) {
-          // fresh:true — a stale cached hit would report an agent that just
-          // died as alive.
-          const probe = await probeAgentProcess(
-            {
-              tmuxSession: session.tmuxSession,
-              agent: session.agent,
-              launchCommand: session.launchCommand,
-            },
-            { fresh: true },
-          );
-          if (!probe.alive) {
-            if (probe.diagnostic) throw new TmuxProbeUnknownError(probe.diagnostic);
-            latchedNotAlive = probe;
-            break;
-          }
-          await sendSubmitKeyToTmux(session.tmuxSession);
-        }
-      }
-      // fresh:true — a cached hit could report an agent that just died as
-      // alive; this value decides throw vs. treat-as-delivered. Skipped when
-      // already non-alive mid-loop.
-      const finalProbe =
-        latchedNotAlive ??
-        (await probeAgentProcess(
-          {
-            tmuxSession: session.tmuxSession,
-            agent: session.agent,
-            launchCommand: session.launchCommand,
-          },
-          { fresh: true },
-        ));
-      if (!finalProbe.alive && finalProbe.diagnostic)
-        throw new TmuxProbeUnknownError(finalProbe.diagnostic);
-      const processAlive = finalProbe.alive;
-      const probeUnresponsive = !finalProbe.alive && finalProbe.unresponsive;
-      const elapsedMs = Date.now() - startedAt;
-      if (processAlive) {
-        this.logEvent("session.controls.delivery_recovered", {
-          level: "warn",
-          sessionId: session.id,
-          message: `Deferred controls ack timed out for ${session.id} but agent process is live; continuing`,
-          details: {
-            agent: session.agent,
-            lastScannedFile: result.lastScannedFile,
-            elapsedMs,
-            processAlive,
-            controlCount: (message.match(/ap1_/g) ?? []).length,
-          },
-        });
-        // Deliberately not "submitted": writeAgentMessage's cursor-live branch
-        // returns "submitted" for an ordinary recovered send, but spawn/trigger
-        // telemetry needs to tell that apart from an unconfirmed deferred-controls
-        // ack. Don't "fix" this to match writeAgentMessage.
-        return "submit_unconfirmed" as const;
-      }
-      throw new SubmitAckTimeoutError({
-        sessionId: session.id,
-        agent: session.agent,
-        lastScannedFile: result.lastScannedFile,
-        elapsedMs,
-        processAlive: false,
-        probeUnresponsive,
-      });
-    });
-  }
-
   private async earlySubmitResendAllowed(
     session: Pick<SessionRecord, "agent" | "tmuxSession" | "worktreePath" | "agentSessionId">,
     message: string,
@@ -17772,13 +17673,19 @@ export class SessionService {
       options?.operation?.assertActive();
       await binding?.markWriteStart?.();
       options?.operation?.assertActive();
-      await sendMessageToTmux(session.tmuxSession, binding?.inputText ?? message, {
-        agent: session.agent,
-        ...(options?.operation ? { operation: options.operation } : {}),
-        ...(session.agent === "codex" && options?.interrupt === false
-          ? { interrupt: false as const }
-          : {}),
-      });
+      if (options?.sensitive) {
+        await sendSensitiveMessageToTmux(session.tmuxSession, binding?.inputText ?? message, {
+          agent: session.agent,
+        });
+      } else {
+        await sendMessageToTmux(session.tmuxSession, binding?.inputText ?? message, {
+          agent: session.agent,
+          ...(options?.operation ? { operation: options.operation } : {}),
+          ...(session.agent === "codex" && options?.interrupt === false
+            ? { interrupt: false as const }
+            : {}),
+        });
+      }
       options?.operation?.assertActive();
       this.recordPaneWrite(session, pastedAt);
       options?.onPaneWritten?.(binding?.baseline ?? null, pastedAt);
@@ -18906,6 +18813,7 @@ export class SessionService {
     deleteAgentHookState(this.config.dataDir, sessionId);
     deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
     deleteSessionUserActions(this.config.dataDir, sessionId);
+    deleteMuteHistory(this.config.dataDir, sessionId);
     // Evict per-session in-memory reader caches so they do not grow unbounded
     // for the life of the daemon as sessions are created and discarded.
     this.evictConversationReaders(sessionId);
