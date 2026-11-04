@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ghModule from "../../src/gh.js";
 import {
   clearGitHubMergeConflictRestoreReplay,
-  hasGitHubMergeConflictRestoreReplay,
+  readGitHubMergeConflictRestoreReplay,
   readGitHubReviewPagination,
   readGitHubSourceSnapshot,
   requestGitHubMergeConflictRestoreReplay,
@@ -785,6 +785,8 @@ describe("resolveBoundPrSummary", () => {
         statusCheckRollup: { state: "FAILURE" },
         state: "OPEN",
         isDraft: true,
+        headRefOid: "head-sha",
+        baseRefOid: "base-sha",
       }),
     );
 
@@ -804,6 +806,8 @@ describe("resolveBoundPrSummary", () => {
       statusCheckRollupState: "FAILURE",
       draft: true,
       state: "OPEN",
+      headRefOid: "head-sha",
+      baseRefOid: "base-sha",
     });
     expect(ghMock).toHaveBeenCalledWith(
       "/wt",
@@ -811,7 +815,7 @@ describe("resolveBoundPrSummary", () => {
       "view",
       "212",
       "--json",
-      "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft",
+      "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft,headRefOid,baseRefOid",
     );
   });
 
@@ -1000,6 +1004,47 @@ describe("resolvePrSummary", () => {
 
     expect(pr?.number).toBe(21);
     expect(pr?.state).toBe("MERGED");
+  });
+
+  it("returns head and base oids and keeps them through the UNKNOWN mergeability recheck", async () => {
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          {
+            number: 21,
+            title: "t",
+            url: "https://github.com/o/r/pull/21",
+            reviewDecision: null,
+            mergeable: "UNKNOWN",
+            mergeStateStatus: "UNKNOWN",
+            state: "OPEN",
+            isDraft: false,
+            headRefOid: "head-1",
+            baseRefOid: "base-1",
+          },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }),
+      );
+
+    const pr = await resolvePrSummary("/wt", "feature/retry");
+
+    expect(pr).toMatchObject({
+      mergeable: "CONFLICTING",
+      mergeStateStatus: "DIRTY",
+      headRefOid: "head-1",
+      baseRefOid: "base-1",
+    });
+    expect(ghMock).toHaveBeenCalledTimes(2);
+    expect(ghMock.mock.calls[1]).toEqual([
+      "/wt",
+      "pr",
+      "view",
+      "21",
+      "--json",
+      "mergeable,mergeStateStatus,statusCheckRollup",
+    ]);
   });
 });
 
@@ -3371,7 +3416,9 @@ describe("github source rearm", () => {
           prNumber: 42,
         },
       });
-      expect(hasGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(false);
+      expect(
+        readGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1"),
+      ).toBeUndefined();
     } finally {
       controller.abort();
       handle.stop();
@@ -3419,7 +3466,9 @@ describe("github source rearm", () => {
 
     try {
       expect(events).toEqual([]);
-      expect(hasGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(false);
+      expect(
+        readGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1"),
+      ).toBeUndefined();
     } finally {
       controller.abort();
       handle.stop();
@@ -3476,7 +3525,9 @@ describe("github source rearm", () => {
 
     try {
       expect(events).toEqual([]);
-      expect(hasGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(false);
+      expect(
+        readGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1"),
+      ).toBeUndefined();
     } finally {
       controller.abort();
       handle.stop();
@@ -3509,11 +3560,39 @@ describe("github source rearm", () => {
     });
 
     try {
-      expect(hasGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(false);
+      expect(
+        readGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1"),
+      ).toBeUndefined();
     } finally {
       controller.abort();
       handle.stop();
       clearGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    }
+  });
+
+  it("stores a fresh restore id per request and rejects malformed markers", async () => {
+    const { dataDir } = await createRuntimeState();
+    requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    const first = readGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    expect(first).toEqual(expect.any(String));
+    expect(readGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(first);
+    requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    const second = readGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    expect(second).toEqual(expect.any(String));
+    expect(second).not.toBe(first);
+    const markerPath = join(
+      dataDir,
+      "source-state",
+      "github",
+      "api",
+      "pr-watch",
+      "api-1.merge-conflict",
+    );
+    for (const content of ["true", "{not json", JSON.stringify({ restoreId: "" })]) {
+      await writeFile(markerPath, content);
+      expect(
+        readGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1"),
+      ).toBeUndefined();
     }
   });
 });
