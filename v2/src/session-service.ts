@@ -24328,7 +24328,12 @@ export class SessionService {
       },
     });
     this.scheduleHealedSidecarRestart(updated);
-    if (!updated.error && !updated.serverErrorAt && this.shouldRunDelivery(updated))
+    if (
+      !updated.error &&
+      !updated.serverErrorAt &&
+      !this.restoreOwnsRuntimeRecovery(updated.id) &&
+      this.shouldRunDelivery(updated)
+    )
       this.scheduleDeliveryRunner(updated.id);
     return updated;
   }
@@ -25619,7 +25624,11 @@ export class SessionService {
         const cleared = { ...recovered, updatedAt: nowIso() };
         writeSession(this.config.dataDir, cleared);
         this.stateCache.delete(session.id);
-        if (!cleared.serverErrorAt && this.shouldRunDelivery(cleared)) {
+        if (
+          !cleared.serverErrorAt &&
+          !this.restoreOwnsRuntimeRecovery(cleared.id) &&
+          this.shouldRunDelivery(cleared)
+        ) {
           let runtime: SessionRuntimeSnapshot;
           try {
             runtime = await this.readRuntimeSnapshot(cleared, { fresh: true });
@@ -25637,7 +25646,7 @@ export class SessionService {
             this.retainDetectionError(
               cleared,
               runtime.diagnostic ?? workspace.diagnostic ?? "runtime state unknown",
-              runtime.probeUnresponsive ? "runtime_probe" : "other",
+              "runtime_probe",
               probeRevision,
             );
           } else if (
