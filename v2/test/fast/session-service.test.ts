@@ -74238,7 +74238,7 @@ describe("SessionService", () => {
 
     it("T6 retires at most 20 sessions per sweep and the rest the next day", async () => {
       const ids = Array.from({ length: 25 }, (_, i) => `api-${String(i + 1).padStart(2, "0")}`);
-      const { state, clock } = seedGc(
+      const { state } = seedGc(
         ids.map((id, i) => ({ id, thread: 100 + i, binding: true, target: true })),
         { live: ids.map((id) => gcRecord(id, "killed")), clockAgeMs: 25 * 60 * 60_000 },
       );
@@ -74248,8 +74248,8 @@ describe("SessionService", () => {
       expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(20);
       expect([...state.values()].filter((e) => e.binding)).toHaveLength(5);
 
-      // Next day: age the persisted clock instead of simulating 288 ticks.
-      clock.value = Date.now() - 25 * 60 * 60_000;
+      // Next day: jump the system clock instead of simulating 288 ticks.
+      vi.setSystemTime(Date.now() + 25 * 60 * 60_000);
       await tick();
       expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(25);
       expect([...state.values()].filter((e) => e.binding)).toHaveLength(0);
@@ -74400,6 +74400,28 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(DAY_MS);
       expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(1);
       expect(gcNotices()).toHaveLength(1);
+      service.dispose();
+    });
+
+    it("holds the claim in memory when the clock write throws", async () => {
+      seedGc([{ id: "api-1", thread: 22, binding: true, target: true }], {
+        live: [gcRecord("api-1", "killed")],
+        clockAgeMs: 25 * 60 * 60_000,
+      });
+      writeTelegramTopicGcClockMock.mockImplementation(() => {
+        throw new Error("EACCES");
+      });
+      const service = await startService();
+      await tick();
+      await tick();
+      await tick();
+
+      expect(writeTelegramTopicGcClockMock).toHaveBeenCalledTimes(1);
+      expect(deleteTelegramTopicMock).not.toHaveBeenCalled();
+      const failed = logSpurEventMock.mock.calls.filter(
+        ([, entry]) => (entry as { event?: string }).event === "source.telegram.topic_gc.failed",
+      );
+      expect(failed).toHaveLength(1);
       service.dispose();
     });
 

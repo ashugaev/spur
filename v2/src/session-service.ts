@@ -3792,6 +3792,7 @@ export class SessionService {
   private sessionGcTimer: NodeJS.Timeout | null = null;
   private sessionGcRunning = false;
   private telegramTopicGcRunning = false;
+  private telegramTopicGcClaimAt: number | null = null;
   private backgroundLoopsStarted = false;
   // Construction time, not epoch 0: a daemon restart must not treat "never
   // swept before" as "due immediately" — the first tick after a restart
@@ -8910,12 +8911,16 @@ export class SessionService {
     try {
       const dataDir = this.config.dataDir;
       const now = Date.now();
-      const last = readTelegramTopicGcClock(dataDir);
+      // The in-memory claim is set before the write, so a failing write still
+      // defers the next sweep (and its warning) by a full interval.
+      const last = this.telegramTopicGcClaimAt ?? readTelegramTopicGcClock(dataDir);
       if (last === null) {
+        this.telegramTopicGcClaimAt = now;
         writeTelegramTopicGcClock(dataDir, now);
         return;
       }
       if (now - last < TELEGRAM_TOPIC_GC_INTERVAL_MS) return;
+      this.telegramTopicGcClaimAt = now;
       writeTelegramTopicGcClock(dataDir, now);
       const candidates: string[] = [];
       const skipped: string[] = [];
