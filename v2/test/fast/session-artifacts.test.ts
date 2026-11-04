@@ -25,12 +25,14 @@ import {
   deleteSessionArtifactById,
   deleteSessionArtifactsDir,
   deleteSessionArtifactsExcept,
+  ensureSessionWorkDir,
   listSessionArtifacts,
   parseArtifactRelativePath,
   readSessionArtifact,
   setSessionArtifactOrigin,
   setSessionArtifactUserAdded,
   sessionArtifactsDir,
+  withSessionArtifactInstructions,
 } from "../../src/session-artifacts.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -324,6 +326,48 @@ describe("nested artifact listing", () => {
     expect(small.truncated).toBe(false);
     expect(small.artifacts).toHaveLength(10);
   });
+
+  it("never lists the agent work dir or charges it against nested budgets", async () => {
+    const dataDir = await newDataDir();
+    const sessionId = "api-work-1";
+    const dir = sessionArtifactsDir(dataDir, sessionId);
+    const workDir = ensureSessionWorkDir(dataDir, sessionId);
+    expect(workDir).toBe(join(dir, ".spur-work"));
+    expect(existsSync(workDir)).toBe(true);
+
+    await mkdir(join(workDir, "deep"), { recursive: true });
+    await mkdir(join(workDir, "bulk"), { recursive: true });
+    await mkdir(join(dir, "design"), { recursive: true });
+    await writeFile(join(workDir, "plan.md"), "plan", "utf8");
+    await writeFile(join(workDir, "deep", "notes.txt"), "notes", "utf8");
+    for (let index = 0; index < MAX_NESTED_ARTIFACT_ROWS + 1; index++) {
+      await writeFile(join(workDir, "bulk", `b-${index}.txt`), "x", "utf8");
+    }
+    await writeFile(join(dir, "shot.png"), "png", "utf8");
+    await writeFile(join(dir, "design", "design-spec.md"), "spec", "utf8");
+
+    const result = listSessionArtifacts(dataDir, sessionId);
+    const ids = result.artifacts.map((artifact) => artifact.id).sort();
+    expect(ids).toEqual(["design/design-spec.md", "shot.png"]);
+    expect(result.truncated).toBe(false);
+    expect(ids.some((id) => id.startsWith(".spur-work"))).toBe(false);
+  });
+});
+
+describe("session artifact instructions", () => {
+  it("tells agents artifacts are for human review and service files go to the work dir", () => {
+    const out = withSessionArtifactInstructions("Do X");
+    expect(out.startsWith("Do X\n\nSession artifacts:\n")).toBe(true);
+    expect(out).toContain("put only final files meant for user review there");
+    expect(out).toContain("`$SPUR_SESSION_WORK_DIR`");
+    expect(out).toContain("plans, drafts, specs, task memory, scratch logs");
+    expect(out).not.toContain("temporary session-owned files");
+  });
+
+  it("leaves a prompt that already references the artifacts dir unchanged", () => {
+    const input = "x $SPUR_SESSION_ARTIFACTS_DIR y";
+    expect(withSessionArtifactInstructions(input)).toBe(input);
+  });
 });
 
 describe("artifact id validation", () => {
@@ -506,5 +550,25 @@ describe("deleteSessionArtifactById", () => {
 
     expect(deleteSessionArtifactById(dataDir, sessionId, "agent-history-link.jsonl")).toBe(false);
     expect(existsSync(join(dataDir, "secret.txt"))).toBe(true);
+  });
+});
+
+describe("withSessionArtifactInstructions snippet bullet", () => {
+  const SNIPPET_BULLET_PATH = "snippet.$SPUR_SESSION.<id>.html";
+
+  it("adds the interactive snippet bullet once, after the existing artifact bullets", () => {
+    const text = withSessionArtifactInstructions("Do the task.");
+    expect(text.startsWith("Do the task.\n\nSession artifacts:\n")).toBe(true);
+    expect(text.split(SNIPPET_BULLET_PATH)).toHaveLength(2);
+    expect(text.split("[spur-snippet-action v1]")).toHaveLength(2);
+    expect(text).toContain("https://raw.githubusercontent.com/ashugaev/spur/main/docs/snippets.md");
+    const lines = text.split("\n");
+    expect(lines[lines.length - 1]).toContain(SNIPPET_BULLET_PATH);
+    expect(lines.filter((line) => line.includes("snippet."))).toHaveLength(1);
+  });
+
+  it("is idempotent on a prompt that already carries the block", () => {
+    const once = withSessionArtifactInstructions("Do the task.");
+    expect(withSessionArtifactInstructions(once)).toBe(once);
   });
 });

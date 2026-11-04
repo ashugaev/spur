@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState, type ReactElement, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SessionDetail } from "@/components/SessionDetail";
+import { buildSnippetActionPrompt } from "@/lib/snippets/snippet-protocol";
 import type { SpurSessionView } from "@/lib/types";
 
 // SessionDetail now reads the tag catalog via react-query (useTagCatalog), so
@@ -6717,6 +6718,268 @@ describe("SessionDetail artifacts", () => {
     expect(screen.getAllByText("None.")).toHaveLength(1);
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
+
+  describe("artifact format filter", () => {
+    type ArtifactSpec = { name: string; addedByUser?: boolean };
+
+    function artifactsFor(specs: ArtifactSpec[]) {
+      return specs.map(({ name, addedByUser }) => ({
+        id: name,
+        name,
+        size: 100,
+        mimeType: name.endsWith(".png")
+          ? "image/png"
+          : name.endsWith(".jpg")
+            ? "image/jpeg"
+            : "text/plain; charset=utf-8",
+        kind:
+          name.endsWith(".png") || name.endsWith(".jpg")
+            ? ("image" as const)
+            : ("download" as const),
+        origin: "intentional" as const,
+        ...(addedByUser ? { addedByUser: true } : {}),
+        createdAt: "2026-04-02T10:00:00.000Z",
+        updatedAt: "2026-04-02T10:00:00.000Z",
+      }));
+    }
+
+    function stubSessions(payloads: Record<string, () => ArtifactSpec[]>) {
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        for (const [id, specs] of Object.entries(payloads)) {
+          if (url === `/api/sessions/${id}`) {
+            return new Response(
+              JSON.stringify(sessionFixture({ id, artifacts: artifactsFor(specs()) })),
+              { status: 200 },
+            );
+          }
+          if (url === `/api/sessions/${id}/conversation`) {
+            return new Response(JSON.stringify(conversationFixture({ state: "working" })), {
+              status: 200,
+            });
+          }
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+    }
+
+    const baseSpecs: ArtifactSpec[] = [
+      { name: "a.png" },
+      { name: "b.png" },
+      { name: "notes.txt" },
+      { name: "Makefile" },
+    ];
+    const allNames = ["a.png", "b.png", "notes.txt", "Makefile"];
+
+    function formatControl() {
+      return screen.getByRole("tablist", { name: "Artifact format" });
+    }
+    function formatButton(name: string) {
+      return within(formatControl()).getByRole("button", { name });
+    }
+    function headerCount() {
+      const h2 = screen.getByText("Artifacts", { selector: "h2" });
+      return within(h2).getByText(/^\d+$/).textContent;
+    }
+    function expectOnly(present: string[]) {
+      for (const name of allNames) {
+        if (present.includes(name)) {
+          expect(screen.getByText(name)).toBeInTheDocument();
+        } else {
+          expect(screen.queryByText(name)).not.toBeInTheDocument();
+        }
+      }
+    }
+
+    it("shows extension options and narrows the grid to the selected format", async () => {
+      stubSessions({ "api-a1": () => baseSpecs });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+
+      const buttons = within(formatControl()).getAllByRole("button");
+      expect(buttons.map((button) => button.textContent)).toEqual([
+        "All",
+        "FILE (1)",
+        "PNG (2)",
+        "TXT (1)",
+      ]);
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      expect(headerCount()).toBe("4");
+
+      fireEvent.click(formatButton("PNG (2)"));
+
+      expectOnly(["a.png", "b.png"]);
+      expect(formatButton("PNG (2)")).toHaveAttribute("aria-pressed", "true");
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "false");
+      expect(headerCount()).toBe("2");
+    });
+
+    it("clicking the active format or All restores the full set", async () => {
+      stubSessions({ "api-a1": () => baseSpecs });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+
+      fireEvent.click(formatButton("PNG (2)"));
+      expectOnly(["a.png", "b.png"]);
+      fireEvent.click(formatButton("PNG (2)"));
+      expectOnly(allNames);
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+
+      fireEvent.click(formatButton("PNG (2)"));
+      expectOnly(["a.png", "b.png"]);
+      fireEvent.click(formatButton("All"));
+      expectOnly(allNames);
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+    });
+
+    it("filters list view rows by format", async () => {
+      stubSessions({ "api-a1": () => baseSpecs });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+
+      fireEvent.click(
+        within(screen.getByRole("tablist", { name: "Artifact view" })).getByRole("button", {
+          name: "List",
+        }),
+      );
+      fireEvent.click(formatButton("PNG (2)"));
+
+      const table = screen.getByRole("table");
+      expect(within(table).getByText("a.png")).toBeInTheDocument();
+      expect(within(table).getByText("b.png")).toBeInTheDocument();
+      expect(within(table).queryByText("notes.txt")).not.toBeInTheDocument();
+      expect(within(table).queryByText("Makefile")).not.toBeInTheDocument();
+    });
+
+    it("hides the format control when the category has one extension", async () => {
+      stubSessions({ "api-a1": () => [{ name: "a.png" }, { name: "b.png" }] });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+
+      expect(screen.queryByRole("tablist", { name: "Artifact format" })).not.toBeInTheDocument();
+    });
+
+    it("resets to All when a poll removes the selected format and does not resurrect it", async () => {
+      let specs = baseSpecs;
+      stubSessions({ "api-a1": () => specs });
+      vi.useFakeTimers();
+      try {
+        render(<SessionDetail sessionId="api-a1" />);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        fireEvent.click(formatButton("PNG (2)"));
+        expectOnly(["a.png", "b.png"]);
+
+        specs = baseSpecs.filter((spec) => !spec.name.endsWith(".png"));
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expectOnly(["notes.txt", "Makefile"]);
+        expect(screen.queryByText("None.")).not.toBeInTheDocument();
+        expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+
+        specs = baseSpecs;
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expectOnly(allNames);
+        expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resets to All when a poll leaves one extension", async () => {
+      let specs = baseSpecs;
+      stubSessions({ "api-a1": () => specs });
+      vi.useFakeTimers();
+      try {
+        render(<SessionDetail sessionId="api-a1" />);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        fireEvent.click(formatButton("PNG (2)"));
+
+        specs = baseSpecs.filter((spec) => spec.name.endsWith(".png"));
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expect(screen.queryByRole("tablist", { name: "Artifact format" })).not.toBeInTheDocument();
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+
+        specs = baseSpecs;
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expectOnly(allNames);
+        expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resets to All on category change", async () => {
+      stubSessions({
+        "api-a1": () => [
+          { name: "a.png" },
+          { name: "notes.txt" },
+          { name: "c.png", addedByUser: true },
+          { name: "d.jpg", addedByUser: true },
+        ],
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+
+      fireEvent.click(formatButton("PNG (1)"));
+      expect(screen.queryByText("notes.txt")).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Attached (2)" }));
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      expect(screen.getByText("c.png")).toBeInTheDocument();
+      expect(screen.getByText("d.jpg")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Agent (2)" }));
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      expect(screen.getByText("a.png")).toBeInTheDocument();
+      expect(screen.getByText("notes.txt")).toBeInTheDocument();
+    });
+
+    it("resets to All when switching session", async () => {
+      stubSessions({
+        "api-a1": () => [{ name: "a1-shot.png" }, { name: "a1-notes.txt" }],
+        "api-b2": () => [{ name: "b2-shot.png" }, { name: "b2-notes.txt" }],
+      });
+      const { rerender } = render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a1-shot.png")).toBeInTheDocument();
+      });
+
+      fireEvent.click(formatButton("PNG (1)"));
+      expect(screen.queryByText("a1-notes.txt")).not.toBeInTheDocument();
+
+      rerender(<SessionDetail sessionId="api-b2" />);
+      await waitFor(() => {
+        expect(screen.getByText("b2-shot.png")).toBeInTheDocument();
+      });
+      expect(screen.getByText("b2-notes.txt")).toBeInTheDocument();
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      expect(headerCount()).toBe("2");
+    });
+  });
 });
 
 describe("SessionDetail load state", () => {
@@ -8838,5 +9101,233 @@ describe("SessionDetail header wrap", () => {
     expect(taskParagraph).toHaveClass("min-w-0");
     expect(taskParagraph).toHaveClass("whitespace-pre-wrap");
     expect(taskParagraph).toHaveClass("[overflow-wrap:anywhere]");
+  });
+});
+
+describe("SessionDetail snippets", () => {
+  const SID = "api-a1b2";
+  const artifact = (name: string, updatedAt = "2026-04-02T10:00:00.000Z", size = 400) => ({
+    id: name,
+    name,
+    size,
+    mimeType: name.endsWith(".html") ? "text/html; charset=utf-8" : "image/png",
+    kind: name.endsWith(".html") ? ("download" as const) : ("image" as const),
+    origin: "intentional" as const,
+    createdAt: updatedAt,
+    updatedAt,
+  });
+  const manifestHtml = (snippetId: string, title: string) =>
+    `<script type="application/spur-snippet+json">${JSON.stringify({
+      protocolVersion: 1,
+      snippetId,
+      ownerSessionId: SID,
+      instanceId: `inst-${snippetId}-0001`.slice(0, 20),
+      revision: 1,
+      title,
+      actions: [
+        {
+          id: "go",
+          label: "Go",
+          payload: { type: "object", properties: { note: { type: "string", maxLength: 20 } } },
+        },
+      ],
+    })}</script><p>body</p>`;
+
+  function mockSession(options: {
+    artifacts: ReturnType<typeof artifact>[];
+    queued?: string[];
+    files?: Record<string, string>;
+    onQueueRemove?: (message: string) => void;
+  }) {
+    return vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === `/api/sessions/${SID}`) {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              id: SID,
+              artifacts: options.artifacts,
+              queuedMessages: { messages: options.queued ?? [], awaitingPrompt: false },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === `/api/sessions/${SID}/conversation`) {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/snippets/spur-snippet-sdk.v1.js") return new Response("/* sdk */");
+      if (url.startsWith("/fonts/")) return new Response(new ArrayBuffer(4));
+      if (url === `/api/sessions/${SID}/queue/remove` && init?.method === "POST") {
+        options.onQueueRemove?.((JSON.parse(init.body as string) as { message: string }).message);
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      const prefix = `/api/sessions/${SID}/artifacts/`;
+      if (url.startsWith(prefix)) {
+        const body = options.files?.[decodeURIComponent(url.slice(prefix.length))];
+        if (body !== undefined) return new Response(body, { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    window.localStorage.clear();
+  });
+
+  it("keeps snippet files out of the Artifacts grid and counts, and keeps non-reserved snippet.* names", async () => {
+    mockSession({
+      artifacts: [
+        artifact(`snippet.${SID}.picker.html`),
+        artifact("snippet.sp-cd34.other.html"),
+        artifact(`snippet.${SID}.picker.html.tmp`),
+        artifact("snippet.png"),
+        artifact("shot.png"),
+      ],
+      files: { [`snippet.${SID}.picker.html`]: manifestHtml("picker", "Picker") },
+    });
+    render(<SessionDetail sessionId={SID} />);
+    await screen.findByAltText("shot.png");
+    expect(screen.getByAltText("snippet.png")).toBeInTheDocument();
+    const artifactsHeading = screen.getByRole("heading", { name: /^Artifacts/ });
+    expect(artifactsHeading).toHaveTextContent("2");
+    expect(screen.queryByText(`snippet.${SID}.picker.html`)).not.toBeInTheDocument();
+    expect(screen.queryByText("snippet.sp-cd34.other.html")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preview snippet.png" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: `Preview snippet.${SID}.picker.html` })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Preview snippet.sp-cd34.other.html" })).toBeNull();
+  });
+
+  it("renders the Snippets block between Dialog and Queued messages with the Dialog header classes", async () => {
+    mockSession({
+      artifacts: [artifact(`snippet.${SID}.picker.html`)],
+      queued: ["follow-up"],
+      files: { [`snippet.${SID}.picker.html`]: manifestHtml("picker", "Picker") },
+    });
+    render(<SessionDetail sessionId={SID} />);
+    const snippets = await screen.findByRole("heading", { name: /^Snippets/ });
+    const dialogHeading = screen.getByRole("heading", { name: /dialog/i });
+    const queued = screen.getByRole("heading", { name: /queued messages/i });
+    expect(
+      dialogHeading.compareDocumentPosition(snippets) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      snippets.compareDocumentPosition(queued) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(snippets.className).toBe(dialogHeading.className);
+    expect(snippets).toHaveTextContent("1");
+    const frame = await screen.findByTitle("Picker");
+    expect(frame.tagName).toBe("IFRAME");
+    expect(frame).toHaveAttribute("sandbox", "allow-scripts");
+  });
+
+  it("prunes snippet records older than 7 days on mount and keeps budget keys", async () => {
+    const day = 24 * 60 * 60 * 1000;
+    const record = (updatedAt: number) =>
+      JSON.stringify({
+        instanceId: "inst-0000001",
+        lastRevision: 1,
+        unconfirmedRevision: null,
+        state: { app: null, controls: [] },
+        action: null,
+        updatedAt,
+      });
+    window.localStorage.setItem("spur:snippet:v1:other-0000:old", record(Date.now() - 8 * day));
+    window.localStorage.setItem("spur:snippet:v1:other-0000:fresh", record(Date.now() - day));
+    window.localStorage.setItem(
+      "spur:snippet-budget:v1:other-0000",
+      JSON.stringify({ unconfirmed: 3, updatedAt: Date.now() - 30 * day }),
+    );
+    mockSession({ artifacts: [artifact("shot.png")] });
+    render(<SessionDetail sessionId={SID} />);
+    await screen.findByAltText("shot.png");
+    expect(window.localStorage.getItem("spur:snippet:v1:other-0000:old")).toBeNull();
+    expect(window.localStorage.getItem("spur:snippet:v1:other-0000:fresh")).not.toBeNull();
+    expect(window.localStorage.getItem("spur:snippet-budget:v1:other-0000")).not.toBeNull();
+  });
+
+  it("has no Snippets block without owned files", async () => {
+    mockSession({
+      artifacts: [artifact("snippet.sp-cd34.other.html"), artifact("shot.png")],
+    });
+    render(<SessionDetail sessionId={SID} />);
+    await screen.findByAltText("shot.png");
+    expect(screen.queryByRole("heading", { name: /^Snippets/ })).not.toBeInTheDocument();
+  });
+
+  it("mounts four snippets, lists the rest, and shows too_large and invalid manifest cards", async () => {
+    const names = ["a", "b", "c", "d", "e", "big", "bad"];
+    const updated = (index: number) => `2026-04-02T10:0${index}:00.000Z`;
+    mockSession({
+      artifacts: names.map((id, index) =>
+        artifact(`snippet.${SID}.${id}.html`, updated(9 - index), id === "big" ? 300 * 1024 : 400),
+      ),
+      files: {
+        [`snippet.${SID}.a.html`]: manifestHtml("a", "Alpha"),
+        [`snippet.${SID}.b.html`]: manifestHtml("b", "Bravo"),
+        [`snippet.${SID}.c.html`]: manifestHtml("c", "Charlie"),
+        [`snippet.${SID}.d.html`]: manifestHtml("d", "Delta"),
+      },
+    });
+    render(<SessionDetail sessionId={SID} />);
+    await screen.findByTitle("Alpha");
+    expect(screen.getByTitle("Delta")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^Snippets/ })).toHaveTextContent("7");
+    expect(screen.getByText(/Not mounted · limit 4/)).toBeInTheDocument();
+    expect(screen.getByText(/snippet\.api-a1b2\.big\.html · updated/)).toBeInTheDocument();
+    expect(screen.queryByTitle("Echo")).not.toBeInTheDocument();
+  });
+
+  it("shows a too_large card without fetching and a manifest card for a bad manifest", async () => {
+    const fetchMock = mockSession({
+      artifacts: [
+        artifact(`snippet.${SID}.big.html`, "2026-04-02T10:02:00.000Z", 300 * 1024),
+        artifact(`snippet.${SID}.bad.html`, "2026-04-02T10:01:00.000Z"),
+      ],
+      files: {
+        [`snippet.${SID}.bad.html`]: `<script type="application/spur-snippet+json">{"x":1}</script>`,
+      },
+    });
+    render(<SessionDetail sessionId={SID} />);
+    expect(await screen.findByText("Too large")).toBeInTheDocument();
+    expect(screen.getByText("File over 256 KiB. Not loaded.")).toBeInTheDocument();
+    expect(await screen.findByText("Manifest invalid")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reload" })).not.toBeInTheDocument();
+    const fetched = fetchMock.mock.calls.map(([input]) =>
+      typeof input === "string" ? input : (input as Request).url,
+    );
+    expect(fetched.some((url) => url.endsWith("snippet.api-a1b2.big.html"))).toBe(false);
+  });
+
+  it("renders a queued snippet prompt as a summary and removes the raw text", async () => {
+    const prompt = buildSnippetActionPrompt({
+      requestId: "11111111-2222-3333-4444-555555555555",
+      sessionId: SID,
+      snippetId: "picker",
+      instanceId: "inst-picker-0001",
+      revision: 3,
+      actionId: "go",
+      label: "Choose selected",
+      payload: { note: "hi" },
+    });
+    const removed: string[] = [];
+    mockSession({
+      artifacts: [],
+      queued: [prompt, "plain follow-up"],
+      onQueueRemove: (message) => removed.push(message),
+    });
+    render(<SessionDetail sessionId={SID} />);
+    await screen.findByText("plain follow-up");
+    const summary = document.querySelector("[data-snippet-action-summary]") as HTMLElement;
+    expect(summary.textContent).toBe("Snippet action Choose selected · picker r3");
+    const details = summary.parentElement?.querySelector("details") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    expect(details.textContent).toContain("[spur-snippet-action v1]");
+    fireEvent.click(screen.getByLabelText("Remove queued message #1"));
+    await waitFor(() => expect(removed).toEqual([prompt]));
   });
 });

@@ -8,7 +8,7 @@ tools: Read, Grep, Glob, Bash, Write, Skill, ToolSearch
 Prepare proposed UI screenshot and approval handoff. Contract: `design` skill.
 
 PROCESS
-  1  Read `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` if present (curator handoff, not authority over code), else the user prompt. Identify only the components the task adds or changes.
+  1  Read `task-memory.md` at the path manager passes, if present (curator handoff, not authority over code), else the user prompt. Identify only the components the task adds or changes.
   2  Load `design` (contract) + `frontend-codestyle` (tokens).
   3  Render changed components and affected states in isolated sidecar or local HTML preview; capture proposed UI.
   4  Save screenshot + `design-spec.md` per `design`; send screenshot through authorized session Telegram. Tokens by name, no hardcoded HEX.
