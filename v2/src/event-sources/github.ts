@@ -841,11 +841,17 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             : candidates.filter((signal) => !LIFECYCLE_KINDS.has(signal.kind));
           if (restoreReplayRequested) {
             const mergeConflictSignal = next.get("merge_conflict");
-            if (
-              mergeConflictSignal &&
-              !toEmit.some((signal) => signal.key === mergeConflictSignal.key)
-            )
-              toEmit.push(mergeConflictSignal);
+            if (mergeConflictSignal) {
+              // A restore re-delivers the active conflict once: a per-restore revision
+              // passes the auto-ping (head, base) dedupe that blocks plain repeats.
+              const replay = {
+                ...mergeConflictSignal,
+                revision: `${mergeConflictSignal.revision ?? ""}:restore:${randomUUID()}`,
+              };
+              const index = toEmit.findIndex((signal) => signal.key === replay.key);
+              if (index === -1) toEmit.push(replay);
+              else toEmit[index] = replay;
+            }
             clearGitHubMergeConflictRestoreReplay(
               deps.dataDir,
               deps.projectId,

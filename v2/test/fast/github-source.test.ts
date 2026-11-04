@@ -1359,6 +1359,30 @@ describe("github source", () => {
       handle.stop();
     });
 
+    it("replays a persisted conflict on each restore with a fresh revision", async () => {
+      const stored = conflictSignal({ revision: "h1:b1", changeKey: "h1:b1" });
+      readReviewSourceSnapshotsMock.mockReturnValue(
+        new Map([["api-a1b2", storedSnapshot([stored])]]),
+      );
+      listSessionsMock.mockReturnValue([makeSession()]);
+      hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(true);
+      const emit = vi.fn();
+      const revisions: unknown[] = [];
+      for (let restore = 0; restore < 2; restore += 1) {
+        mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h1", baseRefOid: "b1" }));
+        const handle = await startLifecycle(emit);
+        const [, data] = conflictEmits(emit).at(-1) ?? [];
+        const signal = (data as { signals: ReviewSignal[] }).signals[0];
+        expect(signal?.changeKey).toBe("h1:b1");
+        expect(signal?.revision).toMatch(/^h1:b1:restore:/);
+        revisions.push(signal?.revision);
+        expect(lastSnapshot().signals.get("merge_conflict")).toEqual(stored);
+        handle.stop();
+      }
+      expect(conflictEmits(emit)).toHaveLength(2);
+      expect(revisions[0]).not.toBe(revisions[1]);
+    });
+
     it("rechecks UNKNOWN mergeability once and emits the settled conflict", async () => {
       readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
       listSessionsMock.mockReturnValue([makeSession()]);
