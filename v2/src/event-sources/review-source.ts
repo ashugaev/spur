@@ -23,6 +23,11 @@ import {
   type SourceStartDeps,
 } from "./types.js";
 
+// merge_conflict revisions are `<head>:<base>`.
+function revisionHead(revision: string): string {
+  return revision.split(":")[0] ?? revision;
+}
+
 function emitSignalsByKind(
   providerId: ReviewProviderId,
   deps: SourceStartDeps<ReviewSourceConfig>,
@@ -98,6 +103,16 @@ export function createReviewSourceModule(
                 collected.data.prNumber,
               );
               const next = collected.snapshot;
+              const heldConflict = previous?.get("merge_conflict");
+              const conflict = next.get("merge_conflict");
+              if (
+                collected.conflictBaseUnknown &&
+                heldConflict?.revision &&
+                conflict?.revision &&
+                revisionHead(heldConflict.revision) === revisionHead(conflict.revision)
+              ) {
+                next.set("merge_conflict", heldConflict);
+              }
               const changed = [...next.values()].filter((signal) =>
                 reviewSignalChanged(previous?.get(signal.key), signal),
               );

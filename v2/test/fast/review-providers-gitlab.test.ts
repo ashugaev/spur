@@ -360,6 +360,7 @@ describe("gitlabReviewProvider.collectSignals", () => {
       expect(second?.snapshot.get("merge_conflict")?.revision).toBe(
         first?.snapshot.get("merge_conflict")?.revision,
       );
+      expect(first?.conflictBaseUnknown).toBe(true);
     },
   );
 });

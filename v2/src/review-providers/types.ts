@@ -36,6 +36,9 @@ export interface ReviewProvider {
     ciCheckFetchFailed?: boolean;
     // True when mergeability is still UNKNOWN after the provider's recheck.
     mergeableUnknown?: boolean;
+    // True when the conflict's base-branch tip lookup failed and merge_conflict
+    // carries a fallback key; the source holds the prior key for the same head.
+    conflictBaseUnknown?: boolean;
   } | null>;
   refreshSignals?(input: RefreshReviewSignalsInput): Promise<ReviewSignalRefreshResult[]>;
 }

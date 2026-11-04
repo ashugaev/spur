@@ -457,3 +457,75 @@ describe("review source poll cycle failure", () => {
     expect(cycleEvents()).toBe(0);
   });
 });
+
+describe("review source merge_conflict hold on unknown base tip", () => {
+  const conflict = (revision: string): ReviewSignal => ({
+    key: "merge_conflict",
+    kind: "merge_conflict",
+    text: "Merge conflicts are blocking this merge request.",
+    changeKey: revision,
+    revision,
+  });
+  const poll = (revision: string, conflictBaseUnknown = false) => ({
+    ...collected(42, [conflict(revision)]),
+    ...(conflictBaseUnknown ? { conflictBaseUnknown } : {}),
+  });
+
+  async function run(
+    stored: ReviewSignal[],
+    polls: ReturnType<typeof poll>[],
+  ): Promise<string[]> {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-1", storedSnapshot(stored)]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    let index = 0;
+    collectSignalsMock.mockImplementation(async () => polls[Math.min(index++, polls.length - 1)]);
+    const emit = vi.fn();
+    const handle = await createReviewSourceModule("gitlab").start({
+      sourceId: "mr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "gitlab", intervalMs: 10, runOnStart: false, emitExisting: false },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+    });
+    for (let waited = 0; index < polls.length + 1; waited += 10) {
+      if (waited >= 4000) throw new Error(`timed out at poll ${index}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    handle.stop();
+    return emit.mock.calls
+      .filter(([event]) => event === "gitlab:merge_conflict")
+      .map(([, data]) => (data as ReviewEventData).signals[0]?.changeKey ?? "");
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    collectSignalsMock.mockReset();
+  });
+
+  it("holds the tip key through a failed lookup for the same head: one ping", async () => {
+    const pings = await run(
+      [],
+      [poll("head-1:tip-1"), poll("head-1:merge-base", true), poll("head-1:tip-1")],
+    );
+    expect(pings).toEqual(["head-1:tip-1"]);
+  });
+
+  it("uses the fallback key when no prior conflict key exists", async () => {
+    const pings = await run([], [poll("head-1:merge-base", true)]);
+    expect(pings).toEqual(["head-1:merge-base"]);
+  });
+
+  it("uses the fallback key once after a head change", async () => {
+    const pings = await run(
+      [conflict("head-1:tip-1")],
+      [poll("head-2:merge-base", true), poll("head-2:merge-base", true)],
+    );
+    expect(pings).toEqual(["head-2:merge-base"]);
+  });
+});
