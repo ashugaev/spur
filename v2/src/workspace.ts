@@ -331,6 +331,37 @@ export async function readRemoteUrls(repoPath: string): Promise<Map<string, stri
   return urls;
 }
 
+export async function readBranchPushUrl(repoPath: string, branch: string): Promise<string | null> {
+  const ref = `refs/heads/${branch}`;
+  try {
+    const refs = await runGit(
+      repoPath,
+      ["for-each-ref", "--format=%(refname)\t%(push:remotename)\t%(push)", ref],
+      GIT_READ_TIMEOUT_MS,
+    );
+    const rows = refs.split("\n");
+    if (rows.length !== 1) return null;
+    const [name, remote, push] = rows[0]?.split("\t") ?? [];
+    if (name !== ref || !remote || push !== `refs/remotes/${remote}/${branch}`) return null;
+    const fetch = await runGit(
+      repoPath,
+      ["config", "--get-all", `remote.${remote}.fetch`],
+      GIT_READ_TIMEOUT_MS,
+    );
+    const canonicalFetch = `refs/heads/*:refs/remotes/${remote}/*`;
+    if (fetch !== canonicalFetch && fetch !== `+${canonicalFetch}`) return null;
+    const urls = await runGit(
+      repoPath,
+      ["remote", "get-url", "--push", "--all", remote],
+      GIT_READ_TIMEOUT_MS,
+    );
+    const candidates = urls.split("\n").filter(Boolean);
+    return candidates.length === 1 ? (candidates[0] ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeBranchHint(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed || trimmed === "HEAD") {
@@ -534,11 +565,27 @@ export async function createWorktree(input: CreateWorktreeInput): Promise<string
       await git(input.repoPath, "worktree", "add", worktreePath, input.branch);
     } else {
       let baseRef = defaultBranchRef;
+      let baseIsDefaultBranch = true;
       if (input.branch !== input.defaultBranch) {
         const branchRef = await resolveFreshBranchRef(input.repoPath, input.branch);
         if (branchRef !== input.branch) {
           baseRef = branchRef;
+          baseIsDefaultBranch = false;
         }
+      }
+      if (
+        baseIsDefaultBranch &&
+        (await gitExitCode(
+          input.repoPath,
+          "rev-parse",
+          "--verify",
+          "--quiet",
+          `${baseRef}^{commit}`,
+        )) !== 0
+      ) {
+        throw new Error(
+          `defaultBranch "${input.defaultBranch}" does not exist in ${input.repoPath} (project ${input.projectId}): spawn with --worktree <branch>, or fix projects.${input.projectId}.defaultBranch (an isolated stand regenerates it on restart)`,
+        );
       }
       await git(input.repoPath, "worktree", "add", "-b", input.branch, worktreePath, baseRef);
     }

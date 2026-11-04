@@ -1,28 +1,15 @@
-# Design workflow (Claude Design pre-implementation gate)
+# Approve proposed UI
 
-> Scope: Claude Design workflow and export contract. Caveman, no overhead.
+Use for visible `packages/web` changes, in any agent runtime.
 
-Pre-implementation design gate in `$manager`: for visible `packages/web` UI, author a design first, get explicit user approval, then hand a runtime-neutral export to any coding agent (Claude/Codex/Cursor).
+1. Render proposed components and affected states in an isolated sidecar or local HTML preview.
+2. Save screenshot and approval handoff to `$SPUR_SESSION_ARTIFACTS_DIR/design/` per [design skill](../.agents/skills/design/SKILL.md).
+3. Send screenshot as an image attachment to authorized session Telegram through [telegram skill](../.agents/skills/telegram/SKILL.md).
+4. Present current → proposed change and approval request here and in Telegram; route text/buttons and screenshot per [telegram skill](../.agents/skills/telegram/SKILL.md).
+5. Record matching user approval before dependent implementation. Prior approval covering scope counts; screenshot proof still required.
 
-## Gate
+Keep preview code in artifacts. Follow [frontend-codestyle](../.agents/skills/frontend-codestyle/SKILL.md) for components and tokens.
 
-- Trigger: task introduces or changes visible `packages/web` UI.
-- The manager runs the `design-author` process itself in the main Claude session (the only place `DesignSync` works) before `architect` — not a Task subagent. Gate order and the approval hard-stop: `manager` skill.
-- Export contract (bundle layout, `design-spec.md` sections, approval field): `design` skill — the owner, not restated here.
-- Post-implementation UI review stays with `designer`; distinct role, unchanged.
+Route approval and gate order through [manager](../.agents/skills/manager/SKILL.md) and [agent protocol](../.agents/skills/github/references/agent-protocol.md). Review implemented UI through `designer`.
 
-## Claude Design integration
-
-- Backend: Claude Design (claude.ai/design). Figma MCP is present but out of scope.
-- Tool: `DesignSync` MCP (load via ToolSearch). Bundled skills `/design-login` (design scope), `/design-sync` (incremental component sync).
-- A design is a design-system project (`PROJECT_TYPE_DESIGN_SYSTEM`). Content = self-contained HTML previews; cards indexed by each preview's first-line `<!-- @dsCard group="..." -->`. Reuse project "Spur Design System".
-- Verified: `DesignSync list_projects` works in the main Claude session, scopes granted. A Task subagent does NOT inherit `DesignSync` — authoring runs in a main Claude session; a subagent or non-Claude runtime is consume-only.
-
-## Why runtime-neutral
-
-Claude Design tools are Claude-only, so authoring is Claude-only. Coding must stay agent-agnostic. Bridge: export the design as plain local files (HTML previews + markdown spec) any agent reads without Claude Design tools. That bundle at `$SPUR_SESSION_ARTIFACTS_DIR/design/` is the contract, not the claude.ai project.
-
-## Open questions (build carefully)
-
-- Cross-session handoff: `$SPUR_SESSION_ARTIFACTS_DIR` is session-scoped. Fine within one task/session; a different runtime session picking up the coding work needs a shared path or a committed `design-spec.md`.
-- Approval is an orchestration rule, not runtime-enforced. Mitigate: manager rule + Telegram ping + await-input.
+At a stop, name exact blocker, rule/tool source, current → proposed change and required action in 2–3 lines. Continue independent work while awaiting approval.

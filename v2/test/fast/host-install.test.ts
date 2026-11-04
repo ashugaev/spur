@@ -15,6 +15,8 @@ import type * as Workspace from "../../src/workspace.js";
 const {
   execFileSyncMock,
   platformMock,
+  userInfoMock,
+  existsSyncMock,
   probeMock,
   probeInfoMock,
   probeHeadroomMock,
@@ -27,6 +29,8 @@ const {
 } = vi.hoisted(() => ({
   execFileSyncMock: vi.fn(),
   platformMock: vi.fn(),
+  userInfoMock: vi.fn(),
+  existsSyncMock: vi.fn(),
   probeMock: vi.fn(),
   probeInfoMock: vi.fn(),
   probeHeadroomMock: vi.fn(),
@@ -65,7 +69,7 @@ vi.mock("node:child_process", async () => {
 
 vi.mock("node:os", async () => {
   const actual = await vi.importActual<typeof OsModule>("node:os");
-  return { ...actual, platform: platformMock };
+  return { ...actual, platform: platformMock, userInfo: userInfoMock };
 });
 
 // C1: `checkDirWritable`'s write-probe uses the real `writeFileSync` by
@@ -75,7 +79,7 @@ vi.mock("node:os", async () => {
 // uid/permission behavior.
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof FsModule>("node:fs");
-  return { ...actual, writeFileSync: writeFileSyncMock };
+  return { ...actual, writeFileSync: writeFileSyncMock, existsSync: existsSyncMock };
 });
 
 vi.mock("../../src/update-health.js", async () => {
@@ -85,6 +89,12 @@ vi.mock("../../src/update-health.js", async () => {
     probe: probeMock,
     probeInfo: probeInfoMock,
     probeHeadroom: probeHeadroomMock,
+    // This sentinel stands in for an uninitialized default installation.
+    // Missing explicit selections are rejected by update-health's own tests.
+    resolveDaemonPortReadOnly: () =>
+      process.env["SPUR_CONFIG"] === "/nonexistent/spur-host-install-test-instance-config.yaml"
+        ? 4310
+        : actual.resolveDaemonPortReadOnly(),
   };
 });
 
@@ -106,6 +116,7 @@ vi.mock("../../src/workspace.js", async () => {
 import {
   _formatLeakedSidecarsCheckForTests as formatLeakedSidecarsCheck,
   checkConfigRegistry,
+  checkGitHubPollDisabled,
   checkHostSkillSymlinks,
   checkServiceHealth,
   checkSpurOnPath,
@@ -116,8 +127,11 @@ import {
   resolveSystemdScope,
   satisfiesNodeEngineRange,
   type SystemdScope,
+  type HostInstallCheck,
 } from "../../src/host-install.js";
+import { recordGitHubPollDisabledSession, writeSession } from "../../src/metadata.js";
 import type { LeakedSidecarTree } from "../../src/sidecars/reap.js";
+import type { AppConfig } from "../../src/types.js";
 import { getVersion } from "../../src/version.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS, npmPinConfigPath } from "../../src/npm-prefix.js";
 import { createProgram } from "../../src/cli.js";
@@ -129,12 +143,15 @@ const version = getVersion();
 // `vi.restoreAllMocks()` (called in `afterEach`) affects a plain `vi.fn()`'s
 // prior implementation.
 const actualFs = await vi.importActual<typeof FsModule>("node:fs");
+const actualOs = await vi.importActual<typeof OsModule>("node:os");
 
 interface ExecState {
   tmuxOk: boolean;
   gitOk: boolean;
   lingerOk: boolean;
   systemctlAvailable: boolean;
+  unitFileState: string;
+  unitFileStateError: boolean;
   daemonActiveState: string;
   webActiveState: string;
   // MainPID systemd reports for each unit ("0" when systemd has no tracked
@@ -182,6 +199,8 @@ beforeEach(() => {
     gitOk: true,
     lingerOk: false,
     systemctlAvailable: false,
+    unitFileState: "enabled",
+    unitFileStateError: false,
     daemonActiveState: "inactive",
     webActiveState: "inactive",
     daemonMainPid: "0",
@@ -241,6 +260,10 @@ beforeEach(() => {
         return "inactive";
       }
       const showIndex = args.indexOf("show");
+      if (showIndex !== -1 && args.includes("--property=UnitFileState")) {
+        if (execState.unitFileStateError) throw new Error("systemctl query timed out");
+        return execState.unitFileState;
+      }
       if (showIndex !== -1 && args.includes("MainPID")) {
         const unit = args[showIndex + 1];
         if (unit === "spur-daemon.service") return execState.daemonMainPid;
@@ -284,6 +307,10 @@ beforeEach(() => {
 
   platformMock.mockReset();
   platformMock.mockReturnValue("linux");
+  userInfoMock.mockReset();
+  userInfoMock.mockImplementation(actualOs.userInfo);
+  existsSyncMock.mockReset();
+  existsSyncMock.mockImplementation(actualFs.existsSync);
 
   probeMock.mockReset();
   probeMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
@@ -1446,6 +1473,202 @@ async function pinInstanceConfig(content: string): Promise<string> {
 
 const MINIMAL_UNIT_BODY = "[Service]\n";
 
+describe("collectHostInstallChecks: service persistence", () => {
+  let home: string;
+  let unitDir: string;
+  const originalTunnelEnv = process.env["SPUR_MCP_TUNNEL_ENV_FILE"];
+
+  beforeEach(async () => {
+    home = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    unitDir = join(home, ".config", "systemd", "user");
+    await writeFile(join(unitDir, "spur-mcp.service"), MINIMAL_UNIT_BODY);
+    await pinInstanceConfig(`dataDir: ${home}/data\nworktreeDir: ${home}/worktrees\n`);
+    process.env["SPUR_MCP_TUNNEL_ENV_FILE"] = join(home, "mcp-tunnel.env");
+    execState.systemctlAvailable = true;
+    execState.daemonActiveState = "active";
+    execState.webActiveState = "active";
+  });
+
+  afterEach(() => {
+    if (originalTunnelEnv === undefined) delete process.env["SPUR_MCP_TUNNEL_ENV_FILE"];
+    else process.env["SPUR_MCP_TUNNEL_ENV_FILE"] = originalTunnelEnv;
+  });
+
+  function queries() {
+    return execFileSyncMock.mock.calls.filter(([, args]) =>
+      (args as string[]).includes("--property=UnitFileState"),
+    );
+  }
+
+  it.each([
+    "enabled",
+    "disabled",
+    "enabled-runtime",
+    "masked",
+    "masked-runtime",
+    "static",
+    "indirect",
+    "linked",
+    "linked-runtime",
+    "alias",
+    "generated",
+    "transient",
+    "bad",
+    "not-found",
+    "",
+    "unexpected-state",
+  ])("accepts only persistent enabled state: %s", async (state) => {
+    execState.unitFileState = ` ${state}\n`;
+    const checks = await collectHostInstallChecks(home);
+    const persistence = checks.filter((check) => check.id.endsWith("-persistence"));
+    expect(persistence.map((check) => check.id)).toEqual([
+      "spur-daemon-persistence",
+      "spur-web-persistence",
+      "spur-mcp-persistence",
+    ]);
+    for (const check of persistence) {
+      expect(check).toMatchObject({ ok: state === "enabled", severity: "error" });
+      if (state === "enabled") expect(check.fix).toBeUndefined();
+      else {
+        expect(check.fix).toContain("systemctl --user");
+        expect(check.fix).not.toContain("restart");
+        expect(check.fix).not.toContain("--runtime");
+        expect(check.fix).not.toContain("--now");
+      }
+      if (!state || state === "unexpected-state") expect(check.detail).toContain("unverified");
+      else if (state !== "enabled") expect(check.detail).toContain(`UnitFileState=${state}`);
+      if (state.startsWith("masked")) expect(check.fix).toContain("unmask");
+      if (
+        ["static", "indirect", "alias", "generated", "transient", "bad", "not-found"].includes(
+          state,
+        )
+      ) {
+        expect(check.fix).toContain("spur reinit");
+      }
+    }
+    expect(checks.find((check) => check.id === "spur-daemon")?.ok).toBe(true);
+    expect(checks.find((check) => check.id === "spur-web")?.ok).toBe(true);
+    expect(queries()).toHaveLength(3);
+    for (const [index, unit] of [
+      "spur-daemon.service",
+      "spur-web.service",
+      "spur-mcp.service",
+    ].entries()) {
+      expect(queries()[index]).toEqual([
+        "systemctl",
+        ["--user", "show", unit, "--property=UnitFileState", "--value"],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 },
+      ]);
+    }
+    expect(
+      execFileSyncMock.mock.calls.some(
+        ([command, args]) =>
+          command === "sudo" ||
+          (args as string[]).some((arg) =>
+            ["enable", "unmask", "restart", "stop", "start", "disable"].includes(arg),
+          ),
+      ),
+    ).toBe(false);
+  });
+
+  it.each(["unavailable", "timeout"])(
+    "fails verification when systemctl is %s",
+    async (failure) => {
+      execState.systemctlAvailable = failure !== "unavailable";
+      execState.unitFileStateError = failure === "timeout";
+      const checks = await collectHostInstallChecks(home);
+      expect(checks.filter((check) => check.id.endsWith("-persistence"))).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ ok: false, detail: expect.stringContaining("unverified") }),
+        ]),
+      );
+      expect(queries()).toHaveLength(3);
+    },
+  );
+
+  it("preserves unhealthy runtime checks when enablement passes", async () => {
+    execState.daemonActiveState = "inactive";
+    const checks = await collectHostInstallChecks(home);
+    expect(checks.find((check) => check.id === "spur-daemon-persistence")?.ok).toBe(true);
+    expect(checks.find((check) => check.id === "spur-daemon")?.ok).toBe(false);
+    expect(checks.find((check) => check.id === "spur-mcp")?.ok).toBe(false);
+  });
+
+  it.each(["missing-config", "invalid-config", "never-installed", "non-linux"])(
+    "skips %s",
+    async (condition) => {
+      if (condition === "missing-config") process.env["SPUR_CONFIG"] = "/nonexistent/config.yaml";
+      if (condition === "invalid-config") await pinInstanceConfig("server: [\n");
+      if (condition === "never-installed") await rm(join(unitDir, "spur-daemon.service"));
+      if (condition === "non-linux") platformMock.mockReturnValue("darwin");
+      const checks = await collectHostInstallChecks(home);
+      expect(checks.filter((check) => check.id.endsWith("-persistence"))).toEqual([]);
+      expect(queries()).toHaveLength(0);
+    },
+  );
+
+  it("leaves absent MCP unit ownership with the missing-unit check", async () => {
+    await rm(join(unitDir, "spur-mcp.service"));
+    const checks = await collectHostInstallChecks(home);
+    expect(checks.find((check) => check.id === "spur-mcp-persistence")).toBeUndefined();
+    expect(checks.find((check) => check.id === "spur-mcp")).toMatchObject({
+      ok: false,
+      detail: "spur-mcp.service missing",
+    });
+    expect(queries()).toHaveLength(2);
+  });
+
+  it.each([
+    ["user", "masked"],
+    ["user", "enabled"],
+    ["system", "masked"],
+    ["system", "static"],
+    ["system", "disabled"],
+    ["system", "unexpected-state"],
+  ])("selects configured tunnel and remedies in %s scope with %s state", async (kind, state) => {
+    const system = kind === "system";
+    const tunnelEnv = system ? "/etc/spur/mcp-tunnel.env" : process.env["SPUR_MCP_TUNNEL_ENV_FILE"];
+    if (system) userInfoMock.mockReturnValue({ homedir: home });
+    existsSyncMock.mockImplementation((path: FsModule.PathLike) => {
+      if (path === tunnelEnv) return true;
+      if (system && String(path).startsWith("/etc/systemd/system/spur-")) return true;
+      if (system && String(path).startsWith(unitDir)) return false;
+      return actualFs.existsSync(path);
+    });
+    if (system) {
+      vi.spyOn(await import("node:fs"), "readFileSync").mockImplementation((path, ...options) =>
+        String(path).startsWith("/etc/systemd/system/spur-")
+          ? MINIMAL_UNIT_BODY
+          : actualFs.readFileSync(path, ...options),
+      );
+    } else await writeFile(join(unitDir, "spur-mcp-tunnel.service"), MINIMAL_UNIT_BODY);
+    execState.unitFileState = state;
+    const checks = await collectHostInstallChecks(home);
+    const persistence = checks.filter((check) => check.id.endsWith("-persistence"));
+    expect(persistence).toHaveLength(4);
+    for (const check of persistence) {
+      expect(check.ok).toBe(state === "enabled");
+      if (state !== "enabled")
+        expect(check.fix).toContain(system ? "sudo systemctl" : "systemctl --user");
+      if (state === "static") expect(check.fix).toContain("source installer");
+      if (state === "unexpected-state") expect(check.detail).toContain("unverified");
+    }
+    if (state === "masked") {
+      expect(persistence.find((check) => check.id === "spur-tunnel-persistence")?.fix).toBe(
+        `${system ? "sudo systemctl" : "systemctl --user"} unmask spur-mcp-tunnel.service, then ${system ? "sudo systemctl" : "systemctl --user"} enable spur-mcp-tunnel.service`,
+      );
+    }
+    expect(queries()[3]?.[1]).toEqual([
+      ...(system ? [] : ["--user"]),
+      "show",
+      "spur-mcp-tunnel.service",
+      "--property=UnitFileState",
+      "--value",
+    ]);
+    expect(execFileSyncMock.mock.calls.some(([command]) => command === "sudo")).toBe(false);
+  });
+});
+
 describe("collectHostInstallChecks: A1 dist integrity", () => {
   it("reports daemon-dist-integrity error when the ExecStart .js target is missing", async () => {
     const fakeHome = await writeFakeUnits(
@@ -2097,7 +2320,17 @@ describe("collectHostInstallChecks: E2 web-ui-port-drift", () => {
   it("reports ok:true when configured ui.port matches the web unit's actual PORT", async () => {
     const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, "[Service]\nEnvironment=PORT=4311\n");
     await pinInstanceConfig(
-      ["server:", "  host: 127.0.0.1", "  port: 4310", "", "ui:", "  port: 4311", ""].join("\n"),
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        "ui:",
+        "  port: 4311",
+        "mcp:",
+        "  port: 4321",
+        "",
+      ].join("\n"),
     );
     execState.systemctlAvailable = true;
     const checks = await collectHostInstallChecks(fakeHome);
@@ -2109,7 +2342,7 @@ describe("collectHostInstallChecks: E2 web-ui-port-drift", () => {
 });
 
 describe("collectHostInstallChecks: F1 corrupt instance config", () => {
-  it("surfaces instance-config-corrupt without throwing, while the daemon probe still falls back to the default port", async () => {
+  it("surfaces instance-config-corrupt without probing another instance", async () => {
     await pinInstanceConfig("server:\n  host: 127.0.0.1\nprojects: [unclosed\n");
     const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-f1");
     expect(checks.find((check) => check.id === "instance-config-corrupt")).toMatchObject({
@@ -2124,9 +2357,210 @@ describe("collectHostInstallChecks: F1 corrupt instance config", () => {
     expect(checks.find((check) => check.id === "data-dir-disk-space")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-log-bytes")).toBeUndefined();
     expect(checks.find((check) => check.id === "web-ui-port-drift")).toBeUndefined();
-    expect(probeInfoMock).toHaveBeenCalledWith(
-      expect.objectContaining({ url: expect.stringContaining(":4310/info") }),
+    expect(probeInfoMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("checkGitHubPollDisabled", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  function pollDisabledConfig(dataDir: string, sources: Record<string, { type: "github" }>) {
+    return { dataDir, projects: { api: { sources } } } as unknown as AppConfig;
+  }
+
+  function seedSession(dataDir: string, id: string): void {
+    writeSession(dataDir, {
+      id,
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: id,
+      worktree: false,
+      worktreePath: "",
+      tmuxSession: id,
+      launchCommand: "claude",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+  }
+
+  // A13
+  it("passes with no disabled pairs", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-poll-disabled-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    await mkdir(dataDir, { recursive: true });
+
+    const check = checkGitHubPollDisabled(
+      pollDisabledConfig(dataDir, { "pr-watch": { type: "github" } }),
     );
+
+    expect(check.id).toBe("github-poll-disabled");
+    expect(check.ok).toBe(true);
+    expect(check.severity).toBe("warn");
+  });
+
+  // A13
+  it("reports every github poll-disabled pair with its PR number and disable date", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-poll-disabled-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    await mkdir(dataDir, { recursive: true });
+    seedSession(dataDir, "api-a1b2");
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1_750_000_000_000);
+
+    // Read-only proof: a filesystem snapshot before and after the check must be
+    // byte-identical (see the "never writes" case below); this case only asserts
+    // reporting content.
+    const check = checkGitHubPollDisabled(
+      pollDisabledConfig(dataDir, { "pr-watch": { type: "github" } }),
+    );
+
+    expect(check.id).toBe("github-poll-disabled");
+    expect(check.ok).toBe(false);
+    expect(check.severity).toBe("warn");
+    expect(check.detail).toContain("api/pr-watch");
+    expect(check.detail).toContain("api-a1b2");
+    expect(check.detail).toContain("PR #42");
+    expect(check.fix).toBe("spur source poll-enable --session <id>");
+  });
+
+  // A13: read-only proof. Never compare mtimes (one-second granularity flakes) —
+  // walk the dataDir and diff file CONTENT before and after the check.
+  it("never writes to the registry it reads", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-poll-disabled-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    await mkdir(dataDir, { recursive: true });
+    seedSession(dataDir, "api-a1b2");
+    seedSession(dataDir, "api-c3d4");
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1_750_000_000_000);
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-c3d4", 43, 1_750_000_100_000);
+
+    function snapshot(): Map<string, string> {
+      const files = new Map<string, string>();
+      const walk = (dir: string): void => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const full = join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else files.set(full, readFileSync(full, "utf-8"));
+        }
+      };
+      walk(dataDir);
+      return files;
+    }
+
+    const before = snapshot();
+    checkGitHubPollDisabled(pollDisabledConfig(dataDir, { "pr-watch": { type: "github" } }));
+    const after = snapshot();
+
+    expect(after).toEqual(before);
+  });
+
+  it("ignores entries for a deleted session or an unconfigured source, still reports a live one", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-poll-disabled-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    await mkdir(dataDir, { recursive: true });
+    seedSession(dataDir, "api-live");
+    seedSession(dataDir, "api-renamed");
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-live", 42, 1_750_000_000_000);
+    // Session record deleted.
+    recordGitHubPollDisabledSession(
+      dataDir,
+      "api",
+      "pr-watch",
+      "api-deleted",
+      43,
+      1_750_000_000_000,
+    );
+    // Source no longer configured.
+    recordGitHubPollDisabledSession(
+      dataDir,
+      "api",
+      "old-source",
+      "api-renamed",
+      44,
+      1_750_000_000_000,
+    );
+
+    const check = checkGitHubPollDisabled(
+      pollDisabledConfig(dataDir, { "pr-watch": { type: "github" } }),
+    );
+
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain("1 session(s)");
+    expect(check.detail).toContain("api-live");
+    expect(check.detail).not.toContain("api-deleted");
+    expect(check.detail).not.toContain("old-source");
+  });
+
+  it("does not write the session index or touch the data dir for an unindexed session", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-poll-disabled-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    await mkdir(join(dataDir, "sessions", "api"), { recursive: true });
+    // Legacy-shaped record on disk, never indexed: readSession would index it.
+    await writeFile(
+      join(dataDir, "sessions", "api", "api-unindexed.json"),
+      JSON.stringify({ id: "api-unindexed", project: "api" }),
+      "utf8",
+    );
+    recordGitHubPollDisabledSession(
+      dataDir,
+      "api",
+      "pr-watch",
+      "api-unindexed",
+      42,
+      1_750_000_000_000,
+    );
+
+    const files = (): Map<string, string> => {
+      const out = new Map<string, string>();
+      const walk = (dir: string): void => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const full = join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else out.set(full, readFileSync(full, "utf-8"));
+        }
+      };
+      walk(dataDir);
+      return out;
+    };
+    const before = files();
+    const check = checkGitHubPollDisabled(
+      pollDisabledConfig(dataDir, { "pr-watch": { type: "github" } }),
+    );
+
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain("api-unindexed");
+    expect(files()).toEqual(before);
+  });
+
+  it("passes when every entry is orphaned", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-poll-disabled-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    await mkdir(dataDir, { recursive: true });
+    recordGitHubPollDisabledSession(
+      dataDir,
+      "api",
+      "pr-watch",
+      "api-deleted",
+      43,
+      1_750_000_000_000,
+    );
+
+    const check = checkGitHubPollDisabled(
+      pollDisabledConfig(dataDir, { "pr-watch": { type: "github" } }),
+    );
+
+    expect(check.ok).toBe(true);
   });
 });
 
@@ -2187,6 +2621,33 @@ describe("spur doctor --json: config-registry per-path listing", () => {
     resolveDoctorRepoRootMock.mockReset();
   });
 
+  it("reports active-disabled service persistence as an exit-code-affecting JSON error", async () => {
+    const home = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    process.env["HOME"] = home;
+    await pinInstanceConfig(`dataDir: ${home}/data\nworktreeDir: ${home}/worktrees\n`);
+    execState.systemctlAvailable = true;
+    execState.daemonActiveState = "active";
+    execState.webActiveState = "active";
+    execState.unitFileState = "disabled";
+    resolveDoctorRepoRootMock.mockResolvedValue(home);
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    process.exitCode = 0;
+    await createProgram("/tmp/dist/cli.js").parseAsync(["node", "spur", "doctor", "--json"]);
+    const output = writeSpy.mock.calls.map((call) => String(call[0])).join("");
+    writeSpy.mockRestore();
+    const parsed = JSON.parse(output) as { hostChecks: HostInstallCheck[] };
+    expect(parsed.hostChecks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "spur-daemon", ok: true }),
+        expect.objectContaining({ id: "spur-daemon-persistence", ok: false, severity: "error" }),
+      ]),
+    );
+    expect(
+      hasErrorSeverity(parsed.hostChecks.filter((check) => check.id.endsWith("-persistence"))),
+    ).toBe(true);
+    expect(process.exitCode).toBe(1);
+  });
+
   it("carries the config-registry per-path array through to the JSON doctor output", async () => {
     // `collectHostInstallChecks()` is called with no argument from the real
     // `doctor` action (it always inspects the live host, never a param), so
@@ -2242,6 +2703,116 @@ describe("spur doctor --json: config-registry per-path listing", () => {
         { path: deadPath, state: "dead" },
       ]),
     );
+  });
+
+  // A13: the check id appears in --json output once an instance config resolves.
+  it("carries the github-poll-disabled check through to the JSON doctor output", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    process.env["HOME"] = fakeHome;
+
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-cli-poll-disabled-"));
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+    await mkdir(worktreeDir, { recursive: true });
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+
+    const emptyWorkspaceRoot = await mkdtemp(join(tmpdir(), "spur-doctor-cli-workspace-"));
+    resolveDoctorRepoRootMock.mockResolvedValue(emptyWorkspaceRoot);
+
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    await createProgram("/tmp/dist/cli.js").parseAsync(["node", "spur", "doctor", "--json"]);
+    const output = writeSpy.mock.calls.map((call) => String(call[0])).join("");
+    writeSpy.mockRestore();
+
+    const parsed = JSON.parse(output) as { hostChecks?: Array<{ id: string }> };
+    expect(parsed.hostChecks?.some((check) => check.id === "github-poll-disabled")).toBe(true);
+  });
+
+  // Instance config has an empty `projects` map; the project lives in a
+  // connected spur.yaml the registry lists. A live disable must still show.
+  it("reports a live poll-disable for a project declared in a connected config", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    process.env["HOME"] = fakeHome;
+
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-cli-poll-scope-"));
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    const repoDir = join(rootDir, "repo");
+    await mkdir(dataDir, { recursive: true });
+    await mkdir(worktreeDir, { recursive: true });
+    await mkdir(repoDir, { recursive: true });
+    const projectConfigPath = join(rootDir, "project.yaml");
+    await writeFile(
+      projectConfigPath,
+      [
+        "projects:",
+        "  api:",
+        `    path: ${repoDir}`,
+        "    sessionPrefix: api",
+        "    sources:",
+        "      pr-watch:",
+        "        type: github",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: [projectConfigPath], unconfiguredProjects: [] }),
+      "utf8",
+    );
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    writeSession(dataDir, {
+      id: "api-live",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-live",
+      worktree: false,
+      worktreePath: "",
+      tmuxSession: "api-live",
+      launchCommand: "claude",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-live", 42, 1_750_000_000_000);
+
+    const emptyWorkspaceRoot = await mkdtemp(join(tmpdir(), "spur-doctor-cli-workspace-"));
+    resolveDoctorRepoRootMock.mockResolvedValue(emptyWorkspaceRoot);
+
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    await createProgram("/tmp/dist/cli.js").parseAsync(["node", "spur", "doctor", "--json"]);
+    const output = writeSpy.mock.calls.map((call) => String(call[0])).join("");
+    writeSpy.mockRestore();
+
+    const parsed = JSON.parse(output) as {
+      hostChecks?: Array<{ id: string; ok: boolean; detail: string }>;
+    };
+    const check = parsed.hostChecks?.find((entry) => entry.id === "github-poll-disabled");
+    expect(check?.ok).toBe(false);
+    expect(check?.detail).toContain("api/pr-watch api-live");
   });
 });
 

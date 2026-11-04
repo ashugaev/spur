@@ -99,6 +99,7 @@ import {
   hasUncommittedChanges,
   hasUnpushedCommits,
   pruneRepoWorktrees,
+  readBranchPushUrl,
   readCurrentBranch,
   readDoctorBranchHint,
   readRemoteUrls,
@@ -239,6 +240,7 @@ describe("createWorktree", () => {
     mockGitFailure("missing local main");
     mockGitFailure("missing local branch");
     mockGitFailure("missing remote branch");
+    mockGitSuccess(); // rev-parse base
     mockGitSuccess();
 
     await createWorktree(baseInput);
@@ -273,6 +275,7 @@ describe("createWorktree", () => {
     mockGitSuccess(" M DIRTY.txt");
     mockGitFailure("missing local branch");
     mockGitFailure("missing remote branch");
+    mockGitSuccess(); // rev-parse base
     mockGitSuccess();
 
     await createWorktree(baseInput);
@@ -303,6 +306,7 @@ describe("createWorktree", () => {
     mockGitSuccess();
     mockGitFailure("missing local branch");
     mockGitFailure("missing remote branch");
+    mockGitSuccess(); // rev-parse base
     mockGitSuccess();
 
     await createWorktree(baseInput);
@@ -401,6 +405,36 @@ describe("createWorktree", () => {
     ).toBe(false);
   });
 
+  it("fails fast naming the project and defaultBranch when the base ref does not resolve", async () => {
+    mockWorkspaceLockResolution();
+    mockGitSuccess(); // worktree prune
+    mockGitSuccess(); // remote get-url origin
+    mockGitSuccess(); // fetch origin
+    mockGitFailure("missing remote renamed"); // refExists origin/renamed
+    mockGitFailure("missing local branch"); // refExists heads/api-1
+    mockGitFailure("missing remote branch"); // refExists origin/api-1
+    mockGitFailure("bad object renamed^{commit}", 1); // rev-parse --verify base
+
+    await expect(createWorktree({ ...baseInput, defaultBranch: "renamed" })).rejects.toThrow(
+      /defaultBranch "renamed" does not exist in \/repo\/api \(project api\).*--worktree <branch>.*projects\.api\.defaultBranch/,
+    );
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["rev-parse", "--verify", "--quiet", "renamed^{commit}"],
+      gitProbeOpts("/repo/api"),
+    );
+    expect(
+      mockExecFileAsync.mock.calls.some(
+        (call) =>
+          call[0] === "git" &&
+          Array.isArray(call[1]) &&
+          call[1][0] === "worktree" &&
+          call[1][1] === "add",
+      ),
+    ).toBe(false);
+  });
+
   it("skips the origin fetch and resolves the local branch when the repo has no origin remote", async () => {
     mockWorkspaceLockResolution();
     mockGitSuccess(); // worktree prune
@@ -408,6 +442,7 @@ describe("createWorktree", () => {
     mockGitFailure("missing remote main"); // refExists origin/main
     mockGitFailure("missing local branch"); // refExists heads/api-1
     mockGitFailure("missing remote branch"); // refExists origin/api-1
+    mockGitSuccess(); // rev-parse base
     mockGitSuccess(); // worktree add
 
     await createWorktree(baseInput);
@@ -1230,5 +1265,81 @@ describe("git read probes", () => {
     mockGitFailure("not a git repository", 128);
 
     await expect(readRemoteUrls("/wt")).resolves.toEqual(new Map());
+  });
+
+  it("reads the exact branch's configured push URL", async () => {
+    mockGitSuccess("refs/heads/feature/issue\torigin\trefs/remotes/origin/feature/issue");
+    mockGitSuccess("+refs/heads/*:refs/remotes/origin/*");
+    mockGitSuccess("git@github.com:acme/api.git");
+
+    await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBe(
+      "git@github.com:acme/api.git",
+    );
+    expect(mockExecFileAsync).toHaveBeenNthCalledWith(
+      1,
+      "git",
+      [
+        "for-each-ref",
+        "--format=%(refname)\t%(push:remotename)\t%(push)",
+        "refs/heads/feature/issue",
+      ],
+      readOpts,
+    );
+    expect(mockExecFileAsync).toHaveBeenNthCalledWith(
+      2,
+      "git",
+      ["config", "--get-all", "remote.origin.fetch"],
+      readOpts,
+    );
+    expect(mockExecFileAsync).toHaveBeenNthCalledWith(
+      3,
+      "git",
+      ["remote", "get-url", "--push", "--all", "origin"],
+      readOpts,
+    );
+  });
+
+  it.each([
+    ["", "missing branch"],
+    [
+      "refs/heads/feature/issue/subtask\torigin\trefs/remotes/origin/feature/issue",
+      "descendant only",
+    ],
+    ["refs/heads/feature/issue\t\trefs/remotes/origin/feature/issue", "missing push remote"],
+    ["refs/heads/feature/issue\torigin", "missing push destination"],
+    ["refs/heads/feature/issue\torigin\trefs/remotes/origin/other", "different push destination"],
+    [
+      "refs/heads/feature/issue\torigin\trefs/remotes/origin/feature/issue\nrefs/heads/feature/issue/subtask\torigin\trefs/remotes/origin/feature/issue",
+      "multiple refs",
+    ],
+  ])("rejects %s (%s)", async (refs) => {
+    mockGitSuccess(refs);
+    await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBeNull();
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["refs/heads/*:refs/remotes/origin/*", true],
+    ["+refs/heads/other:refs/remotes/origin/feature/issue", false],
+    ["+refs/heads/*:refs/remotes/origin/*\n+refs/other/*:refs/remotes/origin/other/*", false],
+    ["", false],
+  ])("checks fetch mapping %s", async (fetch, accepted) => {
+    mockGitSuccess("refs/heads/feature/issue\torigin\trefs/remotes/origin/feature/issue");
+    mockGitSuccess(fetch);
+    if (accepted) mockGitSuccess("git@github.com:acme/api.git");
+    await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBe(
+      accepted ? "git@github.com:acme/api.git" : null,
+    );
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(accepted ? 3 : 2);
+  });
+
+  it("rejects multiple push URLs and Git failures", async () => {
+    mockGitSuccess("refs/heads/feature/issue\torigin\trefs/remotes/origin/feature/issue");
+    mockGitSuccess("+refs/heads/*:refs/remotes/origin/*");
+    mockGitSuccess("git@github.com:acme/api.git\nhttps://github.com/other/api.git");
+    await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBeNull();
+
+    mockGitFailure("not a git repository", 128);
+    await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBeNull();
   });
 });

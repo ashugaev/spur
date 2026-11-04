@@ -23,7 +23,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const SOURCE_SCRIPT_DIR = resolve(HERE, "../../../scripts");
 const REPO_ROOT = resolve(HERE, "../../..");
 const cleanupPaths: string[] = [];
-const DIST_FILE_NAMES = "cli.js isolated-instance-config.js isolated-project-config.js";
+const DIST_FILE_NAMES =
+  "cli.js isolated-instance-config.js isolated-project-config.js isolated-telegram.js isolated-web-endpoint.js isolated-daemon-owner.js";
 const HOST_WRAPPER_SOURCE = "#!/usr/bin/env bash\necho host-wrapper\n";
 // Engines-conformant per the real root package.json (^20.19.0 || ^22.13.0 ||
 // >=24), copied into every fixture below, so the default PATH node clears
@@ -74,19 +75,50 @@ if [[ "$1" == "$SPUR_TEST_REPO/v2/dist/cli.js" && "\${2:-}" == "--version" ]]; t
   fi
   exit 0
 fi
-if [[ ! -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]]; then
-  echo "node-before-runtime $1" >> "$SPUR_TEST_LOG"
-  exit 83
-fi
 case "$1" in
+  "$SPUR_TEST_REPO/v2/bin/isolated-daemon-owner.mjs")
+    if [[ "\${2:-}" == preflight && $# -eq 3 && "$3" == "$TMPDIR"/spur-isolated-daemon.*/owner.sock ]]; then
+      echo "owner-preflight" >> "$SPUR_TEST_LOG"
+      [[ "\${SPUR_TEST_PREFLIGHT_FAIL:-}" != 1 ]] || exit 86
+      exec "$SPUR_TEST_REAL_NODE" "$SPUR_TEST_OWNER_BIN" preflight "$3"
+    fi
+    [[ "\${2:-}" == serve && $# -eq 7 ]] || exit 82
+    config_dir="\${3%/config.yaml}"
+    [[ "$config_dir" == "$TMPDIR"/spur-isolated-daemon.* && "$3" == "$config_dir/config.yaml" && "$4" == "$SPUR_TEST_REPO/v2/dist/cli.js" && "$5" == "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" && "$6" == "$config_dir/project.yaml" && "$7" == "$SPUR_TEST_REPO" ]] || exit 82
+    for file_name in ${DIST_FILE_NAMES}; do
+      [[ -f "$SPUR_TEST_REPO/v2/dist/$file_name" ]] || exit 81
+    done
+    [[ ! -f "$5" ]] || exit 85
+    echo "owner-serve runtime=missing" >> "$SPUR_TEST_LOG"
+    shift 2
+    exec "$SPUR_TEST_REAL_NODE" "$SPUR_TEST_IDENTITY_SCRIPT" "$@"
+    ;;
   "$SPUR_TEST_REPO/v2/bin/write-isolated-instance-config.mjs")
+    [[ ! -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]] || exit 85
     echo "instance-helper" >> "$SPUR_TEST_LOG"
     ;;
   "$SPUR_TEST_REPO/v2/bin/write-isolated-project-config.mjs")
+    [[ ! -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]] || exit 85
     echo "project-helper" >> "$SPUR_TEST_LOG"
+    if [[ "\${SPUR_TEST_REAL_PROJECT_WRITER:-}" == "1" ]]; then
+      shift
+      exec "$SPUR_TEST_REAL_NODE" "$SPUR_TEST_PROJECT_WRITER" "$@"
+    fi
+    for ((index = 1; index <= $#; index++)); do
+      if [[ "\${!index}" == "--telegram-lock-output" ]]; then
+        next=$((index + 1))
+        : > "\${!next}"
+      fi
+    done
     ;;
   "$SPUR_TEST_REPO/v2/dist/cli.js")
-    echo "daemon-start" >> "$SPUR_TEST_LOG"
+    echo "unexpected-direct-daemon" >> "$SPUR_TEST_LOG"
+    exit 83
+    ;;
+  "$SPUR_TEST_REPO/v2/bin/isolated-web-endpoint.mjs")
+    [[ ! -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]] || exit 85
+    shift
+    exec "$SPUR_TEST_REAL_NODE" "$SPUR_TEST_ENDPOINT_HELPER" "$@"
     ;;
   *)
     echo "unexpected-node $1" >> "$SPUR_TEST_LOG"
@@ -146,6 +178,11 @@ function createFakeWorktree(): FakeWorktree {
   copyFileSync(join(REPO_ROOT, "package.json"), join(repoDir, "package.json"));
 
   const logPath = join(repoDir, "calls.log");
+  writeFileSync(
+    join(repoDir, "identity.mjs"),
+    // Stand-in publication boundary, not real owner readiness or native evidence.
+    `import {existsSync,writeFileSync,appendFileSync} from 'node:fs';import {dirname,join} from 'node:path';const [config,cli,runtime,project,worktree]=process.argv.slice(2);if(existsSync(runtime))throw new Error('Published before owner handoff');const quote=value=>"'"+value.replaceAll("'","'\\\\''")+"'";writeFileSync(runtime,Object.entries({SPUR_ISOLATED_CONFIG:config,SPUR_ISOLATED_UI_ENDPOINT_FILE:join(dirname(config),'ui-endpoint.json'),SPUR_ISOLATED_DAEMON_URL:'http://127.0.0.1:4789',SPUR_ISOLATED_PROJECT_CONFIG:project,SPUR_ISOLATED_SOURCE_WORKTREE:worktree}).map(([key,value])=>key+'='+quote(value)+'\\n').join(''));appendFileSync(process.env.SPUR_TEST_LOG,'fake-ready-publication\\n');`,
+  );
   makeExecutable(
     join(pathDir, "pnpm"),
     `#!/usr/bin/env bash
@@ -164,6 +201,7 @@ if [[ "$1" != "--dir" || "$2" != "$SPUR_TEST_REPO/v2" || "$3" != "build" ]]; the
 fi
 echo "build runtime=$runtime_state" >> "$SPUR_TEST_LOG"
 if [[ "\${SPUR_TEST_BUILD_FAIL:-}" == "1" ]]; then
+  printf 'OWN_TEMP=1\\n' > "$SPUR_SESSION_TOOL_DIR/isolated-env.sh.tmp.$PPID"
   exit 84
 fi
 mkdir -p "$SPUR_TEST_REPO/v2/dist"
@@ -257,10 +295,15 @@ function testEnv(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv): NodeJS.P
     HOME: join(worktree.repoDir, "home"),
     PATH: `${worktree.pathDir}:${process.env["PATH"] ?? ""}`,
     SPUR_PROJECT_CONFIG_PATH: join(worktree.repoDir, "spur.yaml"),
+    SPUR_PROJECT: "test",
     SPUR_RESERVED_PORT_DAEMON: "4789",
     SPUR_SESSION_TOOL_DIR: worktree.toolDir,
     SPUR_TEST_LOG: worktree.logPath,
     SPUR_TEST_REAL_NODE: process.execPath,
+    SPUR_TEST_IDENTITY_SCRIPT: join(worktree.repoDir, "identity.mjs"),
+    SPUR_TEST_OWNER_BIN: join(REPO_ROOT, "v2/bin/isolated-daemon-owner.mjs"),
+    SPUR_TEST_ENDPOINT_HELPER: join(REPO_ROOT, "v2/bin/isolated-web-endpoint.mjs"),
+    SPUR_TEST_PROJECT_WRITER: join(REPO_ROOT, "v2/bin/write-isolated-project-config.mjs"),
     SPUR_TEST_REPO: worktree.repoDir,
     TMPDIR: worktree.tmpDir,
     ...extraEnv,
@@ -284,17 +327,88 @@ afterEach(() => {
 });
 
 describe("spur-isolated-daemon build guard", () => {
-  it("keeps the shared runtime unpublished until a missing v2 build finishes", async () => {
+  it.each(["SPUR_PROJECT", "SPUR_SESSION_TOOL_DIR"])(
+    "validates %s before allocation or shared writes",
+    async (field) => {
+      const worktree = createFakeWorktree();
+      const runtime = join(worktree.toolDir, "isolated-env.sh");
+      const wrapper = join(worktree.toolDir, "spur-isolated");
+      writeFileSync(runtime, "prior-runtime");
+      writeFileSync(wrapper, "prior-wrapper");
+      makeExecutable(
+        join(worktree.pathDir, "mktemp"),
+        `#!/bin/bash\necho allocated >> "$SPUR_TEST_LOG"\nexec /usr/bin/mktemp "$@"\n`,
+      );
+      await expect(runIsolatedDaemon(worktree, { [field]: undefined })).rejects.toBeTruthy();
+      expect(existsSync(worktree.logPath)).toBe(false);
+      expect(readdirSync(worktree.tmpDir)).toEqual([]);
+      expect(readFileSync(runtime, "utf8")).toBe("prior-runtime");
+      expect(readFileSync(wrapper, "utf8")).toBe("prior-wrapper");
+    },
+  );
+  it("reclaims allocated private config on owner preflight failure without touching unowned shared paths", async () => {
     const worktree = createFakeWorktree();
-
-    await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
+    const runtime = join(worktree.toolDir, "isolated-env.sh");
+    const wrapper = join(worktree.toolDir, "spur-isolated");
+    const otherTemp = `${runtime}.tmp.other-generation`;
+    writeFileSync(runtime, "prior-runtime");
+    writeFileSync(wrapper, "prior-wrapper");
+    writeFileSync(otherTemp, "prior-temp");
+    makeExecutable(
+      join(worktree.pathDir, "mktemp"),
+      `#!/bin/bash\nallocated="$(/usr/bin/mktemp "$@")"\nprintf '%s\\n' "$allocated" > "$SPUR_TEST_REPO/allocated-path"\nprintf '%s\\n' "$allocated"\n`,
+    );
+    await expect(
+      runIsolatedDaemon(worktree, { SPUR_TEST_PREFLIGHT_FAIL: "1" }),
+    ).rejects.toMatchObject({
+      code: 86,
+      stderr: "",
+    });
+    expect(readFileSync(worktree.logPath, "utf8")).toBe("owner-preflight\n");
+    const allocated = readFileSync(join(worktree.repoDir, "allocated-path"), "utf8").trim();
+    expect(allocated.startsWith(`${worktree.tmpDir}/spur-isolated-daemon.`)).toBe(true);
+    expect(existsSync(allocated)).toBe(false);
+    expect(readFileSync(runtime, "utf8")).toBe("prior-runtime");
+    expect(readFileSync(wrapper, "utf8")).toBe("prior-wrapper");
+    expect(readFileSync(otherTemp, "utf8")).toBe("prior-temp");
+  });
+  it("starts source-free when the session project is absent from repository config", async () => {
+    const worktree = createFakeWorktree();
+    await execFileAsync("git", ["init", "-q"], { cwd: worktree.repoDir });
+    const calls = await runIsolatedDaemon(worktree, {
+      SPUR_PROJECT: "review",
+      SPUR_TEST_REAL_PROJECT_WRITER: "1",
+    });
+    expect(calls).toEqual([
+      "owner-preflight",
       "install runtime=missing",
       "build runtime=missing",
       "cli-probe runtime=missing",
       "instance-helper",
       "project-helper",
-      "daemon-start",
+      "owner-serve runtime=missing",
+      "fake-ready-publication",
     ]);
+    const runtime = readFileSync(join(worktree.toolDir, "isolated-env.sh"), "utf8");
+    const config = runtime.match(/SPUR_ISOLATED_PROJECT_CONFIG='([^\n]+)'/)?.[1];
+    expect(config).toBeDefined();
+    expect(readFileSync(config ?? "", "utf8")).toBe("projects: {}\n");
+  });
+  it("keeps the shared runtime unpublished until a missing v2 build finishes", async () => {
+    const worktree = createFakeWorktree();
+
+    await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
+      "owner-preflight",
+      "install runtime=missing",
+      "build runtime=missing",
+      "cli-probe runtime=missing",
+      "instance-helper",
+      "project-helper",
+      "owner-serve runtime=missing",
+      "fake-ready-publication",
+    ]);
+    const runtime = readFileSync(join(worktree.toolDir, "isolated-env.sh"), "utf8");
+    expect(runtime).toMatch(/SPUR_ISOLATED_UI_ENDPOINT_FILE='[^\n]+\/ui-endpoint\.json'/);
   });
 
   it("removes a stale shared runtime before rebuilding on restart", async () => {
@@ -303,20 +417,22 @@ describe("spur-isolated-daemon build guard", () => {
     writeFileSync(runtimePath, "STALE_RUNTIME=1\n", "utf8");
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
+      "owner-preflight",
       "install runtime=missing",
       "build runtime=missing",
       "cli-probe runtime=missing",
       "instance-helper",
       "project-helper",
-      "daemon-start",
+      "owner-serve runtime=missing",
+      "fake-ready-publication",
     ]);
     expect(readFileSync(runtimePath, "utf8")).toContain(
-      'SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:4789"',
+      "SPUR_ISOLATED_DAEMON_URL='http://127.0.0.1:4789'",
     );
     expect(readFileSync(runtimePath, "utf8")).not.toContain("STALE_RUNTIME");
   });
 
-  it("leaves no runtime marker when the v2 build fails", async () => {
+  it("removes owned runtime/temp on build failure while preserving another invocation's temp", async () => {
     const worktree = createFakeWorktree();
     const runtimePath = join(worktree.toolDir, "isolated-env.sh");
     writeFileSync(runtimePath, "STALE_RUNTIME=1\n", "utf8");
@@ -328,7 +444,10 @@ describe("spur-isolated-daemon build guard", () => {
     expect(existsSync(runtimePath)).toBe(false);
     expect(
       readdirSync(worktree.toolDir).filter((name) => name.startsWith("isolated-env.sh.tmp.")),
-    ).toEqual([]);
+    ).toEqual(["isolated-env.sh.tmp.stale"]);
+    expect(readFileSync(join(worktree.toolDir, "isolated-env.sh.tmp.stale"), "utf8")).toBe(
+      "STALE_TEMP=1\n",
+    );
   });
 
   it("uses existing build outputs without rebuilding", async () => {
@@ -336,11 +455,13 @@ describe("spur-isolated-daemon build guard", () => {
     writeDistFiles(worktree.repoDir);
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
+      "owner-preflight",
       "install runtime=missing",
       "cli-probe runtime=missing",
       "instance-helper",
       "project-helper",
-      "daemon-start",
+      "owner-serve runtime=missing",
+      "fake-ready-publication",
     ]);
   });
 
@@ -357,12 +478,14 @@ describe("spur-isolated-daemon build guard", () => {
     utimesSync(sourcePath, newTime, newTime);
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
+      "owner-preflight",
       "install runtime=missing",
       "build runtime=missing",
       "cli-probe runtime=missing",
       "instance-helper",
       "project-helper",
-      "daemon-start",
+      "owner-serve runtime=missing",
+      "fake-ready-publication",
     ]);
   });
 
@@ -381,12 +504,15 @@ describe("spur-isolated-daemon build guard", () => {
 
   it("removes the isolated wrapper when the v2 build fails", async () => {
     const worktree = createFakeWorktree();
+    const otherTemp = join(worktree.toolDir, "isolated-env.sh.tmp.other-generation");
+    writeFileSync(otherTemp, "prior-temp");
 
     await expect(runIsolatedDaemon(worktree, { SPUR_TEST_BUILD_FAIL: "1" })).rejects.toMatchObject({
       code: 84,
     });
 
     expect(existsSync(join(worktree.toolDir, "spur-isolated"))).toBe(false);
+    expect(readFileSync(otherTemp, "utf8")).toBe("prior-temp");
     expect(readFileSync(join(worktree.toolDir, "spur"), "utf8")).toBe(HOST_WRAPPER_SOURCE);
   });
 
@@ -399,6 +525,7 @@ describe("spur-isolated-daemon build guard", () => {
     ).rejects.toBeTruthy();
 
     expect(readFileSync(worktree.logPath, "utf8").trim().split("\n")).toEqual([
+      "owner-preflight",
       "install runtime=missing",
       "cli-probe runtime=missing",
     ]);
@@ -423,12 +550,14 @@ describe("spur-isolated-daemon build guard", () => {
     writeNvmNodeStub(worktree.nvmDir, "24.15.0");
 
     await expect(runIsolatedDaemon(worktree, { NVM_DIR: worktree.nvmDir })).resolves.toEqual([
+      "owner-preflight",
       "install runtime=missing",
       "build runtime=missing",
       "cli-probe runtime=missing",
       "instance-helper",
       "project-helper",
-      "daemon-start",
+      "owner-serve runtime=missing",
+      "fake-ready-publication",
     ]);
 
     // NODE_BIN is captured via `command -v node` immediately after

@@ -401,7 +401,7 @@ test.describe("Reasoning selector browser intent", () => {
       const select = await open(page, surface, "claude", "max");
       await expect(select).toHaveValue("default");
       await expect(
-        page.getByText(/Max not offered by Reasoning model, using Default/i),
+        page.getByText(/^Max not offered by (?:Reasoning model|this model), using Default$/i),
       ).toBeVisible();
       expect(await submit(page, surface)).toHaveProperty("reasoningEffort", null);
     });

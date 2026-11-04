@@ -1,6 +1,16 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { THEME_STORAGE_KEY, ThemeProvider, useTheme } from "@/lib/theme-context";
+import { THEME_STORAGE_KEY, ThemeProvider, normalizeTheme, useTheme } from "@/lib/theme-context";
+
+const originalMatchMedia = window.matchMedia;
+let systemDark = false;
+const listeners = new Set<(event: MediaQueryListEvent) => void>();
+
+function setSystemDark(dark: boolean) {
+  systemDark = dark;
+  const event = { matches: dark } as MediaQueryListEvent;
+  act(() => listeners.forEach((listener) => listener(event)));
+}
 
 function renderProvider() {
   return renderHook(() => useTheme(), { wrapper: ThemeProvider });
@@ -10,117 +20,101 @@ describe("ThemeProvider", () => {
   beforeEach(() => {
     window.localStorage.clear();
     delete document.documentElement.dataset.theme;
+    document.documentElement.style.colorScheme = "";
+    systemDark = false;
+    listeners.clear();
+    window.matchMedia = ((query: string) => ({
+      matches: query === "(prefers-color-scheme: dark)" && systemDark,
+      media: query,
+      addEventListener: (_event: string, listener: (event: MediaQueryListEvent) => void) =>
+        listeners.add(listener),
+      removeEventListener: (_event: string, listener: (event: MediaQueryListEvent) => void) =>
+        listeners.delete(listener),
+    })) as typeof window.matchMedia;
   });
 
   afterEach(() => {
-    delete document.documentElement.dataset.theme;
+    window.matchMedia = originalMatchMedia;
+    vi.restoreAllMocks();
   });
 
-  it("defaults to dark when localStorage has no stored theme", () => {
+  it("normalizes fixed values and uses OS color for absent, auto, and invalid values", () => {
+    expect(normalizeTheme("light", true)).toEqual({ mode: "light", theme: "light" });
+    expect(normalizeTheme("dark", false)).toEqual({ mode: "dark", theme: "dark" });
+    for (const value of [null, "auto", "invalid"]) {
+      expect(normalizeTheme(value, false)).toEqual({ mode: "auto", theme: "light" });
+      expect(normalizeTheme(value, true)).toEqual({ mode: "auto", theme: "dark" });
+    }
+  });
+
+  it("defaults to Auto and follows OS changes without writing storage", () => {
     const { result } = renderProvider();
-    expect(result.current.theme).toBe("dark");
+    expect(result.current).toMatchObject({ mode: "auto", theme: "light" });
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(document.documentElement.style.colorScheme).toBe("light");
+    setSystemDark(true);
+    expect(result.current).toMatchObject({ mode: "auto", theme: "dark" });
     expect(document.documentElement.dataset.theme).toBeUndefined();
+    expect(document.documentElement.style.colorScheme).toBe("dark");
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
   });
 
-  it("restores state from localStorage on mount, even when data-theme is absent", () => {
+  it("preserves stored fixed themes and ignores OS changes", () => {
     window.localStorage.setItem(THEME_STORAGE_KEY, "light");
     const { result } = renderProvider();
+    expect(result.current).toMatchObject({ mode: "light", theme: "light" });
+    setSystemDark(true);
     expect(result.current.theme).toBe("light");
     expect(document.documentElement.dataset.theme).toBe("light");
   });
 
-  it("resolves to dark, without throwing, when localStorage.getItem throws", () => {
-    // Mirrors the pre-hydration <head> script's try/catch in layout.tsx,
-    // which leaves the theme dark when `localStorage` access throws (e.g.
-    // SecurityError with site data blocked). ThemeProvider is the outermost
-    // provider with no error boundary, so an unguarded throw here would take
-    // down the whole tree before first paint.
-    const getItemSpy = vi.spyOn(window.localStorage, "getItem").mockImplementation(() => {
-      throw new DOMException("blocked", "SecurityError");
-    });
-
-    let hookResult: ReturnType<typeof renderProvider> | undefined;
-    expect(() => {
-      hookResult = renderProvider();
-    }).not.toThrow();
-
-    expect(hookResult?.result.current.theme).toBe("dark");
-    expect(document.documentElement.dataset.theme).toBeUndefined();
-
-    getItemSpy.mockRestore();
-  });
-
-  it("storage wins over a stale data-theme attribute", () => {
-    // Simulates a hydration-recovery re-render that wiped `data-theme` from
-    // the DOM (or left a stale value) while localStorage was never touched.
-    // This is the sole unit-level guard for hydration-mismatch resilience:
-    // it is the only test in this file that would fail if the provider went
-    // back to trusting the DOM attribute instead of localStorage. The e2e
-    // case at tests/theme.spec.ts ("... both survive a reload at
-    // /?project=<id>") exercises the same property against a real browser.
+  it("rereads storage to repair a stale root attribute", () => {
     document.documentElement.dataset.theme = "light";
     const { result } = renderProvider();
-    expect(result.current.theme).toBe("dark");
+    expect(result.current.theme).toBe("light");
+    window.localStorage.setItem(THEME_STORAGE_KEY, "dark");
+    const second = renderProvider();
+    expect(second.result.current.theme).toBe("dark");
     expect(document.documentElement.dataset.theme).toBeUndefined();
   });
 
-  it("toggleTheme flips theme, writes localStorage, and sets data-theme", () => {
+  it("treats inaccessible storage as Auto and falls back to dark if media is unavailable", () => {
+    vi.spyOn(window.localStorage, "getItem").mockImplementation(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
+    window.matchMedia = (() => {
+      throw new Error("unavailable");
+    }) as typeof window.matchMedia;
     const { result } = renderProvider();
-    expect(result.current.theme).toBe("dark");
+    expect(result.current).toMatchObject({ mode: "auto", theme: "dark" });
+    expect(document.documentElement.style.colorScheme).toBe("dark");
+  });
 
-    act(() => {
-      result.current.toggleTheme();
-    });
-
-    expect(result.current.theme).toBe("light");
-    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("light");
-    expect(document.documentElement.dataset.theme).toBe("light");
-
-    act(() => {
-      result.current.toggleTheme();
-    });
-
-    expect(result.current.theme).toBe("dark");
+  it("selects and persists a mode; entering Auto rereads the current OS", () => {
+    const { result } = renderProvider();
+    act(() => result.current.setMode("dark"));
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
-    expect(document.documentElement.dataset.theme).toBeUndefined();
-  });
-
-  it("useTheme outside a provider returns the safe dark default and a no-op toggle", () => {
-    const { result } = renderHook(() => useTheme());
+    setSystemDark(false);
     expect(result.current.theme).toBe("dark");
-    expect(() => result.current.toggleTheme()).not.toThrow();
+    act(() => result.current.setMode("auto"));
+    expect(result.current).toMatchObject({ mode: "auto", theme: "light" });
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("auto");
   });
 
-  it("syncs from a storage event fired by another tab", () => {
+  it("syncs another tab's mode without writing it back", () => {
+    const write = vi.spyOn(window.localStorage, "setItem");
     const { result } = renderProvider();
-    expect(result.current.theme).toBe("dark");
-
-    act(() => {
-      window.dispatchEvent(
-        new StorageEvent("storage", { key: THEME_STORAGE_KEY, newValue: "light" }),
-      );
-    });
-
-    expect(result.current.theme).toBe("light");
-    expect(document.documentElement.dataset.theme).toBe("light");
-
-    act(() => {
+    act(() =>
       window.dispatchEvent(
         new StorageEvent("storage", { key: THEME_STORAGE_KEY, newValue: "dark" }),
-      );
-    });
-
-    expect(result.current.theme).toBe("dark");
-    expect(document.documentElement.dataset.theme).toBeUndefined();
-  });
-
-  it("ignores storage events for unrelated keys", () => {
-    const { result } = renderProvider();
-    act(() => {
-      window.dispatchEvent(
-        new StorageEvent("storage", { key: "spur:something-else", newValue: "light" }),
-      );
-    });
-    expect(result.current.theme).toBe("dark");
+      ),
+    );
+    expect(result.current).toMatchObject({ mode: "dark", theme: "dark" });
+    setSystemDark(true);
+    act(() =>
+      window.dispatchEvent(new StorageEvent("storage", { key: THEME_STORAGE_KEY, newValue: null })),
+    );
+    expect(result.current).toMatchObject({ mode: "auto", theme: "dark" });
+    expect(write).not.toHaveBeenCalled();
   });
 });

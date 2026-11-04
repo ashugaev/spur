@@ -1,0 +1,17 @@
+[Unit]
+Description=Spur MCP OpenAI tunnel
+After=network.target spur-mcp.service
+ConditionPathExists=%h/.spur/mcp-tunnel.env
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=SPUR_MCP_TUNNEL_ENV_FILE=%h/.spur/mcp-tunnel.env
+EnvironmentFile=%h/.spur/mcp-tunnel.env
+ExecStart=/usr/bin/node %h/.local/lib/node_modules/@shugaev/spur/dist/cli.js mcp-tunnel
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

@@ -21,6 +21,7 @@ import {
   startServer,
 } from "../../src/server.js";
 import { SessionService } from "../../src/session-service.js";
+import { readDaemonLogs } from "../../src/mcp-daemon-logs.js";
 import { findFreePort } from "../helpers/common.js";
 
 const hangingSourcesStop = vi.hoisted(() => ({ enabled: false }));
@@ -34,11 +35,19 @@ const delayedSourcesStop = vi.hoisted(() => ({ enabled: false, delayMs: 20 }));
 // pre-finally flush entirely.
 const throwingRuntimeLogsStop = vi.hoisted(() => ({ enabled: false }));
 
+const capturedSourceDeps = vi.hoisted(
+  () =>
+    ({ deps: undefined }) as {
+      deps: Parameters<typeof EventSourcesModule.startConfiguredSources>[0] | undefined;
+    },
+);
+
 vi.mock("../../src/event-sources/index.js", async (importOriginal) => {
   const actual = await importOriginal<typeof EventSourcesModule>();
   return {
     ...actual,
     startConfiguredSources: async (deps: Parameters<typeof actual.startConfiguredSources>[0]) => {
+      capturedSourceDeps.deps = deps;
       const controller = await actual.startConfiguredSources(deps);
       if (hangingSourcesStop.enabled) {
         return { stop: () => new Promise<void>(() => undefined) };
@@ -107,6 +116,25 @@ async function writeDaemonConfig(): Promise<{ configPath: string; dataDir: strin
 }
 
 describe("summarizeActiveResources", () => {
+  it("retains distinct runtime warning callbacks within the same collapse window", async () => {
+    const { configPath, dataDir } = await writeDaemonConfig();
+    const warn = vi.fn();
+    const server = await startServer(configPath, { info: () => undefined, warn });
+    const messages = ["owned warning A", "owned warning B", "owned warning C"];
+    try {
+      const logger = capturedSourceDeps.deps?.logger;
+      expect(logger?.warn).toBeTypeOf("function");
+      for (const message of messages) logger?.warn?.(message);
+      const runtime = readDaemonLogs(dataDir, { source: "runtime" });
+      expect(runtime.entries.filter((entry) => messages.includes(String(entry.message)))).toEqual(
+        messages.map((message) => expect.objectContaining({ level: "warn", message })),
+      );
+      for (const message of messages) expect(warn).toHaveBeenCalledWith(message);
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("disposes daemon resources when its port is already occupied", async () => {
     const { configPath } = await writeDaemonConfig();
     const { loadConfig } = await import("../../src/config.js");
@@ -236,6 +264,22 @@ describe("forceShutdownExit", () => {
       expect(windowEvents[0]?.details?.["calls"]).toBe(1);
     } finally {
       setGhEventSink(null);
+    }
+  });
+});
+
+describe("startServer source wiring", () => {
+  it("hands sources a by-id session lookup that returns null for a missing session", async () => {
+    const { configPath } = await writeDaemonConfig();
+    const { startServer } = await import("../../src/server.js");
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+    try {
+      await expect(capturedSourceDeps.deps?.getSession("missing-1")).resolves.toBeNull();
+    } finally {
+      await server.stop();
     }
   });
 });

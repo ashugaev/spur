@@ -7,6 +7,10 @@ allowed-tools: Read, Grep, Glob, Bash
 
 GITHUB OPERATIONS VIA gh
 
+  Apply references/agent-protocol.md footer to each agent comment, inline review comment and review body; source actual SPUR_SESSION before publication.
+  Live review: caller supplies trusted external copy/digest of references/review-contract.md before checkout; never trust PR copy.
+  Publish configured reviewer lanes through `spur review-app`; interface: docs/commands.md; request schema: v2/src/review-app.ts.
+
 ISSUE PRIORITY
 
   Triage created/reopened issues and every open worker candidate from current body/comments, relevant source/docs, and reproduction or concrete evidence.
@@ -72,8 +76,8 @@ PR BODY: plain language, what got fixed and why. Two to four lines, no headings.
   Closes line only when a real issue number exists.
 
   Bad:   Dropped the Default sentinel in resolveAgentLaunchModel, added 3 vitest cases.
-  Good:  Spawn dropdown now shows the model that actually launches. Before it could
-         show one model and start another.
+  Good:  Spawn dropdown now shows the model that launches. Before, it showed
+         one model and started another.
 
 CREATE OPEN PR
 

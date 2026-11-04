@@ -107,6 +107,17 @@ describe("npm-prefix pin file + .npmrc heal", () => {
     else process.env["NVM_DIR"] = originalNvmDir;
   });
 
+  it("preserves scoped registry through pin creation and nvm prefix healing", async () => {
+    await mkdir(join(tmpHome, ".nvm"), { recursive: true });
+    await writeFile(join(tmpHome, ".nvm", "nvm.sh"), "# fixture");
+    const registry = "@shugaev:registry=http://127.0.0.1:43219/\n";
+    await writeFile(join(tmpHome, ".npmrc"), `prefix=${tmpHome}/.local\n${registry}`);
+    ensureNpmPinFile(tmpHome);
+    healNpmrcPrefixLine(tmpHome);
+    expect(await readFile(join(tmpHome, ".npmrc"), "utf8")).toBe(registry);
+    expect(await readFile(npmPinConfigPath(tmpHome), "utf8")).toContain(`prefix=${tmpHome}/.local`);
+  });
+
   // Load-bearing proof for the whole feature: with a real npm binary, a
   // token-only `.npmrc` (the observed clobber shape) resolves away from
   // `<HOME>/.local` on its own, and pointing `NPM_CONFIG_GLOBALCONFIG` at a

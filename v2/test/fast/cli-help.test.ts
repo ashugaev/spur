@@ -21,6 +21,7 @@ describe("spur help", () => {
     expect(help).toContain("gc [options]");
     expect(help).toContain("cache [options]");
     expect(help).toContain("init [options]");
+    expect(help).toMatch(/^ {2}mcp \[options\] {2,}/m);
     expect(help).toContain("spawn [options] <project> [prompt...]");
     expect(help).toContain("shepherd [options] [prompt...]");
     expect(help).toContain("list|ls [options]");
@@ -39,7 +40,7 @@ describe("spur help", () => {
     expect(help).toContain("subscribe [options] [targetSessionId]");
     expect(help).toContain("Use `spur <command> --help` for per-command details.");
     expect(help).not.toContain("help [command]");
-    expect(help).not.toContain("daemon");
+    expect(help).not.toMatch(/^ {2}daemon(?:[ \t]|$)/m);
     expect(help).not.toContain("slots");
     expect(help).not.toContain("internal");
     expect(help).not.toContain("playwright");
@@ -266,6 +267,22 @@ describe("spur help", () => {
     expect(source.helpInformation()).toContain("Work with source-bound session messages.");
     const help = reply.helpInformation();
     expect(help).toContain("reply [options] <message...>");
+    expect(help).toContain("--session <id>");
+    expect(help).toContain("defaults to SPUR_SESSION");
+  });
+
+  it("documents source poll-enable", () => {
+    const program = buildProgram();
+    const source = program.commands.find((command) => command.name() === "source");
+    const pollEnable = source?.commands.find((command) => command.name() === "poll-enable");
+
+    expect(source).toBeDefined();
+    expect(pollEnable).toBeDefined();
+    if (!pollEnable) {
+      throw new Error("Expected source poll-enable command to be registered");
+    }
+
+    const help = pollEnable.helpInformation();
     expect(help).toContain("--session <id>");
     expect(help).toContain("defaults to SPUR_SESSION");
   });

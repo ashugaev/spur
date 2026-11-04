@@ -14,6 +14,7 @@ function group(overrides: Partial<GcGroupReport> = {}): GcGroupReport {
     sizeBytes: 2_147_483_648,
     action: "reclaim",
     blockReasons: [],
+    archiveSessionIds: ["api-1"],
     restoreLossSessionIds: [],
     removed: false,
     archived: false,
@@ -110,6 +111,28 @@ describe("renderSessionGcResult", () => {
     );
 
     expect(rendered).toContain("1 stopped session(s) lose `spur restore` once collected: api-1");
+  });
+
+  it("renders a partial group with archive and keep counts, reasons, and only collected restore loss", () => {
+    const rendered = renderSessionGcResult(
+      report({
+        groups: [
+          group({
+            action: "partial",
+            sessionIds: ["api-1", "api-2", "api-3"],
+            archiveSessionIds: ["api-1", "api-2"],
+            blockReasons: ["live_session", "not_eligible_status"],
+            restoreLossSessionIds: ["api-2"],
+            sizeBytes: null,
+          }),
+        ],
+      }),
+    );
+
+    expect(rendered).toContain("partial");
+    expect(rendered).toContain("archive 2, keep 1: live_session,not_eligible_status");
+    expect(rendered).not.toContain("/data/worktrees/api/api-1");
+    expect(rendered).toContain("1 stopped session(s) lose `spur restore` once collected: api-2");
   });
 
   it("says nothing to collect when no group is planned", () => {

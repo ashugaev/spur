@@ -3,10 +3,17 @@ import {
   isStaleParked,
   type AgentName,
   type SelfDestructConfig,
+  type SendMessageAttachment,
+  type SendMessageRequest,
   type SessionRecord,
+  type SessionLaunchOptions,
+  type SessionState,
+  type SessionStatus,
   type SourceConfig,
   type SourceType,
   type TelegramSpawnOrigin,
+  type TelegramBotIdentity,
+  type TelegramConversation,
 } from "../types.js";
 
 export interface SpurEvent<T = unknown> {
@@ -35,11 +42,44 @@ export interface SourceSessionListItem {
 export interface SourceSpawnSessionRequest {
   project: string;
   prompt?: string;
+  attachments?: SendMessageAttachment[];
   agent?: AgentName;
   model?: string;
+  mode?: string;
   selfDestruct?: SelfDestructConfig;
-  /** Chat the spawn came from; becomes the session's reply target before the agent can speak. */
+  /** Origin source selects the canonical forum; ingress chat remains manual. */
   telegramOrigin?: TelegramSpawnOrigin;
+}
+
+export type SourceLaunchOptions = SessionLaunchOptions;
+
+export interface SourceWorkSessionItem extends SourceSessionListItem {
+  agent: AgentName;
+  state: SessionState;
+  status: SessionStatus;
+  lastActivityAt: string;
+  runtimeAlive: boolean;
+  canContinue: boolean;
+  restorable: boolean;
+  mode?: string;
+  model: string | null;
+  prUrl?: string;
+}
+
+export interface SourceWorkbench {
+  launchOptions(request: {
+    project: string;
+    agent?: AgentName;
+    mode?: string;
+  }): Promise<SourceLaunchOptions>;
+  listSessions(): Promise<SourceWorkSessionItem[]>;
+  getSession(sessionId: string): Promise<SourceWorkSessionItem>;
+  completeSession(sessionId: string): Promise<void>;
+  killSession(sessionId: string): Promise<void>;
+  restoreSession(request: {
+    sessionId: string;
+    expectedProject: string;
+  }): Promise<SourceWorkSessionItem>;
 }
 
 export interface SourceProjectListItem {
@@ -54,10 +94,21 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   config: TConfig;
   deferInitialSync?: boolean;
   listSessions?(): Promise<SourceSessionListItem[]>;
+  /** One session by id, same inclusion as listSessions. */
+  getSession?(sessionId: string): Promise<SourceSessionListItem | null>;
+  workbench?: SourceWorkbench;
+  telegramConversations?: {
+    ensureTopic(sessionId: string, origin: TelegramSpawnOrigin): Promise<TelegramConversation>;
+    unwatch(sessionId: string, origin: TelegramSpawnOrigin): Promise<boolean>;
+  };
   emit<TEvent = unknown>(name: string, data?: TEvent): void;
   signal: AbortSignal;
   logger: SourceLogger;
   spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
+  prepareSessionMessage?(
+    sessionId: string,
+    request: Pick<SendMessageRequest, "message" | "attachments">,
+  ): Promise<string>;
   /**
    * Every configured, non-shepherd project this daemon knows about — the
    * spawnable-project list for a source's own project picker. Filtered at
@@ -81,8 +132,19 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
 }
 
 export interface SourceHandle {
+  telegramBotIdentity?: TelegramBotIdentity;
   stop(): void | Promise<void>;
   runOnStart?(): void;
+  /**
+   * github-source-specific: drops sessionId's entry from the handle's
+   * in-process pending-poll-disabled override (see github.ts
+   * pendingPollDisabledOverrides), so a session whose disk-registry write
+   * failed still resumes polling from `poll-enable` without waiting for a
+   * rebind, the end-of-cycle sweep, or handle recreation. Returns the PR
+   * number that was pending, or null when nothing was pending for that
+   * session. No other source type implements this.
+   */
+  clearPollDisabledOverride?(sessionId: string): number | null;
 }
 
 export interface SourceModule<TConfig extends SourceConfig = SourceConfig> {
@@ -91,7 +153,15 @@ export interface SourceModule<TConfig extends SourceConfig = SourceConfig> {
 }
 
 export interface SourceGroupController {
+  telegramBotIdentity(projectId: string, sourceId: string): TelegramBotIdentity | null;
   stop(): void | Promise<void>;
+  /**
+   * Reaches a single running source handle by projectId/sourceId and, if it
+   * implements SourceHandle.clearPollDisabledOverride (github sources only),
+   * calls it. Returns null when the source is not running, is a different
+   * type, or had nothing pending for that session.
+   */
+  clearPollDisabledOverride(projectId: string, sourceId: string, sessionId: string): number | null;
 }
 
 /**

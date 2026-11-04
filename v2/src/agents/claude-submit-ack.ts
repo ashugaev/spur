@@ -84,6 +84,17 @@ function extractEnqueuedText(parsed: Record<string, unknown>): string | null {
   return typeof content === "string" ? content : null;
 }
 
+// Claude >=2.1.277 records a long typed paste wrapped as
+// `\n\n<pasted_content id="x">\n<text>\n</pasted_content id="x">\n`, in both the
+// user and the enqueue record. Unwrap only when that block is the whole record
+// and the closing id matches the opening one.
+function unwrapPastedContent(text: string): string {
+  const inner = /^<pasted_content id="([^"]*)">\n([\s\S]*)\n<\/pasted_content id="\1">$/.exec(
+    text.trim(),
+  );
+  return inner?.[2] ?? text;
+}
+
 function extractDeliveredText(parsed: Record<string, unknown>): string | null {
   switch (parsed["type"]) {
     case "user":
@@ -123,7 +134,13 @@ async function scanFileForDeliveredText(
         const parsed = tryParseJson(trimmed);
         if (!parsed) continue;
         const text = extractDeliveredText(parsed);
-        if (text !== null && normalize(text) === normalizedTarget) {
+        // Raw first: a short send that is itself a pasted_content block is
+        // recorded as typed, so unwrapping alone would miss it.
+        if (
+          text !== null &&
+          (normalize(text) === normalizedTarget ||
+            normalize(unwrapPastedContent(text)) === normalizedTarget)
+        ) {
           reader.close();
           return true;
         }
@@ -137,16 +154,21 @@ async function scanFileForDeliveredText(
   return false;
 }
 
+export interface SubmitAckFileScanResult {
+  found: boolean;
+  scannedFile: string | null;
+}
+
 export async function scanClaudeJsonlForMessage(
   baseline: ClaudeSubmitBaseline,
   text: string,
   worktreePath: string,
   agentSessionId?: string,
-): Promise<boolean> {
+): Promise<SubmitAckFileScanResult> {
   const normalizedTarget = normalize(text);
 
   if (await scanFileForDeliveredText(baseline.file, baseline.size, normalizedTarget)) {
-    return true;
+    return { found: true, scannedFile: baseline.file };
   }
 
   // When a pinned id exists, stay bound to its transcript; otherwise fall back
@@ -155,7 +177,10 @@ export async function scanClaudeJsonlForMessage(
     ? await sessionFileForId(worktreePath, agentSessionId)
     : await findLatestSessionFile(worktreePath);
   if (!latest || latest === baseline.file) {
-    return false;
+    return { found: false, scannedFile: baseline.file };
   }
-  return scanFileForDeliveredText(latest, 0, normalizedTarget);
+  return {
+    found: await scanFileForDeliveredText(latest, 0, normalizedTarget),
+    scannedFile: latest,
+  };
 }

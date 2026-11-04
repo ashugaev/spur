@@ -104,6 +104,8 @@ import { POST as createProject } from "@/app/api/projects/route";
 import { POST as switchAuth } from "@/app/api/sessions/[id]/switch-auth/route";
 import { GET as listClaudeAccounts } from "@/app/api/claude-accounts/route";
 import { GET as getSpawnDefaults } from "@/app/api/projects/[id]/spawn-defaults/route";
+import { GET as getCronJobs } from "@/app/api/cron/route";
+import { GET as getCronDraft, PATCH as patchCronDraft } from "@/app/api/cron/edit/route";
 import { POST as postAutoUpdate } from "@/app/api/runtime/auto-update/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
@@ -664,6 +666,33 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(400);
     expect(payload.error).toBe("branch name is invalid");
   });
+
+  it.each(["spawn_in_progress", "spawn_committed", "spawn_failed"])(
+    "POST /api/spawn forwards spawn batch conflict code and sessionId for %s",
+    async (code) => {
+      mockedSpurRequestJson.mockRejectedValue(
+        new SpurDaemonError("Session api-3 was already created", 409, {
+          code,
+          sessionId: "api-3",
+          error: "Session api-3 was already created",
+        }),
+      );
+
+      const response = await spawnSession(
+        new NextRequest("http://localhost:3000/api/spawn", {
+          method: "POST",
+          body: JSON.stringify({ projectId: "api", prompt: "x" }),
+        }),
+      );
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        error: "Session api-3 was already created",
+        code,
+        sessionId: "api-3",
+      });
+    },
+  );
 
   // ── POST /api/diagnose-update ────────────────────────────────────────────
 
@@ -1998,6 +2027,30 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(200);
     expect(payload.branch).toBeNull();
+  });
+
+  it("POST /api/preflight forwards spawn batch conflict code and sessionId", async () => {
+    mockedSpurRequestJson.mockRejectedValue(
+      new SpurDaemonError("Session api-3 was already created", 409, {
+        code: "spawn_committed",
+        sessionId: "api-3",
+        error: "Session api-3 was already created",
+      }),
+    );
+
+    const response = await runPreflight(
+      new NextRequest("http://localhost:3000/api/preflight", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "api", prompt: "Fix it", preflightBatchId: "batch-1" }),
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Session api-3 was already created",
+      code: "spawn_committed",
+      sessionId: "api-3",
+    });
   });
 
   // ── GET /api/runtime/voice ─────────────────────────────────────────────
@@ -3995,6 +4048,99 @@ describe("Spur web API routes", () => {
 
       expect(response.status).toBe(404);
       expect(payload.error).toBe("Unknown project: api");
+    });
+
+    // ── GET /api/cron ─────────────────────────────────────────────────────
+
+    it("GET /api/cron forwards a trimmed project", async () => {
+      const body = { projects: [], eventsSince: "2026-10-27T00:00:00.000Z" };
+      mockedSpurRequestJson.mockResolvedValue(body);
+
+      const response = await getCronJobs(
+        new NextRequest("http://localhost:3000/api/cron?project=%20api%20"),
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith("/projects/cron?project=api", {
+        timeoutMs: 10_000,
+      });
+      expect(await response.json()).toEqual(body);
+    });
+
+    it("GET /api/cron without project or with empty project sends no param", async () => {
+      mockedSpurRequestJson.mockResolvedValue({ projects: [], eventsSince: null });
+
+      await getCronJobs(new NextRequest("http://localhost:3000/api/cron?project="));
+      await getCronJobs(new NextRequest("http://localhost:3000/api/cron"));
+
+      expect(mockedSpurRequestJson.mock.calls).toEqual([
+        ["/projects/cron", { timeoutMs: 10_000 }],
+        ["/projects/cron", { timeoutMs: 10_000 }],
+      ]);
+    });
+
+    it("GET /api/cron surfaces the daemon error status", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("Unknown project: api", 404));
+
+      const response = await getCronJobs(
+        new NextRequest("http://localhost:3000/api/cron?project=api"),
+      );
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(404);
+      expect(payload.error).toBe("Unknown project: api");
+    });
+
+    it("GET/PATCH /api/cron/edit preserves encoded identity and scoped body", async () => {
+      const url =
+        "http://localhost:3000/api/cron/edit?project=%20api%20&source=nightly&trigger=audit%2Fdetail";
+      const body = { revision: "revision", schedule: "0 4 * * *", blocks: [] };
+      mockedSpurRequestJson.mockResolvedValue({ saved: true });
+      await getCronDraft(new NextRequest(url));
+      const result = await patchCronDraft(
+        new NextRequest(url, { method: "PATCH", body: JSON.stringify(body) }),
+      );
+      expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(
+        1,
+        "/projects/cron/edit?project=api&source=nightly&trigger=audit%2Fdetail",
+        { timeoutMs: 10_000 },
+      );
+      expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(
+        2,
+        "/projects/cron/edit?project=api&source=nightly&trigger=audit%2Fdetail",
+        expect.objectContaining({ method: "PATCH", body: JSON.stringify(body) }),
+      );
+      expect(await result.json()).toEqual({ saved: true });
+    });
+
+    it.each([409, 422])(
+      "PATCH /api/cron/edit preserves %s and validation fields",
+      async (status) => {
+        mockedSpurRequestJson.mockRejectedValue(
+          new SpurDaemonError("invalid schedule", status, {
+            code: "invalid_schedule",
+            field: "schedule",
+            secret: "excluded",
+          }),
+        );
+        const response = await patchCronDraft(
+          new NextRequest("http://localhost:3000/api/cron/edit", { method: "PATCH", body: "{}" }),
+        );
+        expect(response.status).toBe(status);
+        expect(await response.json()).toEqual({
+          error: "invalid schedule",
+          code: "invalid_schedule",
+          field: "schedule",
+        });
+      },
+    );
+
+    it("PATCH /api/cron/edit rejects malformed JSON without contacting daemon", async () => {
+      const response = await patchCronDraft(
+        new NextRequest("http://localhost:3000/api/cron/edit", { method: "PATCH", body: "{" }),
+      );
+      expect(response.status).toBe(400);
+      expect(mockedSpurRequestJson).not.toHaveBeenCalled();
     });
   });
 

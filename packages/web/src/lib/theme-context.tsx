@@ -12,17 +12,21 @@ import {
 import type { Theme } from "@/design/colors";
 
 export type { Theme };
+export type ThemeMode = "auto" | Theme;
 
 export const THEME_STORAGE_KEY = "spur:theme";
+const DARK_QUERY = "(prefers-color-scheme: dark)";
 
 interface ThemeContextValue {
+  mode: ThemeMode;
   theme: Theme;
-  toggleTheme: () => void;
+  setMode: (mode: ThemeMode) => void;
 }
 
 const defaultValue: ThemeContextValue = {
+  mode: "auto",
   theme: "dark",
-  toggleTheme: () => {},
+  setMode: () => {},
 };
 
 const ThemeContext = createContext<ThemeContextValue>(defaultValue);
@@ -31,75 +35,88 @@ export function useTheme(): ThemeContextValue {
   return useContext(ThemeContext);
 }
 
-function applyTheme(next: Theme) {
-  if (next === "light") {
-    document.documentElement.dataset.theme = "light";
-  } else {
-    delete document.documentElement.dataset.theme;
+export function normalizeTheme(
+  value: string | null,
+  systemDark: boolean,
+): { mode: ThemeMode; theme: Theme } {
+  if (value === "light" || value === "dark") return { mode: value, theme: value };
+  return { mode: "auto", theme: systemDark ? "dark" : "light" };
+}
+
+function systemIsDark(): boolean {
+  try {
+    return window.matchMedia(DARK_QUERY).matches;
+  } catch {
+    return true;
   }
 }
 
-function normalizeTheme(value: string | null): Theme {
-  return value === "light" ? "light" : "dark";
+function applyTheme(theme: Theme): void {
+  if (theme === "light") document.documentElement.dataset.theme = "light";
+  else delete document.documentElement.dataset.theme;
+  document.documentElement.style.colorScheme = theme;
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>("dark");
+  const [selection, setSelection] = useState<{ mode: ThemeMode; theme: Theme }>(() => ({
+    mode: "auto",
+    theme: "dark",
+  }));
 
-  // `localStorage` is the single source of truth, not the `data-theme`
-  // attribute the pre-hydration <head> script set: a hydration mismatch
-  // elsewhere in the tree can make React wipe attributes it never rendered
-  // itself, silently resetting a light theme back to dark. Reading storage
-  // directly (in a layout effect, so it runs pre-paint) keeps the theme
-  // correct independent of that recovery re-render.
+  // Read storage again after hydration: React recovery can replace the root
+  // attribute set by the blocking head script.
   useLayoutEffect(() => {
-    // `localStorage` access can throw `SecurityError` (e.g. site data
-    // blocked) — mirrors the pre-hydration <head> script's try/catch in
-    // layout.tsx, which leaves the theme dark on throw. Match that: treat a
-    // throw as "no stored value", which normalizeTheme(null) already
-    // resolves to dark.
     let stored: string | null;
     try {
       stored = window.localStorage.getItem(THEME_STORAGE_KEY);
     } catch {
       stored = null;
     }
-    const next = normalizeTheme(stored);
-    setThemeState(next);
-    applyTheme(next);
+    const next = normalizeTheme(stored, systemIsDark());
+    setSelection(next);
+    applyTheme(next.theme);
   }, []);
 
-  // Cross-tab sync: mirror theme changes made in other tabs. The `storage`
-  // event fires only in other documents, so this never loops with our own
-  // writes; we update state + DOM but do not write back to localStorage.
   useEffect(() => {
     const onStorage = (event: StorageEvent) => {
       if (event.key !== THEME_STORAGE_KEY) return;
-      const next = normalizeTheme(event.newValue);
-      setThemeState(next);
-      applyTheme(next);
+      const next = normalizeTheme(event.newValue, systemIsDark());
+      setSelection(next);
+      applyTheme(next.theme);
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
-  const toggleTheme = useCallback(() => {
-    setThemeState((current) => {
-      const next = current === "light" ? "dark" : "light";
-      // React invokes this updater during the render phase (not inside the
-      // click handler's try/catch, if any), and this provider has no error
-      // boundary — a throw here would crash the whole tree, not just this
-      // click, the same failure mode as the mount read above. Persistence
-      // is best-effort; the theme still applies to this tab either way.
-      try {
-        window.localStorage.setItem(THEME_STORAGE_KEY, next);
-      } catch {
-        // Ignore: theme still applies below, just isn't persisted.
-      }
-      applyTheme(next);
-      return next;
-    });
+  useEffect(() => {
+    if (selection.mode !== "auto") return;
+    let media: MediaQueryList;
+    try {
+      media = window.matchMedia(DARK_QUERY);
+    } catch {
+      return;
+    }
+    const onChange = (event: MediaQueryListEvent) => {
+      const next = normalizeTheme("auto", event.matches);
+      setSelection(next);
+      applyTheme(next.theme);
+    };
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, [selection.mode]);
+
+  const setMode = useCallback((mode: ThemeMode) => {
+    const next = normalizeTheme(mode, systemIsDark());
+    setSelection(next);
+    applyTheme(next.theme);
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, mode);
+    } catch {
+      // The selection still applies to this tab.
+    }
   }, []);
 
-  return <ThemeContext.Provider value={{ theme, toggleTheme }}>{children}</ThemeContext.Provider>;
+  return (
+    <ThemeContext.Provider value={{ ...selection, setMode }}>{children}</ThemeContext.Provider>
+  );
 }

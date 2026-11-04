@@ -10,6 +10,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
+import { isCursorDeliveryId } from "./agents/cursor-submit-ack.js";
+import { appendEventLog } from "./event-log.js";
+import { parseConsent, type InterfaceConsent } from "./review-interface-consent.js";
 import {
   isSessionState,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
@@ -17,6 +20,7 @@ import {
   CI_FAILED_MAX_ATTEMPTS,
   type AvailableBacklogItem,
   type PersistedPendingBatch,
+  type PersistedSpawnWork,
   type ReviewProviderId,
   type ReviewSignal,
   type ReviewSnapshot,
@@ -45,6 +49,15 @@ import { normalizePreflightTotals } from "./preflight-usage-store.js";
 
 function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
+}
+
+// Existence only: never reads, so no index or legacy-rewrite writes and no throw on a corrupt record.
+export function sessionRecordExists(
+  dataDir: string,
+  projectId: string,
+  sessionId: string,
+): boolean {
+  return existsSync(sessionFilePath(dataDir, projectId, sessionId));
 }
 
 function sessionIndexFilePath(dataDir: string): string {
@@ -79,12 +92,29 @@ function workItemRegistryFilePath(dataDir: string, projectId: string, sourceId: 
   return join(dataDir, "source-state", "github-work-items", projectId, `${sourceId}.json`);
 }
 
+export function scriptSourceStateDir(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "script", projectId, sourceId);
+}
+
 function availableBacklogFilePath(dataDir: string, projectId: string, backlogId: string): string {
   return join(dataDir, "source-state", "available-backlog", projectId, `${backlogId}.json`);
 }
 
 function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "github-comment-seen", projectId, `${sourceId}.json`);
+}
+
+function ignoredGitHubFeedbackDir(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "github-ignored-feedback", projectId, sourceId);
+}
+
+function ignoredGitHubFeedbackFilePath(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): string {
+  return join(ignoredGitHubFeedbackDir(dataDir, projectId, sourceId), `${sessionId}.json`);
 }
 
 function reviewPaginationFilePath(dataDir: string, projectId: string, sourceId: string): string {
@@ -101,6 +131,10 @@ function lifecycleBaselineRegistryFilePath(
 
 function workItemLifecycleFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "work-item-lifecycle", projectId, `${sourceId}.json`);
+}
+
+function githubPollDisabledFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "github-poll-disabled", projectId, `${sourceId}.json`);
 }
 
 // A single shared file, not one file per queueKey: queueKeys contain colons
@@ -256,26 +290,105 @@ function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch
   return batch["kind"] === "review" || batch["kind"] === "service" || batch["kind"] === "telegram";
 }
 
+const SESSION_RECORD_STRING_FIELDS = [
+  "id",
+  "project",
+  "agent",
+  "prompt",
+  "branch",
+  "worktreePath",
+  "tmuxSession",
+  "launchCommand",
+  "status",
+  "createdAt",
+  "updatedAt",
+] as const;
+
 function isSessionRecord(value: unknown): value is SessionRecord {
-  return isRecord(value) && typeof value["id"] === "string" && typeof value["project"] === "string";
+  return (
+    isRecord(value) &&
+    SESSION_RECORD_STRING_FIELDS.every((field) => typeof value[field] === "string") &&
+    typeof value["worktree"] === "boolean"
+  );
 }
+
+// A session file whose bytes are not valid JSON or lack the SessionRecord
+// shape. Distinct from I/O failures so listSessions can skip exactly these.
+class InvalidSessionMetadataError extends Error {}
 
 // Distinguishes "file vanished between readdir and read" (a benign race with
-// a concurrent GC archive) from every other read failure, which must still
-// surface — a corrupt record on disk is a real problem, not a race.
-// readSessionFile wraps every failure from its inner try (including a
-// readFileSync ENOENT) in a fresh Error with `cause: error`, so the original
-// error code only survives on `cause`, never on the thrown error itself.
-function isEnoentCause(error: unknown): boolean {
-  const cause = error instanceof Error ? error.cause : undefined;
-  return isRecord(cause) && cause["code"] === "ENOENT";
+// a concurrent GC archive) from every other read failure. listSessions skips
+// an invalid record (bad JSON or shape) with one warn per file version;
+// readSession throws; other I/O errors throw.
+function isEnoent(error: unknown): boolean {
+  return isRecord(error) && error["code"] === "ENOENT";
 }
 
-function tryReadSessionFile(path: string): SessionRecord | null {
+// readSessionFile wraps a readFileSync failure (including ENOENT) in a fresh
+// Error with `cause: error`, so the original error code only survives on
+// `cause`, never on the thrown error itself. Parse and shape failures throw
+// InvalidSessionMetadataError instead.
+function isEnoentCause(error: unknown): boolean {
+  return isEnoent(error instanceof Error ? error.cause : undefined);
+}
+
+// Runs one per-entry fs read of a multi-entry scan: null when the entry
+// vanished mid-scan (ENOENT), any other failure still throws.
+function readUnlessVanished<T>(read: () => T): T | null {
   try {
-    return readSessionFileCached(path);
+    return read();
+  } catch (error) {
+    if (isEnoent(error)) return null;
+    throw error;
+  }
+}
+
+function readJsonNames(dir: string): string[] | null {
+  return readUnlessVanished(() =>
+    readdirSync(dir).filter((fileName) => fileName.endsWith(".json")),
+  );
+}
+
+// Path -> "ino:mtimeMs:size" of the invalid file version last logged.
+const loggedInvalidSessionFiles = new Map<string, string>();
+
+function logInvalidSessionFile(dataDir: string, path: string, error: Error): void {
+  const stat = statFingerprint(path);
+  const version = stat ? `${stat.ino}:${stat.mtimeMs}:${stat.size}` : "gone";
+  if (loggedInvalidSessionFiles.get(path) === version) return;
+  loggedInvalidSessionFiles.set(path, version);
+  try {
+    appendEventLog(dataDir, {
+      event: "session.record.invalid",
+      level: "warn",
+      path,
+      message: error.message,
+    });
+  } catch {
+    // Logging must never block listing.
+  }
+}
+
+function pruneInvalidSessionLogEntries(rootDir: string, visited: Set<string>): void {
+  const rootPrefix = rootDir + sep;
+  for (const loggedPath of loggedInvalidSessionFiles.keys()) {
+    if (loggedPath.startsWith(rootPrefix) && !visited.has(loggedPath)) {
+      loggedInvalidSessionFiles.delete(loggedPath);
+    }
+  }
+}
+
+function tryReadSessionFile(dataDir: string, path: string): SessionRecord | null {
+  try {
+    const record = readSessionFileCached(path);
+    loggedInvalidSessionFiles.delete(path);
+    return record;
   } catch (error) {
     if (isEnoentCause(error)) {
+      return null;
+    }
+    if (error instanceof InvalidSessionMetadataError) {
+      logInvalidSessionFile(dataDir, path, error);
       return null;
     }
     throw error;
@@ -283,17 +396,26 @@ function tryReadSessionFile(path: string): SessionRecord | null {
 }
 
 function readSessionFile(path: string): SessionRecord {
-  let rawSession: unknown;
+  let text: string;
   try {
-    rawSession = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    text = readFileSync(path, "utf-8");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Invalid session metadata JSON at ${path}: ${message}`, {
       cause: error,
     });
   }
+  let rawSession: unknown;
+  try {
+    rawSession = JSON.parse(text) as unknown;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new InvalidSessionMetadataError(`Invalid session metadata JSON at ${path}: ${message}`, {
+      cause: error,
+    });
+  }
   if (!isSessionRecord(rawSession)) {
-    throw new Error(`Invalid session metadata shape at ${path}`);
+    throw new InvalidSessionMetadataError(`Invalid session metadata shape at ${path}`);
   }
   const normalizedSession = normalizeSessionRecord(rawSession);
   if ((!rawSession.pr && normalizedSession.pr) || hasLegacyPrSlotAlias(rawSession)) {
@@ -302,16 +424,18 @@ function readSessionFile(path: string): SessionRecord {
   return normalizedSession;
 }
 
-// listSessions() re-reads and re-parses every session file every call — on a
-// fleet-sized data dir (thousands of files, single digit MB of JSON) that is
-// re-parsed on every 2s dashboard-cache tick even when nothing changed. Since
+// Uncached, listSessions() and readSession() re-parse session files on every
+// call — on a fleet-sized data dir (thousands of files, single digit MB of
+// JSON) that is every 2s dashboard-cache tick, and readSession runs inside
+// per-session loops, so O(N²) parses per tick. Since
 // writeJsonFile always renames a freshly created inode (never edits in
 // place), (ino, mtimeMs, size) is an exact "this file's bytes are what we
 // last read" fingerprint — cheaper and safer than an mtime-only key, which
 // can't distinguish two writes landing in the same millisecond. The cache is
 // internal to this module: no export changes, so callers and their tests are
 // unaffected except that unchanged records are now the SAME object across
-// calls (see the "no in-place mutation of a listed record" contract).
+// calls and between listSessions() and readSession(): never mutate a
+// returned record in place.
 interface FileFingerprint {
   ino: number;
   mtimeMs: number;
@@ -432,6 +556,7 @@ function isTelegramMessageOwner(value: unknown): value is TelegramMessageOwner {
 function isTelegramChoice(value: unknown): value is TelegramChoice {
   if (!value || typeof value !== "object") return false;
   const choice = value as Partial<TelegramChoice>;
+  const purpose = (value as Record<string, unknown>).interfaceConsent;
   return (
     typeof choice.token === "string" &&
     choice.token.length > 0 &&
@@ -445,6 +570,10 @@ function isTelegramChoice(value: unknown): value is TelegramChoice {
       (typeof choice.messageThreadId === "number" && Number.isInteger(choice.messageThreadId))) &&
     typeof choice.text === "string" &&
     typeof choice.value === "string" &&
+    (purpose === undefined ||
+      (isRecord(purpose) &&
+        typeof purpose.challenge === "string" &&
+        ["approved", "rejected", "revoked"].includes(String(purpose.decision)))) &&
     typeof choice.expiresAt === "string" &&
     !Number.isNaN(Date.parse(choice.expiresAt))
   );
@@ -614,6 +743,7 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
         result.set(raw.externalId, {
           ...base,
           state,
+          ...(typeof raw.spawnWorkId === "string" ? { spawnWorkId: raw.spawnWorkId } : {}),
         });
         continue;
       }
@@ -801,20 +931,37 @@ function normalizeSubmitAckBaseline(value: unknown): SubmitAckBaseline | undefin
   if (value === null || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
   const { agent } = record;
+  if (agent === "cursor") {
+    const deliveryId = record["deliveryId"];
+    if (deliveryId !== undefined && !isCursorDeliveryId(deliveryId)) return undefined;
+    const file = record["file"];
+    const size = record["size"];
+    if (typeof size !== "number") return undefined;
+    const rotated = record["rotated"];
+    const rotation =
+      rotated !== null && typeof rotated === "object"
+        ? (rotated as Record<string, unknown>)
+        : undefined;
+    const extra =
+      rotation && typeof rotation["file"] === "string" && typeof rotation["size"] === "number"
+        ? { rotated: { file: rotation["file"], size: rotation["size"] } }
+        : {};
+    if (file === null) {
+      return size === 0 && isCursorDeliveryId(deliveryId)
+        ? { agent, file: null, size: 0, deliveryId, ...extra }
+        : undefined;
+    }
+    return typeof file === "string"
+      ? { agent, file, size, ...(deliveryId ? { deliveryId } : {}), ...extra }
+      : undefined;
+  }
   if (
-    (agent === "claude" || agent === "cursor") &&
+    agent === "claude" &&
     typeof record["file"] === "string" &&
     typeof record["size"] === "number"
   ) {
     const base = { file: record["file"], size: record["size"] };
-    const rotated = record["rotated"];
-    if (agent === "claude" || rotated === null || typeof rotated !== "object") {
-      return { agent, ...base };
-    }
-    const { file, size } = rotated as Record<string, unknown>;
-    return typeof file === "string" && typeof size === "number"
-      ? { agent, ...base, rotated: { file, size } }
-      : { agent, ...base };
+    return { agent, ...base };
   }
   const offsets = record["offsets"];
   if (agent === "codex" && offsets !== null && typeof offsets === "object") {
@@ -1042,8 +1189,26 @@ function normalizePreflightTokenUsage(value: unknown): SessionRecord["preflightT
 
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const normalizedSession = normalizeSessionPrBinding(session);
+  // The request is an equality fingerprint, never replayed as executable input.
+  const birthRequest = normalizedSession.triggerBirthRequest;
+  const triggerBirth =
+    typeof normalizedSession.triggerBirthKey === "string" &&
+    normalizedSession.triggerBirthKey.trim().length > 0 &&
+    isRecord(birthRequest) &&
+    birthRequest.project === normalizedSession.project &&
+    (birthRequest.prompt === undefined || typeof birthRequest.prompt === "string")
+      ? { triggerBirthKey: normalizedSession.triggerBirthKey, triggerBirthRequest: birthRequest }
+      : {};
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
+  const sidecarLaunches: Record<string, string> = {};
+  if (isRecord(normalizedSession.sidecarLaunches)) {
+    for (const [name, launchId] of Object.entries(normalizedSession.sidecarLaunches)) {
+      if (name.length > 0 && typeof launchId === "string" && launchId.length > 0) {
+        sidecarLaunches[name] = launchId;
+      }
+    }
+  }
   const tokenUsage = normalizeTokenUsage(normalizedSession.tokenUsage);
   const preflightTokenUsage = normalizePreflightTokenUsage(normalizedSession.preflightTokenUsage);
   // Records written before the rename carry the hold as launchUnconfirmedAt;
@@ -1063,6 +1228,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   return {
     id: normalizedSession.id,
     project: normalizedSession.project,
+    ...triggerBirth,
     // Legacy on-disk records only have `deskId` (or neither field); this is
     // where a pre-workspaceId record gets migrated in memory on every read.
     // Delegates to workspaceIdOf so the `deskId ?? id` fallback chain itself
@@ -1086,6 +1252,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.agentSessionId
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
+    ...(normalizedSession.agentLaunchId ? { agentLaunchId: normalizedSession.agentLaunchId } : {}),
     ...(normalizedSession.cursorRestoreBoundary &&
     typeof normalizedSession.cursorRestoreBoundary.filePath === "string" &&
     Number.isSafeInteger(normalizedSession.cursorRestoreBoundary.offset) &&
@@ -1095,6 +1262,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(typeof normalizedSession.codexRestoreStartedAt === "string" &&
     Number.isFinite(Date.parse(normalizedSession.codexRestoreStartedAt))
       ? { codexRestoreStartedAt: normalizedSession.codexRestoreStartedAt }
+      : {}),
+    ...(typeof normalizedSession.restoredAt === "string" &&
+    Number.isFinite(Date.parse(normalizedSession.restoredAt))
+      ? { restoredAt: normalizedSession.restoredAt }
       : {}),
     prompt: normalizedSession.prompt,
     ...(normalizedSession.originalTaskPrompt
@@ -1130,6 +1301,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
     ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
     ...(sidecarProcs ? { sidecarProcs } : {}),
+    ...(Object.keys(sidecarLaunches).length > 0 ? { sidecarLaunches } : {}),
     ...(normalizedSession.staleSidecars ? { staleSidecars: normalizedSession.staleSidecars } : {}),
     ...(normalizedSession.pipeline
       ? { pipeline: normalizePipelineState(normalizedSession.pipeline) }
@@ -1182,6 +1354,12 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       : {}),
     ...(stateSubscriptions ? { stateSubscriptions } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
+    ...(normalizedSession.error &&
+    (normalizedSession.errorSource === "inferred_runtime_exit" ||
+      normalizedSession.errorSource === "runtime_probe" ||
+      normalizedSession.errorSource === "other")
+      ? { errorSource: normalizedSession.errorSource }
+      : {}),
     ...(normalizedSession.todoLedgerVersion === 1 ? { todoLedgerVersion: 1 as const } : {}),
   };
 }
@@ -1221,23 +1399,92 @@ function pruneStaleSessionFileCacheEntries(rootDir: string, visited: Set<string>
   }
 }
 
+interface CachedDirListing extends FileFingerprint {
+  names: readonly string[];
+}
+
+// Keyed on the absolute subdirectory path under dataDir/sessions. That dir
+// holds a handful of project dirs next to one log-shard dir per session
+// (sessions/<id>/), hundreds on a live fleet, none holding *.json. Caches the
+// *.json FILE NAMES only: content still goes through readSessionFileCached's
+// per-file fingerprint.
+const sessionDirListingCache = new Map<string, CachedDirListing>();
+
+// A listing is stored only when the directory mtime was older than this at
+// the moment before its readdir: a mutation landing after the readdir but
+// inside the same timestamp tick as the pre-readdir stat is never cached.
+const DIR_LISTING_MIN_AGE_MS = 1_000;
+
+// Same path-boundary rule as pruneStaleSessionFileCacheEntries, over the
+// directory entries of this listing rather than its files.
+function pruneStaleSessionDirListingEntries(rootDir: string, visitedDirs: Set<string>): void {
+  const rootPrefix = rootDir + sep;
+  for (const cachedDir of sessionDirListingCache.keys()) {
+    if (cachedDir.startsWith(rootPrefix) && !visitedDirs.has(cachedDir)) {
+      sessionDirListingCache.delete(cachedDir);
+    }
+  }
+}
+
+// The *.json entries of one subdirectory of dataDir/sessions, served from
+// cache while the directory's own fingerprint is unchanged. Sound because the
+// directory mtime advances on every entry create, rename and unlink; ino also
+// changes on rm -r + mkdir unless the inode is reused, and then the fresh
+// mtime catches it.
+function listSessionDirJsonNames(dir: string): readonly string[] {
+  const fingerprint = statFingerprint(dir);
+  if (!fingerprint) {
+    // Vanished between the root readdir and this stat, or unreadable: an
+    // uncached listing skips a vanished dir and throws any other error.
+    sessionDirListingCache.delete(dir);
+    return readJsonNames(dir) ?? [];
+  }
+
+  const cached = sessionDirListingCache.get(dir);
+  if (cached && sameFingerprint(cached, fingerprint)) {
+    return cached.names;
+  }
+
+  // Eligibility is decided BEFORE the readdir: a snapshot young when taken
+  // stays uncached however long this reader stalls before storing it.
+  const cacheable = Date.now() - fingerprint.mtimeMs > DIR_LISTING_MIN_AGE_MS;
+  const names = readJsonNames(dir);
+  if (!names) {
+    sessionDirListingCache.delete(dir);
+    return [];
+  }
+  // Keyed on the PRE-readdir fingerprint: a mutation between the stat and the
+  // readdir is stored under the older mtime, so the next stat misses once.
+  if (cacheable) {
+    sessionDirListingCache.set(dir, {
+      ino: fingerprint.ino,
+      mtimeMs: fingerprint.mtimeMs,
+      size: fingerprint.size,
+      names,
+    });
+  }
+  return names;
+}
+
 export function listSessions(dataDir: string): SessionRecord[] {
   const rootDir = join(dataDir, "sessions");
   if (!existsSync(rootDir)) {
     pruneStaleSessionFileCacheEntries(rootDir, new Set());
+    pruneStaleSessionDirListingEntries(rootDir, new Set());
     return [];
   }
 
   const sessions: SessionRecord[] = [];
   const visited = new Set<string>();
+  const visitedDirs = new Set<string>();
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const projectDir = join(rootDir, entry.name);
-    for (const fileName of readdirSync(projectDir)) {
-      if (!fileName.endsWith(".json")) continue;
+    visitedDirs.add(projectDir);
+    for (const fileName of listSessionDirJsonNames(projectDir)) {
       const filePath = join(projectDir, fileName);
       visited.add(filePath);
-      const session = tryReadSessionFile(filePath);
+      const session = tryReadSessionFile(dataDir, filePath);
       if (session) {
         sessions.push(session);
       }
@@ -1245,6 +1492,8 @@ export function listSessions(dataDir: string): SessionRecord[] {
   }
 
   pruneStaleSessionFileCacheEntries(rootDir, visited);
+  pruneInvalidSessionLogEntries(rootDir, visited);
+  pruneStaleSessionDirListingEntries(rootDir, visitedDirs);
 
   sessions.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   return sessions;
@@ -1252,7 +1501,7 @@ export function listSessions(dataDir: string): SessionRecord[] {
 
 export function readSession(dataDir: string, sessionId: string): SessionRecord | null {
   const path = findSessionFilePath(dataDir, sessionId);
-  return path ? readSessionFile(path) : null;
+  return path ? readSessionFileCached(path) : null;
 }
 
 // Group-atomic archival for session GC: moves every member's record (and its
@@ -1263,13 +1512,29 @@ export function readSession(dataDir: string, sessionId: string): SessionRecord |
 // indexed-but-missing entry on its next lookup). Un-archiving is `mv` back
 // into sessions/<project>/<id>.json; the next findSessionFilePath scan or
 // writeSession repairs the index.
+//
+// A member that is workspaceIdOf() of any record staying in sessions/ (any
+// project) is not moved: archiving a desk anchor strands its dependents.
+// Those ids come back in retainedAnchorIds. Invalid record files are skipped
+// by listSessions and hold no anchor.
 export function archiveSessions(
   dataDir: string,
   members: readonly Pick<SessionRecord, "id" | "project">[],
-): { archivedIds: string[]; archiveDir: string } {
+): { archivedIds: string[]; retainedAnchorIds: string[]; archiveDir: string } {
   const archiveDir = join(dataDir, "sessions-archive");
   const archivedIds: string[] = [];
+  const retainedAnchorIds: string[] = [];
+  const memberIds = new Set(members.map((member) => member.id));
+  const heldAnchorIds = new Set(
+    listSessions(dataDir)
+      .filter((record) => !memberIds.has(record.id))
+      .map(workspaceIdOf),
+  );
   for (const member of members) {
+    if (heldAnchorIds.has(member.id)) {
+      retainedAnchorIds.push(member.id);
+      continue;
+    }
     const sourcePath = sessionFilePath(dataDir, member.project, member.id);
     if (!existsSync(sourcePath)) {
       continue;
@@ -1296,7 +1561,7 @@ export function archiveSessions(
     writeSessionIndexFile(dataDir, nextIndex);
   }
 
-  return { archivedIds, archiveDir };
+  return { archivedIds, retainedAnchorIds, archiveDir };
 }
 
 export function writeServiceInstance(dataDir: string, service: ServiceInstanceRecord): void {
@@ -1314,9 +1579,9 @@ export function listServiceInstances(dataDir: string): ServiceInstanceRecord[] {
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const sessionDir = join(rootDir, entry.name);
-    for (const fileName of readdirSync(sessionDir)) {
-      if (!fileName.endsWith(".json")) continue;
-      services.push(readServiceInstanceFile(join(sessionDir, fileName)));
+    for (const fileName of readJsonNames(sessionDir) ?? []) {
+      const service = readUnlessVanished(() => readServiceInstanceFile(join(sessionDir, fileName)));
+      if (service) services.push(service);
     }
   }
 
@@ -1332,9 +1597,9 @@ export function listServiceInstancesForSession(
   if (!existsSync(dir)) return [];
 
   const services: ServiceInstanceRecord[] = [];
-  for (const fileName of readdirSync(dir)) {
-    if (!fileName.endsWith(".json")) continue;
-    services.push(readServiceInstanceFile(join(dir, fileName)));
+  for (const fileName of readJsonNames(dir) ?? []) {
+    const service = readUnlessVanished(() => readServiceInstanceFile(join(dir, fileName)));
+    if (service) services.push(service);
   }
   services.sort((left, right) => left.serviceId.localeCompare(right.serviceId));
   return services;
@@ -1399,8 +1664,7 @@ export function listRuntimeLogCursorKeys(
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const sessionDir = join(rootDir, entry.name);
-    for (const fileName of readdirSync(sessionDir)) {
-      if (!fileName.endsWith(".json")) continue;
+    for (const fileName of readJsonNames(sessionDir) ?? []) {
       keys.push({
         sessionId: entry.name,
         key: fileName.slice(0, -".json".length),
@@ -1420,10 +1684,10 @@ export function readReviewSourceSnapshots(
   if (!existsSync(dir)) return new Map();
 
   const snapshots = new Map<string, ReviewSnapshot>();
-  for (const fileName of readdirSync(dir)) {
-    if (!fileName.endsWith(".json")) continue;
+  for (const fileName of readJsonNames(dir) ?? []) {
     const sessionId = fileName.slice(0, -".json".length);
-    snapshots.set(sessionId, parseReviewSnapshot(join(dir, fileName)));
+    const snapshot = readUnlessVanished(() => parseReviewSnapshot(join(dir, fileName)));
+    if (snapshot) snapshots.set(sessionId, snapshot);
   }
   return snapshots;
 }
@@ -1544,6 +1808,71 @@ function readIdRegistry(path: string): Set<string> {
   } catch {
     return new Set();
   }
+}
+
+export function readIgnoredGitHubFeedback(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  prNumber: number,
+): Set<string> {
+  const path = ignoredGitHubFeedbackFilePath(dataDir, projectId, sourceId, sessionId);
+  if (!existsSync(path)) return new Set();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+  } catch (error) {
+    throw new Error(`Invalid ignored GitHub feedback at ${path}`, { cause: error });
+  }
+  if (
+    !isRecord(parsed) ||
+    typeof parsed.prNumber !== "number" ||
+    !Number.isSafeInteger(parsed.prNumber) ||
+    parsed.prNumber <= 0 ||
+    !Array.isArray(parsed.ids) ||
+    !parsed.ids.every((id: unknown) => typeof id === "string")
+  ) {
+    throw new Error(`Invalid ignored GitHub feedback at ${path}`);
+  }
+  return parsed.prNumber === prNumber ? new Set<string>(parsed.ids) : new Set();
+}
+
+export function recordIgnoredGitHubFeedback(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  prNumber: number,
+  ids: readonly string[],
+): void {
+  if (ids.length === 0) return;
+  const known = readIgnoredGitHubFeedback(dataDir, projectId, sourceId, sessionId, prNumber);
+  for (const id of ids) known.add(id);
+  const path = ignoredGitHubFeedbackFilePath(dataDir, projectId, sourceId, sessionId);
+  writeJsonFile(path, { prNumber, ids: [...known].sort() });
+}
+
+export function listIgnoredGitHubFeedbackSessions(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): string[] {
+  const dir = ignoredGitHubFeedbackDir(dataDir, projectId, sourceId);
+  return existsSync(dir)
+    ? readdirSync(dir)
+        .filter((name) => name.endsWith(".json"))
+        .map((name) => name.slice(0, -5))
+    : [];
+}
+
+export function deleteIgnoredGitHubFeedback(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): void {
+  rmSync(ignoredGitHubFeedbackFilePath(dataDir, projectId, sourceId, sessionId), { force: true });
 }
 
 export function readAvailableBacklogItems(
@@ -1671,6 +2000,194 @@ export function writeGitHubReviewPagination(
   );
 }
 
+// A session's poll-disable state. disabledAtMs and lastCheckedAtMs are 0 on a legacy
+// bare-number entry (see readGitHubPollDisabled) — 0 means "probe on the next cycle",
+// the safe direction.
+export interface GitHubPollDisabledEntry {
+  prNumber: number;
+  disabledAtMs: number;
+  lastCheckedAtMs: number;
+}
+
+function coerceTimestamp(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+// sessionId -> the disable entry for a session permanently disabled by a not-found PR.
+// Sticky across source-handle recreation (reloadAutomation) and daemon restart; see
+// event-sources/github.ts permanentPrNotFound, the in-memory cache backed by this file.
+// Corrupt or partial JSON reads as an empty map; if the session is still bound to that
+// PR, the next successful poll can persist disable again (one extra source.poll.disabled).
+// Accepts two on-disk value shapes: a bare positive integer (today's/legacy shape,
+// pre-recheck), read as { prNumber, disabledAtMs: 0, lastCheckedAtMs: 0 }; or an object
+// with a positive-integer prNumber, timestamps coerced to 0 unless finite and >= 0.
+// Anything else is dropped.
+export function readGitHubPollDisabled(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Map<string, GitHubPollDisabledEntry> {
+  const path = githubPollDisabledFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return new Map();
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return new Map();
+    const result = new Map<string, GitHubPollDisabledEntry>();
+    for (const [sessionId, value] of Object.entries(parsed)) {
+      if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+        result.set(sessionId, { prNumber: value, disabledAtMs: 0, lastCheckedAtMs: 0 });
+        continue;
+      }
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const record = value as Record<string, unknown>;
+        const prNumber = record["prNumber"];
+        if (typeof prNumber === "number" && Number.isInteger(prNumber) && prNumber > 0) {
+          result.set(sessionId, {
+            prNumber,
+            disabledAtMs: coerceTimestamp(record["disabledAtMs"]),
+            lastCheckedAtMs: coerceTimestamp(record["lastCheckedAtMs"]),
+          });
+        }
+      }
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
+}
+
+// The one legitimate multi-key write: the sweep prune in github.ts, built from a fresh
+// readGitHubPollDisabled, never from the in-memory cache. Every other mutation goes
+// through recordGitHubPollDisabledSession / clearGitHubPollDisabledSession /
+// markGitHubPollDisabledChecked below.
+export function writeGitHubPollDisabled(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  entries: ReadonlyMap<string, GitHubPollDisabledEntry>,
+): void {
+  const path = githubPollDisabledFilePath(dataDir, projectId, sourceId);
+  if (entries.size === 0) {
+    rmSync(path, { force: true });
+    return;
+  }
+  writeJsonFile(
+    path,
+    Object.fromEntries([...entries].sort(([left], [right]) => left.localeCompare(right))),
+  );
+}
+
+export function recordGitHubPollDisabledSession(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  prNumber: number,
+  nowMs: number,
+): void {
+  const entries = readGitHubPollDisabled(dataDir, projectId, sourceId);
+  const existing = entries.get(sessionId);
+  if (existing?.prNumber === prNumber) return;
+  entries.set(sessionId, { prNumber, disabledAtMs: nowMs, lastCheckedAtMs: nowMs });
+  writeGitHubPollDisabled(dataDir, projectId, sourceId, entries);
+}
+
+// Single-key read-modify-write. Stamps lastCheckedAtMs on the session's disk entry so a
+// recreated source handle (reloadAutomation) does not re-probe within the same recheck
+// window. Returns false and writes nothing when the session has no entry on disk (a
+// prior record* write had failed and never landed) — the boolean is load-bearing: the
+// caller must not drop its in-memory override on a false return, or the disable would
+// re-arm the emit on the next refresh.
+export function markGitHubPollDisabledChecked(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  nowMs: number,
+): boolean {
+  const entries = readGitHubPollDisabled(dataDir, projectId, sourceId);
+  const existing = entries.get(sessionId);
+  if (!existing) return false;
+  entries.set(sessionId, { ...existing, lastCheckedAtMs: nowMs });
+  writeGitHubPollDisabled(dataDir, projectId, sourceId, entries);
+  return true;
+}
+
+export function clearGitHubPollDisabledSession(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): number | null {
+  const entries = readGitHubPollDisabled(dataDir, projectId, sourceId);
+  const entry = entries.get(sessionId);
+  if (entry === undefined) return null;
+  entries.delete(sessionId);
+  writeGitHubPollDisabled(dataDir, projectId, sourceId, entries);
+  return entry.prNumber;
+}
+
+// Read-only: every sourceId with a poll-disabled registry file under a project,
+// configured or not (a renamed/removed source leaves its file behind). Missing dir -> [].
+export function listGitHubPollDisabledSourceIds(dataDir: string, projectId: string): string[] {
+  try {
+    return readdirSync(join(dataDir, "source-state", "github-poll-disabled", projectId), {
+      withFileTypes: true,
+    })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+      .map((entry) => entry.name.slice(0, -".json".length));
+  } catch {
+    return [];
+  }
+}
+
+// Read-only directory walk over every project/source poll-disabled registry file.
+// Only consumer is the doctor check (host-install.ts) — never writes. Missing root ->
+// [].
+export function listGitHubPollDisabledEntries(dataDir: string): {
+  projectId: string;
+  sourceId: string;
+  sessionId: string;
+  prNumber: number;
+  disabledAtMs: number;
+}[] {
+  const root = join(dataDir, "source-state", "github-poll-disabled");
+  if (!existsSync(root)) return [];
+  const results: {
+    projectId: string;
+    sourceId: string;
+    sessionId: string;
+    prNumber: number;
+    disabledAtMs: number;
+  }[] = [];
+  let projectIds: string[];
+  try {
+    projectIds = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+  for (const projectId of projectIds) {
+    for (const sourceId of listGitHubPollDisabledSourceIds(dataDir, projectId)) {
+      const entries = readGitHubPollDisabled(dataDir, projectId, sourceId);
+      for (const [sessionId, entry] of entries) {
+        results.push({
+          projectId,
+          sourceId,
+          sessionId,
+          prNumber: entry.prNumber,
+          disabledAtMs: entry.disabledAtMs,
+        });
+      }
+    }
+  }
+  return results.sort(
+    (left, right) =>
+      left.disabledAtMs - right.disabledAtMs || left.sessionId.localeCompare(right.sessionId),
+  );
+}
+
 export function recordCommentSeen(
   dataDir: string,
   projectId: string,
@@ -1728,6 +2245,114 @@ export function deleteWorkItemLifecycle(
 export function readPendingSendBatches(dataDir: string): Map<string, PersistedPendingBatch> {
   const path = pendingSendBatchesFilePath(dataDir);
   return existsSync(path) ? readPendingSendBatchesFile(path) : new Map();
+}
+
+export function readPendingSpawnWork(dataDir: string): Map<string, PersistedSpawnWork> {
+  try {
+    const value: unknown = JSON.parse(
+      readFileSync(join(dataDir, "pending-spawn-work.json"), "utf8"),
+    );
+    if (!Array.isArray(value)) return new Map();
+    const result = new Map<string, PersistedSpawnWork>();
+    for (const item of value) {
+      if (!item || typeof item !== "object") continue;
+      const record = item as Record<string, unknown>;
+      if (
+        ![
+          "workId",
+          "projectId",
+          "triggerId",
+          "sourceId",
+          "eventName",
+          "occurrenceId",
+          "routeFingerprint",
+          "createdAt",
+        ].every((key) => typeof record[key] === "string")
+      )
+        continue;
+      if (
+        ![
+          record.revision,
+          record.nextBlockIndex,
+          record.admissionDenials,
+          record.notBeforeAt,
+        ].every(
+          (number) => typeof number === "number" && Number.isSafeInteger(number) && number >= 0,
+        )
+      )
+        continue;
+      if (
+        (record.anchorSessionId !== undefined && typeof record.anchorSessionId !== "string") ||
+        (record.lastSessionId !== undefined && typeof record.lastSessionId !== "string")
+      )
+        continue;
+      if (
+        !Array.isArray(record.failures) ||
+        !record.failures.every((error) => typeof error === "string") ||
+        !Array.isArray(record.blocks) ||
+        record.blocks.length === 0
+      )
+        continue;
+      if (
+        !record.blocks.every((block: unknown) => {
+          if (!block || typeof block !== "object") return false;
+          const outcome = block as Record<string, unknown>;
+          return (
+            typeof outcome.birthKey === "string" &&
+            (outcome.state === "pending" ||
+              (outcome.state === "succeeded" && typeof outcome.sessionId === "string") ||
+              (outcome.state === "failed" &&
+                typeof outcome.error === "string" &&
+                (outcome.sessionId === undefined || typeof outcome.sessionId === "string")))
+          );
+        })
+      )
+        continue;
+      const work = item as PersistedSpawnWork;
+      if (
+        work.nextBlockIndex > work.blocks.length ||
+        work.blocks.some(
+          (block, index) =>
+            block.birthKey !== `${work.workId}:${index}` ||
+            index < work.nextBlockIndex === (block.state === "pending"),
+        )
+      )
+        continue;
+      const successful = work.blocks.filter((block) => block.state === "succeeded");
+      if (
+        work.lastSessionId !== successful.at(-1)?.sessionId ||
+        (work.anchorSessionId !== undefined &&
+          !successful.some((block) => block.sessionId === work.anchorSessionId))
+      )
+        continue;
+      result.set(work.workId, work);
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
+}
+
+export function writePendingSpawnWork(
+  dataDir: string,
+  work: PersistedSpawnWork,
+  expectedRevision?: number,
+): boolean {
+  const records = readPendingSpawnWork(dataDir);
+  const existing = records.get(work.workId);
+  if (expectedRevision !== undefined && existing?.revision !== expectedRevision) return false;
+  if (expectedRevision === undefined && existing) return false;
+  records.set(work.workId, work);
+  writePrivateJsonFile(join(dataDir, "pending-spawn-work.json"), [...records.values()]);
+  return true;
+}
+
+export function deletePendingSpawnWork(dataDir: string, workId: string, revision: number): boolean {
+  const records = readPendingSpawnWork(dataDir);
+  if (records.get(workId)?.revision !== revision) return false;
+  records.delete(workId);
+  writePrivateJsonFile(join(dataDir, "pending-spawn-work.json"), [...records.values()]);
+  return true;
 }
 
 /**
@@ -2047,16 +2672,25 @@ function writeTelegramChoices(
  * Records one offer for a session in a chat, retiring that session's previous
  * offer there. Empty `choices` retires without recording: two live questions
  * would let a click answer the wrong one, since the reply carries the value
- * alone.
+ * alone. `keepInterfaceConsent` spares interface-approval choices: their click
+ * is bound to a challenge, not to the latest question.
  */
 export function writeTelegramOffer(
   dataDir: string,
   projectId: string,
   sourceId: string,
-  offer: { sessionId: string; chatId: number; choices: TelegramChoice[] },
+  offer: {
+    sessionId: string;
+    chatId: number;
+    choices: TelegramChoice[];
+    keepInterfaceConsent: boolean;
+  },
 ): void {
   const kept = readTelegramChoices(dataDir, projectId, sourceId).filter(
-    (choice) => choice.sessionId !== offer.sessionId || choice.chatId !== offer.chatId,
+    (choice) =>
+      choice.sessionId !== offer.sessionId ||
+      choice.chatId !== offer.chatId ||
+      (offer.keepInterfaceConsent && choice.interfaceConsent !== undefined),
   );
   writeTelegramChoices(dataDir, projectId, sourceId, [...kept, ...offer.choices]);
 }
@@ -2099,6 +2733,29 @@ export function takeTelegramChoice(
   return taken;
 }
 
+function interfaceConsentFilePath(dataDir: string, authority: string): string {
+  return join(dataDir, "interface-consent", `${authority}.json`);
+}
+
+export function readInterfaceConsent(dataDir: string, sessionId: string): InterfaceConsent | null {
+  const authority = workspaceIdOf(readSession(dataDir, sessionId) ?? { id: sessionId });
+  const path = interfaceConsentFilePath(dataDir, authority);
+  if (!existsSync(path)) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch {
+    throw new Error("Unreadable interface consent record");
+  }
+  const record = parseConsent(value);
+  if (record.authority !== authority) throw new Error("Interface consent authority mismatch");
+  return record;
+}
+
+export function writeInterfaceConsent(dataDir: string, record: InterfaceConsent): void {
+  writePrivateJsonFile(interfaceConsentFilePath(dataDir, record.authority), record);
+}
+
 export function readTelegramReplyTarget(
   dataDir: string,
   sessionId: string,
@@ -2127,17 +2784,47 @@ export function deleteTelegramReplyTarget(dataDir: string, sessionId: string): v
   rmSync(telegramReplyTargetFilePath(dataDir, sessionId), { force: true });
 }
 
+export function retireTelegramLegacyState(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  assigned?: Pick<TelegramBinding, "chatId" | "messageThreadId">,
+): void {
+  const bindings = readTelegramBindings(dataDir, projectId, sourceId);
+  const originalSize = bindings.size;
+  for (const [key, binding] of bindings) {
+    if (
+      binding.sessionId === sessionId &&
+      (binding.chatId > 0 || (binding.messageThreadId ?? 1) <= 1)
+    )
+      bindings.delete(key);
+  }
+  if (bindings.size !== originalSize) {
+    writeTelegramBindings(dataDir, projectId, sourceId, bindings.values());
+  }
+  const choices = readTelegramChoices(dataDir, projectId, sourceId);
+  const kept = choices.filter(
+    (choice) =>
+      choice.sessionId !== sessionId ||
+      (assigned !== undefined &&
+        choice.chatId === assigned.chatId &&
+        choice.messageThreadId === assigned.messageThreadId),
+  );
+  if (kept.length !== choices.length) writeTelegramChoices(dataDir, projectId, sourceId, kept);
+}
+
 export function deleteTelegramSourceStateForSession(
   dataDir: string,
   projectId: string,
   sessionId: string,
-): { heldBinding: boolean } {
+): { removedBindings: { sourceId: string; binding: TelegramBinding }[] } {
   const dir = join(dataDir, "source-state", "telegram", projectId);
   if (!existsSync(dir)) {
     deleteTelegramReplyTarget(dataDir, sessionId);
-    return { heldBinding: false };
+    return { removedBindings: [] };
   }
-  let heldBinding = false;
+  const removedBindings: { sourceId: string; binding: TelegramBinding }[] = [];
 
   const choiceDir = join(dir, "choices");
   if (existsSync(choiceDir)) {
@@ -2156,9 +2843,11 @@ export function deleteTelegramSourceStateForSession(
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     const sourceId = entry.name.slice(0, -".json".length);
     const bindings = readTelegramBindings(dataDir, projectId, sourceId);
+    for (const binding of bindings.values()) {
+      if (binding.sessionId === sessionId) removedBindings.push({ sourceId, binding });
+    }
     const remaining = [...bindings.values()].filter((binding) => binding.sessionId !== sessionId);
     if (remaining.length !== bindings.size) {
-      heldBinding = true;
       const lastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
       writeTelegramBindings(
         dataDir,
@@ -2170,7 +2859,7 @@ export function deleteTelegramSourceStateForSession(
     }
   }
   deleteTelegramReplyTarget(dataDir, sessionId);
-  return { heldBinding };
+  return { removedBindings };
 }
 
 export function listActiveServiceProblems(
@@ -2187,8 +2876,8 @@ export function listActiveServiceProblems(
     if (!entry.isDirectory()) continue;
     const path = join(dir, entry.name, `${sessionId}.json`);
     if (!existsSync(path)) continue;
-    const state = readServiceSourceStateFile(path);
-    if (state.serviceId !== serviceId) continue;
+    const state = readUnlessVanished(() => readServiceSourceStateFile(path));
+    if (!state || state.serviceId !== serviceId) continue;
     for (const [ruleId, ruleState] of Object.entries(state.rules)) {
       if (ruleState.active) {
         activeRules.add(ruleId);
@@ -2225,8 +2914,8 @@ export function deleteServiceSourceStatesForService(
     if (!entry.isDirectory()) continue;
     const path = join(dir, entry.name, `${sessionId}.json`);
     if (!existsSync(path)) continue;
-    const state = readServiceSourceStateFile(path);
-    if (state.serviceId === serviceId) {
+    const state = readUnlessVanished(() => readServiceSourceStateFile(path));
+    if (state?.serviceId === serviceId) {
       rmSync(path, { force: true });
     }
   }

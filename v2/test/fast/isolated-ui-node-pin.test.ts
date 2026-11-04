@@ -11,7 +11,7 @@
 // the node in hand, never the predicate: PR #824's QA blocker was a
 // conformant node 22 host with a stale nvm that had no node 24 installed,
 // which the old "pin exactly" predicate rejected outright.
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
@@ -132,10 +132,26 @@ function createFakeWorktree(): FakeWorktree {
   writeFileSync(join(webDir, "next-env.d.ts"), "// next-env\n", "utf8");
   writeFileSync(join(webDir, "tsconfig.json"), "{}\n", "utf8");
 
+  const instanceDir = mkdtempSync(join(repoDir, "instance-"));
+  writeFileSync(
+    join(instanceDir, "config.yaml"),
+    `server: {host: 127.0.0.1, port: 4321}\ndataDir: ${instanceDir}/data\ntmux: {socketName: fixture}\n`,
+    { mode: 0o600 },
+  );
+  const starttime = execFileSync(
+    process.execPath,
+    [join(REPO_ROOT, "v2/bin/isolated-web-endpoint.mjs"), "--owner-starttime", String(process.pid)],
+    { encoding: "utf8" },
+  ).trim();
   writeFileSync(
     join(toolDir, "isolated-env.sh"),
-    'SPUR_ISOLATED_CONFIG="stub"\nSPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:1"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="stub"\n',
-    "utf8",
+    `SPUR_ISOLATED_CONFIG="${instanceDir}/config.yaml"\nSPUR_ISOLATED_UI_ENDPOINT_FILE="${instanceDir}/ui-endpoint.json"\nSPUR_ISOLATED_DATA_DIR="${instanceDir}/data"\nSPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:4321"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="fixture"\nSPUR_ISOLATED_DAEMON_PID="${process.pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="${starttime}"\n`,
+    { mode: 0o600 },
+  );
+  mkdirSync(join(repoDir, "v2/bin"), { recursive: true });
+  writeFileSync(
+    join(repoDir, "v2/bin/isolated-web-endpoint.mjs"),
+    `globalThis.fetch=async()=>Response.json({ok:true,apiVersion:3,pid:${process.pid},host:"127.0.0.1",port:4321,configPath:${JSON.stringify(join(instanceDir, "config.yaml"))},dataDir:${JSON.stringify(join(instanceDir, "data"))},tmuxSocketName:"fixture",lifecycleInstanceId:"fixture-generation"});\nawait import(${JSON.stringify(join(REPO_ROOT, "v2/bin/isolated-web-endpoint.mjs"))});\n`,
   );
 
   const logPath = join(repoDir, "calls.log");

@@ -1,17 +1,32 @@
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { URL } from "node:url";
 import {
   lifecycleErrorReceipt,
   parseLifecycleOperationId,
   SessionLifecycleError,
+  RestoreOperationError,
 } from "./session-lifecycle.js";
 import { parseAgentName } from "./agents/index.js";
-import { AgentReasoningEffortError, listAgentModelCatalog } from "./agents/models.js";
+import { agentPaneChildFallbackEnabled } from "./agents/executable.js";
+import {
+  AgentModelError,
+  AgentReasoningEffortError,
+  listAgentModelCatalog,
+} from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
-import { AutoPingError, AutoPingService } from "./auto-ping.js";
+import { AutoPingError, AutoPingService, redactAutoPingHandles } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
+import { projectConversationPage } from "./conversation-page.js";
+import { readCronJobs, UnknownCronProjectError } from "./cron-jobs.js";
+import {
+  CronJobEditError,
+  cronJobIdentity,
+  readCronJobDraft,
+  saveCronJobDraft,
+} from "./cron-job-editor.js";
 import type { ProcSnapshot } from "./sidecars/reap.js";
 import {
   clearFailedDeploySwitchRecord,
@@ -23,6 +38,7 @@ import { startDeploySwitch } from "./deploy-switch.js";
 import { EventBus } from "./event-bus.js";
 import {
   DEFAULT_EVENT_LOG_CONFIG,
+  appendEventLog,
   flushEventLogCollapse,
   logSpurEvent,
   setEventLogConfig,
@@ -40,10 +56,13 @@ import {
 } from "./user-action-log.js";
 import { startConfiguredBacklogs } from "./backlog/index.js";
 import { spawnableProjects, startConfiguredSources } from "./event-sources/index.js";
+import type { SourceWorkbench, SourceWorkSessionItem } from "./event-sources/types.js";
 import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
+import { readSession } from "./metadata.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
+import { captureTmuxPane } from "./runtime-tmux.js";
 import { getReleases } from "./releases-cache.js";
 import {
   AgentExitedBeforeSendError,
@@ -53,10 +72,12 @@ import {
   InvalidSourceReplyInputError,
   InvalidSessionMemoryInputError,
   InvalidSessionSubscriptionInputError,
+  isRestorableSession,
   ForeignAgentProcessError,
   LaunchPromptPendingError,
   OpenPrActionRequiredError,
   PreflightPreviewError,
+  isListedSessionView,
   QueueDeliveryInFlightError,
   SessionAdmissionDeniedError,
   SessionEndedError,
@@ -68,6 +89,7 @@ import {
   SessionStartingError,
   SidecarPortConflictError,
   SidecarProbeUnresponsiveError,
+  SpawnBatchConflictError,
   WakeDispatchConflictError,
   WakeTargetMissingError,
 } from "./session-service.js";
@@ -107,6 +129,8 @@ import {
   type UpdateSessionSlotsRequest,
   type TodoActor,
   type TodoMutationRequest,
+  type SessionListView,
+  type SessionView,
 } from "./types.js";
 import {
   InvalidTodoRequestError,
@@ -118,6 +142,127 @@ import {
 
 interface JsonError {
   error: string;
+}
+
+export function projectSourceSession(session: SessionListView): SourceWorkSessionItem {
+  const pending = session.lifecycle.operation?.phase === "pending";
+  const candidate =
+    session.pr?.url ?? session.slots?.links.find((link) => link.label === "pr")?.url;
+  let prUrl: string | undefined;
+  if (candidate) {
+    try {
+      const url = new URL(candidate);
+      if (
+        (url.protocol === "https:" || url.protocol === "http:") &&
+        !url.username &&
+        !url.password
+      ) {
+        prUrl = url.href;
+      }
+    } catch {
+      // External slot metadata is not necessarily a URL.
+    }
+  }
+  return {
+    id: session.id,
+    project: session.project,
+    agent: session.agent,
+    state: session.state,
+    status: session.status,
+    lastActivityAt: session.lastActivityAt,
+    runtimeAlive: session.runtimeAlive,
+    canContinue: session.runtimeAlive && !dropsQueuedSend(session) && !pending,
+    restorable: isRestorableSession(session) && !pending,
+    model: session.model ?? null,
+    ...(session.mode ? { mode: session.mode } : {}),
+    ...(session.slots?.title ? { title: session.slots.title } : {}),
+    ...(dropsQueuedSend(session) ? { inactive: true } : {}),
+    ...(prUrl ? { prUrl } : {}),
+  };
+}
+
+const SOURCE_SESSION_RETRY_DELAYS_MS = [250, 750];
+
+function isSnapshotChanged(error: unknown): boolean {
+  return (
+    error instanceof SessionLifecycleError &&
+    error.payload.code === "session_lifecycle_snapshot_changed"
+  );
+}
+
+/** One session by id with the same inclusion as `service.list({ view: "dashboard" })`. */
+export async function sourceSessionById(
+  service: Pick<SessionService, "get">,
+  sessionId: string,
+): Promise<SourceWorkSessionItem | null> {
+  try {
+    let view: SessionView | undefined;
+    for (let attempt = 0; view === undefined; attempt += 1) {
+      try {
+        view = await service.get(sessionId);
+      } catch (error) {
+        const delay = SOURCE_SESSION_RETRY_DELAYS_MS[attempt];
+        if (!isSnapshotChanged(error) || delay === undefined) throw error;
+        await sleep(delay);
+      }
+    }
+    return isListedSessionView(view, view.lifecycle.operation, false)
+      ? projectSourceSession(view)
+      : null;
+  } catch (error) {
+    if (error instanceof SessionResourceNotFoundError) return null;
+    throw error;
+  }
+}
+
+export function createSourceWorkbench(
+  service: Pick<
+    SessionService,
+    "listProjects" | "launchOptions" | "list" | "get" | "restore" | "complete" | "kill"
+  >,
+): SourceWorkbench {
+  const assertSpawnableProject = (project: string): void => {
+    if (!spawnableProjects(service.listProjects()).some((entry) => entry.id === project)) {
+      throw new SessionResourceNotFoundError("Project is no longer available for launch");
+    }
+  };
+  return {
+    async launchOptions(request) {
+      assertSpawnableProject(request.project);
+      return service.launchOptions(request);
+    },
+    async listSessions() {
+      return (await service.list({ view: "dashboard", includeCompleted: true })).map(
+        projectSourceSession,
+      );
+    },
+    async getSession(sessionId) {
+      return projectSourceSession(await service.get(sessionId));
+    },
+    async completeSession(sessionId) {
+      await service.complete(
+        sessionId,
+        { prAction: "leave_open" },
+        {
+          todoActor: { kind: "human", origin: "telegram" },
+        },
+      );
+    },
+    async killSession(sessionId) {
+      await service.kill(sessionId, { prAction: "leave_open" });
+    },
+    async restoreSession({ sessionId, expectedProject }) {
+      const current = await service.get(sessionId);
+      assertSpawnableProject(expectedProject);
+      if (current.id !== sessionId || current.project !== expectedProject) {
+        throw new SessionResourceNotFoundError("Session is no longer in the selected project");
+      }
+      if (!projectSourceSession(current).restorable) {
+        throw new Error("Session is not available for restore");
+      }
+      return projectSourceSession(await service.restore(sessionId));
+    },
+  };
 }
 
 interface ServiceLogger {
@@ -146,7 +291,7 @@ function readParsedBody(request: IncomingMessage): unknown {
 }
 
 function parseOrigin(value: string | string[] | undefined): UserActionOrigin {
-  if (value === "cli" || value === "ui") return value;
+  if (value === "cli" || value === "ui" || value === "mcp") return value;
   return "unknown";
 }
 
@@ -154,7 +299,9 @@ export async function resolveTodoMutationActor(args: {
   origin: UserActionOrigin;
   callerHeader: string | string[] | undefined;
   targetSessionId: string;
-  lookup: (sessionId: string) => Promise<{ id: string; agent: AgentName }>;
+  lookup: (
+    sessionId: string,
+  ) => { id: string; agent: AgentName } | Promise<{ id: string; agent: AgentName }>;
 }): Promise<TodoActor> {
   const { origin, callerHeader, targetSessionId, lookup } = args;
   if (Array.isArray(callerHeader))
@@ -166,7 +313,7 @@ export async function resolveTodoMutationActor(args: {
     const caller = await lookup(callerHeader);
     return { kind: "agent", agent: caller.agent, sessionId: caller.id };
   }
-  if (origin === "cli" || origin === "ui") return { kind: "human", origin };
+  if (origin === "cli" || origin === "ui" || origin === "mcp") return { kind: "human", origin };
   throw new InvalidTodoRequestError("ToDo mutation origin is invalid");
 }
 
@@ -190,7 +337,7 @@ async function authorizeAutoPingTarget(args: {
     }
     return;
   }
-  if (args.origin !== "cli" && args.origin !== "ui") {
+  if (args.origin !== "cli" && args.origin !== "ui" && args.origin !== "mcp") {
     throw new AutoPingError("forbidden", 403, "Auto-ping request origin is invalid");
   }
 }
@@ -210,7 +357,7 @@ function humanTodoOptions(
   origin: UserActionOrigin,
   callerHeader: string | string[] | undefined,
 ): { todoActor: TodoActor } | undefined {
-  if (callerHeader || (origin !== "cli" && origin !== "ui")) return undefined;
+  if (callerHeader || (origin !== "cli" && origin !== "ui" && origin !== "mcp")) return undefined;
   return { todoActor: { kind: "human", origin } };
 }
 
@@ -696,16 +843,35 @@ export async function startServer(
   testOverrides?: { sidecarSnapshot?: () => Promise<ProcSnapshot> },
 ): Promise<StartedServer> {
   const ghPathState = await initializeGhPath();
-  if (ghPathState.status === "unavailable") {
-    (logger.warn ?? writeStderr)(
-      `${ghPathState.message}; GitHub automation disabled until gh is available`,
-    );
-  }
   assertConfigMayUseProdSlot(configPath);
+  for (const agent of ["claude", "codex", "cursor", "opencode"] as const) {
+    agentPaneChildFallbackEnabled(agent);
+  }
   const service = new SessionService(configPath, undefined, {
     deferBackgroundLoops: true,
     ...(testOverrides?.sidecarSnapshot ? { sidecarSnapshot: testOverrides.sidecarSnapshot } : {}),
   });
+  const runtimeLog =
+    (level: "info" | "warn", output: ((message: string) => void) | undefined) =>
+    (message: string): void => {
+      try {
+        appendEventLog(service.config.dataDir, {
+          event: "daemon.diagnostic",
+          level,
+          message: redactAutoPingHandles(message),
+        });
+      } catch {
+        // Retention cannot block existing logger output.
+      }
+      output?.(message);
+    };
+  logger = {
+    info: runtimeLog("info", logger.info),
+    warn: runtimeLog("warn", logger.warn ?? writeStderr),
+  };
+  if (ghPathState.status === "unavailable") {
+    logger.warn?.(`${ghPathState.message}; GitHub automation disabled until gh is available`);
+  }
   const autoPing = new AutoPingService(service.config.dataDir);
   let ready = false;
   const switchStatePath = deploySwitchStatePath(service.config.dataDir);
@@ -722,6 +888,16 @@ export async function startServer(
   const bus = new EventBus();
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
+  service.setTelegramBotIdentityReader(
+    (projectId, sourceId) => sources?.telegramBotIdentity(projectId, sourceId) ?? null,
+  );
+  // Closure over the reassignable `sources` above, so this stays correct
+  // across reloadAutomation recreating sources — registered once, not
+  // re-registered per (re)start.
+  service.setPollDisabledOverrideClearer(
+    (projectId, sourceId, sessionId) =>
+      sources?.clearPollDisabledOverride(projectId, sourceId, sessionId) ?? null,
+  );
   let backlogs: { stop(): void } | null = null;
   let runtimeLogs: RuntimeLogCollector | null = null;
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
@@ -768,27 +944,22 @@ export async function startServer(
           ...(logger.warn ? { warn: logger.warn } : {}),
         },
         listSessions: async () =>
-          (await service.list({ view: "dashboard" })).map((session) => ({
-            id: session.id,
-            project: session.project,
-            agent: session.agent,
-            state: session.state,
-            ...(session.slots?.title ? { title: session.slots.title } : {}),
-            ...(dropsQueuedSend(session) ? { inactive: true } : {}),
-          })),
+          (await service.list({ view: "dashboard" })).map(projectSourceSession),
+        getSession: (sessionId) => sourceSessionById(service, sessionId),
+        prepareSessionMessage: async (sessionId, request) =>
+          service.prepareSourceMessage(sessionId, request),
+        workbench: createSourceWorkbench(service),
+        telegramConversations: {
+          ensureTopic: (sessionId, origin) => service.ensureTelegramTopic(sessionId, origin),
+          unwatch: (sessionId, origin) => service.unwatchTelegramTopic(sessionId, origin),
+        },
         spawnSession: async (request) => {
           const { telegramOrigin, ...spawnRequest } = request;
           const session = await service.spawn(
             spawnRequest,
             telegramOrigin ? { telegramOrigin } : undefined,
           );
-          return {
-            id: session.id,
-            project: session.project,
-            agent: session.agent,
-            state: session.state,
-            ...(session.slots?.title ? { title: session.slots.title } : {}),
-          };
+          return projectSourceSession(session);
         },
         listProjects: async () => spawnableProjects(service.listProjects()),
       });
@@ -1145,7 +1316,18 @@ export async function startServer(
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "true";
         const requestedView = url.searchParams.get("view")?.trim().toLowerCase();
         const view = requestedView === "dashboard" ? "dashboard" : "full";
-        const sessions = await service.list({ includeCompleted, view });
+        const abort = new AbortController();
+        response.once("close", () => {
+          if (!response.writableEnded) abort.abort();
+        });
+        let sessions: Awaited<ReturnType<typeof service.list>>;
+        try {
+          sessions = await service.list({ includeCompleted, view, signal: abort.signal });
+        } catch (error) {
+          if (abort.signal.aborted) return;
+          throw error;
+        }
+        if (abort.signal.aborted) return;
         response.setHeader("x-spur-lifecycle-instance-id", service.info().lifecycleInstanceId);
         sendJson(response, 200, sessions);
         return;
@@ -1153,6 +1335,61 @@ export async function startServer(
 
       if (method === "GET" && path === "/projects") {
         sendJson(response, 200, service.listProjects());
+        return;
+      }
+
+      if ((method === "GET" || method === "PATCH") && path === "/projects/cron/edit") {
+        try {
+          const identity = cronJobIdentity(url.searchParams);
+          const context = {
+            running: service.config,
+            bootstrapConfigPath: service.bootstrapConfigPath,
+            registryPaths: service.getRegistryPaths(),
+          };
+          let body: unknown;
+          if (method === "PATCH") {
+            try {
+              body = await readJsonBody<unknown>(request);
+            } catch {
+              throw new CronJobEditError(400, "invalid_body", "Invalid editor JSON body.");
+            }
+          }
+          sendJson(
+            response,
+            200,
+            method === "GET"
+              ? readCronJobDraft(context, identity)
+              : saveCronJobDraft(context, identity, body),
+          );
+        } catch (error) {
+          if (!(error instanceof CronJobEditError)) throw error;
+          sendJson(response, error.status, {
+            error: error.message,
+            code: error.code,
+            ...(error.field !== undefined ? { field: error.field } : {}),
+          });
+        }
+        return;
+      }
+
+      if (method === "GET" && path === "/projects/cron") {
+        const projectId = url.searchParams.get("project")?.trim() || undefined;
+        try {
+          sendJson(
+            response,
+            200,
+            await readCronJobs({
+              config: service.config,
+              bootstrapConfigPath: service.bootstrapConfigPath,
+              registryPaths: service.getRegistryPaths(),
+              knownProjectIds: new Set(service.listProjects().map((entry) => entry.id)),
+              ...(projectId !== undefined ? { projectId } : {}),
+            }),
+          );
+        } catch (error) {
+          if (!(error instanceof UnknownCronProjectError)) throw error;
+          sendError(response, 404, error.message);
+        }
         return;
       }
 
@@ -1501,7 +1738,91 @@ export async function startServer(
           ...(scope ? { scope } : {}),
           ...(name ? { name } : {}),
         });
-        sendJson(response, 200, entries);
+        if (limit === 0 || !readSession(info.dataDir, logsSessionId)) {
+          sendJson(response, 200, entries);
+          return;
+        }
+        const view = await service.get(logsSessionId);
+        const targets: { kind: "service" | "sidecar"; name: string; pane: string }[] = [];
+        let stoppedServiceId: string | undefined;
+        if (scope !== "sidecar") {
+          for (const serviceView of [...view.services].sort((a, b) =>
+            a.serviceId.localeCompare(b.serviceId),
+          )) {
+            if (name && serviceView.serviceId !== name) continue;
+            if (serviceView.runtimeAlive) {
+              targets.push({
+                kind: "service",
+                name: serviceView.serviceId,
+                pane: serviceView.tmuxSession,
+              });
+            } else {
+              stoppedServiceId ??= serviceView.serviceId;
+            }
+          }
+        }
+        if (scope !== "service") {
+          for (const sidecar of [...view.sidecars].sort((a, b) => a.name.localeCompare(b.name))) {
+            if (name && sidecar.name !== name) continue;
+            if (sidecar.alive || sidecar.deadPane) {
+              targets.push({ kind: "sidecar", name: sidecar.name, pane: sidecar.tmuxSession });
+            }
+          }
+        }
+        if (name && targets.length === 0 && entries.length === 0) {
+          sendError(response, 404, `No retained pane for runtime ${name}`);
+          return;
+        }
+        const sources: SpurLogEntry[][] = entries.length ? [entries] : [];
+        for (const target of targets) {
+          const captured = await captureTmuxPane(target.pane, 200, { fresh: true });
+          if (captured === null) {
+            sendError(
+              response,
+              502,
+              `Failed to capture retained pane for ${target.kind} ${target.name}`,
+            );
+            return;
+          }
+          const paneRows: SpurLogEntry[] = [];
+          for (const line of captured.split(/\r?\n/)) {
+            if (!line) continue;
+            paneRows.push({
+              timestamp: new Date().toISOString(),
+              event: `${target.kind}.output`,
+              level: "info",
+              message: line,
+              sessionId: logsSessionId,
+              details:
+                target.kind === "service"
+                  ? { serviceId: target.name }
+                  : { sidecarName: target.name },
+            });
+          }
+          if (paneRows.length) sources.push(paneRows);
+        }
+        if (stoppedServiceId && sources.length === 0) {
+          sendError(response, 404, `No retained pane for runtime ${stoppedServiceId}`);
+          return;
+        }
+        const selected = sources.map(() => [] as SpurLogEntry[]);
+        let count = 0;
+        for (let depth = 1; count < limit; depth++) {
+          let found = false;
+          for (let index = 0; index < sources.length && count < limit; index++) {
+            const row = sources[index]?.at(-depth);
+            if (!row) continue;
+            selected[index]?.push(row);
+            count++;
+            found = true;
+          }
+          if (!found) break;
+        }
+        sendJson(
+          response,
+          200,
+          selected.flatMap((rows) => rows.reverse()),
+        );
         return;
       }
 
@@ -1528,13 +1849,36 @@ export async function startServer(
 
       const conversationSessionId = path.match(/^\/sessions\/([^/]+)\/conversation$/)?.[1];
       if (method === "GET" && conversationSessionId) {
+        const view = url.searchParams.get("view");
+        const limitValue = url.searchParams.get("limit");
+        const limit = limitValue === null ? 50 : Number(limitValue);
+        if (view !== null && view !== "messages") {
+          sendError(response, 400, "Unsupported conversation view");
+          return;
+        }
+        if (
+          view === "messages" &&
+          (!/^\d+$/.test(limitValue ?? "50") ||
+            !Number.isInteger(limit) ||
+            limit < 1 ||
+            limit > 100)
+        ) {
+          sendError(response, 400, "Conversation limit must be an integer from 1 to 100");
+          return;
+        }
         const fromValue = url.searchParams.get("from");
         const from =
           fromValue && /^\d+$/.test(fromValue) ? Number.parseInt(fromValue, 10) : undefined;
+        const conversation = await service.getConversation(conversationSessionId, {
+          ...(from !== undefined ? { from } : {}),
+          ...(view === "messages" ? { preserveEnd: true } : {}),
+        });
         sendJson(
           response,
           200,
-          await service.getConversation(conversationSessionId, from !== undefined ? { from } : {}),
+          view === "messages"
+            ? projectConversationPage(conversation, conversationSessionId, limit)
+            : conversation,
         );
         return;
       }
@@ -1782,10 +2126,24 @@ export async function startServer(
         return;
       }
 
+      const sourceInfoSessionId = path.match(/^\/sessions\/([^/]+)\/source-info$/)?.[1];
+      if (method === "GET" && sourceInfoSessionId) {
+        sendJson(response, 200, service.sourceInfo(sourceInfoSessionId));
+        return;
+      }
+
       const sourceReplySessionId = path.match(/^\/sessions\/([^/]+)\/source-reply$/)?.[1];
       if (method === "POST" && sourceReplySessionId) {
-        const body = await readJsonBody<SourceReplyRequest>(request);
+        const body = await readJsonBody<SourceReplyRequest>(request, 15_000_000);
         sendJson(response, 200, await service.replyToSource(sourceReplySessionId, body));
+        return;
+      }
+
+      const sourcePollEnableSessionId = path.match(
+        /^\/sessions\/([^/]+)\/source-poll-enable$/,
+      )?.[1];
+      if (method === "POST" && sourcePollEnableSessionId) {
+        sendJson(response, 200, await service.enableSourcePoll(sourcePollEnableSessionId));
         return;
       }
 
@@ -1832,7 +2190,7 @@ export async function startServer(
           origin,
           callerHeader,
           targetSessionId,
-          lookup: (callerSessionId) => service.get(callerSessionId),
+          lookup: (callerSessionId) => service.getSessionIdentity(callerSessionId),
         });
         let body: TodoMutationRequest;
         try {
@@ -1896,7 +2254,22 @@ export async function startServer(
           );
           return;
         }
-        sendJson(response, 200, await service.restore(restoreSessionId, body));
+        const controller = new AbortController();
+        const abort = (): void => controller.abort();
+        const close = (): void => {
+          if (!response.writableFinished) abort();
+        };
+        request.once("aborted", abort);
+        response.once("close", close);
+        try {
+          const restored = await service.restore(restoreSessionId, body, {
+            signal: controller.signal,
+          });
+          if (!response.destroyed) sendJson(response, 200, restored);
+        } finally {
+          request.off("aborted", abort);
+          response.off("close", close);
+        }
         return;
       }
 
@@ -1959,6 +2332,10 @@ export async function startServer(
 
       const switchAuthSessionId = path.match(/^\/sessions\/([^/]+)\/switch-auth$/)?.[1];
       if (method === "POST" && switchAuthSessionId) {
+        if (!service.config.authRotation.switchAuth) {
+          sendError(response, 404, "switch-auth is disabled; set authRotation.switchAuth: true");
+          return;
+        }
         const body = await readJsonBody<{ accountId?: unknown; force?: unknown }>(request);
         const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
         if (!accountId) {
@@ -2055,6 +2432,16 @@ export async function startServer(
         });
         return;
       }
+      if (error instanceof RestoreOperationError) {
+        if (!response.destroyed) {
+          failRequest(response, error.statusCode, message, {
+            method,
+            path,
+            payload: { error: message, code: error.code },
+          });
+        }
+        return;
+      }
       if (error instanceof AutoPingError) {
         failRequest(response, error.status, message, {
           method,
@@ -2077,6 +2464,7 @@ export async function startServer(
       }
       if (
         error instanceof AgentReasoningEffortError ||
+        error instanceof AgentModelError ||
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidConfigPathError ||
@@ -2105,7 +2493,8 @@ export async function startServer(
         error instanceof SidecarPortConflictError ||
         error instanceof OpenPrActionRequiredError ||
         error instanceof GithubPrCheckUnavailableError ||
-        error instanceof SessionNotRestorableError
+        error instanceof SessionNotRestorableError ||
+        error instanceof SpawnBatchConflictError
       ) {
         failRequest(response, error.statusCode, message, {
           method,
@@ -2220,7 +2609,6 @@ export async function startServer(
         resolve();
       });
     });
-    await startAutomation();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logEvent("daemon.startup.failed", {
@@ -2256,6 +2644,20 @@ export async function startServer(
   }
 
   try {
+    await startAutomation();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logEvent("daemon.startup.failed", {
+      level: "error",
+      message: `Spur daemon failed during startup: ${message}`,
+    });
+    service.dispose();
+    autoPing.dispose();
+    await closeServer();
+    throw error;
+  }
+
+  try {
     const { enabled, cap, liveCount } = service.getAdmissionStartupSummary();
     const atOrOverCap = liveCount >= cap.global;
     logEvent("daemon.admission.startup", {
@@ -2284,7 +2686,7 @@ export async function startServer(
       message,
       details: memoryCeilingWarning,
     });
-    process.stderr.write(`${message}\n`);
+    runtimeLog("warn", writeStderr)(message);
   }
 
   ready = true;

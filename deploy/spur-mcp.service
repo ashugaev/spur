@@ -1,0 +1,17 @@
+[Unit]
+Description=Spur MCP
+After=network.target spur-daemon.service
+
+[Service]
+Type=simple
+User={{SPUR_SERVICE_USER}}
+WorkingDirectory={{SPUR_ROOT}}
+Environment=HOME={{SPUR_SERVICE_HOME}}
+Environment=PATH={{SPUR_SERVICE_HOME}}/.local/bin:{{SPUR_SERVICE_HOME}}/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=SPUR_MCP_TUNNEL_ENV_FILE=/etc/spur/mcp-tunnel.env
+ExecStart=/usr/bin/node {{SPUR_ROOT}}/v2/dist/cli.js mcp --http
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
