@@ -13,9 +13,10 @@ import {
 } from "node:fs/promises";
 import type * as FileSystem from "node:fs/promises";
 import type * as ReviewState from "../../src/review-state.js";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, expect, test, vi } from "vitest";
 import {
   parseConfig,
@@ -628,19 +629,10 @@ test.each(["network", "http-403", "http-404"])(
 );
 
 let sourceLoader: string | undefined;
-async function fifoSourceLoader() {
+function fifoSourceLoader() {
   if (!sourceLoader) {
-    const webRoot = fileURLToPath(new URL("../../../packages/web", import.meta.url));
-    const result = await execFileAsync(
-      resolve(webRoot, "node_modules/.bin/tsx"),
-      [
-        "--input-type=module",
-        "--eval",
-        'import { createRequire } from "node:module"; process.stdout.write(createRequire(import.meta.url).resolve("tsx/esm"));',
-      ],
-      { cwd: webRoot, timeout: 3_000, killSignal: "SIGKILL" },
-    );
-    sourceLoader = pathToFileURL(result.stdout.trim()).href;
+    const require = createRequire(new URL("../../../packages/web/package.json", import.meta.url));
+    sourceLoader = pathToFileURL(require.resolve("tsx/esm")).href;
   }
   return sourceLoader;
 }
@@ -687,7 +679,7 @@ test.skipIf(process.platform === "win32").each(["legacy", "pending"])(
         process.execPath,
         [
           "--import",
-          await fifoSourceLoader(),
+          fifoSourceLoader(),
           "--input-type=module",
           "-e",
           child,
