@@ -319,12 +319,47 @@ describe("gitlabReviewProvider.collectSignals", () => {
     expect(endpoints.some((endpoint) => endpoint.includes("/repository/branches/"))).toBe(false);
   });
 
-  it("fails the poll when the target branch lookup fails", async () => {
-    mockConflictPoll(true, () => {
-      throw new Error("glab api 404");
+  function mockBrokenBranchLookup(branchResponse: () => Promise<string>): void {
+    const mr = {
+      iid: 9,
+      title: "feat: x",
+      web_url: "https://gitlab.example.com/group/app/-/merge_requests/9",
+      has_conflicts: true,
+      sha: "head-sha",
+      target_branch: "main",
+      diff_refs: { base_sha: "merge-base-sha" },
+    };
+    glabMock.mockImplementation(async (_cwd: string, ...args: unknown[]) => {
+      const endpoint = String(args[1] ?? "");
+      if (endpoint.includes("/merge_requests?source_branch=")) return JSON.stringify([mr]);
+      if (endpoint.includes("/repository/branches/")) return branchResponse();
+      if (endpoint.includes("/pipelines")) return JSON.stringify([{ id: 4, status: "failed" }]);
+      return "[]";
     });
-    await expect(
-      gitlabReviewProvider.collectSignals(makeSession(), "/tmp/data", "proj", "src"),
-    ).rejects.toThrow("glab api 404");
-  });
+  }
+
+  it.each([
+    ["rejects", () => Promise.reject(new Error("glab api 404"))],
+    ["returns malformed JSON", () => Promise.resolve("{not json")],
+  ])(
+    "keeps CI signals and a stable fallback conflict key when the branch lookup %s",
+    async (_label, branchResponse) => {
+      mockBrokenBranchLookup(branchResponse);
+      const poll = () =>
+        gitlabReviewProvider.collectSignals(makeSession(), "/tmp/data", "proj", "src");
+
+      const first = await poll();
+      const second = await poll();
+
+      expect(first?.snapshot.get("ci_failed")).toMatchObject({ kind: "ci_failed" });
+      expect(first?.snapshot.get("merge_conflict")).toMatchObject({
+        changeKey: "head-sha:merge-base-sha",
+        revision: "head-sha:merge-base-sha",
+      });
+      expect(second?.snapshot.get("merge_conflict")?.changeKey).toBe("head-sha:merge-base-sha");
+      expect(second?.snapshot.get("merge_conflict")?.revision).toBe(
+        first?.snapshot.get("merge_conflict")?.revision,
+      );
+    },
+  );
 });

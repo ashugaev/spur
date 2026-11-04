@@ -82,15 +82,19 @@ async function fetchBranchTip(
   projectPath: string,
   branch: string,
 ): Promise<string | undefined> {
-  const raw = await glab(
-    worktreePath,
-    "api",
-    `projects/${encodeProjectPath(projectPath)}/repository/branches/${encodeURIComponent(branch)}`,
-    "--output",
-    "json",
-  );
-  const parsed = JSON.parse(raw) as { commit?: { id?: string | null } | null };
-  return parsed.commit?.id ?? undefined;
+  try {
+    const raw = await glab(
+      worktreePath,
+      "api",
+      `projects/${encodeProjectPath(projectPath)}/repository/branches/${encodeURIComponent(branch)}`,
+      "--output",
+      "json",
+    );
+    const parsed = JSON.parse(raw) as { commit?: { id?: string | null } | null } | null;
+    return parsed?.commit?.id ?? undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function fetchPipelines(
@@ -271,8 +275,10 @@ async function collectSignals(
       request.headSha && mergeRequest.target_branch
         ? await fetchBranchTip(session.worktreePath, request.repo, mergeRequest.target_branch)
         : undefined;
-    const revision =
-      request.headSha && targetTip ? `${request.headSha}:${targetTip}` : undefined;
+    // Tip lookup failed: fall back to the merge-base so the key stays stable
+    // across polls instead of going key-less.
+    const baseKey = targetTip ?? request.baseSha;
+    const revision = request.headSha && baseKey ? `${request.headSha}:${baseKey}` : undefined;
     snapshot.set("merge_conflict", {
       key: "merge_conflict",
       kind: "merge_conflict",
