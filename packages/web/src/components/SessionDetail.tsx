@@ -47,7 +47,7 @@ import { ArtifactDownloadIcon } from "@/components/icons/ArtifactDownloadIcon";
 import { ArtifactOpenExternalIcon } from "@/components/icons/ArtifactOpenExternalIcon";
 import { ArtifactPreviewIcon } from "@/components/icons/ArtifactPreviewIcon";
 import { ConversationView } from "@/components/ConversationView";
-import { SnippetActionSummary } from "@/components/snippets/SnippetActionSummary";
+import { SpurActionSummary } from "@/components/snippets/SpurActionSummary";
 import { browserSnippetStorage } from "@/components/snippets/SnippetPanel";
 import { SnippetsSection } from "@/components/snippets/SnippetsSection";
 import { pruneSnippetRecords } from "@/lib/snippets/snippet-store";
@@ -3185,7 +3185,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             <div
                               className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
                             >
-                              <SnippetActionSummary text={queuedMessage} fallback={queuedMessage} />
+                              <SpurActionSummary text={queuedMessage} fallback={queuedMessage} />
                             </div>
                           </li>
                         );

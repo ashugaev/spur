@@ -21,9 +21,9 @@ function hits(pattern: RegExp, text: string): string[] {
 describe("snippet source tokens", () => {
   it("scans the three components and the SDK", () => {
     expect(sources.map((source) => source.path.split("/").pop()).sort()).toEqual([
-      "SnippetActionSummary.tsx",
       "SnippetPanel.tsx",
       "SnippetsSection.tsx",
+      "SpurActionSummary.tsx",
       "spur-sdk.v2.js",
     ]);
   });
