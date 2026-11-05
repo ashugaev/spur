@@ -213,7 +213,7 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
     return null;
   }
   // Store data writes are page/snippet traffic, not operator actions.
-  if (/^\/stores\/[^/]+\/(docs|query)\//.test(path)) {
+  if (/^\/stores\/[^/]+\/((docs|query)\/|actions\/[^/]+\/complete$)/.test(path)) {
     return null;
   }
 
@@ -236,6 +236,7 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
     if (path === "/projects") return { action: "project.create" };
     if (path === "/pages") return { action: "page.create" };
     if (/^\/stores\/[^/]+\/agent\/send$/.test(path)) return { action: "store.send" };
+    if (/^\/stores\/[^/]+\/actions$/.test(path)) return { action: "store.invoke" };
     if (path === "/deploy/switch") return { action: "deploy.switch" };
     if (path === "/deploy/auto-update") return { action: "deploy.auto_update" };
 

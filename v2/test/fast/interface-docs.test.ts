@@ -61,6 +61,17 @@ describe("published interface contracts", () => {
     expect(daemonApi).toContain("## Store routes");
     for (const name of ["page:<pageId>", "session:<sid>", "_actions", "_state", "expectedRev"])
       expect(stores).toContain(name);
+    const envelope = await readFile(
+      resolve(repoRoot, "v2/test/fixtures/spur-action-envelope.txt"),
+      "utf8",
+    );
+    expect(stores).toContain(envelope.trimEnd());
+    expect(commands).toContain("spur db <store> done <action-id>");
+    for (const route of [
+      "POST /stores/:store/actions",
+      "POST /stores/:store/actions/:actionId/complete",
+    ])
+      expect(daemonApi).toContain(`\`${route}\``);
   });
 
   it("documents page routes, the page command and links the pages doc", async () => {

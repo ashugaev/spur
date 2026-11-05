@@ -34,7 +34,11 @@ export class SseHub {
   }
 
   /** Opens a stream, or answers 503 and returns null when the cap is reached. */
-  open(request: IncomingMessage, response: ServerResponse): SseStream | null {
+  open(
+    request: IncomingMessage,
+    response: ServerResponse,
+    onHeartbeat?: () => void,
+  ): SseStream | null {
     if (this.streams.size >= (this.options.maxStreams ?? SSE_MAX_STREAMS)) {
       const body = JSON.stringify({ error: "Too many open event streams" }) + "\n";
       response.writeHead(503, { "content-type": "application/json; charset=utf-8" });
@@ -47,6 +51,7 @@ export class SseHub {
     let closed = false;
     const heartbeat = setInterval(() => {
       if (closed) return;
+      onHeartbeat?.();
       response.write(": ping\n\n");
     }, this.options.heartbeatMs ?? SSE_HEARTBEAT_MS);
     heartbeat.unref();

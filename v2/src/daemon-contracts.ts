@@ -1467,6 +1467,66 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "Store agent status: none|working|idle|recovering|error|rate_limited.",
     { response: "{state:string,sessionId:string|null}", source: "v2/src/store-agent.ts" },
   ),
+  operation(
+    "invoke_store_action",
+    "POST",
+    "/stores/{store}/actions",
+    "Record an _actions doc and deliver [spur-action v1] to the store's agent once per id.",
+    {
+      body: body("InvokeActionRequest", [
+        field(
+          "id",
+          "string",
+          "Action id ^[A-Za-z0-9_-]{8,64}$; repeats return the existing doc.",
+          true,
+        ),
+        field("action", "string", "Action name ^[a-z0-9][a-z0-9_-]{0,63}$.", true),
+        field(
+          "label",
+          "string",
+          "1..80 chars, no control/quote/backslash/bracket/bidi; default action.",
+        ),
+        field(
+          "source",
+          '{kind:"page"}|{kind:"snippet",snippetId,instanceId,revision}',
+          "Origin.",
+          true,
+        ),
+        field("payload", "object", "JSON object, at most 49152 bytes.", true),
+        field("userGesture", "boolean", "Sent from a trusted user click."),
+        field("retryOf", "string", "Id of a failed action this retries."),
+      ]),
+      examples: [
+        {
+          body: {
+            id: "act-00000001",
+            action: "pick",
+            source: { kind: "page" },
+            payload: { film: "Dune" },
+          },
+        },
+      ],
+      response:
+        "StoreDoc (status pending); 409 closed store, 429 pending cap or budget, 503 recovery budget.",
+      source: "v2/src/store-actions.ts",
+    },
+  ),
+  operation(
+    "complete_store_action",
+    "POST",
+    "/stores/{store}/actions/{actionId}/complete",
+    "Close a pending action as done or failed; expired or closed actions conflict.",
+    {
+      body: body("CompleteActionRequest", [
+        field("status", '"done"|"failed"', "Outcome.", true),
+        field("result", "unknown", "JSON result for done."),
+        field("error", "string", "1..2000 chars for failed."),
+      ]),
+      examples: [{ body: { status: "done", result: { ok: true } } }],
+      response: "StoreDoc",
+      source: "v2/src/store-actions.ts",
+    },
+  ),
   operation("list_pages", "GET", "/pages", "List pages with title, agent runtime, dir and URL.", {
     response: "{pages:PageSummary[]}",
     source: "v2/src/pages.ts",

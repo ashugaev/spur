@@ -108,6 +108,8 @@
 - `POST /stores/:store/agent/send` — `{message, userGesture?}`; `429` delivery budget, `503` page agent recovery budget; `v2/src/store-agent.ts`.
 - `GET /stores/:store/agent/messages` — `from`, `limit` (1..100, default 50); adds `status`.
 - `GET /stores/:store/agent/status` — `{state: none|working|idle|recovering|error|rate_limited, sessionId}`.
+- `POST /stores/:store/actions` — invoke; `409` closed store, `429` 20 pending or budget; `v2/src/store-actions.ts`.
+- `POST /stores/:store/actions/:actionId/complete` — `{status: done|failed, result?, error?}`; `409` not pending or timed out; CLI and agents only, the web proxy refuses it.
 
 ## Page routes
 

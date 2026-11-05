@@ -334,6 +334,9 @@ describe("spur help", () => {
     expect(db.aliases()).toEqual([]);
     const help = db.helpInformation();
     expect(help).toContain("db <store> <get|list|query|add|set|update|rm> <collection>");
+    expect(help).toContain("<store> <done|fail> <action-id>");
+    expect(help).toContain("--result <json>");
+    expect(help).toContain("--error <text>");
     expect(help).toContain("page:<id> or session:<sid>");
     expect(help).toContain("--rev <number>");
     expect(help).toContain("--limit <number>");

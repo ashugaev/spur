@@ -61,9 +61,10 @@ import type { SourceWorkbench, SourceWorkSessionItem } from "./event-sources/typ
 import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { readSession } from "./metadata.js";
-import { StoreError, StoreService, type StoreQuery } from "./stores.js";
+import { ACTIONS_COLLECTION, StoreError, StoreService, type StoreQuery } from "./stores.js";
 import { SseHub, acceptsEventStream } from "./sse.js";
 import { StoreAgent, parseAgentMessage } from "./store-agent.js";
+import { StoreActions } from "./store-actions.js";
 import {
   PageEvents,
   assertPagePrefixFree,
@@ -936,7 +937,12 @@ export async function startServer(
     readSession: (sessionId) => readSession(service.config.dataDir, sessionId),
   });
   const sseHub = new SseHub();
-  const pageEvents = new PageEvents({ dataDir: () => service.config.dataDir, stores, hub: sseHub });
+  const pageEvents = new PageEvents({
+    dataDir: () => service.config.dataDir,
+    stores,
+    hub: sseHub,
+    beforeRead: (storeId) => storeActions.expire(storeId),
+  });
   const storeAgent = new StoreAgent({
     stores,
     sessions: service,
@@ -945,6 +951,15 @@ export async function startServer(
     projectPrefixes: () => service.listProjects().map((project) => project.prefix),
     onStatus: (pageId, status) => pageEvents.broadcast(pageId, "agent", status),
   });
+  const storeActions = new StoreActions({
+    stores,
+    deliver: (storeId, message, userGesture) =>
+      storeAgent.ensureAndDeliver(storeId, message, userGesture),
+  });
+  // A pending action older than 15 minutes is never read back as pending.
+  const expireBeforeActionsRead = async (storeId: string, collection: string): Promise<void> => {
+    if (collection === ACTIONS_COLLECTION) await storeActions.expire(storeId);
+  };
   // No session-state push hook exists: sample page agent status while a page tab is open.
   const agentStatusSampler = setInterval(() => {
     void storeAgent.sample(pageEvents.openPageIds());
@@ -2532,11 +2547,10 @@ export async function startServer(
 
       const storeCollectionMatch = path.match(/^\/stores\/([^/]+)\/docs\/([^/]+)$/);
       if (method === "GET" && storeCollectionMatch?.[1] && storeCollectionMatch[2]) {
-        const docs = await stores.query(
-          decodeURIComponent(storeCollectionMatch[1]),
-          decodeURIComponent(storeCollectionMatch[2]),
-          parseStoreListQuery(url.searchParams),
-        );
+        const storeId = decodeURIComponent(storeCollectionMatch[1]);
+        const collection = decodeURIComponent(storeCollectionMatch[2]);
+        await expireBeforeActionsRead(storeId, collection);
+        const docs = await stores.query(storeId, collection, parseStoreListQuery(url.searchParams));
         sendJson(response, 200, { docs });
         return;
       }
@@ -2556,14 +2570,13 @@ export async function startServer(
 
       const storeDocMatch = path.match(/^\/stores\/([^/]+)\/docs\/([^/]+)\/([^/]+)$/);
       if (method === "GET" && storeDocMatch?.[1] && storeDocMatch[2] && storeDocMatch[3]) {
+        const storeId = decodeURIComponent(storeDocMatch[1]);
+        const collection = decodeURIComponent(storeDocMatch[2]);
+        await expireBeforeActionsRead(storeId, collection);
         sendJson(
           response,
           200,
-          await stores.get(
-            decodeURIComponent(storeDocMatch[1]),
-            decodeURIComponent(storeDocMatch[2]),
-            decodeURIComponent(storeDocMatch[3]),
-          ),
+          await stores.get(storeId, collection, decodeURIComponent(storeDocMatch[3])),
         );
         return;
       }
@@ -2614,11 +2627,10 @@ export async function startServer(
       const storeQueryMatch = path.match(/^\/stores\/([^/]+)\/query\/([^/]+)$/);
       if (method === "POST" && storeQueryMatch?.[1] && storeQueryMatch[2]) {
         const body = await readJsonBody<StoreQuery>(request);
-        const docs = await stores.query(
-          decodeURIComponent(storeQueryMatch[1]),
-          decodeURIComponent(storeQueryMatch[2]),
-          body,
-        );
+        const storeId = decodeURIComponent(storeQueryMatch[1]);
+        const collection = decodeURIComponent(storeQueryMatch[2]);
+        await expireBeforeActionsRead(storeId, collection);
+        const docs = await stores.query(storeId, collection, body);
         sendJson(response, 200, { docs });
         return;
       }
@@ -2627,13 +2639,43 @@ export async function startServer(
       if (method === "GET" && storeChangesId) {
         const since = url.searchParams.get("since");
         const limit = url.searchParams.get("limit");
+        const storeId = decodeURIComponent(storeChangesId);
+        await storeActions.expire(storeId);
         sendJson(
           response,
           200,
           await stores.changes(
-            decodeURIComponent(storeChangesId),
+            storeId,
             since === null ? 0 : parseQueryInteger(since, "since"),
             limit === null ? undefined : parseQueryInteger(limit, "limit"),
+          ),
+        );
+        return;
+      }
+
+      const storeActionsId = path.match(/^\/stores\/([^/]+)\/actions$/)?.[1];
+      if (method === "POST" && storeActionsId) {
+        const body = await readJsonBody<unknown>(request);
+        sendJson(
+          response,
+          200,
+          await storeActions.invoke(decodeURIComponent(storeActionsId), body),
+        );
+        return;
+      }
+
+      const storeActionCompleteMatch = path.match(
+        /^\/stores\/([^/]+)\/actions\/([^/]+)\/complete$/,
+      );
+      if (method === "POST" && storeActionCompleteMatch?.[1] && storeActionCompleteMatch[2]) {
+        const body = await readJsonBody<unknown>(request);
+        sendJson(
+          response,
+          200,
+          await storeActions.complete(
+            decodeURIComponent(storeActionCompleteMatch[1]),
+            decodeURIComponent(storeActionCompleteMatch[2]),
+            body,
           ),
         );
         return;

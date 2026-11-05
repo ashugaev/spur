@@ -375,6 +375,8 @@ export class PageEvents {
       dataDir: () => string;
       stores: StoreService;
       hub: SseHub;
+      /** Runs before each replay and on every heartbeat (action expiry). */
+      beforeRead: (storeId: string) => Promise<void>;
     },
   ) {}
 
@@ -395,8 +397,10 @@ export class PageEvents {
     const dataDir = this.options.dataDir();
     readPageConfig(dataDir, pageId);
     const storeId = `page:${pageId}`;
-    const { stores } = this.options;
-    const stream = this.options.hub.open(request, response);
+    const { stores, beforeRead } = this.options;
+    const stream = this.options.hub.open(request, response, () => {
+      void beforeRead(storeId).catch(() => undefined);
+    });
     if (!stream) return;
     let channel = this.channels.get(pageId);
     if (!channel) {
@@ -435,6 +439,7 @@ export class PageEvents {
     });
     stream.onClose(off);
     try {
+      await beforeRead(storeId);
       if (since !== null) {
         let cursor = since;
         for (;;) {

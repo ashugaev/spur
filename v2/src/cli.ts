@@ -4439,13 +4439,17 @@ export function createProgram(cliEntrypoint: string): Command {
   program
     .command("db")
     .description("Read and write a page or session document store.")
-    .usage("<store> <get|list|query|add|set|update|rm> <collection> [doc-id] [json] [options]")
+    .usage(
+      "<store> <get|list|query|add|set|update|rm> <collection> [doc-id] [json] [options] | <store> <done|fail> <action-id>",
+    )
     .argument("<store>", "page:<id> or session:<sid>")
-    .argument("<op>", "get, list, query, add, set, update, or rm")
-    .argument("[args...]", "Collection, document id and JSON, per op")
+    .argument("<op>", "get, list, query, add, set, update, rm, done, or fail")
+    .argument("[args...]", "Collection, document id and JSON, per op; action id for done|fail")
     .option("--rev <number>", "Expected revision for set, update, or rm")
     .option("--limit <number>", "Page size for list")
     .option("--start-after <docId>", "Document id cursor for list")
+    .option("--result <json>", "Action result for done")
+    .option("--error <text>", "Action error for fail")
     .option("--json", "Print raw JSON")
     .action(async (store: string, op: string, args: string[], options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
@@ -4567,7 +4571,42 @@ export function createProgram(cliEntrypoint: string): Command {
         });
         return;
       }
-      throw new Error("db op must be get, list, query, add, set, update, or rm");
+      if (op === "done" || op === "fail") {
+        const [actionId] = take(
+          1,
+          op === "done" ? "<action-id> [--result '<json>']" : "<action-id> --error '<text>'",
+        ) as [string];
+        let payload: { status: "done"; result?: unknown } | { status: "failed"; error: string };
+        if (op === "done") {
+          if (options.error !== undefined) throw new Error("db done takes --result, not --error");
+          payload = {
+            status: "done",
+            ...(options.result !== undefined
+              ? { result: parseDbJson(String(options.result), "--result") }
+              : {}),
+          };
+        } else {
+          if (options.result !== undefined) throw new Error("db fail takes --error, not --result");
+          if (typeof options.error !== "string" || options.error.trim() === "") {
+            throw new Error("db fail requires --error '<text>'");
+          }
+          payload = { status: "failed", error: options.error };
+        }
+        await outputResult({
+          json,
+          label: `closing action ${actionId}`,
+          action: () =>
+            postJson<StoreDoc>(
+              cliEntrypoint,
+              `${base}/actions/${encodeURIComponent(actionId)}/complete`,
+              payload,
+              configPath,
+            ),
+          render: (doc) => `Action ${doc.id} ${String(doc.data["status"])}.`,
+        });
+        return;
+      }
+      throw new Error("db op must be get, list, query, add, set, update, rm, done, or fail");
     });
 
   program

@@ -134,6 +134,29 @@ describe("spur db", () => {
     expect(writeStdoutMock).toHaveBeenLastCalledWith("Removed items/d1.");
   });
 
+  it("closes actions with done --result and fail --error", async () => {
+    postJsonMock.mockResolvedValue({ ...doc, id: "act-1", data: { status: "done" } });
+    await db(["session:sp-1", "done", "act-1", "--result", '{"ok":true}']);
+    expect(postJsonMock).toHaveBeenLastCalledWith(
+      "/tmp/dist/cli.js",
+      "/stores/session%3Asp-1/actions/act-1/complete",
+      { status: "done", result: { ok: true } },
+      "/tmp/spur.yaml",
+    );
+    expect(writeStdoutMock).toHaveBeenLastCalledWith("Action act-1 done.");
+    await db(["page:films", "fail", "act-2", "--error", "no such film", "--json"]);
+    expect(postJsonMock).toHaveBeenLastCalledWith(
+      "/tmp/dist/cli.js",
+      "/stores/page%3Afilms/actions/act-2/complete",
+      { status: "failed", error: "no such film" },
+      "/tmp/spur.yaml",
+    );
+    await expect(db(["page:films", "fail", "act-2"])).rejects.toThrow("db fail requires --error");
+    await expect(db(["page:films", "done", "act-2", "--result", "{bad"])).rejects.toThrow(
+      "--result must be valid JSON",
+    );
+  });
+
   it("rejects bad JSON, bad arity, bad --rev and unknown ops before any request", async () => {
     await expect(db(["page:films", "add", "items", "{nope"])).rejects.toThrow(
       "document must be valid JSON",

@@ -21,7 +21,7 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "495bb87500b3857f6ac67e69685736d6f1ddd1e62209c861d5874cfc19a10c07",
+  "server.ts": "80d17f0732dcb3d2f3ac36f323e865a55228f1783f6c787648412d306d8689b9",
   "types.ts": "08e32db98b6ae1b00fe1ba41171cb23ea46693cca9036242b45d0c5ee59b1ded",
   "cron-job-editor.ts": "33fc7b2993819693ef511d9312f9eb8f4260feb2f263421aec2d4e5ac613ec06",
   "session-service.ts": "be72431d9504708289a6d21e954d38db1849a1e4aba927a4626cc4934cd4d1c1",
@@ -45,9 +45,9 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(100);
+    expect(routes).toHaveLength(102);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(100);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(102);
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("spawn_background_session")?.path).toBe("/sessions/background");
     expect(getDaemonOperation("missing")).toBeUndefined();
@@ -265,7 +265,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(100);
+      expect(page.total).toBe(102);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",

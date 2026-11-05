@@ -106,7 +106,7 @@ Telegram `/complete`, `/kill`: finish bound forum-topic session, delete owned to
 
 ## db, page
 
-`spur db <page:<id>|session:<sid>> get|list|query|add|set|update|rm <collection> [doc-id] ['<json>'] [--rev <n>] [--limit <n>] [--start-after <id>] [--json]` — document store; `query` takes `'{"where":[...],"orderBy":{...},"limit":n}'`; [stores.md](stores.md).
+`spur db <page:<id>|session:<sid>> get|list|query|add|set|update|rm <collection> [doc-id] ['<json>'] [--rev <n>] [--limit <n>] [--start-after <id>] [--json]` — document store; `query` takes `'{"where":[...],"orderBy":{...},"limit":n}'`; `spur db <store> done <action-id> [--result '<json>']` / `fail <action-id> --error '<text>'` closes a `[spur-action v1]`; [stores.md](stores.md).
 `spur page create <id> [--title <t>] [--runtime claude|codex|cursor|opencode] [--model <id>] [--template blank]` / `list` / `path <id>` / `rm <id>` [--json] — [pages.md](pages.md).
 
 ## Sidecars
