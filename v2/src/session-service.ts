@@ -20875,8 +20875,11 @@ export class SessionService {
       }),
     );
     const recoverySidecarNames = manualSidecarNames(resolveSessionSidecars(session, project));
+    // A page agent's fresh launch gets its spawn prompt back, never the restore prefix.
     const recoveryContextMessage = buildInitialMessage(
-      buildRestorePrompt(session.prompt, planMode, restrictWrites, mode),
+      isPageProjectId(session.project)
+        ? buildSessionPrompt(session.prompt, planMode, restrictWrites, mode)
+        : buildRestorePrompt(session.prompt, planMode, restrictWrites, mode),
       recoverySidecarNames,
       this.config.tags,
       project.branchNaming?.regex,
@@ -21656,16 +21659,21 @@ export class SessionService {
       // status==="stopped" and would wrongly stop suppressing the restore
       // prompt for that case. This also gates on manual_pause alongside
       // stale_timeout, which isStaleParked does not cover.
+      // A page agent never gets the restore prompt: native resume stays silent,
+      // a fresh launch gets its spawn prompt back (gated below on freshLaunchFallback).
+      const isPageSession = isPageProjectId(current.project);
       const shouldSendRestoreMessage =
         current.status !== "paused" &&
         current.stopReason !== "manual_pause" &&
         current.stopReason !== "stale_timeout" &&
         current.stopReason !== "memory_shed" &&
-        // A page agent resumes its conversation; its spawn prompt is never resent.
-        !isPageProjectId(current.project);
+        !isPageSession;
       const restorePrompt = shouldSendRestoreMessage
         ? buildRestorePrompt(current.prompt, planMode, restrictWrites, mode)
         : "";
+      const freshLaunchPrompt = isPageSession
+        ? buildSessionPrompt(current.prompt, planMode, restrictWrites, mode)
+        : restorePrompt;
       const planOptions = {
         ...withAgentModeOptions(
           withProjectAgentOptions(restoreProjectConfig, {
@@ -21709,7 +21717,7 @@ export class SessionService {
             ),
           );
       const effectivePlan =
-        launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, launchPlanOptions);
+        launchPlan ?? buildAgentLaunchPlan(current.agent, freshLaunchPrompt, launchPlanOptions);
       operation?.assertActive();
       await withLocks(async () => {
         const latest = readSession(this.config.dataDir, sessionId);
@@ -21891,7 +21899,8 @@ export class SessionService {
         throw new Error(`Session ${sessionId} changed during restore readiness`);
       }
       operation?.assertActive();
-      if (shouldSendRestoreMessage && effectivePlan.initialMessage.trim()) {
+      const sendsLaunchMessage = isPageSession ? freshLaunchFallback : shouldSendRestoreMessage;
+      if (sendsLaunchMessage && effectivePlan.initialMessage.trim()) {
         const restoreInitialMessage = buildInitialMessage(
           effectivePlan.initialMessage,
           restoreSidecarNames,
