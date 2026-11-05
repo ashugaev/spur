@@ -1200,6 +1200,7 @@ export interface CodexRolloutStateRecord {
 export interface CodexRolloutReadResult {
   rollout: CodexRolloutStateRecord | null;
   rateLimit: RateLimitDetection | null;
+  rateLimitObservedAtMs?: number;
   /** Timestamp of the newest parseable rollout line of any kind. */
   lastProgressMs?: number;
   threadId?: string;
@@ -1232,6 +1233,8 @@ interface CodexRolloutFold {
   // can reach the result, so the tail stays one turn long.
   stateTail: CodexRolloutStateLine[];
   rateLimit: RateLimitDetection | null;
+  rateLimitObservedAtMs?: number;
+  hardLimitTurnId?: string;
   lastProgressMs?: number;
   model?: string;
   token: {
@@ -1646,8 +1649,32 @@ function foldCodexRolloutLine(fold: CodexRolloutFold, parsed: Record<string, unk
     if (state.reason !== "thread_settings_applied" && !state.callId) fold.stateTail = [state];
     else fold.stateTail.push(state);
   }
+  if (state?.reason === "task_started") {
+    if (fold.hardLimitTurnId !== undefined && state.turnId !== fold.hardLimitTurnId) {
+      fold.hardLimitTurnId = undefined;
+      fold.rateLimit = { limited: false, reason: "" };
+      fold.rateLimitObservedAtMs = state.timestampMs;
+    }
+  } else if (state?.reason === "task_complete") {
+    const payload = parsed["payload"];
+    const error = isRecord(payload) ? payload["error"] : undefined;
+    if (isRecord(error) && error["codex_error_info"] === "usage_limit_exceeded") {
+      fold.hardLimitTurnId = state.turnId ?? "";
+      fold.rateLimit = { limited: true, reason: "codex usage_limit_exceeded" };
+      fold.rateLimitObservedAtMs = state.timestampMs;
+    } else if (error === null || error === undefined) {
+      fold.hardLimitTurnId = undefined;
+      fold.rateLimit = { limited: false, reason: "" };
+      fold.rateLimitObservedAtMs = state.timestampMs;
+    }
+  }
   const detection = detectCodexRateLimit(extractCodexRateLimitsLine(parsed));
-  if (detection) fold.rateLimit = detection;
+  if (detection && fold.hardLimitTurnId === undefined) {
+    fold.rateLimit = detection;
+    const timestamp = parsed["timestamp"];
+    const observedAtMs = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
+    if (Number.isFinite(observedAtMs)) fold.rateLimitObservedAtMs = observedAtMs;
+  }
   const model = extractCodexTurnContextModel(parsed);
   if (model !== undefined) fold.model = model;
   if (typeof parsed["timestamp"] === "string") {
@@ -1680,6 +1707,9 @@ function finalizeCodexRolloutFold(
   return {
     rollout,
     rateLimit: fold.rateLimit,
+    ...(fold.rateLimitObservedAtMs !== undefined
+      ? { rateLimitObservedAtMs: fold.rateLimitObservedAtMs }
+      : {}),
     ...(fold.lastProgressMs !== undefined ? { lastProgressMs: fold.lastProgressMs } : {}),
     ...(meta ? { threadId: meta.threadId } : {}),
     ...(meta?.isSubagent ? { isSubagent: true } : {}),

@@ -165,6 +165,7 @@ import {
   sendDesktopNotificationMock,
   captureCodexRolloutBaselineMock,
   readCodexRolloutStateMock,
+  codexRateLimitPermissionMock,
   scanCodexRolloutForMessageMock,
   ghMock,
   TEST_ARTIFACTS_ROOT,
@@ -13135,6 +13136,46 @@ describe("SessionService", () => {
     },
   );
 
+  it("does not block a retained-error Codex send on a stale pane banner after a clean turn", async () => {
+    const sessions = createSessionStore(
+      runningSession({
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        agentSessionId: "retained-native-thread",
+        error: "Agent runtime exited unexpectedly.",
+        errorSource: "other",
+        queuedMessages: { messages: ["flush me"], awaitingPrompt: true },
+      }),
+    );
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "waiting",
+        reason: "task_complete",
+        timestamp: "2026-03-18T10:04:59.000Z",
+        timestampMs: Date.parse("2026-03-18T10:04:59.000Z"),
+        filePath: "/tmp/codex/rollout.jsonl",
+      },
+      rateLimit: { limited: false, reason: "" },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      `■ Your workspace is out of credits.\n${Array.from({ length: 21 }, (_, i) => `work ${i}`).join("\n")}`,
+    );
+    const service = await createDisposedSessionService();
+
+    await expect(service.flushQueuedMessage("api-1", "flush me")).resolves.toMatchObject({
+      id: "api-1",
+    });
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "flush me", {
+      agent: "codex",
+      interrupt: false,
+    });
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual([]);
+  });
+
   it("refuses every key after the Codex pane changes during a retained-input read (issue #1209)", async () => {
     const sessions = createSessionStore(
       runningSession({
@@ -19460,6 +19501,76 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.state).toBe("rate_limited");
+  });
+
+  it("ignores a stale Codex credit banner after a clean rollout completion", async () => {
+    readSessionMock.mockReturnValue(
+      runningSession({ agent: "codex", launchCommand: "codex --dangerously-bypass-approvals-and-sandbox" }),
+    );
+    readAgentHookStateMock.mockReturnValue({ state: "waiting", updatedAt: "2026-03-18T10:04:59.000Z" });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "waiting",
+        reason: "task_complete",
+        timestamp: "2026-03-18T10:04:59.000Z",
+        timestampMs: Date.parse("2026-03-18T10:04:59.000Z"),
+        filePath: "rollout.jsonl",
+      },
+      rateLimit: { limited: false, reason: "" },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      `■ Your workspace is out of credits.\n${Array.from({ length: 21 }, (_, i) => `work ${i}`).join("\n")}`,
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    expect((await service.get("api-1")).state).toBe("waiting");
+    service.dispose();
+  });
+
+  it("lets newer Codex hook activity supersede a pane banner still in the tail", async () => {
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      runningSession({ agent: "codex", launchCommand: "codex --dangerously-bypass-approvals-and-sandbox" }),
+    );
+    readAgentHookStateMock.mockReturnValue({ state: "waiting", updatedAt: "2026-03-18T10:04:59.000Z" });
+    readCodexRolloutStateMock.mockResolvedValue({ rollout: null, rateLimit: null });
+    captureTmuxPaneMock.mockResolvedValue("■ Your workspace is out of credits.");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    expect((await service.get("api-1")).state).toBe("rate_limited");
+    await vi.advanceTimersByTimeAsync(5_000);
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: new Date().toISOString(),
+    });
+    await service.get("api-1");
+    await vi.advanceTimersByTimeAsync(4_001);
+    expect((await service.get("api-1")).state).toBe("waiting");
+    service.dispose();
+  });
+
+  it("clears an idle Codex limit when the backend allows ordinary usage", async () => {
+    readSessionMock.mockReturnValue(
+      runningSession({ agent: "codex", launchCommand: "codex --dangerously-bypass-approvals-and-sandbox" }),
+    );
+    readAgentHookStateMock.mockReturnValue({ state: "waiting", updatedAt: "2026-03-18T10:04:59.000Z" });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: null,
+      rateLimit: { limited: true, reason: "codex usage_limit_exceeded" },
+      rateLimitObservedAtMs: Date.parse("2026-03-18T10:04:00.000Z"),
+    });
+    captureTmuxPaneMock.mockResolvedValue("■ Your workspace is out of credits.");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    expect((await service.get("api-1")).state).toBe("rate_limited");
+    codexRateLimitPermissionMock.mockReturnValue(true);
+    await vi.advanceTimersByTimeAsync(4_001);
+    expect((await service.get("api-1")).state).toBe("waiting");
+    service.dispose();
   });
 
   it("classifies needs_input for codex when the pane shows a live MCP permission dialog despite a soft rate-limit signal (hook-independent)", async () => {

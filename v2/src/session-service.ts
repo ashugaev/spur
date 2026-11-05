@@ -126,6 +126,7 @@ import {
   type CodexRolloutReaderState,
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
+import { CodexRateLimitPoller } from "./agents/codex-rate-limits.js";
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
 import {
   resolveAgentReasoningEffort,
@@ -800,6 +801,7 @@ const DASHBOARD_IDLE_REFRESH_SWEEP_TICKS = 60;
 // showing the corrected needs_input state between live pane scans instead of
 // reverting to rate_limited every cycle.
 const CODEX_MCP_DIALOG_OVERRIDE_TTL_MS = 15_000;
+const CODEX_RATE_LIMIT_PANE_TAIL_LINES = 20;
 // Same outlast-the-sweep-gap reasoning as CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
 // for the claude compaction spinner override.
 const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
@@ -3686,6 +3688,8 @@ export class SessionService {
   // scanPane:false dashboard tick apply the same needs_input demotion without
   // forking a capture-pane (the tick's whole reason for existing).
   private readonly codexMcpDialogOverrides = new Map<string, number>();
+  private readonly codexPaneLimitObservedAt = new Map<string, number>();
+  private readonly codexRateLimitPoller = new CodexRateLimitPoller();
   // Same pattern for an active claude compaction spinner. Compaction never
   // reaches the persisted claude status (it stays idle throughout, which the
   // scanPane:false dashboard tick maps to waiting), so without this the tick's
@@ -4124,6 +4128,8 @@ export class SessionService {
     // cannot hang on a batch that will never flush.
     cancelPendingPrLookups();
     this.deliveryStopped = true;
+    this.codexPaneLimitObservedAt.clear();
+    this.codexRateLimitPoller.dispose();
     this.scheduledWakeClaims.clear();
     this.scheduledWakeLastFailure.clear();
     this.sidecarEndpoints.clear();
@@ -7621,6 +7627,7 @@ export class SessionService {
   // killed+retainInList sessions are still enriched by its idle round-robin;
   // runDashboardCacheTick owns their pruning.
   private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
+    this.codexRateLimitPoller.prune(liveIds);
     for (const sessionId of this.scheduledWakeClaims.keys()) {
       if (!liveIds.has(sessionId)) this.scheduledWakeClaims.delete(sessionId);
     }
@@ -7653,6 +7660,9 @@ export class SessionService {
       if (!liveIds.has(sessionId)) {
         this.codexMcpDialogOverrides.delete(sessionId);
       }
+    }
+    for (const sessionId of this.codexPaneLimitObservedAt.keys()) {
+      if (!liveIds.has(sessionId)) this.codexPaneLimitObservedAt.delete(sessionId);
     }
     for (const sessionId of this.claudeCompactingOverrides.keys()) {
       if (!liveIds.has(sessionId)) {
@@ -16923,9 +16933,24 @@ export class SessionService {
               const native = await this.classifyCodexState(current);
               const paneText = await captureTmuxPane(current.tmuxSession, 200, { fresh: true });
               if (paneText === null) throw new Error(uncertainInput);
+              const permission = native.rateLimit?.limited
+                ? this.codexRateLimitPoller.permission(
+                    sessionId,
+                    codexHookHomePath(join(this.config.dataDir, "session-tools", sessionId)),
+                    native.rateLimitObservedAtMs ?? 0,
+                  )
+                : null;
               if (
-                rateLimitActive(native.rateLimit, Date.now()) ||
-                rateLimitActive(scanTmuxRateLimit(paneText), Date.now())
+                (permission !== true && rateLimitActive(native.rateLimit, Date.now())) ||
+                rateLimitActive(
+                  this.codexPaneRateLimit(
+                    sessionId,
+                    paneText,
+                    permission === true ? { limited: false, reason: "" } : native.rateLimit,
+                    native.activityMs,
+                  ),
+                  Date.now(),
+                )
               ) {
                 throw new SessionRateLimitedError(`Session ${sessionId} is rate limited`);
               }
@@ -23152,6 +23177,7 @@ export class SessionService {
     hookState: ReturnType<typeof readAgentHookState>;
     rolloutState: CodexRolloutStateRecord | null;
     rateLimit: RateLimitDetection | null;
+    rateLimitObservedAtMs?: number;
     activityMs: number;
     threadId?: string;
     model?: string;
@@ -23227,12 +23253,35 @@ export class SessionService {
       hookState,
       rolloutState,
       rateLimit: rolloutRead.rateLimit,
+      ...(rolloutRead.rateLimitObservedAtMs !== undefined
+        ? { rateLimitObservedAtMs: rolloutRead.rateLimitObservedAtMs }
+        : {}),
       activityMs,
       ...(rolloutRead.threadId ? { threadId: rolloutRead.threadId } : {}),
       ...(rolloutRead.model ? { model: rolloutRead.model } : {}),
       ...(rolloutRead.tokenUsage ? { tokenUsage: rolloutRead.tokenUsage } : {}),
       ...(rolloutRead.tokenUsages ? { tokenUsages: rolloutRead.tokenUsages } : {}),
     };
+  }
+
+  private codexPaneRateLimit(
+    sessionId: string,
+    paneText: string,
+    structured: RateLimitDetection | null,
+    activityMs: number,
+  ): RateLimitDetection | null {
+    const hit = scanTmuxRateLimit(paneText, { tailLines: CODEX_RATE_LIMIT_PANE_TAIL_LINES });
+    if (!hit) {
+      this.codexPaneLimitObservedAt.delete(sessionId);
+      return null;
+    }
+    if (structured !== null) {
+      if (!structured.limited) this.codexPaneLimitObservedAt.delete(sessionId);
+      return structured.limited ? hit : null;
+    }
+    const observedAt = this.codexPaneLimitObservedAt.get(sessionId) ?? Date.now();
+    this.codexPaneLimitObservedAt.set(sessionId, observedAt);
+    return activityMs > observedAt ? null : hit;
   }
 
   // `fresh` busts the fleet caches before each read so the whole snapshot is
@@ -24671,6 +24720,7 @@ export class SessionService {
     }
 
     let rateLimit: RateLimitDetection | null = null;
+    let codexLimitObservedAtMs = 0;
     let hasServerErrorRecord = false;
     let hasAuthenticationFailure = false;
     let serverErrorEvidence: "error" | "recovered" | undefined;
@@ -24893,6 +24943,15 @@ export class SessionService {
         state = codexState.state;
         stateSource = codexState.source;
         rateLimit = codexState.rateLimit;
+        codexLimitObservedAtMs = codexState.rateLimitObservedAtMs ?? 0;
+        if (rateLimit?.limited) {
+          const permission = this.codexRateLimitPoller.permission(
+            session.id,
+            codexHookHomePath(join(this.config.dataDir, "session-tools", session.id)),
+            codexLimitObservedAtMs,
+          );
+          if (permission === true) rateLimit = { limited: false, reason: "" };
+        }
         agentActivityAt = activityAtFromMs(codexState.activityMs);
         liveModel = codexState.model;
         tokenUsage = codexState.tokenUsage;
@@ -25112,7 +25171,12 @@ export class SessionService {
             classifiedDetail = "State: needs_input (codex MCP permission dialog)";
           }
         } else {
-          const hardHit = scanTmuxRateLimit(paneText);
+          const hardHit = this.codexPaneRateLimit(
+            session.id,
+            paneText,
+            rateLimit,
+            agentActivityAt?.getTime() ?? 0,
+          );
           if (hardHit?.limited) {
             rateLimit = hardHit;
             this.codexMcpDialogOverrides.delete(session.id);
@@ -25205,6 +25269,17 @@ export class SessionService {
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
         }
+      }
+      if (
+        session.agent === "codex" &&
+        (rateLimit?.limited || (rateLimit === null && session.rateLimitedAt))
+      ) {
+        const permission = this.codexRateLimitPoller.permission(
+          session.id,
+          codexHookHomePath(join(this.config.dataDir, "session-tools", session.id)),
+          Math.max(codexLimitObservedAtMs, this.codexPaneLimitObservedAt.get(session.id) ?? 0),
+        );
+        if (permission === true) rateLimit = { limited: false, reason: "" };
       }
       // Defined only when the detection is flagged and its parsed reset has
       // passed (rateLimit?.limited && resetAtMs === undefined would make

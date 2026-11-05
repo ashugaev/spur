@@ -954,7 +954,6 @@ describe("startConfiguredTriggers", () => {
 
     it.each([
       { status: "stopped", state: "stopped" },
-      { status: "stopped", state: "stopped", stopReason: "manual_pause" },
       { status: "errored", state: "error" },
       { status: "killed", state: "killed" },
     ])("drops genuinely closed queued work after $status/$state", async (closed) => {
@@ -4733,6 +4732,8 @@ describe("startConfiguredTriggers", () => {
         expect.stringContaining("A new comment arrived."),
         { interrupt: false },
       );
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).toHaveBeenCalledOnce();
     } finally {
       await controller.stop();
     }
@@ -7274,7 +7275,7 @@ describe("startConfiguredTriggers", () => {
       }
     });
 
-    it("keeps a batch for a memory_shed stop with no hold engaged, and drops it once the record is a manual_pause (memory hold engaged)", async () => {
+    it("retains a pending batch through manual_pause and delivers it once after restore", async () => {
       const stoppedSession = (stopReason: "memory_shed" | "manual_pause") => ({
         id: "api-1",
         status: "stopped",
@@ -7311,13 +7312,23 @@ describe("startConfiguredTriggers", () => {
         getMock.mockResolvedValue(stoppedSession("manual_pause"));
         held = true;
         await vi.advanceTimersByTimeAsync(5_000);
-        const dropped = logSpurEventMock.mock.calls.filter(
-          ([, entry]) => entry.event === "trigger.send.dropped",
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+          "trigger.send.dropped",
         );
-        expect(dropped).toHaveLength(1);
-        expect(dropped[0]?.[1].details?.reason).toBe("closed_session");
-        expect(readPendingSendBatchesMock().size).toBe(0);
+        expect(readPendingSendBatchesMock().size).toBe(1);
         expect(deliverMock).not.toHaveBeenCalled();
+
+        getMock.mockResolvedValue({
+          ...stoppedSession("manual_pause"),
+          status: "running",
+          state: "waiting",
+        });
+        held = false;
+        await advanceSendWindow();
+        expect(deliverMock).toHaveBeenCalledOnce();
+        expect(readPendingSendBatchesMock().size).toBe(0);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(deliverMock).toHaveBeenCalledOnce();
       } finally {
         await controller.stop();
       }
@@ -7733,7 +7744,7 @@ describe("startConfiguredTriggers", () => {
 });
 
 describe("dropsQueuedSend", () => {
-  it("closes stopped, error, killed except a live server-error wedge and a memory_shed stop", async () => {
+  it("closes stopped, error, killed except live wedges and recoverable pauses", async () => {
     const { dropsQueuedSend } = await loadTriggersModule();
 
     expect(dropsQueuedSend({ state: "stopped", status: "stopped" })).toBe(true);
@@ -7746,7 +7757,7 @@ describe("dropsQueuedSend", () => {
     ).toBe(false);
     expect(
       dropsQueuedSend({ state: "stopped", status: "stopped", stopReason: "manual_pause" }),
-    ).toBe(true);
+    ).toBe(false);
     expect(dropsQueuedSend({ state: "killed", status: "killed", stopReason: "memory_shed" })).toBe(
       true,
     );
