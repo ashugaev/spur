@@ -61,6 +61,7 @@ import type { SourceWorkbench, SourceWorkSessionItem } from "./event-sources/typ
 import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { readSession } from "./metadata.js";
+import { StoreError, StoreService, type StoreQuery } from "./stores.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import { captureTmuxPane } from "./runtime-tmux.js";
@@ -434,6 +435,35 @@ async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): 
   } catch {
     throw new InvalidJsonBodyError("Invalid JSON in request body");
   }
+}
+
+interface StoreWriteRequest {
+  data?: unknown;
+  expectedRev?: unknown;
+}
+
+function parseQueryInteger(value: string, name: string): number {
+  if (!/^\d+$/.test(value)) {
+    throw new StoreError(400, `${name} must be a non-negative integer`);
+  }
+  return Number.parseInt(value, 10);
+}
+
+function parseExpectedRev(value: unknown): { expectedRev?: number } {
+  if (value === undefined) return {};
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new StoreError(400, "expectedRev must be a non-negative integer");
+  }
+  return { expectedRev: value };
+}
+
+function parseStoreListQuery(params: URLSearchParams): StoreQuery {
+  const limit = params.get("limit");
+  const startAfter = params.get("startAfter");
+  return {
+    ...(limit === null ? {} : { limit: parseQueryInteger(limit, "limit") }),
+    ...(startAfter === null ? {} : { startAfter }),
+  };
 }
 
 const lifecycleErrors = new WeakMap<ServerResponse, SessionLifecycleSnapshot>();
@@ -887,6 +917,12 @@ export async function startServer(
     },
   });
   let ready = false;
+  const stores = new StoreService({
+    get dataDir() {
+      return service.config.dataDir;
+    },
+    readSession: (sessionId) => readSession(service.config.dataDir, sessionId),
+  });
   const switchStatePath = deploySwitchStatePath(service.config.dataDir);
   const switchLedgerPath = updateLedgerPath(service.config.dataDir);
   // Re-applied on every config (re)load, not just boot, so disk-limit changes take
@@ -2467,6 +2503,115 @@ export async function startServer(
         return;
       }
 
+      const storeCollectionMatch = path.match(/^\/stores\/([^/]+)\/docs\/([^/]+)$/);
+      if (method === "GET" && storeCollectionMatch?.[1] && storeCollectionMatch[2]) {
+        const docs = await stores.query(
+          decodeURIComponent(storeCollectionMatch[1]),
+          decodeURIComponent(storeCollectionMatch[2]),
+          parseStoreListQuery(url.searchParams),
+        );
+        sendJson(response, 200, { docs });
+        return;
+      }
+      if (method === "POST" && storeCollectionMatch?.[1] && storeCollectionMatch[2]) {
+        const body = await readJsonBody<StoreWriteRequest>(request);
+        sendJson(
+          response,
+          201,
+          await stores.add(
+            decodeURIComponent(storeCollectionMatch[1]),
+            decodeURIComponent(storeCollectionMatch[2]),
+            body.data,
+          ),
+        );
+        return;
+      }
+
+      const storeDocMatch = path.match(/^\/stores\/([^/]+)\/docs\/([^/]+)\/([^/]+)$/);
+      if (method === "GET" && storeDocMatch?.[1] && storeDocMatch[2] && storeDocMatch[3]) {
+        sendJson(
+          response,
+          200,
+          await stores.get(
+            decodeURIComponent(storeDocMatch[1]),
+            decodeURIComponent(storeDocMatch[2]),
+            decodeURIComponent(storeDocMatch[3]),
+          ),
+        );
+        return;
+      }
+      if (method === "POST" && storeDocMatch?.[1] && storeDocMatch[2] && storeDocMatch[3]) {
+        const body = await readJsonBody<StoreWriteRequest>(request);
+        sendJson(
+          response,
+          200,
+          await stores.set(
+            decodeURIComponent(storeDocMatch[1]),
+            decodeURIComponent(storeDocMatch[2]),
+            decodeURIComponent(storeDocMatch[3]),
+            body.data,
+            parseExpectedRev(body.expectedRev),
+          ),
+        );
+        return;
+      }
+      if (method === "PATCH" && storeDocMatch?.[1] && storeDocMatch[2] && storeDocMatch[3]) {
+        const body = await readJsonBody<StoreWriteRequest>(request);
+        sendJson(
+          response,
+          200,
+          await stores.update(
+            decodeURIComponent(storeDocMatch[1]),
+            decodeURIComponent(storeDocMatch[2]),
+            decodeURIComponent(storeDocMatch[3]),
+            body.data,
+            parseExpectedRev(body.expectedRev),
+          ),
+        );
+        return;
+      }
+      if (method === "DELETE" && storeDocMatch?.[1] && storeDocMatch[2] && storeDocMatch[3]) {
+        const expectedRev = url.searchParams.get("expectedRev");
+        await stores.delete(
+          decodeURIComponent(storeDocMatch[1]),
+          decodeURIComponent(storeDocMatch[2]),
+          decodeURIComponent(storeDocMatch[3]),
+          parseExpectedRev(
+            expectedRev === null ? undefined : parseQueryInteger(expectedRev, "expectedRev"),
+          ),
+        );
+        sendJson(response, 200, { deleted: true });
+        return;
+      }
+
+      const storeQueryMatch = path.match(/^\/stores\/([^/]+)\/query\/([^/]+)$/);
+      if (method === "POST" && storeQueryMatch?.[1] && storeQueryMatch[2]) {
+        const body = await readJsonBody<StoreQuery>(request);
+        const docs = await stores.query(
+          decodeURIComponent(storeQueryMatch[1]),
+          decodeURIComponent(storeQueryMatch[2]),
+          body,
+        );
+        sendJson(response, 200, { docs });
+        return;
+      }
+
+      const storeChangesId = path.match(/^\/stores\/([^/]+)\/changes$/)?.[1];
+      if (method === "GET" && storeChangesId) {
+        const since = url.searchParams.get("since");
+        const limit = url.searchParams.get("limit");
+        sendJson(
+          response,
+          200,
+          await stores.changes(
+            decodeURIComponent(storeChangesId),
+            since === null ? 0 : parseQueryInteger(since, "since"),
+            limit === null ? undefined : parseQueryInteger(limit, "limit"),
+          ),
+        );
+        return;
+      }
+
       logEvent("http.route.not_found", {
         level: "warn",
         method,
@@ -2539,7 +2684,8 @@ export async function startServer(
         error instanceof SessionEndedError ||
         error instanceof ForeignAgentProcessError ||
         error instanceof LaunchPromptPendingError ||
-        error instanceof SidecarProbeUnresponsiveError
+        error instanceof SidecarProbeUnresponsiveError ||
+        error instanceof StoreError
       ) {
         failRequest(response, error.statusCode, message, { method, path });
         return;

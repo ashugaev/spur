@@ -212,6 +212,10 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
   if (method !== "POST" && method !== "PATCH" && method !== "DELETE") {
     return null;
   }
+  // Store data writes are page/snippet traffic, not operator actions.
+  if (/^\/stores\/[^/]+\/(docs|query)\//.test(path)) {
+    return null;
+  }
 
   if (method === "POST") {
     const autoPingMute = path.match(/^\/sessions\/([^/]+)\/auto-ping-suppressions\/mute$/);

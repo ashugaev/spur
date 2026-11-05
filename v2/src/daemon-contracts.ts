@@ -78,6 +78,18 @@ const effort = field(
   "Provider-supported reasoning effort; provider validates supported values.",
 );
 const nullableEffort: ContractField = { ...effort, type: `${effort.type}|null` };
+const storeData = field("data", "object", "Document JSON object, at most 262144 bytes.", true);
+const storeExpectedRev = field(
+  "expectedRev",
+  "integer",
+  "Write only at this revision; 0 = absent.",
+);
+const storeLimit = field("limit", "integer 1..500", "Page size.", false, 100);
+const storeTooLarge: ContractResponse = {
+  status: 413,
+  contentType: "application/json",
+  description: "Document over 262144 bytes or store file over 64 MiB.",
+};
 const attachments = field(
   "attachments",
   "{name:string,data:string}[]",
@@ -1305,6 +1317,116 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
         field("port", "number", "Service port override."),
       ]),
       examples: [{ body: { command: "pnpm dev", cwd: "." } }],
+    },
+  ),
+  operation(
+    "list_store_docs",
+    "GET",
+    "/stores/{store}/docs/{collection}",
+    "List store documents ordered by id; store is page:<id> or session:<sid>.",
+    {
+      query: [storeLimit, field("startAfter", "string", "Document id cursor.")],
+      examples: [{ query: { limit: "20" } }],
+      response: "{docs:StoreDoc[]}",
+      source: "v2/src/stores.ts",
+      extraResponses: [storeTooLarge],
+    },
+  ),
+  operation(
+    "add_store_doc",
+    "POST",
+    "/stores/{store}/docs/{collection}",
+    "Add a document with a generated id; _actions rejected.",
+    {
+      body: body("StoreWriteRequest", [storeData]),
+      examples: [{ body: { data: { title: "Dune" } } }],
+      response: "StoreDoc",
+      status: 201,
+      source: "v2/src/stores.ts",
+      extraResponses: [storeTooLarge],
+    },
+  ),
+  operation(
+    "get_store_doc",
+    "GET",
+    "/stores/{store}/docs/{collection}/{docId}",
+    "Read one store document.",
+    { response: "StoreDoc", source: "v2/src/stores.ts" },
+  ),
+  operation(
+    "set_store_doc",
+    "POST",
+    "/stores/{store}/docs/{collection}/{docId}",
+    "Create or replace a store document; expectedRev mismatch conflicts.",
+    {
+      body: body("StoreWriteRequest", [storeData, storeExpectedRev]),
+      examples: [
+        { body: { data: { title: "Dune" } } },
+        { body: { data: { n: 1 }, expectedRev: 0 } },
+      ],
+      response: "StoreDoc",
+      source: "v2/src/stores.ts",
+      extraResponses: [storeTooLarge],
+    },
+  ),
+  operation(
+    "update_store_doc",
+    "PATCH",
+    "/stores/{store}/docs/{collection}/{docId}",
+    "Merge-patch a store document (RFC 7386; null removes a key).",
+    {
+      body: body("StoreWriteRequest", [storeData, storeExpectedRev]),
+      examples: [{ body: { data: { watched: true } } }],
+      response: "StoreDoc",
+      source: "v2/src/stores.ts",
+      extraResponses: [storeTooLarge],
+    },
+  ),
+  operation(
+    "delete_store_doc",
+    "DELETE",
+    "/stores/{store}/docs/{collection}/{docId}",
+    "Delete a store document.",
+    {
+      query: [field("expectedRev", "integer", "Delete only at this revision.")],
+      response: "{deleted:true}",
+      source: "v2/src/stores.ts",
+    },
+  ),
+  operation(
+    "query_store_docs",
+    "POST",
+    "/stores/{store}/query/{collection}",
+    "Query store documents with where/orderBy/limit/startAfter.",
+    {
+      body: body("StoreQuery", [
+        field(
+          "where",
+          '{field:string,op:"=="|"!="|"<"|"<="|">"|">="|"in"|"contains",value:unknown}[]',
+          "At most 8 clauses; field is a dotted path into data.",
+        ),
+        field("orderBy", '{field:string,direction?:"asc"|"desc"}', "Sort field; ties by id."),
+        storeLimit,
+        field("startAfter", "string", "Document id cursor."),
+      ]),
+      examples: [{ body: { where: [{ field: "watched", op: "==", value: false }], limit: 20 } }],
+      response: "{docs:StoreDoc[]}",
+      source: "v2/src/stores.ts",
+    },
+  ),
+  operation(
+    "list_store_changes",
+    "GET",
+    "/stores/{store}/changes",
+    "Read store change rows after a sequence cursor; reset:true means refetch.",
+    {
+      query: [
+        field("since", "integer", "Last seen change seq.", false, 0),
+        field("limit", "integer 1..500", "Page size.", false, 500),
+      ],
+      examples: [{ query: { since: "0" } }],
+      response: "{changes:{seq,collection,id,op,rev}[],lastSeq:number,reset?:true}",
+      source: "v2/src/stores.ts",
     },
   ),
 ];
