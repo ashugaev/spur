@@ -215,10 +215,12 @@ describe("readCodexRolloutState", () => {
     expect(clean.rateLimit?.limited).toBe(false);
     expect(clean.rateLimitObservedAtMs).toBe(Date.parse("2026-11-05T10:03:00.000Z"));
 
-    lines.push(eventLine("2026-11-05T10:04:00.000Z", "task_complete", {
-      turn_id: "third",
-      error: { codex_error_info: "usage_limit_exceeded" },
-    }));
+    lines.push(
+      eventLine("2026-11-05T10:04:00.000Z", "task_complete", {
+        turn_id: "third",
+        error: { codex_error_info: "usage_limit_exceeded" },
+      }),
+    );
     await writeFile(filePath, lines.join("\n"));
     expect((await readCodexRolloutState(sessionsDir, reader)).rateLimit?.limited).toBe(true);
   });

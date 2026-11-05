@@ -19507,9 +19507,15 @@ describe("SessionService", () => {
 
   it("ignores a stale Codex credit banner after a clean rollout completion", async () => {
     readSessionMock.mockReturnValue(
-      runningSession({ agent: "codex", launchCommand: "codex --dangerously-bypass-approvals-and-sandbox" }),
+      runningSession({
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      }),
     );
-    readAgentHookStateMock.mockReturnValue({ state: "waiting", updatedAt: "2026-03-18T10:04:59.000Z" });
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
     readCodexRolloutStateMock.mockResolvedValue({
       rollout: {
         state: "waiting",
@@ -19532,9 +19538,15 @@ describe("SessionService", () => {
 
   it("lets an expired Codex reset clear a banner still in the pane tail when API is unavailable", async () => {
     readSessionMock.mockReturnValue(
-      runningSession({ agent: "codex", launchCommand: "codex --dangerously-bypass-approvals-and-sandbox" }),
+      runningSession({
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      }),
     );
-    readAgentHookStateMock.mockReturnValue({ state: "waiting", updatedAt: "2026-03-18T10:04:59.000Z" });
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
     readCodexRolloutStateMock.mockResolvedValue({
       rollout: null,
       rateLimit: {
@@ -19555,9 +19567,15 @@ describe("SessionService", () => {
     const sessions = createSessionStore();
     sessions.set(
       "api-1",
-      runningSession({ agent: "codex", launchCommand: "codex --dangerously-bypass-approvals-and-sandbox" }),
+      runningSession({
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      }),
     );
-    readAgentHookStateMock.mockReturnValue({ state: "waiting", updatedAt: "2026-03-18T10:04:59.000Z" });
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
     readCodexRolloutStateMock.mockResolvedValue({ rollout: null, rateLimit: null });
     captureTmuxPaneMock.mockResolvedValue("■ Your workspace is out of credits.");
     const { SessionService } = await loadSessionServiceModule();
@@ -19577,9 +19595,15 @@ describe("SessionService", () => {
 
   it("clears an idle Codex limit when the backend allows ordinary usage", async () => {
     readSessionMock.mockReturnValue(
-      runningSession({ agent: "codex", launchCommand: "codex --dangerously-bypass-approvals-and-sandbox" }),
+      runningSession({
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      }),
     );
-    readAgentHookStateMock.mockReturnValue({ state: "waiting", updatedAt: "2026-03-18T10:04:59.000Z" });
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
     readCodexRolloutStateMock.mockResolvedValue({
       rollout: null,
       rateLimit: { limited: true, reason: "codex usage_limit_exceeded" },

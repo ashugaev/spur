@@ -28,10 +28,9 @@ function fakeAppServer(permission: boolean | null, accountId: string | null = nu
           Buffer.from(
             `${JSON.stringify({
               id: initialize ? 1 : 2,
-              result:
-                initialize
-                  ? {}
-                  : { ordinaryUsageAllowed: permission, accountId, rateLimits: {} },
+              result: initialize
+                ? {}
+                : { ordinaryUsageAllowed: permission, accountId, rateLimits: {} },
             })}\n`,
           ),
         );
@@ -57,19 +56,24 @@ afterEach(() => {
 });
 
 describe("Codex app-server rate-limit probe", () => {
-  it.each([true, false, null])("reads ordinaryUsageAllowed=%s after initialize", async (permission) => {
-    const child = fakeAppServer(permission);
-    spawnMock.mockReturnValue(child);
-    expect(await readCodexOrdinaryUsageAllowed("/tmp/codex-home")).toBe(permission);
-    expect(spawnMock).toHaveBeenCalledWith(
-      "/mock/codex",
-      ["app-server"],
-      expect.objectContaining({ env: expect.objectContaining({ CODEX_HOME: "/tmp/codex-home" }) }),
-    );
-    expect(child.stdin.write.mock.calls[0]?.[0]).toContain('"method":"initialize"');
-    expect(child.stdin.write.mock.calls[1]?.[0]).toContain('"method":"account/rateLimits/read"');
-    expect(child.kill).toHaveBeenCalledOnce();
-  });
+  it.each([true, false, null])(
+    "reads ordinaryUsageAllowed=%s after initialize",
+    async (permission) => {
+      const child = fakeAppServer(permission);
+      spawnMock.mockReturnValue(child);
+      expect(await readCodexOrdinaryUsageAllowed("/tmp/codex-home")).toBe(permission);
+      expect(spawnMock).toHaveBeenCalledWith(
+        "/mock/codex",
+        ["app-server"],
+        expect.objectContaining({
+          env: expect.objectContaining({ CODEX_HOME: "/tmp/codex-home" }),
+        }),
+      );
+      expect(child.stdin.write.mock.calls[0]?.[0]).toContain('"method":"initialize"');
+      expect(child.stdin.write.mock.calls[1]?.[0]).toContain('"method":"account/rateLimits/read"');
+      expect(child.kill).toHaveBeenCalledOnce();
+    },
+  );
 
   it("kills a silent app-server within three seconds", async () => {
     const child = fakeAppServer(null);
