@@ -25,6 +25,12 @@ const configuredAllowedDevOrigins = allowedDevOrigins();
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
+  // `/p/<id>` and `/p/<id>/` differ: the page route itself redirects the bare form,
+  // so relative asset URLs in a page resolve against its dir.
+  skipTrailingSlashRedirect: true,
+  async rewrites() {
+    return [{ source: "/p/:id/_spur/sdk.js", destination: "/spur/spur-sdk.v2.js" }];
+  },
   ...(sidecarDistDir ? { distDir: sidecarDistDir } : {}),
   ...(configuredAllowedDevOrigins.length > 0
     ? { allowedDevOrigins: configuredAllowedDevOrigins }
