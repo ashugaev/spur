@@ -50,7 +50,7 @@ function setup(overrides: Partial<SnippetPanelProps> = {}): Setup {
     sessionId: SID,
     manifest: manifest(),
     html: "<p>a</p>",
-    session: { canSend: true, state: "working" },
+    session: { canSend: true, state: "working", status: "running" },
     bridge: {
       storage,
       request: (method, url, body) => daemon.handle(method, url, body),
@@ -138,7 +138,6 @@ function seedRecord(storage: MemoryStorage, partial: Partial<SnippetRecord>): vo
   };
   storage.data.set(recordKey(SID, "picker"), JSON.stringify(full));
 }
-
 
 beforeEach(() => {
   dialog.setInline.mockClear();
@@ -296,9 +295,7 @@ describe("confirm strip", () => {
   it("shows an agent message waiting for confirm as inert text with no action status", async () => {
     const s = setup();
     const { port } = await mount(s);
-    act(() =>
-      port.emit({ type: "agent", op: "send", message: "<b>hi</b>", callId: "a1" }),
-    );
+    act(() => port.emit({ type: "agent", op: "send", message: "<b>hi</b>", callId: "a1" }));
     const strip = screen.getByLabelText("Confirm snippet action");
     expect(within(strip).getByText("Message to agent")).toBeInTheDocument();
     expect(strip.querySelector("pre")?.textContent).toBe("<b>hi</b>");
@@ -327,7 +324,7 @@ describe("status line", () => {
     ["timeout", "No reply in 15 min", "status", "failed", "timeout"],
   ];
   it.each(cases)("%s reads %s with role %s", async (status, label, role, doc, error) => {
-    const s = setup({ session: { canSend: true, state: "idle" } });
+    const s = setup({ session: { canSend: true, state: "idle", status: "running" } });
     seedAction(s.daemon, doc, error);
     await mount(s);
     const line = (await waitFor(() => {

@@ -25,7 +25,7 @@ vi.mock("@/components/snippets/SnippetPanel", () => ({
 }));
 
 const SID = "sp-ab12";
-const SESSION = { canSend: true, state: "working" as const };
+const SESSION = { canSend: true, state: "working" as const, status: "running" as const };
 
 function files(revision: number) {
   return [

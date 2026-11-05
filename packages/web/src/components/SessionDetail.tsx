@@ -1990,9 +1990,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const genericArtifacts = snippetPartition.generic;
   const snippetCanSend = session ? canSendMessage(session) : false;
   const snippetState = session?.state;
+  const snippetStatus = session?.status;
   const snippetSessionView = useMemo(
-    () => (snippetState ? { canSend: snippetCanSend, state: snippetState } : null),
-    [snippetCanSend, snippetState],
+    () =>
+      snippetState && snippetStatus
+        ? { canSend: snippetCanSend, state: snippetState, status: snippetStatus }
+        : null,
+    [snippetCanSend, snippetState, snippetStatus],
   );
 
   useEffect(() => {

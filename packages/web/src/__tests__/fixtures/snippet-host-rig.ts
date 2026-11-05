@@ -162,7 +162,7 @@ export class FakeDaemon {
             return source[field.slice("source.".length)] === value;
           }),
         )
-        .sort((a, b) => (a.data.createdAt as string) < (b.data.createdAt as string) ? 1 : -1);
+        .sort((a, b) => ((a.data.createdAt as string) < (b.data.createdAt as string) ? 1 : -1));
       return ok({ docs: match.slice(0, 1) });
     }
     if (segments[0] === "docs") {
@@ -193,7 +193,9 @@ export class FakeDaemon {
   }
 
   posts(suffix: string): RequestRecord[] {
-    return this.requests.filter((r) => r.method === "POST" && r.url.split("?")[0]?.endsWith(suffix));
+    return this.requests.filter(
+      (r) => r.method === "POST" && r.url.split("?")[0]?.endsWith(suffix),
+    );
   }
 }
 
@@ -322,7 +324,8 @@ export function harness(
       h.port().emit({ type: "invoke", callId, action, payload });
       return callId;
     },
-    session: (update = {}) => host.updateSession({ canSend: true, state: "working", ...update }),
+    session: (update = {}) =>
+      host.updateSession({ canSend: true, state: "working", status: "running", ...update }),
     remount: (m) => harness({ storage, daemon, poller, ...(m ? { manifest: m } : {}) }),
   };
   return h;

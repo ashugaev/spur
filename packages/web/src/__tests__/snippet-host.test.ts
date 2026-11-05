@@ -365,14 +365,27 @@ describe("agent events", () => {
     expect(events()).toHaveLength(0);
     h.host.updateSession({ canSend: true, state: "working" });
     h.host.updateSession({ canSend: true, state: "working" });
-    h.host.updateSession({ canSend: false, state: "budget_limited" });
-    h.host.updateSession({ canSend: false, state: "killed" });
+    h.host.updateSession({ canSend: false, state: "waiting", status: "budget_limited" });
+    h.host.updateSession({ canSend: false, state: "killed", status: "killed" });
     expect(events().map((message) => message.status)).toEqual([
       { state: "working", sessionId: SID },
       { state: "rate_limited", sessionId: SID },
       { state: "error", sessionId: SID },
     ]);
   });
+
+  it.each(["completed", "killed", "errored"] as const)(
+    "maps a %s session to error whatever its state",
+    async (status) => {
+      const h = harness();
+      h.host.updateSession({ canSend: true, state: "waiting", status: "running" });
+      const port = await ready(h);
+      h.host.updateSession({ canSend: false, state: "waiting", status });
+      expect(port.toFrame.filter((message) => message.type === "agent-event")).toEqual([
+        expect.objectContaining({ status: { state: "error", sessionId: SID } }),
+      ]);
+    },
+  );
 });
 
 describe("rejections send nothing", () => {

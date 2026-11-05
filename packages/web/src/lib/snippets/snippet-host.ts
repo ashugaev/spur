@@ -47,7 +47,7 @@ import {
 import { validateSnippetPayload, type JsonValue, type SnippetSchemaIssue } from "./snippet-schema";
 import { resolveStoreProxyTarget, type ProxyMethod } from "@/lib/store-proxy";
 import type { StoreChangeEvent, StoreChangePoller } from "@/lib/store-change-poller";
-import type { SpurSessionState } from "@/lib/types";
+import type { SpurSessionState, SpurSessionStatus } from "@/lib/types";
 
 type JsonObject = { [key: string]: JsonValue };
 
@@ -240,15 +240,18 @@ export interface SnippetHostState {
 export interface SnippetSessionUpdate {
   canSend: boolean;
   state: SpurSessionState;
+  status: SpurSessionStatus;
 }
 
 type SnippetAgentState = "working" | "idle" | "error" | "rate_limited";
 
 /** Same mapping as the daemon's `mapAgentState` (v2/src/store-agent.ts) behind `agent/status`. */
-function agentStateOf(state: SpurSessionState): SnippetAgentState {
+function agentStateOf(update: SnippetSessionUpdate): SnippetAgentState {
+  const { state, status } = update;
+  if (status === "completed" || status === "killed" || status === "errored") return "error";
   if (state === "error" || state === "killed") return "error";
   if (state === "working") return "working";
-  if (state === "rate_limited" || state === "budget_limited") return "rate_limited";
+  if (state === "rate_limited" || status === "budget_limited") return "rate_limited";
   return "idle";
 }
 
@@ -1094,7 +1097,7 @@ export function createSnippetHost(
 
   function updateSession(update: SnippetSessionUpdate): void {
     agentWorking = update.state === "working";
-    const nextAgentState = agentStateOf(update.state);
+    const nextAgentState = agentStateOf(update);
     if (nextAgentState !== agentState) {
       agentState = nextAgentState;
       // Same `agent` event a page gets from its stream, so spur.on("agent") holds in snippets.
