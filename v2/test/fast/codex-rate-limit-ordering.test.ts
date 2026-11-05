@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -28,6 +28,10 @@ function quota(timestamp: string | null, limited: boolean): string {
       primary: { used_percent: limited ? 100 : 10 },
     },
   });
+}
+
+function meta(id: string, timestamp = "2026-11-05T12:00:00.000Z"): string {
+  return JSON.stringify({ timestamp, type: "session_meta", payload: { id } });
 }
 
 function appServer(permission: boolean) {
@@ -85,6 +89,157 @@ afterEach(async () => {
 });
 
 describe("Codex rollout and permission ordering", () => {
+  it("keeps cached allow across an unchanged quota refold", async () => {
+    spawnMock.mockImplementation(() => appServer(true));
+    const hardLine = quota("2026-11-05T11:59:00.000Z", true);
+    const source = await rollout([meta("root"), hardLine]);
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    const poller = new CodexRateLimitPoller();
+    const first = await readCodexRolloutState(source.sessionsDir, reader);
+    expect(first.rollout).toBeNull();
+    expect(first.rateLimitObservedAtMs).toBe(localTime);
+    poller.permission("session", source.home, first.rateLimitObservedAtMs ?? 0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(poller.permission("session", source.home, first.rateLimitObservedAtMs ?? 0)).toBe(true);
+
+    vi.setSystemTime(localTime + 120_000);
+    await writeFile(source.file, `${meta("root", "2026-11-05T12:01:00.000Z")}\n${hardLine}\n`);
+    const refolded = await readCodexRolloutState(source.sessionsDir, reader);
+    expect(refolded.rateLimit?.limited).toBe(true);
+    expect(refolded.rateLimitObservedAtMs).toBe(localTime);
+    expect(poller.permission("session", source.home, refolded.rateLimitObservedAtMs ?? 0)).toBe(
+      true,
+    );
+    await appendFile(source.file, `${record(null, "thread_settings_applied", {})}\n`);
+    expect((await readCodexRolloutState(source.sessionsDir, reader)).rateLimitObservedAtMs).toBe(
+      localTime,
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    poller.dispose();
+  });
+
+  it("invalidates cached allow for a duplicate hard quota, even after full refold", async () => {
+    spawnMock.mockImplementation(() => appServer(true));
+    const hardLine = quota("2026-11-05T11:59:00.000Z", true);
+    const source = await rollout([meta("root"), hardLine]);
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    const poller = new CodexRateLimitPoller();
+    const first = await readCodexRolloutState(source.sessionsDir, reader);
+    poller.permission("session", source.home, first.rateLimitObservedAtMs ?? 0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(poller.permission("session", source.home, first.rateLimitObservedAtMs ?? 0)).toBe(true);
+
+    vi.setSystemTime(localTime + 120_000);
+    await appendFile(source.file, `${hardLine}\n`);
+    const appended = await readCodexRolloutState(source.sessionsDir, reader);
+    expect(appended.rateLimitObservedAtMs).toBe(localTime + 120_000);
+    expect(
+      poller.permission("session", source.home, appended.rateLimitObservedAtMs ?? 0),
+    ).toBeNull();
+
+    vi.setSystemTime(localTime + 121_000);
+    await writeFile(
+      source.file,
+      `${meta("root", "2026-11-05T12:01:00.000Z")}\n${hardLine}\n${hardLine}\n`,
+    );
+    const refolded = await readCodexRolloutState(source.sessionsDir, reader);
+    expect(refolded.rateLimitObservedAtMs).toBe(localTime + 120_000);
+    expect(refolded.rateLimit?.limited).toBe(true);
+    vi.setSystemTime(localTime + 122_000);
+    await writeFile(
+      source.file,
+      `${meta("root", "2026-11-05T12:02:00.000Z")}\n${hardLine}\n${hardLine}\n${hardLine}\n`,
+    );
+    const newDuplicate = await readCodexRolloutState(source.sessionsDir, reader);
+    expect(newDuplicate.rateLimitObservedAtMs).toBe(localTime + 122_000);
+    expect(
+      poller.permission("session", source.home, newDuplicate.rateLimitObservedAtMs ?? 0),
+    ).toBeNull();
+    poller.dispose();
+  });
+
+  it("invalidates changed quota sequence while ignoring same-turn benign telemetry", async () => {
+    const hardComplete = record("2026-11-05T11:59:00.000Z", "task_complete", {
+      turn_id: "turn",
+      error: { codex_error_info: "usage_limit_exceeded" },
+    });
+    const source = await rollout([
+      meta("root"),
+      quota(null, true),
+      hardComplete,
+      quota(null, false),
+    ]);
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    const first = await readCodexRolloutState(source.sessionsDir, reader);
+    expect(first.rateLimit?.reason).toBe("codex usage_limit_exceeded");
+    vi.setSystemTime(localTime + 120_000);
+    await writeFile(
+      source.file,
+      `${meta("root")}\n${quota("2026-11-05T11:58:00.000Z", true)}\n${hardComplete}\n${quota(null, false)}\n`,
+    );
+    const changed = await readCodexRolloutState(source.sessionsDir, reader);
+    expect(changed.rateLimit?.reason).toBe("codex usage_limit_exceeded");
+    expect(changed.rateLimitObservedAtMs).toBe(localTime + 120_000);
+    vi.setSystemTime(localTime + 121_000);
+    await writeFile(
+      source.file,
+      `${meta("root", "2026-11-05T12:01:00.000Z")}\n${quota("2026-11-05T11:58:00.000Z", true)}\n${hardComplete}\n${quota("2026-11-05T12:02:00.000Z", false)}\n`,
+    );
+    const ignored = await readCodexRolloutState(source.sessionsDir, reader);
+    expect(ignored.rateLimit?.reason).toBe("codex usage_limit_exceeded");
+    expect(ignored.rateLimitObservedAtMs).toBe(localTime + 120_000);
+  });
+
+  it("keeps quota identity for one file and resets it for cold, thread and inode changes", async () => {
+    const hardLine = quota(null, true);
+    const source = await rollout([meta("root"), hardLine]);
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    expect((await readCodexRolloutState(source.sessionsDir, reader)).rateLimitObservedAtMs).toBe(
+      localTime,
+    );
+    vi.setSystemTime(localTime + 1_000);
+    await writeFile(source.file, `${meta("root", "2026-11-05T12:01:00.000Z")}\n${hardLine}\n`);
+    expect((await readCodexRolloutState(source.sessionsDir, reader)).rateLimitObservedAtMs).toBe(
+      localTime,
+    );
+    expect(
+      (await readCodexRolloutState(source.sessionsDir, { files: new Map() })).rateLimitObservedAtMs,
+    ).toBe(localTime + 1_000);
+    const identicalReplacement = `${source.file}.replacement`;
+    await writeFile(
+      identicalReplacement,
+      `${meta("root", "2026-11-05T12:01:00.000Z")}\n${hardLine}\n`,
+    );
+    await rename(identicalReplacement, source.file);
+    // Without a provider event ID, same-thread byte-identical replacement is replay-equivalent.
+    expect((await readCodexRolloutState(source.sessionsDir, reader)).rateLimitObservedAtMs).toBe(
+      localTime,
+    );
+
+    vi.setSystemTime(localTime + 2_000);
+    await writeFile(source.file, `${meta("other")}\n${hardLine}\n`);
+    expect((await readCodexRolloutState(source.sessionsDir, reader)).rateLimitObservedAtMs).toBe(
+      localTime + 2_000,
+    );
+    const noMeta = await rollout([hardLine]);
+    const noMetaReader: CodexRolloutReaderState = { files: new Map() };
+    expect(
+      (await readCodexRolloutState(noMeta.sessionsDir, noMetaReader)).rateLimitObservedAtMs,
+    ).toBe(localTime + 2_000);
+    vi.setSystemTime(localTime + 3_000);
+    const replacement = `${noMeta.file}.replacement`;
+    await writeFile(replacement, `${hardLine}\n`);
+    await rename(replacement, noMeta.file);
+    expect(
+      (await readCodexRolloutState(noMeta.sessionsDir, noMetaReader)).rateLimitObservedAtMs,
+    ).toBe(localTime + 3_000);
+    const otherPath = await rollout([hardLine]);
+    expect(
+      (await readCodexRolloutState(otherPath.sessionsDir, noMetaReader)).rateLimitObservedAtMs,
+    ).toBe(localTime + 3_000);
+  });
+
   it("holds a quota-only backward token count until a fresh allow", async () => {
     spawnMock.mockImplementation(() => appServer(true));
     const source = await rollout([quota("2026-11-05T12:00:00.000Z", true)]);
@@ -149,6 +304,28 @@ describe("Codex rollout and permission ordering", () => {
     expect(poller.permission("session", source.home, hard.rateLimitObservedAtMs ?? 0)).toBeNull();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(poller.permission("session", source.home, hard.rateLimitObservedAtMs ?? 0)).toBe(true);
+
+    vi.setSystemTime(localTime + 240_000);
+    await appendFile(
+      source.file,
+      `${record("2026-11-05T11:59:00.000Z", "task_complete", {
+        turn_id: "two",
+        error: { codex_error_info: "usage_limit_exceeded" },
+      })}\n${quota("2026-11-05T11:59:01.000Z", false)}\n`,
+    );
+    const duplicateHard = await readCodexRolloutState(source.sessionsDir, reader);
+    expect(duplicateHard.rateLimit?.reason).toBe("codex usage_limit_exceeded");
+    expect(duplicateHard.rateLimitObservedAtMs).toBe(localTime + 240_000);
+    expect(
+      poller.permission("session", source.home, duplicateHard.rateLimitObservedAtMs ?? 0),
+    ).toBeNull();
+    expect(
+      poller.permission("session", source.home, duplicateHard.rateLimitObservedAtMs ?? 0),
+    ).toBeNull();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(
+      poller.permission("session", source.home, duplicateHard.rateLimitObservedAtMs ?? 0),
+    ).toBe(true);
 
     await appendFile(
       source.file,

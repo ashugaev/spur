@@ -1812,6 +1812,7 @@ describe("readCodexRolloutState incremental chunked reads", () => {
     await readCodexRolloutState(sessionsDir, reader);
     const oldEntry = reader.files.get(rolloutPath(sessionsDir, "rollout-overlap.jsonl"));
     const oldFold = structuredClone(oldEntry?.fold);
+    const oldDigest = oldEntry?.fold.quotaDigest.copy().digest("hex");
     await appendFile(rolloutPath(sessionsDir, "rollout-overlap.jsonl"), rest);
 
     const [left, right] = await Promise.all([
@@ -1823,7 +1824,11 @@ describe("readCodexRolloutState incremental chunked reads", () => {
     expect(cold.tokenUsage).toBeDefined();
     expect(normalizeResult(left)).toEqual(cold);
     expect(normalizeResult(right)).toEqual(cold);
-    expect(oldEntry?.fold).toEqual(oldFold);
+    expect({ ...oldEntry?.fold, quotaDigest: undefined }).toEqual({
+      ...oldFold,
+      quotaDigest: undefined,
+    });
+    expect(oldEntry?.fold.quotaDigest.copy().digest("hex")).toBe(oldDigest);
   });
 
   it.each([false, true])("coalesces overlapping scans after warm=%s", async (warm) => {

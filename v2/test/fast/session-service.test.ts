@@ -27599,6 +27599,85 @@ describe("SessionService", () => {
     );
   });
 
+  it("preserves quota refold delivery until new evidence requires a fresh allow", async () => {
+    const startedAt = Date.now();
+    const session = runningSession({
+      agent: "codex",
+      launchCommand: agentLaunchCommand("codex"),
+      agentSessionId: "quota-root",
+      queuedMessages: { messages: ["retained"], awaitingPrompt: false },
+    });
+    const sessions = createSessionStore(session);
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: new Date(startedAt - 1_000).toISOString(),
+    });
+    const actualCodex = await vi.importActual<typeof CodexModule>("../../src/agents/codex.js");
+    readCodexRolloutStateMock.mockImplementation(actualCodex.readCodexRolloutState);
+    const sessionsDir = join(TEST_DATA_DIR, "session-tools", "api-1", "codex-home", "sessions");
+    mkdirSync(sessionsDir, { recursive: true });
+    const filePath = join(sessionsDir, "rollout-root.jsonl");
+    const hardLine = JSON.stringify({
+      timestamp: new Date(startedAt - 120_000).toISOString(),
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        rate_limits: { rate_limit_reached_type: "workspace_member_credits_depleted" },
+      },
+    });
+    const metaLine = (suffix: string) =>
+      JSON.stringify({
+        timestamp: new Date(startedAt - 60_000).toISOString(),
+        type: "session_meta",
+        payload: { id: "quota-root", suffix },
+      });
+    writeFileSync(filePath, `${metaLine("first")}\n${hardLine}\n`);
+    let permissionStartedAt = startedAt - 1;
+    codexRateLimitPermissionMock.mockImplementation(
+      (_id: string, _home: string, observedAtMs: number) =>
+        permissionStartedAt > observedAtMs ? true : null,
+    );
+    const { SessionService, SessionRateLimitedError } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", new Date(startedAt).toISOString(), {
+      deferBackgroundLoops: true,
+    });
+    expect((await service.get("api-1")).state).toBe("rate_limited");
+    permissionStartedAt = startedAt + 1_000;
+    await vi.advanceTimersByTimeAsync(4_001);
+    expect((await service.get("api-1")).state).toBe("waiting");
+
+    writeFileSync(filePath, `${metaLine("rewritten")}\n${hardLine}\n`);
+    await vi.advanceTimersByTimeAsync(4_001);
+    expect((await service.get("api-1")).state).toBe("waiting");
+    expect(codexRateLimitPermissionMock).toHaveBeenLastCalledWith(
+      "api-1",
+      expect.any(String),
+      startedAt,
+    );
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+    appendFileSync(filePath, `${hardLine}\n`);
+    await vi.advanceTimersByTimeAsync(4_001);
+    expect((await service.get("api-1")).state).toBe("rate_limited");
+    await expect(service.flushQueuedMessage("api-1", "retained")).rejects.toBeInstanceOf(
+      SessionRateLimitedError,
+    );
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["retained"]);
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+    permissionStartedAt = Date.now() + 1_000;
+    await vi.advanceTimersByTimeAsync(4_001);
+    expect((await service.get("api-1")).state).toBe("waiting");
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: true,
+      lastScannedFile: filePath,
+    });
+    await service.flushQueuedMessage("api-1", "retained");
+    expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    expect(sessions.get("api-1")?.queuedMessages).toBeUndefined();
+    service.dispose();
+  });
+
   it("keeps a backward-dated new Codex limit ahead of cached permission", async () => {
     const observedAt = Date.now();
     const session = runningSession({
