@@ -30,11 +30,11 @@ One SDK file, two transports. Page: `<script src="./_spur/sdk.js"></script>`, fe
 
 Writes an `_actions` doc in the agent store; the owner gets one `[spur-action v1]` message and closes it with `spur db <store> done|fail <id>` ([stores.md](stores.md#actions)).
 
-- Resolves once the doc closes: `{ok: true, id, result}`; `{ok: false, reason: "failed", id, error}`; `{ok: false, reason: "timeout", id}` (pending over 15 min).
+- Resolves once the doc closes: `{ok: true, id, result}`; `{ok: false, reason: "failed", id, error}`; `{ok: false, reason: "timeout", id}`.
 - Rejected before delivery, nothing sent: `{ok: false, reason, issues?}`; `reason`: `not_connected`, `unknown_action`, `payload_too_large`, `invalid_payload`, `session_unavailable`, `busy`, `declined`, `stale`.
 - `issues` (snippet schema): up to 20 `{path, code}`; `code`: `type`, `required`, `unknown_property`, `min_length`, `max_length`, `enum`, `minimum`, `maximum`, `integer`, `min_items`, `max_items`, `selection_mismatch`, `depth`.
 - One action in flight. `retry()` re-invokes the last `error` or `timeout` action with its payload, new id, `retryOf` = old id.
-- Page actions: any name `^[a-z0-9][a-z0-9_-]{0,63}$`, payload object up to 48 KiB. Snippet actions: declared in the manifest, payload checked against its schema.
+- Page actions: undeclared; name and payload limits in [stores.md](stores.md#actions). Snippet actions: declared in the manifest, payload checked against its schema.
 - User gesture: only a trusted click or submit on a library control counts. Automated page sends are budgeted ([pages.md](pages.md#page-agent)).
 
 ## Components

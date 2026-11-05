@@ -18,10 +18,10 @@ First `<script type="application/spur-snippet+json">` in the file. Unknown keys 
 
 - Keys: `protocolVersion` (`2`), `snippetId`, `ownerSessionId` (this session's id), `instanceId`, `revision`, `store` (optional), `title`, `actions`.
 - `protocolVersion: 1` files render an error card: rewrite with `2`.
-- `store`: data store for `spur.db` and `spur.state`, `page:<id>` or `session:<owner>`; default `session:<owner>`. Actions and chat always go to `session:<owner>`.
+- `store`: data store for `spur.db` and `spur.state`, `page:<id>` or `session:<owner>`; default `session:<owner>`. Agent store: [spur-sdk.md](spur-sdk.md#stores).
 - `instanceId`: `[A-Za-z0-9-]{8,64}`, fixed for the snippet's life. New value = new snippet: state and last action reset.
 - `revision`: integer 1..2147483647, strictly increasing within an `instanceId`.
-- `title` 1..120 chars, action `label` 1..80 chars. Banned: control characters, `"`, `\`, `[`, `]`, bidi controls, U+061C, U+2028, U+2029.
+- `title` 1..120 chars, action `label` 1..80 chars; banned characters: action `label` in [stores.md](stores.md#actions).
 - `actions`: 1..32 of `{id, label, payload, confirm?}`; ids unique `^[a-z0-9][a-z0-9-]{0,63}$`. `"confirm": "always"`: every invoke asks the user first.
 
 ## Payload schema
@@ -38,12 +38,12 @@ Root is an object schema. Every string needs `maxLength` 1..20000; every array n
 
 ## Actions
 
-`spur.agent.invoke(actionId, payload)` writes an `_actions` doc in `session:<owner>`; the session gets one `[spur-action v1]` message. Close it with `spur db session:$SPUR_SESSION done <id> --result '<json>'` or `fail <id> --error '<text>'`. Result shapes: [spur-sdk.md](spur-sdk.md#invoke).
+`spur.agent.invoke(actionId, payload)`: the session gets one `[spur-action v1]` message; close it per [stores.md](stores.md#actions). Result shapes: [spur-sdk.md](spur-sdk.md#invoke).
 
 - Panel status from the doc: Queued, Agent working (session working), Done, Failed, No reply in 15 min (daemon expiry). Host Retry on Failed and timeout.
 - Host asks the user before an invoke when: the action declares `confirm`, the snippet never had focus, second action on the same revision, 10 unconfirmed sends in a row, or browser storage is unavailable. `spur.agent.send` and `<spur-chat>` pass the same gates except the per-revision one. The count resets only on the user's Send or Retry click.
 - Reload while sending: the panel shows the latest action of this instance from the store; an unacknowledged send is lost.
-- Payload up to 48 KiB, port message up to 128 KiB, state up to 64 KiB. Unit: UTF-8 bytes of the JSON text.
+- Payload up to 48 KiB, port message up to 128 KiB. Unit: UTF-8 bytes of the JSON text.
 
 ## Revisions
 
@@ -54,7 +54,7 @@ Root is an object schema. Every string needs `maxLength` 1..20000; every array n
 
 ## Sandbox
 
-- Iframe `sandbox="allow-scripts"` only; opaque origin: no dashboard cookies, storage or DOM. All store and agent traffic crosses the host port; the host picks the store.
+- Iframe `sandbox="allow-scripts"` only; opaque origin: no dashboard cookies, storage or DOM.
 - CSP in the srcdoc: no network, assets inline or `data:`/`blob:`; no form submit, no popups, no `alert`.
 - Not blocked: WebRTC (network egress), DNS prefetch, self-navigation. A second page load stops the panel with Reload.
 - Over 100 port messages in 10 s stops the panel.

@@ -24,19 +24,18 @@ spur db page:films add items '{"title":"Dune"}'
 ## Live events
 
 - One stream per open tab, `/p/<id>/_spur/events`: `change` (store write, `id` = change seq), `reset` (refetch), `reload` (page file changed), `agent` (page agent status).
-- File edits reload every open tab.
+- Resume: `since=<seq>` or `Last-Event-ID`. 64 open streams per daemon, then `503`.
 
 ## Page agent
 
 - One background session per page, project `spur-page-<id>`, session ids `pg-<id>-<4 hex>`, cwd = page dir, runtime and model from `page.yaml`. Spawned on the first chat message or action; later messages are queued sends.
 - Stopped or errored agent: resumed on the next message, no restore prompt. Gone: a fresh session is spawned and bound.
-- Budgets, persisted in the page store, no time reset:
-  - Automated messages (no user click): 10, reset by a user click. Over: `429`.
-  - User messages: 30 per 10 minutes. Over: `429`.
-  - Recoveries: 3, reset when the agent replies or the user clicks. Over: `503`.
+- Budgets below persist in the page store.
+- Automated messages (no user click): 10, reset by a user click. Over: `429`.
+- User messages: 30 per 10 minutes. Over: `429`.
+- Recoveries: 3, reset when the agent replies or the user clicks. Over: `503`.
 - `spur page rm <id>` kills the page agent, closes open tabs' streams, deletes the dir.
-- Status: `none`, `working`, `idle`, `recovering`, `error`, `rate_limited`.
-- Sessions with `restrictWrites` cannot edit page files.
+- Status values: [spur-sdk.md](spur-sdk.md#api) `agent.status()`.
 
 ## Security
 

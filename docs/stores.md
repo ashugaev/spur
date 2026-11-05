@@ -36,7 +36,7 @@ One SQLite file per store, Firestore-style documents.
 User actions from pages and snippets. Owner: `v2/src/store-actions.ts`.
 
 - Invoke `{id, action, label?, source, payload, userGesture?, retryOf?}` writes `_actions/<id>` `{action, label, source, payload, status: "pending", retryOf?, createdAt}` and delivers one message to the store's agent: `session:<sid>` → that session; `page:<id>` → the page agent. Same `id` again: existing doc, no second delivery.
-- `id` `^[A-Za-z0-9_-]{8,64}$`; `action` `^[a-z0-9][a-z0-9_-]{0,63}$`; `label` 1..80 chars, no control chars, `"`, `\`, `[`, `]`, bidi controls (default `action`); `payload` JSON object up to 49152 bytes; `retryOf` names a `failed` action.
+- `id` `^[A-Za-z0-9_-]{8,64}$`; `action` `^[a-z0-9][a-z0-9_-]{0,63}$`; `label` 1..80 chars, banned: control characters, `"`, `\`, `[`, `]`, bidi controls, U+061C, U+2028, U+2029 (default `action`); `payload` JSON object up to 49152 bytes; `retryOf` names a `failed` action.
 - Up to 20 pending per store (`429`). Pending older than 15 minutes reads back `failed` with `error: "timeout"`.
 - Delivery failure (budget, closed session): doc `failed` with the error; no retry.
 - Agent closes it once: `spur db <store> done <id> --result '<json>'` or `spur db <store> fail <id> --error '<text>'`. Doc gets `status` `done|failed`, `result|error`, `completedAt`.

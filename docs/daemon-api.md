@@ -95,7 +95,7 @@
 
 ## Store routes
 
-`:store` = `page:<id>` or `session:<sid>`, `:` may arrive as `%3A`; [stores.md](stores.md); `v2/src/stores.ts`.
+`:store` = `page:<id>` or `session:<sid>`, `:` accepted as `%3A`; [stores.md](stores.md); `v2/src/stores.ts`, `v2/src/store-agent.ts`, `v2/src/store-actions.ts`.
 
 - `GET /stores/:store/docs/:collection`
 - `POST /stores/:store/docs/:collection`
@@ -105,18 +105,16 @@
 - `DELETE /stores/:store/docs/:collection/:docId`
 - `POST /stores/:store/query/:collection`
 - `GET /stores/:store/changes`
-- `POST /stores/:store/agent/send` — `{message, userGesture?}`; `429` delivery budget, `503` page agent recovery budget; `v2/src/store-agent.ts`.
-- `GET /stores/:store/agent/messages` — `from`, `limit` (1..100, default 50); adds `status`.
-- `GET /stores/:store/agent/status` — `{state: none|working|idle|recovering|error|rate_limited, sessionId}`.
-- `POST /stores/:store/actions` — invoke; `409` closed store, `429` 20 pending or budget; `v2/src/store-actions.ts`.
-- `POST /stores/:store/actions/:actionId/complete` — `{status: done|failed, result?, error?}`; `409` not pending or timed out; CLI and agents only, the web proxy refuses it.
+- `POST /stores/:store/agent/send`
+- `GET /stores/:store/agent/messages`
+- `GET /stores/:store/agent/status`
+- `POST /stores/:store/actions`
+- `POST /stores/:store/actions/:actionId/complete` — CLI and agents only; the web proxy refuses it.
 
 ## Page routes
 
-[pages.md](pages.md); `v2/src/pages.ts`.
-
-- `GET /pages`
-- `POST /pages` — `409` duplicate id.
+- `GET /pages` — [pages.md](pages.md); `v2/src/pages.ts`.
+- `POST /pages`
 - `DELETE /pages/:id`
-- `GET /pages/:id/files/:path` — `no-store`; dot paths and `data.sqlite*` 404.
-- `GET /pages/:id/events` — `text/event-stream` only (`406` otherwise); events `change`, `reset`, `reload`, `agent`; `since` or `Last-Event-ID`; 64 open streams, then `503`.
+- `GET /pages/:id/files/:path`
+- `GET /pages/:id/events` — `v2/src/sse.ts`.
