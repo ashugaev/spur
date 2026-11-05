@@ -1,8 +1,11 @@
-/* Spur snippet SDK v1 and generic component library.
- * Inlined by the host into the snippet srcdoc; never loaded over the network.
- * Message type strings mirror src/lib/snippets/snippet-protocol.ts
- * (guarded by src/__tests__/snippet-sdk.test.ts). All colors come from the
- * host theme tokens as --spur-<token> custom properties. */
+/* Spur SDK v2: one window.spur for pages and snippets, plus the generic component library.
+ * Transport chosen once: a snippet frame (window.__SPUR_SNIPPET_BOOT__, SDK inlined by the
+ * host) talks to the dashboard panel over a MessageChannel port; a page (/p/<id>/,
+ * loaded as ./_spur/sdk.js) uses fetch plus one EventSource on ./_spur/events.
+ * Port message strings mirror src/lib/snippets/snippet-protocol.ts (guarded by
+ * src/__tests__/spur-sdk.test.ts). Colors come from --spur-<token> custom properties:
+ * host theme tokens in snippets, CSS system colors in pages. User text renders via
+ * textContent only. */
 (function () {
   "use strict";
 
@@ -11,6 +14,11 @@
     connect: "spur:connect",
     invoke: "invoke",
     stateSet: "state-set",
+    stateLoad: "state-load",
+    db: "db",
+    dbSubscribe: "db-subscribe",
+    dbUnsubscribe: "db-unsubscribe",
+    agent: "agent",
     fullscreen: "fullscreen",
     resize: "resize",
     escape: "escape",
@@ -19,37 +27,46 @@
     action: "action",
     theme: "theme",
     availability: "availability",
+    dbChange: "db-change",
+    dbReset: "db-reset",
+    agentEvent: "agent-event",
   };
-  const PROTOCOL_VERSION = 1;
+  const PROTOCOL_VERSION = 2;
   const HELLO_INTERVAL_MS = 200;
   const HELLO_MAX = 25;
   const STATE_WINDOW_MS = 500;
   const STATE_MAX_BYTES = 64 * 1024;
-  const TERMINAL = ["completed", "replaced", "error", "delivery_unknown", "timeout"];
-  const RETRYABLE = ["error", "delivery_unknown", "timeout"];
+  const AGENT_POLL_MS = 2000;
+  const TERMINAL = ["completed", "error", "timeout"];
+  const RETRYABLE = ["error", "timeout"];
   const STATUS_LABELS = {
     awaiting_confirm: "Confirm to send",
     submitting: "Sent",
-    accepted: "Sent",
     queued: "Queued",
     processing: "Agent working",
     completed: "Done",
-    replaced: "Replaced",
     error: "Send failed",
-    delivery_unknown: "Delivery unknown",
     timeout: "No reply in 15 min",
   };
+  const AGENT_LABELS = {
+    none: "Agent starts on first message",
+    working: "Agent working",
+    idle: "Agent idle",
+    recovering: "Agent restarting",
+    error: "Agent unavailable",
+    rate_limited: "Agent rate limited",
+  };
   const REJECTION_TEXT = {
-    not_connected: "Snippet is not connected.",
-    revision_conflict:
-      "This revision changed in place. Actions are blocked until the next revision.",
+    not_connected: "Not connected.",
     unknown_action: "Unknown action.",
     payload_too_large: "Payload is too large.",
     invalid_payload: "Invalid payload.",
-    session_unavailable: "The session is not accepting messages.",
+    session_unavailable: "The agent is not accepting messages.",
     busy: "Another action is still in flight.",
     declined: "Action discarded.",
     stale: "Snippet was replaced before the action was sent.",
+    failed: "The agent reported a failure.",
+    timeout: "No reply in 15 min.",
   };
   const ISSUE_WORDS = {
     type: "wrong type",
@@ -66,6 +83,25 @@
     selection_mismatch: "selection mismatch",
     depth: "nested too deep",
   };
+  // Page defaults: CSS system colors, so a page follows the OS light/dark scheme.
+  const PAGE_THEME = {
+    "bg-base": "Canvas",
+    "bg-surface": "Canvas",
+    "bg-elevated": "Canvas",
+    "text-primary": "CanvasText",
+    "text-secondary": "CanvasText",
+    "text-tertiary": "GrayText",
+    "border-default": "GrayText",
+    "border-subtle": "ButtonFace",
+    accent: "AccentColor",
+    "status-error": "Mark",
+    "status-ready": "AccentColor",
+    "input-bg": "Field",
+    "input-border": "GrayText",
+    "text-inverse": "AccentColorText",
+    "status-working": "Highlight",
+    "status-attention": "Mark",
+  };
   const FIELD_TAGS = "spur-choice-list, spur-text-input, spur-textarea";
   const BOUND_SELECTOR =
     "[data-spur-action], spur-button, spur-choice-list, spur-choice, spur-text-input, spur-textarea";
@@ -73,19 +109,22 @@
     '<svg class="spur-spin" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"></path></svg>';
 
   const boot = window.__SPUR_SNIPPET_BOOT__;
-  let port = null;
   let context = null;
   let action = null;
   let availability = { canInvoke: true, reason: null };
   let rejection = null;
   let invokingEl = null;
-  const listeners = { action: [], theme: [], fullscreen: [], availability: [] };
-  const calls = new Map();
-  let callCounter = 0;
+  let agentStatus = { state: "none", sessionId: null };
+  const listeners = {
+    action: [],
+    theme: [],
+    fullscreen: [],
+    availability: [],
+    agent: [],
+    message: [],
+  };
   let appState = null;
   let stateTimer = null;
-  let lastHeight = null;
-  let resizeFrame = 0;
   let readyResolve = null;
   const readyPromise = new Promise(function (resolve) {
     readyResolve = resolve;
@@ -104,10 +143,6 @@
     });
   }
 
-  function post(message) {
-    if (port) port.postMessage(message);
-  }
-
   function isTerminal(status) {
     return TERMINAL.indexOf(status) >= 0;
   }
@@ -117,6 +152,7 @@
   }
 
   function formatRejection(result) {
+    if (result.reason === "failed" && result.error) return String(result.error);
     const text = REJECTION_TEXT[result.reason] || "Action rejected.";
     if (result.reason !== "invalid_payload" || !result.issues || result.issues.length === 0) {
       return text;
@@ -145,11 +181,402 @@
     }
   }
 
+  function randomId() {
+    const bytes = new Uint8Array(10);
+    crypto.getRandomValues(bytes);
+    return (
+      "act-" +
+      Array.from(bytes)
+        .map(function (b) {
+          return b.toString(16).padStart(2, "0");
+        })
+        .join("")
+    );
+  }
+
+  function encodeSegment(value) {
+    return encodeURIComponent(String(value));
+  }
+
+  // ----------------------------------------------------------------- transports
+  // Shared interface:
+  //   connect() -> Promise<context>  {dataStore, agentStore, state, controls, theme?, ...}
+  //   db(method, path, body) -> Promise<{ok, status, body}>   path relative to the data store
+  //   agent(op, args) -> Promise<{ok, status, body}>          send | messages | status
+  //   invoke(request) -> Promise<result>                      final resolution shape
+  //   stateSave(app, controls) -> void
+  //   subscribe(store) / unsubscribe(store)                   change feed for onSnapshot
+  //   requestFullscreen(open) -> Promise<boolean>
+  // Events arrive through `onTransportEvent`.
+
+  function onTransportEvent(event) {
+    switch (event.type) {
+      case "change":
+        dispatchChange(event.change);
+        return;
+      case "reset":
+        refreshSnapshots();
+        return;
+      case "reload":
+        window.location.reload();
+        return;
+      case "agent":
+        agentStatus = event.status;
+        emit("agent", agentStatus);
+        return;
+      default:
+    }
+  }
+
+  function createPortTransport() {
+    let port = null;
+    const calls = new Map();
+    let callCounter = 0;
+    let lastHeight = null;
+    let resizeFrame = 0;
+
+    function post(message) {
+      if (port) port.postMessage(message);
+    }
+
+    function request(message) {
+      return new Promise(function (resolve) {
+        callCounter += 1;
+        const callId = "c" + callCounter;
+        calls.set(callId, resolve);
+        message.callId = callId;
+        post(message);
+      });
+    }
+
+    function onPortMessage(event) {
+      const data = event.data;
+      if (!data || typeof data.type !== "string") return;
+      if (typeof data.callId === "string" && calls.has(data.callId)) {
+        const resolve = calls.get(data.callId);
+        calls.delete(data.callId);
+        resolve(data);
+        if (data.type !== MSG.fullscreen) return;
+      }
+      switch (data.type) {
+        case MSG.action:
+          setAction(data.action);
+          return;
+        case MSG.theme:
+          context.theme = data.theme;
+          applyTheme(data.theme);
+          emit("theme", data.theme);
+          return;
+        case MSG.availability:
+          availability = data.availability;
+          refreshControls();
+          emit("availability", availability);
+          return;
+        case MSG.fullscreen:
+          if (context && context.fullscreen !== data.fullscreen) {
+            context.fullscreen = data.fullscreen;
+            emit("fullscreen", { fullscreen: data.fullscreen });
+          }
+          return;
+        case MSG.dbChange:
+          onTransportEvent({ type: "change", change: data.change });
+          return;
+        case MSG.dbReset:
+          onTransportEvent({ type: "reset" });
+          return;
+        case MSG.agentEvent:
+          onTransportEvent({ type: "agent", status: data.status });
+          return;
+        default:
+      }
+    }
+
+    function reportHeight() {
+      resizeFrame = 0;
+      if (!port) return;
+      const height = Math.ceil(document.documentElement.getBoundingClientRect().height);
+      if (height === lastHeight) return;
+      lastHeight = height;
+      post({ type: MSG.resize, height: height });
+    }
+
+    function scheduleHeight() {
+      if (resizeFrame) return;
+      resizeFrame = requestAnimationFrame(reportHeight);
+    }
+
+    function connect() {
+      return new Promise(function (resolve) {
+        function onConnect(event) {
+          const data = event.data;
+          if (port || event.source !== window.parent) return;
+          if (!data || data.type !== MSG.connect || !event.ports || !event.ports[0]) return;
+          port = event.ports[0];
+          port.onmessage = onPortMessage;
+          const ctx = data.context;
+          if (ctx.fonts) registerFonts(ctx.fonts);
+          new ResizeObserver(scheduleHeight).observe(document.documentElement);
+          new MutationObserver(function () {
+            queueMicrotask(scheduleHeight);
+          }).observe(document.documentElement, { childList: true, subtree: true });
+          whenParsed(scheduleHeight);
+          document.addEventListener("keydown", function (keyEvent) {
+            if (keyEvent.key === "Escape" && context && context.fullscreen) {
+              post({ type: MSG.escape });
+            }
+          });
+          resolve(ctx);
+        }
+        window.addEventListener("message", onConnect);
+        let hellos = 0;
+        (function hello() {
+          if (port || hellos >= HELLO_MAX) return;
+          hellos += 1;
+          window.parent.postMessage(
+            { type: MSG.hello, protocolVersion: PROTOCOL_VERSION, nonce: boot.nonce },
+            "*",
+          );
+          setTimeout(hello, HELLO_INTERVAL_MS);
+        })();
+      });
+    }
+
+    return {
+      kind: "port",
+      connect: connect,
+      connected: function () {
+        return port !== null;
+      },
+      db: function (method, path, body) {
+        const message = { type: MSG.db, method: method, path: path };
+        if (body !== undefined) message.body = body;
+        return request(message);
+      },
+      agent: function (op, args) {
+        return request(Object.assign({ type: MSG.agent, op: op }, args || {}));
+      },
+      invoke: function (req) {
+        const message = { type: MSG.invoke, action: req.action, payload: req.payload };
+        if (req.retry) message.retry = true;
+        if (req.trusted) message.trusted = true;
+        return request(message).then(function (result) {
+          const out = Object.assign({}, result);
+          delete out.type;
+          delete out.callId;
+          return out;
+        });
+      },
+      stateSave: function (app, controls) {
+        post({ type: MSG.stateSet, app: app, controls: controls });
+      },
+      subscribe: function (store) {
+        post({ type: MSG.dbSubscribe, store: store });
+      },
+      unsubscribe: function (store) {
+        post({ type: MSG.dbUnsubscribe, store: store });
+      },
+      requestFullscreen: function (open) {
+        if (!open) {
+          post({ type: MSG.fullscreen, open: false });
+          return Promise.resolve(false);
+        }
+        return request({ type: MSG.fullscreen, open: true }).then(function (data) {
+          return data.granted === true;
+        });
+      },
+    };
+  }
+
+  function createPageTransport() {
+    const base = "./_spur/";
+    let source = null;
+    const waiters = new Map();
+
+    function call(method, path, body) {
+      const init = { method: method, headers: { accept: "application/json" } };
+      if (body !== undefined) {
+        init.headers["content-type"] = "application/json";
+        init.body = JSON.stringify(body);
+      }
+      return fetch(base + path, init).then(
+        function (response) {
+          return response
+            .json()
+            .catch(function () {
+              return {};
+            })
+            .then(function (json) {
+              return { ok: response.ok, status: response.status, body: json };
+            });
+        },
+        function () {
+          return { ok: false, status: 0, body: { error: "network error" } };
+        },
+      );
+    }
+
+    function readAction(id) {
+      return call("GET", "db/docs/_actions/" + encodeSegment(id));
+    }
+
+    function settleIfClosed(id) {
+      const waiter = waiters.get(id);
+      if (!waiter) return;
+      readAction(id).then(function (response) {
+        if (!response.ok || !waiters.has(id)) return;
+        const doc = response.body;
+        setAction(actionEventFromDoc(doc));
+        const result = resultFromDoc(doc);
+        if (result) {
+          waiters.delete(id);
+          waiter(result);
+        }
+      });
+    }
+
+    return {
+      kind: "page",
+      connect: function () {
+        source = new EventSource(base + "events");
+        source.addEventListener("change", function (event) {
+          const change = JSON.parse(event.data);
+          if (change.collection === "_actions") settleIfClosed(change.id);
+          onTransportEvent({ type: "change", change: change });
+        });
+        source.addEventListener("reset", function () {
+          waiters.forEach(function (_waiter, id) {
+            settleIfClosed(id);
+          });
+          onTransportEvent({ type: "reset" });
+        });
+        source.addEventListener("reload", function () {
+          onTransportEvent({ type: "reload" });
+        });
+        source.addEventListener("agent", function (event) {
+          onTransportEvent({ type: "agent", status: JSON.parse(event.data) });
+        });
+        applyTheme({ mode: null, tokens: PAGE_THEME });
+        return call("GET", "db/docs/_state/page").then(function (response) {
+          const stored = response.ok ? response.body.data : null;
+          return {
+            dataStore: "page",
+            agentStore: "page",
+            state: stored ? stored.app : null,
+            controls: stored && Array.isArray(stored.controls) ? stored.controls : [],
+            fullscreen: false,
+          };
+        });
+      },
+      connected: function () {
+        return source !== null;
+      },
+      db: function (method, path, body) {
+        return call(method, "db/" + path, body);
+      },
+      agent: function (op, args) {
+        if (op === "send") return call("POST", "agent/send", args);
+        const from = args && args.from !== undefined ? "?from=" + encodeSegment(args.from) : "";
+        return call("GET", "agent/" + op + from);
+      },
+      invoke: function (req) {
+        const previous = req.retry ? action : null;
+        if (req.retry && !previous) return Promise.resolve({ ok: false, reason: "busy" });
+        const id = randomId();
+        const body = {
+          id: id,
+          action: req.retry ? previous.action : req.action,
+          payload: req.retry ? previous.payload || {} : req.payload || {},
+          source: { kind: "page" },
+        };
+        if (req.retry) body.retryOf = previous.id;
+        if (req.trusted) body.userGesture = true;
+        setAction({ id: id, action: body.action, payload: body.payload, status: "submitting" });
+        return new Promise(function (resolve) {
+          waiters.set(id, resolve);
+          call("POST", "actions", body).then(function (response) {
+            if (response.ok) {
+              setAction(actionEventFromDoc(response.body));
+              settleIfClosed(id);
+              return;
+            }
+            waiters.delete(id);
+            if (response.status === 400 || response.status === 413) {
+              setAction(null);
+              resolve({
+                ok: false,
+                reason: response.status === 413 ? "payload_too_large" : "invalid_payload",
+              });
+              return;
+            }
+            readAction(id).then(function (doc) {
+              if (doc.ok) {
+                setAction(actionEventFromDoc(doc.body));
+                resolve(resultFromDoc(doc.body) || { ok: false, reason: "failed", id: id });
+              } else {
+                setAction(null);
+                resolve({ ok: false, reason: "session_unavailable" });
+              }
+            });
+          });
+        });
+      },
+      stateSave: function (app, controls) {
+        call("POST", "db/docs/_state/page", { data: { app: app, controls: controls } });
+      },
+      subscribe: function () {},
+      unsubscribe: function () {},
+      requestFullscreen: function (open) {
+        if (!open) {
+          if (document.fullscreenElement) document.exitFullscreen();
+          return Promise.resolve(false);
+        }
+        return document.documentElement.requestFullscreen().then(
+          function () {
+            return true;
+          },
+          function () {
+            return false;
+          },
+        );
+      },
+    };
+  }
+
+  function actionEventFromDoc(doc) {
+    const data = doc.data || {};
+    let status = "queued";
+    if (data.status === "pending")
+      status = agentStatus.state === "working" ? "processing" : "queued";
+    else if (data.status === "done") status = "completed";
+    else if (data.status === "failed") status = data.error === "timeout" ? "timeout" : "error";
+    return {
+      id: doc.id,
+      action: data.action,
+      payload: data.payload,
+      status: status,
+      error: data.error,
+      result: data.result,
+    };
+  }
+
+  function resultFromDoc(doc) {
+    const data = doc.data || {};
+    if (data.status === "done") return { ok: true, id: doc.id, result: data.result };
+    if (data.status === "failed") {
+      return data.error === "timeout"
+        ? { ok: false, reason: "timeout", id: doc.id }
+        : { ok: false, reason: "failed", id: doc.id, error: data.error };
+    }
+    return null;
+  }
+
+  const transport = boot ? createPortTransport() : createPageTransport();
+
   // --------------------------------------------------------------- styles
 
   const STYLE = [
     "html{height:auto}",
-    "html,body{background:transparent;color:var(--spur-text-primary);font-family:var(--spur-font);font-size:12px;letter-spacing:.02em}",
+    "html,body{background:transparent;color:var(--spur-text-primary);font-family:var(--spur-font,system-ui,sans-serif);font-size:12px;letter-spacing:.02em}",
     "*{box-sizing:border-box}",
     "body{margin:0;padding:12px;display:flex;flex-direction:column;gap:12px}",
     "spur-form{display:flex;flex-direction:column;gap:8px}",
@@ -196,13 +623,21 @@
     "spur-loader{display:inline-flex;color:var(--spur-text-secondary)}",
     "spur-empty,spur-error{display:block;border:1px solid var(--spur-border-subtle);padding:8px 10px;color:var(--spur-text-secondary)}",
     "spur-error{border-color:color-mix(in srgb,var(--spur-status-error) 40%,transparent);color:var(--spur-status-error);white-space:pre-line}",
+    "spur-chat{display:flex;flex-direction:column;gap:8px;border:1px solid var(--spur-border-default);padding:8px}",
+    ".spur-chat-log{display:flex;flex-direction:column;gap:6px;max-height:320px;overflow-y:auto}",
+    ".spur-chat-msg{white-space:pre-wrap;line-height:1.5;padding:4px 8px;border-left:2px solid var(--spur-border-subtle)}",
+    ".spur-chat-msg[data-role=assistant]{border-left-color:var(--spur-accent)}",
+    ".spur-chat-status{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--spur-text-tertiary)}",
+    ".spur-chat-form{display:flex;gap:6px}",
+    ".spur-chat-form input{flex:1;font:inherit;color:var(--spur-text-primary);background:var(--spur-input-bg);border:1px solid var(--spur-input-border);padding:6px 8px;border-radius:0}",
   ].join("\n");
 
   function installStyles() {
     const style = document.createElement("style");
     style.setAttribute("data-spur-sdk", "");
     style.textContent = STYLE;
-    document.head.insertBefore(style, document.head.firstChild);
+    const head = document.head || document.documentElement;
+    head.insertBefore(style, head.firstChild);
   }
 
   // ---------------------------------------------------- busy and availability
@@ -242,20 +677,6 @@
   }
 
   // ----------------------------------------------------------------- invoke
-
-  function nextCallId() {
-    callCounter += 1;
-    return "c" + callCounter;
-  }
-
-  function request(message) {
-    return new Promise(function (resolve) {
-      const callId = nextCallId();
-      calls.set(callId, resolve);
-      message.callId = callId;
-      post(message);
-    });
-  }
 
   function invalidFieldPaths(issues) {
     const names = {};
@@ -314,35 +735,91 @@
     refreshControls();
   }
 
-  function invoke(actionId, payload, retryOf) {
-    if (!port) return Promise.resolve({ ok: false, reason: "not_connected" });
+  // Pre-delivery rejections never reach the agent; `failed`/`timeout` come from the doc.
+  function isPreDelivery(result) {
+    return !result.ok && result.reason !== "failed" && result.reason !== "timeout";
+  }
+
+  function invokeAction(name, payload, trusted, retry) {
+    if (!transport.connected()) return Promise.resolve({ ok: false, reason: "not_connected" });
+    if (!retry && isBusy()) return Promise.resolve({ ok: false, reason: "busy" });
     const before = action;
-    const message = { type: MSG.invoke, actionId: actionId };
-    if (payload !== undefined) message.payload = payload;
-    if (retryOf) message.retryOf = retryOf;
-    return request(message).then(function (result) {
-      if (result.ok) {
-        clearRejection();
-      } else {
-        if (action && action.status === "awaiting_confirm") {
-          action = before;
-          if (before) emit("action", before);
+    return transport
+      .invoke({ action: name, payload: payload || {}, trusted: trusted === true, retry: retry })
+      .then(function (result) {
+        if (result.ok) {
+          clearRejection();
+        } else if (isPreDelivery(result)) {
+          if (action && action.status === "awaiting_confirm") {
+            action = before;
+            if (before) emit("action", before);
+          }
+          showRejection(result);
+        } else {
+          refreshControls();
         }
-        showRejection(result);
-      }
-      return result.ok ? { ok: true, requestId: result.requestId } : result;
-    });
+        return result;
+      });
   }
 
-  function setInvokingEl(node) {
-    invokingEl = node;
-  }
-
-  function retry() {
+  function retryAction(trusted) {
     if (!action || RETRYABLE.indexOf(action.status) < 0) {
       return Promise.resolve({ ok: false, reason: "busy" });
     }
-    return invoke(action.actionId, undefined, action.requestId);
+    return invokeAction(action.action, undefined, trusted, true);
+  }
+
+  // ----------------------------------------------------------------- agent
+
+  function sendMessage(text, trusted) {
+    const message = String(text || "").trim();
+    if (!message) return Promise.resolve({ ok: false, reason: "invalid_payload" });
+    if (!transport.connected()) return Promise.resolve({ ok: false, reason: "not_connected" });
+    return transport
+      .agent("send", { message: message, userGesture: trusted === true })
+      .then(function (response) {
+        return response.ok
+          ? { ok: true, sessionId: response.body.sessionId }
+          : { ok: false, reason: "session_unavailable", error: response.body.error };
+      });
+  }
+
+  // One poller per document, shared by every onMessage listener and <spur-chat>.
+  const messagePoll = { timer: null, from: undefined, seen: new Set(), messages: [] };
+
+  function pollMessages() {
+    const args = messagePoll.from === undefined ? {} : { from: messagePoll.from };
+    return transport.agent("messages", args).then(function (response) {
+      if (!response.ok) return;
+      const body = response.body;
+      if (body.status) {
+        const changed =
+          body.status.state !== agentStatus.state ||
+          body.status.sessionId !== agentStatus.sessionId;
+        agentStatus = body.status;
+        if (changed) emit("agent", agentStatus);
+      }
+      if (body.sessionId === null) return;
+      (body.messages || []).forEach(function (message) {
+        const key = body.sessionId + ":" + message.index;
+        if (messagePoll.seen.has(key)) return;
+        messagePoll.seen.add(key);
+        messagePoll.messages.push(message);
+        emit("message", message);
+      });
+      if (typeof body.nextFrom === "number") messagePoll.from = body.nextFrom;
+    });
+  }
+
+  function startMessagePoll() {
+    if (messagePoll.timer !== null) return;
+    const tick = function () {
+      pollMessages().finally(function () {
+        messagePoll.timer = setTimeout(tick, AGENT_POLL_MS);
+      });
+    };
+    messagePoll.timer = 0;
+    readyPromise.then(tick);
   }
 
   // ------------------------------------------------------------------ state
@@ -357,15 +834,10 @@
   }
 
   function scheduleStateSend() {
-    if (!port || stateTimer !== null) return;
+    if (!transport.connected() || stateTimer !== null) return;
     stateTimer = setTimeout(function () {
       stateTimer = null;
-      post({
-        type: MSG.stateSet,
-        callId: nextCallId(),
-        app: appState,
-        controls: collectControls(),
-      });
+      transport.stateSave(appState, collectControls());
     }, STATE_WINDOW_MS);
   }
 
@@ -373,6 +845,150 @@
     if (node.getAttribute("id")) scheduleStateSend();
     if (node.hasAttribute("aria-invalid") && typeof node.setIssue === "function")
       node.setIssue(null);
+  }
+
+  // ------------------------------------------------------------------- db
+
+  const snapshots = new Set();
+
+  function dispatchChange(change) {
+    snapshots.forEach(function (snapshot) {
+      if (snapshot.collection === change.collection) snapshot.run();
+    });
+  }
+
+  function refreshSnapshots() {
+    snapshots.forEach(function (snapshot) {
+      snapshot.run();
+    });
+  }
+
+  function dbResult(response) {
+    if (response.ok) return response.body;
+    const error = new Error((response.body && response.body.error) || "Store request failed");
+    error.status = response.status;
+    throw error;
+  }
+
+  function makeQuery(collection, clauses) {
+    function body() {
+      const out = {};
+      if (clauses.where.length) out.where = clauses.where;
+      if (clauses.orderBy) out.orderBy = clauses.orderBy;
+      if (clauses.limit !== undefined) out.limit = clauses.limit;
+      if (clauses.startAfter !== undefined) out.startAfter = clauses.startAfter;
+      return out;
+    }
+    const query = {
+      where: function (field, op, value) {
+        return makeQuery(
+          collection,
+          Object.assign({}, clauses, {
+            where: clauses.where.concat([{ field: field, op: op, value: value }]),
+          }),
+        );
+      },
+      orderBy: function (field, direction) {
+        return makeQuery(
+          collection,
+          Object.assign({}, clauses, { orderBy: { field: field, direction: direction || "asc" } }),
+        );
+      },
+      limit: function (count) {
+        return makeQuery(collection, Object.assign({}, clauses, { limit: count }));
+      },
+      startAfter: function (docId) {
+        return makeQuery(collection, Object.assign({}, clauses, { startAfter: docId }));
+      },
+      get: function () {
+        return readyPromise
+          .then(function () {
+            return transport.db("POST", "query/" + encodeSegment(collection), body());
+          })
+          .then(dbResult)
+          .then(function (result) {
+            return result.docs;
+          });
+      },
+      onSnapshot: function (callback, onError) {
+        let generation = 0;
+        const snapshot = {
+          collection: collection,
+          run: function () {
+            generation += 1;
+            const mine = generation;
+            query.get().then(
+              function (docs) {
+                if (mine === generation && snapshots.has(snapshot)) callback(docs);
+              },
+              function (error) {
+                if (onError) onError(error);
+              },
+            );
+          },
+        };
+        snapshots.add(snapshot);
+        if (snapshots.size === 1)
+          readyPromise.then(function () {
+            transport.subscribe(context.dataStore);
+          });
+        snapshot.run();
+        return function () {
+          snapshots.delete(snapshot);
+          if (snapshots.size === 0) transport.unsubscribe(context.dataStore);
+        };
+      },
+    };
+    return query;
+  }
+
+  function collectionRef(collection) {
+    const ref = makeQuery(collection, { where: [] });
+    ref.add = function (data) {
+      return readyPromise
+        .then(function () {
+          return transport.db("POST", "docs/" + encodeSegment(collection), { data: data });
+        })
+        .then(dbResult);
+    };
+    ref.doc = function (docId) {
+      const path = "docs/" + encodeSegment(collection) + "/" + encodeSegment(docId);
+      function write(method, data, options) {
+        const payload = { data: data };
+        if (options && options.expectedRev !== undefined) payload.expectedRev = options.expectedRev;
+        return readyPromise
+          .then(function () {
+            return transport.db(method, path, payload);
+          })
+          .then(dbResult);
+      }
+      return {
+        id: docId,
+        get: function () {
+          return readyPromise
+            .then(function () {
+              return transport.db("GET", path);
+            })
+            .then(function (response) {
+              return response.status === 404 ? null : dbResult(response);
+            });
+        },
+        set: function (data, options) {
+          return write("POST", data, options);
+        },
+        update: function (data, options) {
+          return write("PATCH", data, options);
+        },
+        delete: function () {
+          return readyPromise
+            .then(function () {
+              return transport.db("DELETE", path);
+            })
+            .then(dbResult);
+        },
+      };
+    };
+    return ref;
   }
 
   // ----------------------------------------------------------- selection
@@ -405,10 +1021,46 @@
     ready: function () {
       return readyPromise;
     },
-    invoke: function (actionId, payload) {
-      return invoke(actionId, payload);
+    db: {
+      collection: function (name) {
+        return collectionRef(name);
+      },
     },
-    retry: retry,
+    state: {
+      get: function () {
+        return appState;
+      },
+      set: function (value) {
+        if (byteLength(value) > STATE_MAX_BYTES) throw new RangeError("spur state over 64 KiB");
+        appState = value;
+        scheduleStateSend();
+      },
+    },
+    agent: {
+      invoke: function (name, payload) {
+        return invokeAction(name, payload, false, false);
+      },
+      retry: function () {
+        return retryAction(false);
+      },
+      send: function (text) {
+        return sendMessage(text, false);
+      },
+      onMessage: function (handler) {
+        startMessagePoll();
+        return sdk.on("message", handler);
+      },
+      status: function () {
+        return readyPromise
+          .then(function () {
+            return transport.agent("status");
+          })
+          .then(function (response) {
+            if (response.ok) agentStatus = response.body;
+            return agentStatus;
+          });
+      },
+    },
     on: function (event, handler) {
       listeners[event].push(handler);
       return function () {
@@ -423,22 +1075,12 @@
       });
       return off;
     },
-    state: {
-      get: function () {
-        return appState;
-      },
-      set: function (value) {
-        if (byteLength(value) > STATE_MAX_BYTES) throw new RangeError("snippet state over 64 KiB");
-        appState = value;
-        scheduleStateSend();
-      },
-    },
     requestFullscreen: function () {
-      if (!port) return Promise.resolve(false);
-      return request({ type: MSG.fullscreen, open: true });
+      if (!transport.connected()) return Promise.resolve(false);
+      return transport.requestFullscreen(true);
     },
     exitFullscreen: function () {
-      post({ type: MSG.fullscreen, open: false });
+      transport.requestFullscreen(false);
     },
     selection: function (sourceId) {
       return selectionFromDocument(sourceId);
@@ -453,12 +1095,12 @@
   Object.defineProperty(sdk, "formatRejection", { value: formatRejection });
   window.spur = sdk;
 
-  // -------------------------------------------------------------- port + host
+  // -------------------------------------------------------------- theme + boot
 
   function applyTheme(theme) {
     const root = document.documentElement;
     // Without it Chromium paints an opaque light canvas under a dark host.
-    root.style.colorScheme = theme.mode;
+    root.style.colorScheme = theme.mode || "light dark";
     Object.keys(theme.tokens).forEach(function (token) {
       root.style.setProperty("--spur-" + token, theme.tokens[token]);
     });
@@ -489,109 +1131,21 @@
     });
   }
 
-  function onPortMessage(event) {
-    const data = event.data;
-    if (!data || typeof data.type !== "string") return;
-    switch (data.type) {
-      case MSG.invokeResult:
-      case MSG.stateAck: {
-        const resolve = calls.get(data.callId);
-        if (resolve) {
-          calls.delete(data.callId);
-          resolve(data);
-        }
-        return;
-      }
-      case MSG.action:
-        setAction(data.action);
-        return;
-      case MSG.theme:
-        context.theme = data.theme;
-        applyTheme(data.theme);
-        emit("theme", data.theme);
-        return;
-      case MSG.availability:
-        availability = data.availability;
-        refreshControls();
-        emit("availability", availability);
-        return;
-      case MSG.fullscreen: {
-        if (typeof data.callId === "string") {
-          const pending = calls.get(data.callId);
-          if (pending) {
-            calls.delete(data.callId);
-            pending(data.granted === true);
-          }
-        }
-        if (context && context.fullscreen !== data.fullscreen) {
-          context.fullscreen = data.fullscreen;
-          emit("fullscreen", { fullscreen: data.fullscreen });
-        }
-        return;
-      }
-      default:
-    }
-  }
-
-  function reportHeight() {
-    resizeFrame = 0;
-    if (!port) return;
-    const height = Math.ceil(document.documentElement.getBoundingClientRect().height);
-    if (height === lastHeight) return;
-    lastHeight = height;
-    post({ type: MSG.resize, height: height });
-  }
-
-  function scheduleHeight() {
-    if (resizeFrame) return;
-    resizeFrame = requestAnimationFrame(reportHeight);
-  }
-
-  function onConnect(event) {
-    const data = event.data;
-    if (port || event.source !== window.parent) return;
-    if (!data || data.type !== MSG.connect || !event.ports || !event.ports[0]) return;
-    port = event.ports[0];
-    context = data.context;
-    availability = context.availability;
-    action = context.action;
-    appState = context.state;
-    port.onmessage = onPortMessage;
-    applyTheme(context.theme);
-    if (context.fonts) registerFonts(context.fonts);
-    new ResizeObserver(scheduleHeight).observe(document.documentElement);
-    whenParsed(function () {
-      scheduleHeight();
-      refreshControls();
-    });
-    restoreControls(context.controls || []);
-    document.addEventListener("keydown", function (keyEvent) {
-      if (keyEvent.key === "Escape" && context.fullscreen) post({ type: MSG.escape });
-    });
-    readyResolve(context);
-  }
-
-  window.addEventListener("message", onConnect);
-
-  let hellos = 0;
-  function hello() {
-    if (port || hellos >= HELLO_MAX) return;
-    hellos += 1;
-    window.parent.postMessage(
-      { type: MSG.hello, protocolVersion: PROTOCOL_VERSION, nonce: boot.nonce },
-      "*",
-    );
-    setTimeout(hello, HELLO_INTERVAL_MS);
-  }
-
   installStyles();
   new MutationObserver(function () {
-    queueMicrotask(function () {
-      applyControlState();
-      scheduleHeight();
-    });
+    queueMicrotask(applyControlState);
   }).observe(document.documentElement, { childList: true, subtree: true });
-  hello();
+  transport.connect().then(function (ctx) {
+    context = ctx;
+    if (ctx.availability) availability = ctx.availability;
+    if (ctx.action !== undefined) action = ctx.action;
+    if (ctx.agentStatus) agentStatus = ctx.agentStatus;
+    appState = ctx.state === undefined ? null : ctx.state;
+    if (ctx.theme) applyTheme(ctx.theme);
+    whenParsed(refreshControls);
+    restoreControls(ctx.controls || []);
+    readyResolve(ctx);
+  });
 
   // ----------------------------------------------------------------- library
 
@@ -685,7 +1239,7 @@
               control.addEventListener("keydown", (keyEvent) => {
                 if (keyEvent.key !== "Enter") return;
                 const form = this.closest("spur-form");
-                if (form) form.submit();
+                if (form) form.submit(keyEvent.isTrusted);
               });
             }
             this.syncDisabled();
@@ -921,8 +1475,8 @@
           while (this.firstChild) button.appendChild(this.firstChild);
           this.appendChild(button);
           this._button = button;
-          button.addEventListener("click", () => {
-            this.press();
+          button.addEventListener("click", (clickEvent) => {
+            this.press(clickEvent.isTrusted);
           });
           this.syncDisabled();
         });
@@ -942,7 +1496,7 @@
         if (show && !existing) this._button.insertAdjacentHTML("afterbegin", SPINNER);
         if (!show && existing) existing.remove();
       }
-      press() {
+      press(trusted) {
         if (this.hasAttribute("disabled")) return;
         const toolbar = this.closest("spur-selection-toolbar");
         const form = this.getAttribute("form")
@@ -956,8 +1510,8 @@
         }
         const id = this.getAttribute("action") || (form && form.getAttribute("action"));
         if (!id) return;
-        setInvokingEl(this);
-        invoke(id, payload);
+        invokingEl = this;
+        invokeAction(id, payload, trusted === true, false);
       }
     },
   );
@@ -968,11 +1522,11 @@
       collect() {
         return gatherForm(this);
       }
-      submit() {
+      submit(trusted) {
         const id = this.getAttribute("action");
         if (!id || this.hasAttribute("disabled")) return;
         invokingEl = this.querySelector('spur-button[type="submit"]');
-        invoke(id, this.collect());
+        invokeAction(id, this.collect(), trusted === true, false);
       }
     },
   );
@@ -985,7 +1539,8 @@
           this.render();
         });
         this.addEventListener("click", function (clickEvent) {
-          if (clickEvent.target.closest && clickEvent.target.closest("[data-spur-retry]")) retry();
+          if (clickEvent.target.closest && clickEvent.target.closest("[data-spur-retry]"))
+            retryAction(clickEvent.isTrusted);
         });
       }
       render() {
@@ -1004,7 +1559,7 @@
           let label = STATUS_LABELS[status] || status;
           if (status === "error" && action.httpStatus !== undefined)
             label += " · HTTP " + action.httpStatus;
-          if (status === "error" || status === "delivery_unknown") tone = "error";
+          if (status === "error") tone = "error";
           head.appendChild(el("span", "", label));
           if (RETRYABLE.indexOf(status) >= 0) {
             const again = el("button", "spur-btn", "Retry");
@@ -1013,23 +1568,12 @@
             head.appendChild(again);
           }
           this.appendChild(head);
-          if (status === "error") {
-            this.appendChild(
-              el(
-                "div",
-                "spur-status-note",
-                "Session refused the message. Retry sends a new request.",
-              ),
-            );
+          if (status === "error" && action.error) {
+            this.appendChild(el("div", "spur-status-note", String(action.error)));
           }
           if (status === "timeout") {
             this.appendChild(
-              el("div", "spur-status-note", "A late matching revision still completes the action."),
-            );
-          }
-          if (status === "delivery_unknown") {
-            this.appendChild(
-              el("div", "spur-status-note", "Check Queued messages before retrying."),
+              el("div", "spur-status-note", "The agent did not close the action in 15 min."),
             );
           }
         } else {
@@ -1040,6 +1584,61 @@
         this.setAttribute("data-active", "");
         if (tone) this.setAttribute("data-tone", tone);
         else this.removeAttribute("data-tone");
+      }
+    },
+  );
+
+  // Chat with the store's agent. Messages render through textContent only.
+  define(
+    "spur-chat",
+    class extends HTMLElement {
+      connectedCallback() {
+        whenParsed(() => {
+          if (this._ready) return;
+          this._ready = true;
+          const status = el("div", "spur-chat-status", AGENT_LABELS[agentStatus.state] || "");
+          const log = el("div", "spur-chat-log");
+          log.setAttribute("role", "log");
+          log.setAttribute("aria-live", "polite");
+          const form = el("form", "spur-chat-form");
+          const input = document.createElement("input");
+          input.type = "text";
+          input.maxLength = 20000;
+          input.placeholder = this.getAttribute("placeholder") || "Message the agent...";
+          input.setAttribute("aria-label", "Message");
+          const send = el("button", "spur-btn", "Send");
+          send.type = "submit";
+          form.appendChild(input);
+          form.appendChild(send);
+          this.appendChild(status);
+          this.appendChild(log);
+          this.appendChild(form);
+          const render = (message) => {
+            const node = el("div", "spur-chat-msg", message.text);
+            node.setAttribute("data-role", message.role);
+            log.appendChild(node);
+            log.scrollTop = log.scrollHeight;
+          };
+          messagePoll.messages.forEach(render);
+          sdk.agent.onMessage(render);
+          sdk.on("agent", function (next) {
+            status.textContent = AGENT_LABELS[next.state] || next.state;
+          });
+          form.addEventListener("submit", (submitEvent) => {
+            submitEvent.preventDefault();
+            const text = input.value.trim();
+            if (!text) return;
+            send.disabled = true;
+            sendMessage(text, submitEvent.isTrusted).then(function (result) {
+              send.disabled = false;
+              if (result.ok) {
+                input.value = "";
+              } else {
+                status.textContent = result.error || REJECTION_TEXT[result.reason] || "Not sent";
+              }
+            });
+          });
+        });
       }
     },
   );
@@ -1063,9 +1662,11 @@
     const node = target && target.closest ? target.closest("[data-spur-action]") : null;
     if (!node || node.hasAttribute("disabled")) return;
     invokingEl = node;
-    invoke(
+    invokeAction(
       node.getAttribute("data-spur-action"),
       parseJsonObject(node.getAttribute("data-spur-payload")),
+      clickEvent.isTrusted,
+      false,
     );
   });
 })();

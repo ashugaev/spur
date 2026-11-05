@@ -11,7 +11,7 @@ const sources = [
   ...readdirSync(componentDir)
     .filter((name) => name.endsWith(".tsx"))
     .map((name) => resolve(componentDir, name)),
-  resolve(webRoot, "public/snippets/spur-snippet-sdk.v1.js"),
+  resolve(webRoot, "public/spur/spur-sdk.v2.js"),
 ].map((path) => ({ path, text: readFileSync(path, "utf8") }));
 
 function hits(pattern: RegExp, text: string): string[] {
@@ -24,7 +24,7 @@ describe("snippet source tokens", () => {
       "SnippetActionSummary.tsx",
       "SnippetPanel.tsx",
       "SnippetsSection.tsx",
-      "spur-snippet-sdk.v1.js",
+      "spur-sdk.v2.js",
     ]);
   });
 

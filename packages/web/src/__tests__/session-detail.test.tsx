@@ -9159,7 +9159,7 @@ describe("SessionDetail snippets", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
-      if (url === "/snippets/spur-snippet-sdk.v1.js") return new Response("/* sdk */");
+      if (url === "/spur/spur-sdk.v2.js") return new Response("/* sdk */");
       if (url.startsWith("/fonts/")) return new Response(new ArrayBuffer(4));
       if (url === `/api/sessions/${SID}/queue/remove` && init?.method === "POST") {
         options.onQueueRemove?.((JSON.parse(init.body as string) as { message: string }).message);

@@ -1,7 +1,7 @@
 // Single source for the snippet protocol: message types, limits, labels,
 // canonical prompt, lifecycle derivation. The SDK at
-// public/snippets/spur-snippet-sdk.v1.js carries copies of the message type
-// strings; snippet-sdk.test.ts pins them to this file.
+// public/spur/spur-sdk.v2.js carries copies of the message type
+// strings; spur-sdk.test.ts pins them to this file.
 
 import type { ConversationMessage, SpurSessionState } from "@/lib/types";
 import type { JsonValue } from "./snippet-schema";
@@ -25,7 +25,7 @@ export const SNIPPET_HEIGHT_MIN = 120;
 export const SNIPPET_HEIGHT_MAX = 800;
 export const SNIPPET_PROTOCOL_VERSION = 1;
 
-export const SNIPPET_SDK_URL = "/snippets/spur-snippet-sdk.v1.js";
+export const SNIPPET_SDK_URL = "/spur/spur-sdk.v2.js";
 export const SNIPPET_FONT_URLS = {
   regular: { url: "/fonts/JetBrainsMono-Regular.woff2", weight: "400" },
   bold: { url: "/fonts/JetBrainsMono-Bold.woff2", weight: "700" },
@@ -50,9 +50,16 @@ export function snippetFileName(sessionId: string, snippetId: string): string {
 
 // MESSAGES
 export const SNIPPET_WINDOW_MSG = { hello: "spur:hello", connect: "spur:connect" } as const;
+// Requests carrying a `callId` (db, agent, invoke, fullscreen open) are answered with
+// the same `type` and `callId`.
 export const SNIPPET_TO_HOST = {
   invoke: "invoke",
   stateSet: "state-set",
+  stateLoad: "state-load",
+  db: "db",
+  dbSubscribe: "db-subscribe",
+  dbUnsubscribe: "db-unsubscribe",
+  agent: "agent",
   fullscreen: "fullscreen",
   resize: "resize",
   escape: "escape",
@@ -64,6 +71,9 @@ export const SNIPPET_TO_FRAME = {
   theme: "theme",
   fullscreen: "fullscreen",
   availability: "availability",
+  dbChange: "db-change",
+  dbReset: "db-reset",
+  agentEvent: "agent-event",
 } as const;
 
 export const SNIPPET_THEME_TOKENS = [
