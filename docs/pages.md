@@ -19,7 +19,7 @@ spur db page:films add items '{"title":"Dune"}'
 
 - `page.yaml`: `title` (1..120 chars), `icon` (optional), `agent.runtime` (`claude` default, `codex`, `cursor`, `opencode`), `agent.model` (optional).
 - Any static file; no build step. Dot paths and `data.sqlite*` are never served. Responses are `no-store`.
-- Load the SDK with `<script src="./_spur/sdk.js"></script>`.
+- Load the SDK with `<script src="./_spur/sdk.js"></script>`. API: [spur-sdk.md](spur-sdk.md).
 
 ## Live events
 

@@ -57,7 +57,8 @@ DOCS
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
   Full-access daemon MCP, backend controls, logs and cached attached PR status; connection/setup: docs/mcp.md
-  Interactive session snippets: docs/snippets.md
+  Interactive session snippets: docs/snippets.md; SDK and components: docs/spur-sdk.md
+  Pages and document stores, `spur page`, `spur db`, `[spur-action v1]`: docs/pages.md, docs/stores.md
 
 EDITING THIS FILE
 

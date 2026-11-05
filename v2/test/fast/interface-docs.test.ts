@@ -103,6 +103,24 @@ describe("published interface contracts", () => {
     expect(configuration).toMatch(/sessionPrefix[^\n]*`pg-\*`[^\n]*`spur-page-\*`/);
   });
 
+  it("documents snippet protocol 2 and the shared SDK, linked from README and both skills", async () => {
+    const [readme, snippets, sdk, skill] = await Promise.all([
+      readRepoFile("README.md"),
+      readRepoFile("docs/snippets.md"),
+      readRepoFile("docs/spur-sdk.md"),
+      readRepoFile(".claude/skills/spur/SKILL.md"),
+    ]);
+    expect(readme).toContain("docs/spur-sdk.md");
+    expect(skill).toContain("docs/spur-sdk.md");
+    expect(skill).toContain("docs/stores.md");
+    expect(snippets).not.toContain("spur-snippet-action");
+    expect(snippets).not.toContain("respondsToRequestId");
+    for (const name of ['"protocolVersion": 2', "`store`", "[spur-action v1]", "spur-sdk.md"])
+      expect(snippets).toContain(name);
+    for (const name of ["agent.invoke", "agent.send", "db.collection", "state.set", "<spur-chat"])
+      expect(sdk).toContain(name);
+  });
+
   it("documents closeout ownership in command docs", async () => {
     const commands = await readRepoFile("docs/commands.md");
 
