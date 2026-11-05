@@ -30,6 +30,7 @@ spur db page:films add items '{"title":"Dune"}'
 
 - One background session per page, project `spur-page-<id>`, session ids `pg-<id>-<4 hex>`, cwd = page dir, runtime and model from `page.yaml`. Spawned on the first chat message or action; later messages are queued sends.
 - Stopped or errored agent: resumed on the next message, no restore prompt; when resume fails, relaunched with its spawn prompt.
+- Completed, killed or gone agent: a fresh session is spawned with its spawn prompt and bound.
 - Budgets below persist in the page store.
 - Automated messages (no user click): 10, reset by a user click. Over: `429`.
 - User messages: 30 per 10 minutes. Over: `429`.
