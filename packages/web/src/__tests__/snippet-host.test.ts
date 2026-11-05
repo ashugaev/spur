@@ -5,11 +5,7 @@ import {
   decideInvoke,
   decideSend,
 } from "@/lib/snippets/snippet-host";
-import {
-  budgetKey,
-  readSnippetBudget,
-  recordKey,
-} from "@/lib/snippets/snippet-store";
+import { budgetKey, readSnippetBudget, recordKey } from "@/lib/snippets/snippet-store";
 import {
   FakeDaemon,
   FakePoller,
@@ -269,7 +265,12 @@ describe("handshake and teardown", () => {
   it("drops port messages over 128 KiB in UTF-8 bytes", async () => {
     const h = harness();
     const port = await ready(h);
-    port.emit({ type: "invoke", callId: "big", action: "go", payload: { note: "日".repeat(44_000) } });
+    port.emit({
+      type: "invoke",
+      callId: "big",
+      action: "go",
+      payload: { note: "日".repeat(44_000) },
+    });
     await flush();
     expect(port.ofType("invoke-result")).toHaveLength(0);
     expect(sent(h)).toBe(0);
@@ -333,6 +334,21 @@ describe("handshake and teardown", () => {
     h.host.reload(true);
     expect(h.host.getState().phase).toBe("error");
     expect(h.ports).toHaveLength(0);
+  });
+
+  it("fails with protocol, without connecting, when the state doc id cannot be hashed", async () => {
+    vi.stubGlobal("crypto", { subtle: undefined });
+    try {
+      const h = harness();
+      await flush();
+      h.hello();
+      await flush();
+      expect(h.host.getState()).toMatchObject({ phase: "error", error: "protocol" });
+      expect(h.posts).toHaveLength(0);
+      expect(h.ports).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

@@ -338,6 +338,8 @@ export function createSnippetHost(
   const ownerStore = ownerStoreOf(sessionId);
   const snippetId = initial.manifest.snippetId;
   const stateDocId = snippetStateDocId(sessionId, snippetId);
+  // Handled at hello (error card); this only keeps an early rejection from going unhandled.
+  stateDocId.catch(() => undefined);
   const listeners = new Set<() => void>();
   let disposed = false;
   let mountCount = 0;
@@ -553,7 +555,8 @@ export function createSnippetHost(
     resolveConfirmCall("stale");
     const wasInvoke = state.confirm.kind === "invoke";
     set({ confirm: null });
-    if (wasInvoke && state.action?.status === "awaiting_confirm") set({ action: actionBeforeConfirm });
+    if (wasInvoke && state.action?.status === "awaiting_confirm")
+      set({ action: actionBeforeConfirm });
   }
 
   function failInvokeCall(): void {
@@ -1018,17 +1021,26 @@ export function createSnippetHost(
     clearTimeout(helloTimer);
     handshaking = true;
     const mount = mountCount;
-    void loadState().then((saved) => {
-      if (disposed || mount !== mountCount || state.phase !== "connecting") return;
-      handshaking = false;
-      const channel = deps.createChannel();
-      port = channel.hostPort;
-      port.onmessage = (event) => onPortMessage(event.data);
-      set({ phase: "connected" });
-      deps.postToFrame({ type: SNIPPET_WINDOW_MSG.connect, context: buildContext(saved) }, [
-        channel.framePort,
-      ]);
-    });
+    const current = () => !disposed && mount === mountCount && state.phase === "connecting";
+    loadState().then(
+      (saved) => {
+        if (!current()) return;
+        handshaking = false;
+        const channel = deps.createChannel();
+        port = channel.hostPort;
+        port.onmessage = (event) => onPortMessage(event.data);
+        set({ phase: "connected" });
+        deps.postToFrame({ type: SNIPPET_WINDOW_MSG.connect, context: buildContext(saved) }, [
+          channel.framePort,
+        ]);
+      },
+      // No state doc id (crypto.subtle missing outside a secure context): no connect.
+      () => {
+        if (!current()) return;
+        handshaking = false;
+        fail("protocol");
+      },
+    );
   }
 
   // ----- file changes
