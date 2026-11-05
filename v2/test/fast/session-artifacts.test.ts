@@ -574,14 +574,21 @@ describe("deleteSessionArtifactById", () => {
 describe("withSessionArtifactInstructions snippet bullet", () => {
   const SNIPPET_BULLET_PATH = "snippet.$SPUR_SESSION.<id>.html";
 
-  it("adds the interactive snippet bullet once, after the existing artifact bullets", () => {
+  it("adds the snippet bullet and then the pages bullet, after the existing artifact bullets", () => {
     const text = withSessionArtifactInstructions("Do the task.");
     expect(text.startsWith("Do the task.\n\nSession artifacts:\n")).toBe(true);
     expect(text.split(SNIPPET_BULLET_PATH)).toHaveLength(2);
-    expect(text.split("[spur-snippet-action v1]")).toHaveLength(2);
+    expect(text.split("[spur-action v1]")).toHaveLength(2);
+    expect(text).not.toContain("spur-snippet-action");
+    expect(text).toContain("spur db session:$SPUR_SESSION done <id>");
+    expect(text).toContain("spur db session:$SPUR_SESSION fail <id>");
     expect(text).toContain("https://raw.githubusercontent.com/ashugaev/spur/main/docs/snippets.md");
     const lines = text.split("\n");
-    expect(lines[lines.length - 1]).toContain(SNIPPET_BULLET_PATH);
+    expect(lines[lines.length - 2]).toContain(SNIPPET_BULLET_PATH);
+    expect(lines[lines.length - 1]).toContain("spur page create <id>");
+    expect(lines[lines.length - 1]).toContain(
+      "https://raw.githubusercontent.com/ashugaev/spur/main/docs/pages.md",
+    );
     expect(lines.filter((line) => line.includes("snippet."))).toHaveLength(1);
   });
 
