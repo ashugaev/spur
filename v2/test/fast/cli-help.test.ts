@@ -327,6 +327,18 @@ describe("spur help", () => {
     expect(help).toContain("--file <path>");
     expect(help).toContain("--session <id>");
   });
+
+  it("documents the db command store, ops and flags", () => {
+    const db = buildProgram().commands.find((command) => command.name() === "db");
+    if (!db) throw new Error("Expected db command to be registered");
+    expect(db.aliases()).toEqual([]);
+    const help = db.helpInformation();
+    expect(help).toContain("db <store> <get|list|query|add|set|update|rm> <collection>");
+    expect(help).toContain("page:<id> or session:<sid>");
+    expect(help).toContain("--rev <number>");
+    expect(help).toContain("--limit <number>");
+    expect(help).toContain("--start-after <docId>");
+  });
 });
 
 describe("argvWithoutStrayHelpFlags", () => {

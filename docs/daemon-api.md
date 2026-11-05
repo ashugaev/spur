@@ -92,3 +92,16 @@
 - `GET /sessions/:id/shared-memory/:scope/:key`
 - `POST /sessions/:id/shared-memory/:scope/:key`
 - `DELETE /sessions/:id/shared-memory/:scope/:key`
+
+## Store routes
+
+`:store` = `page:<id>` or `session:<sid>`, `:` may arrive as `%3A`; [stores.md](stores.md); `v2/src/stores.ts`.
+
+- `GET /stores/:store/docs/:collection`
+- `POST /stores/:store/docs/:collection`
+- `GET /stores/:store/docs/:collection/:docId`
+- `POST /stores/:store/docs/:collection/:docId`
+- `PATCH /stores/:store/docs/:collection/:docId`
+- `DELETE /stores/:store/docs/:collection/:docId`
+- `POST /stores/:store/query/:collection`
+- `GET /stores/:store/changes`

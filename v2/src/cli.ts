@@ -36,6 +36,7 @@ import {
   getJson,
   getExistingJson,
   listProjects,
+  patchJson,
   postJson,
   postPreflight,
   restartDaemonIfRunning,
@@ -62,6 +63,7 @@ import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
 import type { UsageReport } from "./usage-report.js";
 import { appendAgentIssue, readAgentIssueLog, type AgentIssueRecord } from "./agent-issue-log.js";
 import type { UserActionRecord } from "./user-action-log.js";
+import type { StoreDoc } from "./stores.js";
 import {
   accent,
   brandMark,
@@ -461,6 +463,22 @@ function parseSharedMemoryScope(value: unknown): SharedMemoryScope {
     throw new Error("--scope must be task, project, or global");
   }
   return scope;
+}
+
+function parseDbInteger(value: unknown, flag: string): number {
+  const text = String(value);
+  if (!/^\d+$/.test(text)) {
+    throw new Error(`${flag} must be a non-negative integer`);
+  }
+  return Number.parseInt(text, 10);
+}
+
+function parseDbJson(text: string, what: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new Error(`${what} must be valid JSON`);
+  }
 }
 
 function renderSourceInfo(response: SourceInfoResponse): string {
@@ -4416,6 +4434,140 @@ export function createProgram(cliEntrypoint: string): Command {
         throw new Error("memory action must be set, get, list, or rm");
       },
     );
+
+  program
+    .command("db")
+    .description("Read and write a page or session document store.")
+    .usage("<store> <get|list|query|add|set|update|rm> <collection> [doc-id] [json] [options]")
+    .argument("<store>", "page:<id> or session:<sid>")
+    .argument("<op>", "get, list, query, add, set, update, or rm")
+    .argument("[args...]", "Collection, document id and JSON, per op")
+    .option("--rev <number>", "Expected revision for set, update, or rm")
+    .option("--limit <number>", "Page size for list")
+    .option("--start-after <docId>", "Document id cursor for list")
+    .option("--json", "Print raw JSON")
+    .action(async (store: string, op: string, args: string[], options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const json = Boolean(options.json);
+      const expected =
+        options.rev === undefined ? {} : { expectedRev: parseDbInteger(options.rev, "--rev") };
+      const take = (count: number, usage: string): string[] => {
+        if (args.length !== count) {
+          throw new Error(`Usage: spur db <store> ${op} ${usage}`);
+        }
+        return args;
+      };
+      const base = `/stores/${encodeURIComponent(store)}`;
+      const docPath = (collection: string, docId: string) =>
+        `${base}/docs/${encodeURIComponent(collection)}/${encodeURIComponent(docId)}`;
+      const collectionPath = (collection: string) =>
+        `${base}/docs/${encodeURIComponent(collection)}`;
+      const renderDoc = (doc: StoreDoc) => JSON.stringify(doc, null, 2);
+      const renderDocs = (response: { docs: StoreDoc[] }) =>
+        response.docs.length === 0
+          ? "No documents."
+          : response.docs
+              .map((doc) => JSON.stringify({ id: doc.id, rev: doc.rev, data: doc.data }))
+              .join("\n");
+
+      if (op === "get") {
+        const [collection, docId] = take(2, "<collection> <doc-id>") as [string, string];
+        await outputResult({
+          json,
+          label: `loading ${collection}/${docId}`,
+          action: () => getJson<StoreDoc>(cliEntrypoint, docPath(collection, docId), configPath),
+          render: renderDoc,
+        });
+        return;
+      }
+      if (op === "list") {
+        const [collection] = take(1, "<collection>") as [string];
+        const search = new URLSearchParams();
+        if (options.limit !== undefined)
+          search.set("limit", String(parseDbInteger(options.limit, "--limit")));
+        if (options.startAfter !== undefined) search.set("startAfter", String(options.startAfter));
+        const query = search.size > 0 ? `?${search}` : "";
+        await outputResult({
+          json,
+          label: `listing ${collection}`,
+          action: () =>
+            getJson<{ docs: StoreDoc[] }>(
+              cliEntrypoint,
+              `${collectionPath(collection)}${query}`,
+              configPath,
+            ),
+          render: renderDocs,
+        });
+        return;
+      }
+      if (op === "query") {
+        const [collection, queryJson] = take(2, "<collection> '<query-json>'") as [string, string];
+        const query = parseDbJson(queryJson, "query");
+        await outputResult({
+          json,
+          label: `querying ${collection}`,
+          action: () =>
+            postJson<{ docs: StoreDoc[] }>(
+              cliEntrypoint,
+              `${base}/query/${encodeURIComponent(collection)}`,
+              query,
+              configPath,
+            ),
+          render: renderDocs,
+        });
+        return;
+      }
+      if (op === "add") {
+        const [collection, dataJson] = take(2, "<collection> '<json>'") as [string, string];
+        const data = parseDbJson(dataJson, "document");
+        await outputResult({
+          json,
+          label: `adding to ${collection}`,
+          action: () =>
+            postJson<StoreDoc>(cliEntrypoint, collectionPath(collection), { data }, configPath),
+          success: (doc) => `Added ${collection}/${doc.id}.`,
+          render: renderDoc,
+        });
+        return;
+      }
+      if (op === "set" || op === "update") {
+        const [collection, docId, dataJson] = take(3, "<collection> <doc-id> '<json>'") as [
+          string,
+          string,
+          string,
+        ];
+        const payload = { data: parseDbJson(dataJson, "document"), ...expected };
+        await outputResult({
+          json,
+          label: `${op === "set" ? "writing" : "updating"} ${collection}/${docId}`,
+          action: () =>
+            op === "set"
+              ? postJson<StoreDoc>(cliEntrypoint, docPath(collection, docId), payload, configPath)
+              : patchJson<StoreDoc>(cliEntrypoint, docPath(collection, docId), payload, configPath),
+          success: (doc) => `Saved ${collection}/${doc.id} at rev ${doc.rev}.`,
+          render: renderDoc,
+        });
+        return;
+      }
+      if (op === "rm") {
+        const [collection, docId] = take(2, "<collection> <doc-id>") as [string, string];
+        const query =
+          expected.expectedRev === undefined ? "" : `?expectedRev=${expected.expectedRev}`;
+        await outputResult({
+          json,
+          label: `removing ${collection}/${docId}`,
+          action: () =>
+            deleteJson<{ deleted: true }>(
+              cliEntrypoint,
+              `${docPath(collection, docId)}${query}`,
+              configPath,
+            ),
+          render: () => `Removed ${collection}/${docId}.`,
+        });
+        return;
+      }
+      throw new Error("db op must be get, list, query, add, set, update, or rm");
+    });
 
   program
     .command("actions")

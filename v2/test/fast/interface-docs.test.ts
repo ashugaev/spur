@@ -37,6 +37,32 @@ describe("published interface contracts", () => {
     for (const field of ["BOT_TOKEN", "CHAT_ID", "ALLOWED_USERS", "ALLOWED_CHATS"])
       expect(configuration).toContain(`TELEGRAM_TEST_${field}`);
   });
+  it("documents store routes, the db command and links the store doc", async () => {
+    const [readme, commands, daemonApi, stores] = await Promise.all([
+      readRepoFile("README.md"),
+      readRepoFile("docs/commands.md"),
+      readRepoFile("docs/daemon-api.md"),
+      readRepoFile("docs/stores.md"),
+    ]);
+    expect(readme).toContain("docs/stores.md");
+    expect(commands).toContain("## db");
+    expect(commands).toContain("spur db <page:<id>|session:<sid>>");
+    for (const route of [
+      "GET /stores/:store/docs/:collection",
+      "POST /stores/:store/docs/:collection",
+      "GET /stores/:store/docs/:collection/:docId",
+      "POST /stores/:store/docs/:collection/:docId",
+      "PATCH /stores/:store/docs/:collection/:docId",
+      "DELETE /stores/:store/docs/:collection/:docId",
+      "POST /stores/:store/query/:collection",
+      "GET /stores/:store/changes",
+    ])
+      expect(daemonApi).toContain(`\`${route}\``);
+    expect(daemonApi).toContain("## Store routes");
+    for (const name of ["page:<pageId>", "session:<sid>", "_actions", "_state", "expectedRev"])
+      expect(stores).toContain(name);
+  });
+
   it("documents closeout ownership in command docs", async () => {
     const commands = await readRepoFile("docs/commands.md");
 

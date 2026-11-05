@@ -33,6 +33,7 @@ By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/ins
 - [docs/web-terminal.md](docs/web-terminal.md) — recent web links in terminal output
 - [docs/claude-accounts.md](docs/claude-accounts.md) — claude account rotation and per-session credential switch
 - [docs/snippets.md](docs/snippets.md) — interactive session snippets: authoring contract, SDK, components
+- [docs/stores.md](docs/stores.md) — page and session document stores, queries, `spur db`
 - [docs/voice.md](docs/voice.md) — voice input setup
 - [docs/telegram-calls.md](docs/telegram-calls.md) — native Telegram call prototype with sandbox Shepherd
 - [docs/https-tailscale.md](docs/https-tailscale.md) — HTTPS on the tailnet hostname (required for voice)
