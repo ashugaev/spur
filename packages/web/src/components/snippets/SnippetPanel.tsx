@@ -22,12 +22,14 @@ import {
   RELOADABLE_ERRORS,
   type PendingConfirm,
   type PanelRuntimeError,
+  type SnippetAction,
   type SnippetFontBuffer,
   type ApplyFileResult,
   type SnippetHost,
   type SnippetHostDeps,
   type SnippetPort,
   type SnippetSessionUpdate,
+  type StoreResponse,
 } from "@/lib/snippets/snippet-host";
 import type { SnippetManifest } from "@/lib/snippets/snippet-manifest";
 import {
@@ -37,14 +39,13 @@ import {
   SNIPPET_RETRY_STATUSES,
   SNIPPET_THEME_TOKENS,
   snippetStatusLabel,
-  type SnippetActionRecord,
   type SnippetTheme,
   type SnippetThemeToken,
 } from "@/lib/snippets/snippet-protocol";
 import { enterFullscreen, exitFullscreen, setInline } from "@/lib/snippets/snippet-dialog";
 import type { SnippetStorage } from "@/lib/snippets/snippet-store";
 import { buildSnippetSrcdoc, SNIPPET_FRAME_SANDBOX } from "@/lib/snippets/snippet-srcdoc";
-import type { ConversationMessage } from "@/lib/types";
+import { storeChangePoller } from "@/lib/store-change-poller";
 
 // ---------------------------------------------------------------------------
 // page-level assets: SDK source and fonts are fetched once per page
@@ -103,6 +104,24 @@ export function browserSnippetStorage(): SnippetStorage {
     return window.localStorage;
   } catch {
     return DENIED_STORAGE;
+  }
+}
+
+async function storeRequest(method: string, url: string, body?: unknown): Promise<StoreResponse> {
+  try {
+    const response = await fetch(url, {
+      method,
+      cache: "no-store",
+      headers: {
+        accept: "application/json",
+        ...(body !== undefined ? { "content-type": "application/json" } : {}),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    const json: unknown = await response.json().catch(() => ({}));
+    return { ok: response.ok, status: response.status, body: json };
+  } catch {
+    return { ok: false, status: 0, body: { error: "network error" } };
   }
 }
 
@@ -232,33 +251,45 @@ function ConfirmStrip({
     >
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <span className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
-          {confirm.label}
+          {confirm.kind === "invoke" ? confirm.label : "Message to agent"}
         </span>
-        <span className="text-[10px] text-[var(--color-text-tertiary)]">{confirm.actionId}</span>
+        {confirm.kind === "invoke" ? (
+          <span className="text-[10px] text-[var(--color-text-tertiary)]">{confirm.actionId}</span>
+        ) : null}
         <span className="text-[var(--color-status-attention)]">
           {SNIPPET_CONFIRM_REASON_TEXT[confirm.reason]}
         </span>
       </div>
-      <dl className="mt-2 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1">
-        {Object.entries(confirm.payload).map(([key, value]) => (
-          <div className="contents" key={key}>
-            <dt className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-              {key}
-            </dt>
-            <dd className="truncate text-[var(--color-text-secondary)]">{payloadPreview(value)}</dd>
-          </div>
-        ))}
-      </dl>
-      <details className="mt-2">
-        <summary
-          className={`cursor-pointer text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)] ${FOCUS_RING}`}
-        >
-          Full payload
-        </summary>
-        <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2 text-[11px] text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">
-          {JSON.stringify(confirm.payload, null, 2)}
+      {confirm.kind === "invoke" ? (
+        <>
+          <dl className="mt-2 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1">
+            {Object.entries(confirm.payload).map(([key, value]) => (
+              <div className="contents" key={key}>
+                <dt className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  {key}
+                </dt>
+                <dd className="truncate text-[var(--color-text-secondary)]">
+                  {payloadPreview(value)}
+                </dd>
+              </div>
+            ))}
+          </dl>
+          <details className="mt-2">
+            <summary
+              className={`cursor-pointer text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)] ${FOCUS_RING}`}
+            >
+              Full payload
+            </summary>
+            <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2 text-[11px] text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">
+              {JSON.stringify(confirm.payload, null, 2)}
+            </pre>
+          </details>
+        </>
+      ) : (
+        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2 text-[11px] text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">
+          {confirm.message}
         </pre>
-      </details>
+      )}
       <div className="mt-2.5 flex justify-end gap-2 max-sm:[&>button]:flex-1">
         <button
           className={SECONDARY_BUTTON}
@@ -282,20 +313,18 @@ function ConfirmStrip({
 
 function StatusLine({
   action,
-  manifest,
   onRetry,
 }: {
-  action: SnippetActionRecord | null;
-  manifest: SnippetManifest;
+  action: SnippetAction | null;
   onRetry: (trusted: boolean) => void;
 }) {
   if (!action) {
     return <div aria-live="polite" className="h-0 overflow-hidden" role="status" />;
   }
-  const failed = action.status === "error" || action.status === "delivery_unknown";
+  const failed = action.status === "error";
   const attention = action.status === "timeout" || action.status === "awaiting_confirm";
   const working = !isTerminalSnippetStatus(action.status) && action.status !== "awaiting_confirm";
-  const label = manifest.actions.find((candidate) => candidate.id === action.actionId)?.label;
+  const { label } = action;
   const tone = failed
     ? "text-[var(--color-status-error)]"
     : attention
@@ -322,7 +351,7 @@ function StatusLine({
       </span>
       {label ? <span className="text-[var(--color-text-secondary)]">{label}</span> : null}
       <span className="ml-auto text-[var(--color-text-tertiary)]">
-        {formatRelativeTime(new Date(action.dispatchedAt).toISOString())}
+        {formatRelativeTime(new Date(action.createdAt).toISOString())}
       </span>
       {SNIPPET_RETRY_STATUSES.includes(action.status) ? (
         <button
@@ -358,13 +387,9 @@ export interface SnippetPanelProps {
   sessionId: string;
   manifest: SnippetManifest;
   html: string;
-  // listing metadata: lets the panel tell a poll that changed the file from one that did not
-  listingKey: string;
-  fetching: boolean;
   updatedAt?: string;
-  session: Omit<SnippetSessionUpdate, "messages" | "fileSettled">;
-  messages: readonly ConversationMessage[];
-  // Bridge seam: tests replace the browser-backed deps (channel, send, storage, clocks).
+  session: SnippetSessionUpdate;
+  // Bridge seam: tests replace the browser-backed deps (channel, request, poller, storage, clocks).
   bridge?: Partial<SnippetHostDeps>;
   // Outcome of each file handed to the controller (a lower revision is refused there).
   onApplyResult?: (result: ApplyFileResult) => void;
@@ -374,11 +399,8 @@ export function SnippetPanel({
   sessionId,
   manifest,
   html,
-  listingKey,
-  fetching,
   updatedAt,
   session,
-  messages,
   bridge,
   onApplyResult,
 }: SnippetPanelProps) {
@@ -392,7 +414,6 @@ export function SnippetPanel({
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const [host, setHost] = useState<SnippetHost | null>(null);
   const hostRef = useRef<SnippetHost | null>(null);
-  const prevKeyRef = useRef(listingKey);
   const titleId = `snippet-title-${sessionId}-${manifest.snippetId}`;
 
   function openFullscreen(): void {
@@ -423,18 +444,8 @@ export function SnippetPanel({
         const channel = new MessageChannel();
         return { hostPort: channel.port1 as unknown as SnippetPort, framePort: channel.port2 };
       },
-      send: async (prompt) => {
-        try {
-          const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ message: prompt, queue: true }),
-          });
-          return { kind: "response", status: response.status };
-        } catch {
-          return { kind: "failure" };
-        }
-      },
+      request: storeRequest,
+      poller: storeChangePoller,
       loadSdk,
       getFonts: currentFonts,
       getTheme: readTheme,
@@ -507,10 +518,8 @@ export function SnippetPanel({
   }, [host, manifest, html]);
 
   useEffect(() => {
-    const settled = prevKeyRef.current === listingKey && !fetching;
-    prevKeyRef.current = listingKey;
-    host?.updateSession({ ...session, messages, fileSettled: settled });
-  }, [host, session, messages, listingKey, fetching]);
+    host?.updateSession(session);
+  }, [host, session]);
 
   const fullscreen = state?.fullscreen ?? false;
   useEffect(() => {
@@ -667,7 +676,6 @@ export function SnippetPanel({
         ) : null}
         <StatusLine
           action={state.action}
-          manifest={state.manifest}
           onRetry={(trusted) => host.retry(trusted)}
         />
       </dialog>

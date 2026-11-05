@@ -70,9 +70,12 @@ export function createStoreChangePoller(deps: StoreChangePollerDeps): StoreChang
       } else if (page.reset) {
         entry.cursor = page.lastSeq;
         emit(entry, { type: "reset" });
-      } else if (page.changes.length > 0) {
-        entry.cursor = page.changes[page.changes.length - 1]!.seq;
-        emit(entry, { type: "changes", changes: page.changes });
+      } else {
+        const last = page.changes.at(-1);
+        if (last) {
+          entry.cursor = last.seq;
+          emit(entry, { type: "changes", changes: page.changes });
+        }
       }
     } catch {
       // network or daemon error: keep the cursor, try again next tick
