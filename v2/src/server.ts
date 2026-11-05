@@ -63,8 +63,10 @@ import { writeStderr } from "./io.js";
 import { readSession } from "./metadata.js";
 import { StoreError, StoreService, type StoreQuery } from "./stores.js";
 import { SseHub, acceptsEventStream } from "./sse.js";
+import { StoreAgent, parseAgentMessage } from "./store-agent.js";
 import {
   PageEvents,
+  assertPagePrefixFree,
   createPage,
   listPages,
   removePageDir,
@@ -383,6 +385,7 @@ const DEFAULT_LOGGER: ServiceLogger = {
   warn: writeStderr,
 };
 const SHUTDOWN_GRACE_MS = 5_000;
+const AGENT_STATUS_SAMPLE_MS = 5_000;
 
 // Total budget for a shutdown, measured from the signal to the last teardown step.
 // Every await inside shutdown() is bounded by what is left of it, so no single step
@@ -934,6 +937,19 @@ export async function startServer(
   });
   const sseHub = new SseHub();
   const pageEvents = new PageEvents({ dataDir: () => service.config.dataDir, stores, hub: sseHub });
+  const storeAgent = new StoreAgent({
+    stores,
+    sessions: service,
+    dataDir: () => service.config.dataDir,
+    readSession: (sessionId) => readSession(service.config.dataDir, sessionId),
+    projectPrefixes: () => service.listProjects().map((project) => project.prefix),
+    onStatus: (pageId, status) => pageEvents.broadcast(pageId, "agent", status),
+  });
+  // No session-state push hook exists: sample page agent status while a page tab is open.
+  const agentStatusSampler = setInterval(() => {
+    void storeAgent.sample(pageEvents.openPageIds());
+  }, AGENT_STATUS_SAMPLE_MS);
+  agentStatusSampler.unref();
   const switchStatePath = deploySwitchStatePath(service.config.dataDir);
   const switchLedgerPath = updateLedgerPath(service.config.dataDir);
   // Re-applied on every config (re)load, not just boot, so disk-limit changes take
@@ -2629,6 +2645,12 @@ export async function startServer(
       }
       if (method === "POST" && path === "/pages") {
         const body = await readJsonBody<CreatePageRequest>(request);
+        if (typeof body.id === "string") {
+          assertPagePrefixFree(
+            body.id,
+            service.listProjects().map((project) => project.prefix),
+          );
+        }
         sendJson(response, 201, createPage(service.config.dataDir, body));
         return;
       }
@@ -2636,8 +2658,10 @@ export async function startServer(
       const pageId = path.match(/^\/pages\/([^/]+)$/)?.[1];
       if (method === "DELETE" && pageId) {
         const id = decodeURIComponent(pageId);
-        pageEvents.closePage(id);
-        removePageDir(service.config.dataDir, id);
+        await storeAgent.deletePage(id, () => {
+          pageEvents.closePage(id);
+          removePageDir(service.config.dataDir, id);
+        });
         sendJson(response, 200, { deleted: true, id });
         return;
       }
@@ -2677,12 +2701,57 @@ export async function startServer(
         }
         // A reconnecting EventSource repeats the original URL; its Last-Event-ID wins.
         const since = request.headers["last-event-id"] ?? url.searchParams.get("since");
+        const eventsPageId = decodeURIComponent(pageEventsId);
         await pageEvents.open(
-          decodeURIComponent(pageEventsId),
+          eventsPageId,
           typeof since === "string" ? parseQueryInteger(since, "since") : null,
           request,
           response,
         );
+        void storeAgent
+          .status(`page:${eventsPageId}`)
+          .then((status) => pageEvents.broadcast(eventsPageId, "agent", status))
+          .catch(() => undefined);
+        return;
+      }
+
+      const storeAgentSendId = path.match(/^\/stores\/([^/]+)\/agent\/send$/)?.[1];
+      if (method === "POST" && storeAgentSendId) {
+        const body = await readJsonBody<{ message?: unknown; userGesture?: unknown }>(request);
+        sendJson(
+          response,
+          200,
+          await storeAgent.ensureAndDeliver(
+            decodeURIComponent(storeAgentSendId),
+            parseAgentMessage(body.message),
+            body.userGesture === true,
+          ),
+        );
+        return;
+      }
+
+      const storeAgentMessagesId = path.match(/^\/stores\/([^/]+)\/agent\/messages$/)?.[1];
+      if (method === "GET" && storeAgentMessagesId) {
+        const from = url.searchParams.get("from");
+        const limit = url.searchParams.get("limit");
+        const pageSize = limit === null ? 50 : parseQueryInteger(limit, "limit");
+        if (pageSize < 1 || pageSize > 100) {
+          throw new StoreError(400, "limit must be an integer from 1 to 100");
+        }
+        sendJson(
+          response,
+          200,
+          await storeAgent.messages(decodeURIComponent(storeAgentMessagesId), {
+            ...(from === null ? {} : { from: parseQueryInteger(from, "from") }),
+            limit: pageSize,
+          }),
+        );
+        return;
+      }
+
+      const storeAgentStatusId = path.match(/^\/stores\/([^/]+)\/agent\/status$/)?.[1];
+      if (method === "GET" && storeAgentStatusId) {
+        sendJson(response, 200, await storeAgent.status(decodeURIComponent(storeAgentStatusId)));
         return;
       }
 
@@ -2866,6 +2935,7 @@ export async function startServer(
 
   const closeServer = async (): Promise<void> => {
     // Open event streams never end on their own; end them so close() does not wait out the grace.
+    clearInterval(agentStatusSampler);
     sseHub.closeAll();
     await new Promise<void>((resolve) => {
       // server.closeAllConnections() destroys every tracked socket, including

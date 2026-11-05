@@ -67,7 +67,9 @@ interface SseEvent {
 // Minimal EventSource reader over fetch: collects parsed events and comments.
 function openEvents(url: string, headers: Record<string, string> = {}) {
   const controller = new AbortController();
+  // Agent status events land in `agents`; store and file events in `events`.
   const events: SseEvent[] = [];
+  const agents: SseEvent[] = [];
   const comments: string[] = [];
   let resolveResponse!: (response: Response) => void;
   const responsePromise = new Promise<Response>((resolve) => (resolveResponse = resolve));
@@ -95,7 +97,7 @@ function openEvents(url: string, headers: Record<string, string> = {}) {
             else if (line.startsWith("data: ")) event.lines.push(line.slice(6));
           }
           if (event.event) {
-            events.push({
+            (event.event === "agent" ? agents : events).push({
               event: event.event,
               ...(event.id ? { id: event.id } : {}),
               data: JSON.parse(event.lines.join("\n")) as unknown,
@@ -108,7 +110,14 @@ function openEvents(url: string, headers: Record<string, string> = {}) {
     }
   })();
   cleanups.push(() => controller.abort());
-  return { events, comments, response: responsePromise, done, close: () => controller.abort() };
+  return {
+    events,
+    agents,
+    comments,
+    response: responsePromise,
+    done,
+    close: () => controller.abort(),
+  };
 }
 
 async function waitFor(check: () => boolean, timeoutMs = 3000): Promise<void> {
@@ -152,6 +161,30 @@ describe("page routes", () => {
   });
 });
 
+describe("store agent routes", () => {
+  it("reports no page agent before the first message and validates send bodies", async () => {
+    const { call } = await boot();
+    await call("POST", "/pages", { id: "films" });
+    expect(JSON.parse((await call("GET", "/stores/page%3Afilms/agent/status")).text)).toEqual({
+      state: "none",
+      sessionId: null,
+    });
+    expect(JSON.parse((await call("GET", "/stores/page%3Afilms/agent/messages")).text)).toEqual({
+      sessionId: null,
+      messages: [],
+      status: { state: "none", sessionId: null },
+    });
+    expect((await call("GET", "/stores/page%3Afilms/agent/messages?limit=101")).status).toBe(400);
+    expect((await call("POST", "/stores/page%3Afilms/agent/send", { message: "" })).status).toBe(
+      400,
+    );
+    expect((await call("POST", "/stores/page%3Anope/agent/send", { message: "hi" })).status).toBe(
+      404,
+    );
+    expect((await call("GET", "/stores/session%3Anope/agent/status")).status).toBe(404);
+  });
+});
+
 describe("page event stream", () => {
   it("pins SSE headers, rejects non-SSE Accept with 406, and 404s an unknown page", async () => {
     const { base, call } = await boot();
@@ -167,6 +200,8 @@ describe("page event stream", () => {
     for (const [name, value] of Object.entries(SSE_HEADERS)) {
       if (name !== "connection") expect(response.headers.get(name)).toBe(value);
     }
+    await waitFor(() => stream.agents.length === 1);
+    expect(stream.agents[0]?.data).toEqual({ state: "none", sessionId: null });
   });
 
   it("sends change after a store write and reload after a file write", async () => {

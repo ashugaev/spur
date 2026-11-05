@@ -1429,6 +1429,44 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
       source: "v2/src/stores.ts",
     },
   ),
+  operation(
+    "send_store_agent",
+    "POST",
+    "/stores/{store}/agent/send",
+    "Queue a message to the store's agent; a page agent spawns or recovers on demand.",
+    {
+      body: body("StoreAgentSendRequest", [
+        field("message", "string", "1..20000 characters.", true),
+        field("userGesture", "boolean", "Sent from a trusted user click; resets loop budgets."),
+      ]),
+      examples: [{ body: { message: "Suggest three films" } }],
+      response: "{sessionId:string}; 429 delivery budget, 503 page recovery budget.",
+      source: "v2/src/store-agent.ts",
+    },
+  ),
+  operation(
+    "list_store_agent_messages",
+    "GET",
+    "/stores/{store}/agent/messages",
+    "Visible messages of the store's agent session plus its status.",
+    {
+      query: [
+        field("from", "integer", "Conversation entry cursor."),
+        field("limit", "integer 1..100", "Page size.", false, 50),
+      ],
+      examples: [{ query: { limit: "20" } }],
+      response:
+        "ConversationPage & {status:{state,sessionId}} | {sessionId:null,messages:[],status}",
+      source: "v2/src/store-agent.ts",
+    },
+  ),
+  operation(
+    "get_store_agent_status",
+    "GET",
+    "/stores/{store}/agent/status",
+    "Store agent status: none|working|idle|recovering|error|rate_limited.",
+    { response: "{state:string,sessionId:string|null}", source: "v2/src/store-agent.ts" },
+  ),
   operation("list_pages", "GET", "/pages", "List pages with title, agent runtime, dir and URL.", {
     response: "{pages:PageSummary[]}",
     source: "v2/src/pages.ts",

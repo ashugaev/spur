@@ -234,6 +234,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { resolveBootstrapConfigReferencePath } from "../../src/bootstrap-prompt.js";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
+import { createPage } from "../../src/pages.js";
 import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as sessionSlotsModule from "../../src/session-slots.js";
 import type * as metadataModule from "../../src/metadata.js";
@@ -45323,6 +45324,33 @@ describe("SessionService", () => {
     );
   });
 
+  it("restores a page agent in its page dir without a restore prompt or the spawn prompt", async () => {
+    const page = createPage(TEST_DATA_DIR, { id: "films", title: "Films" });
+    findAgentSessionIdMock.mockResolvedValue("session-uuid");
+    createSessionStore({
+      id: "pg-films-ab12",
+      project: "spur-page-films",
+      agent: "claude",
+      prompt: "page agent prompt",
+      branch: "main",
+      worktree: false,
+      worktreePath: page.path,
+      tmuxSession: "pg-films-ab12",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    mockExitedThenRestoredProcess();
+
+    const service = await createDisposedSessionService();
+    await service.restore("pg-films-ab12");
+
+    expect(buildAgentRestorePlanMock).toHaveBeenCalledWith("claude", page.path, "", {});
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
+  });
+
   it("restores a manually stopped session without sending a restore prompt", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -59128,6 +59156,33 @@ describe("SessionService", () => {
           path: projectDir,
         }),
       ).toThrow(/sessionPrefix "api" is already in use/);
+    });
+
+    it("createUnconfiguredProject and updateUnconfiguredProject reject reserved page identities", async () => {
+      seedUnconfigured([{ id: "stub", displayName: "Stub", prefix: "stub", path: projectDir }]);
+      const service = await createDisposedSessionService();
+      expect(() =>
+        service.createUnconfiguredProject({
+          displayName: "Demo",
+          prefix: "pg-x",
+          path: projectDir,
+        }),
+      ).toThrow('sessionPrefix "pg-x" uses the reserved page prefix pg-');
+      expect(() =>
+        service.createUnconfiguredProject({
+          displayName: "Spur Page X",
+          prefix: "spx",
+          path: projectDir,
+        }),
+      ).toThrow('project id "spur-page-x" uses the reserved prefix spur-page-');
+      expect(() =>
+        service.updateUnconfiguredProject("stub", {
+          displayName: "Stub",
+          prefix: "pg-x",
+          path: projectDir,
+        }),
+      ).toThrow('sessionPrefix "pg-x" uses the reserved page prefix pg-');
+      expect(addUnconfiguredProjectMock).not.toHaveBeenCalled();
     });
 
     it("createUnconfiguredProject derives a suffixed id when displayName collides", async () => {

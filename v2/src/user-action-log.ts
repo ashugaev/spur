@@ -235,6 +235,7 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
     if (preflight?.[1]) return { action: "project.preflight", projectId: preflight[1] };
     if (path === "/projects") return { action: "project.create" };
     if (path === "/pages") return { action: "page.create" };
+    if (/^\/stores\/[^/]+\/agent\/send$/.test(path)) return { action: "store.send" };
     if (path === "/deploy/switch") return { action: "deploy.switch" };
     if (path === "/deploy/auto-update") return { action: "deploy.auto_update" };
 

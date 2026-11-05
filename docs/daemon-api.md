@@ -105,6 +105,9 @@
 - `DELETE /stores/:store/docs/:collection/:docId`
 - `POST /stores/:store/query/:collection`
 - `GET /stores/:store/changes`
+- `POST /stores/:store/agent/send` — `{message, userGesture?}`; `429` delivery budget, `503` page agent recovery budget; `v2/src/store-agent.ts`.
+- `GET /stores/:store/agent/messages` — `from`, `limit` (1..100, default 50); adds `status`.
+- `GET /stores/:store/agent/status` — `{state: none|working|idle|recovering|error|rate_limited, sessionId}`.
 
 ## Page routes
 

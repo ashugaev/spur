@@ -193,6 +193,8 @@ import {
   SHEPHERD_PROJECT_ID,
   SHEPHERD_PROJECT_NAME,
 } from "./shepherd.js";
+import { buildPageProject, isPageProjectId, parsePageProjectId } from "./pages.js";
+import { assertProjectIdentityNotReserved } from "./page-identity.js";
 import { renderBootstrapPrompt, resolveBootstrapConfigReferencePath } from "./bootstrap-prompt.js";
 import {
   extractBareUserTask,
@@ -6420,6 +6422,7 @@ export class SessionService {
       candidateId = `${baseId}-${suffix}`;
       suffix += 1;
     }
+    assertProjectIdentityNotReserved(candidateId, prefix);
 
     let absolutePath: string;
     if (rawPath) {
@@ -6484,6 +6487,7 @@ export class SessionService {
     if (!existingUnconfigured.some((entry) => entry.id === id)) {
       throw new SessionResourceNotFoundError(`Unknown unconfigured project: ${id}`);
     }
+    assertProjectIdentityNotReserved(id, prefix);
     const configuredPrefixes = Object.values(this.config.projects).map(
       (project) => project.sessionPrefix,
     );
@@ -9413,6 +9417,14 @@ export class SessionService {
     if (projectId === SHEPHERD_PROJECT_ID) {
       return buildShepherdProject(this.config.dataDir);
     }
+    const pageId = parsePageProjectId(projectId);
+    if (pageId !== null) {
+      try {
+        return buildPageProject(this.config.dataDir, pageId);
+      } catch {
+        throw new SessionResourceNotFoundError(`Unknown project: ${projectId}`);
+      }
+    }
     const project = this.config.projects[projectId];
     if (!project) {
       throw new SessionResourceNotFoundError(`Unknown project: ${projectId}`);
@@ -9425,6 +9437,14 @@ export class SessionService {
   ): ProjectConfig | undefined {
     if (session.project === SHEPHERD_PROJECT_ID) {
       return buildShepherdProject(this.config.dataDir);
+    }
+    const pageId = parsePageProjectId(session.project);
+    if (pageId !== null) {
+      try {
+        return buildPageProject(this.config.dataDir, pageId);
+      } catch {
+        return undefined;
+      }
     }
     const daemonProject = this.config.projects[session.project];
     // Only a config that lives in the session's own worktree counts. Walking
@@ -21640,7 +21660,9 @@ export class SessionService {
         current.status !== "paused" &&
         current.stopReason !== "manual_pause" &&
         current.stopReason !== "stale_timeout" &&
-        current.stopReason !== "memory_shed";
+        current.stopReason !== "memory_shed" &&
+        // A page agent resumes its conversation; its spawn prompt is never resent.
+        !isPageProjectId(current.project);
       const restorePrompt = shouldSendRestoreMessage
         ? buildRestorePrompt(current.prompt, planMode, restrictWrites, mode)
         : "";
