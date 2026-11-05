@@ -20,7 +20,7 @@ import type { SessionArtifact, SessionArtifactKind, SessionArtifactOrigin } from
 
 const ARTIFACTS_DIR = "session-artifacts";
 const ARTIFACT_METADATA_FILE = ".spur-artifacts.json";
-const SESSION_WORK_DIR = ".spur-work";
+export const SESSION_WORK_DIR = ".spur-work";
 
 // Every entry pulled from a below-root directory costs one tick, and opening that
 // directory costs one tick too, whether the directory turns out empty, its entries become
