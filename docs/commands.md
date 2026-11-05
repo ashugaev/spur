@@ -96,8 +96,7 @@ Telegram `/complete`, `/kill`: finish bound forum-topic session, delete owned to
 
 ## spur-slots
 
-`spur-slots --title-if-absent "<title>"`, `spur-slots --link <label>=<url>`/`--unlink <label>`, `spur-slots --clear-title`, `spur-slots --tag <name>`/`--untag <name>`/`--list-tags` — session `PATH` helper for tmux title/links/tags.
-`spur actions [--session <id> | --global] [--limit <n>] [--json]` — logged mutating requests, one session or fleet-wide.
+`spur-slots --title-if-absent "<title>"`, `spur-slots --link <label>=<url>`/`--unlink <label>`, `spur-slots --clear-title`, `spur-slots --tag <name>`/`--untag <name>`/`--list-tags` — session `PATH` helper for tmux title/links/tags. `spur actions [--session <id> | --global] [--limit <n>] [--json]` — logged mutating requests, one session or fleet-wide.
 
 ## service, memory, agent-issue, comment-seen, subscribe
 
@@ -105,9 +104,10 @@ Telegram `/complete`, `/kill`: finish bound forum-topic session, delete owned to
 `spur agent-issue log <text...>` / `list [--project <id>] [--session <id>] [--limit <n>] [--json]` — friction operating Spur itself, never a repo code defect. `spur comment-seen record <id...>` — marks GitHub review-comment ids seen, needs `SPUR_PROJECT`.
 `spur subscribe <targetSessionId> --state <state>... [--message <text>] [--session <id>] | --list | --remove <subscriptionId>`. States: `working|waiting|needs_input|rate_limited|stale|stopped|error|killed`.
 
-## db
+## db, page
 
 `spur db <page:<id>|session:<sid>> get|list|query|add|set|update|rm <collection> [doc-id] ['<json>'] [--rev <n>] [--limit <n>] [--start-after <id>] [--json]` — document store; `query` takes `'{"where":[...],"orderBy":{...},"limit":n}'`; [stores.md](stores.md).
+`spur page create <id> [--title <t>] [--runtime claude|codex|cursor|opencode] [--model <id>] [--template blank]` / `list` / `path <id>` / `rm <id>` [--json] — [pages.md](pages.md).
 
 ## Sidecars
 

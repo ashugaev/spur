@@ -339,6 +339,20 @@ describe("spur help", () => {
     expect(help).toContain("--limit <number>");
     expect(help).toContain("--start-after <docId>");
   });
+
+  it("documents the page command actions and create flags", () => {
+    const page = buildProgram().commands.find((command) => command.name() === "page");
+    if (!page) throw new Error("Expected page command to be registered");
+    const help = page.helpInformation();
+    expect(help).toContain("page <create|list|path|rm> [id]");
+    for (const flag of [
+      "--title <title>",
+      "--runtime <agent>",
+      "--model <model>",
+      "--template <name>",
+    ])
+      expect(help).toContain(flag);
+  });
 });
 
 describe("argvWithoutStrayHelpFlags", () => {

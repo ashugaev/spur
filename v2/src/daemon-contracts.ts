@@ -1429,6 +1429,69 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
       source: "v2/src/stores.ts",
     },
   ),
+  operation("list_pages", "GET", "/pages", "List pages with title, agent runtime, dir and URL.", {
+    response: "{pages:PageSummary[]}",
+    source: "v2/src/pages.ts",
+  }),
+  operation("create_page", "POST", "/pages", "Create a page dir with page.yaml and a template.", {
+    body: body("CreatePageRequest", [
+      field("id", "string", "Page id ^[a-z0-9][a-z0-9-]{0,39}$.", true),
+      field("title", "string", "1..120 printable characters; defaults to id."),
+      field(
+        "runtime",
+        '"claude"|"codex"|"cursor"|"opencode"',
+        "Page agent runtime.",
+        false,
+        "claude",
+      ),
+      field("model", "string", "Page agent model."),
+      field("template", '"blank"', "Starter files.", false, "blank"),
+    ]),
+    examples: [{ body: { id: "films", title: "Films" } }],
+    response: "PageSummary",
+    status: 201,
+    source: "v2/src/pages.ts",
+  }),
+  operation(
+    "delete_page",
+    "DELETE",
+    "/pages/{pageId}",
+    "Delete a page dir, its store and streams.",
+    {
+      response: "{deleted:true,id:string}",
+      source: "v2/src/pages.ts",
+    },
+  ),
+  operation(
+    "get_page_file",
+    "GET",
+    "/pages/{pageId}/files/{path}",
+    "Serve one page file; dot paths and the store file are hidden.",
+    {
+      catchAllPathParams: ["path"],
+      response: "Raw file, PAGE_CONTENT_TYPES MIME, cache-control no-store.",
+      source: "v2/src/pages.ts",
+    },
+  ),
+  operation(
+    "stream_page_events",
+    "GET",
+    "/pages/{pageId}/events",
+    "Page event stream (text/event-stream): change, reset, reload, agent.",
+    {
+      query: [field("since", "integer", "Replay changes after this seq; Last-Event-ID wins.")],
+      examples: [{ query: { since: "0" } }],
+      response: "text/event-stream; non-SSE Accept 406; 64 open streams 503.",
+      source: "v2/src/pages.ts",
+      extraResponses: [
+        {
+          status: 406,
+          contentType: "application/json",
+          description: "Accept lacks text/event-stream.",
+        },
+      ],
+    },
+  ),
 ];
 
 export function getDaemonOperation(operationId: string): DaemonOperation | undefined {

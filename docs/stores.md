@@ -33,7 +33,7 @@ One SQLite file per store, Firestore-style documents.
 
 ## CLI
 
-`spur db <store> get|list|query|add|set|update|rm` — [commands.md#db](commands.md#db).
+`spur db <store> get|list|query|add|set|update|rm` — [commands.md#db-page](commands.md#db-page).
 
 ```sh
 spur db page:films add items '{"title":"Dune"}'

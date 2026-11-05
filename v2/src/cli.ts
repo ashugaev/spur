@@ -64,6 +64,7 @@ import type { UsageReport } from "./usage-report.js";
 import { appendAgentIssue, readAgentIssueLog, type AgentIssueRecord } from "./agent-issue-log.js";
 import type { UserActionRecord } from "./user-action-log.js";
 import type { StoreDoc } from "./stores.js";
+import type { PageSummary } from "./pages.js";
 import {
   accent,
   brandMark,
@@ -4567,6 +4568,86 @@ export function createProgram(cliEntrypoint: string): Command {
         return;
       }
       throw new Error("db op must be get, list, query, add, set, update, or rm");
+    });
+
+  program
+    .command("page")
+    .description("Create, list, locate, or remove Spur pages.")
+    .usage("<create|list|path|rm> [id] [options]")
+    .argument("<action>", "create, list, path, or rm")
+    .argument("[id]", "Page id")
+    .option("--title <title>", "Page title for create; defaults to the id")
+    .option("--runtime <agent>", "Page agent runtime for create: claude, codex, cursor, opencode")
+    .option("--model <model>", "Page agent model for create")
+    .option("--template <name>", "Starter files for create", "blank")
+    .option("--json", "Print raw JSON")
+    .action(async (action: string, id: string | undefined, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const json = Boolean(options.json);
+      const renderPage = (page: PageSummary) =>
+        `${page.id}  ${page.title}  ${page.url}  ${page.path}`;
+      if (action === "list") {
+        if (id !== undefined) throw new Error("page list takes no id");
+        await outputResult({
+          json,
+          label: "loading pages",
+          action: () => getJson<{ pages: PageSummary[] }>(cliEntrypoint, "/pages", configPath),
+          render: (response) =>
+            response.pages.length === 0 ? "No pages." : response.pages.map(renderPage).join("\n"),
+        });
+        return;
+      }
+      if (!id) throw new Error(`page ${action} requires an id`);
+      if (action === "create") {
+        const body = {
+          id,
+          template: options.template,
+          ...(options.title !== undefined ? { title: options.title } : {}),
+          ...(options.runtime !== undefined ? { runtime: options.runtime } : {}),
+          ...(options.model !== undefined ? { model: options.model } : {}),
+        };
+        await outputResult({
+          json,
+          label: `creating page ${id}`,
+          action: () => postJson<PageSummary>(cliEntrypoint, "/pages", body, configPath),
+          success: (page) => `Created page ${page.id}. Open ${page.url} on the Spur web UI.`,
+          render: (page) => page.path,
+        });
+        return;
+      }
+      if (action === "path") {
+        await outputResult({
+          json,
+          label: `locating page ${id}`,
+          action: async () => {
+            const { pages } = await getJson<{ pages: PageSummary[] }>(
+              cliEntrypoint,
+              "/pages",
+              configPath,
+            );
+            const page = pages.find((entry) => entry.id === id);
+            if (!page) throw new Error(`Page not found: ${id}`);
+            return page;
+          },
+          render: (page) => page.path,
+        });
+        return;
+      }
+      if (action === "rm") {
+        await outputResult({
+          json,
+          label: `removing page ${id}`,
+          action: () =>
+            deleteJson<{ deleted: true; id: string }>(
+              cliEntrypoint,
+              `/pages/${encodeURIComponent(id)}`,
+              configPath,
+            ),
+          render: () => `Removed page ${id}.`,
+        });
+        return;
+      }
+      throw new Error("page action must be create, list, path, or rm");
     });
 
   program

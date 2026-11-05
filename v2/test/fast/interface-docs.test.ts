@@ -45,7 +45,7 @@ describe("published interface contracts", () => {
       readRepoFile("docs/stores.md"),
     ]);
     expect(readme).toContain("docs/stores.md");
-    expect(commands).toContain("## db");
+    expect(commands).toContain("## db, page");
     expect(commands).toContain("spur db <page:<id>|session:<sid>>");
     for (const route of [
       "GET /stores/:store/docs/:collection",
@@ -61,6 +61,27 @@ describe("published interface contracts", () => {
     expect(daemonApi).toContain("## Store routes");
     for (const name of ["page:<pageId>", "session:<sid>", "_actions", "_state", "expectedRev"])
       expect(stores).toContain(name);
+  });
+
+  it("documents page routes, the page command and links the pages doc", async () => {
+    const [readme, commands, daemonApi, pages] = await Promise.all([
+      readRepoFile("README.md"),
+      readRepoFile("docs/commands.md"),
+      readRepoFile("docs/daemon-api.md"),
+      readRepoFile("docs/pages.md"),
+    ]);
+    expect(readme).toContain("docs/pages.md");
+    expect(commands).toContain("spur page create <id>");
+    for (const route of [
+      "GET /pages",
+      "POST /pages",
+      "DELETE /pages/:id",
+      "GET /pages/:id/files/:path",
+      "GET /pages/:id/events",
+    ])
+      expect(daemonApi).toContain(`\`${route}\``);
+    for (const name of ["page.yaml", "/p/<id>/", "./_spur/sdk.js", "reload"])
+      expect(pages).toContain(name);
   });
 
   it("documents closeout ownership in command docs", async () => {

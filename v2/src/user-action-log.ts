@@ -234,6 +234,7 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
     const preflight = path.match(/^\/projects\/([^/]+)\/preflight$/);
     if (preflight?.[1]) return { action: "project.preflight", projectId: preflight[1] };
     if (path === "/projects") return { action: "project.create" };
+    if (path === "/pages") return { action: "page.create" };
     if (path === "/deploy/switch") return { action: "deploy.switch" };
     if (path === "/deploy/auto-update") return { action: "deploy.auto_update" };
 
@@ -306,6 +307,7 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
   if (method === "DELETE") {
     const projectDelete = path.match(/^\/projects\/([^/]+)$/);
     if (projectDelete?.[1]) return { action: "project.delete", projectId: projectDelete[1] };
+    if (/^\/pages\/[^/]+$/.test(path)) return { action: "page.delete" };
     const sharedMemoryRemove = path.match(/^\/sessions\/([^/]+)\/shared-memory\/[^/]+\/[^/]+$/);
     if (sharedMemoryRemove?.[1]) {
       return { action: "shared.memory_remove", sessionId: sharedMemoryRemove[1] };

@@ -62,6 +62,15 @@ import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { readSession } from "./metadata.js";
 import { StoreError, StoreService, type StoreQuery } from "./stores.js";
+import { SseHub, acceptsEventStream } from "./sse.js";
+import {
+  PageEvents,
+  createPage,
+  listPages,
+  removePageDir,
+  resolvePageFile,
+  type CreatePageRequest,
+} from "./pages.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import { captureTmuxPane } from "./runtime-tmux.js";
@@ -923,6 +932,8 @@ export async function startServer(
     },
     readSession: (sessionId) => readSession(service.config.dataDir, sessionId),
   });
+  const sseHub = new SseHub();
+  const pageEvents = new PageEvents({ dataDir: () => service.config.dataDir, stores, hub: sseHub });
   const switchStatePath = deploySwitchStatePath(service.config.dataDir);
   const switchLedgerPath = updateLedgerPath(service.config.dataDir);
   // Re-applied on every config (re)load, not just boot, so disk-limit changes take
@@ -2612,6 +2623,69 @@ export async function startServer(
         return;
       }
 
+      if (method === "GET" && path === "/pages") {
+        sendJson(response, 200, { pages: listPages(service.config.dataDir) });
+        return;
+      }
+      if (method === "POST" && path === "/pages") {
+        const body = await readJsonBody<CreatePageRequest>(request);
+        sendJson(response, 201, createPage(service.config.dataDir, body));
+        return;
+      }
+
+      const pageId = path.match(/^\/pages\/([^/]+)$/)?.[1];
+      if (method === "DELETE" && pageId) {
+        const id = decodeURIComponent(pageId);
+        pageEvents.closePage(id);
+        removePageDir(service.config.dataDir, id);
+        sendJson(response, 200, { deleted: true, id });
+        return;
+      }
+
+      const pageFileMatch = path.match(/^\/pages\/([^/]+)\/files\/(.+)$/);
+      if (method === "GET" && pageFileMatch?.[1] && pageFileMatch[2]) {
+        let file: ReturnType<typeof resolvePageFile>;
+        try {
+          file = resolvePageFile(
+            service.config.dataDir,
+            decodeURIComponent(pageFileMatch[1]),
+            pageFileMatch[2]
+              .split("/")
+              .map((segment) => decodeURIComponent(segment))
+              .join("/"),
+          );
+        } catch (error) {
+          if (error instanceof URIError) throw new StoreError(404, "Page file not found");
+          throw error;
+        }
+        response.writeHead(200, {
+          "content-type": file.contentType,
+          "content-length": String(file.size),
+          "cache-control": "no-store",
+        });
+        const stream = createReadStream(file.path);
+        stream.on("error", () => response.destroy());
+        stream.pipe(response);
+        return;
+      }
+
+      const pageEventsId = path.match(/^\/pages\/([^/]+)\/events$/)?.[1];
+      if (method === "GET" && pageEventsId) {
+        if (!acceptsEventStream(request)) {
+          sendError(response, 406, "This route serves text/event-stream only");
+          return;
+        }
+        // A reconnecting EventSource repeats the original URL; its Last-Event-ID wins.
+        const since = request.headers["last-event-id"] ?? url.searchParams.get("since");
+        await pageEvents.open(
+          decodeURIComponent(pageEventsId),
+          typeof since === "string" ? parseQueryInteger(since, "since") : null,
+          request,
+          response,
+        );
+        return;
+      }
+
       logEvent("http.route.not_found", {
         level: "warn",
         method,
@@ -2791,6 +2865,8 @@ export async function startServer(
   });
 
   const closeServer = async (): Promise<void> => {
+    // Open event streams never end on their own; end them so close() does not wait out the grace.
+    sseHub.closeAll();
     await new Promise<void>((resolve) => {
       // server.closeAllConnections() destroys every tracked socket, including
       // in-flight requests, so a stuck handler can't block shutdown past the grace period.

@@ -105,3 +105,13 @@
 - `DELETE /stores/:store/docs/:collection/:docId`
 - `POST /stores/:store/query/:collection`
 - `GET /stores/:store/changes`
+
+## Page routes
+
+[pages.md](pages.md); `v2/src/pages.ts`.
+
+- `GET /pages`
+- `POST /pages` — `409` duplicate id.
+- `DELETE /pages/:id`
+- `GET /pages/:id/files/:path` — `no-store`; dot paths and `data.sqlite*` 404.
+- `GET /pages/:id/events` — `text/event-stream` only (`406` otherwise); events `change`, `reset`, `reload`, `agent`; `since` or `Last-Event-ID`; 64 open streams, then `503`.
