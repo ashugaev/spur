@@ -231,22 +231,31 @@ export class StoreActions {
         throw new StoreError(400, `retryOf must name a failed action: ${request.retryOf}`);
       }
     }
-    const pending = await stores.query(storeId, ACTIONS_COLLECTION, {
-      where: [{ field: "status", op: "==", value: "pending" }],
-      limit: ACTION_PENDING_CAP + 1,
-    });
-    if (pending.length >= ACTION_PENDING_CAP && !pending.some((doc) => doc.id === request.id)) {
-      throw new StoreError(429, `More than ${ACTION_PENDING_CAP} pending actions`);
-    }
-    const { inserted, doc } = await stores.insertIfAbsent(storeId, ACTIONS_COLLECTION, request.id, {
-      action: request.action,
-      label: request.label,
-      source: request.source,
-      payload: request.payload,
-      status: "pending",
-      ...(request.retryOf !== undefined ? { retryOf: request.retryOf } : {}),
-      createdAt: new Date(this.now()).toISOString(),
-    });
+    // The pending count runs inside the insert transaction so concurrent invokes cannot
+    // both pass at ACTION_PENDING_CAP - 1; an existing id returns before the check.
+    const { inserted, doc } = await stores.insertIfAbsent(
+      storeId,
+      ACTIONS_COLLECTION,
+      request.id,
+      {
+        action: request.action,
+        label: request.label,
+        source: request.source,
+        payload: request.payload,
+        status: "pending",
+        ...(request.retryOf !== undefined ? { retryOf: request.retryOf } : {}),
+        createdAt: new Date(this.now()).toISOString(),
+      },
+      (query) => {
+        const pending = query({
+          where: [{ field: "status", op: "==", value: "pending" }],
+          limit: ACTION_PENDING_CAP,
+        });
+        if (pending.length >= ACTION_PENDING_CAP) {
+          throw new StoreError(429, `More than ${ACTION_PENDING_CAP} pending actions`);
+        }
+      },
+    );
     // Only the inserter delivers: one delivery per id across retries and restarts.
     if (!inserted) return doc;
     try {

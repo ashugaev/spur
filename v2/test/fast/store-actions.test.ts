@@ -1,4 +1,5 @@
-import { readFile, rm } from "node:fs/promises";
+import { readFile, rm, truncate } from "node:fs/promises";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createPage } from "../../src/pages.js";
 import { StoreAgent, type StoreAgentSessions } from "../../src/store-agent.js";
@@ -8,7 +9,13 @@ import {
   StoreActions,
   buildActionEnvelope,
 } from "../../src/store-actions.js";
-import { StoreError, StoreService, type StoreSessionView } from "../../src/stores.js";
+import {
+  MAX_STORE_BYTES,
+  StoreError,
+  StoreService,
+  type StoreSessionView,
+  pageDirPath,
+} from "../../src/stores.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -172,6 +179,36 @@ describe("action delivery", () => {
     expect(old.data).toMatchObject({ status: "failed", error: "timeout" });
     const changes = await stores.changes("page:films", 0);
     expect(changes.changes.filter((change) => change.id === "act-00000000")).toHaveLength(2);
+  });
+
+  it("admits exactly one of two concurrent invokes at 19 pending", async () => {
+    const { actions, stores, delivered } = await setup();
+    for (let n = 0; n < ACTION_PENDING_CAP - 1; n++) {
+      await actions.invoke("page:films", invokeBody(`act-${String(n).padStart(8, "0")}`));
+    }
+    const results = await Promise.all([
+      status(actions.invoke("page:films", invokeBody("act-race-0001"))),
+      status(actions.invoke("page:films", invokeBody("act-race-0002"))),
+    ]);
+    expect(results.sort()).toEqual([429, "ok"]);
+    const pending = await stores.query("page:films", "_actions", {
+      where: [{ field: "status", op: "==", value: "pending" }],
+    });
+    expect(pending).toHaveLength(ACTION_PENDING_CAP);
+    expect(delivered).toHaveLength(ACTION_PENDING_CAP);
+  });
+
+  it("expires a pending action on a store over the size cap", async () => {
+    const { actions, stores, dataDir, advance } = await setup();
+    await actions.invoke("page:films", invokeBody("act-00000001"));
+    await truncate(join(pageDirPath(dataDir, "films"), "data.sqlite"), MAX_STORE_BYTES + 1);
+    advance(ACTION_TIMEOUT_MS + 1000);
+    await actions.expire("page:films");
+    expect((await stores.get("page:films", "_actions", "act-00000001")).data).toMatchObject({
+      status: "failed",
+      error: "timeout",
+    });
+    expect(await status(actions.invoke("page:films", invokeBody("act-00000002")))).toBe(413);
   });
 
   it("keeps an expired action failed on a terminal session store while generic writes stay closed", async () => {

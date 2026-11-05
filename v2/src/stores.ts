@@ -90,8 +90,8 @@ export interface StoreQuery {
 
 export interface WriteOptions {
   expectedRev?: number;
-  // Daemon-internal writes (action docs, expiry) bypass the `_actions` gate and the
-  // terminal-session gate.
+  // Daemon-internal writes (action docs, expiry) bypass the `_actions` gate, the
+  // terminal-session gate and, except action inserts, the store size cap.
   internal?: boolean;
 }
 
@@ -271,10 +271,16 @@ export class StoreService {
     };
   }
 
-  private async open(path: string, create: boolean): Promise<DatabaseSync | null> {
+  private async open({ ref, path }: Resolved, create: boolean): Promise<DatabaseSync | null> {
     if (!create && !existsSync(path)) return null;
     const { DatabaseSync } = await loadSqlite();
-    if (create) mkdirSync(dirname(path), { recursive: true });
+    if (create) {
+      // The work dir is Spur's to create; a page dir only `spur page` creates, so a
+      // write racing page removal 404s instead of resurrecting the dir.
+      if (ref.kind === "session") mkdirSync(dirname(path), { recursive: true });
+      else if (!existsSync(dirname(path)))
+        throw new StoreError(404, `Page not found: ${ref.pageId}`);
+    }
     const db = new DatabaseSync(path);
     try {
       db.exec("PRAGMA busy_timeout = 2000");
@@ -288,8 +294,7 @@ export class StoreService {
   }
 
   private async withRead<T>(storeId: string, empty: T, fn: (db: DatabaseSync) => T): Promise<T> {
-    const { path } = this.resolve(storeId, "read");
-    const db = await this.open(path, false);
+    const db = await this.open(this.resolve(storeId, "read"), false);
     if (!db) return empty;
     try {
       return fn(db);
@@ -302,10 +307,12 @@ export class StoreService {
     storeId: string,
     options: WriteOptions,
     fn: (db: DatabaseSync, changes: StoreChangeEvent[]) => T,
+    capSize = !options.internal,
   ): Promise<T> {
-    const { path } = this.resolve(storeId, options.internal ? "internal" : "write");
-    assertStoreSize(path);
-    const db = await this.open(path, true);
+    const resolved = this.resolve(storeId, options.internal ? "internal" : "write");
+    const { path } = resolved;
+    if (capSize) assertStoreSize(path);
+    const db = await this.open(resolved, true);
     if (!db) throw new StoreError(404, `Store not found: ${storeId}`);
     const changes: StoreChangeEvent[] = [];
     let result: T;
@@ -341,16 +348,7 @@ export class StoreService {
   async query(storeId: string, collection: string, query: StoreQuery): Promise<StoreDoc[]> {
     assertCollection(collection);
     const built = buildQuery(collection, query);
-    return this.withRead(storeId, [], (db) => {
-      const params = [...built.params];
-      let sql = built.sql;
-      if (query.startAfter !== undefined) {
-        const cursor = cursorClause(db, collection, query, params);
-        sql = sql.replace("/*cursor*/", cursor);
-      }
-      const rows = db.prepare(sql).all(...params) as unknown as DocRow[];
-      return rows.map(rowToDoc);
-    });
+    return this.withRead(storeId, [], (db) => runQuery(db, collection, query, built));
   }
 
   async add(
@@ -431,21 +429,31 @@ export class StoreService {
     });
   }
 
-  /** Inserts only when the doc is absent, atomically. Daemon-internal. */
+  /**
+   * Inserts only when the doc is absent, atomically. Daemon-internal, size-capped.
+   * `admit` runs in the same transaction before an insert and throws to refuse it.
+   */
   async insertIfAbsent(
     storeId: string,
     collection: string,
     docId: string,
     data: unknown,
+    admit?: (query: (query: StoreQuery) => StoreDoc[]) => void,
   ): Promise<{ inserted: boolean; doc: StoreDoc }> {
     assertCollection(collection);
     assertDocId(docId);
     const text = encodeDocData(data);
-    return this.withWrite(storeId, { internal: true }, (db, changes) => {
-      const current = readDoc(db, collection, docId);
-      if (current) return { inserted: false, doc: current };
-      return { inserted: true, doc: writeDoc(db, changes, collection, docId, text, null) };
-    });
+    return this.withWrite(
+      storeId,
+      { internal: true },
+      (db, changes) => {
+        const current = readDoc(db, collection, docId);
+        if (current) return { inserted: false, doc: current };
+        admit?.((query) => runQuery(db, collection, query, buildQuery(collection, query)));
+        return { inserted: true, doc: writeDoc(db, changes, collection, docId, text, null) };
+      },
+      true,
+    );
   }
 
   async changes(
@@ -611,6 +619,21 @@ function readChanges(db: DatabaseSync, since: number, limit: number): StoreChang
     changes: rows.map((row) => ({ ...row, seq: Number(row.seq), rev: Number(row.rev) })),
     lastSeq,
   };
+}
+
+function runQuery(
+  db: DatabaseSync,
+  collection: string,
+  query: StoreQuery,
+  built: { sql: string; params: SQLInputValue[] },
+): StoreDoc[] {
+  const params = [...built.params];
+  let sql = built.sql;
+  if (query.startAfter !== undefined) {
+    sql = sql.replace("/*cursor*/", cursorClause(db, collection, query, params));
+  }
+  const rows = db.prepare(sql).all(...params) as unknown as DocRow[];
+  return rows.map(rowToDoc);
 }
 
 function buildQuery(

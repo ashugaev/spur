@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { mkdir, rm, truncate, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -134,6 +134,35 @@ describe("store CRUD", () => {
     const file = join(pageDirPath(dataDir, "films"), "data.sqlite");
     await truncate(file, MAX_STORE_BYTES + 1);
     await expectStatus(service.add("page:films", "items", { n: 1 }), 413);
+  });
+
+  it("lets internal writes close actions on a full store but caps new action inserts", async () => {
+    const { service, dataDir } = await setup();
+    await service.insertIfAbsent("page:films", "_actions", "a1", { status: "pending" });
+    await truncate(join(pageDirPath(dataDir, "films"), "data.sqlite"), MAX_STORE_BYTES + 1);
+    const closed = await service.update(
+      "page:films",
+      "_actions",
+      "a1",
+      { status: "failed", error: "timeout" },
+      { internal: true },
+    );
+    expect(closed.data).toEqual({ status: "failed", error: "timeout" });
+    await service.transactMeta("page:films", (meta) => meta.set("budget.auto", 1));
+    await expectStatus(
+      service.insertIfAbsent("page:films", "_actions", "a2", { status: "pending" }),
+      413,
+    );
+  });
+
+  it("404s a page store write racing page removal without recreating the page dir", async () => {
+    const { service, dataDir } = await setup();
+    const pageDir = pageDirPath(dataDir, "films");
+    // resolve() passes synchronously; the dir goes before the async open.
+    const write = service.set("page:films", "items", "d1", { title: "Dune" });
+    rmSync(pageDir, { recursive: true, force: true });
+    await expectStatus(write, 404);
+    expect(existsSync(pageDir)).toBe(false);
   });
 
   it("persists across service instances", async () => {
