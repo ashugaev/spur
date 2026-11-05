@@ -352,6 +352,29 @@ describe("handshake and teardown", () => {
   });
 });
 
+describe("agent events", () => {
+  it("connects with the agent status and posts agent-event only when the mapped state changes", async () => {
+    const h = harness();
+    h.host.updateSession({ canSend: true, state: "waiting" });
+    const port = await ready(h);
+    expect(h.posts[0]?.message.context).toMatchObject({
+      agentStatus: { state: "idle", sessionId: SID },
+    });
+    const events = () => port.toFrame.filter((message) => message.type === "agent-event");
+    h.host.updateSession({ canSend: true, state: "needs_input" });
+    expect(events()).toHaveLength(0);
+    h.host.updateSession({ canSend: true, state: "working" });
+    h.host.updateSession({ canSend: true, state: "working" });
+    h.host.updateSession({ canSend: false, state: "budget_limited" });
+    h.host.updateSession({ canSend: false, state: "killed" });
+    expect(events().map((message) => message.status)).toEqual([
+      { state: "working", sessionId: SID },
+      { state: "rate_limited", sessionId: SID },
+      { state: "error", sessionId: SID },
+    ]);
+  });
+});
+
 describe("rejections send nothing", () => {
   it("returns typed results with zero sends", async () => {
     const h = harness();

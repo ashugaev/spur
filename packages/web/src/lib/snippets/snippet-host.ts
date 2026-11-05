@@ -242,6 +242,16 @@ export interface SnippetSessionUpdate {
   state: SpurSessionState;
 }
 
+type SnippetAgentState = "working" | "idle" | "error" | "rate_limited";
+
+/** Same mapping as the daemon's `mapAgentState` (v2/src/store-agent.ts) behind `agent/status`. */
+function agentStateOf(state: SpurSessionState): SnippetAgentState {
+  if (state === "error" || state === "killed") return "error";
+  if (state === "working") return "working";
+  if (state === "rate_limited" || state === "budget_limited") return "rate_limited";
+  return "idle";
+}
+
 export type ApplyFileResult = "mounted" | "ignored" | "conflict" | "lower_revision";
 
 export interface SnippetHost {
@@ -351,6 +361,8 @@ export function createSnippetHost(
   let floodTimes: number[] = [];
   let canSend = true;
   let agentWorking = false;
+  // Last agent state sent to the frame; null until the first session update.
+  let agentState: SnippetAgentState | null = null;
   // Invoke promise in the frame waiting for its action's final status.
   let invokeCall: { callId: string; actionId: string } | null = null;
   // Frame call waiting on the confirm strip (invoke-result or agent reply).
@@ -391,6 +403,13 @@ export function createSnippetHost(
 
   function postToSnippet(message: unknown): void {
     if (state.phase === "connected" && port) port.postMessage(message);
+  }
+
+  function agentStatusOf(agent: SnippetAgentState): {
+    state: SnippetAgentState;
+    sessionId: string;
+  } {
+    return { state: agent, sessionId };
   }
 
   function setAvailability(conflict: boolean): void {
@@ -645,6 +664,7 @@ export function createSnippetHost(
       state: saved.app,
       controls: saved.controls,
       action: state.action ? eventOf(state.action) : null,
+      ...(agentState ? { agentStatus: agentStatusOf(agentState) } : {}),
       actions: manifest.actions.map((action) => ({ id: action.id, label: action.label })),
       theme: deps.getTheme(),
       fullscreen: state.fullscreen,
@@ -1074,6 +1094,12 @@ export function createSnippetHost(
 
   function updateSession(update: SnippetSessionUpdate): void {
     agentWorking = update.state === "working";
+    const nextAgentState = agentStateOf(update.state);
+    if (nextAgentState !== agentState) {
+      agentState = nextAgentState;
+      // Same `agent` event a page gets from its stream, so spur.on("agent") holds in snippets.
+      postToSnippet({ type: SNIPPET_TO_FRAME.agentEvent, status: agentStatusOf(nextAgentState) });
+    }
     if (canSend !== update.canSend) {
       canSend = update.canSend;
       if (!canSend) staleConfirm();
