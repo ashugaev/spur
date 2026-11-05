@@ -13136,7 +13136,7 @@ describe("SessionService", () => {
     },
   );
 
-  it("does not block a retained-error Codex send on a stale pane banner after a clean turn", async () => {
+  it("does not block a retained-error Codex send on a pane banner after the structured reset", async () => {
     const sessions = createSessionStore(
       runningSession({
         agent: "codex",
@@ -13159,11 +13159,13 @@ describe("SessionService", () => {
         timestampMs: Date.parse("2026-03-18T10:04:59.000Z"),
         filePath: "/tmp/codex/rollout.jsonl",
       },
-      rateLimit: { limited: false, reason: "" },
+      rateLimit: {
+        limited: true,
+        reason: "codex 5h window exhausted",
+        resetAtMs: Date.parse("2026-03-18T10:04:00.000Z"),
+      },
     });
-    captureTmuxPaneMock.mockResolvedValue(
-      `■ Your workspace is out of credits.\n${Array.from({ length: 21 }, (_, i) => `work ${i}`).join("\n")}`,
-    );
+    captureTmuxPaneMock.mockResolvedValue("■ Your workspace is out of credits.");
     const service = await createDisposedSessionService();
 
     await expect(service.flushQueuedMessage("api-1", "flush me")).resolves.toMatchObject({
@@ -19521,6 +19523,27 @@ describe("SessionService", () => {
     captureTmuxPaneMock.mockResolvedValue(
       `■ Your workspace is out of credits.\n${Array.from({ length: 21 }, (_, i) => `work ${i}`).join("\n")}`,
     );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    expect((await service.get("api-1")).state).toBe("waiting");
+    service.dispose();
+  });
+
+  it("lets an expired Codex reset clear a banner still in the pane tail when API is unavailable", async () => {
+    readSessionMock.mockReturnValue(
+      runningSession({ agent: "codex", launchCommand: "codex --dangerously-bypass-approvals-and-sandbox" }),
+    );
+    readAgentHookStateMock.mockReturnValue({ state: "waiting", updatedAt: "2026-03-18T10:04:59.000Z" });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: null,
+      rateLimit: {
+        limited: true,
+        reason: "codex 5h window exhausted",
+        resetAtMs: Date.parse("2026-03-18T10:04:00.000Z"),
+      },
+    });
+    captureTmuxPaneMock.mockResolvedValue("■ Your workspace is out of credits.");
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 

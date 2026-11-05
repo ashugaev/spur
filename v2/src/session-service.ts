@@ -23277,7 +23277,7 @@ export class SessionService {
     }
     if (structured !== null) {
       if (!structured.limited) this.codexPaneLimitObservedAt.delete(sessionId);
-      return structured.limited ? hit : null;
+      return rateLimitActive(structured, Date.now()) ? structured : null;
     }
     const observedAt = this.codexPaneLimitObservedAt.get(sessionId) ?? Date.now();
     this.codexPaneLimitObservedAt.set(sessionId, observedAt);
