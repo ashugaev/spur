@@ -76,7 +76,7 @@ export function parseSpurActionEnvelope(text: string): SpurActionEnvelope | null
   if (!source || !STORE_ID_RE.test(store)) return null;
   if (head[2] !== action || head[3] !== describeSource(source, store)) return null;
   if (head[4] !== store || head[5] !== id) return null;
-  const close = `Close: spur db ${store} done ${id} --result '<json>'  |  spur db ${store} fail ${id} --error '<text>'`;
+  const close = `Close: "$SPUR_SESSION_TOOL_DIR/spur" db ${store} done ${id} --result '<json>'  |  "$SPUR_SESSION_TOOL_DIR/spur" db ${store} fail ${id} --error '<text>'`;
   if (lines[3] !== close) return null;
   return { id, store, action, label, source, payload: body.payload };
 }

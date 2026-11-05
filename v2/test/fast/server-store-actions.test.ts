@@ -100,7 +100,9 @@ describe("store actions over HTTP", () => {
     expect(sends).toHaveLength(1);
     expect(sends[0]).toMatchObject({ sessionId: "demo-1", queue: true });
     expect(sends[0]?.message.split("\n")[0]).toBe("[spur-action v1]");
-    expect(sends[0]?.message).toContain("spur db session:demo-1 done act-00000001");
+    expect(sends[0]?.message).toContain(
+      '"$SPUR_SESSION_TOOL_DIR/spur" db session:demo-1 done act-00000001',
+    );
 
     const done = await call("POST", "/stores/session%3Ademo-1/actions/act-00000001/complete", {
       status: "done",

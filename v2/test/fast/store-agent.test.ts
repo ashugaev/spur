@@ -179,6 +179,9 @@ describe("page agent spawn and binding", () => {
       prompt: renderPageAgentPrompt("films", readPageConfig(dataDir, "films")),
     });
     expect(sessions.spawns[0]?.prompt).not.toContain("hello agent");
+    expect(sessions.spawns[0]?.prompt).toContain(
+      '`"$SPUR_SESSION_TOOL_DIR/spur" db page:films get',
+    );
     expect(sessions.sends).toEqual([
       { sessionId: result.sessionId, message: "hello agent", queue: true },
     ]);

@@ -97,7 +97,9 @@ describe("action envelope", () => {
     expect(envelope.split("\n")[1]).toBe(
       'User action "Save" (save) from snippet form revision 3, store session:sp-1, id act-0001abcd.',
     );
-    expect(envelope).toContain("spur db session:sp-1 done act-0001abcd");
+    expect(envelope.split("\n")[3]).toBe(
+      `Close: "$SPUR_SESSION_TOOL_DIR/spur" db session:sp-1 done act-0001abcd --result '<json>'  |  "$SPUR_SESSION_TOOL_DIR/spur" db session:sp-1 fail act-0001abcd --error '<text>'`,
+    );
   });
 
   it("rejects labels with newline, bidi override, bracket or quote", async () => {

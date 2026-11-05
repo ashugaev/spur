@@ -580,12 +580,13 @@ describe("withSessionArtifactInstructions snippet bullet", () => {
     expect(text.split(SNIPPET_BULLET_PATH)).toHaveLength(2);
     expect(text.split("[spur-action v1]")).toHaveLength(2);
     expect(text).not.toContain("spur-snippet-action");
-    expect(text).toContain("spur db session:$SPUR_SESSION done <id>");
-    expect(text).toContain("spur db session:$SPUR_SESSION fail <id>");
+    expect(text).toContain('"$SPUR_SESSION_TOOL_DIR/spur" db session:$SPUR_SESSION done <id>');
+    expect(text).toContain('"$SPUR_SESSION_TOOL_DIR/spur" db session:$SPUR_SESSION fail <id>');
+    expect(text).not.toMatch(/`spur (db|page) /);
     expect(text).toContain("https://raw.githubusercontent.com/ashugaev/spur/main/docs/snippets.md");
     const lines = text.split("\n");
     expect(lines[lines.length - 2]).toContain(SNIPPET_BULLET_PATH);
-    expect(lines[lines.length - 1]).toContain("spur page create <id>");
+    expect(lines[lines.length - 1]).toContain('"$SPUR_SESSION_TOOL_DIR/spur" page create <id>');
     expect(lines[lines.length - 1]).toContain(
       "https://raw.githubusercontent.com/ashugaev/spur/main/docs/pages.md",
     );
