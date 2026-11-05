@@ -29,7 +29,7 @@ One SQLite file per store, Firestore-style documents.
 
 ## Limits
 
-- Document 262144 bytes, store file 64 MiB: `413`. Request body over 1000000 bytes: `500`.
+- Document 262144 bytes, store file 64 MiB: `413`. Store over 64 MiB refuses new actions and client writes; agent closes, expiry and delivery-failure marks still succeed. Request body over 1000000 bytes: `500`.
 
 ## Actions
 
