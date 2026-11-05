@@ -24,7 +24,7 @@ export function SpurActionSummary({ text, fallback }: { text: string; fallback: 
       >
         <svg
           aria-hidden="true"
-          className="mt-0.5 h-3 w-3 shrink-0 text-[var(--color-text-tertiary)]"
+          className="mt-0.5 h-3 w-3 shrink-0"
           fill="none"
           stroke="currentColor"
           strokeLinecap="round"
@@ -34,7 +34,7 @@ export function SpurActionSummary({ text, fallback }: { text: string; fallback: 
         >
           <path d="M6 3 2 8l4 5M10 3l4 5-4 5" />
         </svg>
-        <span className="shrink-0 whitespace-nowrap text-[10px] uppercase leading-[18px] tracking-[0.12em] text-[var(--color-text-tertiary)]">
+        <span className="shrink-0 whitespace-nowrap text-[10px] uppercase leading-[18px] tracking-[0.12em]">
           {kind}
         </span>{" "}
         <span className={`flex-1 ${HARD_WRAP_TEXT_CLASS}`}>
@@ -43,7 +43,7 @@ export function SpurActionSummary({ text, fallback }: { text: string; fallback: 
         </span>
       </div>
       <details className="mt-1">
-        <summary className="cursor-pointer text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]">
+        <summary className="cursor-pointer text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]">
           Raw prompt
         </summary>
         <pre className="mt-1 whitespace-pre-wrap border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2 text-[11px] text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">

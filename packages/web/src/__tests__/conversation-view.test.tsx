@@ -673,6 +673,10 @@ describe("ConversationView spur-action summary", () => {
     expect(details.open).toBe(false);
     expect(screen.getByText("Raw prompt")).toBeInTheDocument();
     expect(details.querySelector("pre")?.textContent).toBe(prompt);
+    // Labels sit on the user bubble: the tertiary token fails contrast there in dark mode.
+    const labels = [summary, details.querySelector("summary") as HTMLElement];
+    expect(labels.map((node) => node.outerHTML).join("")).not.toContain("--color-text-tertiary");
+    expect(details.querySelector("summary")?.className).toContain("--color-text-secondary");
   });
 
   it("renders a malformed envelope as markdown, as before", () => {
