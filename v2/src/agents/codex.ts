@@ -1640,6 +1640,10 @@ function foldCodexSessionMeta(fold: CodexRolloutFold, parsed: Record<string, unk
   };
 }
 
+function observeCodexRateLimit(fold: CodexRolloutFold): void {
+  fold.rateLimitObservedAtMs = Math.max(Date.now(), fold.rateLimitObservedAtMs ?? -Infinity);
+}
+
 function foldCodexRolloutLine(fold: CodexRolloutFold, parsed: Record<string, unknown>): void {
   foldCodexSessionMeta(fold, parsed);
   const matchedCallId = readMatchedToolCallId(parsed);
@@ -1653,7 +1657,7 @@ function foldCodexRolloutLine(fold: CodexRolloutFold, parsed: Record<string, unk
     if (fold.hardLimitTurnId !== undefined && state.turnId !== fold.hardLimitTurnId) {
       delete fold.hardLimitTurnId;
       fold.rateLimit = { limited: false, reason: "" };
-      fold.rateLimitObservedAtMs = state.timestampMs;
+      observeCodexRateLimit(fold);
     }
   } else if (state?.reason === "task_complete") {
     const payload = parsed["payload"];
@@ -1661,24 +1665,17 @@ function foldCodexRolloutLine(fold: CodexRolloutFold, parsed: Record<string, unk
     if (isRecord(error) && error["codex_error_info"] === "usage_limit_exceeded") {
       fold.hardLimitTurnId = state.turnId ?? "";
       fold.rateLimit = { limited: true, reason: "codex usage_limit_exceeded" };
-      fold.rateLimitObservedAtMs = state.timestampMs;
+      observeCodexRateLimit(fold);
     } else if (error === null || error === undefined) {
       delete fold.hardLimitTurnId;
       fold.rateLimit = { limited: false, reason: "" };
-      fold.rateLimitObservedAtMs = state.timestampMs;
+      observeCodexRateLimit(fold);
     }
   }
   const detection = detectCodexRateLimit(extractCodexRateLimitsLine(parsed));
   if (detection && fold.hardLimitTurnId === undefined) {
-    const timestamp = parsed["timestamp"];
-    const observedAtMs = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
-    // File order wins when a token_count has no usable timestamp (or a
-    // backward clock): a new limit must invalidate an earlier API allow.
-    fold.rateLimitObservedAtMs = Math.max(
-      Number.isFinite(observedAtMs) ? observedAtMs : Date.now(),
-      (fold.rateLimitObservedAtMs ?? -Infinity) + 1,
-    );
     fold.rateLimit = detection;
+    observeCodexRateLimit(fold);
   }
   const model = extractCodexTurnContextModel(parsed);
   if (model !== undefined) fold.model = model;
@@ -1982,6 +1979,9 @@ async function readCodexRolloutStateSnapshot(
   return {
     rollout: null,
     rateLimit: newestByMtime?.result.rateLimit ?? null,
+    ...(newestByMtime?.result.rateLimitObservedAtMs !== undefined
+      ? { rateLimitObservedAtMs: newestByMtime.result.rateLimitObservedAtMs }
+      : {}),
     ...(model ? { model } : {}),
     ...(newestTokenUsage ? { tokenUsage: newestTokenUsage } : {}),
     ...(tokenUsages.length > 0 ? { tokenUsages } : {}),

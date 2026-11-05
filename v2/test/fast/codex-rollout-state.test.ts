@@ -238,9 +238,11 @@ describe("readCodexRolloutState", () => {
 
     lines.push(eventLine("2026-11-05T10:03:00.000Z", "task_complete", { turn_id: "second" }));
     await writeFile(filePath, lines.join("\n"));
+    const readStartedAt = Date.now();
     const clean = await readCodexRolloutState(sessionsDir, reader);
     expect(clean.rateLimit?.limited).toBe(false);
-    expect(clean.rateLimitObservedAtMs).toBe(Date.parse("2026-11-05T10:03:00.000Z"));
+    expect(clean.rateLimitObservedAtMs).toBeGreaterThanOrEqual(readStartedAt);
+    expect(clean.rateLimitObservedAtMs).toBeLessThanOrEqual(Date.now());
 
     lines.push(
       eventLine("2026-11-05T10:04:00.000Z", "task_complete", {
