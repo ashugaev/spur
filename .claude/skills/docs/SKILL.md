@@ -60,7 +60,7 @@ navigation for an agent that reads source freely, never a copy of the source.
   own tests, never to this file.
   New surface ships with exactly one line added. Nothing else grows.
   Line budget per file, hard cap: commands.md 132, configuration.md 250,
-  daemon-api.md 94. daemon-api.md only: one method + one full path per
+  daemon-api.md 119. daemon-api.md only: one method + one full path per
   line, always — never `GET|POST /x` or `/x/a|b`, a route grep must find
   its exact `METHOD /path` string verbatim on one line. Over budget on your
   own edit: cut elsewhere in the same file before adding.
