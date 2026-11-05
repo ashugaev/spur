@@ -16933,13 +16933,14 @@ export class SessionService {
               const native = await this.classifyCodexState(current);
               const paneText = await captureTmuxPane(current.tmuxSession, 200, { fresh: true });
               if (paneText === null) throw new Error(uncertainInput);
-              const permission = native.rateLimit?.limited
-                ? this.codexRateLimitPoller.permission(
-                    sessionId,
-                    codexHookHomePath(join(this.config.dataDir, "session-tools", sessionId)),
-                    native.rateLimitObservedAtMs ?? 0,
-                  )
-                : null;
+              const permission =
+                native.state === "waiting" && native.rateLimit?.limited
+                  ? this.codexRateLimitPoller.permission(
+                      sessionId,
+                      codexHookHomePath(join(this.config.dataDir, "session-tools", sessionId)),
+                      native.rateLimitObservedAtMs ?? 0,
+                    )
+                  : null;
               if (
                 (permission !== true && rateLimitActive(native.rateLimit, Date.now())) ||
                 rateLimitActive(
@@ -24721,6 +24722,7 @@ export class SessionService {
 
     let rateLimit: RateLimitDetection | null = null;
     let codexLimitObservedAtMs = 0;
+    let codexPermission: boolean | null | undefined;
     let hasServerErrorRecord = false;
     let hasAuthenticationFailure = false;
     let serverErrorEvidence: "error" | "recovered" | undefined;
@@ -24944,13 +24946,13 @@ export class SessionService {
         stateSource = codexState.source;
         rateLimit = codexState.rateLimit;
         codexLimitObservedAtMs = codexState.rateLimitObservedAtMs ?? 0;
-        if (rateLimit?.limited) {
-          const permission = this.codexRateLimitPoller.permission(
+        if (codexState.state === "waiting" && rateLimit?.limited) {
+          codexPermission = this.codexRateLimitPoller.permission(
             session.id,
             codexHookHomePath(join(this.config.dataDir, "session-tools", session.id)),
             codexLimitObservedAtMs,
           );
-          if (permission === true) rateLimit = { limited: false, reason: "" };
+          if (codexPermission === true) rateLimit = { limited: false, reason: "" };
         }
         agentActivityAt = activityAtFromMs(codexState.activityMs);
         liveModel = codexState.model;
@@ -25272,14 +25274,16 @@ export class SessionService {
       }
       if (
         session.agent === "codex" &&
+        state === "waiting" &&
+        codexPermission === undefined &&
         (rateLimit?.limited || (rateLimit === null && session.rateLimitedAt))
       ) {
-        const permission = this.codexRateLimitPoller.permission(
+        codexPermission = this.codexRateLimitPoller.permission(
           session.id,
           codexHookHomePath(join(this.config.dataDir, "session-tools", session.id)),
           Math.max(codexLimitObservedAtMs, this.codexPaneLimitObservedAt.get(session.id) ?? 0),
         );
-        if (permission === true) rateLimit = { limited: false, reason: "" };
+        if (codexPermission === true) rateLimit = { limited: false, reason: "" };
       }
       // Defined only when the detection is flagged and its parsed reset has
       // passed (rateLimit?.limited && resetAtMs === undefined would make

@@ -1670,10 +1670,15 @@ function foldCodexRolloutLine(fold: CodexRolloutFold, parsed: Record<string, unk
   }
   const detection = detectCodexRateLimit(extractCodexRateLimitsLine(parsed));
   if (detection && fold.hardLimitTurnId === undefined) {
-    fold.rateLimit = detection;
     const timestamp = parsed["timestamp"];
     const observedAtMs = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
-    if (Number.isFinite(observedAtMs)) fold.rateLimitObservedAtMs = observedAtMs;
+    // File order wins when a token_count has no usable timestamp (or a
+    // backward clock): a new limit must invalidate an earlier API allow.
+    fold.rateLimitObservedAtMs = Math.max(
+      Number.isFinite(observedAtMs) ? observedAtMs : Date.now(),
+      (fold.rateLimitObservedAtMs ?? -Infinity) + 1,
+    );
+    fold.rateLimit = detection;
   }
   const model = extractCodexTurnContextModel(parsed);
   if (model !== undefined) fold.model = model;

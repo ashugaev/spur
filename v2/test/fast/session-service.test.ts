@@ -13081,7 +13081,7 @@ describe("SessionService", () => {
     },
   );
 
-  it.each(["native reader throws", "hard pane limit"] as const)(
+  it.each(["native reader throws", "hard pane limit", "working native quota"] as const)(
     "holds retained-error Codex after reaching %s (issue #1209)",
     async (scenario) => {
       const sessions = createSessionStore(
@@ -13102,6 +13102,11 @@ describe("SessionService", () => {
       });
       if (scenario === "native reader throws") {
         readCodexRolloutStateMock.mockRejectedValue(new Error("native state read failed"));
+      } else if (scenario === "working native quota") {
+        readCodexRolloutStateMock.mockResolvedValue({
+          rollout: null,
+          rateLimit: { limited: true, reason: "codex usage_limit_exceeded" },
+        });
       } else {
         captureTmuxPaneMock.mockResolvedValue("■ Your workspace is out of credits");
       }
@@ -13129,6 +13134,9 @@ describe("SessionService", () => {
       expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
       expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
       expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      if (scenario === "working native quota") {
+        expect(codexRateLimitPermissionMock).not.toHaveBeenCalled();
+      }
       expect(sessions.get("api-1")).toEqual(before);
       expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(0);
       expect(sessionServiceInternals(service).sessionLifecycleLocks.size).toBe(0);
@@ -19619,6 +19627,40 @@ describe("SessionService", () => {
     expect((await service.get("api-1")).state).toBe("waiting");
     service.dispose();
   });
+
+  it.each([true, false])(
+    "probes idle Codex, not a working hook with older limit evidence (scanPane=%s)",
+    async (scanPane) => {
+      const sessions = createSessionStore();
+      const working = runningSession({
+        id: "working-codex",
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      });
+      const idle = runningSession({
+        id: "idle-codex",
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      });
+      sessions.set(working.id, working);
+      sessions.set(idle.id, idle);
+      readAgentHookStateMock.mockImplementation((_dataDir: string, id: string) => ({
+        state: id === working.id ? "working" : "waiting",
+        updatedAt: "2026-03-18T10:04:59.000Z",
+      }));
+      readCodexRolloutStateMock.mockResolvedValue({
+        rollout: null,
+        rateLimit: { limited: true, reason: "codex usage_limit_exceeded" },
+      });
+      captureTmuxPaneMock.mockResolvedValue("Waiting for the next task.");
+      const service = await createDisposedSessionService();
+
+      await sessionServiceInternals(service).classifySessionRecord(working, { scanPane });
+      expect(codexRateLimitPermissionMock).not.toHaveBeenCalled();
+      await sessionServiceInternals(service).classifySessionRecord(idle, { scanPane });
+      expect(codexRateLimitPermissionMock).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("classifies needs_input for codex when the pane shows a live MCP permission dialog despite a soft rate-limit signal (hook-independent)", async () => {
     readSessionMock.mockReturnValue({

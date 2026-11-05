@@ -111,7 +111,9 @@ describe("Codex app-server rate-limit probe", () => {
     spawnMock.mockImplementation(() => fakeAppServer(false, null));
     const poller = new CodexRateLimitPoller();
     expect(poller.permission("first", "/tmp/codex-home-a", 0)).toBeNull();
-    await vi.advanceTimersByTimeAsync(0);
+    expect(spawnMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
     expect(poller.permission("second", "/tmp/codex-home-b", 0)).toBeNull();
     expect(spawnMock).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(59_999);
@@ -125,14 +127,31 @@ describe("Codex app-server rate-limit probe", () => {
     spawnMock.mockImplementation(() => fakeAppServer(true));
     const poller = new CodexRateLimitPoller();
     expect(poller.permission("first", "/tmp/codex-home", 0)).toBeNull();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(60_000);
     expect(poller.permission("first", "/tmp/codex-home", 0)).toBe(true);
 
-    vi.setSystemTime(2_000);
-    expect(poller.permission("first", "/tmp/codex-home", 2_000)).toBeNull();
+    vi.setSystemTime(62_000);
+    expect(poller.permission("first", "/tmp/codex-home", 62_000)).toBeNull();
     expect(spawnMock).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(59_000);
     expect(spawnMock).toHaveBeenCalledTimes(2);
     poller.dispose();
+  });
+
+  it("waits a full minute after reconstruction before probing again", async () => {
+    spawnMock.mockImplementation(() => fakeAppServer(false));
+    const first = new CodexRateLimitPoller();
+    first.permission("first", "/tmp/codex-home", 0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    first.dispose();
+
+    const second = new CodexRateLimitPoller();
+    second.permission("first", "/tmp/codex-home", 0);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    second.dispose();
   });
 });

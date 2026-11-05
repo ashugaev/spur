@@ -185,6 +185,33 @@ async function makeMultiFileSessionsDir(fileSpecs: SessionFile[]): Promise<strin
 }
 
 describe("readCodexRolloutState", () => {
+  it("dates an undated quota record after an earlier clean turn and cached API allow", async () => {
+    const cleanAt = new Date(Date.now() - 60_000).toISOString();
+    const content = [
+      sessionMeta("undated-quota"),
+      eventLine(cleanAt, "task_complete", { turn_id: "clean" }),
+    ];
+    const sessionsDir = await makeSessionsDir(content.join("\n"));
+    const filePath = join(sessionsDir, "2026", "04", "19", "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    expect((await readCodexRolloutState(sessionsDir, reader)).rateLimit?.limited).toBe(false);
+
+    const cachedAllowStartedAt = Date.now() - 1;
+    content.push(
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          rate_limits: { rate_limit_reached_type: "workspace_member_credits_depleted" },
+        },
+      }),
+    );
+    await writeFile(filePath, content.join("\n"));
+    const limited = await readCodexRolloutState(sessionsDir, reader);
+    expect(limited.rateLimit?.limited).toBe(true);
+    expect(limited.rateLimitObservedAtMs).toBeGreaterThan(cachedAllowStartedAt);
+  });
+
   it("latches a usage-limit completion through same-turn telemetry and clears on a later clean turn", async () => {
     const lines = [
       sessionMeta("quota-turns"),

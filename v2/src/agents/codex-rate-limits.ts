@@ -125,7 +125,9 @@ export class CodexRateLimitPoller {
   private readonly requested = new Map<string, string>();
   private readonly pending: string[] = [];
   private readonly controller = new AbortController();
-  private globalStartedAt = -Infinity;
+  // A process restart loses the prior probe time. Delay the first read long
+  // enough that an earlier process cannot have started one in this window.
+  private globalStartedAt = Date.now();
   private active = false;
   private timer: NodeJS.Timeout | null = null;
 
