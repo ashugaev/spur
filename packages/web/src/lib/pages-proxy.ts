@@ -1,4 +1,4 @@
-import { PAGE_ID_RE, resolveStoreProxyTarget } from "./store-proxy";
+import { PAGE_ID_RE, isSafeSegment, resolveStoreProxyTarget } from "./store-proxy";
 
 // Maps `/p/<id>/<path>` onto the daemon: page files, the page's own store under
 // `_spur/db|actions|agent`, and the one page event stream. A page reaches only
@@ -8,16 +8,6 @@ export type PageProxyTarget =
   | { kind: "file"; daemonPath: string }
   | { kind: "events"; daemonPath: string }
   | { kind: "store"; daemonPath: string; forcePageSource: boolean };
-
-function isSafeSegment(segment: string): boolean {
-  return (
-    segment.length > 0 &&
-    segment !== "." &&
-    segment !== ".." &&
-    !segment.includes("/") &&
-    !segment.includes("\\")
-  );
-}
 
 export function resolvePageProxyTarget(
   pageId: string,

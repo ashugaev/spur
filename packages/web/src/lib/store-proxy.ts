@@ -9,7 +9,7 @@ export const DOC_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 export type ProxyMethod = "GET" | "POST" | "PATCH" | "DELETE";
 
-function isSafeSegment(segment: string): boolean {
+export function isSafeSegment(segment: string): boolean {
   return (
     segment.length > 0 &&
     segment !== "." &&

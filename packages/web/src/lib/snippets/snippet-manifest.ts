@@ -88,7 +88,7 @@ export type ParsedSnippetManifest =
 export const SNIPPET_V1_MESSAGE =
   "Snippet protocol 1 is no longer supported; rewrite with protocolVersion 2";
 
-const MANIFEST_SCRIPT_SELECTOR ='script[type="application/spur-snippet+json"]';
+const MANIFEST_SCRIPT_SELECTOR = 'script[type="application/spur-snippet+json"]';
 const MANIFEST_KEYS = [
   "protocolVersion",
   "snippetId",
