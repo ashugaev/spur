@@ -8,6 +8,7 @@ import {
   ACTION_TIMEOUT_MS,
   StoreActions,
   buildActionEnvelope,
+  parseActionEnvelope,
 } from "../../src/store-actions.js";
 import {
   MAX_STORE_BYTES,
@@ -83,6 +84,21 @@ describe("action envelope", () => {
       payload: { film: "Dune", rating: 5 },
     });
     expect(envelope).toBe((await readFile(FIXTURE, "utf8")).trimEnd());
+  });
+
+  it("parses only text that rebuilds byte-equal", async () => {
+    const fixture = (await readFile(FIXTURE, "utf8")).trimEnd();
+    expect(parseActionEnvelope(fixture)).toEqual({
+      id: "act-0001abcd",
+      store: "page:films",
+      action: "pick",
+      label: "Pick film",
+      source: { kind: "page" },
+    });
+    expect(parseActionEnvelope(fixture.replace('"action":"pick"', '"action":"pock"'))).toBeNull();
+    expect(parseActionEnvelope(fixture.replace('spur" db', 'spur"  db'))).toBeNull();
+    expect(parseActionEnvelope(`${fixture}\n`)).toBeNull();
+    expect(parseActionEnvelope("[spur-action v1]\nnot an envelope")).toBeNull();
   });
 
   it("names the snippet and revision for snippet sources", () => {

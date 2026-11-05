@@ -1,4 +1,9 @@
-import { projectConversationPage } from "./conversation-page.js";
+import { createHash } from "node:crypto";
+import { unwrapPastedContent } from "./agents/claude-submit-ack.js";
+import {
+  type ConversationMessageClassifier,
+  projectConversationPage,
+} from "./conversation-page.js";
 import {
   assertPagePrefixFree,
   pageProjectId,
@@ -6,6 +11,7 @@ import {
   renderPageAgentPrompt,
 } from "./pages.js";
 import { SessionEndedError } from "./session-service.js";
+import { parseActionEnvelope } from "./store-actions.js";
 import { StoreClosedError, StoreError, type StoreService, parseStoreId } from "./stores.js";
 import type {
   ConversationPage,
@@ -32,6 +38,8 @@ const META_AUTO = "budget.auto";
 const META_RECOVER = "budget.recover";
 const META_RECOVER_AT = "budget.recoverAt";
 const META_USER = "budget.user";
+const META_CHAT = "chat.sent";
+const CHAT_SENT_CAP = 100;
 const TERMINAL = new Set<SessionRecord["status"]>(["completed", "killed", "errored"]);
 
 export type AgentStatusState =
@@ -68,6 +76,10 @@ export interface StoreAgentHost {
   projectPrefixes(): string[];
   onStatus?(pageId: string, status: AgentStatus): void;
   now?(): number;
+}
+
+function chatHash(text: string): string {
+  return createHash("sha256").update(text.trim()).digest("hex");
 }
 
 function count(value: unknown): number {
@@ -108,6 +120,24 @@ export class StoreAgent {
       if (this.chains.get(storeId) === settled) this.chains.delete(storeId);
     });
     return next;
+  }
+
+  /** Records a chat send for the chat view, then delivers it like any message. */
+  async deliverChat(
+    storeId: string,
+    message: string,
+    userGesture: boolean,
+  ): Promise<{ sessionId: string }> {
+    // Recorded before delivery: a poll must never consume the message before it is known.
+    const hash = chatHash(message);
+    await this.host.stores.transactMeta(storeId, (meta) => {
+      const stored = meta.get(META_CHAT);
+      const sent = (Array.isArray(stored) ? stored : []).filter(
+        (value): value is string => typeof value === "string" && value !== hash,
+      );
+      meta.set(META_CHAT, [...sent, hash].slice(-CHAT_SENT_CAP));
+    });
+    return this.ensureAndDeliver(storeId, message, userGesture);
   }
 
   /** Delivers one message to the store's owner, spawning or recovering a page agent. */
@@ -331,7 +361,26 @@ export class StoreAgent {
       ...(options.from !== undefined ? { from: options.from } : {}),
       preserveEnd: true,
     });
-    return { ...projectConversationPage(conversation, status.sessionId, options.limit), status };
+    const classify = await this.chatClassifier(storeId);
+    return {
+      ...projectConversationPage(conversation, status.sessionId, options.limit, classify),
+      status,
+    };
+  }
+
+  /** Chat view: chat sends, this store's action envelopes as their label, agent replies. */
+  private async chatClassifier(storeId: string): Promise<ConversationMessageClassifier> {
+    const stored = await this.host.stores.readMeta(storeId, META_CHAT);
+    const sent = new Set<unknown>(Array.isArray(stored) ? stored : []);
+    return ({ role, text }) => {
+      if (role === "assistant") return { kind: "reply", text };
+      for (const candidate of [text.trim(), unwrapPastedContent(text).trim()]) {
+        const action = parseActionEnvelope(candidate);
+        if (action?.store === storeId) return { kind: "action", text: action.label };
+        if (sent.has(chatHash(candidate))) return { kind: "chat", text: candidate };
+      }
+      return null;
+    };
   }
 
   /** Samples page agent status for open page streams; emits only on change. */

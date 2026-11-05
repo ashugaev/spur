@@ -2763,7 +2763,7 @@ export async function startServer(
         sendJson(
           response,
           200,
-          await storeAgent.ensureAndDeliver(
+          await storeAgent.deliverChat(
             decodeURIComponent(storeAgentSendId),
             parseAgentMessage(body.message),
             body.userGesture === true,

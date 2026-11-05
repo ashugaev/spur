@@ -12,6 +12,7 @@ import {
   renderPageAgentPrompt,
 } from "../../src/pages.js";
 import { SessionEndedError } from "../../src/session-service.js";
+import { buildActionEnvelope } from "../../src/store-actions.js";
 import {
   AUTO_DELIVERY_BUDGET,
   StoreAgent,
@@ -404,6 +405,55 @@ describe("session store owner", () => {
     expect(await outcome(agent.ensureAndDeliver("session:nope", "x", true))).toBe(404);
     expect(sessions.spawns).toHaveLength(0);
     expect(await agent.status("session:demo-1")).toEqual({ state: "error", sessionId: "demo-1" });
+  });
+});
+
+describe("chat view", () => {
+  it("shows chat sends, own action envelopes as their label and replies; hides the rest", async () => {
+    const { agent, sessions } = await setup();
+    const record = sessions.add({ id: "demo-1", project: "demo" });
+    await agent.deliverChat("session:demo-1", "hello from chat", true);
+    const long = "line one\nline two";
+    await agent.deliverChat("session:demo-1", long, false);
+    const envelope = buildActionEnvelope({
+      id: "act-0001abcd",
+      store: "session:demo-1",
+      action: "pick",
+      label: "Pick film",
+      source: { kind: "snippet", snippetId: "picker", instanceId: "inst-0001", revision: 2 },
+      payload: { film: "Dune" },
+    });
+    const foreign = buildActionEnvelope({
+      id: "act-0002abcd",
+      store: "page:films",
+      action: "pick",
+      label: "Foreign",
+      source: { kind: "page" },
+      payload: {},
+    });
+    const user = (text: string): TranscriptEntry => ({ kind: "message", role: "user", text });
+    record.entries = [
+      user('<pasted_content id="1">\nYou are the agent of ...\n</pasted_content id="1">'),
+      { kind: "message", role: "assistant", text: "Ready." },
+      user("hello from chat"),
+      { kind: "tool", name: "Bash" },
+      user(`<pasted_content id="2">\n${long}\n</pasted_content id="2">`),
+      user("Spur ToDo is empty. Record the step you are on before continuing."),
+      user(envelope),
+      user(envelope.replace('"action":"pick"', '"action":"pock"')),
+      user(foreign),
+      { kind: "message", role: "assistant", text: "Done." },
+    ];
+    const page = await agent.messages("session:demo-1", { limit: 50 });
+    expect(page.messages).toEqual([
+      { index: 1, role: "assistant", kind: "reply", text: "Ready." },
+      { index: 2, role: "user", kind: "chat", text: "hello from chat" },
+      { index: 4, role: "user", kind: "chat", text: long },
+      { index: 6, role: "user", kind: "action", text: "Pick film" },
+      { index: 9, role: "assistant", kind: "reply", text: "Done." },
+    ]);
+    expect(page).toMatchObject({ nextFrom: 10, totalEntries: 10 });
+    expect(sessions.sends.map((send) => send.message)).toEqual(["hello from chat", long]);
   });
 });
 

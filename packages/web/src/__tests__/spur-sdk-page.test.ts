@@ -143,6 +143,37 @@ describe("page transport", () => {
     ).toBe("./_spur/agent/messages?from=2");
   });
 
+  it("renders an action message as a tagged label line and spaces the status off the log", async () => {
+    const r = await pageRig("<style>spur-chat{display:block}</style><spur-chat></spur-chat>");
+    r.respond((method, url) =>
+      method === "GET" && url.startsWith("./_spur/agent/messages")
+        ? [
+            200,
+            {
+              sessionId: "pg-films-ab12",
+              nextFrom: 2,
+              status: { state: "idle", sessionId: "pg-films-ab12" },
+              messages: [
+                { index: 0, role: "user", kind: "action", text: "Pick film" },
+                { index: 1, role: "assistant", kind: "reply", text: "Picked." },
+              ],
+            },
+          ]
+        : undefined,
+    );
+    await flush();
+    r.advance(2000);
+    await flush();
+    const [action, reply] = Array.from(r.doc.querySelectorAll(".spur-chat-msg"));
+    expect(action?.getAttribute("data-kind")).toBe("action");
+    expect(action?.querySelector(".spur-chat-tag")?.textContent).toBe("Action");
+    expect(action?.textContent).toBe("ActionPick film");
+    expect(reply?.getAttribute("data-kind")).toBe("reply");
+    expect(reply?.textContent).toBe("Picked.");
+    const log = r.doc.querySelector(".spur-chat-log") as Element;
+    expect(r.win.getComputedStyle(log).marginTop).toBe("8px");
+  });
+
   it("restarts the message cursor when the agent session changes", async () => {
     const r = await pageRig("");
     let sessionId = "pg-films-aaaa";

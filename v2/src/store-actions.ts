@@ -172,6 +172,31 @@ export function buildActionEnvelope(input: {
   ].join("\n");
 }
 
+/** Strict inverse of `buildActionEnvelope`: the text must rebuild byte-equal, else null. */
+export function parseActionEnvelope(
+  text: string,
+): { id: string; store: string; action: string; label: string; source: ActionSource } | null {
+  const lines = text.split("\n");
+  if (lines.length !== 6 || lines[0] !== ACTION_ENVELOPE_OPEN) return null;
+  const quoted = /^User action ("[^"\\]*") \(/.exec(lines[1] ?? "")?.[1];
+  if (quoted === undefined) return null;
+  try {
+    const body: unknown = JSON.parse(lines[4] ?? "");
+    if (!isObject(body) || !isObject(body["payload"])) return null;
+    const { id, store, action } = body;
+    if (typeof id !== "string" || typeof store !== "string" || typeof action !== "string") {
+      return null;
+    }
+    const label = JSON.parse(quoted) as string;
+    const source = parseSource(body["source"]);
+    const payload = body["payload"] as JsonObject;
+    if (buildActionEnvelope({ id, store, action, label, source, payload }) !== text) return null;
+    return { id, store, action, label, source };
+  } catch {
+    return null;
+  }
+}
+
 export interface StoreActionsHost {
   stores: StoreService;
   deliver(storeId: string, message: string, userGesture: boolean): Promise<unknown>;

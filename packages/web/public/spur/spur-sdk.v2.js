@@ -149,6 +149,13 @@
     return action !== null && !isTerminal(action.status);
   }
 
+  // Every agent status source (connect context, stream event, poll, status()) lands here.
+  function setAgentStatus(next) {
+    const changed = next.state !== agentStatus.state || next.sessionId !== agentStatus.sessionId;
+    agentStatus = next;
+    if (changed) emit("agent", agentStatus);
+  }
+
   function formatRejection(result) {
     if (result.reason === "failed" && result.error) return String(result.error);
     const text = REJECTION_TEXT[result.reason] || "Action rejected.";
@@ -219,8 +226,7 @@
         window.location.reload();
         return;
       case "agent":
-        agentStatus = event.status;
-        emit("agent", agentStatus);
+        setAgentStatus(event.status);
         return;
       default:
     }
@@ -633,10 +639,15 @@
     "spur-loader{display:inline-flex;color:var(--spur-text-secondary)}",
     "spur-empty,spur-error{display:block;border:1px solid var(--spur-border-subtle);padding:8px 10px;color:var(--spur-text-secondary)}",
     "spur-error{border-color:color-mix(in srgb,var(--spur-status-error) 40%,transparent);color:var(--spur-status-error);white-space:pre-line}",
-    "spur-chat{display:flex;flex-direction:column;gap:8px;border:1px solid var(--spur-border-default);padding:8px}",
-    ".spur-chat-log{display:flex;flex-direction:column;gap:6px;max-height:320px;overflow-y:auto}",
+    // Spacing by margin, not gap: a page rule like `spur-chat{display:block}` must not
+    // let the status line run into the scrolled log.
+    "spur-chat{display:flex;flex-direction:column;border:1px solid var(--spur-border-default);padding:8px}",
+    "spur-chat>*+*{margin-top:8px}",
+    ".spur-chat-log{display:flex;flex-direction:column;gap:6px;max-height:320px;overflow-y:auto;border-top:1px solid var(--spur-border-subtle);padding-top:8px}",
     ".spur-chat-msg{white-space:pre-wrap;line-height:1.5;padding:4px 8px;border-left:2px solid var(--spur-border-subtle)}",
     ".spur-chat-msg[data-role=assistant]{border-left-color:var(--spur-accent)}",
+    ".spur-chat-msg[data-kind=action]{font-size:11px;color:var(--spur-text-secondary)}",
+    ".spur-chat-tag{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--spur-text-tertiary);margin-right:8px}",
     ".spur-chat-status{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--spur-text-tertiary)}",
     ".spur-chat-form{display:flex;gap:6px}",
     ".spur-chat-form input{flex:1;font:inherit;color:var(--spur-text-primary);background:var(--spur-input-bg);border:1px solid var(--spur-input-border);padding:6px 8px;border-radius:0}",
@@ -808,13 +819,7 @@
     return transport.agent("messages", args).then(function (response) {
       if (!response.ok) return;
       const body = response.body;
-      if (body.status) {
-        const changed =
-          body.status.state !== agentStatus.state ||
-          body.status.sessionId !== agentStatus.sessionId;
-        agentStatus = body.status;
-        if (changed) emit("agent", agentStatus);
-      }
+      if (body.status) setAgentStatus(body.status);
       // The cursor indexes one session's conversation: a new agent session starts over.
       if (body.sessionId !== messagePoll.sessionId) {
         messagePoll.sessionId = body.sessionId;
@@ -1080,7 +1085,7 @@
             return transport.agent("status");
           })
           .then(function (response) {
-            if (response.ok) agentStatus = response.body;
+            if (response.ok) setAgentStatus(response.body);
             return agentStatus;
           });
       },
@@ -1163,7 +1168,7 @@
     context = ctx;
     if (ctx.availability) availability = ctx.availability;
     if (ctx.action !== undefined) action = ctx.action;
-    if (ctx.agentStatus) agentStatus = ctx.agentStatus;
+    if (ctx.agentStatus) setAgentStatus(ctx.agentStatus);
     appState = ctx.state === undefined ? null : ctx.state;
     if (ctx.theme) applyTheme(ctx.theme);
     whenParsed(refreshControls);
@@ -1638,8 +1643,11 @@
           this.appendChild(log);
           this.appendChild(form);
           const render = (message) => {
-            const node = el("div", "spur-chat-msg", message.text);
+            const node = el("div", "spur-chat-msg");
+            if (message.kind === "action") node.appendChild(el("span", "spur-chat-tag", "Action"));
+            node.appendChild(document.createTextNode(message.text));
             node.setAttribute("data-role", message.role);
+            if (message.kind) node.setAttribute("data-kind", message.kind);
             log.appendChild(node);
             log.scrollTop = log.scrollHeight;
           };

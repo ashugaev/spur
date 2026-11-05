@@ -18,7 +18,7 @@ One SDK file, two transports. Page: `<script src="./_spur/sdk.js"></script>`, fe
 - `state.get()`, `state.set(value)`: `_state` doc in the data store, up to 64 KiB, throws `RangeError` over it, saved 500 ms after the last change. Page doc `page`; snippet doc `snippet-<12 hex sha256(owner)>-<snippetId>`, reset when `instanceId` changes.
 - `agent.invoke(action, payload)`, `agent.retry()`: [Invoke](#invoke).
 - `agent.send(text)`: message to the store owner. Resolves `{ok: true, sessionId}` or `{ok: false, reason, error?}`.
-- `agent.onMessage(cb)`: conversation messages, polled every 2 s; returns unsubscribe.
+- `agent.onMessage(cb)`: `{index, role, kind, text, timestampMs?, textTruncated?}`, polled every 2 s; returns unsubscribe. `kind`: `chat` (sent by `agent.send` or `spur-chat`), `action` (this store's `[spur-action v1]`, `text` = label), `reply` (agent). Other messages to the agent are omitted.
 - `agent.status()`: `{state, sessionId}`; `state`: `none`, `working`, `idle`, `recovering`, `error`, `rate_limited`.
 - `on(event, handler)`, `once(...)`: `action`, `agent`, `message`, `theme`, `fullscreen`, `availability`. Returns unsubscribe.
 - `action`: current `{id, action, payload, status, error?, result?}` or `null`. Status: `awaiting_confirm`, `submitting`, `queued`, `processing`, `completed`, `error`, `timeout`.

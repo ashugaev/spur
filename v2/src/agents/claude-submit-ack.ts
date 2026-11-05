@@ -88,7 +88,7 @@ function extractEnqueuedText(parsed: Record<string, unknown>): string | null {
 // `\n\n<pasted_content id="x">\n<text>\n</pasted_content id="x">\n`, in both the
 // user and the enqueue record. Unwrap only when that block is the whole record
 // and the closing id matches the opening one.
-function unwrapPastedContent(text: string): string {
+export function unwrapPastedContent(text: string): string {
   const inner = /^<pasted_content id="([^"]*)">\n([\s\S]*)\n<\/pasted_content id="\1">$/.exec(
     text.trim(),
   );

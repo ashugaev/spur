@@ -166,7 +166,7 @@ export function blankTemplate(title: string): string {
 <style>
   body { font-family: system-ui, sans-serif; margin: 0 auto; max-width: 640px; padding: 16px; background: Canvas; color: CanvasText; }
   ul { padding-left: 20px; }
-  spur-chat { display: block; margin-top: 24px; }
+  spur-chat { margin-top: 24px; }
 </style>
 </head>
 <body>

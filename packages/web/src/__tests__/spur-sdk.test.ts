@@ -212,6 +212,17 @@ describe("db, state and agent over the port", () => {
     r.fromHost({ type: "agent-event", status: { state: "working", sessionId: "sp-ab12" } });
     expect(states).toEqual([{ state: "working", sessionId: "sp-ab12" }]);
   });
+
+  it("chat status follows the connect context and later agent-event status", async () => {
+    const r = await portRig("<spur-chat></spur-chat>", { booted: false });
+    const label = () => r.doc.querySelector(".spur-chat-status")?.textContent;
+    expect(label()).toBe("Agent starts on first message");
+    r.connect({ agentStatus: { state: "idle", sessionId: "sp-ab12" } });
+    await flush();
+    expect(label()).toBe("Agent idle");
+    r.fromHost({ type: "agent-event", status: { state: "working", sessionId: "sp-ab12" } });
+    expect(label()).toBe("Agent working");
+  });
 });
 
 describe("frame host plumbing", () => {
