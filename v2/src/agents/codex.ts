@@ -1651,7 +1651,7 @@ function foldCodexRolloutLine(fold: CodexRolloutFold, parsed: Record<string, unk
   }
   if (state?.reason === "task_started") {
     if (fold.hardLimitTurnId !== undefined && state.turnId !== fold.hardLimitTurnId) {
-      fold.hardLimitTurnId = undefined;
+      delete fold.hardLimitTurnId;
       fold.rateLimit = { limited: false, reason: "" };
       fold.rateLimitObservedAtMs = state.timestampMs;
     }
@@ -1663,7 +1663,7 @@ function foldCodexRolloutLine(fold: CodexRolloutFold, parsed: Record<string, unk
       fold.rateLimit = { limited: true, reason: "codex usage_limit_exceeded" };
       fold.rateLimitObservedAtMs = state.timestampMs;
     } else if (error === null || error === undefined) {
-      fold.hardLimitTurnId = undefined;
+      delete fold.hardLimitTurnId;
       fold.rateLimit = { limited: false, reason: "" };
       fold.rateLimitObservedAtMs = state.timestampMs;
     }
