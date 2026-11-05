@@ -143,6 +143,48 @@ describe("page transport", () => {
     ).toBe("./_spur/agent/messages?from=2");
   });
 
+  it("restarts the message cursor when the agent session changes", async () => {
+    const r = await pageRig("");
+    let sessionId = "pg-films-aaaa";
+    r.respond((method, url) => {
+      if (method !== "GET" || !url.startsWith("./_spur/agent/messages")) return undefined;
+      const from = Number(new URL(url, "http://host/").searchParams.get("from") ?? "0");
+      const messages = [0, 1]
+        .filter((index) => index >= from)
+        .map((index) => ({ index, role: "assistant", text: `${sessionId} #${index}` }));
+      return [200, { sessionId, nextFrom: 2, status: { state: "idle", sessionId }, messages }];
+    });
+    const texts: string[] = [];
+    r.win.spur.agent.onMessage((message: { text: string }) => texts.push(message.text));
+    await flush();
+    r.advance(2000);
+    await flush();
+    sessionId = "pg-films-bbbb";
+    r.advance(2000);
+    await flush();
+    expect(texts).toEqual([
+      "pg-films-aaaa #0",
+      "pg-films-aaaa #1",
+      "pg-films-bbbb #0",
+      "pg-films-bbbb #1",
+    ]);
+    r.advance(2000);
+    await flush();
+    expect(
+      r.requests.filter((request) => request.url.startsWith("./_spur/agent/messages")).at(-1)?.url,
+    ).toBe("./_spur/agent/messages?from=2");
+  });
+
+  it("drops a malformed stream frame and keeps handling the next one", async () => {
+    const r = await pageRig("");
+    const states: unknown[] = [];
+    r.win.spur.on("agent", (status) => states.push(status));
+    expect(() => r.sources[0]?.emitRaw("change", "{not json")).not.toThrow();
+    expect(() => r.sources[0]?.emitRaw("agent", "{not json")).not.toThrow();
+    r.sources[0]?.emit("agent", { state: "working", sessionId: "pg-films-ab12" });
+    expect(states).toEqual([{ state: "working", sessionId: "pg-films-ab12" }]);
+  });
+
   it("saves state to _state/page, debounced", async () => {
     const r = await pageRig("");
     r.win.spur.state.set({ tab: 1 });

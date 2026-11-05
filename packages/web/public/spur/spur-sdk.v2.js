@@ -417,6 +417,16 @@
       return call("GET", "db/docs/_actions/" + encodeSegment(id));
     }
 
+    // A malformed stream frame is dropped, never thrown into the EventSource handler.
+    function parseEventData(event) {
+      try {
+        const data = JSON.parse(event.data);
+        return data !== null && typeof data === "object" ? data : null;
+      } catch {
+        return null;
+      }
+    }
+
     function settleIfClosed(id) {
       const waiter = waiters.get(id);
       if (!waiter) return;
@@ -437,7 +447,8 @@
       connect: function () {
         source = new EventSource(base + "events");
         source.addEventListener("change", function (event) {
-          const change = JSON.parse(event.data);
+          const change = parseEventData(event);
+          if (!change) return;
           if (change.collection === "_actions") settleIfClosed(change.id);
           onTransportEvent({ type: "change", change: change });
         });
@@ -451,7 +462,8 @@
           onTransportEvent({ type: "reload" });
         });
         source.addEventListener("agent", function (event) {
-          onTransportEvent({ type: "agent", status: JSON.parse(event.data) });
+          const status = parseEventData(event);
+          if (status) onTransportEvent({ type: "agent", status: status });
         });
         applyTheme({ mode: null, tokens: PAGE_THEME });
         return call("GET", "db/docs/_state/page").then(function (response) {
@@ -783,7 +795,13 @@
   }
 
   // One poller per document, shared by every onMessage listener and <spur-chat>.
-  const messagePoll = { timer: null, from: undefined, seen: new Set(), messages: [] };
+  const messagePoll = {
+    timer: null,
+    sessionId: null,
+    from: undefined,
+    seen: new Set(),
+    messages: [],
+  };
 
   function pollMessages() {
     const args = messagePoll.from === undefined ? {} : { from: messagePoll.from };
@@ -796,6 +814,14 @@
           body.status.sessionId !== agentStatus.sessionId;
         agentStatus = body.status;
         if (changed) emit("agent", agentStatus);
+      }
+      // The cursor indexes one session's conversation: a new agent session starts over.
+      if (body.sessionId !== messagePoll.sessionId) {
+        messagePoll.sessionId = body.sessionId;
+        if (messagePoll.from !== undefined) {
+          messagePoll.from = undefined;
+          return pollMessages();
+        }
       }
       if (body.sessionId === null) return;
       (body.messages || []).forEach(function (message) {

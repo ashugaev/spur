@@ -226,6 +226,8 @@ export async function portRig(body = "", options: { booted?: boolean } = {}): Pr
 export interface FakeEventSource {
   url: string;
   emit(type: string, data: unknown, id?: string): void;
+  /** Delivers `data` as the frame text unencoded, e.g. malformed JSON. */
+  emitRaw(type: string, data: string): void;
 }
 
 export interface PageRig extends Clock {
@@ -269,6 +271,9 @@ export async function pageRig(body = ""): Promise<PageRig> {
           for (const fn of self.handlers.get(type) ?? []) {
             fn({ data: JSON.stringify(data), lastEventId: id ?? "" });
           }
+        },
+        emitRaw(type, data) {
+          for (const fn of self.handlers.get(type) ?? []) fn({ data, lastEventId: "" });
         },
       });
     }
