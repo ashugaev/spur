@@ -33,6 +33,9 @@ interface Fixture {
   worktreeDir: string;
   logEvent: ReturnType<typeof vi.fn>;
   discard(sessionId: string): Promise<void>;
+  // Runs between the eligibility read and the archive (branch cleanup start).
+  duringCleanup(hook: () => void): void;
+  setOperationPending(pending: boolean): void;
 }
 
 const triggerOrigin: WorkItemTriggerOrigin = {
@@ -65,10 +68,20 @@ async function createFixture(): Promise<Fixture> {
   await git(repoPath, "fetch", "origin");
   await git(repoPath, "branch", "--set-upstream-to=origin/main", "main");
   const logEvent = vi.fn();
+  let cleanupHook: (() => void) | undefined;
+  let operationPending = false;
   const standIn = {
     config: { dataDir },
-    getProject: () => ({ path: repoPath }),
+    getProject: () => {
+      cleanupHook?.();
+      return { path: repoPath };
+    },
     logEvent,
+    withSessionLifecycleLocks: (_ids: readonly string[], task: () => Promise<void>) => task(),
+    lifecycleIdsFor: (session: SessionRecord) => [session.id],
+    lifecycle: {
+      snapshot: () => ({ operation: operationPending ? { phase: "pending" } : null }),
+    },
   };
   return {
     root,
@@ -78,6 +91,12 @@ async function createFixture(): Promise<Fixture> {
     logEvent,
     discard: (sessionId) =>
       SessionService.prototype.discardFailedSpawn.call(standIn as never, sessionId),
+    duringCleanup: (hook) => {
+      cleanupHook = hook;
+    },
+    setOperationPending: (pending) => {
+      operationPending = pending;
+    },
   };
 }
 
@@ -240,6 +259,38 @@ describe("discardFailedSpawn", () => {
     expect(await branches(f, "api-1")).toBe("");
     expect(readSession(f.dataDir, "api-1")).toBeNull();
     expect(existsSync(archivedPath(f, "api-1"))).toBe(true);
+  });
+
+  it("keeps a record a restore took over during branch cleanup", async () => {
+    const f = await createFixture();
+    await git(f.repoPath, "branch", "api-1");
+    writeSession(f.dataDir, erroredRecord("api-1"));
+    const restored = erroredRecord("api-1", {
+      status: "running",
+      launchCommand: "claude --resume",
+      agentLaunchId: "restore-launch",
+    });
+    delete restored.error;
+    f.duringCleanup(() => writeSession(f.dataDir, restored));
+
+    await f.discard("api-1");
+
+    expect(readSession(f.dataDir, "api-1")).toMatchObject({
+      status: "running",
+      agentLaunchId: "restore-launch",
+    });
+    expect(existsSync(archivedPath(f, "api-1"))).toBe(false);
+  });
+
+  it("keeps an errored record while a restore is still pending", async () => {
+    const f = await createFixture();
+    writeSession(f.dataDir, erroredRecord("api-1", { branch: "feature/other" }));
+    f.setOperationPending(true);
+
+    await f.discard("api-1");
+
+    expect(readSession(f.dataDir, "api-1")).toMatchObject({ status: "errored" });
+    expect(existsSync(archivedPath(f, "api-1"))).toBe(false);
   });
 
   it("keeps a branch that is not the session id or is checked out, and archives both", async () => {

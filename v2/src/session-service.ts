@@ -11940,14 +11940,19 @@ export class SessionService {
   // Cleans up what a hard spawn failure of a work-item trigger block left
   // behind before a replacement spawns: the session's own local branch (named
   // after its id, never reused) and the errored record. Untagged or non-errored
-  // records are not touched. The record is archived whatever the delete does.
+  // records are not touched. The record is archived whatever the delete does,
+  // unless a restore took it over meanwhile.
   async discardFailedSpawn(sessionId: string): Promise<void> {
-    const record = readSession(this.config.dataDir, sessionId);
     // launchCommand stays empty until the agent launches: a launched session
     // is not a never-started spawn leftover.
-    if (!record || record.status !== "errored" || !record.triggerOrigin) return;
-    if (record.spawnIntent) return;
-    if (record.launchCommand !== "") return;
+    const discardable = (current: SessionRecord | null): current is SessionRecord =>
+      current !== null &&
+      current.status === "errored" &&
+      current.triggerOrigin !== undefined &&
+      !current.spawnIntent &&
+      current.launchCommand === "";
+    const record = readSession(this.config.dataDir, sessionId);
+    if (!discardable(record)) return;
     if (record.branch === record.id) {
       try {
         await deleteLocalBranch(this.getProject(record.project).path, record.branch);
@@ -11962,7 +11967,18 @@ export class SessionService {
         });
       }
     }
-    archiveSessions(this.config.dataDir, [record]);
+    // Branch cleanup awaits: revalidate under the lock restore takes before
+    // the destructive archive.
+    await this.withSessionLifecycleLocks(this.lifecycleIdsFor(record), async () => {
+      const current = readSession(this.config.dataDir, sessionId);
+      if (
+        !discardable(current) ||
+        current.agentLaunchId !== record.agentLaunchId ||
+        this.lifecycle.snapshot(sessionId).operation?.phase === "pending"
+      )
+        return;
+      archiveSessions(this.config.dataDir, [current]);
+    });
   }
 
   async branchStatus(projectId: string, name: string): Promise<BranchExistsResponse> {
