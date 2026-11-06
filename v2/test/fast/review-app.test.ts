@@ -573,7 +573,8 @@ test.each(["network", "http-403", "http-404"])(
       if (path.endsWith("/reviews") && options?.method === "POST") {
         expect(JSON.parse(await readFile(f.request.receipt, "utf8"))).toMatchObject({
           mutationStarted: true,
-          status: "BLOCKED",
+          status: "PENDING",
+          feedback: plan,
         });
         await f.transport(url, options);
         throw new Error("lost response after commit");

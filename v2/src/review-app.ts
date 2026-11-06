@@ -787,8 +787,6 @@ async function transitionReview(
         review.state === state
       );
     };
-    receipt.status = "BLOCKED";
-    await save();
     // Reconcile before mutation too: rerunning a completed attempt must not duplicate its review.
     const history = await app.history(`${path}/reviews`);
     const effective = (rows: unknown[]) => effectiveNativeReview(rows, { login: access.actor });

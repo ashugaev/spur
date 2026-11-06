@@ -3,6 +3,7 @@ import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
+import { readJson } from "../../src/github-app.js";
 import {
   blockReview,
   parseConfig,
@@ -56,6 +57,7 @@ async function fixture(mode: "clean" | "denied" | "lost" | "final-failure" | "al
     },
   });
   const comments: { id: number; body: string; user: { login: string } }[] = [];
+  const snapshots = { beforeNative: "", afterNative: "" };
   let offlineObserved = false,
     nativePosts = 0;
   let review:
@@ -109,6 +111,7 @@ async function fixture(mode: "clean" | "denied" | "lost" | "final-failure" | "al
       return Response.json(comments.find((row) => String(row.id) === path.split("/").at(-1)));
     if (path.endsWith("/reviews")) {
       if (options?.method !== "POST") return Response.json(review ? [review] : []);
+      snapshots.beforeNative = await readFile(request.receipt, "utf8");
       nativePosts++;
       const payload = JSON.parse(String(options.body)) as {
         body: string;
@@ -125,7 +128,10 @@ async function fixture(mode: "clean" | "denied" | "lost" | "final-failure" | "al
       };
       return Response.json(review);
     }
-    if (path.endsWith("/reviews/20")) return Response.json(review);
+    if (path.endsWith("/reviews/20")) {
+      snapshots.afterNative = await readFile(request.receipt, "utf8");
+      return Response.json(review);
+    }
     throw new Error("unexpected fixture API");
   };
   return {
@@ -133,6 +139,7 @@ async function fixture(mode: "clean" | "denied" | "lost" | "final-failure" | "al
     request,
     transport,
     comments,
+    snapshots,
     offlineObserved: () => offlineObserved,
     nativePosts: () => nativePosts,
   };
@@ -197,6 +204,34 @@ test("plan-only prepare and unchanged wakes publish no duplicate status or nativ
   expect(f.nativePosts()).toBe(1);
   expect(await readFile(f.request.receipt, "utf8")).toBe(saved);
 });
+test.each(["beforeNative", "afterNative"] as const)(
+  "interrupted %s snapshot reconciles native review without another POST",
+  async (stage) => {
+    const f = await fixture("clean");
+    await prepareReview(f.config, f.request, f.request.session, f.transport);
+    await publishReview(f.config, f.request, f.request.session, f.transport);
+    const snapshot = f.snapshots[stage];
+    await writeFile(f.request.receipt, snapshot);
+    f.comments.splice(1);
+    const receipt = await readJson(f.request.receipt);
+    expect(receipt).toMatchObject({
+      status: "PENDING",
+      feedback: { kind: "plan" },
+      preparedFeedback: plan,
+      localVerdict: "APPROVED",
+      evidence: f.request.rows,
+      mutationStarted: true,
+      reviewId: stage === "beforeNative" ? null : 20,
+    });
+    expect(await publishReview(f.config, f.request, f.request.session, f.transport)).toMatchObject({
+      status: "APPROVED",
+      feedbackPublication: { status: "confirmed" },
+      reviewId: 20,
+    });
+    expect(f.nativePosts()).toBe(1);
+    expect(f.comments).toHaveLength(2);
+  },
+);
 test("uncertain environment BLOCKED publishes observed and unproven facts once", async () => {
   const f = await fixture("clean");
   await prepareReview(f.config, f.request, f.request.session, f.transport);
