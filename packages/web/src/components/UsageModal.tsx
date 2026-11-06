@@ -304,12 +304,12 @@ function UsageContent({ data }: { data: UsageReport }) {
             {TOKEN_WINDOWS.map((entry, index) => (
               <button
                 aria-pressed={tab === entry.window}
-                className={`px-2 py-0.5 font-bold uppercase tracking-[0.08em] focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-[var(--color-accent)] ${
+                className={`px-2 py-0.5 font-bold uppercase tracking-[0.08em] focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 ${
                   index > 0 ? "border-l border-[var(--color-border-default)]" : ""
                 } ${
                   tab === entry.window
-                    ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]"
-                    : `${SECONDARY_TEXT} hover:text-[var(--color-text-primary)]`
+                    ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)] focus-visible:underline focus-visible:outline-[var(--color-text-inverse)]"
+                    : `${SECONDARY_TEXT} hover:text-[var(--color-text-primary)] focus-visible:outline-[var(--color-accent)]`
                 }`}
                 key={entry.window}
                 onClick={() => setTab(entry.window)}
