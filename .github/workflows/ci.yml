@@ -24,6 +24,35 @@ jobs:
     with:
       stage: quality
 
+  package:
+    name: Package
+    needs: quality-admission
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.quality-admission.result == 'success' }}
+    runs-on: self-hosted
+    timeout-minutes: 20
+    env:
+      SPUR_BUILD_RESTART: "0"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v5
+        with:
+          dest: ${{ runner.temp }}/pnpm-setup
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile
+      - name: Build web
+        run: pnpm --dir packages/web build
+      - name: Bundle web into v2
+        run: bash scripts/bundle-web.sh
+      - name: Verify packed tarball contents
+        run: bash scripts/pack-release.sh "$RUNNER_TEMP"
+      - name: Verify bundled web boots
+        run: node scripts/verify-bundled-web.mjs v2/web/dist-server/web-server.js
+
   quality:
     name: Quality
     runs-on: self-hosted

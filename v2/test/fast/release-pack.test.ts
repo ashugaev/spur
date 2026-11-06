@@ -1,0 +1,212 @@
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { parse } from "yaml";
+
+type Step = { name?: string; run?: string };
+type Workflow = {
+  jobs: Record<string, { steps?: Step[]; needs?: string; if?: string }>;
+};
+
+const root = fileURLToPath(new URL("../../../", import.meta.url));
+const release = parse(
+  readFileSync(join(root, ".github/workflows/release.yml"), "utf8"),
+) as Workflow;
+const ci = parse(readFileSync(join(root, ".github/workflows/ci.yml"), "utf8")) as Workflow;
+const workflows = [
+  { name: "Release", job: release.jobs["release"]! },
+  { name: "PR Package", job: ci.jobs["package"]! },
+];
+const realTar = execFileSync("bash", ["-c", "command -v tar"], { encoding: "utf8" }).trim();
+
+describe("release pack shell boundary", () => {
+  let directory: string;
+  let workspace: string;
+  let bin: string;
+  let destination: string;
+  let archive: string;
+  let calls: string;
+  let payload: string;
+
+  beforeEach(() => {
+    directory = mkdtempSync(join(tmpdir(), "spur-release-pack-"));
+    workspace = join(directory, "workspace with spaces");
+    bin = join(directory, "bin");
+    destination = join(directory, "pack destination");
+    archive = join(directory, "fixture.tgz");
+    calls = join(directory, "tar-calls");
+    payload = join(directory, "payload", "package");
+    for (const path of [bin, destination, join(workspace, "scripts"), join(workspace, "v2")]) {
+      mkdirSync(path, { recursive: true });
+    }
+    for (const name of ["pack-release.sh", "verify-package-tarball.sh"]) {
+      copyFileSync(join(root, "scripts", name), join(workspace, "scripts", name));
+    }
+    const manifest = readFileSync(join(root, "v2/required-package-files.txt"), "utf8");
+    writeFileSync(join(workspace, "v2/required-package-files.txt"), manifest);
+    for (const entry of [
+      ...manifest.trim().split("\n"),
+      `web/node_modules/node-pty/prebuilds/linux-${process.arch}/pty.node`,
+    ]) {
+      const path = join(payload, entry);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, "fixture\n");
+    }
+    writeFileSync(
+      join(bin, "npm"),
+      `#!/usr/bin/env bash
+set -eu
+[[ "$#" == 3 && "$1" == pack && "$2" == --pack-destination ]]
+[[ "$PWD" == "$PACK_TEST_WORKSPACE/v2" ]]
+if [[ "$PACK_TEST_MODE" == fail ]]; then
+  printf 'fixture compiler diagnostic\nELIFECYCLE Command failed with exit code 2.\n'
+  printf 'fixture npm stderr\n' >&2
+  exit 2
+fi
+if [[ "$PACK_TEST_MODE" == success ]]; then
+  cp "$PACK_TEST_ARCHIVE" "$3/$PACK_TEST_NAME"
+fi
+printf 'fixture prepack output\n%s\n' "$PACK_TEST_NAME"
+`,
+    );
+    writeFileSync(
+      join(bin, "tar"),
+      `#!/usr/bin/env bash
+printf 'tar\n' >> "$PACK_TEST_CALLS"
+exec "$PACK_TEST_REAL_TAR" "$@"
+`,
+    );
+    chmodSync(join(bin, "npm"), 0o755);
+    chmodSync(join(bin, "tar"), 0o755);
+  });
+
+  afterEach(() => rmSync(directory, { recursive: true, force: true }));
+
+  function run(step: string, mode = "success", name = "shugaev-spur-fixture.tgz") {
+    execFileSync(realTar, ["-czf", archive, "-C", join(directory, "payload"), "package"]);
+    return spawnSync("bash", ["-e", "-c", step], {
+      cwd: workspace,
+      encoding: "utf8",
+      timeout: 5_000,
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env["PATH"] ?? ""}`,
+        RUNNER_TEMP: destination,
+        GITHUB_WORKSPACE: workspace,
+        PACK_TEST_WORKSPACE: workspace,
+        PACK_TEST_ARCHIVE: archive,
+        PACK_TEST_MODE: mode,
+        PACK_TEST_NAME: name,
+        PACK_TEST_CALLS: calls,
+        PACK_TEST_REAL_TAR: realTar,
+      },
+    });
+  }
+
+  for (const { name, job } of workflows) {
+    const step = job.steps!.find((entry) => entry.name === "Verify packed tarball contents")!.run!;
+
+    it(`${name} preserves failed prepack exit and both output streams before invoking tar`, () => {
+      const result = run(step, "fail");
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("fixture compiler diagnostic");
+      expect(result.stderr).toContain("ELIFECYCLE Command failed with exit code 2.");
+      expect(result.stderr).toContain("fixture npm stderr");
+      expect(existsSync(calls)).toBe(false);
+    });
+
+    it(`${name} verifies the produced archive with paths containing spaces`, () => {
+      const result = run(step);
+      expect(result.error).toBeUndefined();
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe(join(destination, "shugaev-spur-fixture.tgz"));
+      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(3);
+    });
+  }
+
+  const step = workflows[0]!.job.steps!.find(
+    (entry) => entry.name === "Verify packed tarball contents",
+  )!.run!;
+
+  it.each([
+    "",
+    "../outside.tgz",
+    "other/archive.tgz",
+    "archive with spaces.tgz",
+    "ELIFECYCLE",
+    ".tgz",
+  ])("rejects invalid pack filename %j before invoking tar", (name) => {
+    const result = run(step, "invalid", name);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("npm pack did not produce a valid archive");
+    expect(existsSync(calls)).toBe(false);
+  });
+
+  it("rejects a valid filename when npm did not produce the file", () => {
+    const result = run(step, "missing");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("npm pack did not produce a valid archive");
+    expect(existsSync(calls)).toBe(false);
+  });
+
+  it("retains required-file verification", () => {
+    unlinkSync(join(payload, "dist/cli.js"));
+    const result = run(step);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("tarball missing: package/dist/cli.js");
+  });
+
+  it("retains the native binary check", () => {
+    unlinkSync(join(payload, `web/node_modules/node-pty/prebuilds/linux-${process.arch}/pty.node`));
+    const result = run(step);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`missing node-pty/prebuilds/linux-${process.arch}/pty.node`);
+  });
+
+  it("rejects a skill stored as a symlink", () => {
+    const skill = join(payload, "skills/spur/SKILL.md");
+    unlinkSync(skill);
+    symlinkSync("target.md", skill);
+    writeFileSync(join(dirname(skill), "target.md"), "fixture\n");
+    const result = run(step);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("SKILL.md as a non-regular file");
+  });
+
+  it("runs PR packaging after admission without waiting for Quality format or lint", () => {
+    const job = ci.jobs["package"]!;
+    expect(job.needs).toBe("quality-admission");
+    expect(job.if).toContain("github.event_name == 'pull_request'");
+    expect(job.if).toContain("needs.quality-admission.result == 'success'");
+    const packIndex = job.steps!.findIndex(
+      (entry) => entry.name === "Verify packed tarball contents",
+    );
+    expect(job.steps!.slice(0, packIndex).map((entry) => entry.run)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      "pnpm install --frozen-lockfile",
+      "pnpm --dir packages/web build",
+      "bash scripts/bundle-web.sh",
+    ]);
+    expect(job.steps![packIndex + 1]!.run).toBe(
+      "node scripts/verify-bundled-web.mjs v2/web/dist-server/web-server.js",
+    );
+  });
+});
