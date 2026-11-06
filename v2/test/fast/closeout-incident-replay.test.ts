@@ -24,7 +24,6 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as githubProviderModule from "../../src/review-providers/github.js";
 import type * as metadataModule from "../../src/metadata.js";
-import type { SessionRecord } from "../../src/types.js";
 
 // The delivery path refreshes queued feedback through the GitHub provider; no
 // network in this test, every queued signal is still live.
