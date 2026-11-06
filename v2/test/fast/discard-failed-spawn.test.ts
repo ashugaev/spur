@@ -350,6 +350,85 @@ describe("discardFailedSpawn", () => {
     }
   });
 
+  it("waits on a failed spawn whose restore is pending instead of spawning a replacement", async () => {
+    const f = await createFixture();
+    const item = {
+      externalId: triggerOrigin.externalId,
+      url: "https://example.invalid/7",
+      number: 7,
+      title: "fixture",
+      repo: "acme/api",
+      autoComplete: false,
+      createdAt: new Date().toISOString(),
+    };
+    updateWorkItemMembers(f.dataDir, "api", "pr-watch", item, () => [
+      {
+        triggerId: "review",
+        blockIndex: 0,
+        state: "failed",
+        claimedAt: "2026-05-11T10:00:00.000Z",
+        nextRetryAt: "2026-05-11T10:45:00.000Z",
+        attempts: 1,
+        deferrals: 0,
+      },
+    ]);
+    await git(f.repoPath, "branch", "api-1");
+    writeSession(f.dataDir, erroredRecord("api-1"));
+    f.duringCleanup(() => f.setOperationPending(true));
+    const get = vi.fn().mockImplementation(async (id: string) => ({
+      ...readSession(f.dataDir, id),
+      state: "error",
+      workspaceExists: true,
+    }));
+    const spawn = vi.fn().mockResolvedValue({ id: "api-new" });
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: {
+        dataDir: f.dataDir,
+        projects: {
+          api: {
+            sources: { "pr-watch": { type: "github", query: "is:pr is:open" } },
+            triggers: {
+              review: {
+                source: "pr-watch",
+                event: "github:work_item.new",
+                spawn: { blocks: [{ prompt: "review {{url}}" }] },
+              },
+            },
+          },
+        },
+      } as never,
+      bus,
+      autoPing: new AutoPingService(f.dataDir),
+      sessionService: { get, spawn, discardFailedSpawn: f.discard } as never,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      bus.emit({
+        occurrenceId: "restore-pending-during-discard",
+        projectId: "api",
+        sourceId: "pr-watch",
+        name: "github:work_item.new",
+        data: item,
+      });
+      await vi.waitFor(() =>
+        expect(
+          readWorkItemLifecycles(f.dataDir, "api", "pr-watch").get(item.externalId)?.members[0],
+        ).toMatchObject({ state: "spawning", sessionId: "api-1" }),
+      );
+      // Existing pending binding: the claim's attempt is refunded.
+      expect(
+        readWorkItemLifecycles(f.dataDir, "api", "pr-watch").get(item.externalId)?.members[0]
+          ?.attempts,
+      ).toBe(1);
+      expect(spawn).not.toHaveBeenCalled();
+      expect(readSession(f.dataDir, "api-1")).toMatchObject({ status: "errored" });
+      expect(existsSync(archivedPath(f, "api-1"))).toBe(false);
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("keeps a record a restore took over during branch cleanup", async () => {
     const f = await createFixture();
     await git(f.repoPath, "branch", "api-1");
