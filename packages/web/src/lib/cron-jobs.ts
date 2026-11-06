@@ -1,6 +1,9 @@
 import type {
   CronActionEvent,
   CronDiskState,
+  CronJobEditDraft,
+  CronJobEditResult,
+  CronJobEditUpdate,
   CronJobsResponse,
   CronSourceView,
   CronTriggerView,
@@ -33,6 +36,59 @@ export async function fetchCronJobs(
   const response = await fetch(`/api/cron${query}`, { cache: "no-store", signal });
   if (!response.ok) throw new Error(`Cron jobs request failed: ${response.status}`);
   return (await response.json()) as CronJobsResponse;
+}
+
+export type CronJobEditIdentity = Pick<CronJobEditDraft, "projectId" | "sourceId" | "triggerId">;
+
+export class CronJobEditRequestError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly field?: string,
+  ) {
+    super(message);
+  }
+}
+
+function editUrl(identity: CronJobEditIdentity): string {
+  return `/api/cron/edit?${new URLSearchParams({
+    project: identity.projectId,
+    source: identity.sourceId,
+    trigger: identity.triggerId,
+  })}`;
+}
+
+async function editResponse<T>(response: Response): Promise<T> {
+  const payload: unknown = await response.json();
+  if (!response.ok) {
+    const error = payload as { error?: unknown; field?: unknown } | null;
+    throw new CronJobEditRequestError(
+      response.status,
+      typeof error?.error === "string" ? error.error : "Could not edit cron job.",
+      typeof error?.field === "string" ? error.field : undefined,
+    );
+  }
+  return payload as T;
+}
+
+export async function fetchCronJobDraft(
+  identity: CronJobEditIdentity,
+  signal: AbortSignal,
+): Promise<CronJobEditDraft> {
+  return editResponse(await fetch(editUrl(identity), { cache: "no-store", signal }));
+}
+
+export async function saveCronJobDraft(
+  identity: CronJobEditIdentity,
+  update: CronJobEditUpdate,
+): Promise<CronJobEditResult> {
+  return editResponse(
+    await fetch(editUrl(identity), {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(update),
+    }),
+  );
 }
 
 function mergeRuns(source: CronSourceView, trigger: CronTriggerView | null): CronRun[] {

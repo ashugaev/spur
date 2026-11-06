@@ -13,6 +13,7 @@ import {
 } from "./deploy-switch-state.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { isActive, resolveSystemdScope, runNpmInit } from "./host-install.js";
+import { spurInstallLockPath } from "./install-lock.js";
 import { writeStdout } from "./io.js";
 import { getReleases, isReleaseVersion } from "./releases-cache.js";
 import {
@@ -127,15 +128,20 @@ export function recordManualRollback(dataDir: string, failure: ManualRollbackFai
   });
 }
 
-export function acquireUpdateLock(home = homedir()): () => void {
-  const lockPath = join(home, ".spur", "install-and-restart.lock");
+const UPDATE_LOCK_WAIT_SECONDS = 5;
+
+export function acquireUpdateLock(
+  home = homedir(),
+  waitSeconds = UPDATE_LOCK_WAIT_SECONDS,
+): () => void {
+  const lockPath = spurInstallLockPath(home);
   mkdirSync(dirname(lockPath), { recursive: true });
   const fd = openSync(lockPath, "w");
   try {
     // `flock` locks the open file description, which the child shares through
     // the inherited fd, so the lock outlives the child and is released only
     // when this process closes its own descriptor.
-    execFileSync("flock", ["--nonblock", "3"], {
+    execFileSync("flock", ["--wait", String(waitSeconds), "3"], {
       stdio: ["ignore", "ignore", "ignore", fd],
     });
   } catch (error) {

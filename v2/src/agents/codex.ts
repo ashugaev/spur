@@ -608,6 +608,35 @@ function appendCodexArgs(command: string, codexArgs: string[] | undefined): stri
   return `${command} ${codexArgs.map((arg) => shellEscape(arg)).join(" ")}`;
 }
 
+const CODEX_PROVIDER_OVERRIDE = /^\s*(model_provider|profile)\s*=/;
+
+export function codexArgsSelectProvider(args: readonly string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] ?? "";
+    if (
+      arg === "--oss" ||
+      arg.startsWith("--local-provider") ||
+      arg === "--profile" ||
+      arg.startsWith("--profile=") ||
+      arg.startsWith("-p")
+    ) {
+      return true;
+    }
+    let value: string | undefined;
+    if (arg === "-c" || arg === "--config") {
+      value = args[i + 1];
+    } else if (arg.startsWith("--config=")) {
+      value = arg.slice("--config=".length);
+    } else if (arg.startsWith("-c")) {
+      value = arg.startsWith("-c=") ? arg.slice(3) : arg.slice(2);
+    }
+    if (value !== undefined && CODEX_PROVIDER_OVERRIDE.test(value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function appendCodexReasoningEffort(
   command: string,
   reasoningEffort: ProviderReasoningEffort | undefined,
@@ -795,13 +824,42 @@ function withCodexMcpServer(configText: string, binding: SidecarMcpBinding): str
   return `${trimmed}${separator}${table}`;
 }
 
+export async function readCodexUserConfig(): Promise<string> {
+  return readFile(join(homedir(), ".codex", "config.toml"), "utf8").catch(() => "");
+}
+
+function codexTopLevelLines(configText: string): string[] {
+  const lines: string[] = [];
+  for (const line of configText.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    if (trimmed.startsWith("[")) {
+      break;
+    }
+    lines.push(line);
+  }
+  return lines;
+}
+
+export function codexUsesCustomProvider(configText: string): boolean {
+  const providerPattern = /^\s*model_provider\s*=\s*(?:"([^"]*)"|'([^']*)')/;
+  return codexTopLevelLines(configText).some((line) => {
+    if (/^\s*profile\s*=/.test(line)) {
+      return true;
+    }
+    const match = providerPattern.exec(line);
+    return match !== null && (match[1] ?? match[2]) !== "openai";
+  });
+}
+
 export async function buildEphemeralCodexConfig(
   trustedProjects: readonly string[],
   mcpBindings: readonly SidecarMcpBinding[] = [],
   mcpExclude: readonly string[] = [],
 ): Promise<string> {
-  const userConfigPath = join(homedir(), ".codex", "config.toml");
-  const baseConfig = await readFile(userConfigPath, "utf8").catch(() => "");
+  const baseConfig = await readCodexUserConfig();
   const withTrust = appendCodexTrustedProjects(baseConfig, trustedProjects);
   // Exclude first so a project can suppress the host server and still receive
   // Spur's managed sidecar binding under the same name.
@@ -814,17 +872,8 @@ export async function buildEphemeralCodexConfig(
 
 function withSuppressUnstableFeaturesWarning(configText: string): string {
   const keyPattern = /^\s*suppress_unstable_features_warning\s*=/;
-  for (const line of configText.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      continue;
-    }
-    if (trimmed.startsWith("[")) {
-      break;
-    }
-    if (keyPattern.test(line)) {
-      return configText;
-    }
+  if (codexTopLevelLines(configText).some((line) => keyPattern.test(line))) {
+    return configText;
   }
 
   const line = "suppress_unstable_features_warning = true";
@@ -1151,6 +1200,9 @@ export interface CodexRolloutStateRecord {
 export interface CodexRolloutReadResult {
   rollout: CodexRolloutStateRecord | null;
   rateLimit: RateLimitDetection | null;
+  rateLimitObservedAtMs?: number;
+  /** Timestamp of the newest parseable rollout line of any kind. */
+  lastProgressMs?: number;
   threadId?: string;
   isSubagent?: boolean;
   model?: string;
@@ -1181,6 +1233,10 @@ interface CodexRolloutFold {
   // can reach the result, so the tail stays one turn long.
   stateTail: CodexRolloutStateLine[];
   rateLimit: RateLimitDetection | null;
+  rateLimitObservedAtMs?: number;
+  quotaDigest: Hash;
+  hardLimitTurnId?: string;
+  lastProgressMs?: number;
   model?: string;
   token: {
     previous?: CodexTokenUsageSnapshot;
@@ -1553,6 +1609,7 @@ function newCodexRolloutFold(): CodexRolloutFold {
     matchedCallIds: new Set(),
     stateTail: [],
     rateLimit: null,
+    quotaDigest: createHash("sha256"),
     token: { overflowed: false },
   };
 }
@@ -1562,6 +1619,7 @@ function cloneCodexRolloutFold(fold: CodexRolloutFold): CodexRolloutFold {
     ...fold,
     matchedCallIds: new Set(fold.matchedCallIds),
     stateTail: fold.stateTail.slice(),
+    quotaDigest: fold.quotaDigest.copy(),
     token: { ...fold.token },
   };
 }
@@ -1585,7 +1643,17 @@ function foldCodexSessionMeta(fold: CodexRolloutFold, parsed: Record<string, unk
   };
 }
 
-function foldCodexRolloutLine(fold: CodexRolloutFold, parsed: Record<string, unknown>): void {
+function observeCodexRateLimit(fold: CodexRolloutFold, rawLine: string): void {
+  fold.quotaDigest.update(`${Buffer.byteLength(rawLine, "utf8")}:`);
+  fold.quotaDigest.update(rawLine, "utf8");
+  fold.rateLimitObservedAtMs = Math.max(Date.now(), fold.rateLimitObservedAtMs ?? -Infinity);
+}
+
+function foldCodexRolloutLine(
+  fold: CodexRolloutFold,
+  parsed: Record<string, unknown>,
+  rawLine: string,
+): void {
   foldCodexSessionMeta(fold, parsed);
   const matchedCallId = readMatchedToolCallId(parsed);
   if (matchedCallId) fold.matchedCallIds.add(matchedCallId);
@@ -1594,10 +1662,36 @@ function foldCodexRolloutLine(fold: CodexRolloutFold, parsed: Record<string, unk
     if (state.reason !== "thread_settings_applied" && !state.callId) fold.stateTail = [state];
     else fold.stateTail.push(state);
   }
+  if (state?.reason === "task_started") {
+    if (fold.hardLimitTurnId !== undefined && state.turnId !== fold.hardLimitTurnId) {
+      delete fold.hardLimitTurnId;
+      fold.rateLimit = { limited: false, reason: "" };
+      observeCodexRateLimit(fold, rawLine);
+    }
+  } else if (state?.reason === "task_complete") {
+    const payload = parsed["payload"];
+    const error = isRecord(payload) ? payload["error"] : undefined;
+    if (isRecord(error) && error["codex_error_info"] === "usage_limit_exceeded") {
+      fold.hardLimitTurnId = state.turnId ?? "";
+      fold.rateLimit = { limited: true, reason: "codex usage_limit_exceeded" };
+      observeCodexRateLimit(fold, rawLine);
+    } else if (error === null || error === undefined) {
+      delete fold.hardLimitTurnId;
+      fold.rateLimit = { limited: false, reason: "" };
+      observeCodexRateLimit(fold, rawLine);
+    }
+  }
   const detection = detectCodexRateLimit(extractCodexRateLimitsLine(parsed));
-  if (detection) fold.rateLimit = detection;
+  if (detection && fold.hardLimitTurnId === undefined) {
+    fold.rateLimit = detection;
+    observeCodexRateLimit(fold, rawLine);
+  }
   const model = extractCodexTurnContextModel(parsed);
   if (model !== undefined) fold.model = model;
+  if (typeof parsed["timestamp"] === "string") {
+    const lineMs = Date.parse(parsed["timestamp"]);
+    if (Number.isFinite(lineMs)) fold.lastProgressMs = lineMs;
+  }
   foldCodexTokenUsage(fold, parsed);
 }
 
@@ -1624,6 +1718,10 @@ function finalizeCodexRolloutFold(
   return {
     rollout,
     rateLimit: fold.rateLimit,
+    ...(fold.rateLimitObservedAtMs !== undefined
+      ? { rateLimitObservedAtMs: fold.rateLimitObservedAtMs }
+      : {}),
+    ...(fold.lastProgressMs !== undefined ? { lastProgressMs: fold.lastProgressMs } : {}),
     ...(meta ? { threadId: meta.threadId } : {}),
     ...(meta?.isSubagent ? { isSubagent: true } : {}),
     ...(fold.model ? { model: fold.model } : {}),
@@ -1670,7 +1768,7 @@ interface CodexLineFolder<F> {
   start: () => F;
   // Copy of a cached fold to append to; the cached one is never mutated.
   resume: (fold: F) => F;
-  line: (fold: F, parsed: Record<string, unknown>) => void;
+  line: (fold: F, parsed: Record<string, unknown>, rawLine: string) => void;
 }
 
 // One gate slot covers prefix verification and the scan, so concurrent opens
@@ -1717,7 +1815,7 @@ async function foldCodexJsonlFile<F>(
         } catch {
           return false;
         }
-        if (isRecord(parsed)) folder.line(fold, parsed);
+        if (isRecord(parsed)) folder.line(fold, parsed, line);
         return true;
       },
       fingerprint?.size,
@@ -1754,6 +1852,20 @@ async function readCodexRolloutFile(
     line: foldCodexRolloutLine,
   });
   if (!read) return null;
+  if (cached?.fold.rateLimitObservedAtMs !== undefined) {
+    const oldThreadId = cached.fold.meta?.threadId;
+    const newThreadId = read.fold.meta?.threadId;
+    const sameIdentity =
+      oldThreadId && newThreadId
+        ? oldThreadId === newThreadId
+        : !oldThreadId && !newThreadId && fingerprint && cached.ino === fingerprint.ino;
+    if (
+      sameIdentity &&
+      cached.fold.quotaDigest.copy().digest("hex") === read.fold.quotaDigest.copy().digest("hex")
+    ) {
+      read.fold.rateLimitObservedAtMs = cached.fold.rateLimitObservedAtMs;
+    }
+  }
   const result = finalizeCodexRolloutFold(read.fold, filePath);
   const candidate =
     !result.rollout && !result.rateLimit && !result.model && !result.tokenUsage
@@ -1890,6 +2002,9 @@ async function readCodexRolloutStateSnapshot(
   return {
     rollout: null,
     rateLimit: newestByMtime?.result.rateLimit ?? null,
+    ...(newestByMtime?.result.rateLimitObservedAtMs !== undefined
+      ? { rateLimitObservedAtMs: newestByMtime.result.rateLimitObservedAtMs }
+      : {}),
     ...(model ? { model } : {}),
     ...(newestTokenUsage ? { tokenUsage: newestTokenUsage } : {}),
     ...(tokenUsages.length > 0 ? { tokenUsages } : {}),

@@ -8,7 +8,7 @@ const listSessionsMock = vi.fn();
 const readReviewSourceSnapshotsMock = vi.fn();
 const writeReviewSourceSnapshotMock = vi.fn();
 const deleteReviewSourceSnapshotMock = vi.fn();
-const hasGitHubMergeConflictRestoreReplayMock = vi.fn();
+const readGitHubMergeConflictRestoreReplayMock = vi.fn();
 const clearGitHubMergeConflictRestoreReplayMock = vi.fn();
 const readWorkItemRegistryMock = vi.fn();
 const recordWorkItemMock = vi.fn();
@@ -48,7 +48,6 @@ vi.mock("../../src/metadata.js", () => ({
   clearGitHubMergeConflictRestoreReplay: clearGitHubMergeConflictRestoreReplayMock,
   clearGitHubPollDisabledSession: clearGitHubPollDisabledSessionMock,
   deleteReviewSourceSnapshot: deleteReviewSourceSnapshotMock,
-  hasGitHubMergeConflictRestoreReplay: hasGitHubMergeConflictRestoreReplayMock,
   listSessions: listSessionsMock,
   markGitHubPollDisabledChecked: markGitHubPollDisabledCheckedMock,
   readCommentSeenRegistry: readCommentSeenRegistryMock,
@@ -56,6 +55,7 @@ vi.mock("../../src/metadata.js", () => ({
   recordIgnoredGitHubFeedback: recordIgnoredGitHubFeedbackMock,
   listIgnoredGitHubFeedbackSessions: listIgnoredGitHubFeedbackSessionsMock,
   deleteIgnoredGitHubFeedback: deleteIgnoredGitHubFeedbackMock,
+  readGitHubMergeConflictRestoreReplay: readGitHubMergeConflictRestoreReplayMock,
   readGitHubPollDisabled: readGitHubPollDisabledMock,
   readGitHubReviewPagination: readGitHubReviewPaginationMock,
   readLifecycleBaselinedSessions: readLifecycleBaselinedSessionsMock,
@@ -175,10 +175,10 @@ function parseMockJson(raw: unknown, fallback: unknown): unknown {
   }
 }
 
-function graphqlAuthor(user: unknown): { login: unknown } | null {
-  return typeof user === "object" && user !== null && "login" in user
-    ? { login: user.login }
-    : null;
+// REST `user.type` maps onto the GraphQL actor `__typename`.
+function graphqlAuthor(user: unknown): { login: unknown; __typename?: unknown } | null {
+  if (typeof user !== "object" || user === null || !("login" in user)) return null;
+  return "type" in user ? { login: user.login, __typename: user.type } : { login: user.login };
 }
 
 // The account the daemon authenticates as, answered by the batch query's root
@@ -275,7 +275,7 @@ describe("github source", () => {
     vi.clearAllMocks();
     _resetGhUsageForTests();
     ghTransportMock.mockImplementation(legacyGhAdapter);
-    hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(false);
+    readGitHubMergeConflictRestoreReplayMock.mockReturnValue(undefined);
     readWorkItemRegistryMock.mockReturnValue(new Set());
     readCommentSeenRegistryMock.mockReturnValue(new Set());
     readIgnoredGitHubFeedbackMock.mockReturnValue(new Set());
@@ -1281,7 +1281,7 @@ describe("github source", () => {
   it("unions restore replay with new comments and persists confirmed conflict clearance", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
-    hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(true);
+    readGitHubMergeConflictRestoreReplayMock.mockReturnValue("restore-1");
     const emit = vi.fn();
     mockLifecyclePoll(
       prView({ mergeable: "CONFLICTING" }),
@@ -1311,6 +1311,323 @@ describe("github source", () => {
       mergeConflictClearId: cleared.mergeConflictClearId,
     });
     handle.stop();
+  });
+
+  describe("merge conflict detection", () => {
+    const conflictSignal = (extra: Partial<ReviewSignal> = {}): ReviewSignal => ({
+      key: "merge_conflict",
+      kind: "merge_conflict",
+      text: "Merge conflicts are blocking this PR.",
+      ...extra,
+    });
+    const lastSnapshot = (): ReviewSnapshot =>
+      writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+    const conflictEmits = (emit: ReturnType<typeof vi.fn>) =>
+      emit.mock.calls.filter(([name]) => name === "github:merge_conflict");
+    const unknownView = { mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" };
+    const baseTip = (oid: string) => ({ baseRef: { target: { oid } } });
+    const recheckView = (overrides: Record<string, unknown>) => JSON.stringify(overrides);
+    const recheckCalls = () =>
+      ghMock.mock.calls.filter(
+        (call) => call[1] === "pr" && call[2] === "view" && call[3] === "42",
+      );
+
+    it("emits a conflict present at the first observation without emitExisting", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+      mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h1", ...baseTip("b1") }));
+      const emit = vi.fn();
+      const handle = await startLifecycle(emit);
+      expect(conflictEmits(emit)).toHaveLength(1);
+      expect(lastSnapshot().signals.get("merge_conflict")).toMatchObject({
+        changeKey: "h1:b1",
+        revision: "h1:b1",
+      });
+      handle.stop();
+    });
+
+    it("emits nothing for a conflict already in the persisted snapshot (restart)", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(
+        new Map([
+          ["api-a1b2", storedSnapshot([conflictSignal({ revision: "h1:b1", changeKey: "h1:b1" })])],
+        ]),
+      );
+      listSessionsMock.mockReturnValue([makeSession()]);
+      mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h1", ...baseTip("b1") }));
+      const emit = vi.fn();
+      const handle = await startLifecycle(emit);
+      expect(conflictEmits(emit)).toHaveLength(0);
+      handle.stop();
+    });
+
+    const replayRevisions = async (restoreIds: string[]): Promise<unknown[]> => {
+      const stored = conflictSignal({ revision: "h1:b1", changeKey: "h1:b1" });
+      readReviewSourceSnapshotsMock.mockReturnValue(
+        new Map([["api-a1b2", storedSnapshot([stored])]]),
+      );
+      listSessionsMock.mockReturnValue([makeSession()]);
+      const emit = vi.fn();
+      const revisions: unknown[] = [];
+      for (const restoreId of restoreIds) {
+        readGitHubMergeConflictRestoreReplayMock.mockReturnValue(restoreId);
+        mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h1", ...baseTip("b1") }));
+        const handle = await startLifecycle(emit);
+        const [, data] = conflictEmits(emit).at(-1) ?? [];
+        const signal = (data as { signals: ReviewSignal[] }).signals[0];
+        expect(signal?.changeKey).toBe("h1:b1");
+        expect(signal?.revision).toBe(`h1:b1:restore:${restoreId}`);
+        revisions.push(signal?.revision);
+        expect(lastSnapshot().signals.get("merge_conflict")).toEqual(stored);
+        handle.stop();
+      }
+      return revisions;
+    };
+
+    it("replays a persisted conflict on each restore with that restore's revision", async () => {
+      const revisions = await replayRevisions(["restore-1", "restore-2"]);
+      expect(new Set(revisions).size).toBe(2);
+    });
+
+    it("keeps the replay revision stable when the restore marker outlives its emit", async () => {
+      // Same revision lets auto-ping (head, base, revision) dedupe drop the repeat.
+      const revisions = await replayRevisions(["restore-1", "restore-1"]);
+      expect(new Set(revisions).size).toBe(1);
+    });
+
+    it("rechecks UNKNOWN mergeability once and emits the settled conflict", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      mockLifecyclePoll(prView({ ...unknownView, headRefOid: "h1", ...baseTip("b1") }));
+      ghMock.mockResolvedValueOnce(
+        recheckView({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }),
+      );
+      const emit = vi.fn();
+      const handle = await startLifecycle(emit);
+      expect(recheckCalls()).toHaveLength(1);
+      expect(conflictEmits(emit)).toHaveLength(1);
+      handle.stop();
+    });
+
+    it("holds the prior conflict and its clear id while mergeability stays UNKNOWN", async () => {
+      const clearId = "11111111-1111-4111-8111-111111111111";
+      const held = conflictSignal({ revision: "h1:b1", changeKey: "h1:b1" });
+      readReviewSourceSnapshotsMock.mockReturnValue(
+        new Map([["api-a1b2", { ...storedSnapshot([held]), mergeConflictClearId: clearId }]]),
+      );
+      listSessionsMock.mockReturnValue([makeSession()]);
+      const emit = vi.fn();
+      let snapshot: ReviewSnapshot | undefined;
+      for (let poll = 0; poll < 5; poll += 1) {
+        mockLifecyclePoll(prView({ ...unknownView, headRefOid: "h1", ...baseTip("b1") }));
+        ghMock.mockResolvedValueOnce(recheckView(unknownView));
+        const handle = await startLifecycle(emit);
+        snapshot = lastSnapshot();
+        readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", snapshot]]));
+        handle.stop();
+      }
+      expect(conflictEmits(emit)).toHaveLength(0);
+      expect(snapshot?.signals.get("merge_conflict")).toEqual(held);
+      expect(snapshot?.mergeConflictClearId).toBe(clearId);
+    });
+
+    it("emits again for an unchanged conflict text on a new head or base commit", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(
+        new Map([
+          ["api-a1b2", storedSnapshot([conflictSignal({ revision: "h1:b1", changeKey: "h1:b1" })])],
+        ]),
+      );
+      listSessionsMock.mockReturnValue([makeSession()]);
+      mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h2", ...baseTip("b1") }));
+      const emit = vi.fn();
+      const handle = await startLifecycle(emit);
+      expect(conflictEmits(emit)).toHaveLength(1);
+      expect(lastSnapshot().signals.get("merge_conflict")?.revision).toBe("h2:b1");
+      handle.stop();
+    });
+
+    it("keys the conflict on the base branch tip, so a base-only push emits once", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(
+        new Map([
+          ["api-a1b2", storedSnapshot([conflictSignal({ revision: "h1:b1", changeKey: "h1:b1" })])],
+        ]),
+      );
+      listSessionsMock.mockReturnValue([makeSession()]);
+      // baseRefOid lags at the merge-base; only baseRef.target.oid moves.
+      const view = prView({
+        mergeable: "CONFLICTING",
+        headRefOid: "h1",
+        baseRefOid: "b1",
+        ...baseTip("b2"),
+      });
+      mockLifecyclePoll(view);
+      const emit = vi.fn();
+      const handle = await startLifecycle(emit);
+      expect(conflictEmits(emit)).toHaveLength(1);
+      expect(lastSnapshot().signals.get("merge_conflict")?.changeKey).toBe("h1:b2");
+      handle.stop();
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", lastSnapshot()]]));
+      mockLifecyclePoll(view);
+      const again = vi.fn();
+      const next = await startLifecycle(again);
+      expect(conflictEmits(again)).toHaveLength(0);
+      next.stop();
+    });
+
+    it("adopts a revision on a legacy snapshot with the same text without emitting", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(
+        new Map([["api-a1b2", storedSnapshot([conflictSignal()])]]),
+      );
+      listSessionsMock.mockReturnValue([makeSession()]);
+      mockLifecyclePoll(prView({ mergeable: "CONFLICTING", headRefOid: "h1", ...baseTip("b1") }));
+      const emit = vi.fn();
+      const handle = await startLifecycle(emit);
+      expect(conflictEmits(emit)).toHaveLength(0);
+      expect(lastSnapshot().signals.get("merge_conflict")?.revision).toBe("h1:b1");
+      handle.stop();
+    });
+  });
+
+  describe("CI run identity", () => {
+    it("carries the head commit and failing check names on ci_failed", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghMock
+        .mockResolvedValueOnce(
+          prView({
+            headRefOid: "head-1",
+            baseRefOid: "base-1",
+            statusCheckRollup: [
+              {
+                name: "build",
+                conclusion: "FAILURE",
+                status: "COMPLETED",
+                detailsUrl: "https://github.com/acme/api/actions/runs/9/job/91",
+              },
+              {
+                context: "lint",
+                state: "FAILURE",
+                createdAt: "2026-01-01T00:00:00Z",
+              },
+            ],
+          }),
+        )
+        .mockResolvedValueOnce("[]")
+        .mockResolvedValueOnce("[]")
+        .mockResolvedValueOnce("[]")
+        .mockResolvedValueOnce("[]");
+      const emit = vi.fn();
+      const handle = await startLifecycle(emit);
+      const signal = (
+        writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot
+      ).signals.get("ci_failed");
+      expect(signal?.changeKey).toBe("head-1");
+      expect(signal?.ciRun?.head).toBe("head-1");
+      expect(signal?.ciRun?.checks).toEqual(["build", "lint"]);
+      expect(signal?.revision).toBe("head-1:build,lint");
+      handle.stop();
+    });
+
+    describe("first observation", () => {
+      const failingView = () =>
+        prView({
+          headRefOid: "head-1",
+          baseRefOid: "base-1",
+          statusCheckRollup: [{ name: "build", conclusion: "FAILURE", status: "COMPLETED" }],
+        });
+      const ciEmits = (emit: ReturnType<typeof vi.fn>) =>
+        emit.mock.calls.filter(([name]) => name === "github:ci_failed");
+
+      it("emits failing CI present at the first observation without emitExisting", async () => {
+        readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+        listSessionsMock.mockReturnValue([makeSession()]);
+        mockLifecyclePoll(failingView());
+        const emit = vi.fn();
+        const handle = await startLifecycle(emit);
+        expect(ciEmits(emit)).toHaveLength(1);
+        handle.stop();
+      });
+
+      it("does not emit first-observation failing CI without a head commit", async () => {
+        readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+        listSessionsMock.mockReturnValue([makeSession()]);
+        mockLifecyclePoll(
+          prView({
+            headRefOid: "",
+            baseRefOid: "base-1",
+            statusCheckRollup: [{ name: "build", conclusion: "FAILURE", status: "COMPLETED" }],
+          }),
+        );
+        const emit = vi.fn();
+        const handle = await startLifecycle(emit);
+        expect(ciEmits(emit)).toHaveLength(0);
+        handle.stop();
+      });
+
+      it("emits nothing for failing CI already in the persisted snapshot (restart)", async () => {
+        readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+        listSessionsMock.mockReturnValue([makeSession()]);
+        mockLifecyclePoll(failingView());
+        const first = await startLifecycle(vi.fn());
+        const persisted = writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+        first.stop();
+        readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", persisted]]));
+        mockLifecyclePoll(failingView());
+        const emit = vi.fn();
+        const handle = await startLifecycle(emit);
+        expect(ciEmits(emit)).toHaveLength(0);
+        handle.stop();
+      });
+
+      it("emits nothing for a legacy snapshot with the same failing text", async () => {
+        readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+        listSessionsMock.mockReturnValue([makeSession()]);
+        mockLifecyclePoll(failingView());
+        const first = await startLifecycle(vi.fn());
+        const persisted = writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+        first.stop();
+        const current = persisted.signals.get("ci_failed");
+        if (!current) throw new Error("expected ci_failed signal");
+        const { revision: _revision, changeKey: _changeKey, ciRun: _ciRun, ...legacy } = current;
+        readReviewSourceSnapshotsMock.mockReturnValue(
+          new Map([["api-a1b2", storedSnapshot([legacy])]]),
+        );
+        mockLifecyclePoll(failingView());
+        const emit = vi.fn();
+        const handle = await startLifecycle(emit);
+        expect(ciEmits(emit)).toHaveLength(0);
+        handle.stop();
+      });
+    });
+
+    it("keeps the revision when the same failing check is re-created with a new job id", async () => {
+      const failing = (url: string) =>
+        prView({
+          headRefOid: "head-1",
+          baseRefOid: "base-1",
+          statusCheckRollup: [
+            { name: "build", conclusion: "FAILURE", status: "COMPLETED", detailsUrl: url },
+          ],
+        });
+      listSessionsMock.mockReturnValue([makeSession()]);
+      const emit = vi.fn();
+      let previous = storedSnapshot([]);
+      const revisions: Array<string | undefined> = [];
+      for (const url of [
+        "https://x/runs/1/job/1",
+        "https://x/runs/1/job/1",
+        "https://x/runs/1/job/2",
+      ]) {
+        readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", previous]]));
+        mockLifecyclePoll(failing(url));
+        const handle = await startLifecycle(emit);
+        previous = writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+        revisions.push(previous.signals.get("ci_failed")?.revision);
+        handle.stop();
+      }
+      expect(revisions[0]).toBe(revisions[1]);
+      expect(revisions[2]).toBe(revisions[1]);
+      expect(emit.mock.calls.filter(([name]) => name === "github:ci_failed")).toHaveLength(1);
+    });
   });
 
   function prView(overrides: Record<string, unknown> = {}): string {
@@ -1371,7 +1688,11 @@ describe("github source", () => {
     });
   }
 
-  async function startLifecycle(emit: (name: string, data?: unknown) => void, selfMarker?: string) {
+  async function startLifecycle(
+    emit: (name: string, data?: unknown) => void,
+    selfMarker?: string,
+    ignoreChecks?: string[],
+  ) {
     return githubSourceModule.start({
       sourceId: "pr-watch",
       projectId: "api",
@@ -1382,6 +1703,7 @@ describe("github source", () => {
         runOnStart: false,
         emitExisting: false,
         ...(selfMarker ? { selfMarker } : {}),
+        ...(ignoreChecks ? { ignoreChecks } : {}),
       },
       emit,
       signal: new AbortController().signal,
@@ -1390,7 +1712,10 @@ describe("github source", () => {
     });
   }
 
-  async function pollCiSignal(rollup: unknown[]): Promise<ReviewSignal | undefined> {
+  async function pollCiSignal(
+    rollup: unknown[],
+    ignoreChecks?: string[],
+  ): Promise<{ signal: ReviewSignal | undefined; emit: ReturnType<typeof vi.fn> }> {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
     ghMock
@@ -1399,10 +1724,11 @@ describe("github source", () => {
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]");
-    const handle = await startLifecycle(vi.fn());
+    const emit = vi.fn();
+    const handle = await startLifecycle(emit, undefined, ignoreChecks);
     const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
     handle.stop();
-    return snapshot.signals.get("ci_failed");
+    return { signal: snapshot.signals.get("ci_failed"), emit };
   }
   const rolledRun = (
     conclusion: string,
@@ -1423,7 +1749,7 @@ describe("github source", () => {
   });
 
   it("emits no ci_failed for a cancelled run superseded by a later suite of the same workflow", async () => {
-    const signal = await pollCiSignal([
+    const { signal } = await pollCiSignal([
       rolledRun("CANCELLED", { id: 1, createdAt: "2026-01-01T00:00:00Z", app: 5, workflow: 7 }),
       rolledRun("SUCCESS", { id: 2, createdAt: "2026-01-01T00:05:00Z", app: 5, workflow: 7 }),
     ]);
@@ -1431,10 +1757,33 @@ describe("github source", () => {
   });
 
   it("emits ci_failed when another app publishes a later success under the same name", async () => {
-    const signal = await pollCiSignal([
+    const { signal } = await pollCiSignal([
       rolledRun("FAILURE", { id: 1, createdAt: "2026-01-01T00:00:00Z", app: 5, workflow: null }),
       rolledRun("SUCCESS", { id: 2, createdAt: "2026-01-01T00:05:00Z", app: 6, workflow: null }),
     ]);
+    expect(signal?.text).toBe("CI is failing: Labeler.");
+  });
+
+  it("ignoreChecks drops ci_failed when only ignored checks fail", async () => {
+    const { signal, emit } = await pollCiSignal(
+      [
+        { name: "approvals", conclusion: "FAILURE", status: "COMPLETED" },
+        { name: "Spur Approval Gate", conclusion: "FAILURE", status: "COMPLETED" },
+      ],
+      ["approvals", "Spur Approval Gate"],
+    );
+    expect(signal).toBeUndefined();
+    expect(emit).not.toHaveBeenCalledWith("github:ci_failed", expect.anything());
+  });
+
+  it("ignoreChecks keeps non-ignored failing checks in ci_failed", async () => {
+    const { signal } = await pollCiSignal(
+      [
+        { name: "approvals", conclusion: "FAILURE", status: "COMPLETED" },
+        { name: "Labeler", conclusion: "FAILURE", status: "COMPLETED" },
+      ],
+      ["approvals"],
+    );
     expect(signal?.text).toBe("CI is failing: Labeler.");
   });
 
@@ -1713,6 +2062,31 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("moves the PR-wide comment change key for a new review id below an issue comment id", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    ghMock
+      .mockResolvedValueOnce(prView())
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(
+        JSON.stringify([{ id: 9001, body: "first pass please", user: { login: "alice" } }]),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          { id: 601, state: "COMMENTED", body: "please rename the helper", user: { login: "bob" } },
+        ]),
+      );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.get("review:601")?.changeKey).toBe("ic:9001|rv:601");
+    expect(snapshot.signals.get("comment:9001")?.changeKey).toBe("ic:9001|rv:601");
+    handle.stop();
+  });
+
   it("ignores a review with an empty body and no approval", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
@@ -1897,6 +2271,31 @@ describe("github source", () => {
       .filter(([name]) => name === "github:comment")
       .flatMap(([, payload]) => (payload as { signals: ReviewSignal[] }).signals);
     expect(comments.map((signal) => signal.key)).toEqual(["review-comment:621", "comment:623"]);
+    handle.stop();
+  });
+
+  it("does not wake on bot-authored issue comments", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    ghMock
+      .mockResolvedValueOnce(prView({ headRefName: "feature/native-pr-binding" }))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          { id: 640, body: "PR Reviewer Guide", user: { login: "github-actions", type: "Bot" } },
+          { id: 641, body: "please check", user: { login: "other-reviewer", type: "User" } },
+        ]),
+      )
+      .mockResolvedValueOnce("[]");
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const comments = emit.mock.calls
+      .filter(([name]) => name === "github:comment")
+      .flatMap(([, payload]) => (payload as { signals: ReviewSignal[] }).signals);
+    expect(comments.map((signal) => signal.key)).toEqual(["comment:641"]);
     handle.stop();
   });
 

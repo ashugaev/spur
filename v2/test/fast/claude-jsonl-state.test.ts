@@ -268,6 +268,29 @@ describe("classifyClaudeJsonlState", () => {
     ];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("error");
   });
+
+  it("keeps error when system, last-prompt and cost-state records follow the server_error line", () => {
+    const ts = Date.parse("2026-09-20T11:51:02.493Z");
+    const lines = [
+      JSON.stringify({
+        type: "assistant",
+        isApiErrorMessage: true,
+        error: "server_error",
+        timestamp: "2026-09-20T11:51:02.493Z",
+        message: {
+          model: "<synthetic>",
+          role: "assistant",
+          stop_reason: "stop_sequence",
+          content: [{ type: "text", text: "API Error: 500" }],
+        },
+      }),
+      JSON.stringify({ type: "system" }),
+      JSON.stringify({ type: "last-prompt", lastPrompt: "x", sessionId: "s" }),
+      JSON.stringify({ type: "cost-state", sessionId: "s", totalCostUSD: 1 }),
+    ];
+    const records = lines.map((line) => parseJsonlRecord(line, ts)).filter((r) => r !== null);
+    expect(classifyClaudeJsonlState(records, ts + 3_600_000)).toBe("error");
+  });
 });
 
 // ── parseJsonlRecord: interrupt marker ───────────────────────────────
@@ -969,7 +992,7 @@ describe("parseJsonlRecord rate_limit reset detection", () => {
     expect(record?.rateLimitResetAtMs).toBeUndefined();
   });
 
-  it("leaves rateLimitResetAtMs undefined for a weekly-limit banner", () => {
+  it("parses rateLimitResetAtMs from a dated weekly-limit banner", () => {
     const line = JSON.stringify({
       type: "assistant",
       isApiErrorMessage: true,
@@ -980,12 +1003,14 @@ describe("parseJsonlRecord rate_limit reset detection", () => {
         model: "<synthetic>",
         role: "assistant",
         stop_reason: "stop_sequence",
-        content: [{ type: "text", text: "You've hit your weekly limit · resets 7pm (UTC)" }],
+        content: [
+          { type: "text", text: "You've hit your weekly limit · resets Jul 15, 8am (UTC)" },
+        ],
       },
     });
     const record = parseJsonlRecord(line, 0);
     expect(record?.rateLimited).toBe(true);
-    expect(record?.rateLimitResetAtMs).toBeUndefined();
+    expect(record?.rateLimitResetAtMs).toBe(Date.parse("2026-07-15T08:00:00.000Z"));
   });
 });
 
@@ -1019,6 +1044,25 @@ describe("hasTrailingClaudeServerError", () => {
     const records = [
       rec({ type: "assistant", serverError: true }),
       rec({ type: "system" }),
+      rec({ type: "user", role: "user" }),
+    ];
+    expect(hasTrailingClaudeServerError(records)).toBe(false);
+  });
+
+  it("skips a trailing cost-state record", () => {
+    const records = [rec({ type: "assistant", serverError: true }), rec({ type: "cost-state" })];
+    expect(hasTrailingClaudeServerError(records)).toBe(true);
+  });
+
+  it("skips a trailing last-prompt record", () => {
+    const records = [rec({ type: "assistant", serverError: true }), rec({ type: "last-prompt" })];
+    expect(hasTrailingClaudeServerError(records)).toBe(true);
+  });
+
+  it("returns false once a user record follows a cost-state record", () => {
+    const records = [
+      rec({ type: "assistant", serverError: true }),
+      rec({ type: "cost-state" }),
       rec({ type: "user", role: "user" }),
     ];
     expect(hasTrailingClaudeServerError(records)).toBe(false);

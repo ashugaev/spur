@@ -22,7 +22,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { readJson } from "./github-app.js";
-import { join, relative, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -50,6 +50,7 @@ import {
   ensureInstanceConfig,
   findProjectConfigPath,
   findProjectConfigPathInDirectory,
+  isDefaultInstanceConfigPath,
   loadConfig,
   loadInstanceConfigReadOnly,
   loadProjectConfig,
@@ -128,7 +129,11 @@ import {
 } from "./disk-gc.js";
 import { findBuildCacheDirs } from "./build-cache-scan.js";
 import { snapshotProcesses } from "./process-tree.js";
-import { readdir as readdirAsync, lstat as lstatAsync } from "node:fs/promises";
+import {
+  readdir as readdirAsync,
+  lstat as lstatAsync,
+  readFile as readFileAsync,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { startServer } from "./server.js";
 import {
@@ -136,11 +141,13 @@ import {
   isRespawnableStatus,
   isSessionState,
   type AppConfig,
+  type AutoPingMuteItem,
+  type AutoPingMuteRequest,
+  type AutoPingMuteResponse,
+  type AutoPingMuteView,
+  type AutoPingResumeRequest,
   type AutoPingResumeResponse,
-  type AutoPingScope,
   type AutoPingSuppressionListResponse,
-  type AutoPingSuppressionView,
-  type AutoPingUnsubscribeResponse,
   type OpenPrAction,
   type ProjectConfigMutationResponse,
   type ProviderReasoningEffort,
@@ -465,8 +472,12 @@ function renderSourceInfo(response: SourceInfoResponse): string {
 }
 
 function renderSourceReplyResponse(response: SourceReplyResponse): string {
-  const buttons = response.buttons ? ` with ${response.buttons} button(s)` : "";
-  return `Sent ${response.source} reply for ${response.sessionId}${buttons}.`;
+  const parts = [
+    ...(response.buttons ? [`${response.buttons} button(s)`] : []),
+    ...(response.images ? [`${response.images} image(s)`] : []),
+  ];
+  const extras = parts.length > 0 ? ` with ${parts.join(" and ")}` : "";
+  return `Sent ${response.source} reply for ${response.sessionId}${extras}.`;
 }
 
 /** `<label>` or `<label>=<value>`; the value defaults to the label. */
@@ -759,52 +770,98 @@ function resolveAutoPingSessionId(explicitSession: string | undefined): string {
   return explicit;
 }
 
-function resolveAutoPingUnsubscribe(args: {
-  event?: string;
-  thread?: string;
-  subscription?: string;
-}): { scope: AutoPingScope; handle: string } {
-  const entries: Array<{ scope: AutoPingScope; handle: string }> = [];
-  if (args.event?.trim()) entries.push({ scope: "event", handle: args.event.trim() });
-  if (args.thread?.trim()) entries.push({ scope: "thread", handle: args.thread.trim() });
-  if (args.subscription?.trim()) {
-    entries.push({ scope: "subscription", handle: args.subscription.trim() });
+const AUTO_PING_FOR_MAX_MS = 24 * 3_600_000;
+const AUTO_PING_FOR_MIN_MS = 60_000;
+
+function resolveAutoPingMute(args: {
+  handle: string;
+  for?: string;
+  forever?: boolean;
+  reason?: string;
+}): AutoPingMuteRequest {
+  const handle = args.handle.trim();
+  const reason = args.reason?.trim();
+  if (args.for !== undefined && args.forever) {
+    throw new Error("Use only one of --for or --forever.");
   }
-  if (entries.length !== 1) {
-    throw new Error("Use exactly one of --event, --thread, or --subscription");
+  if (args.forever) {
+    if (!reason) throw new Error("--reason is required.");
+    return { handle, mode: "forever", reason };
   }
-  const entry = entries[0];
-  if (!entry) {
-    throw new Error("Use exactly one of --event, --thread, or --subscription");
+  if (args.for !== undefined) {
+    const durationMs = parseDurationMs(args.for, "--for");
+    if (durationMs > AUTO_PING_FOR_MAX_MS) throw new Error("--for max is 24h.");
+    if (durationMs < AUTO_PING_FOR_MIN_MS) throw new Error("--for min is 1m.");
+    if (!reason) throw new Error("--reason is required.");
+    return { handle, mode: "for", durationMs, reason };
   }
-  return entry;
+  return { handle, mode: "until_change", ...(reason ? { reason } : {}) };
 }
 
-function renderAutoPingSuppression(record: AutoPingSuppressionView): string {
+function autoPingSubjectLabel(items: AutoPingMuteItem[]): string {
+  const subjects = [...new Set(items.map((item) => item.subject))];
+  if (subjects.length !== 1) return `${subjects.length} subjects`;
+  const [subject = ""] = subjects;
+  const pr = /^review:[^:]+:.*#(\d+)$/.exec(subject);
+  return pr?.[1] ? `PR #${pr[1]}` : subject;
+}
+
+function autoPingUntilLabel(record: AutoPingMuteView): string {
+  if (record.mode === "forever") return "forever";
+  if (record.mode === "for") return `until ${record.expiresAt ?? "expiry"}`;
+  if (record.endedAt) return "until it changes";
+  const labels = [...new Set(record.items.map((item) => item.label).filter(Boolean))];
+  return labels.length === 1 ? (labels[0] ?? "until it changes") : "until it changes";
+}
+
+function renderAutoPingMute(response: AutoPingMuteResponse, request: AutoPingMuteRequest): string {
+  const { record } = response;
+  const kinds = [...new Set(record.items.map((item) => item.kind))].join(", ");
+  const when =
+    request.mode === "for" && request.durationMs !== undefined
+      ? `for ${formatAutoPingDuration(request.durationMs)}`
+      : autoPingUntilLabel(record);
+  const prefix = response.created ? "Muted" : "Already muted";
+  return `${prefix} ${kinds} on ${autoPingSubjectLabel(record.items)} ${when}. Undo: "$SPUR_SESSION_TOOL_DIR/spur" auto-ping resume ${request.handle}`;
+}
+
+function formatAutoPingDuration(durationMs: number): string {
+  return durationMs % 3_600_000 === 0
+    ? `${durationMs / 3_600_000}h`
+    : `${Math.round(durationMs / 60_000)}m`;
+}
+
+function renderAutoPingMuteRecord(record: AutoPingMuteView): string {
+  const kinds = [...new Set(record.items.map((item) => item.kind))].join(",");
+  const subjects = [...new Set(record.items.map((item) => item.subject))].join(",");
   const parts = [
     record.suppressionId,
-    record.scope,
-    record.destination.sessionId,
+    record.mode,
+    kinds,
+    subjects,
+    autoPingUntilLabel(record),
+    record.reason ?? "",
     record.createdAt,
-  ].filter((part): part is string => typeof part === "string" && part.length > 0);
+    ...(record.endedAt ? [`ended ${record.endReason ?? ""} ${record.endedAt}`.trim()] : []),
+  ];
   return parts.join("\t");
 }
 
 function renderAutoPingList(response: AutoPingSuppressionListResponse): string {
-  if (response.records.length === 0) {
-    return dimText("No auto-ping suppressions.");
+  const lines: string[] = [];
+  if (response.records.length === 0) lines.push(dimText("No active auto-ping mutes."));
+  else lines.push(...response.records.map(renderAutoPingMuteRecord));
+  if (response.history) {
+    lines.push("History:");
+    if (response.history.length === 0) lines.push(dimText("No auto-ping mute history."));
+    else lines.push(...response.history.map(renderAutoPingMuteRecord));
   }
-  return response.records.map(renderAutoPingSuppression).join("\n");
+  return lines.join("\n");
 }
 
-function renderAutoPingUnsubscribe(response: AutoPingUnsubscribeResponse): string {
-  const prefix = response.created ? "Created" : "Already active";
-  return `${prefix} auto-ping ${response.record.scope} suppression ${response.record.suppressionId}.`;
-}
-
-function renderAutoPingResume(response: AutoPingResumeResponse, suppressionId: string): string {
+function renderAutoPingResume(response: AutoPingResumeResponse, target: string): string {
   const prefix = response.removed ? "Resumed" : "Already resumed";
-  return `${prefix} auto-ping suppression ${suppressionId}.`;
+  return `${prefix} auto-ping mute ${target}.`;
 }
 
 function parsePrActionOption(value: string): OpenPrAction {
@@ -1110,7 +1167,9 @@ function renderDoctorResult(result: DoctorResult): string {
       dimText(
         `Project config already exists: ${displayPathFromCwd(result.existingProjectConfigPath)}`,
       ),
-      dimText("Next: `spur connect --config spur.yaml` or `spur list` from the repo."),
+      dimText(
+        `Next: \`spur connect ${displayPathFromCwd(result.existingProjectConfigPath)}\` or \`spur list\` from the repo.`,
+      ),
     );
     return lines.join("\n");
   }
@@ -1270,6 +1329,7 @@ interface SidecarPortRow {
   env: string;
   port: number;
   alive: boolean;
+  listening: boolean | null;
 }
 
 // Flattens a session's per-sidecar reserved ports into rows for the `sidecar
@@ -1288,6 +1348,7 @@ function sidecarPortRows(view: SessionView, name?: string): SidecarPortRow[] {
       env: port.env,
       port: port.port,
       alive: sidecar.alive,
+      listening: port.listening ?? null,
     })),
   );
   // Plain string comparison, not localeCompare: this output is machine-read
@@ -3798,50 +3859,52 @@ export function createProgram(cliEntrypoint: string): Command {
 
   const autoPingCommand = program
     .command("auto-ping")
-    .description("Manage automatic trigger suppressions for a session.");
+    .description("Mute automatic trigger pings for a session.");
   autoPingCommand
-    .command("unsubscribe")
-    .option("--event <handle>", "Event suppression handle")
-    .option("--thread <handle>", "Thread suppression handle")
-    .option("--subscription <handle>", "Subscription suppression handle")
+    .command("mute")
+    .argument("<handle>", "Handle printed in the ping")
+    .option("--for <duration>", "Mute for a while, max 24h; needs --reason")
+    .option("--forever", "Mute the whole trigger route for this session; needs --reason")
+    .option("--reason <why>", "Why the mute is needed")
     .option("--session <id>", "Session id")
     .option("--json", "Print raw JSON")
-    .action(async (options, command) => {
+    .action(async (handle: string, options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       const sessionId = resolveAutoPingSessionId(options.session as string | undefined);
-      const requestOptions: { event?: string; thread?: string; subscription?: string } = {};
-      if (typeof options.event === "string") requestOptions.event = options.event;
-      if (typeof options.thread === "string") requestOptions.thread = options.thread;
-      if (typeof options.subscription === "string")
-        requestOptions.subscription = options.subscription;
-      const request = resolveAutoPingUnsubscribe(requestOptions);
+      const request = resolveAutoPingMute({
+        handle,
+        ...(typeof options.for === "string" ? { for: options.for } : {}),
+        forever: Boolean(options.forever),
+        ...(typeof options.reason === "string" ? { reason: options.reason } : {}),
+      });
       await outputResult({
         json: Boolean(options.json),
-        label: "updating auto-ping suppressions",
+        label: "muting auto-ping",
         action: () =>
-          postJson<AutoPingUnsubscribeResponse>(
+          postJson<AutoPingMuteResponse>(
             cliEntrypoint,
-            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions/unsubscribe`,
+            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions/mute`,
             request,
             configPath,
           ),
-        render: renderAutoPingUnsubscribe,
+        render: (response) => renderAutoPingMute(response, request),
       });
     });
   autoPingCommand
     .command("list")
     .option("--session <id>", "Session id")
+    .option("--all", "Include mute history")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       const sessionId = resolveAutoPingSessionId(options.session as string | undefined);
       await outputResult({
         json: Boolean(options.json),
-        label: "loading auto-ping suppressions",
+        label: "loading auto-ping mutes",
         action: () =>
           getJson<AutoPingSuppressionListResponse>(
             cliEntrypoint,
-            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions`,
+            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions${options.all ? "?all=1" : ""}`,
             configPath,
           ),
         render: renderAutoPingList,
@@ -3849,25 +3912,27 @@ export function createProgram(cliEntrypoint: string): Command {
     });
   autoPingCommand
     .command("resume")
-    .argument("<suppressionId>", "Suppression id")
+    .argument("<handleOrId>", "Handle printed in the ping, or mute id from list")
     .option("--session <id>", "Session id")
     .option("--json", "Print raw JSON")
-    .action(async (suppressionId: string, options, command) => {
+    .action(async (handleOrId: string, options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       const sessionId = resolveAutoPingSessionId(options.session as string | undefined);
+      const target = handleOrId.trim();
+      const request: AutoPingResumeRequest = target.startsWith("ap1_")
+        ? { handle: target }
+        : { suppressionId: target };
       await outputResult({
         json: Boolean(options.json),
-        label: "resuming auto-ping suppression",
+        label: "resuming auto-ping mute",
         action: () =>
           postJson<AutoPingResumeResponse>(
             cliEntrypoint,
-            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions/${encodeURIComponent(
-              suppressionId,
-            )}/resume`,
-            {},
+            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions/resume`,
+            request,
             configPath,
           ),
-        render: (response) => renderAutoPingResume(response, suppressionId),
+        render: (response) => renderAutoPingResume(response, target),
       });
     });
 
@@ -4337,7 +4402,10 @@ export function createProgram(cliEntrypoint: string): Command {
   service
     .command("run")
     .description("Run a service command bound to the current Spur session.")
-    .argument("<serviceId>", "Logical service id")
+    .argument(
+      "<serviceId>",
+      "Logical service id declared as a project source with type: service and service: <id>",
+    )
     .argument("<command...>", "Shell command to run")
     .option("--port <number>", "Port held by this service")
     .option("--json", "Print raw JSON")
@@ -4636,7 +4704,7 @@ export function createProgram(cliEntrypoint: string): Command {
       );
       for (const row of rows) {
         writeStdout(
-          `${row.sidecar}\t${row.id}\t${row.env}\t${row.port}\t${row.alive ? "alive" : "dead"}`,
+          `${row.sidecar}\t${row.id}\t${row.env}\t${row.port}\t${row.alive ? "alive" : "dead"}\t${row.listening === null ? "unknown" : row.listening ? "listening" : "not-listening"}`,
         );
       }
     });
@@ -4743,6 +4811,11 @@ export function createProgram(cliEntrypoint: string): Command {
       "Inline choice button; repeatable. A click arrives as a user message carrying the value.",
       parseButtonOption,
     )
+    .option(
+      "--image <path>",
+      "PNG/JPEG/WebP posted as a photo before the text; repeatable, up to 4, 10 MB total",
+      collectOptionValue,
+    )
     .option("--json", "Print raw JSON")
     .action(
       async (
@@ -4751,6 +4824,7 @@ export function createProgram(cliEntrypoint: string): Command {
           session?: string;
           json?: boolean;
           button?: SourceReplyButton[];
+          image?: string[];
           requestInterfaceApproval?: string;
         },
         command: Command,
@@ -4763,12 +4837,19 @@ export function createProgram(cliEntrypoint: string): Command {
           throw new Error("source reply requires --session or SPUR_SESSION");
         }
         const buttons = options.button ?? [];
+        const images = await Promise.all(
+          (options.image ?? []).map(async (path) => ({
+            name: basename(path),
+            data: (await readFileAsync(path)).toString("base64"),
+          })),
+        );
         const payload: SourceReplyRequest = {
           message: messageParts.join(" "),
           ...(buttons.length > 0 ? { buttons } : {}),
           ...(options.requestInterfaceApproval
             ? { requestInterfaceApproval: await readJson(options.requestInterfaceApproval) }
             : {}),
+          ...(images.length > 0 ? { images } : {}),
         };
         await outputResult({
           json: Boolean(options.json),
@@ -4830,16 +4911,20 @@ export function createProgram(cliEntrypoint: string): Command {
       // MUST FIX 1: a source-install / main-deploy host that never runs
       // `spur init`/`update`/`reinit` (`runNpmInit`) never gets the pin file
       // every agent session's `NPM_CONFIG_GLOBALCONFIG` points at, and npm
-      // silently ignores a missing globalconfig file. Every real daemon boot
-      // writes it instead (see npm-prefix.ts). A read-only filesystem or a
+      // silently ignores a missing globalconfig file. Every default-instance
+      // daemon boot writes it instead (see npm-prefix.ts). A read-only filesystem or a
       // permissions error writing into `<home>/.spur/` must never abort
       // daemon boot, so failures are reported and swallowed, not thrown.
-      try {
-        ensureNpmPinFile();
-      } catch (error) {
-        writeStderr(
-          `spur: failed to write npm global-prefix pin file: ${error instanceof Error ? error.message : String(error)}`,
-        );
+      // Default instance config only: a non-default `--config` (isolated
+      // daemon, sidecar, worktree daemon) must not touch the host pin file.
+      if (isDefaultInstanceConfigPath(configPath)) {
+        try {
+          ensureNpmPinFile();
+        } catch (error) {
+          writeStderr(
+            `spur: failed to write npm global-prefix pin file: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
       // Own try/catch, kept separate from the pin-file one above: a skill
       // failure must stay distinguishable in stderr from a pin-file failure,

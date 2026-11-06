@@ -20,7 +20,7 @@ const {
   runBundledWebSmoke: (entry: string, options?: SmokeOptions) => Promise<void>;
 } = await import(new URL("../../../scripts/verify-bundled-web.mjs", import.meta.url).href);
 const directories: string[] = [];
-const options = { startupTimeoutMs: 2_000, upgradeTimeoutMs: 1_000, shutdownTimeoutMs: 100 };
+const options = { startupTimeoutMs: 2_000, upgradeTimeoutMs: 1_000 };
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 async function untilFile(path: string) {

@@ -214,15 +214,11 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
   }
 
   if (method === "POST") {
-    const autoPingUnsubscribe = path.match(
-      /^\/sessions\/([^/]+)\/auto-ping-suppressions\/unsubscribe$/,
-    );
-    if (autoPingUnsubscribe?.[1]) {
-      return { action: "session.auto_ping_unsubscribe", sessionId: autoPingUnsubscribe[1] };
+    const autoPingMute = path.match(/^\/sessions\/([^/]+)\/auto-ping-suppressions\/mute$/);
+    if (autoPingMute?.[1]) {
+      return { action: "session.auto_ping_mute", sessionId: autoPingMute[1] };
     }
-    const autoPingResume = path.match(
-      /^\/sessions\/([^/]+)\/auto-ping-suppressions\/([^/]+)\/resume$/,
-    );
+    const autoPingResume = path.match(/^\/sessions\/([^/]+)\/auto-ping-suppressions\/resume$/);
     if (autoPingResume?.[1]) {
       return { action: "session.auto_ping_resume", sessionId: autoPingResume[1] };
     }
@@ -336,11 +332,9 @@ function textFieldForAction(action: string): "message" | "prompt" | undefined {
 function buildParams(action: string, body: unknown): Record<string, unknown> | undefined {
   if (!isRecord(body)) return undefined;
 
-  if (action === "session.auto_ping_unsubscribe") {
-    return body["scope"] === "event" ||
-      body["scope"] === "thread" ||
-      body["scope"] === "subscription"
-      ? { scope: body["scope"] }
+  if (action === "session.auto_ping_mute") {
+    return body["mode"] === "until_change" || body["mode"] === "for" || body["mode"] === "forever"
+      ? { mode: body["mode"] }
       : undefined;
   }
 

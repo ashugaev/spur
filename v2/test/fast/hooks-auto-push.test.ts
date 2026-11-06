@@ -151,6 +151,9 @@ describe("auto-push Stop hook", () => {
     }
     expect(parsed.reason).toContain("Problems: uncommitted no-pr");
     expect(parsed.reason).toContain("$github");
+    expect(parsed.reason).toContain(
+      "$SPUR_SESSION_WORK_DIR ($SPUR_SESSION_ARTIFACTS_DIR/.spur-work when unset)",
+    );
   });
 
   it("keeps the plain text prompt for non-Codex runtimes", async () => {
@@ -166,6 +169,9 @@ describe("auto-push Stop hook", () => {
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("$github");
     expect(result.stdout).toContain("Problems: uncommitted no-pr");
+    expect(result.stdout).toContain(
+      "$SPUR_SESSION_WORK_DIR ($SPUR_SESSION_ARTIFACTS_DIR/.spur-work when unset)",
+    );
   });
 
   it("emits one block for an unchanged Spur closeout obligation", async () => {

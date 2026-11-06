@@ -34,6 +34,12 @@ export interface ReviewProvider {
     // observing zero active checks). Callers that track CI-active hysteresis across
     // cycles must not count this session as a "clean" observation when true.
     ciCheckFetchFailed?: boolean;
+    // True when mergeability is still UNKNOWN after the provider's recheck.
+    mergeableUnknown?: boolean;
+    // Head SHA, set when the conflict's base-branch tip lookup failed and
+    // merge_conflict carries a fallback key; the source holds the prior key for
+    // this head.
+    conflictHead?: string;
   } | null>;
   refreshSignals?(input: RefreshReviewSignalsInput): Promise<ReviewSignalRefreshResult[]>;
 }

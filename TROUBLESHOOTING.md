@@ -58,7 +58,7 @@ bash scripts/setup.sh
 
 ## Session stays `spawning` with a shell prompt in the pane
 
-The agent launches through your login + interactive shell rc (`$SHELL -lic`). An rc prompt on startup (oh-my-zsh `Would you like to update? [Y/n]`) blocks it. Answer in the session's web terminal before the agent's ready timeout, or the spawn fails. Permanent fix: your rc tool's non-interactive update mode.
+Agent launches through `$SHELL -lic`. Spur sets `DISABLE_AUTO_UPDATE=true` in the pane, so oh-my-zsh skips its update check unless `zstyle ':omz:update' mode` is set. Any other rc prompt still blocks: answer in the session's web terminal before the ready timeout, or make the rc non-interactive.
 
 ## Codex reviewer cannot run commands or write QA output
 

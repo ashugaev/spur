@@ -66,6 +66,88 @@ function envelopePayload(body: string, marker: string): unknown {
     throw new ReviewAppError("invalid-state-envelope");
   }
 }
+interface FeedbackFields {
+  reason: string;
+  check: string;
+  observed: string;
+  expected: string;
+  evidence: string;
+  action: string;
+  actor: string;
+}
+export type ReviewFeedback = FeedbackFields &
+  (
+    | { kind: "plan" }
+    | { kind: "defect" }
+    | {
+        kind: "capability";
+        constraint: "access" | "credentials" | "environment" | "evidence" | "publication";
+        unproven: string;
+      }
+  );
+export function parseFeedback(value: unknown, status: LaneState["status"]): ReviewFeedback {
+  const data = object(value);
+  const kind = status === "PENDING" ? "plan" : status === "BLOCKED" ? "capability" : "defect";
+  if (status === "APPROVED" || data.kind !== kind)
+    throw new ReviewAppError("invalid-review-feedback");
+  const text = (value: unknown) => {
+    // eslint-disable-next-line no-control-regex -- Reject ASCII-control-only feedback, including DEL.
+    if (typeof value !== "string" || !value.replace(/[\x00-\x20\x7f]+/g, " ").trim())
+      throw new ReviewAppError("invalid-review-feedback");
+    return value.trim();
+  };
+  const fields: FeedbackFields = {
+    reason: text(data.reason),
+    check: text(data.check),
+    observed: text(data.observed),
+    expected: text(data.expected),
+    evidence: text(data.evidence),
+    action: text(data.action),
+    actor: text(data.actor),
+  };
+  if (Buffer.byteLength(JSON.stringify(fields), "utf8") > BODY_LIMIT / 16)
+    throw new ReviewAppError("invalid-review-feedback");
+  if (kind !== "capability") return { kind, ...fields };
+  if (
+    !["access", "credentials", "environment", "evidence", "publication"].includes(
+      String(data.constraint),
+    )
+  )
+    throw new ReviewAppError("invalid-review-feedback");
+  const capability: ReviewFeedback = {
+    kind,
+    ...fields,
+    constraint: data.constraint as
+      | "access"
+      | "credentials"
+      | "environment"
+      | "evidence"
+      | "publication",
+    unproven: text(data.unproven),
+  };
+  if (Buffer.byteLength(JSON.stringify(capability), "utf8") > BODY_LIMIT / 16)
+    throw new ReviewAppError("invalid-review-feedback");
+  return capability;
+}
+export function feedbackSummary(feedback: ReviewFeedback): string {
+  const visible = (value: string) =>
+    value
+      // eslint-disable-next-line no-control-regex -- Normalize ASCII controls and DEL in visible feedback.
+      .replace(/[\x00-\x20\x7f]+/g, " ")
+      .replace(/[<>&\\`*_[\]~|!]/g, (character) => `&#${character.charCodeAt(0)};`);
+  const fields: [string, string][] = [
+    ["Reason", feedback.reason],
+    ["Check", feedback.check],
+    ["Observed", feedback.observed],
+    ["Expected", feedback.expected],
+    ["Evidence", feedback.evidence],
+    ["Next action", feedback.action],
+    ["Actor", feedback.actor],
+  ];
+  if (feedback.kind === "capability")
+    fields.push(["Constraint", feedback.constraint], ["Unproven", feedback.unproven]);
+  return fields.map(([label, value]) => `${label}: ${visible(value)}`).join("; ");
+}
 export interface LaneState {
   version: 1;
   lane: "code" | "browser";
@@ -79,6 +161,7 @@ export interface LaneState {
   evidenceDigest: string;
   reviewId: number | null;
   assessment: InterfaceAssessment | null;
+  feedback?: ReviewFeedback;
 }
 export function parseLaneState(value: unknown): LaneState {
   const data = object(value);
@@ -112,17 +195,18 @@ export function parseLaneState(value: unknown): LaneState {
     evidenceDigest: string(data.evidenceDigest),
     reviewId,
     assessment,
+    ...(data.feedback === undefined
+      ? {}
+      : { feedback: parseFeedback(data.feedback, data.status as LaneState["status"]) }),
   };
 }
 export function stateBody(state: LaneState): string {
   const value = parseLaneState(state);
   const status = value.status.toLowerCase().replaceAll("_", " ");
   const detail =
-    value.status === "BLOCKED"
-      ? " — Required review checks incomplete"
-      : value.status === "CHANGES_REQUESTED"
-        ? " — See the native review"
-        : "";
+    value.status === "APPROVED"
+      ? ""
+      : ` — ${feedbackSummary(parseFeedback(value.feedback, value.status))}`;
   return envelopeBody(
     `${value.lane === "code" ? "Code" : "Browser"} review: ${status}${detail}.`,
     stateMarker,

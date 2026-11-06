@@ -1,4 +1,5 @@
 import type { HostMemory } from "./host-memory.js";
+import type { CursorPersistedSubmitBaseline } from "./agents/cursor-submit-ack.js";
 
 export type AgentName = "claude" | "codex" | "cursor" | "opencode";
 export const SPUR_DAEMON_API_VERSION = 3;
@@ -322,6 +323,8 @@ export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> &
     // one bounded recheck request. Default 86400000 (24h, see
     // event-sources/github.ts POLL_DISABLED_RECHECK_INTERVAL_MS).
     pollDisabledRecheckMs?: number;
+    // Exact, case-sensitive check names excluded from github:ci_failed.
+    ignoreChecks?: string[];
   };
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
@@ -384,7 +387,7 @@ export interface TelegramSourceConfig extends BaseSourceConfig {
   token: string;
   allowedUsers?: number[];
   allowedChats?: number[];
-  /** Destination for agent-initiated sends from a session with no inbound Telegram message. */
+  /** Canonical forum for agent conversations; absent or positive disables the stream. */
   chatId?: number;
   autoSpawn?: TelegramAutoSpawnConfig;
 }
@@ -442,6 +445,10 @@ export interface TelegramReplyTarget extends TelegramBinding {
   lastReplyAt?: string;
   updatedAt: string;
 }
+
+export type TelegramConversation =
+  | { kind: "disabled" }
+  | { kind: "topic"; projectId: string; sourceId: string; chatId: number; messageThreadId: number };
 
 export type SourceConfig =
   | CronSourceConfig
@@ -583,9 +590,13 @@ export interface ReviewSignal {
   kind: ReviewSignalKind | GitHubLifecycleKind | GitHubPrOccurrenceKind;
   text: string;
   providerThreadTarget?: AutoPingThreadTarget;
+  /** Until-change mute key: a different value means the subject changed. */
+  changeKey?: string;
+  /** Occurrence identity: joins the snapshot diff and the retry fingerprint. */
+  revision?: string;
+  /** Head commit and failing check names of a ci_failed signal. */
+  ciRun?: { head: string; checks: string[] };
 }
-
-export type AutoPingScope = "event" | "thread" | "subscription";
 
 export type AutoPingDestination = { kind: "session"; sessionId: string };
 
@@ -593,11 +604,6 @@ export type AutoPingThreadTarget =
   | { kind: "github-review-thread"; threadId: string }
   | { kind: "gitlab-discussion"; mergeRequestIid: number; discussionId: string }
   | { kind: "telegram-topic"; chatId: number; messageThreadId: number };
-
-export type AutoPingTarget =
-  | { kind: "occurrence"; occurrenceId: string }
-  | AutoPingThreadTarget
-  | { kind: "subscription" };
 
 export interface AutoPingRouteDescriptor {
   version: 1;
@@ -611,26 +617,54 @@ export interface AutoPingRouteDescriptor {
   spawnDeskGroup: boolean;
 }
 
-export interface AutoPingSuppressionView {
+export type AutoPingMuteMode = "until_change" | "for" | "forever";
+export type AutoPingMuteEndReason = "resumed" | "changed" | "expired" | "route_removed";
+
+export interface AutoPingMuteItem {
+  subject: string;
+  kind: string;
+  label: string;
+  changeKey?: string;
+}
+
+export interface AutoPingMuteView {
   suppressionId: string;
-  scope: AutoPingScope;
+  mode: AutoPingMuteMode;
   routeFingerprint: string;
   destination: AutoPingDestination;
-  target: AutoPingTarget;
+  actorSessionId: string;
+  items: AutoPingMuteItem[];
+  reason?: string;
   createdAt: string;
+  expiresAt?: string;
+  endedAt?: string;
+  endReason?: AutoPingMuteEndReason;
 }
 
 export interface AutoPingSuppressionListResponse {
-  records: AutoPingSuppressionView[];
+  records: AutoPingMuteView[];
+  history?: AutoPingMuteView[];
 }
 
-export interface AutoPingUnsubscribeResponse {
-  record: AutoPingSuppressionView;
+export interface AutoPingMuteRequest {
+  handle: string;
+  mode: AutoPingMuteMode;
+  durationMs?: number;
+  reason?: string;
+}
+
+export interface AutoPingMuteResponse {
+  record: AutoPingMuteView;
   created: boolean;
 }
 
+export interface AutoPingResumeRequest {
+  handle?: string;
+  suppressionId?: string;
+}
+
 export interface AutoPingResumeResponse {
-  records: AutoPingSuppressionView[];
+  records: AutoPingMuteView[];
   removed: boolean;
 }
 
@@ -675,6 +709,9 @@ export interface ReviewRequestSummary {
   repo: string;
   mergeable: string;
   mergeStateStatus: string;
+  /** Head and base commit ids when the provider returns them (until-change mute keys). */
+  headSha?: string;
+  baseSha?: string;
 }
 
 export interface ReviewCheck {
@@ -696,21 +733,7 @@ export interface ServiceProblemEventData {
   ruleId: string;
 }
 
-export interface PersistedAutoPingBatchItem {
-  occurrenceId: string;
-  eventHandle: string;
-  threadTarget?: AutoPingThreadTarget;
-  threadHandle?: string;
-}
-
-export interface PersistedAutoPingBatchState {
-  routeFingerprint: string;
-  destination: AutoPingDestination;
-  subscriptionHandle: string;
-  items: Record<string, PersistedAutoPingBatchItem>;
-}
-
-export type PersistedSendBatch = (
+export type PersistedSendBatch =
   | {
       kind: "review";
       providerId: ReviewProviderId;
@@ -737,8 +760,7 @@ export type PersistedSendBatch = (
       prompt?: string;
       sessionId: string;
       messages: TelegramMessageEventData[];
-    }
-) & { autoPing?: PersistedAutoPingBatchState };
+    };
 
 export interface PersistedPendingBatch {
   queueKey: string;
@@ -753,6 +775,8 @@ export interface PersistedPendingBatch {
   projectId: string;
   triggerId: string;
   sourceId: string;
+  /** Route the batch was queued under; a restore under a changed route is skipped. */
+  routeFingerprint?: string;
   batch: PersistedSendBatch;
   retryAccounting?: SendBatchRetryEntry[];
   admissionCapRetryAt?: number | undefined;
@@ -765,12 +789,10 @@ export interface SendBatchRetryEntry {
   itemKey: string;
   fingerprint: string;
   deliveryAttempts: number;
-  ciAttempts: number;
   nextAttemptAt: number;
 }
 
 export const DELIVERY_MAX_ATTEMPTS = 8;
-export const CI_FAILED_MAX_ATTEMPTS = 3;
 
 export interface SessionModeConfig {
   skill: string;
@@ -1020,6 +1042,8 @@ export interface AppConfig {
     autoRotateOnRateLimit: boolean;
     cooldownMinutes: number;
     maxRotationsPerEpisode: number;
+    // Manual "Switch auth" surface: daemon route plus SessionView.claudeAccounts.
+    switchAuth: boolean;
   };
   diskRetention: {
     warnFreeGb: number;
@@ -1105,6 +1129,7 @@ export interface SessionIntervalWakeState {
   intervalMs: number;
   message: string;
   stopCondition: string;
+  dispatchClaimId?: string;
 }
 
 export interface SessionDailyWakeState {
@@ -1349,6 +1374,8 @@ export interface SidecarPortView {
   id: string;
   env: string;
   port: number;
+  /** Host TCP listener presence; null when observation is unavailable or invalidated. */
+  listening: boolean | null;
 }
 
 // A desk-shared (non-mcp) project sidecar's `tmuxSession` is
@@ -1550,13 +1577,16 @@ export interface SpawnSessionRequest {
 }
 
 /**
- * Telegram chat a source-initiated spawn came from. Internal to the daemon:
- * only the source adapter passes it (spawn options), never the HTTP body.
+ * Manual Telegram ingress and source provenance for canonical topic assignment.
+ * Source adapter spawn options only; never accepted from the HTTP body.
  */
 export type TelegramSpawnOrigin = Pick<
   TelegramReplyTarget,
   "projectId" | "sourceId" | "chatId" | "messageThreadId"
 >;
+
+export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+export const MAX_ATTACHMENTS = 10;
 
 export interface SendMessageAttachment {
   name: string;
@@ -1596,6 +1626,7 @@ export interface SourceReplyRequest {
   message: string;
   buttons?: SourceReplyButton[];
   requestInterfaceApproval?: unknown;
+  images?: SendMessageAttachment[];
 }
 
 export interface SourceReplyResponse {
@@ -1607,6 +1638,7 @@ export interface SourceReplyResponse {
   chatId: number;
   messageThreadId?: number;
   buttons?: number;
+  images?: number;
 }
 
 export interface SourcePollEnableResponse {
@@ -1802,6 +1834,12 @@ export interface SessionNotRestorablePayload {
   availableActions: ("force_kill" | "respawn")[];
 }
 
+export interface SpawnBatchConflictPayload {
+  code: "spawn_in_progress" | "spawn_committed" | "spawn_failed";
+  sessionId: string;
+  error: string;
+}
+
 export interface RespawnSessionRequest {
   prompt?: string;
   attachments?: SendMessageAttachment[];
@@ -1929,6 +1967,32 @@ export interface CronJobsResponse {
   eventsSince: string | null;
 }
 
+export interface CronJobEditBlock {
+  prompt: string;
+  agent: AgentName | null;
+  model: string | null;
+  reasoningEffort: ProviderReasoningEffort | null;
+}
+
+export interface CronJobEditUpdate {
+  revision: string;
+  schedule: string;
+  blocks: CronJobEditBlock[];
+}
+
+export interface CronJobEditDraft extends CronJobEditUpdate {
+  projectId: string;
+  sourceId: string;
+  triggerId: string;
+  ownerPath: string;
+  sourceTriggerIds: string[];
+}
+
+export interface CronJobEditResult extends CronJobEditDraft {
+  saved: true;
+  activation: "pending";
+}
+
 export interface SessionLaunchOptions {
   project: string;
   agent: AgentName;
@@ -2047,13 +2111,7 @@ export interface ConversationMessage {
 export type SubmitAckBaseline =
   | { agent: "claude"; file: string; size: number }
   | { agent: "codex"; offsets: Record<string, number> }
-  | {
-      agent: "cursor";
-      file: string;
-      size: number;
-      /** Rotated chat transcript and its offset at send time. */
-      rotated?: { file: string; size: number };
-    }
+  | ({ agent: "cursor" } & CursorPersistedSubmitBaseline)
   | {
       agent: "opencode";
       sessionId: string;
