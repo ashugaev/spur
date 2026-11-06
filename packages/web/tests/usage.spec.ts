@@ -111,7 +111,9 @@ test.describe("Usage modal", () => {
     await expect(dialog).toBeVisible();
     await expect(dialog.getByText("96% used")).toBeVisible();
     await expect(dialog.getByRole("table")).toBeVisible();
-    await expect.poll(() => finished.length).toBeGreaterThanOrEqual(1);
+    await expect.poll(() => finished.length).toBe(1);
+    await expect(dialog.getByRole("table")).toBeVisible();
+    expect(finished).toHaveLength(1);
 
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
