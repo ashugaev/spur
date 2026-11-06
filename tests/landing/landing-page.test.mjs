@@ -265,9 +265,15 @@ test("feature cards describe supported controls and their limits", () => {
   assert.match(features, /Unknown usage stays\s+unenforced/);
   assert.match(features, /warn only/);
   assert.match(features, /choices follow\s+the\s+selected agent and model/);
-  for (const command of ["/new", "/work", "/watch"]) {
+  for (const command of ["/new", "/work", "/complete", "/kill"]) {
     assert.ok(features.includes(`<code>${command}</code>`), `missing Telegram action: ${command}`);
   }
+  assert.match(features, /its\s+own\s+forum\s+topic/);
+  assert.match(features, /Files\s+reach\s+the\s+agent/);
+  assert.doesNotMatch(features, /Bind\s+a\s+chat\s+or\s+topic|provider\s+key/);
+  assert.match(features, /Opt\s+in\s+to\s+switching\s+a\s+session\s+between\s+them\s+in\s+place/);
+  assert.doesNotMatch(features, /logins\s+and\s+switch\s+a\s+session/);
+  assert.match(features, /interactive\s+panels\s+that\s+send\s+your\s+clicks\s+back/);
   assert.match(features, /Detached\s+containers need their own teardown/);
   assert.doesNotMatch(features, /die with the\s+session/);
 });
