@@ -728,7 +728,8 @@ const original = Buffer.from(JSON.stringify({ repository: "fixture/repo", pr: 7,
 await writeFile(receipt, original, { mode: 0o600, flag: "wx" });
 const digest = createHash("sha256").update(original).digest("hex");
 const request = join(root, "request.json");
-await writeFile(request, JSON.stringify({ repo: "fixture/repo", pr: 7, lane: "code", session: "package-fixture", attempt: "fresh-attempt", H: "a".repeat(40), B: "b".repeat(40), contractDigest: "c".repeat(64), receipt }), { mode: 0o600, flag: "wx" });
+const feedback = { kind: "plan", reason: "Review current changes", check: "Named boundary checks", observed: "Checks pending", expected: "Supported behavior passes", evidence: "Pending execution", action: "Run checks and inspect results", actor: "Assigned reviewer" };
+await writeFile(request, JSON.stringify({ repo: "fixture/repo", pr: 7, lane: "code", session: "package-fixture", attempt: "fresh-attempt", H: "a".repeat(40), B: "b".repeat(40), contractDigest: "c".repeat(64), receipt, feedback }), { mode: 0o600, flag: "wx" });
 const argv = (...args) => [process.execPath, entry, "review-app", ...args];
 await run(argv("status", "--app-config", config, "--repo", "fixture/repo", "--json"));
 assert(!process.exitCode, "status failed");
@@ -738,7 +739,7 @@ assert(!process.exitCode, "recover failed");
 const pending = await readFile(receipt);
 let state;
 try { state = JSON.parse(pending.toString("utf8")); } catch { throw new Error("invalid pending receipt"); }
-assert(state.status === "PENDING" && state.reviewId === null && state.localVerdict === null && state.inputDigest === null && state.coverage === null && state.evidence.length === 0 && state.mutationStarted === false, "authority reset failed");
+assert(state.status === "PENDING" && state.feedbackPublication?.status === "confirmed" && state.preparedFeedback?.kind === "plan" && state.reviewId === null && state.localVerdict === null && state.inputDigest === null && state.coverage === null && state.evidence.length === 0 && state.mutationStarted === false, "authority reset failed");
 assert(state.supersededAttempts.includes("historical-attempt"), "attempt not retired");
 assert(original.equals(await readFile(receipt + ".legacy-" + digest)), "archive changed");
 await run(recover);
@@ -752,7 +753,10 @@ process.exitCode = undefined;
 comments.splice(0);
 badReadback = true;
 await run(recover);
-assert(process.exitCode === 1 && pending.equals(await readFile(receipt)), "readback failure not enforced");
+let failed;
+try { failed = JSON.parse((await readFile(receipt)).toString("utf8")); } catch { throw new Error("invalid failed receipt"); }
+// Ordinary FAIL replay adopts persisted feedback failure, not registered-denial replay semantics.
+assert(process.exitCode === 1 && failed.status === "BLOCKED" && failed.feedbackPublication?.status === "failed" && original.equals(await readFile(receipt + ".legacy-" + digest)), "readback failure not enforced");
 process.exitCode = undefined;
 const beforeConfigFailure = calls.length;
 await run(argv("status", "--app-config", join(root, "missing.json"), "--repo", "fixture/repo"));

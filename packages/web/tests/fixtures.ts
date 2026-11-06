@@ -490,6 +490,7 @@ const APP_SHELL_ROUTES: { pattern: string | RegExp; status?: number; body: unkno
     pattern: /\/api\/sessions\/[^/]+\/conversation(\?.*)?$/,
     body: { entries: [], messages: [], durationMs: 0, state: "working" },
   },
+  { pattern: /\/api\/sessions\/[^/]+\/auto-ping$/, body: { records: [], history: [] } },
   // Artifact bytes belong to the spec that fabricated the artifact row; a run
   // that never mocked one gets the daemon's own answer for a file it does not
   // have.

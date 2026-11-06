@@ -15,12 +15,18 @@ import {
   type ReviewSourceConfig,
 } from "../types.js";
 import { reviewProvider } from "../review-providers/index.js";
+import { reviewSignalChanged } from "../review-providers/shared.js";
 import {
   isEligibleForSourcePoll,
   type SourceHandle,
   type SourceModule,
   type SourceStartDeps,
 } from "./types.js";
+
+// merge_conflict revisions are `<head>:<base>`.
+function revisionHead(revision: string): string {
+  return revision.split(":")[0] ?? revision;
+}
 
 function emitSignalsByKind(
   providerId: ReviewProviderId,
@@ -97,10 +103,18 @@ export function createReviewSourceModule(
                 collected.data.prNumber,
               );
               const next = collected.snapshot;
-              const changed = [...next.values()].filter((signal) => {
-                const prior = previous?.get(signal.key);
-                return !prior || prior.text !== signal.text;
-              });
+              const heldConflict = previous?.get("merge_conflict");
+              if (
+                collected.conflictHead &&
+                next.has("merge_conflict") &&
+                heldConflict?.revision &&
+                revisionHead(heldConflict.revision) === collected.conflictHead
+              ) {
+                next.set("merge_conflict", heldConflict);
+              }
+              const changed = [...next.values()].filter((signal) =>
+                reviewSignalChanged(previous?.get(signal.key), signal),
+              );
 
               // Built once, handed to both the in-memory map and the on-disk write
               // so the two copies cannot desync.

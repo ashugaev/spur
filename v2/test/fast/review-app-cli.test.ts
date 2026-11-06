@@ -1,13 +1,15 @@
 import { Command } from "commander";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { expect, test, vi } from "vitest";
-import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import type * as FileSystem from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerReviewApp } from "../../src/review-app.js";
 import { createProgram } from "../../src/cli.js";
 import { createReviewAppProgram, run as runReviewApp } from "../../src/review-app-cli.js";
+import { plan, capability } from "./review-feedback.fixture.js";
+import { object, readJson } from "../../src/github-app.js";
 
 const faults = vi.hoisted(() => ({ pattern: "" }));
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -15,7 +17,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   return {
     ...actual,
     writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
-      if (faults.pattern && typeof args[1] === "string" && args[1].includes(faults.pattern)) {
+      if (faults.pattern && (typeof args[1] === "string" || Buffer.isBuffer(args[1])) && args[1].toString().includes(faults.pattern)) {
         faults.pattern = "";
         throw new Error("fixture first save failed");
       }
@@ -78,6 +80,7 @@ test.each(["prepare", "block"])(
           B: "b".repeat(40),
           contractDigest: "c".repeat(64),
           receipt: join(dir, "fixture", "repo", "1", "code.json"),
+          feedback: plan,
         }),
       );
       const run = (name: string) =>
@@ -92,11 +95,16 @@ test.each(["prepare", "block"])(
           request,
           "--json",
         ]);
-      if (action === "block") await run("prepare");
+      if (action === "block") {
+        await run("prepare");
+        const input = object(await readJson(request));
+        await writeFile(request, JSON.stringify({ ...input, feedback: capability }));
+      }
       faults.pattern = action === "prepare" ? '"status": "PENDING"' : '"reason": "review-blocked"';
       process.exitCode = undefined;
       await run(action);
       expect(process.exitCode).toBe(1);
+      expect(output.mock.calls.at(-1)?.[0]).toContain('"feedbackPublication":{"status":"failed"');
     } finally {
       faults.pattern = "";
       output.mockRestore();
@@ -197,7 +205,7 @@ test.each(["full", "dedicated"])("%s recover rejects invalid digest or session b
 
 test.each(
   ["full", "dedicated"].flatMap((entry) =>
-    ["verified-pending", "announcement-failure", "write-failure"].map((mode) => ({ entry, mode })),
+    ["verified-pending", "announcement-failure", "write-failure", "missing-plan", "capability-plan", "malformed-plan"].map((mode) => ({ entry, mode })),
   ),
 )(
   "daemon-free $entry recover CLI $mode obeys verified PENDING exit contract",
@@ -294,6 +302,7 @@ test.each(
           B: "b".repeat(40),
           contractDigest: "c".repeat(64),
           receipt,
+          feedback: mode === "missing-plan" ? undefined : mode === "capability-plan" ? capability : mode === "malformed-plan" ? {} : plan,
         }),
       );
       process.env["SPUR_SESSION"] = "fixture-session";
@@ -313,13 +322,20 @@ test.each(
         createHash("sha256").update(raw).digest("hex"),
         "--json",
       ]);
-      if (mode === "write-failure") await expect(run).rejects.toThrow("receipt-write");
+      if (mode.endsWith("-plan")) {
+        await expect(run).rejects.toThrow(mode === "missing-plan" ? "invalid-response" : "invalid-review-feedback");
+        expect(network).not.toHaveBeenCalled();
+        expect(await readFile(receipt)).toEqual(raw);
+      } else if (mode === "write-failure") await expect(run).rejects.toThrow("receipt-write");
       else {
         await run;
         expect(output.mock.calls.at(-1)?.[0]).toContain(
           `"status":"${mode === "verified-pending" ? "PENDING" : "BLOCKED"}"`,
         );
         expect(process.exitCode).toBe(mode === "verified-pending" ? undefined : 1);
+        expect(output.mock.calls.at(-1)?.[0]).toContain(
+          `"feedbackPublication":{"status":"${mode === "verified-pending" ? "confirmed" : "failed"}"`,
+        );
       }
       expect(network.mock.calls.some(([url]) => String(url).includes("/reviews"))).toBe(false);
     } finally {

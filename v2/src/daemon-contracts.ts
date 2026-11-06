@@ -845,31 +845,43 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "list_auto_ping_suppressions",
     "GET",
     "/sessions/{sessionId}/auto-ping-suppressions",
-    "Read automatic ping suppressions.",
+    "Read active automatic ping mutes; all=1 adds the session's mute history.",
+    {
+      query: [field("all", '"1"', "Include per-session mute history.", false)],
+      examples: [{}, { query: { all: "1" } }],
+    },
   ),
   operation(
-    "unsubscribe_auto_ping",
+    "mute_auto_ping",
     "POST",
-    "/sessions/{sessionId}/auto-ping-suppressions/unsubscribe",
-    "Suppress automatic ping delivery using issued handle.",
+    "/sessions/{sessionId}/auto-ping-suppressions/mute",
+    "Mute automatic pings using the issued handle.",
     {
-      body: body("AutoPingUnsubscribe", [
-        field("scope", '"event"|"thread"|"subscription"', "Handle scope.", true),
+      body: body("AutoPingMute", [
         field("handle", "string", "Opaque issued session credential.", true),
+        field("mode", '"until_change"|"for"|"forever"', "Mute mode.", true),
+        field("durationMs", "number", "Mode for only: 60000 to 86400000.", false),
+        field("reason", "string", "Required for for and forever.", false),
       ]),
       examples: [
-        { body: { scope: "event", handle: "issued-event-handle" } },
-        { body: { scope: "thread", handle: "issued-thread-handle" } },
-        { body: { scope: "subscription", handle: "issued-subscription-handle" } },
+        { body: { handle: "issued-handle", mode: "until_change" } },
+        { body: { handle: "issued-handle", mode: "for", durationMs: 7200000, reason: "waiting" } },
+        { body: { handle: "issued-handle", mode: "forever", reason: "wrong trigger" } },
       ],
     },
   ),
   operation(
     "resume_auto_ping",
     "POST",
-    "/sessions/{sessionId}/auto-ping-suppressions/{suppressionId}/resume",
-    "Resume suppressed automatic pings; body must be empty object.",
-    { body: body("EmptyObject", []), examples: [{ body: {} }] },
+    "/sessions/{sessionId}/auto-ping-suppressions/resume",
+    "Resume muted automatic pings by handle or mute id.",
+    {
+      body: body("AutoPingResume", [
+        field("handle", "string", "Issued handle; exclusive with suppressionId.", false),
+        field("suppressionId", "string", "Mute id; exclusive with handle.", false),
+      ]),
+      examples: [{ body: { handle: "issued-handle" } }, { body: { suppressionId: "mute-id" } }],
+    },
   ),
   operation(
     "get_artifact",

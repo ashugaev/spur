@@ -17,6 +17,9 @@ type GitLabMergeRequest = {
   has_conflicts?: boolean | null;
   detailed_merge_status?: string | null;
   blocking_discussions_resolved?: boolean | null;
+  sha?: string | null;
+  target_branch?: string | null;
+  diff_refs?: { base_sha?: string | null } | null;
 };
 
 type GitLabPipeline = {
@@ -72,6 +75,28 @@ async function fetchMergeRequestsByBranch(
   return JSON.parse(raw) as GitLabMergeRequest[];
 }
 
+// Current target branch tip. diff_refs.base_sha is the merge-base, which a
+// target-only push never moves, so it cannot key a conflict change.
+async function fetchBranchTip(
+  worktreePath: string,
+  projectPath: string,
+  branch: string,
+): Promise<string | undefined> {
+  try {
+    const raw = await glab(
+      worktreePath,
+      "api",
+      `projects/${encodeProjectPath(projectPath)}/repository/branches/${encodeURIComponent(branch)}`,
+      "--output",
+      "json",
+    );
+    const parsed = JSON.parse(raw) as { commit?: { id?: string | null } | null } | null;
+    return parsed?.commit?.id ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function fetchPipelines(
   worktreePath: string,
   projectPath: string,
@@ -123,9 +148,11 @@ export async function resolveMergeRequestSummary(
   worktreePath: string,
   branch: string,
 ): Promise<ReviewRequestSummary | null> {
-  const requests = await fetchMergeRequestsByBranch(worktreePath, branch);
-  const request = requests[0];
-  if (!request) return null;
+  const [request] = await fetchMergeRequestsByBranch(worktreePath, branch);
+  return request ? toSummary(request) : null;
+}
+
+function toSummary(request: GitLabMergeRequest): ReviewRequestSummary {
   return {
     number: request.iid,
     title: request.title,
@@ -134,18 +161,35 @@ export async function resolveMergeRequestSummary(
     repo: projectPathFromUrl(request.web_url),
     mergeable: request.has_conflicts ? "CONFLICTING" : "MERGEABLE",
     mergeStateStatus: request.detailed_merge_status ?? "",
+    ...(request.sha ? { headSha: request.sha } : {}),
+    ...(request.diff_refs?.base_sha ? { baseSha: request.diff_refs.base_sha } : {}),
   };
+}
+
+function failingPipelineIds(pipelines: GitLabPipeline[]): string[] {
+  return pipelines
+    .filter((pipeline) => summarizeFailingCi([{ name: "pipeline", state: pipeline.status ?? "" }]))
+    .map((pipeline) => String(pipeline.id ?? ""))
+    .sort();
 }
 
 async function collectCommentSignals(
   worktreePath: string,
   projectPath: string,
   mergeRequestIid: number,
-): Promise<{ signals: ReviewSignal[]; unresolvedDiscussions: number }> {
+): Promise<{ signals: ReviewSignal[]; unresolvedDiscussions: number; maxNoteId?: string }> {
   const discussions = await fetchDiscussions(worktreePath, projectPath, mergeRequestIid);
   const signals: ReviewSignal[] = [];
   let unresolvedDiscussions = 0;
+  let maxNote = 0;
   for (const discussion of discussions) {
+    const lastNote = discussion.notes.filter((note) => !note.system).at(-1);
+    const threadChangeKey = lastNote
+      ? `${String(lastNote.id)}:${String(discussion.notes.every((note) => note.resolvable !== true || note.resolved === true))}`
+      : undefined;
+    for (const note of discussion.notes) {
+      if (!note.system) maxNote = Math.max(maxNote, note.id);
+    }
     const unresolved = discussion.notes.some(
       (note) => note.resolvable === true && note.resolved !== true,
     );
@@ -172,12 +216,21 @@ async function collectCommentSignals(
                 mergeRequestIid,
                 discussionId: discussion.id,
               },
+              ...(threadChangeKey !== undefined ? { changeKey: threadChangeKey } : {}),
             }),
       };
       signals.push(signal);
     }
   }
-  return { signals, unresolvedDiscussions };
+  return {
+    signals: signals.map((signal) =>
+      signal.providerThreadTarget || maxNote === 0
+        ? signal
+        : { ...signal, changeKey: String(maxNote) },
+    ),
+    unresolvedDiscussions,
+    ...(maxNote > 0 ? { maxNoteId: String(maxNote) } : {}),
+  };
 }
 
 async function collectSignals(
@@ -186,8 +239,10 @@ async function collectSignals(
   _projectId: string,
   _sourceId: string,
 ): Promise<{ data: ReviewEventData; snapshot: Map<string, ReviewSignal> } | null> {
-  const request = await resolveMergeRequestSummary(session.worktreePath, session.branch);
-  if (!request || !request.repo) return null;
+  const [mergeRequest] = await fetchMergeRequestsByBranch(session.worktreePath, session.branch);
+  if (!mergeRequest) return null;
+  const request = toSummary(mergeRequest);
+  if (!request.repo) return null;
 
   const [pipelines, discussionData] = await Promise.all([
     fetchPipelines(session.worktreePath, request.repo, request.number),
@@ -201,20 +256,37 @@ async function collectSignals(
       key: "changes_requested",
       kind: "changes_requested",
       text: "Unresolved review discussions need changes.",
+      ...(discussionData.maxNoteId !== undefined ? { changeKey: discussionData.maxNoteId } : {}),
     });
   }
   if (ciText) {
+    const sha = request.headSha;
     snapshot.set("ci_failed", {
       key: "ci_failed",
       kind: "ci_failed",
       text: ciText,
+      ...(sha
+        ? { changeKey: sha, revision: `${sha}:${failingPipelineIds(pipelines).join(",")}` }
+        : {}),
     });
   }
+  let conflictHead: string | undefined;
   if (hasMergeConflict(request)) {
+    const targetTip =
+      request.headSha && mergeRequest.target_branch
+        ? await fetchBranchTip(session.worktreePath, request.repo, mergeRequest.target_branch)
+        : undefined;
+    // Tip lookup failed: fall back to the merge-base, or `<head>:` when the
+    // list response omits diff_refs; the review source holds the prior key for
+    // the same head so a flaky lookup cannot flip it.
+    if (request.headSha && !targetTip) conflictHead = request.headSha;
+    const baseKey = targetTip ?? request.baseSha ?? "";
+    const revision = request.headSha ? `${request.headSha}:${baseKey}` : undefined;
     snapshot.set("merge_conflict", {
       key: "merge_conflict",
       kind: "merge_conflict",
       text: "Merge conflicts are blocking this merge request.",
+      ...(revision ? { changeKey: revision, revision } : {}),
     });
   }
 
@@ -230,6 +302,7 @@ async function collectSignals(
       signals: [],
     },
     snapshot,
+    ...(conflictHead ? { conflictHead } : {}),
   };
 }
 

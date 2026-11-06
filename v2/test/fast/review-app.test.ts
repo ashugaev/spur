@@ -30,6 +30,7 @@ import {
 import { publishLaneState } from "../../src/review-state.js";
 import { execFileAsync } from "../helpers/common.js";
 import { readJson } from "../../src/github-app.js";
+import { plan, capability, defect } from "./review-feedback.fixture.js";
 
 const dirs: string[] = [];
 const faults = vi.hoisted(() => ({
@@ -64,7 +65,10 @@ vi.mock("node:crypto", async (importOriginal) => {
     },
   };
 });
-vi.mock("../../src/review-state.js", () => ({ publishLaneState: vi.fn(async () => undefined) }));
+vi.mock("../../src/review-state.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof ReviewState>()),
+  publishLaneState: vi.fn(async () => undefined),
+}));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof FileSystem>();
   return {
@@ -80,8 +84,8 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       }
       if (
         faults.approvedWrite &&
-        typeof args[1] === "string" &&
-        args[1].includes('"status": "APPROVED"')
+        (typeof args[1] === "string" || Buffer.isBuffer(args[1])) &&
+        args[1].toString().includes('"status": "APPROVED"')
       )
         throw new Error("fixture final save denied");
       await actual.writeFile(...args);
@@ -136,6 +140,7 @@ const draft = {
   contractDigest: "c".repeat(64),
   body: "Code Review Conclusion",
   verdict: "APPROVED",
+  feedback: plan,
   coverage: { challenger: "critic-1", output: "matrix.txt", omissionsClosed: true },
   rows: [{ status: "passed", evidence: "proof.png" }],
   assessment: {
@@ -170,6 +175,30 @@ test("accepts optional legacy coverage and blocks malformed coverage or failed r
       browser: { appId: 1, keyPath: "k" },
     }),
   ).toThrow("duplicate-apps");
+});
+test("final defects require attributable feedback and failed evidence", () => {
+  expect(() => parseRequest({ ...draft, receipt: "r", verdict: "CHANGES_REQUESTED" })).toThrow(
+    "invalid-review-feedback",
+  );
+  expect(() =>
+    parseRequest({ ...draft, receipt: "r", verdict: "CHANGES_REQUESTED", feedback: defect }),
+  ).toThrow("missing-failed-evidence");
+});
+test("exported action helpers reject bare or misclassified input before network", async () => {
+  const network = vi.fn<typeof fetch>();
+  const config = parseConfig({
+    repositories: ["owner/repo"],
+    receiptRoot: "/unused",
+    code: { appId: 1, keyPath: "unused" },
+    browser: { appId: 2, keyPath: "unused" },
+  });
+  const { feedback: _feedback, ...bare } = parseRequest({ ...draft, receipt: "unused" });
+  await expect(prepareReview(config, bare, draft.session, network)).rejects.toThrow();
+  await expect(
+    blockReview(config, { ...bare, feedback: defect }, draft.session, network),
+  ).rejects.toThrow();
+  expect(network).not.toHaveBeenCalled();
+  expect(publishLaneState).not.toHaveBeenCalled();
 });
 test("publishes and reconciles completed approval without a challenger", async () => {
   const f = await lifecycleFixture();
@@ -386,6 +415,7 @@ test.each([
   const request = parseRequest({
     ...f.request,
     verdict,
+    feedback: verdict === "APPROVED" ? plan : defect,
     rows: [
       { status: verdict === "APPROVED" ? "passed" : "failed", evidence: "targeted-check.txt" },
     ],
@@ -450,8 +480,14 @@ test("superseded attempt cannot overwrite newer BLOCKED; new reviewed attempt ca
 test("superseded attempt cannot restore approval after newer request-changes", async () => {
   const f = await lifecycleFixture();
   await publishReview(f.config, f.request, draft.session, f.transport);
-  const newer = { ...f.request, attempt: "attempt-2", verdict: "CHANGES_REQUESTED" as const };
-  await prepareReview(f.config, newer, draft.session);
+  const newer = {
+    ...f.request,
+    attempt: "attempt-2",
+    verdict: "CHANGES_REQUESTED" as const,
+    feedback: defect,
+    rows: [{ status: "failed" as const, evidence: "attributable assertion" }],
+  };
+  await prepareReview(f.config, { ...newer, feedback: plan }, draft.session);
   expect((await publishReview(f.config, newer, draft.session, f.transport)).status).toBe(
     "CHANGES_REQUESTED",
   );
@@ -472,10 +508,12 @@ test("prepare invalidates old approval before QA and block ends current attempt 
     status: "PENDING",
     inputDigest: null,
   });
-  await expect(blockReview(f.config, f.request, draft.session)).rejects.toThrow(
-    "attempt-superseded",
-  );
-  expect(await blockReview(f.config, newer, draft.session)).toMatchObject({
+  await expect(
+    blockReview(f.config, { ...f.request, feedback: capability }, draft.session),
+  ).rejects.toThrow("attempt-superseded");
+  expect(
+    await blockReview(f.config, { ...newer, feedback: capability }, draft.session),
+  ).toMatchObject({
     status: "BLOCKED",
     reviewBlocked: true,
   });
@@ -588,7 +626,8 @@ test.each(["network", "http-403", "http-404"])(
       if (path.endsWith("/reviews") && options?.method === "POST") {
         expect(JSON.parse(await readFile(f.request.receipt, "utf8"))).toMatchObject({
           mutationStarted: true,
-          status: "BLOCKED",
+          status: "PENDING",
+          feedback: plan,
         });
         await f.transport(url, options);
         throw new Error("lost response after commit");
@@ -1018,20 +1057,26 @@ test("legacy recovery archives exact bytes and retires both attempts without a n
 });
 
 test.each(["success", "announcement-failure"])(
-  "legacy recovery G1 %s preserves converted PENDING bytes",
+  "legacy recovery G1 %s retains archive and reports feedback publication",
   async (mode) => {
     const f = await legacyRecoveryFixture();
     await f.recover();
     const current = await readFile(f.request.receipt);
     expect(createHash("sha256").update(current).digest("hex")).not.toBe(f.sha256);
-    const writes = faults.writes;
     if (mode === "announcement-failure") {
       f.comments.splice(0);
       f.failReadback();
-      await expect(f.recover()).rejects.toThrow("state-publication-mismatch");
-    } else expect(await f.recover()).toMatchObject({ status: "PENDING" });
-    expect(faults.writes).toBe(writes);
-    expect(await readFile(f.request.receipt)).toEqual(current);
+      expect(await f.recover()).toMatchObject({
+        status: "BLOCKED",
+        feedbackPublication: { status: "failed", error: "state-publication-mismatch" },
+      });
+    } else {
+      expect(await f.recover()).toMatchObject({
+        status: "PENDING",
+        feedbackPublication: { status: "confirmed" },
+      });
+      expect(await readFile(f.request.receipt)).toEqual(current);
+    }
     expect(await readFile(f.archive)).toEqual(f.raw);
     expect(f.posts()).toBe(0);
   },
@@ -1281,7 +1326,19 @@ test.each(["APPROVED", "CHANGES_REQUESTED"] as const)(
     const f = await legacyRecoveryFixture();
     await f.recover();
     expect(
-      await publishReview(f.config, { ...f.request, verdict }, f.request.session, f.transport),
+      await publishReview(
+        f.config,
+        {
+          ...f.request,
+          verdict,
+          feedback: verdict === "APPROVED" ? plan : defect,
+          rows: [
+            { status: verdict === "APPROVED" ? "passed" : "failed", evidence: "named attribution" },
+          ],
+        },
+        f.request.session,
+        f.transport,
+      ),
     ).toMatchObject({ status: verdict });
     const current = await readFile(f.request.receipt);
     const posts = f.posts();
@@ -1508,12 +1565,16 @@ test.each(["code", "browser"] as const)(
       mutationStarted: false,
       supersededAttempts: ["historical-attempt"],
       legacyRecovery: { digest: f.sha256, publication: "unknown" },
+      feedbackPublication: { status: "confirmed" },
     });
     expect(await readFile(f.archive)).toEqual(f.raw);
     expect((await stat(f.archive)).mode & 0o077).toBe(0);
     const pending = await readFile(f.request.receipt);
     const writes = faults.writes;
-    expect(await f.recover()).toMatchObject({ status: "PENDING" });
+    expect(await f.recover()).toMatchObject({
+      status: "PENDING",
+      feedbackPublication: { status: "confirmed" },
+    });
     expect(faults.writes).toBe(writes);
     expect(await readFile(f.request.receipt)).toEqual(pending);
     expect(f.comments).toHaveLength(1);
@@ -1529,6 +1590,35 @@ test.each(["code", "browser"] as const)(
     expect(fetch).not.toHaveBeenCalled();
   },
 );
+
+test.each([undefined, capability, {}])("registered recovery refuses invalid fresh plan %j before transport", async (feedback) => {
+  const f = await registeredFixture();
+  const writes = faults.writes;
+  await expect(recoverReview(f.config, { ...f.request, feedback } as typeof f.request, f.request.session, f.sha256, f.transport)).rejects.toThrow(feedback === undefined ? "invalid-response" : "invalid-review-feedback");
+  expect(await readFile(f.request.receipt)).toEqual(f.raw);
+  expect(faults.writes).toBe(writes);
+  expect(f.calls).toEqual([]);
+});
+
+test("registered replay confirms feedback transiently and refuses a different prepared plan", async () => {
+  const f = await registeredFixture();
+  await f.recover();
+  const current = (await readJson(f.request.receipt)) as Record<string, unknown>;
+  current.feedbackPublication = { status: "unconfirmed" };
+  await writeFile(f.request.receipt, JSON.stringify(current));
+  const pending = await readFile(f.request.receipt);
+  const writes = faults.writes;
+  expect(await f.recover()).toMatchObject({ status: "PENDING", feedbackPublication: { status: "confirmed" } });
+  expect(await readFile(f.request.receipt)).toEqual(pending);
+  expect(faults.writes).toBe(writes);
+  f.request.feedback = { ...plan, reason: "Different fresh plan" };
+  f.calls.splice(0);
+  await expect(f.recover()).rejects.toThrow("attempt-conflict");
+  expect(await readFile(f.request.receipt)).toEqual(pending);
+  expect(await readFile(f.archive)).toEqual(f.raw);
+  expect(faults.writes).toBe(writes);
+  expect(f.calls).toEqual([]);
+});
 
 test.each(["code", "browser"] as const)(
   "real-hash %s sanitized lookalike and original digest both reject",
@@ -1673,6 +1763,39 @@ test.each(["authentication", "history", "fresh", "archive", "stage", "delete"])(
     if (["archive", "stage"].includes(phase)) expect(await readFile(f.archive)).toEqual(f.raw);
   },
 );
+
+test.each(
+  ["confirmed", "failed"].flatMap((outcome) =>
+    ["await-replace", "await-delete", "stage-replace", "stage-delete"].map((phase) => ({ outcome, phase })),
+  ),
+)("registered conversion $outcome feedback save preserves $phase external state", async ({ outcome, phase }) => {
+  const f = await registeredFixture();
+  const external = Buffer.from("external owner after first rename");
+  let changed = false;
+  const change = async () => {
+    if (changed) return;
+    changed = true;
+    if (phase.endsWith("delete")) await rm(f.request.receipt);
+    else await writeFile(f.request.receipt, external);
+  };
+  if (outcome === "failed") f.controls.mode = "readback";
+  if (phase.startsWith("stage")) {
+    let stages = 0;
+    faults.afterWrite = async (path) => {
+      if (path.endsWith("receipt.json") && ++stages === 2) await change();
+    };
+  } else f.controls.intercept = async (url) => {
+    if (url.pathname.includes("/issues/comments/")) await change();
+    return undefined;
+  };
+  await expect(f.recover()).rejects.toThrow("receipt-write");
+  expect(changed).toBe(true);
+  if (phase.endsWith("delete")) await expect(readFile(f.request.receipt)).rejects.toMatchObject({ code: "ENOENT" });
+  else expect(await readFile(f.request.receipt)).toEqual(external);
+  expect(await readFile(f.archive)).toEqual(f.raw);
+  await expect(stat(`${f.request.receipt}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+  expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
+});
 
 test.each(["preflight-drift", "announce-drift", "readback"])(
   "mocked-admission replay %s never saves canonical",

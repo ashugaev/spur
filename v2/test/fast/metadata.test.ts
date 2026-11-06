@@ -975,15 +975,19 @@ describe("pending send batches", () => {
       itemKey: "item",
       fingerprint: "a".repeat(64),
       deliveryAttempts: 8,
-      ciAttempts: 0,
       nextAttemptAt: 1234,
     };
     const record = reviewPendingBatch({ retryAccounting: [entry] });
     recordPendingSendBatch(dataDir, record);
     expect(readPendingSendBatches(dataDir).get(record.queueKey)?.retryAccounting).toEqual([entry]);
+    // A file written before the CI reminder loop was removed still parses.
+    writeFileSync(
+      join(dataDir, "pending-send-batches.json"),
+      JSON.stringify({ records: [{ ...record, retryAccounting: [{ ...entry, ciAttempts: 3 }] }] }),
+    );
+    expect(readPendingSendBatches(dataDir).size).toBe(1);
     for (const invalid of [
       { ...entry, deliveryAttempts: 9 },
-      { ...entry, ciAttempts: -1 },
       { ...entry, fingerprint: "bad" },
       { ...entry, nextAttemptAt: "tomorrow" },
     ]) {
