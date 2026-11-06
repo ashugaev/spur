@@ -4696,7 +4696,6 @@ describe("SessionService", () => {
     readAgentHookStateMock.mockReturnValue({
       state: "waiting",
       updatedAt: new Date(Date.now() + 1).toISOString(),
-      agentLaunchId: sessions.get("api-1")?.agentLaunchId,
     });
     await advanceSeconds(16);
     await waitForRealTime(() => {

@@ -313,7 +313,7 @@ function strictSessionMeta(line: unknown): { cwd: string; threadId: string } | n
 async function* readRolloutLines(
   filePath: string,
   start: number,
-  range?: { handle: FileHandle; end: number; hash?: Hash },
+  range?: { handle: FileHandle; end: number },
 ): AsyncGenerator<string> {
   if (range) {
     const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -323,7 +323,6 @@ async function* readRolloutLines(
       const chunk = Buffer.alloc(Math.min(SCAN_CHUNK_BYTES, range.end - position));
       const { bytesRead } = await range.handle.read(chunk, 0, chunk.length, position);
       if (bytesRead === 0) throw new Error("Incomplete original rollout read");
-      range.hash?.update(chunk.subarray(0, bytesRead));
       position += bytesRead;
       const combined = Buffer.concat([pending, chunk.subarray(0, bytesRead)]);
       let offset = 0;
@@ -1212,24 +1211,7 @@ export interface CodexRolloutReadResult {
   model?: string;
   tokenUsage?: ProviderTokenUsageSample;
   tokenUsages?: ProviderTokenUsageSample[];
-  launchProof?: CodexLaunchProof;
 }
-
-export interface CodexLaunchProofContext {
-  sinceMs: number;
-  nowMs: number;
-}
-
-export type CodexLaunchProof =
-  | { kind: "unknown" }
-  | {
-      kind: "primary";
-      complete: true;
-      threadId: string;
-      turnId: string;
-      timestampMs: number;
-      frame: string;
-    };
 
 interface CodexRolloutCandidate {
   result: CodexRolloutReadResult;
@@ -1240,7 +1222,6 @@ interface CodexRolloutFileFingerprint {
   ino: number;
   mtimeMs: number;
   size: number;
-  dev?: number;
 }
 
 type CodexRolloutStateLine = Omit<CodexRolloutStateRecord, "filePath">;
@@ -1256,13 +1237,6 @@ interface CodexRolloutFold {
   // can reach the result, so the tail stays one turn long.
   stateTail: CodexRolloutStateLine[];
   rateLimit: RateLimitDetection | null;
-  origin: {
-    kind: "primary" | "child" | "unknown";
-    declaration?: string;
-    threadId?: string;
-    latestMs: number;
-    timingKnown: boolean;
-  };
   rateLimitObservedAtMs?: number;
   quotaDigest: Hash;
   hardLimitTurnId?: string;
@@ -1646,7 +1620,6 @@ function newCodexRolloutFold(): CodexRolloutFold {
     matchedCallIds: new Set(),
     stateTail: [],
     rateLimit: null,
-    origin: { kind: "unknown", latestMs: -Infinity, timingKnown: true },
     quotaDigest: createHash("sha256"),
     token: { overflowed: false },
   };
@@ -1659,66 +1632,12 @@ function cloneCodexRolloutFold(fold: CodexRolloutFold): CodexRolloutFold {
     stateTail: fold.stateTail.slice(),
     quotaDigest: fold.quotaDigest.copy(),
     token: { ...fold.token },
-    origin: { ...fold.origin },
   };
 }
 
 function foldCodexSessionMeta(fold: CodexRolloutFold, parsed: Record<string, unknown>): void {
-  if (parsed["type"] !== "session_meta") return;
+  if (fold.meta || parsed["type"] !== "session_meta") return;
   const payload = parsed["payload"];
-  const declarations = isRecord(payload) ? [parsed, payload] : [parsed];
-  const ids = declarations.flatMap((data) =>
-    [data["id"], data["threadId"], data["thread_id"]].filter((value) => value !== undefined),
-  );
-  const sources = declarations.flatMap((data) =>
-    data["source"] === undefined ? [] : [data["source"]],
-  );
-  const threads = declarations.flatMap((data) =>
-    data["thread_source"] === undefined ? [] : [data["thread_source"]],
-  );
-  const parents = declarations.flatMap((data) =>
-    Object.entries(data)
-      .filter(
-        ([key, value]) =>
-          /^(?:parent(?:$|_|[A-Z])|fork(?:ed)?(?:$|_|[A-Z]))/.test(key) && value !== null,
-      )
-      .map(([key, value]) => [key, value]),
-  );
-  const sourceKinds = sources.map((source) =>
-    source === "cli"
-      ? "cli"
-      : source === "subagent" || (isRecord(source) && source["subagent"] !== undefined)
-        ? "child"
-        : "unknown",
-  );
-  const threadKinds = threads.map((source) =>
-    source === "user" ? "user" : source === "subagent" ? "child" : "unknown",
-  );
-  const threadId = ids[0];
-  let kind: CodexRolloutFold["origin"]["kind"] = "unknown";
-  if (
-    typeof threadId === "string" &&
-    /^[a-zA-Z0-9_-]+$/.test(threadId) &&
-    ids.every((id) => id === threadId) &&
-    (payload === undefined || isRecord(payload)) &&
-    parents.every(([, value]) => typeof value === "string" && value.trim().length > 0) &&
-    !sourceKinds.includes("unknown") &&
-    !threadKinds.includes("unknown") &&
-    !(sourceKinds.includes("cli") && sourceKinds.includes("child")) &&
-    !(threadKinds.includes("user") && threadKinds.includes("child"))
-  ) {
-    if (sourceKinds.includes("child") || threadKinds.includes("child") || parents.length > 0)
-      kind = "child";
-    else if (sourceKinds.length > 0 && threadKinds.length > 0) kind = "primary";
-  }
-  const declaration = JSON.stringify({ threadId, sources, threads, parents });
-  const origin = fold.origin;
-  if (origin.declaration === undefined) {
-    origin.kind = kind;
-    origin.declaration = declaration;
-    if (typeof threadId === "string") origin.threadId = threadId;
-  } else if (origin.declaration !== declaration || kind === "unknown") origin.kind = "unknown";
-  if (fold.meta) return;
   if (!isRecord(payload) || typeof payload["id"] !== "string" || !payload["id"]) return;
   const source = payload["source"];
   const subagent = isRecord(source) ? source["subagent"] : undefined;
@@ -1767,21 +1686,6 @@ function foldCodexRolloutLine(
       const timestampMs =
         typeof parsed["timestamp"] === "string" ? Date.parse(parsed["timestamp"]) : NaN;
       if (id !== undefined && Number.isFinite(timestampMs)) fold.currentTurn = { id, timestampMs };
-    }
-  }
-  const timestamps = [
-    parsed["timestamp"],
-    isRecord(parsed["payload"]) ? parsed["payload"]["timestamp"] : undefined,
-  ].filter((value) => value !== undefined);
-  if (
-    timestamps.length === 0 ||
-    timestamps.some((value) => typeof value !== "string" || !Number.isFinite(Date.parse(value)))
-  ) {
-    fold.origin.timingKnown = false;
-  } else {
-    for (const timestamp of timestamps) {
-      if (typeof timestamp === "string")
-        fold.origin.latestMs = Math.max(fold.origin.latestMs, Date.parse(timestamp));
     }
   }
   const matchedCallId = readMatchedToolCallId(parsed);
@@ -1921,57 +1825,6 @@ interface CodexLineFolder<F> {
   line: (fold: F, parsed: Record<string, unknown>, rawLine: string) => void;
 }
 
-function isKnownCodexNonauthorityRecord(
-  type: unknown,
-  payload: unknown,
-  timestamp: unknown,
-): boolean {
-  if (
-    typeof timestamp !== "string" ||
-    !Number.isFinite(Date.parse(timestamp)) ||
-    !isRecord(payload)
-  )
-    return false;
-  if (type === "world_state") {
-    return (
-      Object.keys(payload).length === 2 &&
-      typeof payload["full"] === "boolean" &&
-      isRecord(payload["state"])
-    );
-  }
-  if (type !== "token_usage_record" || Object.keys(payload).length !== 8) return false;
-  const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
-  if (
-    ![payload["thread_id"], payload["session_id"]].every(
-      (value) => typeof value === "string" && uuid.test(value),
-    )
-  )
-    return false;
-  if (
-    ![payload["turn_id"], payload["root_turn_id"], payload["response_id"]].every(
-      (value) => typeof value === "string",
-    )
-  )
-    return false;
-  const required = [
-    "input_tokens",
-    "cached_input_tokens",
-    "output_tokens",
-    "reasoning_output_tokens",
-    "total_tokens",
-  ];
-  return [payload["usage"], payload["turn_token_usage"], payload["thread_token_usage"]].every(
-    (usage) =>
-      isRecord(usage) &&
-      required.every((key) => Number.isSafeInteger(usage[key])) &&
-      Object.keys(usage).every(
-        (key) => required.includes(key) || key === "cache_write_input_tokens",
-      ) &&
-      (!Object.hasOwn(usage, "cache_write_input_tokens") ||
-        Number.isSafeInteger(usage["cache_write_input_tokens"])),
-  );
-}
-
 // One gate slot covers prefix verification and the scan, so concurrent opens
 // never exceed CODEX_ROLLOUT_READ_MAX_CONCURRENCY. Resumes from `cached` only
 // when the verified prefix is unchanged, else folds the whole file. Null: read
@@ -1981,92 +1834,12 @@ async function foldCodexJsonlFile<F>(
   fingerprint: CodexRolloutFileFingerprint | null,
   cached: CodexJsonlCursor<F> | undefined,
   folder: CodexLineFolder<F>,
-  strict = false,
-): Promise<{
-  fold: F;
-  cursor: CodexJsonlCursor<F> | null;
-  complete: boolean;
-  frame?: string;
-} | null> {
+): Promise<{ fold: F; cursor: CodexJsonlCursor<F> | null } | null> {
   return codexRolloutReadGate.run(async () => {
     let fold = folder.start();
     let offset = 0;
     let previousTail: Buffer = Buffer.alloc(0);
     let prefixHasher = createHash("sha256");
-    let valid = true;
-    const consume = (line: string): boolean => {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        valid = false;
-        return false;
-      }
-      if (!isRecord(parsed)) valid = false;
-      if (
-        strict &&
-        isRecord(parsed) &&
-        !["session_meta", "event_msg", "response_item", "turn_context"].includes(
-          String(parsed["type"]),
-        ) &&
-        !isKnownCodexNonauthorityRecord(parsed["type"], parsed["payload"], parsed["timestamp"])
-      )
-        valid = false;
-      if (
-        strict &&
-        isRecord(parsed) &&
-        (parsed["type"] !== "session_meta" || parsed["payload"] !== undefined) &&
-        !isRecord(parsed["payload"])
-      )
-        valid = false;
-      if (isRecord(parsed)) folder.line(fold, parsed, line);
-      return true;
-    };
-    if (strict) {
-      if (!fingerprint) return null;
-      let handle: FileHandle | undefined;
-      let result: { fold: F; cursor: null; complete: boolean; frame: string } | null;
-      try {
-        handle = await open(
-          filePath,
-          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-        );
-        const before = await handle.stat();
-        if (
-          !before.isFile() ||
-          before.ino !== fingerprint.ino ||
-          before.dev !== fingerprint.dev ||
-          before.size !== fingerprint.size ||
-          before.mtimeMs !== fingerprint.mtimeMs
-        )
-          return null;
-        for await (const line of readRolloutLines(filePath, 0, {
-          handle,
-          end: before.size,
-          hash: prefixHasher,
-        })) {
-          if (line.trim()) consume(line);
-        }
-        const after = await handle.stat();
-        if (
-          after.ino !== before.ino ||
-          after.dev !== before.dev ||
-          after.size !== before.size ||
-          after.mtimeMs !== before.mtimeMs
-        )
-          return null;
-        result = { fold, cursor: null, complete: valid, frame: prefixHasher.digest("hex") };
-      } catch {
-        result = null;
-      } finally {
-        try {
-          await handle?.close();
-        } catch {
-          result = null;
-        }
-      }
-      return result;
-    }
     if (
       fingerprint &&
       cached &&
@@ -2086,17 +1859,29 @@ async function foldCodexJsonlFile<F>(
         prefixHasher = verified.hash;
       }
     }
-    const scan = await scanJsonlLines(filePath, offset, consume, fingerprint?.size, (bytes) =>
-      prefixHasher.update(bytes),
+    const scan = await scanJsonlLines(
+      filePath,
+      offset,
+      (line) => {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          return false;
+        }
+        if (isRecord(parsed)) folder.line(fold, parsed, line);
+        return true;
+      },
+      fingerprint?.size,
+      (bytes) => prefixHasher.update(bytes),
     );
     if (!scan) return null;
-    if (!fingerprint) return { fold, cursor: null, complete: false };
+    if (!fingerprint) return { fold, cursor: null };
     const tail = Buffer.from(
       Buffer.concat([previousTail, scan.tail]).subarray(-PREFIX_VERIFY_BYTES),
     );
     return {
       fold,
-      complete: false,
       cursor: {
         ...fingerprint,
         offset: offset + scan.consumedBytes,
@@ -2114,25 +1899,12 @@ async function readCodexRolloutFile(
   filePath: string,
   fingerprint: CodexRolloutFileFingerprint | null,
   cached: CodexRolloutFileEntry | undefined,
-  strict = false,
-): Promise<{
-  candidate: CodexRolloutCandidate | null;
-  entry?: CodexRolloutFileEntry;
-  fold: CodexRolloutFold;
-  complete: boolean;
-  frame?: string;
-} | null> {
-  const read = await foldCodexJsonlFile(
-    filePath,
-    fingerprint,
-    strict ? undefined : cached,
-    {
-      start: newCodexRolloutFold,
-      resume: cloneCodexRolloutFold,
-      line: foldCodexRolloutLine,
-    },
-    strict,
-  );
+): Promise<{ candidate: CodexRolloutCandidate | null; entry?: CodexRolloutFileEntry } | null> {
+  const read = await foldCodexJsonlFile(filePath, fingerprint, cached, {
+    start: newCodexRolloutFold,
+    resume: cloneCodexRolloutFold,
+    line: foldCodexRolloutLine,
+  });
   if (!read) return null;
   if (cached?.fold.rateLimitObservedAtMs !== undefined) {
     const oldThreadId = cached.fold.meta?.threadId;
@@ -2153,22 +1925,15 @@ async function readCodexRolloutFile(
     !result.rollout && !result.rateLimit && !result.model && !result.tokenUsage
       ? null
       : { result, mtimeMs: fingerprint?.mtimeMs ?? 0 };
-  return {
-    candidate,
-    fold: read.fold,
-    complete: read.complete,
-    ...(read.frame ? { frame: read.frame } : {}),
-    ...(read.cursor ? { entry: { ...read.cursor, candidate } } : {}),
-  };
+  return { candidate, ...(read.cursor ? { entry: { ...read.cursor, candidate } } : {}) };
 }
 
 export async function readCodexRolloutState(
   sessionsDir: string,
   reader?: CodexRolloutReaderState,
   rootThreadId?: string,
-  proof?: CodexLaunchProofContext,
 ): Promise<CodexRolloutReadResult> {
-  if (!reader) return readCodexRolloutStateSnapshot(sessionsDir, reader, rootThreadId, proof);
+  if (!reader) return readCodexRolloutStateSnapshot(sessionsDir, reader, rootThreadId);
   // Serialize collection, stat, and cache publication together. Queued callers
   // see both the preceding scan's cache and any append made while it ran.
   const previous = codexRolloutReaderQueues.get(reader);
@@ -2179,7 +1944,7 @@ export async function readCodexRolloutState(
   codexRolloutReaderQueues.set(reader, completed);
   await previous;
   try {
-    return await readCodexRolloutStateSnapshot(sessionsDir, reader, rootThreadId, proof);
+    return await readCodexRolloutStateSnapshot(sessionsDir, reader, rootThreadId);
   } finally {
     complete();
     if (codexRolloutReaderQueues.get(reader) === completed) {
@@ -2192,58 +1957,29 @@ async function readCodexRolloutStateSnapshot(
   sessionsDir: string,
   reader: CodexRolloutReaderState | undefined,
   rootThreadId: string | undefined,
-  proof: CodexLaunchProofContext | undefined,
 ): Promise<CodexRolloutReadResult> {
   let files: string[];
   try {
-    if (proof && (await realpath(sessionsDir)) !== resolve(sessionsDir))
-      throw new Error("Escaped rollout root");
-    files = await collectJsonlFiles(sessionsDir, 0, proof !== undefined);
+    files = await collectJsonlFiles(sessionsDir);
   } catch {
-    return {
-      rollout: null,
-      rateLimit: null,
-      ...(proof ? { launchProof: { kind: "unknown" as const } } : {}),
-    };
+    return { rollout: null, rateLimit: null };
   }
   // The `codex resume` poison-id heal step rewrites every rollout file at ~the
   // same instant, so filesystem mtime stops reflecting content recency. Rank by
   // the newest in-content state timestamp instead (heal preserves those), and
   // keep mtime only as a deterministic tie-breaker.
   const nextFiles = new Map<string, CodexRolloutFileEntry>();
-  let proofComplete = true;
-  const contexts: {
-    filePath: string;
-    fingerprint: CodexRolloutFileFingerprint;
-    fold: CodexRolloutFold;
-    rollout: CodexRolloutStateRecord | null;
-    frame: string;
-  }[] = [];
   const candidates = await Promise.all(
     files.map(async (filePath) => {
       let fingerprint: CodexRolloutFileFingerprint | null = null;
       try {
-        const fileStat = proof ? await lstat(filePath) : await stat(filePath);
-        if (proof && (!fileStat.isFile() || (await realpath(filePath)) !== resolve(filePath))) {
-          proofComplete = false;
-          return null;
-        }
-        fingerprint = {
-          ino: fileStat.ino,
-          mtimeMs: fileStat.mtimeMs,
-          size: fileStat.size,
-          ...(proof ? { dev: fileStat.dev } : {}),
-        };
+        const fileStat = await stat(filePath);
+        fingerprint = { ino: fileStat.ino, mtimeMs: fileStat.mtimeMs, size: fileStat.size };
       } catch {
-        if (proof) {
-          proofComplete = false;
-          return null;
-        }
         // Preserve the existing best-effort read below for a stat/read race.
       }
       const cached = reader?.files.get(filePath);
       if (
-        !proof &&
         fingerprint &&
         cached?.ino === fingerprint.ino &&
         cached.mtimeMs === fingerprint.mtimeMs &&
@@ -2252,95 +1988,18 @@ async function readCodexRolloutStateSnapshot(
         nextFiles.set(filePath, cached);
         return cached.candidate;
       }
-      const read = await readCodexRolloutFile(filePath, fingerprint, cached, proof !== undefined);
-      if (!read) {
-        if (proof) proofComplete = false;
-        return null;
-      }
-      if (proof) {
-        if (!read.complete || !fingerprint || !read.frame) proofComplete = false;
-        else
-          contexts.push({
-            filePath,
-            fingerprint,
-            fold: read.fold,
-            rollout: read.candidate?.result.rollout ?? null,
-            frame: read.frame,
-          });
-      }
+      const read = await readCodexRolloutFile(filePath, fingerprint, cached);
+      if (!read) return null;
       if (read.entry) nextFiles.set(filePath, read.entry);
       return read.candidate;
     }),
   );
-  if (reader && !proof) reader.files = nextFiles;
-  let launchProof: CodexLaunchProof | undefined;
-  if (proof) {
-    launchProof = { kind: "unknown" };
-    try {
-      const finalFiles = await collectJsonlFiles(sessionsDir, 0, true);
-      if (JSON.stringify(finalFiles.sort()) !== JSON.stringify([...files].sort()))
-        proofComplete = false;
-      for (const context of contexts) {
-        const current = await lstat(context.filePath);
-        const before = context.fingerprint;
-        if (
-          !current.isFile() ||
-          current.ino !== before.ino ||
-          current.dev !== before.dev ||
-          current.size !== before.size ||
-          current.mtimeMs !== before.mtimeMs
-        )
-          proofComplete = false;
-      }
-    } catch {
-      proofComplete = false;
-    }
-    const eligible = contexts.filter(
-      ({ fold }) =>
-        fold.origin.kind === "primary" &&
-        !(fold.origin.timingKnown && fold.origin.latestMs < proof.sinceMs),
-    );
-    const selected = eligible[0];
-    const rollout = selected?.rollout;
-    if (
-      proofComplete &&
-      contexts.length === files.length &&
-      eligible.length === 1 &&
-      contexts.every(
-        ({ fold }) => fold.origin.kind !== "unknown" && fold.origin.latestMs <= proof.nowMs,
-      ) &&
-      Number.isFinite(proof.sinceMs) &&
-      Number.isFinite(proof.nowMs) &&
-      proof.sinceMs <= proof.nowMs &&
-      selected?.fold.origin.threadId === rootThreadId &&
-      rootThreadId &&
-      rollout?.turnId?.trim() &&
-      rollout.timestampMs >= proof.sinceMs &&
-      rollout.timestampMs <= proof.nowMs
-    ) {
-      launchProof = {
-        kind: "primary",
-        complete: true,
-        threadId: rootThreadId,
-        turnId: rollout.turnId,
-        timestampMs: rollout.timestampMs,
-        frame: createHash("sha256")
-          .update(
-            JSON.stringify(
-              contexts
-                .sort((a, b) => a.filePath.localeCompare(b.filePath))
-                .map(({ filePath, fingerprint, frame }) => ({ filePath, fingerprint, frame })),
-            ),
-          )
-          .digest("hex"),
-      };
-    }
-  }
+  if (reader) reader.files = nextFiles;
   const existing = candidates.filter(
     (candidate): candidate is CodexRolloutCandidate => candidate !== null,
   );
   if (existing.length === 0) {
-    return { rollout: null, rateLimit: null, ...(launchProof ? { launchProof } : {}) };
+    return { rollout: null, rateLimit: null };
   }
   // A just-started rollout file can carry a `turn_context` model before it has
   // any state or rate-limit line, so it loses both selections below. Rank the
@@ -2385,7 +2044,6 @@ async function readCodexRolloutStateSnapshot(
     const tokenUsage = best.result.tokenUsage ?? newestTokenUsage;
     return {
       ...best.result,
-      ...(launchProof ? { launchProof } : {}),
       ...(model ? { model } : {}),
       ...(tokenUsage ? { tokenUsage } : {}),
       ...(tokenUsages.length > 0 ? { tokenUsages } : {}),
@@ -2397,7 +2055,6 @@ async function readCodexRolloutStateSnapshot(
   );
   return {
     rollout: null,
-    ...(launchProof ? { launchProof } : {}),
     rateLimit: newestByMtime?.result.rateLimit ?? null,
     ...(newestByMtime?.result.rateLimitObservedAtMs !== undefined
       ? { rateLimitObservedAtMs: newestByMtime.result.rateLimitObservedAtMs }

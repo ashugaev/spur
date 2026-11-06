@@ -18,7 +18,7 @@ INTERFACES
   CLI: `spur --help`, then `spur <command> --help`.
   `$SPUR_SESSION_TOOL_DIR` holds the session-bound wrappers; `ls "$SPUR_SESSION_TOOL_DIR"` enumerates them. Call each as `"$SPUR_SESSION_TOOL_DIR/<tool>"`, never bare.
   Session variables: `env | grep '^SPUR_'`.
-  Agent launch and hook-state identity contract: `docs/commands.md#session-tools-and-environment`.
+  Agent launch identity contract: `docs/commands.md#session-tools-and-environment`.
   Manual-wake response fields: `docs/daemon-api.md`.
   Automatic reminder limits: `docs/configuration.md#automatic-reminders`.
   Edit scheduled jobs through footer Cron viewer or MCP; config behavior: docs/configuration.md; operations: docs/daemon-api.md.
