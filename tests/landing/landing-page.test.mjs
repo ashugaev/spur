@@ -281,7 +281,7 @@ test("MCP section links qualified client control to the canonical setup guide", 
   assert.match(mcp, /<h2 id="mcp-h">Your AI has tools\. Now give it a team\.<\/h2>/);
   assert.match(mcp, /Connect an MCP-compatible client to Spur/);
   for (const capability of ["Start agents", "Send work", "Check progress"]) {
-    assert.match(mcp, new RegExp(`<strong>${capability}<\/strong>`));
+    assert.match(mcp, new RegExp(`<strong>${capability}</strong>`));
   }
   assert.match(mcp, /Read conversations and wait for an answer or question/);
   assert.match(mcp, /Use stdio locally or over SSH, or connect through private HTTP\./);
@@ -298,7 +298,7 @@ test("MCP diagram describes one request and session without relying on animation
   assert.match(mcp, /class="mcp-stages" aria-hidden="true"/);
   assert.equal((mcp.match(/class="mcp-stage(?: mcp-stage--hub)?"/g) ?? []).length, 3);
   for (const label of ["Your MCP client", "Spur", "One agent session"]) {
-    assert.equal((mcp.match(new RegExp(`<strong>${label}<\/strong>`, "g")) ?? []).length, 1);
+    assert.equal((mcp.match(new RegExp(`<strong>${label}</strong>`, "g")) ?? []).length, 1);
   }
   for (const agent of ["claude", "codex", "cursor", "opencode"]) {
     assert.equal((mcp.match(new RegExp(`\\b${agent}\\b`, "g")) ?? []).length, 1);
