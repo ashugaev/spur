@@ -314,7 +314,7 @@ describe("spur-isolated-ui.sh", () => {
           await stopChild(restarted);
         }
       },
-      publicationDelayMs === 0 ? 30_000 : 45_000,
+      30_000 + 2 * publicationDelayMs,
     );
   }
   it("refuses receipt and cleans owned web when daemon generation changes during UI readiness", async (context) => {
