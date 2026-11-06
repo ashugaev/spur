@@ -34197,6 +34197,99 @@ describe("SessionService", () => {
     });
 
     it.each([
+      ["owner first", ["api-1", "api-2"]],
+      ["member first", ["api-2", "api-1"]],
+    ] as const)("restores shared-workspace reboot rows when listed %s", async (_order, ids) => {
+      const config = baseConfig();
+      loadConfigMock.mockReturnValue({
+        ...config,
+        projects: { api: { ...config.projects.api, restoreAfterReboot: true } },
+      });
+      readHostMemoryMock.mockReturnValue(null);
+      const sessions = createSessionStore(
+        runningSession({ id: "api-1", workspaceId: "api-1", status: "stopped" }),
+        runningSession({ id: "api-2", workspaceId: "api-1", status: "stopped" }),
+      );
+      const service = await createDisposedSessionService();
+      const internals = repairInternals(service);
+      const restore = vi.spyOn(service, "restore").mockImplementation(async (id) => {
+        const owner = internals.lifecycle.begin("restore", [id]);
+        const settled = internals.lifecycle.settle(
+          owner,
+          true,
+          () => "succeeded",
+          () => true,
+        );
+        const current = sessions.get(id);
+        if (current) sessions.set(id, { ...current, status: "running" });
+        return { lifecycle: settled } as never;
+      });
+
+      await service.restoreRebootedSessions(rebootCandidates(service, [...ids]));
+
+      expect(restore.mock.calls.map(([id]) => id)).toEqual(ids);
+      expect(logSpurEventMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.reboot.restore.aborted",
+          details: expect.objectContaining({ reason: "lifecycle_changed" }),
+        }),
+      );
+      service.dispose();
+    });
+
+    it("logs a shared-workspace sibling skipped by an external lifecycle operation", async () => {
+      const config = baseConfig();
+      loadConfigMock.mockReturnValue({
+        ...config,
+        projects: { api: { ...config.projects.api, restoreAfterReboot: true } },
+      });
+      readHostMemoryMock.mockReturnValue(null);
+      const sessions = createSessionStore(
+        runningSession({ id: "api-1", workspaceId: "api-1", status: "stopped" }),
+        runningSession({ id: "api-2", workspaceId: "api-1", status: "stopped" }),
+      );
+      const service = await createDisposedSessionService();
+      const internals = repairInternals(service);
+      const restore = vi.spyOn(service, "restore").mockImplementation(async (id) => {
+        const owner = internals.lifecycle.begin("restore", [id]);
+        const settled = internals.lifecycle.settle(
+          owner,
+          true,
+          () => "succeeded",
+          () => true,
+        );
+        if (id === "api-1") {
+          const external = internals.lifecycle.begin("stop", ["api-1"]);
+          internals.lifecycle.settle(
+            external,
+            true,
+            () => "succeeded",
+            () => true,
+          );
+        }
+        return { lifecycle: settled } as never;
+      });
+
+      await service.restoreRebootedSessions(rebootCandidates(service, ["api-1", "api-2"]));
+
+      expect(restore.mock.calls.map(([id]) => id)).toEqual(["api-1"]);
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.reboot.restore.aborted",
+          level: "warn",
+          sessionId: "api-2",
+          details: expect.objectContaining({
+            reason: "lifecycle_changed",
+            lifecycleIds: ["api-1"],
+          }),
+        }),
+      );
+      service.dispose();
+    });
+
+    it.each([
       "dailyAt",
       "message",
       "stopCondition",
@@ -61804,6 +61897,217 @@ describe("SessionService", () => {
         return WATCHED.reduce((total, event) => total + events(event).length, 0);
       }
 
+      it("reserves the parked wake slot while its runtime probe is pending", async () => {
+        capAt(1);
+        trackRuntimes([]);
+        mockClaudeJsonlState("waiting");
+        createSessionStore(
+          stoppedRecord("api-1", {
+            stopReason: "stale_timeout",
+            scheduledWake: {
+              dueAt: "2026-03-18T10:00:00.000Z",
+              message: "scheduled wake",
+            },
+          }),
+        );
+        const service = await createDisposedSessionService();
+        const internals = service as unknown as {
+          readRuntimeSnapshot(session: SessionRecord): Promise<{
+            runtimeAlive: boolean;
+            paneUsable: boolean;
+            processAlive: boolean;
+            tmuxActivityAt: Date | null;
+            probeUnresponsive: boolean;
+            diagnostic?: string;
+          }>;
+          reserveAdmission(projectId: string, context: "spawn"): symbol;
+          admissionReservations: Map<symbol, string>;
+        };
+        const readRuntimeSnapshot = internals.readRuntimeSnapshot.bind(service);
+        let releaseProbe!: () => void;
+        const probeBarrier = new Promise<void>((resolve) => {
+          releaseProbe = resolve;
+        });
+        let signalProbe!: () => void;
+        const probeStarted = new Promise<void>((resolve) => {
+          signalProbe = resolve;
+        });
+        vi.spyOn(internals, "readRuntimeSnapshot").mockImplementation(async (session) => {
+          if (session.id === "api-1") {
+            signalProbe();
+            await probeBarrier;
+          }
+          return readRuntimeSnapshot(session);
+        });
+        const pendingWake = tick(service);
+        await probeStarted;
+
+        expect(internals.admissionReservations.size).toBe(1);
+        let spawnDenial: unknown;
+        try {
+          internals.reserveAdmission("api", "spawn");
+        } catch (error) {
+          spawnDenial = error;
+        }
+        expect(spawnDenial).toBeInstanceOf(Error);
+        expect(spawnDenial).toMatchObject({ statusCode: 429, reason: "cap" });
+
+        releaseProbe();
+        await pendingWake;
+        expect(internals.admissionReservations.size).toBe(0);
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        service.dispose();
+      });
+
+      type RuntimeSnapshot = {
+        runtimeAlive: boolean;
+        paneUsable: boolean;
+        processAlive: boolean;
+        tmuxActivityAt: Date | null;
+        probeUnresponsive: boolean;
+        diagnostic?: string;
+      };
+
+      function holdWakeProbe(service: unknown, fail = false) {
+        const internals = service as unknown as {
+          readRuntimeSnapshot(session: SessionRecord): Promise<RuntimeSnapshot>;
+          admissionReservations: Map<symbol, string>;
+          countLiveSessions(): { total: number };
+        };
+        const readRuntimeSnapshot = internals.readRuntimeSnapshot.bind(service);
+        let releaseProbe!: () => void;
+        const probeBarrier = new Promise<void>((resolve) => {
+          releaseProbe = resolve;
+        });
+        let signalProbe!: () => void;
+        const probeStarted = new Promise<void>((resolve) => {
+          signalProbe = resolve;
+        });
+        let reservationCountAtProbe = 0;
+        let probeHeld = false;
+        vi.spyOn(internals, "readRuntimeSnapshot").mockImplementation(async (session) => {
+          if (session.id === "api-1" && !probeHeld) {
+            probeHeld = true;
+            reservationCountAtProbe = internals.admissionReservations.size;
+            signalProbe();
+            await probeBarrier;
+            if (fail) throw new Error("held wake runtime probe failed");
+          }
+          return readRuntimeSnapshot(session);
+        });
+        return {
+          internals,
+          probeStarted,
+          releaseProbe,
+          reservationCount: () => reservationCountAtProbe,
+          pendingWake: tick(service),
+        };
+      }
+
+      const ordinaryWakeCases = [
+        ["stopped", "interval"],
+        ["stopped", "daily"],
+        ["paused", "interval"],
+        ["paused", "daily"],
+      ] as const;
+
+      it.each(ordinaryWakeCases)(
+        "reserves an ordinary %s %s wake slot across the runtime probe and counts the live result",
+        async (status, kind) => {
+          capAt(1);
+          trackRuntimes([]);
+          mockClaudeJsonlState("waiting");
+          const due = "2026-03-18T10:00:00.000Z";
+          const wakeOverrides: Partial<SessionRecord> = { status };
+          if (status === "paused") wakeOverrides.stopReason = "manual_pause";
+          if (kind === "interval") {
+            wakeOverrides.intervalWake = {
+              nextDueAt: due,
+              intervalMs: 60_000,
+              message: "interval wake",
+              stopCondition: "Stop condition",
+            };
+          } else {
+            wakeOverrides.dailyWake = {
+              dailyAt: ["10:00"],
+              nextDueAt: due,
+              message: "daily wake",
+              stopCondition: "Stop condition",
+            };
+          }
+          const sessions = createSessionStore(stoppedRecord("api-1", wakeOverrides));
+          const service = await createDisposedSessionService();
+          const held = holdWakeProbe(service);
+          await held.probeStarted;
+
+          let spawnError: unknown;
+          try {
+            await service.spawn({ project: "api", prompt: "concurrent spawn" });
+          } catch (error) {
+            spawnError = error;
+          } finally {
+            held.releaseProbe();
+          }
+          await held.pendingWake;
+
+          expect(held.reservationCount()).toBe(1);
+          expect(held.internals.countLiveSessions().total).toBe(1);
+          expect(held.internals.admissionReservations.size).toBe(0);
+          expect(spawnError).toMatchObject({ statusCode: 429, reason: "cap" });
+          expect(sessions.get("api-1")?.status).toBe("running");
+          expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+          expect(
+            kind === "interval"
+              ? events("session.wake.interval_sent", "api-1")
+              : events("session.wake.daily_sent", "api-1"),
+          ).toHaveLength(1);
+          await expect(
+            service.spawn({ project: "api", prompt: "after wake" }),
+          ).rejects.toMatchObject({ statusCode: 429, reason: "cap" });
+          service.dispose();
+        },
+      );
+
+      it.each(ordinaryWakeCases)(
+        "releases an ordinary %s %s wake reservation when the runtime probe fails",
+        async (status, kind) => {
+          capAt(1);
+          trackRuntimes([]);
+          mockClaudeJsonlState("waiting");
+          const due = "2026-03-18T10:00:00.000Z";
+          const wakeOverrides: Partial<SessionRecord> = { status };
+          if (status === "paused") wakeOverrides.stopReason = "manual_pause";
+          if (kind === "interval") {
+            wakeOverrides.intervalWake = {
+              nextDueAt: due,
+              intervalMs: 60_000,
+              message: "interval wake",
+              stopCondition: "Stop condition",
+            };
+          } else {
+            wakeOverrides.dailyWake = {
+              dailyAt: ["10:00"],
+              nextDueAt: due,
+              message: "daily wake",
+              stopCondition: "Stop condition",
+            };
+          }
+          const sessions = createSessionStore(stoppedRecord("api-1", wakeOverrides));
+          const service = await createDisposedSessionService();
+          const held = holdWakeProbe(service, true);
+          await held.probeStarted;
+          const reservationCountAtProbe = held.reservationCount();
+          held.releaseProbe();
+          await held.pendingWake;
+
+          expect(reservationCountAtProbe).toBe(1);
+          expect(held.internals.admissionReservations.size).toBe(0);
+          expect(held.internals.countLiveSessions().total).toBe(0);
+          expect(sessions.get("api-1")?.status).not.toBe("running");
+          service.dispose();
+        },
+      );
+
       describe("unexpected admission check failure", () => {
         function failFirstCheck(service: unknown): void {
           vi.spyOn(
@@ -62139,6 +62443,40 @@ describe("SessionService", () => {
           );
           await idleTicks(service, 10);
           expect(wakeSends("daily-api-1")).toBe(1);
+          service.dispose();
+        });
+
+        it("leaves a due occurrence armed while a lifecycle operation is pending", async () => {
+          const { sessions } = seedDaily();
+          vi.setSystemTime(at(9, 0, 1));
+          const service = await createDisposedSessionService();
+          const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister })
+            .lifecycle;
+          const pending = lifecycle.begin("restore", ["api-1"]);
+
+          await tick(service);
+
+          expect(sessions.get("api-1")?.dailyWake).toEqual({
+            dailyAt: ["09:00", "09:40"],
+            nextDueAt: iso(at(9, 0)),
+            message: "daily-api-1",
+            stopCondition: "Stop condition",
+          });
+          expect(events("session.admission.denied")).toHaveLength(0);
+          expect(events("session.wake.daily_deferred")).toHaveLength(0);
+
+          lifecycle.settle(
+            pending,
+            true,
+            () => "succeeded",
+            () => true,
+          );
+          await tick(service, at(9, 0, 2));
+          expect(sessions.get("api-1")?.dailyWake).toMatchObject({
+            nextDueAt: iso(at(9, 15, 2)),
+            admissionDeferredOccurrence: iso(at(9, 0)),
+          });
+          expect(events("session.wake.daily_deferred")).toHaveLength(1);
           service.dispose();
         });
 

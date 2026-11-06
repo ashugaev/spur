@@ -126,7 +126,7 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 
 ## Admission control
 
-Admission gates spawn, restore and wake relaunch; policy: `v2/src/session-service.ts`; capacity: [`GET /headroom`](daemon-api.md); diagnostics: [`spur doctor`](commands.md#doctor).
+Admission gates spawn and restore. Background interval/daily wakes gate stopped/paused, stale-parked and memory-shed relaunches; manual interval/daily dispatch gates only stale-parked and memory-shed relaunches. Policy: `v2/src/session-service.ts`; capacity: [`GET /headroom`](daemon-api.md); diagnostics: [`spur doctor`](commands.md#doctor).
 
 `stopReason: "runtime_lost"`: confirmed runtime loss becomes restorable `stopped`, retains error evidence, releases capacity; unknown probes retain capacity (`v2/src/session-service.ts`).
 

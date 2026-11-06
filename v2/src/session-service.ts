@@ -20,6 +20,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   annotateLifecycleError,
   createRestoreOperation,
+  lifecycleErrorReceipt,
   RestoreOperationError,
   type RestoreOperationContext,
   SessionLifecycleError,
@@ -1284,6 +1285,7 @@ type ScheduledWakeClaim = {
   revision: number;
   manual: boolean;
   stage: "unattempted" | "input-started" | "accepted";
+  admissionReservation?: symbol;
 };
 
 type AgentMessageTarget = Pick<
@@ -1363,6 +1365,7 @@ type SessionPreparationOptions = {
   operation?: RestoreOperationContext;
   preparedObservation?: PreparedSessionObservation;
   observePreparedSession?: (session: SessionRecord) => void;
+  wakeAdmissionReservation?: symbol;
 };
 
 type ForegroundSpawnReceipt = {
@@ -1444,6 +1447,7 @@ interface SessionObservation {
 }
 interface DailyWakeClaim extends SessionObservation {
   record: SessionRecord & { dailyWake: SessionDailyWakeState };
+  admissionReservation?: symbol;
 }
 // Plan-time facts the reap executor re-proves under the workspace lifecycle lock.
 interface SidecarReapEntryContext {
@@ -1524,6 +1528,7 @@ function isRestorableStatus(status: SessionStatus): boolean {
 }
 
 type WakeAdmissionDenial = { kind: "denied" | "check_failed"; error: Error };
+type WakeAdmissionClaim = { reservation?: symbol; denial?: WakeAdmissionDenial };
 
 function wakeAdmissionReason(denial: WakeAdmissionDenial): string {
   return denial.kind === "denied" ? "admission" : "admission_check_failed";
@@ -4180,7 +4185,7 @@ export class SessionService {
     this.deliveryStopped = true;
     this.codexPaneLimitObservedAt.clear();
     this.codexRateLimitPoller.dispose();
-    this.scheduledWakeClaims.clear();
+    for (const claim of this.scheduledWakeClaims.values()) this.releaseScheduledWakeClaim(claim);
     this.scheduledWakeLastFailure.clear();
     this.sidecarEndpoints.clear();
     this.sidecarObservation = undefined;
@@ -5675,72 +5680,85 @@ export class SessionService {
               return null;
             },
           );
-          if (
-            claimedNextDueAt !== null &&
-            !this.deferIntervalWakeForAdmission(session, intervalWake, claimedNextDueAt)
-          ) {
+          if (claimedNextDueAt !== null) {
             const nextDueAt = claimedNextDueAt;
-            try {
-              await this.send(session.id, {
-                message: this.formatIntervalWakeMessage(
+            const admission = this.claimWakeAdmission(session.id);
+            if (admission.denial) {
+              this.deferIntervalWakeForAdmission(
+                session,
+                intervalWake,
+                claimedNextDueAt,
+                admission.denial,
+              );
+            } else {
+              try {
+                await this.sendScheduledWake(
                   session.id,
-                  intervalWake.message,
-                  intervalWake.stopCondition,
-                ),
-              });
-              this.logEvent("session.wake.interval_sent", {
-                level: "info",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Sent interval wake to ${session.id}`,
-                details: {
-                  nextDueAt,
-                  intervalMs: intervalWake.intervalMs,
-                },
-              });
-            } catch (error) {
-              if (error instanceof SessionAdmissionDeniedError) {
-                // Same reasoning as the scheduled-wake branch above: this
-                // occurrence was already claimed (nextDueAt advanced and
-                // persisted) before the send attempt. Roll nextDueAt back to
-                // the occurrence that was just refused (CAS: only if nothing
-                // else re-armed it meanwhile) so the next poll tick retries
-                // it promptly instead of waiting a full interval.
-                await this.withWorkspaceLifecycleLocks(session.id, async () => {
-                  const afterDenial = readSession(this.config.dataDir, session.id);
-                  if (afterDenial?.intervalWake?.nextDueAt === nextDueAt) {
-                    writeSession(this.config.dataDir, {
-                      ...afterDenial,
-                      intervalWake: {
-                        ...afterDenial.intervalWake,
-                        nextDueAt: intervalWake.nextDueAt,
-                      },
-                      updatedAt: nowIso(),
-                    });
-                  }
-                });
-                this.logEvent("session.wake.interval_deferred", {
-                  level: "warn",
+                  {
+                    message: this.formatIntervalWakeMessage(
+                      session.id,
+                      intervalWake.message,
+                      intervalWake.stopCondition,
+                    ),
+                  },
+                  admission.reservation,
+                );
+                this.logEvent("session.wake.interval_sent", {
+                  level: "info",
                   sessionId: session.id,
                   projectId: session.project,
-                  message: `Deferred interval wake for ${session.id}: ${error.message}`,
+                  message: `Sent interval wake to ${session.id}`,
                   details: {
                     nextDueAt,
                     intervalMs: intervalWake.intervalMs,
                   },
                 });
-              } else {
-                const message = error instanceof Error ? error.message : String(error);
-                this.logEvent("session.wake.interval_failed", {
-                  level: "error",
-                  sessionId: session.id,
-                  projectId: session.project,
-                  message: `Failed to send interval wake to ${session.id}: ${message}`,
-                  details: {
-                    nextDueAt,
-                    intervalMs: intervalWake.intervalMs,
-                  },
-                });
+              } catch (error) {
+                if (error instanceof SessionAdmissionDeniedError) {
+                  // Same reasoning as the scheduled-wake branch above: this
+                  // occurrence was already claimed (nextDueAt advanced and
+                  // persisted) before the send attempt. Roll nextDueAt back to
+                  // the occurrence that was just refused (CAS: only if nothing
+                  // else re-armed it meanwhile) so the next poll tick retries
+                  // it promptly instead of waiting a full interval.
+                  await this.withWorkspaceLifecycleLocks(session.id, async () => {
+                    const afterDenial = readSession(this.config.dataDir, session.id);
+                    if (afterDenial?.intervalWake?.nextDueAt === nextDueAt) {
+                      writeSession(this.config.dataDir, {
+                        ...afterDenial,
+                        intervalWake: {
+                          ...afterDenial.intervalWake,
+                          nextDueAt: intervalWake.nextDueAt,
+                        },
+                        updatedAt: nowIso(),
+                      });
+                    }
+                  });
+                  this.logEvent("session.wake.interval_deferred", {
+                    level: "warn",
+                    sessionId: session.id,
+                    projectId: session.project,
+                    message: `Deferred interval wake for ${session.id}: ${error.message}`,
+                    details: {
+                      nextDueAt,
+                      intervalMs: intervalWake.intervalMs,
+                    },
+                  });
+                } else {
+                  const message = error instanceof Error ? error.message : String(error);
+                  this.logEvent("session.wake.interval_failed", {
+                    level: "error",
+                    sessionId: session.id,
+                    projectId: session.project,
+                    message: `Failed to send interval wake to ${session.id}: ${message}`,
+                    details: {
+                      nextDueAt,
+                      intervalMs: intervalWake.intervalMs,
+                    },
+                  });
+                }
+              } finally {
+                this.releaseAdmissionReservation(admission.reservation);
               }
             }
           }
@@ -6018,6 +6036,12 @@ export class SessionService {
             ) {
               return null;
             }
+            const lifecycle = this.lifecycleIdsFor(currentDailyWakeSession).map((id) => ({
+              id,
+              snapshot: this.lifecycle.snapshot(id),
+            }));
+            if (lifecycle.some(({ snapshot }) => snapshot.operation?.phase === "pending"))
+              return null;
             // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
             const dailyWakeClaimed =
               currentDailyWakeSession.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
@@ -6074,16 +6098,14 @@ export class SessionService {
               writeSession(this.config.dataDir, updated);
               const claim: DailyWakeClaim = {
                 record: updated,
-                lifecycle: this.lifecycleIdsFor(updated).map((id) => ({
-                  id,
-                  snapshot: this.lifecycle.snapshot(id),
-                })),
+                lifecycle,
               };
-              const admissionDenial = this.wakeAdmissionDenial(session.id);
-              if (admissionDenial) {
-                this.deferDailyWakeForAdmission(session, dailyWake, claim, admissionDenial, now);
+              const admission = this.claimWakeAdmission(session.id);
+              if (admission.denial) {
+                this.deferDailyWakeForAdmission(session, dailyWake, claim, admission.denial, now);
                 return null;
               }
+              claim.admissionReservation = admission.reservation;
               return claim;
             }
             return null;
@@ -6092,13 +6114,17 @@ export class SessionService {
         if (claimedDailyWake !== null) {
           const claimedDailyNextDueAt = claimedDailyWake.record.dailyWake.nextDueAt;
           try {
-            await this.send(session.id, {
-              message: this.formatDailyWakeMessage(
-                session.id,
-                dailyWake.message,
-                dailyWake.stopCondition,
-              ),
-            });
+            await this.sendScheduledWake(
+              session.id,
+              {
+                message: this.formatDailyWakeMessage(
+                  session.id,
+                  dailyWake.message,
+                  dailyWake.stopCondition,
+                ),
+              },
+              claimedDailyWake.admissionReservation,
+            );
             this.logEvent("session.wake.daily_sent", {
               level: "info",
               sessionId: session.id,
@@ -6150,6 +6176,8 @@ export class SessionService {
                 },
               });
             }
+          } finally {
+            this.releaseAdmissionReservation(claimedDailyWake.admissionReservation);
           }
         }
       }
@@ -6161,16 +6189,18 @@ export class SessionService {
   // Runs after the occurrence claim: a denial before it would leave the wake
   // due and retry every tick. An unexpected check failure denies only this
   // record: rethrowing would abort the wake loop for every later session.
-  private wakeAdmissionDenial(sessionId: string): WakeAdmissionDenial | null {
+  private claimWakeAdmission(sessionId: string): WakeAdmissionClaim {
     const current = readSession(this.config.dataDir, sessionId);
-    if (!current || !wakeRelaunchNeedsAdmission(current)) return null;
+    if (!current || !wakeRelaunchNeedsAdmission(current)) return {};
     try {
-      this.assertAdmissible(current.project, "wake");
-      return null;
+      return { reservation: this.reserveAdmission(current.project, "wake") };
     } catch (error) {
-      if (error instanceof SessionAdmissionDeniedError) return { kind: "denied", error };
+      if (error instanceof SessionAdmissionDeniedError)
+        return { denial: { kind: "denied", error } };
       const message = error instanceof Error ? error.message : String(error);
-      return { kind: "check_failed", error: new Error(`admission check failed: ${message}`) };
+      return {
+        denial: { kind: "check_failed", error: new Error(`admission check failed: ${message}`) },
+      };
     }
   }
 
@@ -6180,9 +6210,8 @@ export class SessionService {
     session: SessionRecord,
     intervalWake: SessionIntervalWakeState,
     nextDueAt: string,
-  ): boolean {
-    const denial = this.wakeAdmissionDenial(session.id);
-    if (!denial) return false;
+    denial: WakeAdmissionDenial,
+  ): void {
     this.logEvent("session.wake.interval_deferred", {
       level: wakeAdmissionLogLevel(denial),
       sessionId: session.id,
@@ -6194,7 +6223,6 @@ export class SessionService {
         reason: wakeAdmissionReason(denial),
       },
     });
-    return true;
   }
 
   // Denied daily occurrence retries every DAILY_WAKE_ADMISSION_RETRY_MS until
@@ -7805,8 +7833,8 @@ export class SessionService {
   // runDashboardCacheTick owns their pruning.
   private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
     this.codexRateLimitPoller.prune(liveIds);
-    for (const sessionId of this.scheduledWakeClaims.keys()) {
-      if (!liveIds.has(sessionId)) this.scheduledWakeClaims.delete(sessionId);
+    for (const [sessionId, claim] of this.scheduledWakeClaims) {
+      if (!liveIds.has(sessionId)) this.releaseScheduledWakeClaim(claim);
     }
     for (const sessionId of this.scheduledWakeLastFailure.keys()) {
       if (!liveIds.has(sessionId)) this.scheduledWakeLastFailure.delete(sessionId);
@@ -12226,6 +12254,12 @@ export class SessionService {
   }
 
   async restoreRebootedSessions(drifted: SessionObservation[]): Promise<void> {
+    const loopOwnedLifecycle = new Map<string, SessionLifecycleSnapshot>();
+    const rememberRestoreReceipt = (receipt: SessionLifecycleSnapshot | undefined): void => {
+      const operation = receipt?.operation;
+      if (operation?.action !== "restore" || operation.phase === "pending") return;
+      for (const id of operation.targetIds) loopOwnedLifecycle.set(id, receipt);
+    };
     for (const [index, { record, lifecycle }] of drifted.entries()) {
       const { id, project } = record;
       const projectConfig = this.config.projects[project];
@@ -12250,6 +12284,16 @@ export class SessionService {
         break;
       }
       const current = readSession(this.config.dataDir, id);
+      const fencedLifecycleIds = lifecycle.flatMap(({ id: ownerId, snapshot }) => {
+        const expected = loopOwnedLifecycle.get(ownerId) ?? snapshot;
+        const latest = this.lifecycle.snapshot(ownerId);
+        return snapshot.operation?.phase === "pending" ||
+          latest.operation?.phase === "pending" ||
+          latest.instanceId !== expected.instanceId ||
+          latest.revision !== expected.revision
+          ? [ownerId]
+          : [];
+      });
       if (
         !current ||
         !sameSessionRuntimeOwner(current, record) ||
@@ -12258,23 +12302,27 @@ export class SessionService {
         current.error !== record.error ||
         current.errorSource !== record.errorSource ||
         current.serverErrorAt !== record.serverErrorAt ||
-        lifecycle.some(({ id: ownerId, snapshot }) => {
-          const latest = this.lifecycle.snapshot(ownerId);
-          return (
-            snapshot.operation?.phase === "pending" ||
-            latest.operation?.phase === "pending" ||
-            latest.instanceId !== snapshot.instanceId ||
-            latest.revision !== snapshot.revision
-          );
-        })
-      )
+        fencedLifecycleIds.length > 0
+      ) {
+        if (fencedLifecycleIds.length > 0) {
+          this.logEvent("session.reboot.restore.aborted", {
+            level: "warn",
+            sessionId: id,
+            projectId: project,
+            message: `Reboot restore skipped for ${id}: lifecycle ownership changed`,
+            details: { reason: "lifecycle_changed", lifecycleIds: fencedLifecycleIds },
+          });
+        }
         continue;
+      }
       try {
-        await this.restore(id);
+        const restored = await this.restore(id);
+        rememberRestoreReceipt(restored.lifecycle);
         if (memory !== null) {
           await sleep(RESTORE_SETTLE_MS);
         }
       } catch (error) {
+        rememberRestoreReceipt(lifecycleErrorReceipt(error));
         const message = error instanceof Error ? error.message : String(error);
         this.logEvent("session.reboot.restore.failed", {
           level: "warn",
@@ -15276,7 +15324,8 @@ export class SessionService {
     }
     writeSession(this.config.dataDir, updated);
     if (request.target === "scheduled") {
-      this.scheduledWakeClaims.delete(sessionId);
+      const claim = this.scheduledWakeClaims.get(sessionId);
+      if (claim) this.releaseScheduledWakeClaim(claim);
       this.scheduledWakeLastFailure.delete(sessionId);
     }
     return this.enrich(updated);
@@ -15371,8 +15420,16 @@ export class SessionService {
         this.lifecycle.snapshot(session.id).operation?.phase === "pending"
       )
         return null;
+      const previousClaim = this.scheduledWakeClaims.get(session.id);
+      const previousReservation = previousClaim?.admissionReservation;
+      let admissionReservation = previousReservation;
       if (isStaleParked(current) || current.stopReason === "memory_shed") {
-        this.assertWakeAdmissible(current, manual ? undefined : wake);
+        admissionReservation = this.checkWakeAdmission(
+          current,
+          manual ? undefined : wake,
+          admissionReservation,
+          true,
+        );
       }
       const claim: ScheduledWakeClaim = {
         session: current,
@@ -15380,11 +15437,21 @@ export class SessionService {
         manual,
         revision: this.lifecycle.snapshot(session.id).revision,
         stage: "unattempted",
+        ...(admissionReservation ? { admissionReservation } : {}),
       };
       this.scheduledWakeClaims.set(session.id, claim);
-      if (manual) {
-        const { scheduledWake: _wake, ...base } = current;
-        writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+      if (previousClaim && previousReservation) {
+        previousClaim.admissionReservation = undefined;
+        if (!claim.admissionReservation) this.admissionReservations.delete(previousReservation);
+      }
+      try {
+        if (manual) {
+          const { scheduledWake: _wake, ...base } = current;
+          writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+        }
+      } catch (error) {
+        this.releaseScheduledWakeClaim(claim);
+        throw error;
       }
       return claim;
     });
@@ -15413,8 +15480,20 @@ export class SessionService {
   }
 
   private releaseScheduledWakeClaim(claim: ScheduledWakeClaim): void {
-    if (this.scheduledWakeClaims.get(claim.session.id) === claim)
+    if (this.scheduledWakeClaims.get(claim.session.id) === claim) {
       this.scheduledWakeClaims.delete(claim.session.id);
+      this.releaseScheduledWakeAdmission(claim);
+    }
+  }
+
+  private releaseScheduledWakeAdmission(claim: ScheduledWakeClaim): void {
+    if (!claim.admissionReservation) return;
+    this.releaseAdmissionReservation(claim.admissionReservation);
+    claim.admissionReservation = undefined;
+  }
+
+  private releaseAdmissionReservation(reservation?: symbol): void {
+    if (reservation) this.admissionReservations.delete(reservation);
   }
 
   private logScheduledWakeFailure(
@@ -15436,12 +15515,20 @@ export class SessionService {
     });
   }
 
-  private assertWakeAdmissible(
+  private checkWakeAdmission(
     session: SessionRecord,
     scheduledWake?: NonNullable<SessionRecord["scheduledWake"]>,
-  ): void {
+    admissionReservation?: symbol,
+    reserve = false,
+  ): symbol | undefined {
     try {
+      if (admissionReservation) {
+        this.assertAdmissible(session.project, "wake", { admissionReservation });
+        return admissionReservation;
+      }
+      if (reserve) return this.reserveAdmission(session.project, "wake");
       this.assertAdmissible(session.project, "wake");
+      return undefined;
     } catch (error) {
       // Record the actual refusal before releasing ownership to a replacement.
       if (scheduledWake && error instanceof SessionAdmissionDeniedError)
@@ -15713,7 +15800,8 @@ export class SessionService {
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, updated);
-    this.scheduledWakeClaims.delete(sessionId);
+    const claim = this.scheduledWakeClaims.get(sessionId);
+    if (claim) this.releaseScheduledWakeClaim(claim);
     this.scheduledWakeLastFailure.delete(sessionId);
     this.logEvent("session.wake.scheduled", {
       level: "info",
@@ -16251,12 +16339,33 @@ export class SessionService {
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
+    return this.sendAndWait(sessionId, request);
+  }
+
+  private async sendScheduledWake(
+    sessionId: string,
+    request: SendMessageRequest,
+    wakeAdmissionReservation?: symbol,
+  ): Promise<SessionView> {
+    return this.sendAndWait(sessionId, request, wakeAdmissionReservation);
+  }
+
+  private async sendAndWait(
+    sessionId: string,
+    request: SendMessageRequest,
+    wakeAdmissionReservation?: symbol,
+  ): Promise<SessionView> {
     const appended =
       request.queue !== false ? this.appendBehindTypingDelivery(sessionId, request) : null;
     if (appended) {
       return this.enrich(appended);
     }
-    const sent = await this.sendWithAttempt(sessionId, request);
+    const sent = await this.sendWithAttempt(
+      sessionId,
+      request,
+      undefined,
+      wakeAdmissionReservation,
+    );
     // The typed marker also covers an attempt that wrote before registration.
     const { view, paneWrite } = {
       view: sent.view,
@@ -16301,6 +16410,7 @@ export class SessionService {
     sessionId: string,
     request: SendMessageRequest,
     wakeClaim?: ScheduledWakeClaim,
+    wakeAdmissionReservation?: symbol,
   ): Promise<{ view: SessionView; attempt: Promise<boolean> | null }> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -16354,6 +16464,7 @@ export class SessionService {
       await this.ensureReadyForQueuedSend(sessionId, activationStamp, {
         ...(operation ? { operation } : {}),
         ...(wakeClaim ? { wakeClaim } : {}),
+        ...(wakeAdmissionReservation ? { wakeAdmissionReservation } : {}),
       });
     } finally {
       operation?.dispose();
@@ -20094,9 +20205,10 @@ export class SessionService {
       isStaleParked(session) ||
       (session.status === "stopped" && session.stopReason === "memory_shed")
     ) {
-      this.assertWakeAdmissible(
+      this.checkWakeAdmission(
         session,
         options?.wakeClaim && !options.wakeClaim.manual ? options.wakeClaim.wake : undefined,
+        options?.wakeClaim?.admissionReservation,
       );
     }
 
@@ -20135,8 +20247,13 @@ export class SessionService {
       this.restoreWarmupUntil.delete(session.id);
       this.launchesInFlight.delete(session.id);
     }
-    operation?.assertActive();
-    recovered.session = this.writeRecoverySession(recovered.session, options?.wakeClaim, options);
+    try {
+      operation?.assertActive();
+      recovered.session = this.writeRecoverySession(recovered.session, options?.wakeClaim, options);
+    } finally {
+      if (options?.wakeClaim) this.releaseScheduledWakeAdmission(options.wakeClaim);
+      this.releaseAdmissionReservation(options?.wakeAdmissionReservation);
+    }
     // After the running record is on disk: a project sidecar can take tens of
     // seconds to come up, and the reaper's running|spawning filter must cover
     // that whole window without relying on the warmup cleared just above.
@@ -23838,7 +23955,7 @@ export class SessionService {
 
   private reserveAdmission(
     projectId: string,
-    context: "spawn" | "restore",
+    context: "spawn" | "restore" | "wake",
     opts?: { replacingSessionId?: string },
   ): symbol {
     this.assertAdmissible(projectId, context, opts);
