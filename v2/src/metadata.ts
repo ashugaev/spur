@@ -55,7 +55,7 @@ import { normalizePreflightTotals } from "./preflight-usage-store.js";
 import { parseArtifactRelativePath } from "./session-artifacts.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 
-function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
+export function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
 }
 

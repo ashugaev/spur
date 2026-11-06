@@ -102,6 +102,7 @@ import { useBackendConnection } from "@/lib/backend-connection-context";
 import { useVersionSwitch } from "@/lib/version-switch-context";
 import { useTagCatalog } from "@/hooks/useTagCatalog";
 import { CronJobsModal } from "@/components/CronJobsModal";
+import { UsageModal } from "@/components/UsageModal";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
@@ -1214,6 +1215,7 @@ export function Dashboard() {
   const [prReadyOnly, setPrReadyOnly] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [cronOpen, setCronOpen] = useState(false);
+  const [usageOpen, setUsageOpen] = useState(false);
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
     const stored = window.localStorage.getItem(TAG_FILTERS_STORAGE_KEY);
@@ -2949,6 +2951,7 @@ export function Dashboard() {
             projects={filterProjectOptions}
           />
         ) : null}
+        {usageOpen ? <UsageModal onClose={() => setUsageOpen(false)} /> : null}
         {filtersOpen ? (
           <FiltersModal
             activeFilterCount={activeFilterCount}
@@ -3367,7 +3370,7 @@ export function Dashboard() {
           ) : null}
         </main>
         <ToastViewport toasts={toasts} onDismiss={dismissToast} />
-        <StatusBar onOpenCron={() => setCronOpen(true)} />
+        <StatusBar onOpenCron={() => setCronOpen(true)} onOpenUsage={() => setUsageOpen(true)} />
       </div>
     </TagsContext.Provider>
   );
