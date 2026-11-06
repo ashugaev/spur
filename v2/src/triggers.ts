@@ -752,8 +752,23 @@ async function findTaggedWorkItemSession(
     for (const sessionId of erroredIds) {
       if (!ctx.controllerCurrent()) return undefined;
       try {
-        await service.discardFailedSpawn(sessionId);
+        const discarded = await service.discardFailedSpawn(sessionId);
         if (!ctx.controllerCurrent()) return undefined;
+        if (discarded === "declined") {
+          // A restore or relaunch took the errored session over during
+          // cleanup: it still stands for the block, so adopt it, or wait on it
+          // while its takeover is unresolved, instead of spawning a second.
+          // No spawn happens for this claim, so its attempt is refunded.
+          const view = await getWorkItemSessionIfPresent(service, sessionId);
+          if (!ctx.controllerCurrent()) return undefined;
+          if (!view) continue;
+          const outcome = classifyWorkItemOwner(view, readSession(ctx.dataDir, sessionId));
+          return {
+            sessionId,
+            outcome: outcome === "replace" ? "pending" : outcome,
+            accepted: true,
+          };
+        }
       } catch (error) {
         if (!ctx.controllerCurrent()) return undefined;
         const message = error instanceof Error ? error.message : String(error);

@@ -11940,9 +11940,10 @@ export class SessionService {
   // Cleans up what a hard spawn failure of a work-item trigger block left
   // behind before a replacement spawns: the session's own local branch (named
   // after its id, never reused) and the errored record. Untagged or non-errored
-  // records are not touched. The record is archived whatever the delete does,
-  // unless a restore took it over meanwhile.
-  async discardFailedSpawn(sessionId: string): Promise<void> {
+  // records are not touched ("skipped"). The record is archived whatever the
+  // delete does, unless a restore or relaunch took it over meanwhile
+  // ("declined"): its owner then still stands for the block.
+  async discardFailedSpawn(sessionId: string): Promise<"archived" | "skipped" | "declined"> {
     // launchCommand stays empty until the agent launches: a launched session
     // is not a never-started spawn leftover.
     const discardable = (current: SessionRecord | null): current is SessionRecord =>
@@ -11952,7 +11953,7 @@ export class SessionService {
       !current.spawnIntent &&
       current.launchCommand === "";
     const record = readSession(this.config.dataDir, sessionId);
-    if (!discardable(record)) return;
+    if (!discardable(record)) return "skipped";
     if (record.branch === record.id) {
       try {
         await deleteLocalBranch(this.getProject(record.project).path, record.branch);
@@ -11969,15 +11970,16 @@ export class SessionService {
     }
     // Branch cleanup awaits: revalidate under the lock restore takes before
     // the destructive archive.
-    await this.withSessionLifecycleLocks(this.lifecycleIdsFor(record), async () => {
+    return this.withSessionLifecycleLocks(this.lifecycleIdsFor(record), async () => {
       const current = readSession(this.config.dataDir, sessionId);
       if (
         !discardable(current) ||
         current.agentLaunchId !== record.agentLaunchId ||
         this.lifecycle.snapshot(sessionId).operation?.phase === "pending"
       )
-        return;
+        return "declined";
       archiveSessions(this.config.dataDir, [current]);
+      return "archived";
     });
   }
 

@@ -32,7 +32,7 @@ interface Fixture {
   dataDir: string;
   worktreeDir: string;
   logEvent: ReturnType<typeof vi.fn>;
-  discard(sessionId: string): Promise<void>;
+  discard(sessionId: string): Promise<"archived" | "skipped" | "declined">;
   // Runs between the eligibility read and the archive (branch cleanup start).
   duringCleanup(hook: () => void): void;
   setOperationPending(pending: boolean): void;
@@ -259,6 +259,94 @@ describe("discardFailedSpawn", () => {
     expect(await branches(f, "api-1")).toBe("");
     expect(readSession(f.dataDir, "api-1")).toBeNull();
     expect(existsSync(archivedPath(f, "api-1"))).toBe(true);
+  });
+
+  it("adopts a restored failed spawn instead of spawning a replacement", async () => {
+    const f = await createFixture();
+    const item = {
+      externalId: triggerOrigin.externalId,
+      url: "https://example.invalid/7",
+      number: 7,
+      title: "fixture",
+      repo: "acme/api",
+      autoComplete: false,
+      createdAt: new Date().toISOString(),
+    };
+    updateWorkItemMembers(f.dataDir, "api", "pr-watch", item, () => [
+      {
+        triggerId: "review",
+        blockIndex: 0,
+        state: "failed",
+        claimedAt: "2026-05-11T10:00:00.000Z",
+        nextRetryAt: "2026-05-11T10:45:00.000Z",
+        attempts: 1,
+        deferrals: 0,
+      },
+    ]);
+    await git(f.repoPath, "branch", "api-1");
+    writeSession(f.dataDir, erroredRecord("api-1"));
+    const restored = erroredRecord("api-1", {
+      status: "running",
+      launchCommand: "claude --resume",
+      agentLaunchId: "restore-launch",
+      agentSessionId: "restore-native",
+    });
+    delete restored.error;
+    f.duringCleanup(() => writeSession(f.dataDir, restored));
+    const get = vi.fn().mockImplementation(async (id: string) => {
+      const record = readSession(f.dataDir, id);
+      return {
+        ...record,
+        state: record?.status === "running" ? "working" : "error",
+        workspaceExists: true,
+      };
+    });
+    const spawn = vi.fn().mockResolvedValue({ id: "api-new" });
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: {
+        dataDir: f.dataDir,
+        projects: {
+          api: {
+            sources: { "pr-watch": { type: "github", query: "is:pr is:open" } },
+            triggers: {
+              review: {
+                source: "pr-watch",
+                event: "github:work_item.new",
+                spawn: { blocks: [{ prompt: "review {{url}}" }] },
+              },
+            },
+          },
+        },
+      } as never,
+      bus,
+      autoPing: new AutoPingService(f.dataDir),
+      sessionService: { get, spawn, discardFailedSpawn: f.discard } as never,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      bus.emit({
+        occurrenceId: "restored-during-discard",
+        projectId: "api",
+        sourceId: "pr-watch",
+        name: "github:work_item.new",
+        data: item,
+      });
+      await vi.waitFor(() =>
+        expect(
+          readWorkItemLifecycles(f.dataDir, "api", "pr-watch").get(item.externalId)?.members[0],
+        ).toMatchObject({ state: "running", sessionId: "api-1" }),
+      );
+      expect(
+        readWorkItemLifecycles(f.dataDir, "api", "pr-watch").get(item.externalId)?.members[0]
+          ?.attempts,
+      ).toBe(1);
+      expect(spawn).not.toHaveBeenCalled();
+      expect(readSession(f.dataDir, "api-1")).toMatchObject({ status: "running" });
+      expect(existsSync(archivedPath(f, "api-1"))).toBe(false);
+    } finally {
+      await controller.stop();
+    }
   });
 
   it("keeps a record a restore took over during branch cleanup", async () => {
