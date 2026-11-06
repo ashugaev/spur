@@ -29377,7 +29377,7 @@ describe("SessionService", () => {
       state: "waiting",
       updatedAt: new Date(startedAt - 1_000).toISOString(),
     });
-    const actualCodex = await vi.importActual<typeof CodexModule>("../../src/agents/codex.js");
+    const actualCodex = await vi.importActual<typeof codexModule>("../../src/agents/codex.js");
     readCodexRolloutStateMock.mockImplementation(actualCodex.readCodexRolloutState);
     const sessionsDir = join(TEST_DATA_DIR, "session-tools", "api-1", "codex-home", "sessions");
     mkdirSync(sessionsDir, { recursive: true });
@@ -29456,7 +29456,7 @@ describe("SessionService", () => {
       state: "waiting",
       updatedAt: new Date(observedAt - 1_000).toISOString(),
     });
-    const actualCodex = await vi.importActual<typeof CodexModule>("../../src/agents/codex.js");
+    const actualCodex = await vi.importActual<typeof codexModule>("../../src/agents/codex.js");
     readCodexRolloutStateMock.mockImplementation(actualCodex.readCodexRolloutState);
     const sessionsDir = join(TEST_DATA_DIR, "session-tools", "api-1", "codex-home", "sessions");
     mkdirSync(sessionsDir, { recursive: true });

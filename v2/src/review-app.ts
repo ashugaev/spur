@@ -516,6 +516,7 @@ async function transitionReview(
   };
   const announce = async () => {
     receipt.feedbackPublication = { status: "unconfirmed" };
+    const feedback = receipt.status === "APPROVED" ? undefined : receipt.feedback;
     try {
       await publishLaneState(app, {
         version: 1,
@@ -535,7 +536,7 @@ async function transitionReview(
         reviewId: receipt.reviewId,
         assessment:
           receipt.status !== "PENDING" && "assessment" in request ? request.assessment : null,
-        ...(receipt.status === "APPROVED" ? {} : { feedback: receipt.feedback }),
+        ...(feedback === undefined ? {} : { feedback }),
       });
       receipt.feedbackPublication = { status: "confirmed" };
     } catch (error) {

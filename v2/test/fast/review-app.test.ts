@@ -17,7 +17,7 @@ import {
   recoverReview,
   registerReviewApp,
 } from "../../src/review-app.js";
-import { publishLaneState } from "../../src/review-state.js";
+import { publishLaneState, stateBody } from "../../src/review-state.js";
 import { execFileAsync } from "../helpers/common.js";
 import { object, readJson } from "../../src/github-app.js";
 import { plan, capability, defect } from "./review-feedback.fixture.js";
@@ -392,6 +392,37 @@ test.each([
     ]),
   );
 });
+
+test.each([true, false])(
+  "announcement includes feedback only when prepared feedback exists: %s",
+  async (hasFeedback) => {
+    const f = await lifecycleFixture();
+    if (!hasFeedback) {
+      const prior = object(await readJson(f.request.receipt));
+      delete prior.preparedFeedback;
+      await writeFile(f.request.receipt, JSON.stringify(prior));
+    }
+    vi.mocked(publishLaneState)
+      .mockClear()
+      .mockImplementationOnce(async (_app, state) => {
+        stateBody(state);
+      });
+    const result = await publishReview(f.config, f.request, draft.session, f.transport);
+    const announced = vi.mocked(publishLaneState).mock.calls[0]?.[1];
+    if (!announced) throw new Error("missing announcement");
+    expect(announced.status).toBe("PENDING");
+    expect(Object.hasOwn(announced, "feedback")).toBe(hasFeedback);
+    expect(JSON.stringify(announced).includes('"feedback":')).toBe(hasFeedback);
+    if (hasFeedback) expect(announced.feedback).toEqual(plan);
+    expect(result.status).toBe(hasFeedback ? "APPROVED" : "BLOCKED");
+    expect(f.posts()).toBe(hasFeedback ? 1 : 0);
+    const completed = vi.mocked(publishLaneState).mock.calls.at(-1)?.[1];
+    if (!completed) throw new Error("missing final announcement");
+    expect(completed.status).toBe(result.status);
+    expect(Object.hasOwn(completed, "feedback")).toBe(!hasFeedback);
+    expect(JSON.stringify(completed).includes('"feedback":')).toBe(!hasFeedback);
+  },
+);
 
 test("superseded attempt cannot overwrite newer BLOCKED; new reviewed attempt can recover", async () => {
   const f = await lifecycleFixture();
