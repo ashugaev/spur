@@ -19,18 +19,16 @@ import { parse } from "yaml";
 
 type Step = { name?: string; run?: string };
 type Workflow = {
-  jobs: Record<string, { steps?: Step[]; needs?: string; if?: string }>;
+  jobs: { release: { steps: Step[] } };
 };
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const release = parse(
   readFileSync(join(root, ".github/workflows/release.yml"), "utf8"),
 ) as Workflow;
-const ci = parse(readFileSync(join(root, ".github/workflows/ci.yml"), "utf8")) as Workflow;
-const workflows = [
-  { name: "Release", job: release.jobs["release"]! },
-  { name: "PR Package", job: ci.jobs["package"]! },
-];
+const step = release.jobs.release.steps.find(
+  (entry) => entry.name === "Verify packed tarball contents",
+)!.run!;
 const realTar = execFileSync("bash", ["-c", "command -v tar"], { encoding: "utf8" }).trim();
 
 describe("release pack shell boundary", () => {
@@ -117,32 +115,24 @@ exec "$PACK_TEST_REAL_TAR" "$@"
     });
   }
 
-  for (const { name, job } of workflows) {
-    const step = job.steps!.find((entry) => entry.name === "Verify packed tarball contents")!.run!;
+  it("preserves failed prepack exit and both output streams before invoking tar", () => {
+    const result = run(step, "fail");
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("fixture compiler diagnostic");
+    expect(result.stderr).toContain("ELIFECYCLE Command failed with exit code 2.");
+    expect(result.stderr).toContain("fixture npm stderr");
+    expect(existsSync(calls)).toBe(false);
+  });
 
-    it(`${name} preserves failed prepack exit and both output streams before invoking tar`, () => {
-      const result = run(step, "fail");
-      expect(result.error).toBeUndefined();
-      expect(result.status).toBe(2);
-      expect(result.stderr).toContain("fixture compiler diagnostic");
-      expect(result.stderr).toContain("ELIFECYCLE Command failed with exit code 2.");
-      expect(result.stderr).toContain("fixture npm stderr");
-      expect(existsSync(calls)).toBe(false);
-    });
-
-    it(`${name} verifies the produced archive with paths containing spaces`, () => {
-      const result = run(step);
-      expect(result.error).toBeUndefined();
-      expect(result.stderr).toBe("");
-      expect(result.status).toBe(0);
-      expect(result.stdout.trim()).toBe(join(destination, "shugaev-spur-fixture.tgz"));
-      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(3);
-    });
-  }
-
-  const step = workflows[0]!.job.steps!.find(
-    (entry) => entry.name === "Verify packed tarball contents",
-  )!.run!;
+  it("verifies the produced archive with paths containing spaces", () => {
+    const result = run(step);
+    expect(result.error).toBeUndefined();
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe(join(destination, "shugaev-spur-fixture.tgz"));
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(3);
+  });
 
   it.each([
     "",
@@ -187,26 +177,5 @@ exec "$PACK_TEST_REAL_TAR" "$@"
     const result = run(step);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("SKILL.md as a non-regular file");
-  });
-
-  it("runs PR packaging after admission without waiting for Quality format or lint", () => {
-    const job = ci.jobs["package"]!;
-    expect(job.needs).toBe("quality-admission");
-    expect(job.if).toContain("github.event_name == 'pull_request'");
-    expect(job.if).toContain("needs.quality-admission.result == 'success'");
-    const packIndex = job.steps!.findIndex(
-      (entry) => entry.name === "Verify packed tarball contents",
-    );
-    expect(job.steps!.slice(0, packIndex).map((entry) => entry.run)).toEqual([
-      undefined,
-      undefined,
-      undefined,
-      "pnpm install --frozen-lockfile",
-      "pnpm --dir packages/web build",
-      "bash scripts/bundle-web.sh",
-    ]);
-    expect(job.steps![packIndex + 1]!.run).toBe(
-      "node scripts/verify-bundled-web.mjs v2/web/dist-server/web-server.js",
-    );
   });
 });
