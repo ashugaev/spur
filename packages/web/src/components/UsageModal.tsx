@@ -68,7 +68,7 @@ const TONE_FILL: Record<MeterTone, string> = {
   error: "bg-[var(--color-status-error)]",
 };
 
-const ACTION_CLASS = `uppercase ${SECONDARY_TEXT} outline-none transition underline-offset-2 hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-accent)] focus-visible:underline disabled:opacity-60`;
+const ACTION_CLASS = `uppercase ${SECONDARY_TEXT} outline-none transition underline-offset-2 hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-accent)] focus-visible:underline`;
 
 function SectionHeader({
   dot,
