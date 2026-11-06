@@ -6105,7 +6105,7 @@ export class SessionService {
                 this.deferDailyWakeForAdmission(session, dailyWake, claim, admission.denial, now);
                 return null;
               }
-              claim.admissionReservation = admission.reservation;
+              if (admission.reservation) claim.admissionReservation = admission.reservation;
               return claim;
             }
             return null;
@@ -12257,7 +12257,7 @@ export class SessionService {
     const loopOwnedLifecycle = new Map<string, SessionLifecycleSnapshot>();
     const rememberRestoreReceipt = (receipt: SessionLifecycleSnapshot | undefined): void => {
       const operation = receipt?.operation;
-      if (operation?.action !== "restore" || operation.phase === "pending") return;
+      if (!receipt || operation?.action !== "restore" || operation.phase === "pending") return;
       for (const id of operation.targetIds) loopOwnedLifecycle.set(id, receipt);
     };
     for (const [index, { record, lifecycle }] of drifted.entries()) {
@@ -15441,7 +15441,7 @@ export class SessionService {
       };
       this.scheduledWakeClaims.set(session.id, claim);
       if (previousClaim && previousReservation) {
-        previousClaim.admissionReservation = undefined;
+        delete previousClaim.admissionReservation;
         if (!claim.admissionReservation) this.admissionReservations.delete(previousReservation);
       }
       try {
@@ -15489,7 +15489,7 @@ export class SessionService {
   private releaseScheduledWakeAdmission(claim: ScheduledWakeClaim): void {
     if (!claim.admissionReservation) return;
     this.releaseAdmissionReservation(claim.admissionReservation);
-    claim.admissionReservation = undefined;
+    delete claim.admissionReservation;
   }
 
   private releaseAdmissionReservation(reservation?: symbol): void {
