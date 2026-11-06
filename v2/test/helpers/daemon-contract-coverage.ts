@@ -48,6 +48,36 @@ function routePatterns(expression: ts.Expression): string[] {
   return values;
 }
 
+function conjuncts(expression: ts.Expression): ts.Expression[] {
+  if (ts.isParenthesizedExpression(expression)) return conjuncts(expression.expression);
+  if (
+    ts.isBinaryExpression(expression) &&
+    expression.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+  )
+    return [...conjuncts(expression.left), ...conjuncts(expression.right)];
+  return [expression];
+}
+
+function methodAlternatives(expression: ts.Expression): string[] {
+  if (ts.isParenthesizedExpression(expression)) return methodAlternatives(expression.expression);
+  if (ts.isBinaryExpression(expression)) {
+    if (expression.operatorToken.kind === ts.SyntaxKind.BarBarToken)
+      return [...methodAlternatives(expression.left), ...methodAlternatives(expression.right)];
+    if (
+      expression.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken &&
+      ts.isIdentifier(expression.left) &&
+      expression.left.text === "method" &&
+      ts.isStringLiteral(expression.right)
+    ) {
+      const method = expression.right.text;
+      if (!["GET", "POST", "PATCH", "DELETE"].includes(method))
+        throw new Error(`Unknown HTTP method: ${method}`);
+      return [method];
+    }
+  }
+  throw new Error(`Unknown method predicate: ${expression.getText()}`);
+}
+
 export function inventoryDaemonRoutes(source: string): string[] {
   const file = sourceFile(source);
   let handler: ts.ArrowFunction | undefined;
@@ -70,11 +100,29 @@ export function inventoryDaemonRoutes(source: string): string[] {
     declarations.set(node.name.text, patterns);
   });
   const routes: string[] = [];
-  walk(handler, (node) => {
-    if (!ts.isIfStatement(node)) return;
-    let method: string | undefined;
+  function inventory(node: ts.Node, activeMethods?: ReadonlySet<string>): void {
+    if (!ts.isIfStatement(node)) {
+      ts.forEachChild(node, (child) => inventory(child, activeMethods));
+      return;
+    }
+    const text = node.expression.getText(file);
+    if (text === "!request.method" || text === "method && path") {
+      ts.forEachChild(node, (child) => inventory(child, activeMethods));
+      return;
+    }
+    let methods: string[] = [];
     let literalPath: string | undefined;
     const references = new Set<string>();
+    for (const part of conjuncts(node.expression)) {
+      let usesMethod = false;
+      walk(part, (child) => {
+        if (ts.isIdentifier(child) && child.text === "method") usesMethod = true;
+      });
+      if (usesMethod) {
+        if (methods.length) throw new Error(`Unknown method predicate: ${text}`);
+        methods = methodAlternatives(part);
+      }
+    }
     walk(node.expression, (part) => {
       if (ts.isIdentifier(part) && declarations.has(part.text)) references.add(part.text);
       if (
@@ -83,35 +131,34 @@ export function inventoryDaemonRoutes(source: string): string[] {
       )
         return;
       if (ts.isIdentifier(part.left) && ts.isStringLiteral(part.right)) {
-        if (part.left.text === "method") method = part.right.text;
         if (part.left.text === "path") literalPath = part.right.text;
       }
     });
-    if (!method) {
-      // An unfamiliar comparison involving method cannot silently evade the inventory.
-      if (
-        /\bmethod\b/.test(node.expression.getText(file)) &&
-        node.expression.getText(file) !== "!request.method" &&
-        node.expression.getText(file) !== "method && path"
-      ) {
-        throw new Error(`Unknown method predicate: ${node.expression.getText(file)}`);
-      }
+    if (methods.length === 0) {
+      ts.forEachChild(node, (child) => inventory(child, activeMethods));
       return;
     }
-    if (!["GET", "POST", "PATCH", "DELETE"].includes(method))
-      throw new Error(`Unknown HTTP method: ${method}`);
+    if (activeMethods) {
+      if (methodAlternatives(node.expression).some((method) => !activeMethods.has(method)))
+        throw new Error(`Unknown nested dispatch predicate: ${text}`);
+      ts.forEachChild(node, (child) => inventory(child, activeMethods));
+      return;
+    }
     if (literalPath) {
       if (references.size) throw new Error("Mixed literal/regex route requires contract review");
-      routes.push(`${method} ${literalPath}`);
+      for (const method of methods) routes.push(`${method} ${literalPath}`);
     } else {
       if (references.size !== 1)
         throw new Error(`Unknown dispatch predicate: ${node.expression.getText(file)}`);
       const name = references.values().next().value;
       const patterns = name === undefined ? undefined : declarations.get(name);
       if (!patterns) throw new Error("Missing route declaration");
-      for (const path of patterns) routes.push(`${method} ${path}`);
+      for (const method of methods) for (const path of patterns) routes.push(`${method} ${path}`);
     }
-  });
+    inventory(node.thenStatement, new Set(methods));
+    if (node.elseStatement) inventory(node.elseStatement);
+  }
+  inventory(handler);
   if (new Set(routes).size !== routes.length)
     throw new Error("Duplicate daemon routes require contract review");
   return routes.sort();

@@ -625,6 +625,9 @@ describe("Dashboard project create/delete", () => {
       if (url.startsWith("/api/projects/api/spawn-defaults")) {
         return new Response(JSON.stringify({ model: "sonnet", worktree: false }));
       }
+      if (url.endsWith("/preflight-batches")) {
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
+      }
       if (url === "/api/spawn") {
         spawnInit = init;
         return new Response(
@@ -779,6 +782,9 @@ describe("Dashboard project create/delete", () => {
       }
       if (url.startsWith("/api/projects/api/spawn-defaults")) {
         return new Response(JSON.stringify({ error: "daemon unreachable" }), { status: 502 });
+      }
+      if (url.endsWith("/preflight-batches")) {
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
       }
       if (url === "/api/spawn") {
         spawnInit = init;
@@ -1046,6 +1052,9 @@ describe("Dashboard project create/delete", () => {
       if (url.startsWith("/api/projects/api/spawn-defaults")) {
         return new Response(JSON.stringify({ error: "daemon unreachable" }), { status: 502 });
       }
+      if (url.endsWith("/preflight-batches")) {
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
+      }
       if (url === "/api/spawn") {
         spawnInit = init;
         return new Response(
@@ -1158,6 +1167,9 @@ describe("Dashboard project create/delete", () => {
         return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
       }
       if (url.startsWith("/api/projects/api/spawn-defaults")) return pendingSpawnDefaults;
+      if (url.endsWith("/preflight-batches")) {
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
+      }
       if (url === "/api/spawn") {
         spawnInit = init;
         return new Response(
@@ -1357,6 +1369,9 @@ describe("Dashboard project create/delete", () => {
       if (url.startsWith("/api/projects/web/spawn-defaults")) {
         return new Response(JSON.stringify({ model: null, worktree: false }));
       }
+      if (url.endsWith("/preflight-batches")) {
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
+      }
       if (url === "/api/spawn") {
         spawnInit = init;
         return new Response(
@@ -1492,6 +1507,9 @@ describe("Dashboard project create/delete", () => {
       }
       if (url.startsWith("/api/projects/web/spawn-defaults")) {
         return new Response(JSON.stringify({ model: null, worktree: false }));
+      }
+      if (url.endsWith("/preflight-batches")) {
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
       }
       if (url === "/api/spawn") {
         spawnInit = init;
@@ -1682,6 +1700,9 @@ describe("Dashboard project create/delete", () => {
       if (url.startsWith("/api/projects/web/spawn-defaults")) {
         return new Response(JSON.stringify({ model: null, worktree: false }));
       }
+      if (url.endsWith("/preflight-batches")) {
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
+      }
       if (url === "/api/spawn") {
         spawnInit = init;
         return new Response(
@@ -1785,6 +1806,9 @@ describe("Dashboard project create/delete", () => {
       }
       if (url.startsWith("/api/projects/web/spawn-defaults")) {
         return new Response(JSON.stringify({ model: null, worktree: false }));
+      }
+      if (url.endsWith("/preflight-batches")) {
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
       }
       if (url === "/api/spawn") {
         spawnInit = init;

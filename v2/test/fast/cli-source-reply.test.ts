@@ -2,6 +2,7 @@ import { beforeAll, afterEach, beforeEach, describe, expect, it, vi } from "vite
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
 
 const postJsonMock = vi.fn();
 const getExistingJsonMock = vi.fn();
@@ -40,7 +41,8 @@ vi.mock("../../src/io.js", () => ({
   writeStdout: writeStdoutMock,
 }));
 
-vi.mock("../../src/runtime-tmux.js", () => ({
+vi.mock("../../src/runtime-tmux.js", async (importOriginal) => ({
+  TmuxProbeUnknownError: (await importOriginal<typeof RuntimeTmuxModule>()).TmuxProbeUnknownError,
   setTmuxSocketName: vi.fn(),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   withTmuxSocketArgs: vi.fn((args: string[]) => args),
@@ -221,6 +223,63 @@ describe("source reply CLI", () => {
 
     expect(writeStdoutMock.mock.calls.flat().join("")).toContain(
       "Sent telegram reply for api-1 with 2 button(s).",
+    );
+  });
+
+  it("posts repeated --image files as base64 with their base names next to the manifest", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "spur-image-cli-"));
+    const manifestPath = join(directory, "manifest.json");
+    const manifest = { version: 1, repository: "owner/repo", baseBranch: "main", surfaces: [] };
+    const first = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const second = Buffer.from([0xff, 0xd8, 0xff]);
+    try {
+      await writeFile(manifestPath, JSON.stringify(manifest));
+      await writeFile(join(directory, "a.png"), first);
+      await writeFile(join(directory, "b.jpg"), second);
+      await parseSourceReply([
+        "source",
+        "reply",
+        "Review",
+        "--image",
+        join(directory, "a.png"),
+        "--image",
+        join(directory, "b.jpg"),
+        "--request-interface-approval",
+        manifestPath,
+        "--json",
+      ]);
+      expect(postJsonMock).toHaveBeenCalledWith(
+        "/tmp/dist/cli.js",
+        "/sessions/api-1/source-reply",
+        {
+          message: "Review",
+          requestInterfaceApproval: manifest,
+          images: [
+            { name: "a.png", data: first.toString("base64") },
+            { name: "b.jpg", data: second.toString("base64") },
+          ],
+        },
+        "/tmp/spur.yaml",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails before posting when an --image file is missing", async () => {
+    await expect(
+      parseSourceReply(["source", "reply", "look", "--image", "/nonexistent/spur-shot.png"]),
+    ).rejects.toThrow("ENOENT");
+    expect(postJsonMock).not.toHaveBeenCalled();
+  });
+
+  it("reports the image count in the human-readable line", async () => {
+    postJsonMock.mockResolvedValue({ ...replyResponse(2), images: 3 });
+
+    await parseSourceReply(["source", "reply", "pick", "--button", "Yes", "--button", "No"]);
+
+    expect(writeStdoutMock.mock.calls.flat().join("")).toContain(
+      "Sent telegram reply for api-1 with 2 button(s) and 3 image(s).",
     );
   });
 });

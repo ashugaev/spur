@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ConsentRejectedError,
   decideConsent,
   parseConsent,
   presentConsent,
@@ -155,40 +156,79 @@ it("preserves first PR/task binding when renewal uses fresh source payload", () 
 });
 
 describe("semantic interface consent", () => {
-  it("presents before/after/constraints before PR exists", () => {
-    const record = proposal();
-    expect(presentConsent(record)).toContain("run accepts no flags");
-    expect(presentConsent(record)).toContain("run accepts --dry-run");
-    expect(presentConsent(record)).toContain("dry run creates no process");
+  it("presents before/after/constraints compactly before PR exists", () => {
+    const record = proposeConsent(
+      {
+        ...proposal(),
+        manifest: {
+          ...manifest,
+          surfaces: [
+            ...manifest.surfaces,
+            {
+              kind: "config" as const,
+              id: "retry",
+              before: [],
+              after: ["retry must be positive", "retry: 3"],
+              constraints: [],
+            },
+          ],
+        },
+      },
+      null,
+      1000,
+    );
+    expect(presentConsent(record)).toBe(
+      [
+        "**Interface approval** · owner/repo · feature/change → main",
+        "",
+        "**CLI: run**",
+        "Before: run accepts no flags",
+        "After: run accepts --dry-run",
+        "Constraints: dry run creates no process",
+        "",
+        "**config: retry**",
+        "After: retry must be positive; retry: 3",
+      ].join("\n"),
+    );
+    expect(presentConsent(record)).not.toContain("none");
     expect(record.decision).toBe("pending");
   });
-  it.each(["actor", "chatId", "sourceId", "projectId", "session", "challenge"] as const)(
-    "rejects wrong %s",
-    (field) => {
-      const record = { ...proposal(), delivery: "sent" as const };
-      expect(() =>
-        decideConsent(
-          record,
-          {
-            ...click(record.challenge),
-            [field]: typeof click(record.challenge)[field] === "number" ? 99 : "other",
-          },
-          2000,
-        ),
-      ).toThrow();
-    },
-  );
+  it.each([
+    ["actor", "not-approver"],
+    ["chatId", "binding-mismatch"],
+    ["sourceId", "binding-mismatch"],
+    ["projectId", "binding-mismatch"],
+    ["session", "binding-mismatch"],
+    ["challenge", "superseded"],
+  ] as const)("rejects wrong %s as %s", (field, reason) => {
+    const record = { ...proposal(), delivery: "sent" as const };
+    const reject = () =>
+      decideConsent(
+        record,
+        {
+          ...click(record.challenge),
+          [field]: typeof click(record.challenge)[field] === "number" ? 99 : "other",
+        },
+        2000,
+      );
+    expect(reject).toThrow(ConsentRejectedError);
+    expect(reject).toThrow(expect.objectContaining({ reason }));
+  });
   it("rejects delivery failure, expiry and replay", () => {
     const record = proposal();
-    expect(() => decideConsent(record, click(record.challenge), 2000)).toThrow();
+    expect(() => decideConsent(record, click(record.challenge), 2000)).toThrow(
+      expect.objectContaining({ reason: "not-delivered" }),
+    );
     const sent = { ...record, delivery: "sent" as const };
     expect(() =>
       decideConsent(sent, click(record.challenge), Date.parse(record.expiresAt)),
-    ).toThrow();
+    ).toThrow(expect.objectContaining({ reason: "expired" }));
     const approved = decideConsent(sent, click(record.challenge), 2000);
     expect(approved.decision).toBe("approved");
     expect(approved.outbox).toBe("pending");
-    expect(() => decideConsent(approved, click(record.challenge), 2001)).toThrow();
+    expect(() => decideConsent(approved, click(record.challenge), 2001)).toThrow(
+      expect.objectContaining({ reason: "decided" }),
+    );
     expect(parseConsent(JSON.parse(JSON.stringify(approved)))).toEqual(approved);
   });
   it("renews nonce/generation and rejects tampered semantic records", () => {

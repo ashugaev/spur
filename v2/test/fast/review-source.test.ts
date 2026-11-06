@@ -12,6 +12,11 @@ const readReviewSourceSnapshotsMock = vi.fn();
 const writeReviewSourceSnapshotMock = vi.fn();
 const deleteReviewSourceSnapshotMock = vi.fn();
 const collectSignalsMock = vi.fn();
+const logSpurEventMock = vi.fn();
+
+vi.mock("../../src/event-log.js", () => ({
+  logSpurEvent: logSpurEventMock,
+}));
 
 vi.mock("../../src/metadata.js", () => ({
   listSessions: listSessionsMock,
@@ -320,5 +325,220 @@ describe("createReviewSourceModule (generic review source)", () => {
       }),
     );
     handle.stop();
+  });
+});
+
+describe("review source poll cycle failure", () => {
+  const REAL_INTERVAL_MS = 20;
+  const SLOW_INTERVAL_MS = 60_000;
+  const logger = { info: vi.fn(), warn: vi.fn() };
+  const unhandled = vi.fn();
+  const uncaught = vi.fn();
+
+  // listSessions is first called by poll(), so `healthyCalls` polls return [] before
+  // `failures` consecutive throws.
+  function scripted(healthyCalls: number, failures: number): () => number {
+    let calls = 0;
+    listSessionsMock.mockImplementation(() => {
+      calls += 1;
+      if (calls > healthyCalls && calls <= healthyCalls + failures) {
+        throw new Error("EACCES: permission denied, scandir");
+      }
+      return [];
+    });
+    return () => calls;
+  }
+
+  async function waitForCalls(calls: () => number, target: number): Promise<void> {
+    for (let waited = 0; calls() < target; waited += 10) {
+      if (waited >= 4000) throw new Error(`timed out at ${calls()} of ${target} calls`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  function startSource(
+    config: { intervalMs: number; runOnStart: boolean },
+    deferInitialSync?: boolean,
+  ) {
+    return createReviewSourceModule("gitlab").start({
+      sourceId: "mr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "gitlab", emitExisting: false, ...config },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      ...(deferInitialSync === undefined ? {} : { deferInitialSync }),
+    });
+  }
+
+  function cycleWarns(): number {
+    return logger.warn.mock.calls.filter(([line]) => String(line).includes("poll cycle failed"))
+      .length;
+  }
+
+  function cycleEvents(): number {
+    return logSpurEventMock.mock.calls.filter(
+      ([, entry]) => entry.event === "source.poll_cycle.error",
+    ).length;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    process.on("unhandledRejection", unhandled);
+    process.on("uncaughtException", uncaught);
+  });
+
+  afterEach(() => {
+    listSessionsMock.mockReset();
+    process.removeListener("unhandledRejection", unhandled);
+    process.removeListener("uncaughtException", uncaught);
+  });
+
+  it("logs once per failed interval tick and polls again after recovery", async () => {
+    // 1: awaited initial poll, 2-3: failing ticks, 4+: recovered.
+    const calls = scripted(1, 2);
+    const handle = await startSource({ intervalMs: REAL_INTERVAL_MS, runOnStart: false });
+    await waitForCalls(calls, 4);
+    handle.stop();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    expect(cycleWarns()).toBe(2);
+    expect(cycleEvents()).toBe(2);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "source.poll_cycle.error",
+        level: "error",
+        projectId: "api",
+        sourceId: "mr-watch",
+      }),
+    );
+    expect(unhandled).not.toHaveBeenCalled();
+    expect(uncaught).not.toHaveBeenCalled();
+  });
+
+  it("logs once when a deferred initial poll fails and start still resolves", async () => {
+    scripted(0, 1);
+    const handle = await startSource({ intervalMs: SLOW_INTERVAL_MS, runOnStart: false }, true);
+    await flushPollCycle();
+    await flushPollCycle();
+    handle.stop();
+
+    expect(cycleWarns()).toBe(1);
+    expect(cycleEvents()).toBe(1);
+    expect(unhandled).not.toHaveBeenCalled();
+    expect(uncaught).not.toHaveBeenCalled();
+  });
+
+  it("logs once when a runOnStart poll fails", async () => {
+    scripted(0, 1);
+    const handle = await startSource({ intervalMs: SLOW_INTERVAL_MS, runOnStart: true });
+    expect(cycleWarns()).toBe(0);
+    handle.runOnStart?.();
+    await flushPollCycle();
+    await flushPollCycle();
+    handle.stop();
+
+    expect(cycleWarns()).toBe(1);
+    expect(cycleEvents()).toBe(1);
+    expect(unhandled).not.toHaveBeenCalled();
+    expect(uncaught).not.toHaveBeenCalled();
+  });
+
+  it("still rejects start when the awaited initial poll fails", async () => {
+    scripted(0, 1);
+    await expect(
+      startSource({ intervalMs: SLOW_INTERVAL_MS, runOnStart: false }, false),
+    ).rejects.toThrow(/EACCES/);
+    expect(cycleWarns()).toBe(0);
+    expect(cycleEvents()).toBe(0);
+  });
+});
+
+describe("review source merge_conflict hold on unknown base tip", () => {
+  const conflict = (revision: string): ReviewSignal => ({
+    key: "merge_conflict",
+    kind: "merge_conflict",
+    text: "Merge conflicts are blocking this merge request.",
+    changeKey: revision,
+    revision,
+  });
+  const poll = (revision: string, baseUnknown = false) => ({
+    ...collected(42, [conflict(revision)]),
+    ...(baseUnknown ? { conflictHead: revision.split(":")[0] } : {}),
+  });
+
+  async function run(stored: ReviewSignal[], polls: ReturnType<typeof poll>[]): Promise<string[]> {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-1", storedSnapshot(stored)]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    let index = 0;
+    collectSignalsMock.mockImplementation(async () => polls[Math.min(index++, polls.length - 1)]);
+    const emit = vi.fn();
+    const handle = await createReviewSourceModule("gitlab").start({
+      sourceId: "mr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "gitlab", intervalMs: 10, runOnStart: false, emitExisting: false },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+    });
+    for (let waited = 0; index < polls.length + 1; waited += 10) {
+      if (waited >= 4000) throw new Error(`timed out at poll ${index}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    handle.stop();
+    return emit.mock.calls
+      .filter(([event]) => event === "gitlab:merge_conflict")
+      .map(([, data]) => (data as ReviewEventData).signals[0]?.changeKey ?? "");
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    collectSignalsMock.mockReset();
+  });
+
+  it("holds the tip key through a failed lookup for the same head: one ping", async () => {
+    const pings = await run(
+      [],
+      [poll("head-1:tip-1"), poll("head-1:merge-base", true), poll("head-1:tip-1")],
+    );
+    expect(pings).toEqual(["head-1:tip-1"]);
+  });
+
+  it("uses the fallback key when no prior conflict key exists", async () => {
+    const pings = await run([], [poll("head-1:merge-base", true)]);
+    expect(pings).toEqual(["head-1:merge-base"]);
+  });
+
+  it("uses the fallback key once after a head change", async () => {
+    const pings = await run(
+      [conflict("head-1:tip-1")],
+      [poll("head-2:merge-base", true), poll("head-2:merge-base", true)],
+    );
+    expect(pings).toEqual(["head-2:merge-base"]);
+  });
+
+  it("holds the prior key when the lookup fails without diff_refs for the same head", async () => {
+    const pings = await run(
+      [conflict("head-1:tip-1")],
+      [poll("head-1:", true), poll("head-1:", true), poll("head-1:tip-1")],
+    );
+    expect(pings).toEqual([]);
+  });
+
+  it("pings the head-only key once after a head change without diff_refs", async () => {
+    const pings = await run(
+      [conflict("head-1:tip-1")],
+      [poll("head-2:", true), poll("head-2:", true)],
+    );
+    expect(pings).toEqual(["head-2:"]);
   });
 });

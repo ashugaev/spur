@@ -5,6 +5,7 @@ import type { ProviderTokenUsageSample } from "./token-usage.js";
 import { findLatestSessionFile, sessionFileForId } from "./agents/claude.js";
 import {
   CLAUDE_BOOKKEEPING_RECORD_TYPES,
+  CLAUDE_SESSION_META_RECORD_TYPES,
   detectClaudeRateLimit,
   parseRateLimitResetAtMs,
   type RateLimitDetection,
@@ -128,13 +129,18 @@ export function deriveClaudeLiveModel(records: ParsedRecord[]): string | undefin
 // Claude transcript tail. A trailing synthetic assistant record flagged
 // `error: "server_error"` means the session is wedged on a transient Claude
 // API failure (5xx or connection failure). Walks backwards skipping
-// CLAUDE_BOOKKEEPING_RECORD_TYPES — the same shape as detectClaudeRateLimit —
-// because Claude always appends a `system`/`file-history-snapshot` record
-// after the error, which would otherwise mask it.
+// CLAUDE_BOOKKEEPING_RECORD_TYPES and CLAUDE_SESSION_META_RECORD_TYPES — the
+// same shape as detectClaudeRateLimit — because Claude always appends a
+// `system`/`file-history-snapshot` record after the error, and may add
+// `cost-state`/`last-prompt` session metadata, which would otherwise mask it.
 export function hasTrailingClaudeServerError(records: readonly ParsedRecord[]): boolean {
   for (let i = records.length - 1; i >= 0; i--) {
     const record = records[i];
-    if (!record || CLAUDE_BOOKKEEPING_RECORD_TYPES.has(record.type)) {
+    if (
+      !record ||
+      CLAUDE_BOOKKEEPING_RECORD_TYPES.has(record.type) ||
+      CLAUDE_SESSION_META_RECORD_TYPES.has(record.type)
+    ) {
       continue;
     }
     return record.serverError === true;

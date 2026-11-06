@@ -39,6 +39,29 @@ export interface InterfaceConsent {
   boundPr?: { number: number; headRepository: string };
 }
 
+export type ConsentRejectReason =
+  | "not-delivered"
+  | "decided"
+  | "expired"
+  | "binding-mismatch"
+  | "not-approver"
+  | "superseded"
+  | "policy-unavailable"
+  | "policy-changed"
+  | "task-changed"
+  | "retired";
+
+/** A refused approval click; `reason` picks the text shown to the clicker. */
+export class ConsentRejectedError extends Error {
+  constructor(
+    readonly reason: ConsentRejectReason,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ConsentRejectedError";
+  }
+}
+
 export async function consentPolicy(
   allowedUsers: number[] | undefined,
 ): Promise<{ repositories: string[]; approverUserId: number }> {
@@ -127,18 +150,32 @@ export function decideConsent(
   },
   now = Date.now(),
 ): InterfaceConsent {
+  if (record.delivery !== "sent")
+    throw new ConsentRejectedError(
+      "not-delivered",
+      "Interface approval challenge was not delivered",
+    );
+  if (record.decision !== "pending")
+    throw new ConsentRejectedError("decided", "Interface approval challenge is already decided");
+  if (Date.parse(record.expiresAt) <= now)
+    throw new ConsentRejectedError("expired", "Interface approval challenge expired");
   if (
-    record.delivery !== "sent" ||
-    record.decision !== "pending" ||
-    Date.parse(record.expiresAt) <= now ||
     input.session !== record.session ||
     input.sourceId !== record.sourceId ||
     input.projectId !== record.projectId ||
-    input.chatId !== record.chatId ||
-    input.actor !== record.approverUserId ||
-    input.challenge !== record.challenge
+    input.chatId !== record.chatId
   )
-    throw new Error("Interface approval challenge is inactive or belongs to another actor/source");
+    throw new ConsentRejectedError(
+      "binding-mismatch",
+      "Interface approval challenge belongs to another session/source/chat",
+    );
+  if (input.actor !== record.approverUserId)
+    throw new ConsentRejectedError(
+      "not-approver",
+      "Interface approval challenge belongs to another actor",
+    );
+  if (input.challenge !== record.challenge)
+    throw new ConsentRejectedError("superseded", "Interface approval challenge was superseded");
   return {
     ...record,
     decision: input.decision,
@@ -147,16 +184,25 @@ export function decideConsent(
   };
 }
 
+/** Markdown approval text: bold header, one block per surface, empty clause lists omitted. */
 export function presentConsent(record: InterfaceConsent): string {
   return [
-    `Interface approval · ${record.repository} · ${record.branch} → ${record.baseBranch}`,
-    ...record.manifest.surfaces.flatMap((surface) => [
-      `${surface.kind}: ${surface.id}`,
-      `Before: ${surface.before.join("; ") || "none"}`,
-      `After: ${surface.after.join("; ") || "none"}`,
-      `Constraints: ${surface.constraints.join("; ") || "none"}`,
-    ]),
-  ].join("\n");
+    `**Interface approval** · ${record.repository} · ${record.branch} → ${record.baseBranch}`,
+    ...record.manifest.surfaces.map((surface) =>
+      [
+        `**${surface.kind}: ${surface.id}**`,
+        ...(
+          [
+            ["Before", surface.before],
+            ["After", surface.after],
+            ["Constraints", surface.constraints],
+          ] as const
+        )
+          .filter(([, clauses]) => clauses.length > 0)
+          .map(([label, clauses]) => `${label}: ${clauses.join("; ")}`),
+      ].join("\n"),
+    ),
+  ].join("\n\n");
 }
 
 export function parseConsent(value: unknown): InterfaceConsent {

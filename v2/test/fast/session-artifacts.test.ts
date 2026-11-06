@@ -1,17 +1,38 @@
-import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import type * as fs from "node:fs";
+import { type Mode, type PathLike, existsSync } from "node:fs";
+import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Simulates a dir owned by another uid: chmod fails with EPERM, so it stays locked.
+const chmodState = vi.hoisted(() => ({ lockedPath: null as string | null }));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof fs>();
+  return {
+    ...actual,
+    chmodSync: (path: PathLike, mode: Mode) => {
+      if (chmodState.lockedPath !== null && String(path) === chmodState.lockedPath) {
+        throw Object.assign(new Error(`EPERM: operation not permitted, chmod '${path}'`), {
+          code: "EPERM",
+        });
+      }
+      actual.chmodSync(path, mode);
+    },
+  };
+});
 import {
   MAX_NESTED_ARTIFACT_ROWS,
   deleteSessionArtifactById,
+  deleteSessionArtifactsDir,
   deleteSessionArtifactsExcept,
+  ensureSessionWorkDir,
   listSessionArtifacts,
   parseArtifactRelativePath,
   readSessionArtifact,
   setSessionArtifactOrigin,
   setSessionArtifactUserAdded,
   sessionArtifactsDir,
+  withSessionArtifactInstructions,
 } from "../../src/session-artifacts.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -305,6 +326,48 @@ describe("nested artifact listing", () => {
     expect(small.truncated).toBe(false);
     expect(small.artifacts).toHaveLength(10);
   });
+
+  it("never lists the agent work dir or charges it against nested budgets", async () => {
+    const dataDir = await newDataDir();
+    const sessionId = "api-work-1";
+    const dir = sessionArtifactsDir(dataDir, sessionId);
+    const workDir = ensureSessionWorkDir(dataDir, sessionId);
+    expect(workDir).toBe(join(dir, ".spur-work"));
+    expect(existsSync(workDir)).toBe(true);
+
+    await mkdir(join(workDir, "deep"), { recursive: true });
+    await mkdir(join(workDir, "bulk"), { recursive: true });
+    await mkdir(join(dir, "design"), { recursive: true });
+    await writeFile(join(workDir, "plan.md"), "plan", "utf8");
+    await writeFile(join(workDir, "deep", "notes.txt"), "notes", "utf8");
+    for (let index = 0; index < MAX_NESTED_ARTIFACT_ROWS + 1; index++) {
+      await writeFile(join(workDir, "bulk", `b-${index}.txt`), "x", "utf8");
+    }
+    await writeFile(join(dir, "shot.png"), "png", "utf8");
+    await writeFile(join(dir, "design", "design-spec.md"), "spec", "utf8");
+
+    const result = listSessionArtifacts(dataDir, sessionId);
+    const ids = result.artifacts.map((artifact) => artifact.id).sort();
+    expect(ids).toEqual(["design/design-spec.md", "shot.png"]);
+    expect(result.truncated).toBe(false);
+    expect(ids.some((id) => id.startsWith(".spur-work"))).toBe(false);
+  });
+});
+
+describe("session artifact instructions", () => {
+  it("tells agents artifacts are for human review and service files go to the work dir", () => {
+    const out = withSessionArtifactInstructions("Do X");
+    expect(out.startsWith("Do X\n\nSession artifacts:\n")).toBe(true);
+    expect(out).toContain("put only final files meant for user review there");
+    expect(out).toContain("`$SPUR_SESSION_WORK_DIR`");
+    expect(out).toContain("plans, drafts, specs, task memory, scratch logs");
+    expect(out).not.toContain("temporary session-owned files");
+  });
+
+  it("leaves a prompt that already references the artifacts dir unchanged", () => {
+    const input = "x $SPUR_SESSION_ARTIFACTS_DIR y";
+    expect(withSessionArtifactInstructions(input)).toBe(input);
+  });
 });
 
 describe("artifact id validation", () => {
@@ -386,6 +449,54 @@ describe("session artifact cleanup", () => {
   });
 });
 
+describe.skipIf(process.getuid?.() === 0)("session artifact cleanup with read-only dirs", () => {
+  async function seedReadOnlyTree(dataDir: string, sessionId: string): Promise<string> {
+    const dir = sessionArtifactsDir(dataDir, sessionId);
+    const cache = join(dir, "handoff", "back", ".pytest_cache");
+    await mkdir(join(cache, "v"), { recursive: true });
+    await writeFile(join(cache, ".gitignore"), "*\n", "utf8");
+    await writeFile(join(cache, "v", "lastfailed"), "{}", "utf8");
+    await writeFile(join(dir, "shot.png"), "png", "utf8");
+    await chmod(join(cache, "v"), 0o500);
+    await chmod(cache, 0o555);
+    return dir;
+  }
+
+  it("removes the whole dir despite a read-only nested dir (EACCES on unlink)", async () => {
+    const dataDir = await newDataDir();
+    const dir = await seedReadOnlyTree(dataDir, "ro-1");
+
+    expect(() => deleteSessionArtifactsDir(dataDir, "ro-1")).not.toThrow();
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it("removes non-kept files under a read-only nested dir", async () => {
+    const dataDir = await newDataDir();
+    const dir = await seedReadOnlyTree(dataDir, "ro-2");
+
+    expect(() => deleteSessionArtifactsExcept(dataDir, "ro-2", ["shot.png"])).not.toThrow();
+    expect(existsSync(join(dir, "shot.png"))).toBe(true);
+    expect(existsSync(join(dir, "handoff"))).toBe(false);
+  });
+
+  it("removes what it can and does not throw when a locked dir cannot be chmod'd", async () => {
+    const dataDir = await newDataDir();
+    const dir = await seedReadOnlyTree(dataDir, "ro-3");
+    const cache = join(dir, "handoff", "back", ".pytest_cache");
+    await writeFile(join(dir, "handoff", "back", "conftest.py"), "x", "utf8");
+    chmodState.lockedPath = cache;
+    try {
+      expect(() => deleteSessionArtifactsDir(dataDir, "ro-3")).not.toThrow();
+    } finally {
+      chmodState.lockedPath = null;
+      await chmod(cache, 0o755);
+    }
+    expect(existsSync(join(dir, "shot.png"))).toBe(false);
+    expect(existsSync(join(dir, "handoff", "back", "conftest.py"))).toBe(false);
+    expect(existsSync(join(cache, ".gitignore"))).toBe(true);
+  });
+});
+
 describe("deleteSessionArtifactById", () => {
   it("removes one file and its metadata entry, leaving siblings untouched", async () => {
     const dataDir = await newDataDir();
@@ -439,5 +550,25 @@ describe("deleteSessionArtifactById", () => {
 
     expect(deleteSessionArtifactById(dataDir, sessionId, "agent-history-link.jsonl")).toBe(false);
     expect(existsSync(join(dataDir, "secret.txt"))).toBe(true);
+  });
+});
+
+describe("withSessionArtifactInstructions snippet bullet", () => {
+  const SNIPPET_BULLET_PATH = "snippet.$SPUR_SESSION.<id>.html";
+
+  it("adds the interactive snippet bullet once, after the existing artifact bullets", () => {
+    const text = withSessionArtifactInstructions("Do the task.");
+    expect(text.startsWith("Do the task.\n\nSession artifacts:\n")).toBe(true);
+    expect(text.split(SNIPPET_BULLET_PATH)).toHaveLength(2);
+    expect(text.split("[spur-snippet-action v1]")).toHaveLength(2);
+    expect(text).toContain("https://raw.githubusercontent.com/ashugaev/spur/main/docs/snippets.md");
+    const lines = text.split("\n");
+    expect(lines[lines.length - 1]).toContain(SNIPPET_BULLET_PATH);
+    expect(lines.filter((line) => line.includes("snippet."))).toHaveLength(1);
+  });
+
+  it("is idempotent on a prompt that already carries the block", () => {
+    const once = withSessionArtifactInstructions("Do the task.");
+    expect(withSessionArtifactInstructions(once)).toBe(once);
   });
 });

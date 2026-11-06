@@ -1,6 +1,7 @@
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { URL } from "node:url";
 import {
   lifecycleErrorReceipt,
@@ -9,11 +10,23 @@ import {
   RestoreOperationError,
 } from "./session-lifecycle.js";
 import { parseAgentName } from "./agents/index.js";
-import { AgentReasoningEffortError, listAgentModelCatalog } from "./agents/models.js";
+import { agentPaneChildFallbackEnabled } from "./agents/executable.js";
+import {
+  AgentModelError,
+  AgentReasoningEffortError,
+  listAgentModelCatalog,
+} from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
-import { AutoPingError, AutoPingService } from "./auto-ping.js";
+import { AutoPingError, AutoPingService, redactAutoPingHandles } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
 import { projectConversationPage } from "./conversation-page.js";
+import { readCronJobs, UnknownCronProjectError } from "./cron-jobs.js";
+import {
+  CronJobEditError,
+  cronJobIdentity,
+  readCronJobDraft,
+  saveCronJobDraft,
+} from "./cron-job-editor.js";
 import type { ProcSnapshot } from "./sidecars/reap.js";
 import {
   clearFailedDeploySwitchRecord,
@@ -25,6 +38,7 @@ import { startDeploySwitch } from "./deploy-switch.js";
 import { EventBus } from "./event-bus.js";
 import {
   DEFAULT_EVENT_LOG_CONFIG,
+  appendEventLog,
   flushEventLogCollapse,
   logSpurEvent,
   setEventLogConfig,
@@ -75,6 +89,7 @@ import {
   SessionStartingError,
   SidecarPortConflictError,
   SidecarProbeUnresponsiveError,
+  SpawnBatchConflictError,
   WakeDispatchConflictError,
   WakeTargetMissingError,
 } from "./session-service.js";
@@ -95,6 +110,7 @@ import {
   type DisconnectProjectConfigRequest,
   type SessionLifecycleSnapshot,
   type KillSessionRequest,
+  type AutoPingMuteMode,
   type OpenPrAction,
   type PreflightRequest,
   type HandoffSessionRequest,
@@ -166,6 +182,8 @@ export function projectSourceSession(session: SessionListView): SourceWorkSessio
   };
 }
 
+const SOURCE_SESSION_RETRY_DELAYS_MS = [250, 750];
+
 function isSnapshotChanged(error: unknown): boolean {
   return (
     error instanceof SessionLifecycleError &&
@@ -179,12 +197,15 @@ export async function sourceSessionById(
   sessionId: string,
 ): Promise<SourceWorkSessionItem | null> {
   try {
-    let view: SessionView;
-    try {
-      view = await service.get(sessionId);
-    } catch (error) {
-      if (!isSnapshotChanged(error)) throw error;
-      view = await service.get(sessionId);
+    let view: SessionView | undefined;
+    for (let attempt = 0; view === undefined; attempt += 1) {
+      try {
+        view = await service.get(sessionId);
+      } catch (error) {
+        const delay = SOURCE_SESSION_RETRY_DELAYS_MS[attempt];
+        if (!isSnapshotChanged(error) || delay === undefined) throw error;
+        await sleep(delay);
+      }
     }
     return isListedSessionView(view, view.lifecycle.operation, false)
       ? projectSourceSession(view)
@@ -823,17 +844,46 @@ export async function startServer(
   testOverrides?: { sidecarSnapshot?: () => Promise<ProcSnapshot> },
 ): Promise<StartedServer> {
   const ghPathState = await initializeGhPath();
-  if (ghPathState.status === "unavailable") {
-    (logger.warn ?? writeStderr)(
-      `${ghPathState.message}; GitHub automation disabled until gh is available`,
-    );
-  }
   assertConfigMayUseProdSlot(configPath);
+  for (const agent of ["claude", "codex", "cursor", "opencode"] as const) {
+    agentPaneChildFallbackEnabled(agent);
+  }
   const service = new SessionService(configPath, undefined, {
     deferBackgroundLoops: true,
     ...(testOverrides?.sidecarSnapshot ? { sidecarSnapshot: testOverrides.sidecarSnapshot } : {}),
   });
-  const autoPing = new AutoPingService(service.config.dataDir);
+  const runtimeLog =
+    (level: "info" | "warn", output: ((message: string) => void) | undefined) =>
+    (message: string): void => {
+      try {
+        appendEventLog(service.config.dataDir, {
+          event: "daemon.diagnostic",
+          level,
+          message: redactAutoPingHandles(message),
+        });
+      } catch {
+        // Retention cannot block existing logger output.
+      }
+      output?.(message);
+    };
+  logger = {
+    info: runtimeLog("info", logger.info),
+    warn: runtimeLog("warn", logger.warn ?? writeStderr),
+  };
+  if (ghPathState.status === "unavailable") {
+    logger.warn?.(`${ghPathState.message}; GitHub automation disabled until gh is available`);
+  }
+  const autoPing = new AutoPingService(service.config.dataDir, {
+    log: (event, sessionId, details) => {
+      logSpurEvent(service.config.dataDir, {
+        event,
+        level: "info",
+        ...(sessionId !== undefined ? { sessionId } : {}),
+        message: event,
+        details,
+      });
+    },
+  });
   let ready = false;
   const switchStatePath = deploySwitchStatePath(service.config.dataDir);
   const switchLedgerPath = updateLedgerPath(service.config.dataDir);
@@ -907,7 +957,13 @@ export async function startServer(
         listSessions: async () =>
           (await service.list({ view: "dashboard" })).map(projectSourceSession),
         getSession: (sessionId) => sourceSessionById(service, sessionId),
+        prepareSessionMessage: async (sessionId, request) =>
+          service.prepareSourceMessage(sessionId, request),
         workbench: createSourceWorkbench(service),
+        telegramConversations: {
+          ensureTopic: (sessionId, origin) => service.ensureTelegramTopic(sessionId, origin),
+          unwatch: (sessionId, origin) => service.unwatchTelegramTopic(sessionId, origin),
+        },
         spawnSession: async (request) => {
           const { telegramOrigin, ...spawnRequest } = request;
           const session = await service.spawn(
@@ -1290,6 +1346,61 @@ export async function startServer(
 
       if (method === "GET" && path === "/projects") {
         sendJson(response, 200, service.listProjects());
+        return;
+      }
+
+      if ((method === "GET" || method === "PATCH") && path === "/projects/cron/edit") {
+        try {
+          const identity = cronJobIdentity(url.searchParams);
+          const context = {
+            running: service.config,
+            bootstrapConfigPath: service.bootstrapConfigPath,
+            registryPaths: service.getRegistryPaths(),
+          };
+          let body: unknown;
+          if (method === "PATCH") {
+            try {
+              body = await readJsonBody<unknown>(request);
+            } catch {
+              throw new CronJobEditError(400, "invalid_body", "Invalid editor JSON body.");
+            }
+          }
+          sendJson(
+            response,
+            200,
+            method === "GET"
+              ? readCronJobDraft(context, identity)
+              : saveCronJobDraft(context, identity, body),
+          );
+        } catch (error) {
+          if (!(error instanceof CronJobEditError)) throw error;
+          sendJson(response, error.status, {
+            error: error.message,
+            code: error.code,
+            ...(error.field !== undefined ? { field: error.field } : {}),
+          });
+        }
+        return;
+      }
+
+      if (method === "GET" && path === "/projects/cron") {
+        const projectId = url.searchParams.get("project")?.trim() || undefined;
+        try {
+          sendJson(
+            response,
+            200,
+            await readCronJobs({
+              config: service.config,
+              bootstrapConfigPath: service.bootstrapConfigPath,
+              registryPaths: service.getRegistryPaths(),
+              knownProjectIds: new Set(service.listProjects().map((entry) => entry.id)),
+              ...(projectId !== undefined ? { projectId } : {}),
+            }),
+          );
+        } catch (error) {
+          if (!(error instanceof UnknownCronProjectError)) throw error;
+          sendError(response, 404, error.message);
+        }
         return;
       }
 
@@ -1832,15 +1943,18 @@ export async function startServer(
           targetSessionId,
           lookup: (sessionId) => service.get(sessionId),
         });
-        sendJson(response, 200, { records: autoPing.list(targetSessionId) });
+        sendJson(response, 200, {
+          records: autoPing.list(targetSessionId),
+          ...(url.searchParams.get("all") === "1"
+            ? { history: autoPing.history(targetSessionId) }
+            : {}),
+        });
         return;
       }
 
-      const autoPingUnsubscribeMatch = path.match(
-        /^\/sessions\/([^/]+)\/auto-ping-suppressions\/unsubscribe$/,
-      );
-      if (method === "POST" && autoPingUnsubscribeMatch?.[1]) {
-        const targetSessionId = decodeAutoPingPathSegment(autoPingUnsubscribeMatch[1]);
+      const autoPingMuteMatch = path.match(/^\/sessions\/([^/]+)\/auto-ping-suppressions\/mute$/);
+      if (method === "POST" && autoPingMuteMatch?.[1]) {
+        const targetSessionId = decodeAutoPingPathSegment(autoPingMuteMatch[1]);
         await authorizeAutoPingTarget({
           origin,
           callerHeader: request.headers["x-spur-caller-session"],
@@ -1852,23 +1966,30 @@ export async function startServer(
         });
         if (
           !isRecord(body) ||
-          (body.scope !== "event" && body.scope !== "thread" && body.scope !== "subscription") ||
-          typeof body.handle !== "string"
+          typeof body.handle !== "string" ||
+          typeof body.mode !== "string" ||
+          (body.durationMs !== undefined && typeof body.durationMs !== "number") ||
+          (body.reason !== undefined && typeof body.reason !== "string")
         ) {
-          throw new AutoPingError("invalid_request", 400, "Auto-ping unsubscribe body is invalid");
+          throw new AutoPingError("invalid_request", 400, "Auto-ping mute body is invalid");
         }
         sendJson(
           response,
           200,
-          await autoPing.unsubscribe(targetSessionId, body.scope, body.handle),
+          await autoPing.mute(targetSessionId, {
+            handle: body.handle,
+            mode: body.mode as AutoPingMuteMode,
+            ...(body.durationMs !== undefined ? { durationMs: body.durationMs } : {}),
+            ...(body.reason !== undefined ? { reason: body.reason } : {}),
+          }),
         );
         return;
       }
 
       const autoPingResumeMatch = path.match(
-        /^\/sessions\/([^/]+)\/auto-ping-suppressions\/([^/]+)\/resume$/,
+        /^\/sessions\/([^/]+)\/auto-ping-suppressions\/resume$/,
       );
-      if (method === "POST" && autoPingResumeMatch?.[1] && autoPingResumeMatch[2]) {
+      if (method === "POST" && autoPingResumeMatch?.[1]) {
         const targetSessionId = decodeAutoPingPathSegment(autoPingResumeMatch[1]);
         await authorizeAutoPingTarget({
           origin,
@@ -1876,14 +1997,24 @@ export async function startServer(
           targetSessionId,
           lookup: (sessionId) => service.get(sessionId),
         });
-        const suppressionId = decodeAutoPingPathSegment(autoPingResumeMatch[2]);
         const body = await readJsonBody<unknown>(request).catch(() => {
           throw new AutoPingError("invalid_request", 400, "Auto-ping body must be valid JSON");
         });
-        if (!isRecord(body) || Object.keys(body).length !== 0) {
-          throw new AutoPingError("invalid_request", 400, "Auto-ping resume body must be empty");
+        if (
+          !isRecord(body) ||
+          (body.handle !== undefined && typeof body.handle !== "string") ||
+          (body.suppressionId !== undefined && typeof body.suppressionId !== "string")
+        ) {
+          throw new AutoPingError("invalid_request", 400, "Auto-ping resume body is invalid");
         }
-        sendJson(response, 200, await autoPing.resume(targetSessionId, suppressionId));
+        sendJson(
+          response,
+          200,
+          await autoPing.resume(targetSessionId, {
+            ...(body.handle !== undefined ? { handle: body.handle } : {}),
+            ...(body.suppressionId !== undefined ? { suppressionId: body.suppressionId } : {}),
+          }),
+        );
         return;
       }
 
@@ -2034,7 +2165,7 @@ export async function startServer(
 
       const sourceReplySessionId = path.match(/^\/sessions\/([^/]+)\/source-reply$/)?.[1];
       if (method === "POST" && sourceReplySessionId) {
-        const body = await readJsonBody<SourceReplyRequest>(request);
+        const body = await readJsonBody<SourceReplyRequest>(request, 15_000_000);
         sendJson(response, 200, await service.replyToSource(sourceReplySessionId, body));
         return;
       }
@@ -2232,6 +2363,10 @@ export async function startServer(
 
       const switchAuthSessionId = path.match(/^\/sessions\/([^/]+)\/switch-auth$/)?.[1];
       if (method === "POST" && switchAuthSessionId) {
+        if (!service.config.authRotation.switchAuth) {
+          sendError(response, 404, "switch-auth is disabled; set authRotation.switchAuth: true");
+          return;
+        }
         const body = await readJsonBody<{ accountId?: unknown; force?: unknown }>(request);
         const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
         if (!accountId) {
@@ -2360,6 +2495,7 @@ export async function startServer(
       }
       if (
         error instanceof AgentReasoningEffortError ||
+        error instanceof AgentModelError ||
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidConfigPathError ||
@@ -2388,7 +2524,8 @@ export async function startServer(
         error instanceof SidecarPortConflictError ||
         error instanceof OpenPrActionRequiredError ||
         error instanceof GithubPrCheckUnavailableError ||
-        error instanceof SessionNotRestorableError
+        error instanceof SessionNotRestorableError ||
+        error instanceof SpawnBatchConflictError
       ) {
         failRequest(response, error.statusCode, message, {
           method,
@@ -2580,7 +2717,7 @@ export async function startServer(
       message,
       details: memoryCeilingWarning,
     });
-    process.stderr.write(`${message}\n`);
+    runtimeLog("warn", writeStderr)(message);
   }
 
   ready = true;
