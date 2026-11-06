@@ -220,6 +220,16 @@ describe("daemon MCP operation contracts", () => {
     );
   });
 
+  it("states allowedTriggers omit and empty-array semantics in the spawn contracts", () => {
+    for (const operationId of ["spawn_session", "spawn_background_session"]) {
+      const description = getDaemonOperation(operationId)?.body?.fields.find(
+        ({ name }) => name === "allowedTriggers",
+      )?.description;
+      expect(description, operationId).toContain("Omit to allow all");
+      expect(description, operationId).toContain("[] blocks every send trigger");
+    }
+  });
+
   it("provides examples, path/query/body metadata, errors and source references for every operation", () => {
     for (const entry of DAEMON_OPERATIONS) {
       expect(entry.summary.length, entry.operationId).toBeGreaterThan(12);
