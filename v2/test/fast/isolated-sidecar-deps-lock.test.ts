@@ -23,7 +23,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { PassThrough } from "node:stream";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const execFileAsync = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -286,6 +287,78 @@ function runIsolatedDaemon(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv)
 
 type ScriptRun = ReturnType<typeof execFileAsync>;
 
+type Ac3Daemon = Promise<unknown> & {
+  child: Pick<ScriptRun["child"], "stdout" | "stdin">;
+};
+
+async function waitForAc3Ready(daemon: Ac3Daemon): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let output = "";
+  let ready: () => void = () => undefined;
+  const onData = (chunk: Buffer) => {
+    output += chunk.toString();
+    if (output.includes("daemon-ready")) ready();
+    output = output.slice(-"daemon-ready".length);
+  };
+  try {
+    await new Promise<void>((done, reject) => {
+      ready = done;
+      timer = setTimeout(
+        () => reject(Object.assign(new Error("AC3 readiness"), { code: "readiness-timeout" })),
+        20_000,
+      );
+      daemon.child.stdout?.on("data", onData);
+      void daemon.then(
+        () => reject(Object.assign(new Error("AC3 readiness"), { code: "early-exit" })),
+        reject,
+      );
+    });
+  } finally {
+    clearTimeout(timer);
+    daemon.child.stdout?.off("data", onData);
+  }
+}
+
+function ac3Failure(phase: "readiness" | "ui" | "release", error: unknown): string {
+  const code = error !== null && typeof error === "object" && "code" in error ? error.code : null;
+  const safeCode =
+    typeof code === "number" && Number.isSafeInteger(code)
+      ? code
+      : code === "readiness-timeout" || code === "early-exit"
+        ? code
+        : "other";
+  const signal =
+    error !== null &&
+    typeof error === "object" &&
+    "signal" in error &&
+    (error.signal === "SIGKILL" || error.signal === "SIGTERM")
+      ? error.signal
+      : "none";
+  const killed =
+    error !== null && typeof error === "object" && "killed" in error && error.killed === true;
+  return `${phase}:failed code=${safeCode} signal=${signal} killed=${killed}`;
+}
+
+async function runAc3(daemon: Ac3Daemon, ui: () => Promise<unknown>): Promise<void> {
+  const failures: string[] = [];
+  let phase: "readiness" | "ui" = "readiness";
+  try {
+    await waitForAc3Ready(daemon);
+    phase = "ui";
+    await ui();
+  } catch (error) {
+    failures.push(ac3Failure(phase, error));
+  } finally {
+    daemon.child.stdin?.end("go\n");
+    try {
+      await daemon;
+    } catch (error) {
+      failures.push(ac3Failure("release", error));
+    }
+  }
+  if (failures.length) throw new Error(failures.join("; "));
+}
+
 // Readiness is the observed marker, not a fixed poll: fail fast when the
 // script exits without producing it, otherwise wait out a generous budget
 // (startup scans host process cwds, which stalls under full-suite load).
@@ -372,16 +445,170 @@ function materializeReadyTree(repoDir: string): ReadyTreeMarkers {
   return markers;
 }
 
-afterEach(async () => {
+async function cleanupFixtures(): Promise<void> {
   await Promise.all([...liveScriptRuns].map(stopScriptRun));
   for (const path of cleanupPaths.splice(0)) {
     rmSync(path, { recursive: true, force: true });
   }
-});
+}
+afterEach(cleanupFixtures);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+describe("AC3 owned daemon boundary", () => {
+  afterEach(() => vi.useRealTimers());
+
+  function deferred<T>() {
+    let resolve: (value: T | PromiseLike<T>) => void = () => undefined;
+    let reject: (reason: unknown) => void = () => undefined;
+    const promise = new Promise<T>((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    return { promise, resolve, reject };
+  }
+
+  function syntheticDaemon() {
+    const settlement = deferred<undefined>();
+    const stdout = new PassThrough();
+    const stdin = new PassThrough();
+    const daemon = Object.assign(settlement.promise, { child: { stdout, stdin } });
+    return { daemon, stdout, stdin, ...settlement };
+  }
+
+  function expectDisposed(child: ReturnType<typeof syntheticDaemon>) {
+    expect(child.stdout.listenerCount("data")).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  }
+
+  it("accepts only the complete split marker and disposes readiness resources", async () => {
+    vi.useFakeTimers();
+    const child = syntheticDaemon();
+    let ready = false;
+    const waiting = waitForAc3Ready(child.daemon).then(() => {
+      ready = true;
+    });
+    child.stdout.write("daemon-");
+    await Promise.resolve();
+    expect(ready).toBe(false);
+    child.stdout.write("ready\n");
+    await waiting;
+    expect(ready).toBe(true);
+    expectDisposed(child);
+    child.resolve(undefined);
+  });
+
+  it("fails missing readiness at20s and disposes resources", async () => {
+    vi.useFakeTimers();
+    const child = syntheticDaemon();
+    const failure = expect(waitForAc3Ready(child.daemon)).rejects.toMatchObject({
+      code: "readiness-timeout",
+    });
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(child.stdout.listenerCount("data")).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await failure;
+    expectDisposed(child);
+    child.resolve(undefined);
+  });
+
+  for (const outcome of ["exit", "reject"] as const) {
+    it(`fails early daemon ${outcome} and disposes resources`, async () => {
+      vi.useFakeTimers();
+      const child = syntheticDaemon();
+      const failure = expect(waitForAc3Ready(child.daemon)).rejects.toThrow();
+      if (outcome === "exit") child.resolve(undefined);
+      else child.reject(new Error("synthetic private detail"));
+      await failure;
+      expectDisposed(child);
+    });
+  }
+
+  it("keeps the daemon parked beyond25s until actual UI success and release settlement", async () => {
+    vi.useFakeTimers();
+    const child = syntheticDaemon();
+    const ui = deferred<undefined>();
+    let complete = false;
+    const running = runAc3(child.daemon, () => ui.promise).then(() => {
+      complete = true;
+    });
+    child.stdout.write("daemon-ready\n");
+    await vi.advanceTimersByTimeAsync(26_000);
+    expect(complete).toBe(false);
+    expect(child.stdin.writableEnded).toBe(false);
+    ui.resolve(undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(child.stdin.writableEnded).toBe(true);
+    expect(complete).toBe(false);
+    child.resolve(undefined);
+    await running;
+    expect(complete).toBe(true);
+    expectDisposed(child);
+  });
+
+  for (const mode of ["primary", "secondary", "combined"] as const) {
+    it(`preserves ${mode} failure with fixed private-safe facts`, async () => {
+      vi.useFakeTimers();
+      const child = syntheticDaemon();
+      const privateError = Object.assign(new Error("/private/fixture credential🔐"), {
+        code: 2,
+        signal: "SIGTERM",
+        killed: true,
+      });
+      const result = runAc3(child.daemon, async () => {
+        if (mode !== "secondary") throw privateError;
+      }).then(
+        () => "success",
+        (error: unknown) => (error instanceof Error ? error.message : "unexpected"),
+      );
+      child.stdout.write("daemon-ready\n");
+      await vi.advanceTimersByTimeAsync(0);
+      if (mode === "primary") child.resolve(undefined);
+      else child.reject(privateError);
+      const message = await result;
+      expect(message).not.toBe("success");
+      expect(message).not.toMatch(/private|fixture|credential|🔐/);
+      expect(message).toContain("code=2 signal=SIGTERM killed=true");
+      if (mode === "primary") expect(message).toMatch(/^ui:failed/);
+      if (mode === "secondary") expect(message).toMatch(/^release:failed/);
+      if (mode === "combined") expect(message).toMatch(/^ui:failed.*; release:failed/);
+      expectDisposed(child);
+    });
+  }
+
+  it("does not delete the fixture until existing tracked cleanup confirms settlement", async () => {
+    const root = mkdtempSync(join(tmpdir(), "spur-ac3-cleanup-"));
+    cleanupPaths.push(root);
+    const actual = execFileAsync("setsid", [
+      process.execPath,
+      "-e",
+      "console.log('daemon-ready');setInterval(()=>{},1000)",
+    ]);
+    const actualSettled = actual.then(
+      () => undefined,
+      () => undefined,
+    );
+    const settlement = deferred<{ stdout: string; stderr: string }>();
+    const run = trackScriptRun(Object.assign(settlement.promise, { child: actual.child }));
+    try {
+      await waitForAc3Ready(run);
+      const cleaning = cleanupFixtures();
+      await actualSettled;
+      expect(existsSync(root)).toBe(true);
+      expect(liveScriptRuns.has(run)).toBe(true);
+      settlement.resolve({ stdout: "", stderr: "" });
+      await cleaning;
+      expect(existsSync(root)).toBe(false);
+      expect(liveScriptRuns.has(run)).toBe(false);
+    } finally {
+      settlement.resolve({ stdout: "", stderr: "" });
+      await stopScriptRun(run);
+      await actualSettled;
+    }
+  });
+});
 
 // AC2's proof that the daemon is genuinely PARKED on the workspace-deps
 // flock — not merely slow to reach it (spur-6128's prune_stale_config_dirs
@@ -573,27 +800,9 @@ describe("isolated sidecar workspace dependency lock (#823)", () => {
     const worktree = createFixture();
     const markers = materializeReadyTree(worktree.repoDir);
 
-    const daemon = execFileAsync(
-      "bash",
-      [join(worktree.repoDir, "scripts/spur-isolated-daemon.sh")],
-      { env: testEnv(worktree, { SPUR_TEST_DAEMON_STDIN: "1" }), timeout: 25_000 },
+    await runAc3(runIsolatedDaemon(worktree, { SPUR_TEST_DAEMON_STDIN: "1" }), () =>
+      runIsolatedUi(worktree),
     );
-    try {
-      await new Promise<void>((done, reject) => {
-        const timer = setTimeout(() => reject(new Error("Daemon did not exec")), 20_000);
-        daemon.child.stdout?.on("data", (chunk: Buffer) => {
-          if (chunk.toString().includes("daemon-ready")) {
-            clearTimeout(timer);
-            done();
-          }
-        });
-        void daemon.catch(reject);
-      });
-      await runIsolatedUi(worktree);
-    } finally {
-      daemon.child.stdin?.end("go\n");
-      await daemon;
-    }
 
     const log = readLog(worktree);
     expect(log).not.toContain("install-start");
