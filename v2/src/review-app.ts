@@ -659,7 +659,9 @@ async function transitionReview(
         reviewId: receipt.reviewId,
         assessment:
           receipt.status !== "PENDING" && "assessment" in request ? request.assessment : null,
-        ...(receipt.status === "APPROVED" ? {} : { feedback: receipt.feedback }),
+        ...(receipt.status === "APPROVED" || receipt.feedback === undefined
+          ? {}
+          : { feedback: receipt.feedback }),
       });
       receipt.feedbackPublication = { status: "confirmed" };
     } catch (error) {
