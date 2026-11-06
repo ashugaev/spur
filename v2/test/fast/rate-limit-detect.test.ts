@@ -1298,6 +1298,14 @@ describe("detectCodexMcpPermissionDialog", () => {
 });
 
 describe("scanTmuxRateLimit", () => {
+  it("limits Codex banner fallback to the recent pane tail", () => {
+    const banner = "■ Your workspace is out of credits. Ask your owner.";
+    const pane = `${banner}\n${Array.from({ length: 21 }, (_, index) => `work ${index}`).join("\n")}\n\n`;
+    expect(scanTmuxRateLimit(pane, { tailLines: 20 })).toBeNull();
+    expect(scanTmuxRateLimit(banner, { tailLines: 20 })?.limited).toBe(true);
+    expect(scanTmuxRateLimit(pane)?.limited).toBe(true);
+  });
+
   // Real captured tmux panes/scrollbacks. The two REAL codex panes render a
   // genuine banner and must classify limited; the two agent-work panes only
   // contain rate-limit vocabulary in prose/diffs and must not.
