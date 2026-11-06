@@ -48,10 +48,11 @@ const PROVIDER_NAMES: Record<
   opencode: "OpenCode",
 };
 
-const LEVEL_COLOR: Record<QuotaLevel, string> = {
+const DOT_COLOR: Record<QuotaLevel | "working", string> = {
   ready: "var(--color-status-ready)",
   attention: "var(--color-status-attention)",
   error: "var(--color-status-error)",
+  working: "var(--color-status-working)",
 };
 
 const TONE_TEXT: Record<MeterTone, string> = {
@@ -69,14 +70,12 @@ const TONE_FILL: Record<MeterTone, string> = {
 const ACTION_CLASS = `uppercase ${SECONDARY_TEXT} outline-none transition underline-offset-2 hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-accent)] focus-visible:underline disabled:opacity-60`;
 
 function SectionHeader({
-  color,
+  dot,
   label,
-  level,
   right,
 }: {
-  color: string;
+  dot: QuotaLevel | "working";
   label: string;
-  level?: QuotaLevel;
   right: ReactNode;
 }) {
   return (
@@ -84,9 +83,9 @@ function SectionHeader({
       <span
         aria-hidden="true"
         className="h-1.5 w-1.5 shrink-0"
-        data-level={level}
-        data-testid={level ? "quota-dot" : undefined}
-        style={{ background: color }}
+        data-level={dot === "working" ? undefined : dot}
+        data-testid={dot === "working" ? undefined : "quota-dot"}
+        style={{ background: DOT_COLOR[dot] }}
       />
       <span className={`font-bold uppercase tracking-[0.1em] ${SECONDARY_TEXT}`}>{label}</span>
       <span className="flex-1 border-t border-[var(--color-border-default)]" />
@@ -130,7 +129,7 @@ function QuotaMeter({ window: quotaWindow }: { window: QuotaWindow }) {
         className={`order-last col-span-full text-left sm:order-none sm:col-span-1 sm:text-right ${TERTIARY_TEXT}`}
         title={quotaWindow.resetsAt ? formatShortTimestamp(quotaWindow.resetsAt) : undefined}
       >
-        {quotaWindow.resetsAt === null || reset === "no reset time" ? reset : `resets in ${reset}`}
+        {reset === "no reset time" ? reset : `resets in ${reset}`}
       </span>
     </div>
   );
@@ -279,9 +278,8 @@ function UsageContent({ data }: { data: UsageReport }) {
   return (
     <div className="pb-2">
       <SectionHeader
-        color={LEVEL_COLOR[level]}
+        dot={level}
         label="Quota"
-        level={level}
         right={
           <span className={`tabular-nums ${SECONDARY_TEXT}`}>
             {okCount}/{data.quotas.length}
@@ -292,7 +290,7 @@ function UsageContent({ data }: { data: UsageReport }) {
         <QuotaSource key={`${quota.provider}/${quota.source}`} quota={quota} />
       ))}
       <SectionHeader
-        color="var(--color-status-working)"
+        dot="working"
         label="Tokens"
         right={
           <div className="flex border border-[var(--color-border-default)]">
