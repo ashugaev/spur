@@ -23,27 +23,17 @@ Read-only host/config/daemon health check; `--scaffold` writes local `spur.yaml`
 ## disk
 
 `spur disk [--json]` reports disk usage, writes `<dataDir>/disk-budget.json` ([disk budget](configuration.md#disk-budget)).
+`spur disk-gc [--execute --browser-revisions --older-than <days> --limit <n> --json]` reclaims stale playwright profiles and terminal-worktree build caches.
+`spur artifacts-gc [--execute --older-than <days> --max-bytes <bytes> --max-files <n> --project <id> --limit <n> --json]` prunes `agent-history-*.jsonl`. See [Artifact retention](configuration.md#artifact-retention).
+`spur cache [--prune --yes]` reports/prunes host caches outside `~/.spur`.
 
 ## usage
 
 `spur usage [--json]`: quota windows per Claude account and Codex, token totals today/7d/30d by provider and launch model; read-only, saved logins never refreshed; failing source prints an error row; quota cached 3 min per source; tokens from unarchived sessions dated by last activity — `v2/src/usage-report.ts`. Web: the footer Usage button shows the same report.
 
-## disk-gc, artifacts-gc, cache
-
-`spur disk-gc [--execute --browser-revisions --older-than <days> --limit <n> --json]` reclaims stale playwright profiles and terminal-worktree build caches.
-`spur artifacts-gc [--execute --older-than <days> --max-bytes <bytes> --max-files <n> --project <id> --limit <n> --json]` prunes `agent-history-*.jsonl`. See [Artifact retention](configuration.md#artifact-retention).
-`spur cache [--prune --yes]` reports/prunes host caches outside `~/.spur`.
-
 ## opencode-gc
 
-`spur opencode-gc [--execute --older-than <days> --statuses <completed,killed,stopped> --limit <n> --no-sizes --json]` reclaims opencode's own store (root from `opencode db path`). Dry run unless `--execute`, daemon-free. Flags override `opencodeGc.*` ([configuration.md](configuration.md#field-reference)); `--no-sizes` skips `du`. Exits `1` on any error.
-
-- Units: store rows (`opencode session delete`, then one CLI-only `VACUUM`), snapshot leaves whose `[core] worktree` no longer exists, `log/opencode.log` above `opencodeGc.logMaxBytes` (tail kept as `opencode.log.1`, then truncated).
-- Selects a store session when a Spur record's `agentSessionId` equals its id and every such record's status is in `opencodeGc.statuses` (default `completed,killed`; `--statuses` overrides).
-- Skip reasons: `protected_live_record`, `directory_gone_protected`, `live_process_holds_session`, `directory_unresolvable`, `no_record_match`, `too_recent`, `over_limit`; entry blocked on recheck: `changed_during_run`.
-- Plan refusals: `store_unresolved`, `enumeration_failed`, `enumeration_truncated`.
-- `VACUUM` skipped with reason: `dry_run`, `no_sessions_deleted`, `db_path_unresolved`, `free_space_unknown`, `insufficient_free_space` (needs 2x DB size free), `live_opencode_record`.
-- Bytes: freed files and `VACUUM` DB delta, never summed; dry run reports files only. Mechanism: `v2/src/opencode-gc.ts`.
+`spur opencode-gc [--execute]`: dry run by default; store rows, dead-worktree snapshots and logs; policy: [`opencodeGc.*`](configuration.md#field-reference); `v2/src/opencode-gc.ts`.
 
 ## daemon
 
