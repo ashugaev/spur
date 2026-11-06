@@ -47,7 +47,7 @@ import { workspaceIdOf } from "./session-desk.js";
 import { aggregateTokenUsage } from "./token-usage.js";
 import { normalizePreflightTotals } from "./preflight-usage-store.js";
 
-function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
+export function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
 }
 

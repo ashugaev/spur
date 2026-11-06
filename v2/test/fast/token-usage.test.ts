@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { reconcileTokenUsage } from "../../src/token-usage.js";
+import {
+  reconcileTokenUsage,
+  summarizeTokenUsageWindows,
+  sumTokenUsage,
+  type TokenUsageActivity,
+} from "../../src/token-usage.js";
 
 describe("reconcileTokenUsage", () => {
   it("does not decrease a repeated generation sample", () => {
@@ -132,5 +137,59 @@ describe("reconcileTokenUsage", () => {
     expect(codex.generations).toEqual({
       "codex-generation": { inputTokens: 30, outputTokens: 10, totalTokens: 40 },
     });
+  });
+});
+
+const DAY = 86_400_000;
+const NOW = Date.UTC(2026, 10, 6, 12);
+const TODAY = Date.UTC(2026, 10, 6, 0);
+
+function activity(
+  provider: "claude" | "codex",
+  model: string | null,
+  total: number,
+  activityMs: number,
+): TokenUsageActivity {
+  const totals = { inputTokens: total, outputTokens: 0, totalTokens: total };
+  return { tokenUsage: { provider, generations: { g: totals }, ...totals }, model, activityMs };
+}
+
+describe("sumTokenUsage", () => {
+  it("drops optional components when not every snapshot has them", () => {
+    const sum = sumTokenUsage([
+      { inputTokens: 1, outputTokens: 1, totalTokens: 2, cacheReadInputTokens: 5 },
+      { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+    ]);
+    expect(sum).toEqual({ inputTokens: 2, outputTokens: 2, totalTokens: 4 });
+  });
+});
+
+describe("summarizeTokenUsageWindows", () => {
+  it("buckets by window boundary, provider and model", () => {
+    const summary = summarizeTokenUsageWindows(
+      [
+        activity("claude", "opus", 10, TODAY),
+        activity("claude", null, 20, TODAY - 1),
+        activity("claude", "opus", 30, NOW - 7 * DAY),
+        activity("codex", "gpt", 40, NOW - 7 * DAY - 1),
+        activity("codex", "gpt", 50, NOW - 30 * DAY - 1),
+        activity("codex", "gpt", 60, Number.NaN),
+      ],
+      NOW,
+      TODAY,
+    );
+    expect(summary.map((w) => w.window)).toEqual(["today", "7d", "30d"]);
+    expect(summary[0]?.byProvider).toHaveLength(1);
+    expect(summary[0]?.byProvider[0]?.totals.totalTokens).toBe(10);
+    const week = summary[1]?.byProvider;
+    expect(week?.map((p) => [p.provider, p.sessionCount, p.totals.totalTokens])).toEqual([
+      ["claude", 3, 60],
+    ]);
+    expect(week?.[0]?.byModel.map((m) => m.model)).toEqual(["opus", null]);
+    const month = summary[2]?.byProvider;
+    expect(month?.map((p) => [p.provider, p.totals.totalTokens])).toEqual([
+      ["claude", 60],
+      ["codex", 40],
+    ]);
   });
 });
