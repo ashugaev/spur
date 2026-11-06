@@ -18,6 +18,7 @@ import { PendingLaunchBanner } from "@/components/PendingLaunchBanner";
 import { SubmitFailedBanner } from "@/components/SubmitFailedBanner";
 import { CenteredLoader } from "@/components/CenteredLoader";
 import { TokenCount } from "@/components/TokenCount";
+import { SessionLoadState, type SessionLoadFailure } from "@/components/SessionLoadState";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
@@ -46,6 +47,10 @@ import { ArtifactDownloadIcon } from "@/components/icons/ArtifactDownloadIcon";
 import { ArtifactOpenExternalIcon } from "@/components/icons/ArtifactOpenExternalIcon";
 import { ArtifactPreviewIcon } from "@/components/icons/ArtifactPreviewIcon";
 import { ConversationView } from "@/components/ConversationView";
+import { SnippetActionSummary } from "@/components/snippets/SnippetActionSummary";
+import { browserSnippetStorage } from "@/components/snippets/SnippetPanel";
+import { SnippetsSection } from "@/components/snippets/SnippetsSection";
+import { pruneSnippetRecords } from "@/lib/snippets/snippet-store";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
 import { IconActionButton } from "@/components/IconActionButton";
@@ -54,8 +59,9 @@ import { SendIcon } from "@/components/icons/SendIcon";
 import { Spinner } from "@/components/icons/Spinner";
 import { TrashIcon } from "@/components/icons/TrashIcon";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
+import { SessionMutes } from "@/components/SessionMutes";
 import { SessionTodo } from "@/components/SessionTodo";
-import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS, STATUS_CARD_CLASS } from "@/design/classes";
+import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
 import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
   formatAbsoluteTime,
@@ -118,6 +124,7 @@ import {
   isTokenBudgetBlocked,
   isTerminalSession,
   toDashboardSession,
+  type ConversationMessage,
   type ConversationResponse,
   type DashboardSession,
   type GithubPrCheckUnavailablePayload,
@@ -129,6 +136,7 @@ import {
   type SpurSessionView,
   type SpurUpdateSessionSlotsResponse,
 } from "@/lib/types";
+import { partitionSnippetArtifacts } from "@/lib/snippets/snippet-manifest";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 import { resolveActivityStatus } from "@/lib/terminal-status";
 
@@ -378,6 +386,20 @@ function ArtifactZoomResetIcon() {
 }
 
 const POLL_INTERVAL_MS = 4_000;
+// Stable identity so the snippet panels' session effect does not re-run on an empty conversation.
+const EMPTY_CONVERSATION_MESSAGES: ConversationMessage[] = [];
+
+// Daemon answers 503 while starting; the Next route answers 502 when it can't reach it.
+const TRANSIENT_LOAD_STATUSES: ReadonlySet<number> = new Set([502, 503]);
+
+class SessionLoadHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
 // Page size for a scroll-back fetch. Must match the daemon's
 // CONVERSATION_PAGE_ENTRIES (v2/src/claude-jsonl-state.ts).
 const CONVERSATION_SCROLL_PAGE_ENTRIES = 100;
@@ -450,8 +472,9 @@ function readArtifactViewMode(): ArtifactViewMode {
   }
 }
 
-function artifactTabClass(active: boolean): string {
-  return `border-r border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase tracking-[0.12em] last:border-r-0 ${
+function artifactTabClass(active: boolean, wrapping = false): string {
+  const edge = wrapping ? "-ml-px -mt-px border" : "border-r last:border-r-0";
+  return `${edge} border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase tracking-[0.12em] ${
     active
       ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]"
       : "text-[var(--color-text-secondary)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
@@ -462,6 +485,19 @@ function artifactExtension(name: string): string {
   const base = artifactBasename(name);
   const dotIndex = base.lastIndexOf(".");
   return dotIndex > 0 ? base.slice(dotIndex + 1).toUpperCase() : "FILE";
+}
+
+function artifactFormatOptions(
+  artifacts: readonly SessionArtifact[],
+): Array<{ extension: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const artifact of artifacts) {
+    const extension = artifactExtension(artifact.name);
+    counts.set(extension, (counts.get(extension) ?? 0) + 1);
+  }
+  return [...counts]
+    .map(([extension, count]) => ({ extension, count }))
+    .sort((a, b) => a.extension.localeCompare(b.extension));
 }
 
 function isMarkdownArtifact(artifact: SessionArtifact): boolean {
@@ -1586,7 +1622,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const router = useRouter();
   const [session, setSession] = useState<DashboardSession | null>(null);
   const [message, setMessage] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<SessionLoadFailure | null>(null);
   const [busyRequestAction, setBusyAction] = useState<string | null>(null);
   const lifecycleRef = useRef(new SessionLifecycleConsumer());
   const rawSessionRef = useRef<SpurSessionView | null>(null);
@@ -1635,6 +1671,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     Record<string, ArtifactPreviewState>
   >({});
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
+  const [artifactFormat, setArtifactFormat] = useState<string | null>(null);
   const [artifactCategory, setArtifactCategory] = useState<ArtifactCategory>("agent");
   const [artifactViewMode, setArtifactViewMode] = useState<ArtifactViewMode>(readArtifactViewMode);
   // Not persisted to localStorage: the list's sort resets to the default on
@@ -1756,7 +1793,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
             }
           }
-          throw new Error(await readApiErrorMessage(response, "Failed to load session"));
+          throw new SessionLoadHttpError(
+            await readApiErrorMessage(response, "Failed to load session"),
+            response.status,
+          );
         }
         const payload = (await response.json()) as SpurSessionView;
         if (
@@ -1788,7 +1828,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         const message = errorMessage(loadError, "Failed to load session");
         if (sessionRef.current?.id !== requestedSessionId) {
           setSession(null);
-          setError(message);
+          setError({
+            message,
+            transient:
+              loadError instanceof SessionLoadHttpError &&
+              TRANSIENT_LOAD_STATUSES.has(loadError.status),
+          });
           return;
         }
         if (lastLoadErrorToastRef.current?.message === message) return;
@@ -1930,19 +1975,44 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   useEffect(() => {
     setArtifactCategory("agent");
+    setArtifactFormat(null);
     setShowAllDeskMembers(false);
   }, [sessionId]);
+
+  // Drop snippet records untouched for 7 days (budget keys are never pruned).
+  useEffect(() => {
+    pruneSnippetRecords(browserSnippetStorage(), Date.now());
+  }, []);
+
+  // Reserved snippet files leave every artifact surface; only generic
+  // artifacts reach categories, counts, grid, list, lightbox and navigation.
+  const snippetPartition = useMemo(
+    () => partitionSnippetArtifacts(session?.artifacts ?? [], session?.id ?? ""),
+    [session?.artifacts, session?.id],
+  );
+  const genericArtifacts = snippetPartition.generic;
+  const snippetSessionView = useMemo(
+    () =>
+      session
+        ? {
+            canSend: canSendMessage(session),
+            state: session.state,
+            queuedMessages: session.queuedMessages.messages,
+          }
+        : null,
+    [session],
+  );
 
   useEffect(() => {
     if (!session) return;
     setArtifactPreviewStates((current) => {
       const next: Record<string, ArtifactPreviewState> = {};
-      for (const artifact of session.artifacts) {
+      for (const artifact of genericArtifacts) {
         next[artifact.id] = current[artifact.id] ?? "loading";
       }
       return next;
     });
-  }, [session]);
+  }, [session, genericArtifacts]);
 
   // Send now / flush to an agent with no interrupt key while it works: the
   // daemon queued the message at the head instead of typing it.
@@ -2377,8 +2447,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     return session.state;
   }, [conversation?.state, session]);
 
-  // The daemon queues a send to a spawning session and refuses Send now (409).
-  const sessionStarting = session?.status === "spawning";
+  const sessionStarting =
+    session?.status === "spawning" ||
+    session?.lifecyclePending === "restore" ||
+    session?.lifecyclePending === "reopen";
   // The daemon refuses every immediate send (409) while the last prompt is
   // unconfirmed; Queue stays, and PendingLaunchBanner submits the prompt.
   const launchPending = Boolean(session?.submitUnconfirmedAt);
@@ -2421,24 +2493,24 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
   );
-  const allArtifacts = session?.artifacts ?? [];
+  const allArtifacts = genericArtifacts;
   const agentArtifacts = useMemo(
     () =>
-      session?.artifacts.filter(
+      genericArtifacts.filter(
         (artifact) => artifact.origin !== "automatic" && artifact.addedByUser !== true,
-      ) ?? [],
-    [session],
+      ),
+    [genericArtifacts],
   );
   const attachedArtifacts = useMemo(
     () =>
-      session?.artifacts.filter(
+      genericArtifacts.filter(
         (artifact) => artifact.origin !== "automatic" && artifact.addedByUser === true,
-      ) ?? [],
-    [session],
+      ),
+    [genericArtifacts],
   );
   const systemArtifacts = useMemo(
-    () => session?.artifacts.filter((artifact) => artifact.origin === "automatic") ?? [],
-    [session],
+    () => genericArtifacts.filter((artifact) => artifact.origin === "automatic"),
+    [genericArtifacts],
   );
   const visibleArtifacts = useMemo(
     () =>
@@ -2452,6 +2524,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const visibleArtifactIds = useMemo(
     () => new Set(visibleArtifacts.map((artifact) => artifact.id)),
     [visibleArtifacts],
+  );
+  const formatOptions = useMemo(() => artifactFormatOptions(visibleArtifacts), [visibleArtifacts]);
+  const activeArtifactFormat =
+    formatOptions.length > 1 && formatOptions.some((option) => option.extension === artifactFormat)
+      ? artifactFormat
+      : null;
+  const filteredArtifacts = useMemo(
+    () =>
+      activeArtifactFormat === null
+        ? visibleArtifacts
+        : visibleArtifacts.filter(
+            (artifact) => artifactExtension(artifact.name) === activeArtifactFormat,
+          ),
+    [visibleArtifacts, activeArtifactFormat],
   );
   // List mode's viewer navigation must step over the same sort the list
   // renders, not the raw payload order. It still walks every category
@@ -2536,9 +2622,19 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   // The list's sort used to reset via `key={artifactCategory}` remounting
   // ArtifactList's own local state. Lifting that state up here means the
   // remount no longer resets it, so reset it explicitly on category change.
+  // The format filter resets with it.
   useEffect(() => {
     setArtifactListSort(DEFAULT_ARTIFACT_SORT);
+    setArtifactFormat(null);
   }, [artifactCategory]);
+
+  // Clear a stored format the derived value already ignores (ext gone, or
+  // fewer than 2 extensions) so it cannot resurrect on a later poll.
+  useEffect(() => {
+    if (artifactFormat !== null && activeArtifactFormat === null) {
+      setArtifactFormat(null);
+    }
+  }, [artifactFormat, activeArtifactFormat]);
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
@@ -2804,6 +2900,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </span>
                 ) : null}
                 <TagEditor session={session} variant="chips" />
+                <SessionMutes sessionId={session.id} />
               </div>
             </TagsContext.Provider>
           </header>
@@ -3021,6 +3118,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 onAnswer={handleAnswer}
               />
 
+              {snippetSessionView && snippetPartition.owned.length > 0 ? (
+                <SnippetsSection
+                  files={snippetPartition.owned}
+                  messages={conversation?.messages ?? EMPTY_CONVERSATION_MESSAGES}
+                  session={snippetSessionView}
+                  sessionId={session.id}
+                />
+              ) : null}
+
               {/* Queued messages */}
               {session.queuedMessages.messages.length > 0 ||
               (session.queuedMessages.pipelineMessages?.length ?? 0) > 0 ? (
@@ -3079,7 +3185,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             <div
                               className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
                             >
-                              {queuedMessage}
+                              <SnippetActionSummary text={queuedMessage} fallback={queuedMessage} />
                             </div>
                           </li>
                         );
@@ -3259,12 +3365,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </section>
               ) : null}
 
-              {session.artifacts.length > 0 || session.artifactsTruncated ? (
+              {genericArtifacts.length > 0 || session.artifactsTruncated ? (
                 <section>
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                     Artifacts
                     <span className="text-[var(--color-text-secondary)]">
-                      {visibleArtifacts.length}
+                      {filteredArtifacts.length}
                     </span>
                     <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                   </h2>
@@ -3326,20 +3432,50 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         })}
                       </div>
                     ) : null}
+                    {formatOptions.length > 1 ? (
+                      <div
+                        aria-label="Artifact format"
+                        className="inline-flex flex-wrap pl-px pt-px"
+                        role="tablist"
+                      >
+                        <button
+                          aria-pressed={activeArtifactFormat === null}
+                          className={artifactTabClass(activeArtifactFormat === null, true)}
+                          onClick={() => setArtifactFormat(null)}
+                          type="button"
+                        >
+                          All
+                        </button>
+                        {formatOptions.map(({ extension, count }) => {
+                          const active = activeArtifactFormat === extension;
+                          return (
+                            <button
+                              key={extension}
+                              aria-pressed={active}
+                              className={artifactTabClass(active, true)}
+                              onClick={() => setArtifactFormat(active ? null : extension)}
+                              type="button"
+                            >
+                              {`${extension} (${count})`}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
                   </div>
                   {session.artifactsTruncated ? (
                     <p className="pb-2 text-[var(--color-text-secondary)]">
                       Nested artifacts were truncated; every root-level artifact is still listed.
                     </p>
                   ) : null}
-                  {visibleArtifacts.length > 0 ? (
+                  {filteredArtifacts.length > 0 ? (
                     <div
                       className="max-h-[min(36rem,55dvh)] overflow-y-auto overscroll-y-auto pr-1"
                       data-artifact-collection
                     >
                       {artifactViewMode === "list" ? (
                         <ArtifactList
-                          artifacts={visibleArtifacts}
+                          artifacts={filteredArtifacts}
                           hrefFor={(artifactId) => artifactUrl(session.id, artifactId)}
                           onPreview={setSelectedArtifactId}
                           onSortChange={setArtifactListSort}
@@ -3347,7 +3483,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         />
                       ) : (
                         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                          {visibleArtifacts.map((artifact) => {
+                          {filteredArtifacts.map((artifact) => {
                             const artifactHref = artifactUrl(session.id, artifact.id);
                             const previewState = artifactPreviewStates[artifact.id] ?? "loading";
                             return (
@@ -3881,50 +4017,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           />
         </>
       ) : error ? (
-        <div className="flex flex-1 items-center justify-center py-5">
-          <section
-            aria-labelledby="session-load-error-heading"
-            className={`w-full max-w-sm ${STATUS_CARD_CLASS}`}
-          >
-            <div className="flex items-start gap-3">
-              <svg
-                aria-hidden="true"
-                className="h-5 w-5 shrink-0 text-[var(--color-status-attention)]"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <circle cx="12" cy="12" r="9" />
-                <path d="M12 7v6M12 17h.01" />
-              </svg>
-              <div className="min-w-0">
-                <h2
-                  className="font-bold text-[var(--color-text-primary)]"
-                  id="session-load-error-heading"
-                >
-                  Unable to load this session.
-                </h2>
-                <p
-                  className={`mt-1 normal-case tracking-normal text-[var(--color-text-secondary)] ${HARD_WRAP_TEXT_CLASS}`}
-                >
-                  {error}
-                </p>
-              </div>
-            </div>
-            <div className="mt-3 flex justify-end">
-              <button
-                type="button"
-                onClick={() => void loadSession()}
-                className="border border-[var(--color-status-attention)] px-3 py-1 font-bold uppercase text-[var(--color-status-attention)] outline-none transition-colors hover:bg-[var(--color-status-attention)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-attention)] focus-visible:text-[var(--color-bg-elevated)]"
-              >
-                Retry
-              </button>
-            </div>
-          </section>
-        </div>
+        <SessionLoadState failure={error} onRetry={loadSession} />
       ) : (
         <CenteredLoader className="flex-1" label="Loading session" />
       )}

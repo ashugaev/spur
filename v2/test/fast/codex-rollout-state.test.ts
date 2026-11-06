@@ -1054,11 +1054,11 @@ describe("readCodexRolloutState", () => {
     [
       "hard reached type",
       { credits: { has_credits: true }, rate_limit_reached_type: "hard_cap" },
-      true,
+      false,
     ],
-    ["unknown cap", { credits: { has_credits: true }, individual_limit: {} }, true],
+    ["unknown cap", { credits: { has_credits: true }, individual_limit: {} }, false],
   ] as const)(
-    "selects the newest %s snapshot over an older hard limit",
+    "clears the newest %s snapshot and an older hard limit on clean task completion",
     async (_name, latest, limited) => {
       const lines = [
         sessionMeta("credit-thread"),
@@ -1094,6 +1094,172 @@ describe("readCodexRolloutState", () => {
       const result = await readCodexRolloutState(dir, undefined, "credit-thread");
       expect(result.rollout).toMatchObject({ state: "waiting", reason: "task_complete" });
       expect(result.rateLimit?.limited).toBe(limited);
+    },
+  );
+
+  it("dates an undated quota record after an earlier clean turn and cached API allow", async () => {
+    const cleanAt = new Date(Date.now() - 60_000).toISOString();
+    const content = [
+      sessionMeta("undated-quota"),
+      eventLine(cleanAt, "task_complete", { turn_id: "clean" }),
+    ];
+    const sessionsDir = await makeSessionsDir(content.join("\n"));
+    const filePath = join(sessionsDir, "2026", "04", "19", "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    expect((await readCodexRolloutState(sessionsDir, reader)).rateLimit?.limited).toBe(false);
+
+    const cachedAllowStartedAt = Date.now() - 1;
+    content.push(
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          rate_limits: { rate_limit_reached_type: "workspace_member_credits_depleted" },
+        },
+      }),
+    );
+    await writeFile(filePath, content.join("\n"));
+    const limited = await readCodexRolloutState(sessionsDir, reader);
+    expect(limited.rateLimit?.limited).toBe(true);
+    expect(limited.rateLimitObservedAtMs).toBeGreaterThan(cachedAllowStartedAt);
+  });
+
+  it("latches a usage-limit completion through same-turn telemetry and clears on a later clean turn", async () => {
+    const lines = [
+      sessionMeta("quota-turns"),
+      eventLine("2026-11-05T10:00:00.000Z", "task_started", { turn_id: "first" }),
+      eventLine("2026-11-05T10:01:00.000Z", "task_complete", {
+        turn_id: "first",
+        error: { codex_error_info: "usage_limit_exceeded" },
+      }),
+      eventLine("2026-11-05T10:01:01.000Z", "token_count", {
+        rate_limits: { primary: { used_percent: 10 }, rate_limit_reached_type: null },
+      }),
+    ];
+    const sessionsDir = await makeSessionsDir(lines.join("\n"));
+    const filePath = join(sessionsDir, "2026", "04", "19", "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    expect((await readCodexRolloutState(sessionsDir, reader)).rateLimit).toEqual({
+      limited: true,
+      reason: "codex usage_limit_exceeded",
+    });
+
+    lines.push(eventLine("2026-11-05T10:02:00.000Z", "task_started", { turn_id: "second" }));
+    await writeFile(filePath, lines.join("\n"));
+    expect((await readCodexRolloutState(sessionsDir, reader)).rateLimit?.limited).toBe(false);
+
+    lines.push(eventLine("2026-11-05T10:03:00.000Z", "task_complete", { turn_id: "second" }));
+    await writeFile(filePath, lines.join("\n"));
+    const readStartedAt = Date.now();
+    const clean = await readCodexRolloutState(sessionsDir, reader);
+    expect(clean.rateLimit?.limited).toBe(false);
+    expect(clean.rateLimitObservedAtMs).toBeGreaterThanOrEqual(readStartedAt);
+    expect(clean.rateLimitObservedAtMs).toBeLessThanOrEqual(Date.now());
+
+    lines.push(
+      eventLine("2026-11-05T10:04:00.000Z", "task_complete", {
+        turn_id: "third",
+        error: { codex_error_info: "usage_limit_exceeded" },
+      }),
+    );
+    await writeFile(filePath, lines.join("\n"));
+    expect((await readCodexRolloutState(sessionsDir, reader)).rateLimit?.limited).toBe(true);
+  });
+
+  it("Codex quota expiry retains the pinned root reset across restore and refreshes genuine rejection", async () => {
+    const reset = 1791949078;
+    const record = (type: string, payload: Record<string, unknown>) =>
+      JSON.stringify({
+        timestamp: "2026-10-14T03:38:00.000Z",
+        type,
+        payload,
+      });
+    const content = [
+      sessionMeta("quota-root"),
+      record("event_msg", {
+        type: "token_count",
+        rate_limits: {
+          primary: { used_percent: 100, window_minutes: 10080, resets_at: reset },
+          secondary: null,
+          rate_limit_reached_type: null,
+        },
+      }),
+      record("event_msg", { type: "thread_settings_applied", thread_id: "quota-root" }),
+    ].join("\n");
+    const sessionsDir = await makeMultiFileSessionsDir([
+      { filename: "rollout-root.jsonl", content, mtimeMs: 1_000 },
+      {
+        filename: "rollout-sibling.jsonl",
+        mtimeMs: 2_000,
+        content: [
+          sessionMeta("quota-sibling"),
+          record("event_msg", {
+            type: "token_count",
+            rate_limits: {
+              rate_limit_reached_type: "weekly",
+            },
+          }),
+        ].join("\n"),
+      },
+    ]);
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    const first = await readCodexRolloutState(sessionsDir, reader, "quota-root");
+    expect(first.rollout?.reason).toBe("thread_settings_applied");
+    expect(first.rateLimit).toEqual({
+      limited: true,
+      reason: "codex 5h window exhausted",
+      resetAtMs: reset * 1000,
+    });
+    expect(await readCodexRolloutState(sessionsDir, reader, "quota-root")).toEqual(first);
+    await writeFile(
+      join(sessionsDir, "2026", "04", "19", "rollout-root.jsonl"),
+      `${content}\n${record("event_msg", {
+        type: "token_count",
+        rate_limits: {
+          rate_limit_reached_type: "weekly",
+        },
+      })}`,
+      "utf8",
+    );
+    expect((await readCodexRolloutState(sessionsDir, reader, "quota-root")).rateLimit).toEqual({
+      limited: true,
+      reason: "codex weekly",
+    });
+  });
+
+  it.each([1791949138, undefined])(
+    "paid-credit continuation survives exhausted reset %s until explicit refusal",
+    async (reset) => {
+      const tokenCount = (refused: boolean) =>
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-10-14T03:38:00.000Z",
+          payload: {
+            type: "token_count",
+            rate_limits: {
+              primary: { used_percent: 100, resets_at: reset },
+              secondary: { used_percent: 100 },
+              credits: { has_credits: true },
+              rate_limit_reached_type: refused ? "weekly" : null,
+            },
+          },
+        });
+      const content = `${sessionMeta("paid-root")}\n${tokenCount(false)}`;
+      const sessionsDir = await makeSessionsDir(content);
+      const reader: CodexRolloutReaderState = { files: new Map() };
+      expect((await readCodexRolloutState(sessionsDir, reader, "paid-root")).rateLimit).toEqual({
+        limited: false,
+        reason: "",
+      });
+      await writeFile(
+        join(sessionsDir, "2026", "04", "19", "rollout-test.jsonl"),
+        `${content}\n${tokenCount(true)}`,
+        "utf8",
+      );
+      expect((await readCodexRolloutState(sessionsDir, reader, "paid-root")).rateLimit).toEqual({
+        limited: true,
+        reason: "codex weekly",
+      });
     },
   );
 
@@ -1334,6 +1500,46 @@ describe("readCodexRolloutState", () => {
       reason: "task_started",
       turnId: "019e1300-bbbb-7000-9000-000000000003",
     });
+    expect(result.lastProgressMs).toBe(Date.parse("2026-05-10T11:00:02.000Z"));
+  });
+
+  it("reports lastProgressMs from a trailing non-state line while rollout keeps the task_started time", async () => {
+    const sessionsDir = await makeSessionsDir(
+      [
+        JSON.stringify({
+          timestamp: "2026-05-10T11:00:00.000Z",
+          type: "event_msg",
+          payload: {
+            type: "task_started",
+            turn_id: "019e1300-bbbb-7000-9000-000000000004",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-10T11:00:01.000Z",
+          type: "response_item",
+          payload: { type: "function_call", name: "exec_command", call_id: "call_Y" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-10T11:00:02.000Z",
+          type: "response_item",
+          payload: { type: "function_call_output", call_id: "call_Y" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-10T11:05:00.000Z",
+          type: "event_msg",
+          payload: { type: "token_count", info: null, rate_limits: null },
+        }),
+      ].join("\n"),
+      "rollout-trailing-token-count.jsonl",
+    );
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toMatchObject({
+      reason: "task_started",
+      timestampMs: Date.parse("2026-05-10T11:00:00.000Z"),
+    });
+    expect(result.lastProgressMs).toBe(Date.parse("2026-05-10T11:05:00.000Z"));
   });
 
   it("reads waiting from a real task_complete rollout tail", async () => {
@@ -1748,7 +1954,7 @@ describe("readCodexRolloutState", () => {
     expect(result).toEqual({ rollout: null, rateLimit: null, model: "gpt-5.5-codex" });
   });
 
-  it("retains Codex authority through pinned cached and incremental rate-limit reads", async () => {
+  it("retains Codex rate limits through pinned cached and incremental reads", async () => {
     const native = "authority-thread";
     const token = (limits: unknown, timestamp: string) =>
       JSON.stringify({
@@ -1767,7 +1973,6 @@ describe("readCodexRolloutState", () => {
       expect((await readCodexRolloutState(sessionsDir, reader, native)).rateLimit).toEqual({
         limited: true,
         reason: "codex 5h window exhausted",
-        codexAuthority: "soft",
       });
     }
     await writeFile(
@@ -1778,7 +1983,6 @@ describe("readCodexRolloutState", () => {
     expect((await readCodexRolloutState(sessionsDir, reader, native)).rateLimit).toEqual({
       limited: true,
       reason: "codex 5h window exhausted",
-      codexAuthority: "hard",
     });
     expect(
       (await readCodexRolloutState(sessionsDir, reader, "foreign-thread")).rateLimit,
@@ -1812,11 +2016,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result.rateLimit).toEqual({
-      limited: true,
-      reason: "codex primary",
-      codexAuthority: "hard",
-    });
+    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary" });
     expect(result.model).toBe("gpt-5.5-codex");
   });
 
@@ -1980,14 +2180,10 @@ describe("readCodexRolloutState", () => {
     expect(result.rollout).toMatchObject({
       turnId: "019e0000-0000-7000-9000-0000000curnt",
     });
-    expect(result.rateLimit).toEqual({
-      limited: true,
-      reason: "codex primary",
-      codexAuthority: "hard",
-    });
+    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary" });
   });
 
-  it("returns the selected file's null rate-limit rather than a stale sibling's", async () => {
+  it("returns the selected file's clean completion rather than a stale sibling's limit", async () => {
     const currentContent = JSON.stringify({
       timestamp: "2026-05-10T10:00:00.000Z",
       type: "event_msg",
@@ -2024,7 +2220,7 @@ describe("readCodexRolloutState", () => {
     expect(result.rollout).toMatchObject({
       turnId: "019e0000-0000-7000-9000-0000000curnt",
     });
-    expect(result.rateLimit).toBeNull();
+    expect(result.rateLimit).toEqual({ limited: false, reason: "" });
   });
 
   it("falls back to the newest-mtime file's rate limit when no file has a rollout state", async () => {
@@ -2054,11 +2250,7 @@ describe("readCodexRolloutState", () => {
     const result = await readCodexRolloutState(sessionsDir);
 
     expect(result.rollout).toBeNull();
-    expect(result.rateLimit).toEqual({
-      limited: true,
-      reason: "codex primary",
-      codexAuthority: "hard",
-    });
+    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary" });
   });
 
   it("breaks equal in-content timestamps by picking the newer-mtime file", async () => {
@@ -2105,9 +2297,14 @@ function rolloutPath(sessionsDir: string, filename: string): string {
 }
 
 function normalizeResult(result: CodexRolloutReadResult): CodexRolloutReadResult {
-  return result.rollout
-    ? { ...result, rollout: { ...result.rollout, filePath: basename(result.rollout.filePath) } }
-    : result;
+  const {
+    lastProgressMs: _lastProgressMs,
+    rateLimitObservedAtMs: _rateLimitObservedAtMs,
+    ...rest
+  } = result;
+  return rest.rollout
+    ? { ...rest, rollout: { ...rest.rollout, filePath: basename(rest.rollout.filePath) } }
+    : rest;
 }
 
 function eventLine(timestamp: string, type: string, payload: Record<string, unknown>): string {
@@ -2562,6 +2759,7 @@ describe("readCodexRolloutState incremental chunked reads", () => {
     await readCodexRolloutState(sessionsDir, reader);
     const oldEntry = reader.files.get(rolloutPath(sessionsDir, "rollout-overlap.jsonl"));
     const oldFold = structuredClone(oldEntry?.fold);
+    const oldDigest = oldEntry?.fold.quotaDigest.copy().digest("hex");
     await appendFile(rolloutPath(sessionsDir, "rollout-overlap.jsonl"), rest);
 
     const [left, right] = await Promise.all([
@@ -2573,7 +2771,11 @@ describe("readCodexRolloutState incremental chunked reads", () => {
     expect(cold.tokenUsage).toBeDefined();
     expect(normalizeResult(left)).toEqual(cold);
     expect(normalizeResult(right)).toEqual(cold);
-    expect(oldEntry?.fold).toEqual(oldFold);
+    expect({ ...oldEntry?.fold, quotaDigest: undefined }).toEqual({
+      ...oldFold,
+      quotaDigest: undefined,
+    });
+    expect(oldEntry?.fold.quotaDigest.copy().digest("hex")).toBe(oldDigest);
   });
 
   it.each([false, true])("coalesces overlapping scans after warm=%s", async (warm) => {

@@ -3,8 +3,6 @@ export interface RateLimitDetection {
   reason: string;
   /** Epoch ms the limit resets at, when the source text carries a parseable reset instant. */
   resetAtMs?: number;
-  /** Codex native evidence authority; absent on other providers and legacy readers. */
-  codexAuthority?: "hard" | "soft" | "unknown";
 }
 
 const NOT_LIMITED: RateLimitDetection = { limited: false, reason: "" };
@@ -122,46 +120,15 @@ export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | 
   }
   const reachedType = rateLimits["rate_limit_reached_type"];
   if (typeof reachedType === "string" && reachedType.length > 0) {
-    return { limited: true, reason: `codex ${reachedType}`, codexAuthority: "hard" };
+    return { limited: true, reason: `codex ${reachedType}` };
   }
   const credits = rateLimits["credits"];
-  const creditedMeters =
-    (reachedType === undefined || reachedType === null) &&
-    (rateLimits["individual_limit"] === undefined || rateLimits["individual_limit"] === null) &&
-    (rateLimits["spend_control_reached"] === undefined ||
-      rateLimits["spend_control_reached"] === null) &&
-    isRecord(credits) &&
-    (credits["has_credits"] === undefined || typeof credits["has_credits"] === "boolean") &&
-    (credits["unlimited"] === undefined || typeof credits["unlimited"] === "boolean") &&
-    (credits["has_credits"] === true || credits["unlimited"] === true);
-  const windows = [rateLimits["primary"], rateLimits["secondary"]];
-  const knownWindows = windows.every(
-    (window) =>
-      window === undefined ||
-      window === null ||
-      (isRecord(window) &&
-        typeof window["used_percent"] === "number" &&
-        Number.isFinite(window["used_percent"]) &&
-        window["used_percent"] >= 0),
-  );
-  const knownCredits =
-    credits === undefined ||
-    (isRecord(credits) &&
-      (credits["has_credits"] === undefined || typeof credits["has_credits"] === "boolean") &&
-      (credits["unlimited"] === undefined || typeof credits["unlimited"] === "boolean") &&
-      (typeof credits["has_credits"] === "boolean" || typeof credits["unlimited"] === "boolean"));
-  const codexAuthority =
-    (reachedType === undefined || reachedType === null) &&
-    (rateLimits["individual_limit"] === undefined || rateLimits["individual_limit"] === null) &&
-    (rateLimits["spend_control_reached"] === undefined ||
-      rateLimits["spend_control_reached"] === null) &&
-    knownWindows &&
-    knownCredits &&
-    (windows.some(usageWindowPresent) || creditedMeters)
-      ? "soft"
-      : "unknown";
-  // Preserve legacy false-credit denial without a live window. HARD authority
-  // requires complete known flags and explicit null windows/cap companions.
+  // A window-metered account (e.g. team/enterprise, billed via Azure/API key)
+  // reports has_credits:false as a benign soft signal alongside a live usage
+  // window even at 0% used — it just means "not on the credits plan", not
+  // "out of credits". Only treat has_credits:false as a hard limit when no
+  // usage window is present at all (the genuine credit-metered-account case);
+  // otherwise fall through to the used_percent checks below.
   if (
     isRecord(credits) &&
     credits["has_credits"] === false &&
@@ -169,26 +136,36 @@ export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | 
     !usageWindowPresent(rateLimits["primary"]) &&
     !usageWindowPresent(rateLimits["secondary"])
   ) {
-    return {
+    return { limited: true, reason: "codex out of credits" };
+  }
+  if (isRecord(credits) && credits["has_credits"] === true) {
+    return NOT_LIMITED;
+  }
+  const exhaustedWindows = [rateLimits["primary"], rateLimits["secondary"]].filter(
+    usedPercentExhausted,
+  );
+  if (exhaustedWindows.length > 0) {
+    const detection: RateLimitDetection = {
       limited: true,
-      reason: "codex out of credits",
-      codexAuthority:
-        credits["unlimited"] === false &&
-        windows.every((window) => window === null) &&
-        reachedType === null &&
-        rateLimits["individual_limit"] === null &&
-        rateLimits["spend_control_reached"] === null
-          ? "hard"
-          : "unknown",
+      reason: usedPercentExhausted(rateLimits["primary"])
+        ? "codex 5h window exhausted"
+        : "codex weekly window exhausted",
     };
+    let latestResetAtMs = 0;
+    for (const window of exhaustedWindows) {
+      const reset = isRecord(window) ? window["resets_at"] : undefined;
+      if (typeof reset !== "number" || !Number.isSafeInteger(reset) || reset <= 0) {
+        return detection;
+      }
+      const resetAtMs = reset * 1000;
+      if (!Number.isSafeInteger(resetAtMs) || !Number.isFinite(new Date(resetAtMs).getTime())) {
+        return detection;
+      }
+      latestResetAtMs = Math.max(latestResetAtMs, resetAtMs);
+    }
+    return { ...detection, resetAtMs: latestResetAtMs };
   }
-  if (!creditedMeters && usedPercentExhausted(rateLimits["primary"])) {
-    return { limited: true, reason: "codex 5h window exhausted", codexAuthority };
-  }
-  if (!creditedMeters && usedPercentExhausted(rateLimits["secondary"])) {
-    return { limited: true, reason: "codex weekly window exhausted", codexAuthority };
-  }
-  return { ...NOT_LIMITED, codexAuthority };
+  return NOT_LIMITED;
 }
 
 export interface ClaudeRateLimitRecord {
@@ -340,7 +317,7 @@ export const CLAUDE_BOOKKEEPING_RECORD_TYPES: ReadonlySet<string> = new Set([
 // exits, `last-prompt` alongside prompts. Kept out of
 // CLAUDE_BOOKKEEPING_RECORD_TYPES because classifyClaudeJsonlState maps that set
 // to "waiting", while it already walks past these as unknown types.
-const CLAUDE_SESSION_META_RECORD_TYPES: ReadonlySet<string> = new Set([
+export const CLAUDE_SESSION_META_RECORD_TYPES: ReadonlySet<string> = new Set([
   "cost-state",
   "last-prompt",
 ]);
@@ -532,8 +509,17 @@ export function detectCodexMcpPermissionDialog(paneText: string): boolean {
 // banner — a ■-prefixed banner or a line-leading status banner — rejecting
 // diff/quote gutters and quoted code tokens. This keeps an agent whose pane
 // merely contains rate-limit vocabulary from being misclassified rate_limited.
-export function scanTmuxRateLimit(paneText: string): RateLimitDetection | null {
-  for (const line of paneText.split("\n")) {
+export function scanTmuxRateLimit(
+  paneText: string,
+  options?: { tailLines?: number },
+): RateLimitDetection | null {
+  const allLines = paneText.split("\n");
+  let end = allLines.length;
+  while (end > 0 && allLines[end - 1]?.trim() === "") end -= 1;
+  const lines = options?.tailLines
+    ? allLines.slice(Math.max(0, end - options.tailLines), end)
+    : allLines;
+  for (const line of lines) {
     const content = line.replace(/^\s+/, "");
     if (content.length === 0) {
       continue;

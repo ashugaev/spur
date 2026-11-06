@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import {
@@ -35,6 +36,8 @@ import {
 import { ensureCursorTokenUsageHook } from "../cursor-token-usage.js";
 import {
   captureCursorSubmitBaseline,
+  cursorDeliveryInput,
+  markCursorWriteStart,
   persistCursorSubmitBaseline,
   restoreCursorSubmitBaseline,
   scanCursorJsonlForMessage,
@@ -106,16 +109,6 @@ const DEFAULT_SUBMIT_ACK_WINDOW_MS = 300_000;
 const DEFAULT_SUBMIT_MAX_RESENDS = 2;
 const CURSOR_SUBMIT_ACK_WINDOW_MS = 5_000;
 const CURSOR_SUBMIT_MAX_RESENDS = 12;
-// Deferred sensitive-controls ack scan window, all agents. The scan runs
-// inside withPaneWriteLock, so a long window starves every other send to
-// that pane; bounded short so the lock releases quickly regardless of agent.
-export const DEFERRED_CONTROLS_ACK_WINDOW_MS = 5_000;
-// Resend budget for the deferred controls leg, all agents. Cursor's old
-// pacing here was 12 resends x 5s = a 65s pane-lock hold; forensics found it
-// never rescued anything in the measured failures. 2 matches every other
-// agent's DEFAULT_SUBMIT_MAX_RESENDS and restores just enough recovery for a
-// genuinely dropped Enter without reintroducing that hold.
-export const DEFERRED_CONTROLS_MAX_RESENDS = 2;
 // Pacing for a send typed into an agent known to be idle or just interrupted:
 // the user's send/flush, the queued-message drain, the ToDo reminder. An idle
 // agent records the submit within seconds, so a miss means a swallowed Enter,
@@ -143,11 +136,15 @@ const CLAUDE_SUBMIT_FIRST_ACK_WINDOW_MS = 5_000;
 // Launch-send pacing for codex, same shape as claude's: a launch send that
 // never acked stayed in "spawning" behind the 300s default window. A healthy
 // codex launch records the prompt in its rollout ~2.5-4s after the submit,
-// so 10s windows leave margin before an Enter resend.
+// so 10s windows leave margin before an Enter resend. The ready markers already
+// match codex's startup composer, which ignores Enter before codex <0.156
+// finishes startup (25-30s+ with npx MCP servers), so the resends span 100s.
+// Codex >=0.156 queues the first Enter and ignores the rest.
 const CODEX_LAUNCH_SUBMIT_ACK_WINDOW_MS = 10_000;
-const CODEX_LAUNCH_SUBMIT_MAX_RESENDS = 2;
+const CODEX_LAUNCH_SUBMIT_MAX_RESENDS = 9;
 
 export interface AgentSubmitAckContext {
+  message?: string;
   worktreePath: string;
   codexSessionsDir: string;
   /** Pinned native session id, used to bind claude ack scanning by id. */
@@ -182,14 +179,18 @@ export interface AgentEarlyResendContext {
 }
 
 export interface SubmitAckBinding {
+  inputText?: string;
   baseline: SubmitAckBaseline;
   scan(text: string): Promise<SubmitAckScanResult>;
+  /** Called once per send right before the pane write; mutates `baseline` in place. Cursor only. */
+  markWriteStart?(): Promise<void>;
 }
 
 export interface ConversationReadContext {
   worktreePath: string;
   codexSessionsDir?: string;
   agentSessionId?: string;
+  cursorConfigDir?: string;
 }
 
 interface AgentAdapter {
@@ -540,13 +541,13 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       return {
         baseline: { agent: "claude", ...baseline },
         async scan(text) {
-          const found = await scanClaudeJsonlForMessage(
+          const result = await scanClaudeJsonlForMessage(
             baseline,
             text,
             ctx.worktreePath,
             ctx.agentSessionId,
           );
-          return { found, lastScannedFile: baseline.file };
+          return { found: result.found, lastScannedFile: result.scannedFile };
         },
       };
     },
@@ -626,7 +627,14 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         worktreePath,
         options?.cursorConfigDir ? { configDir: options.cursorConfigDir } : undefined,
       ),
-    readConversation: (ctx) => readCursorTranscriptEntries(ctx.worktreePath, ctx.agentSessionId),
+    readConversation: async (ctx) => {
+      const chatId =
+        ctx.agentSessionId ??
+        (ctx.cursorConfigDir
+          ? await findCursorSessionId(ctx.worktreePath, { configDir: ctx.cursorConfigDir })
+          : null);
+      return chatId ? readCursorTranscriptEntries(ctx.worktreePath, chatId) : null;
+    },
     setup: async ({ worktreePath, restrictWrites, cursorConfigDir }) => {
       await ensureCursorWorkspaceTrust(worktreePath);
       if (cursorConfigDir) {
@@ -659,29 +667,58 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     busyQueuedSendAwaitsPrompt: true,
     queuedSendPromptGraceMs: 5_000,
     submitAck: async (ctx, persisted) => {
+      const deliveryId =
+        persisted?.agent === "cursor"
+          ? persisted.deliveryId
+          : ctx.message && !ctx.message.trimStart().startsWith("/")
+            ? randomUUID()
+            : undefined;
       const baseline =
         persisted?.agent === "cursor"
           ? restoreCursorSubmitBaseline(persisted)
           : await captureCursorSubmitBaseline(
               ctx.worktreePath,
               ctx.agentSessionId,
-              ctx.cursorConfigDir ? { cursorConfigDir: ctx.cursorConfigDir } : undefined,
+              ctx.cursorConfigDir || deliveryId
+                ? {
+                    ...(ctx.cursorConfigDir ? { cursorConfigDir: ctx.cursorConfigDir } : {}),
+                    ...(deliveryId ? { deliveryId } : {}),
+                  }
+                : undefined,
             );
       if (!baseline) {
         return null;
       }
+      const cursorOptions = ctx.cursorConfigDir
+        ? { cursorConfigDir: ctx.cursorConfigDir }
+        : undefined;
+      const persistedBaseline: Extract<SubmitAckBaseline, { agent: "cursor" }> = {
+        agent: "cursor",
+        ...persistCursorSubmitBaseline(baseline),
+      };
       return {
-        baseline: { agent: "cursor", ...persistCursorSubmitBaseline(baseline) },
+        baseline: persistedBaseline,
+        ...(deliveryId && ctx.message
+          ? { inputText: cursorDeliveryInput(deliveryId, ctx.message) }
+          : {}),
         async scan(text) {
           const result = await scanCursorJsonlForMessage(
             baseline,
             text,
             ctx.worktreePath,
             ctx.agentSessionId,
-            ctx.cursorConfigDir ? { cursorConfigDir: ctx.cursorConfigDir } : undefined,
+            cursorOptions,
           );
           return { found: result.found, lastScannedFile: result.scannedFile };
         },
+        markWriteStart: () =>
+          markCursorWriteStart(
+            baseline,
+            persistedBaseline,
+            ctx.worktreePath,
+            ctx.agentSessionId,
+            cursorOptions,
+          ),
       };
     },
   },
@@ -694,7 +731,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     buildResumePlan: (agentSessionId, binary, options) =>
       buildOpenCodeResumePlan(agentSessionId, binary, openCodePlanOptions(options)),
     findSessionId: (worktreePath) => findOpenCodeSessionId(worktreePath),
-    readConversation: (ctx) => readOpenCodeConversation(ctx.agentSessionId),
+    readConversation: (ctx) => readOpenCodeConversation(ctx.agentSessionId, ctx.worktreePath),
     setup: async ({
       mcpBindings,
       restrictWrites,
@@ -728,7 +765,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       const baseline =
         persisted?.agent === "opencode"
           ? { sessionId: persisted.sessionId, after: persisted.after }
-          : await captureOpenCodeSubmitBaseline(ctx.agentSessionId);
+          : await captureOpenCodeSubmitBaseline(ctx.agentSessionId, ctx.worktreePath);
       if (!baseline) {
         throw new Error("OpenCode submit acknowledgment requires a pinned native session");
       }
@@ -740,7 +777,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         },
         async scan(text) {
           return {
-            found: await scanOpenCodeForTypedMessage(baseline, text),
+            found: await scanOpenCodeForTypedMessage(baseline, text, ctx.worktreePath),
             lastScannedFile: null,
           };
         },

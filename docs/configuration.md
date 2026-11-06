@@ -55,10 +55,9 @@ A mode is a prompt suffix naming a skill, set via `projects.<id>.modes.<name>.{s
 `chatId<0` selects canonical agent forum; missing/positive `chatId` disables agent communication; `allowedUsers`/`allowedChats` gates manual access — `v2/src/session-service.ts`, `v2/src/event-sources/telegram.ts`.
 Task launch, attention cards, topic lifecycle: [`/new`, `/work`, `/complete`, `/kill`](commands.md#source-reply); complete/kill topic deletion requires bot administrator `can_delete_messages`.
 [`source reply`](commands.md#source-reply), questions, attention and typing use assigned topic; Telegram spawn assigns before launch; legacy destinations migrate on input/output — `v2/src/session-service.ts`.
-Queued topics: accepted ID/intent retained; launch and competing requests hold until acknowledged assignment; uncertain creation is not retried automatically — `v2/src/session-service.ts`.
 DMs support commands/spawn tasks; existing-agent text, buttons and voice outside assigned topic redirect without delivery — `v2/src/event-sources/telegram.ts`.
 Telegram attachments (photo/document/audio/video/animation/voice/video_note/sticker): spawn/followup artifact references, optional captions, 10 files × 5 MiB; grouped albums reject late members — `v2/src/event-sources/telegram.ts`, `v2/src/types.ts`.
-Failed inbound update from an allowed user answers `Message not delivered. Send it again.` once in the same chat/topic; taps on buttons older than 48h answer in the group main — `v2/src/event-sources/telegram.ts`.
+Failed inbound update from an allowed user answers `Message not delivered. Send it again.` once in the same chat/topic (a forum-topic session lookup failure replaces the delivery ack); taps on buttons older than 48h answer in the group main — `v2/src/event-sources/telegram.ts`.
 `/spawn` creates its own canonical topic; `/watch` and `/work` Continue return topic links; `/unwatch` removes selected binding and retains topic — `v2/src/event-sources/telegram.ts`, `v2/src/session-service.ts`.
 Recorded bot-message owners: 1000 per source, oldest evicted first — `v2/src/metadata.ts`.
 Pending button choices: 200 per source, oldest offers evicted first; session cleanup retires its choices — `v2/src/metadata.ts`.
@@ -66,7 +65,7 @@ Assigned-topic placeholders: `Received. <label> is thinking...`, `is busy; your 
 Queued Telegram sends suppress `is waiting.` notices and ToDo nudges — `v2/src/session-service.ts`.
 Assigned-topic typing: delivered, unanswered messages while session works; 10 min cap — `v2/src/session-service.ts`.
 Agent Markdown: bold, strike, inline/fenced code, HTTP(S) links and headings render as HTML; Telegram parse rejection retries plain text — `v2/src/telegram-markdown.ts`, `v2/src/telegram-source-state.ts`.
-Forum topic names: status emoji, title, session id, agent; titled names capped at 128 UTF-16 units, title truncation preserves identity when it fits — `v2/src/session-service.ts`.
+Forum topic names: status emoji, title, session id, agent; names capped at 128 UTF-16 units, title truncation preserves identity when it fits — `v2/src/session-service.ts`.
 Generated Telegram launch instructions require source `chatId<0` and matching `telegram:message` send trigger — `v2/src/session-service.ts`.
 
 ## Event log retention
@@ -81,13 +80,13 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `dataDir` (`~/.spur`), `worktreeDir` (`~/.spur/worktrees`), `projectsRoot` (`<dataDir>/projects`).
 - `defaultAgent` (`claude|codex|cursor|opencode`, default `claude`).
 - `ui.port` (`5555`; `spur-web.service` `PORT` env wins on mismatch, `spur doctor` warns `web-ui-port-drift`).
-- `models.codexHome` (`~/.codex`, instance only).
+- `models.codexHome` (`~/.codex`, instance only). Its `models_cache.json` gates every spawn with an explicit codex model, including CLI `--model`, respawn, handoff, trigger spawn blocks and Telegram `autoSpawn`: a model absent from a non-empty cache is rejected with 400. Skipped when the cache is missing or empty, when `~/.codex/config.toml` sets a non-`openai` top-level `model_provider` or a top-level `profile`, or when project `codexArgs` pass `--oss`, `--local-provider`, `--profile`/`-p`, or a `-c`/`--config` override of `model_provider` or `profile`.
 - `SPUR_CLAUDE_BIN`/`SPUR_CODEX_BIN`/`SPUR_CURSOR_BIN`/`SPUR_OPENCODE_BIN`: process env, per-agent executable override.
+- `SPUR_{CLAUDE,CODEX,CURSOR,OPENCODE}_PANE_CHILD_FALLBACK` (`auto|off`, default `auto`): process env; `off` disables per-agent fallback daemon-wide; requires every wrapper launch name-matchable throughout agent lifetime — `v2/src/agents/executable.ts`.
 - `tags.<name>.{description,color}`: `description` required, instance only.
 - `authRotation.{autoRotateOnRateLimit false, cooldownMinutes 60, maxRotationsPerEpisode 2, switchAuth false}`: instance only. `switchAuth` gates per-session [Switch auth](claude-accounts.md#per-session-switch); off hides it in web and `POST /sessions/:id/switch-auth` returns 404.
 - `diskRetention.warnFreeGb` (`10`, instance only, drives `doctor`'s `home-disk-headroom`).
 - `rateLimitReactivation.afterHours` (`0`, instance only).
-- Codex limit authority, MCP precedence and current-launch episode recovery: `v2/src/rate-limit-detect.ts`, `v2/src/session-service.ts`, `v2/src/metadata.ts`.
 - `staleAfterMinutes` (`720`, instance/per-project). See [Stale mode](#stale-mode).
 - `autoUpdate` (`false`, instance only). See [Auto update](#auto-update).
 - `sessionGc.{enabled false, olderThanDays 30, intervalMinutes 360, maxGroupsPerSweep 20, statuses [completed,killed,stopped]}`: [`spur gc`](commands.md#gc).
@@ -104,6 +103,8 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `projects.<id>.restoreAfterReboot` (`false`). See [Restore after reboot](#restore-after-reboot).
 - `projects.<id>.sidecars.<name>` (map, mutually exclusive with `devServer`; built-in `playwright` — [Built-in MCP sidecars](commands.md#built-in-mcp-sidecars)), `.idleTtlMinutes` ([Sidecar reaping](#sidecar-reaping)), `.ports.<id>.{env,start,end,url}` ([Sidecars](commands.md#sidecars)); `v2/src/config.ts`.
 - Isolated Telegram: retained `TELEGRAM_TEST_BOT_TOKEN`, `TELEGRAM_TEST_CHAT_ID`, `TELEGRAM_TEST_ALLOWED_USERS`, `TELEGRAM_TEST_ALLOWED_CHATS` string fields; reject known resolved supplied-project Telegram token collisions before seed/attachment, unresolved/undisclosed tokens unchecked, one local poller per bot, no production fallback; `v2/src/config.ts`, `v2/src/isolated-telegram.ts`, [Sidecars](commands.md#sidecars).
+- `SPUR_ISOLATED_TELEGRAM`: `test` (default) or `off` (no TEST fixture, lease, or Telegram source); empty/invalid reject launch; set on daemon sidecar `env`, UI env does not propagate to dependency; `scripts/spur-isolated-daemon.sh`.
+- `TMPDIR` isolated `owner.sock` full pathname: Linux107/Darwin103 UTF-8 bytes, checked before TEST setup; `v2/bin/isolated-daemon-owner.mjs`.
 - Isolated voice: current daemon-owner readiness precedes private UI receipt; fail-closed discovery without parent helper or production fallback; `v2/src/ports.ts`, [Session tools](commands.md#session-tools-and-environment).
 - Native Telegram call sidecars: `voice-daemon`, `voice-call` require configured integration inputs; direct agent tools and isolated child config: [prototype workflow](telegram-calls.md), `scripts/telegram-call/bridge.py`, `scripts/spur-isolated-daemon.sh`, `spur.yaml`.
 - `projects.<id>.mcp.exclude` (`[]`). See [Suppressing a host MCP server](commands.md#suppressing-a-host-mcp-server).
@@ -118,7 +119,7 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `projects.<id>.sources.<sourceId>.signPosts` (`false`, github): requires `selfMarker` with no line break, leading `>` or backtick, equal to every other github `selfMarker` in the project; adds a `GitHub posts:` block to session launch prompts project-wide. `v2/src/config.ts`, `v2/src/session-service.ts`.
 - Webhook `.host` (IP literal, `127.0.0.1`; no hostname or zone id), `.port` (required integer `1..65535`; same-port bind cannot overlap another webhook, server, or UI bind; a server hostname overlaps every webhook host), `.path` (required exact path, 1..2048 visible ASCII bytes; one leading `/`; no query, fragment, whitespace, or control byte), `.secret` (required 16..512 visible ASCII bytes; `${VAR}`-resolvable).
 - `projects.<id>.triggers.<triggerId>.{source,event,spawn|send}`.
-- `spawn[].{prompt,steps,agent,model,reasoningEffort,mode,selfDestruct,branch,overrides.worktree,overrides.defaultBranch,restrictWrites,autoComplete}`, `spawnDeskGroup`: effort overrides project default; `v2/src/config.ts`; see [Desk groups](#desk-groups), [selfDestruct](#selfdestruct-steps).
+- `spawn[].{prompt,steps,agent,model,reasoningEffort,mode,selfDestruct,branch,overrides.worktree,overrides.defaultBranch,restrictWrites,autoComplete}`, `spawnDeskGroup`: `model` requires `agent` in the same block, overrides `defaultModels`; effort overrides project default; `v2/src/config.ts`; see [Desk groups](#desk-groups), [selfDestruct](#selfdestruct-steps).
 - Work-item retries: `v2/src/work-item-retry.ts`; accepted pending members: `v2/src/triggers.ts`; tagged cleanup: `v2/src/session-service.ts`; branch guards: `v2/src/workspace.ts`.
 - Work-item trigger renames: unresolved tagged-session adoption and guarded cleanup; v2/src/triggers.ts.
 - `send.{interrupt false, prompt}`. `false` opens a send window (default 30s, `SPUR_IDLE_WAIT_BEFORE_FLUSH_MS`; `telegram:message` batches use 2s, never above the env value), counted from the agent's last activity.
@@ -127,17 +128,16 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 
 ## Admission control
 
-Spawn waits automatically for memory-guard or live-session-cap recovery; `v2/src/session-service.ts`.
-Accepted background and resource-queued HTTP spawns retain session id, launch intent, messages, attachments, and selected account across daemon restart; `v2/src/session-service.ts`, `v2/src/metadata.ts`.
-Recovery adopts confirmed existing runtime; uncertain runtime or startup delivery holds and rechecks automatically; [queued topic creation](#telegram-binding) retains its separate hold policy — `v2/src/session-service.ts`.
+Cap limits concurrent live sessions at spawn, restore, and the wake of a stale-parked or memory-shed session. Over cap: `429` naming stop candidates. Reporting route: [`GET /headroom`](daemon-api.md). CLI: [`spur doctor`](commands.md#doctor). Schema `v2/src/config.ts`, enforcement `v2/src/session-service.ts`.
+Accepted background spawns retain session id, launch intent, messages, attachments, and selected account across daemon restart; a recovered or retried intent waits for memory-guard or cap recovery under the same id; `v2/src/session-service.ts`, `v2/src/metadata.ts`.
+Recovery adopts confirmed existing runtime; uncertain runtime or startup delivery holds and rechecks automatically — `v2/src/session-service.ts`.
 OpenCode recovery without a persisted native session id stays `session.spawn.recovery_held`; history and prompt acknowledgment cannot supply ownership; `v2/src/session-service.ts`.
-
-Restore and wake reject memory-guard or cap denial (`429`); `v2/src/session-service.ts`.
-Limits: `v2/src/config.ts`; reports: [`GET /headroom`](daemon-api.md), [`spur doctor`](commands.md#doctor).
 
 `stopReason: "runtime_lost"`: confirmed runtime loss becomes restorable `stopped`, retains error evidence, releases capacity; unknown probes retain capacity (`v2/src/session-service.ts`).
 
 The shed's session stop writes `status: "stopped"`, `stopReason: "memory_shed"`. Queued trigger batches for such a session are held, not dropped, and its wake passes the admission gate.
+
+Memory guard floors (`enforceFloors`) also deny spawn, restore, and wake while the daemon cgroup's `memory.max` headroom is within the shed's emergency threshold, or its release band while the shed is latched. Unreadable cgroup or unlimited `memory.max` adds no denial.
 
 Events: `daemon.memory.shed`(`.failed`), `session.admission.denied`, `session.admission.memory_guard`, `session.spawn.recovery_held`, `daemon.memory.unbounded`, `daemon.memory.hold.engaged`(`.cleared`/`.failed`), `trigger.send.suppressed_memory_guard`.
 
@@ -161,13 +161,15 @@ The same pass also runs a detect-only step over one shared process-table snapsho
 
 ## Automatic reminders
 
-Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 attempts for unchanged open work/blockers/empty ledger — see [todo](commands.md#todo). Pending automatic GitHub/Jira sends: 8 attempts per unchanged item; CI-failure reminders: 3.
+Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 attempts for unchanged open work/blockers/empty ledger — see [todo](commands.md#todo). Pending automatic GitHub/Jira sends: 8 attempts per unchanged item. `ci_failed` pings once per head commit and failing check name, a re-run of the same check on that commit does not ping again, a new head commit does; no reminder loop. `merge_conflict` pings at most once per head+base pair. Failing CI or a conflict present at a PR's first observation pings once; a persisted or legacy snapshot does not replay it.
 
 A session bound to a PR GitHub reports as nonexistent stops signal polling after one attempt, logs `source.poll.disabled` once (`warn`), and persists the disable per source under `<dataDir>/source-state/github-poll-disabled/<projectId>/<sourceId>.json` across source reload and daemon restart. Clear via rebind away from that PR, [`spur source poll-enable`](commands.md#source), or `spur restore`/`spur reopen`. Bounded recheck every `pollDisabledRecheckMs` (default 24h); a still-missing PR does not re-emit `source.poll.disabled`. A resolved recheck logs `source.poll.enabled` once.
 
 ## Events
 
-Sources emit events; triggers `spawn` or `send`. Auto-ping scopes: [commands.md#auto-ping](commands.md#auto-ping). `--thread` targets: `github` (review threads), `gitlab` (discussions), `telegram` (forum topics) — no other source has a thread target. `cron`, `github-ci`, `sentry`, `jira`, `script` carry no auto-ping controls at all (spawn-only sources). Retry/backoff and poll-cost mechanics: `v2/src/event-sources/*.ts`.
+Cursor input correlation: [send, queue](commands.md#send-queue); retained baseline: [Session routes](daemon-api.md#session-routes).
+
+Sources emit events; triggers `spawn` or `send`. Auto-ping mute modes: [commands.md#auto-ping](commands.md#auto-ping). Until-change mutes need `github` or `gitlab` pings; `telegram` and `service` pings offer `--for` and `--forever` only. `cron`, `github-ci`, `sentry`, `jira`, `script` carry no auto-ping controls at all (spawn-only sources). Retry/backoff and poll-cost mechanics: `v2/src/event-sources/*.ts`.
 
 Trigger spawn retry: cap/memory denials persist across restarts, preserve successful desk members; source-type/trigger changes or removal discard pending work (`v2/src/triggers.ts`).
 
@@ -175,6 +177,7 @@ Event names by source:
 
 - `cron`: `cron:tick`.
 - `github`: `github:changes_requested`, `ci_failed`, `comment`, `merge_conflict`, `review_requested`, `ready_for_review`, `approved`, `merged`, `closed`, `work_item.new` (with `query`). PR URLs seed the native `session.pr` binding; other review URLs go to `slots.links`. `work_item.new` spawn-prompt template: `{{url}} {{number}} {{title}} {{repo}} {{externalId}}`.
+- `github:comment`: skips PR issue comments authored by a GitHub App or Actions bot.
 - `github:approved`: per-login signals; initial lifecycle suppression — `v2/src/review-providers/github.ts`, `v2/src/event-sources/github.ts`.
 - `github-ci`: `github-ci:run.completed`.
 - `gitlab`: `gitlab:changes_requested`, `ci_failed`, `comment`, `merge_conflict`.
@@ -187,7 +190,7 @@ Event names by source:
 
 - Webhook request: `POST <path>` with `Authorization: Bearer <secret>` and `Content-Type: application/json`; runtime behavior and limits: `v2/src/event-sources/webhook.ts`.
 
-Other event names (see source file for trigger conditions): `trigger.spawn.suppressed`, `trigger.spawn.{retry_scheduled,retry_deferred,retry_ended,adopted,discard_failed}`, `source.poll.disabled`, `source.poll.enabled`, `source.poll_cycle.error`, `source.telegram.{callback_dropped,choice_rejected}`, `gh.poll_cycle`, `gh.usage`, `gh.poll_budget_paused`, `session.message.{sent,delivery_recovered,delivery_failed,requeued,submit_unconfirmed,queued_ahead,queue_removed,stalled}`, `session.spawn.{orphan_stopped,launch_unconfirmed,launch_submitted}`, `session.controls.delivery_recovered`, `session.todo.{nudge_failed,nudge_disabled,nudge_exhausted}`, `session.{complete,pause,self_destruct,desk_complete,handoff}.{completed,failed}`, `session.wake.{failed,daily_failed,interval_failed,sent,daily_sent,interval_sent,interval_cancelled,daily_cancelled,suppressed}`, `session.wake.token_budget_blocked`, `session.token_budget.exhausted`, `session.token_budget.unenforced`, `session.token_budget.teardown_failed`, `session.attention_monitor.{failed,session_failed,slow}`, `session.runtime.{probe_unresponsive,pane_child_fallback}`, `session.agent_process.{pane_pid_unreadable,capture_unavailable,capture_blind,survivors}`, `session.{handoff,respawn}.startup_attachment_missing`, `session.server_error.reactivation_exhausted`, `session.sidecar.{start_noop,start_rejected,launch_reap_skipped,owner_missing}`, `session.list.enrich_failed`, `session.submit.{timeout,confirmed,released,failure_dismissed}`, `session.subscription.{delivery_failed,spawn_failed}`, `session.recover.context_unconfirmed`, `session.record.invalid`, `trigger.send.{failed,suppressed_admission,suppressed_launch_pending}`, `host.disk.low`, `daemon.admission.startup`, `daemon.registry.{count,warning}`, `daemon.auto_update.{started,failed,retry,skipped,suppressed,paused,config_invalid,disarm_failed}`, `daemon.deploy_switch.{started,rejected}`, `cli.update.{started,rolled_back,abandoned}`.
+Other event names (see source file for trigger conditions): `trigger.spawn.suppressed`, `trigger.spawn.{retry_scheduled,retry_deferred,retry_ended,adopted,discard_failed}`, `source.poll.disabled`, `source.poll.enabled`, `source.poll_cycle.error`, `source.telegram.{callback_dropped,choice_rejected}`, `gh.poll_cycle`, `gh.usage`, `gh.poll_budget_paused`, `session.message.{sent,delivery_recovered,delivery_failed,requeued,submit_unconfirmed,queued_ahead,queue_removed,stalled}`, `session.spawn.{orphan_stopped,launch_unconfirmed,launch_submitted}`, `auto-ping.{muted,unmuted,migrated}`, `session.todo.{nudge_failed,nudge_disabled,nudge_exhausted}`, `session.{complete,pause,self_destruct,desk_complete,handoff}.{completed,failed}`, `session.wake.{failed,daily_failed,interval_failed,sent,daily_sent,interval_sent,interval_cancelled,daily_cancelled,suppressed}`, `session.wake.token_budget_blocked`, `session.token_budget.exhausted`, `session.token_budget.unenforced`, `session.token_budget.teardown_failed`, `session.attention_monitor.{failed,session_failed,slow}`, `session.runtime.{probe_unresponsive,pane_child_fallback}`, `session.agent_process.{pane_pid_unreadable,capture_unavailable,capture_blind,survivors}`, `session.{handoff,respawn}.startup_attachment_missing`, `session.server_error.reactivation_exhausted`, `session.sidecar.{start_noop,start_rejected,launch_reap_skipped,owner_missing}`, `session.list.enrich_failed`, `session.submit.{timeout,confirmed,released,failure_dismissed}`, `session.subscription.{delivery_failed,spawn_failed}`, `session.recover.context_unconfirmed`, `session.record.invalid`, `trigger.send.{failed,suppressed,suppressed_admission,suppressed_launch_pending}`, `host.disk.low`, `daemon.admission.startup`, `daemon.registry.{count,warning}`, `daemon.auto_update.{started,failed,retry,skipped,suppressed,paused,config_invalid,disarm_failed}`, `daemon.deploy_switch.{started,rejected}`, `cli.update.{started,rolled_back,abandoned}`.
 
 ## Auto update
 

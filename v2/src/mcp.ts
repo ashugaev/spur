@@ -158,6 +158,40 @@ export function createMcpWrapper(gateway: McpGateway): McpServer {
     },
   );
   register(
+    "restart_daemon",
+    "Restart the backend daemon, preserving session agents. Supply a new UUID operationId once; retries reuse that ID. Returns durable accepted receipt, not completion. Resolve with get_daemon_restart after reconnect; never replay unknown effects with a new ID.",
+    { operationId: z.string().uuid() },
+    true,
+    ({ operationId }, signal) => gateway.restartDaemon(operationId, signal),
+    { idempotentHint: true, openWorldHint: false },
+  );
+  register(
+    "get_daemon_restart",
+    "Read the durable daemon.restart operator receipt during outage or after MCP reconnect. completed requires a different ready daemon generation; accepted/unknown never authorize another restart.",
+    { operationId: z.string().uuid() },
+    false,
+    ({ operationId }, signal) => gateway.getDaemonRestart(operationId, signal),
+  );
+  register(
+    "read_daemon_logs",
+    "Read bounded daemon logs: source=runtime selects captured daemon logger/server diagnostics; events selects structured daemon/http events. Session/service/sidecar logs, prebootstrap raw stdio and external journals are excluded. Forward nextCursor; rotation requires a fresh read; oversized records report truncation.",
+    {
+      cursor: z.string().max(1024).optional(),
+      limit: z.number().int().min(1).max(100).optional(),
+      maxBytes: z.number().int().min(1024).max(16384).optional(),
+      source: z.enum(["events", "runtime"]).optional(),
+    },
+    false,
+    (input, signal) => gateway.daemonLogs(input, signal),
+  );
+  register(
+    "get_session_pr_status",
+    "Read existing extracted status for the PR attached to a session: state, CI, review decision, merge conflict, thread counts, ready semantics and cache freshness/provenance. Cache only; never refreshes GitHub. Missing attachment, unknown cache and unavailable web service are distinct.",
+    { sessionId: id },
+    false,
+    ({ sessionId }, signal) => gateway.sessionPrStatus(sessionId, signal),
+  );
+  register(
     "wait_session",
     "Wait for structured progress. Pass after from spawn/send to require matching submission and assistant/question progress; old idle cannot complete a write.",
     {

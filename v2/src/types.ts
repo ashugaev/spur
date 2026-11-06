@@ -1,4 +1,5 @@
 import type { HostMemory } from "./host-memory.js";
+import type { CursorPersistedSubmitBaseline } from "./agents/cursor-submit-ack.js";
 
 export type AgentName = "claude" | "codex" | "cursor" | "opencode";
 export const SPUR_DAEMON_API_VERSION = 3;
@@ -624,9 +625,13 @@ export interface ReviewSignal {
   kind: ReviewSignalKind | GitHubLifecycleKind | GitHubPrOccurrenceKind;
   text: string;
   providerThreadTarget?: AutoPingThreadTarget;
+  /** Until-change mute key: a different value means the subject changed. */
+  changeKey?: string;
+  /** Occurrence identity: joins the snapshot diff and the retry fingerprint. */
+  revision?: string;
+  /** Head commit and failing check names of a ci_failed signal. */
+  ciRun?: { head: string; checks: string[] };
 }
-
-export type AutoPingScope = "event" | "thread" | "subscription";
 
 export type AutoPingDestination = { kind: "session"; sessionId: string };
 
@@ -634,11 +639,6 @@ export type AutoPingThreadTarget =
   | { kind: "github-review-thread"; threadId: string }
   | { kind: "gitlab-discussion"; mergeRequestIid: number; discussionId: string }
   | { kind: "telegram-topic"; chatId: number; messageThreadId: number };
-
-export type AutoPingTarget =
-  | { kind: "occurrence"; occurrenceId: string }
-  | AutoPingThreadTarget
-  | { kind: "subscription" };
 
 export interface AutoPingRouteDescriptor {
   version: 1;
@@ -652,26 +652,54 @@ export interface AutoPingRouteDescriptor {
   spawnDeskGroup: boolean;
 }
 
-export interface AutoPingSuppressionView {
+export type AutoPingMuteMode = "until_change" | "for" | "forever";
+export type AutoPingMuteEndReason = "resumed" | "changed" | "expired" | "route_removed";
+
+export interface AutoPingMuteItem {
+  subject: string;
+  kind: string;
+  label: string;
+  changeKey?: string;
+}
+
+export interface AutoPingMuteView {
   suppressionId: string;
-  scope: AutoPingScope;
+  mode: AutoPingMuteMode;
   routeFingerprint: string;
   destination: AutoPingDestination;
-  target: AutoPingTarget;
+  actorSessionId: string;
+  items: AutoPingMuteItem[];
+  reason?: string;
   createdAt: string;
+  expiresAt?: string;
+  endedAt?: string;
+  endReason?: AutoPingMuteEndReason;
 }
 
 export interface AutoPingSuppressionListResponse {
-  records: AutoPingSuppressionView[];
+  records: AutoPingMuteView[];
+  history?: AutoPingMuteView[];
 }
 
-export interface AutoPingUnsubscribeResponse {
-  record: AutoPingSuppressionView;
+export interface AutoPingMuteRequest {
+  handle: string;
+  mode: AutoPingMuteMode;
+  durationMs?: number;
+  reason?: string;
+}
+
+export interface AutoPingMuteResponse {
+  record: AutoPingMuteView;
   created: boolean;
 }
 
+export interface AutoPingResumeRequest {
+  handle?: string;
+  suppressionId?: string;
+}
+
 export interface AutoPingResumeResponse {
-  records: AutoPingSuppressionView[];
+  records: AutoPingMuteView[];
   removed: boolean;
 }
 
@@ -716,6 +744,9 @@ export interface ReviewRequestSummary {
   repo: string;
   mergeable: string;
   mergeStateStatus: string;
+  /** Head and base commit ids when the provider returns them (until-change mute keys). */
+  headSha?: string;
+  baseSha?: string;
 }
 
 export interface ReviewCheck {
@@ -737,21 +768,7 @@ export interface ServiceProblemEventData {
   ruleId: string;
 }
 
-export interface PersistedAutoPingBatchItem {
-  occurrenceId: string;
-  eventHandle: string;
-  threadTarget?: AutoPingThreadTarget;
-  threadHandle?: string;
-}
-
-export interface PersistedAutoPingBatchState {
-  routeFingerprint: string;
-  destination: AutoPingDestination;
-  subscriptionHandle: string;
-  items: Record<string, PersistedAutoPingBatchItem>;
-}
-
-export type PersistedSendBatch = (
+export type PersistedSendBatch =
   | {
       kind: "review";
       providerId: ReviewProviderId;
@@ -778,8 +795,7 @@ export type PersistedSendBatch = (
       prompt?: string;
       sessionId: string;
       messages: TelegramMessageEventData[];
-    }
-) & { autoPing?: PersistedAutoPingBatchState };
+    };
 
 export interface PersistedPendingBatch {
   queueKey: string;
@@ -794,6 +810,8 @@ export interface PersistedPendingBatch {
   projectId: string;
   triggerId: string;
   sourceId: string;
+  /** Route the batch was queued under; a restore under a changed route is skipped. */
+  routeFingerprint?: string;
   batch: PersistedSendBatch;
   retryAccounting?: SendBatchRetryEntry[];
   admissionCapRetryAt?: number | undefined;
@@ -806,12 +824,10 @@ export interface SendBatchRetryEntry {
   itemKey: string;
   fingerprint: string;
   deliveryAttempts: number;
-  ciAttempts: number;
   nextAttemptAt: number;
 }
 
 export const DELIVERY_MAX_ATTEMPTS = 8;
-export const CI_FAILED_MAX_ATTEMPTS = 3;
 
 export interface SessionModeConfig {
   skill: string;
@@ -2170,13 +2186,7 @@ export interface ConversationMessage {
 export type SubmitAckBaseline =
   | { agent: "claude"; file: string; size: number }
   | { agent: "codex"; offsets: Record<string, number> }
-  | {
-      agent: "cursor";
-      file: string;
-      size: number;
-      /** Rotated chat transcript and its offset at send time. */
-      rotated?: { file: string; size: number };
-    }
+  | ({ agent: "cursor" } & CursorPersistedSubmitBaseline)
   | {
       agent: "opencode";
       sessionId: string;

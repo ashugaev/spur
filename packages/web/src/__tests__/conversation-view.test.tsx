@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationView } from "@/components/ConversationView";
+import { buildSnippetActionPrompt } from "@/lib/snippets/snippet-protocol";
 import type { TranscriptEntry } from "@/lib/types";
 
 describe("ConversationView", () => {
@@ -640,5 +641,54 @@ describe("ConversationView", () => {
 
     expect(rowAfter).not.toBeNull();
     expect(rowAfter).toBe(rowBefore);
+  });
+});
+
+describe("ConversationView snippet action summary", () => {
+  const prompt = buildSnippetActionPrompt({
+    requestId: "11111111-2222-3333-4444-555555555555",
+    sessionId: "sp-ab12",
+    snippetId: "picker",
+    instanceId: "inst-00000001",
+    revision: 3,
+    actionId: "go",
+    label: "Choose selected",
+    payload: { note: "a *bold* note" },
+  });
+
+  function renderMessages(entries: TranscriptEntry[]) {
+    return render(
+      <ConversationView
+        entries={entries}
+        messages={[]}
+        durationMs={0}
+        isWorking={false}
+        agent="claude"
+        onAnswer={vi.fn()}
+      />,
+    );
+  }
+
+  it("renders a user snippet action as a one-line summary with a closed raw prompt", () => {
+    renderMessages([{ kind: "message", role: "user", text: prompt, timestampMs: 1 }]);
+    const summary = document.querySelector("[data-snippet-action-summary]") as HTMLElement;
+    expect(summary.textContent).toBe("Snippet action Choose selected · picker r3");
+    const details = document.querySelector("details") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    expect(screen.getByText("Raw prompt")).toBeInTheDocument();
+    expect(details.querySelector("pre")?.textContent).toBe(prompt);
+  });
+
+  it("renders a malformed envelope as markdown, as before", () => {
+    const broken = prompt.replace("[/spur-snippet-action]", "[/spur-snippet-action] ");
+    renderMessages([{ kind: "message", role: "user", text: broken, timestampMs: 1 }]);
+    expect(document.querySelector("[data-snippet-action-summary]")).toBeNull();
+    expect(document.querySelector("details")).toBeNull();
+    expect(screen.getByText(/spur-snippet-action v1/)).toBeInTheDocument();
+  });
+
+  it("never summarizes an assistant message", () => {
+    renderMessages([{ kind: "message", role: "assistant", text: prompt, timestampMs: 1 }]);
+    expect(document.querySelector("[data-snippet-action-summary]")).toBeNull();
   });
 });

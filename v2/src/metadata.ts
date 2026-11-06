@@ -9,8 +9,10 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { isCursorDeliveryId } from "./agents/cursor-submit-ack.js";
 import { appendEventLog } from "./event-log.js";
 import { parseConsent, type InterfaceConsent } from "./review-interface-consent.js";
 import {
@@ -18,7 +20,6 @@ import {
   isTerminalSessionStatus,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   DELIVERY_MAX_ATTEMPTS,
-  CI_FAILED_MAX_ATTEMPTS,
   type AvailableBacklogItem,
   type PersistedPendingBatch,
   type PersistedSpawnWork,
@@ -284,10 +285,6 @@ function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch
           Number.isInteger(entry["deliveryAttempts"]) &&
           entry["deliveryAttempts"] >= 0 &&
           entry["deliveryAttempts"] <= DELIVERY_MAX_ATTEMPTS &&
-          typeof entry["ciAttempts"] === "number" &&
-          Number.isInteger(entry["ciAttempts"]) &&
-          entry["ciAttempts"] >= 0 &&
-          entry["ciAttempts"] <= CI_FAILED_MAX_ATTEMPTS &&
           typeof entry["nextAttemptAt"] === "number" &&
           Number.isFinite(entry["nextAttemptAt"]) &&
           entry["nextAttemptAt"] >= 0,
@@ -1006,20 +1003,37 @@ function normalizeSubmitAckBaseline(value: unknown): SubmitAckBaseline | undefin
   if (value === null || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
   const { agent } = record;
+  if (agent === "cursor") {
+    const deliveryId = record["deliveryId"];
+    if (deliveryId !== undefined && !isCursorDeliveryId(deliveryId)) return undefined;
+    const file = record["file"];
+    const size = record["size"];
+    if (typeof size !== "number") return undefined;
+    const rotated = record["rotated"];
+    const rotation =
+      rotated !== null && typeof rotated === "object"
+        ? (rotated as Record<string, unknown>)
+        : undefined;
+    const extra =
+      rotation && typeof rotation["file"] === "string" && typeof rotation["size"] === "number"
+        ? { rotated: { file: rotation["file"], size: rotation["size"] } }
+        : {};
+    if (file === null) {
+      return size === 0 && isCursorDeliveryId(deliveryId)
+        ? { agent, file: null, size: 0, deliveryId, ...extra }
+        : undefined;
+    }
+    return typeof file === "string"
+      ? { agent, file, size, ...(deliveryId ? { deliveryId } : {}), ...extra }
+      : undefined;
+  }
   if (
-    (agent === "claude" || agent === "cursor") &&
+    agent === "claude" &&
     typeof record["file"] === "string" &&
     typeof record["size"] === "number"
   ) {
     const base = { file: record["file"], size: record["size"] };
-    const rotated = record["rotated"];
-    if (agent === "claude" || rotated === null || typeof rotated !== "object") {
-      return { agent, ...base };
-    }
-    const { file, size } = rotated as Record<string, unknown>;
-    return typeof file === "string" && typeof size === "number"
-      ? { agent, ...base, rotated: { file, size } }
-      : { agent, ...base };
+    return { agent, ...base };
   }
   const offsets = record["offsets"];
   if (agent === "codex" && offsets !== null && typeof offsets === "object") {
@@ -2132,13 +2146,23 @@ export function deleteGitHubSourceSnapshot(
   deleteReviewSourceSnapshot(dataDir, "github", projectId, sourceId, sessionId);
 }
 
-export function hasGitHubMergeConflictRestoreReplay(
+/** Restore id of a pending merge-conflict replay; undefined when absent or malformed. */
+export function readGitHubMergeConflictRestoreReplay(
   dataDir: string,
   projectId: string,
   sourceId: string,
   sessionId: string,
-): boolean {
-  return existsSync(githubMergeConflictRestoreFilePath(dataDir, projectId, sourceId, sessionId));
+): string | undefined {
+  const path = githubMergeConflictRestoreFilePath(dataDir, projectId, sourceId, sessionId);
+  if (!existsSync(path)) return undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object") return undefined;
+    const restoreId = (parsed as { restoreId?: unknown }).restoreId;
+    return typeof restoreId === "string" && restoreId.length > 0 ? restoreId : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function requestGitHubMergeConflictRestoreReplay(
@@ -2147,7 +2171,9 @@ export function requestGitHubMergeConflictRestoreReplay(
   sourceId: string,
   sessionId: string,
 ): void {
-  writeJsonFile(githubMergeConflictRestoreFilePath(dataDir, projectId, sourceId, sessionId), true);
+  writeJsonFile(githubMergeConflictRestoreFilePath(dataDir, projectId, sourceId, sessionId), {
+    restoreId: randomUUID(),
+  });
 }
 
 export function clearGitHubMergeConflictRestoreReplay(

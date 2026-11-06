@@ -420,72 +420,45 @@ test.describe("S1: Session detail header", () => {
     });
     await page.goto("/sessions/detail-missing");
 
+    await expect(page.getByTestId("session-load-failed")).toContainText(
+      "Unable to load this session",
+    );
     await expect(page.getByText("Session not found")).toBeVisible();
     await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
     await expect(page.getByRole("status", { name: "Loading session" })).toHaveCount(0);
-    await expect(page.getByRole("region", { name: "Unable to load this session." })).toBeVisible();
     await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
     await expect(page.getByRole("alertdialog")).toHaveCount(0);
   });
 
-  for (const theme of ["dark", "light"]) {
-    for (const viewport of [
-      { width: 390, height: 844 },
-      { width: 1280, height: 800 },
-    ]) {
-      for (const detail of ["Daemon is starting", `Session not found\n${"detail".repeat(80)}`]) {
-        const state = detail === "Daemon is starting" ? "startup error" : "missing session";
-        test(`${state} card fits and recovers: ${theme} ${viewport.width}`, async ({
-          page,
-        }, testInfo) => {
-          await page.setViewportSize(viewport);
-          await page.addInitScript((selectedTheme) => {
-            window.localStorage.setItem("spur:theme", selectedTheme);
-          }, theme);
-          const session = makeWorkingSession({ id: "detail-error-card" });
-          let recovered = false;
-          await page.route(`**/api/sessions/${session.id}`, (route) =>
-            route.fulfill({
-              status: recovered ? 200 : 503,
+  test("daemon starting shows the starting card and opens the session once ready", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-starting" });
+    let ready = false;
+    await mockSessionConversation(page, session.id, "working");
+    await page.route(`**/api/sessions/${session.id}`, (route) => {
+      void route.fulfill(
+        ready
+          ? { status: 200, contentType: "application/json", body: JSON.stringify(session) }
+          : {
+              status: 503,
               contentType: "application/json",
-              body: JSON.stringify(recovered ? session : { error: detail }),
-            }),
-          );
-          await mockSessionConversation(page, session.id, "working");
-          await page.goto(`/sessions/${session.id}`);
-          if (theme === "light") {
-            await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-          } else {
-            await expect(page.locator("html")).not.toHaveAttribute("data-theme");
-          }
-          const card = page.getByRole("region", { name: "Unable to load this session." });
-          await expect(card).toBeVisible();
-          expect(await card.locator("p").textContent()).toBe(detail);
-          await expect(page.getByRole("alertdialog")).toHaveCount(0);
-          await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
-          const box = await card.boundingBox();
-          expect(box).not.toBeNull();
-          if (!box) throw new Error("Session error card missing bounds");
-          expect(box.x).toBeGreaterThanOrEqual(0);
-          expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
-          expect(Math.abs(box.x + box.width / 2 - viewport.width / 2)).toBeLessThanOrEqual(1);
-          expect(
-            await page.evaluate(() => document.documentElement.scrollWidth),
-          ).toBeLessThanOrEqual(viewport.width);
-          const retry = card.getByRole("button", { name: "Retry" });
-          await expect(retry).toBeInViewport();
-          await page.getByRole("link", { name: /back/i }).focus();
-          await page.keyboard.press("Tab");
-          await expect(retry).toBeFocused();
-          await page.screenshot({ path: testInfo.outputPath("session-error-card.png") });
-          recovered = true;
-          await page.keyboard.press("Enter");
-          await expect(card).toHaveCount(0);
-          await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-        });
-      }
-    }
-  }
+              body: JSON.stringify({ error: "Daemon is starting" }),
+            },
+      );
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    const card = page.getByTestId("session-load-starting");
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("Spur is starting…");
+    await expect(card.getByRole("button", { name: "Retry now" })).toBeVisible();
+    await expect(page.getByTestId("session-load-failed")).toHaveCount(0);
+
+    ready = true;
+    await expect(card).toHaveCount(0, { timeout: 8000 });
+    await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
+  });
 
   test("back link visible", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s1-1" });
@@ -1265,6 +1238,65 @@ test.describe("S2: Actions bar", () => {
     await page.getByRole("button", { name: /^kill$/i }).click();
     expect(dialogShown).toBe(true);
   });
+
+  for (const action of ["restore", "reopen"] as const) {
+    test(`pending ${action} shows starting until a settled receipt`, async ({ page }) => {
+      const session = (action === "restore" ? makeStoppedSession : makeCompletedSession)({
+        id: `detail-pending-${action}`,
+        runtimeAlive: false,
+      });
+      await mockSessionDetail(page, session);
+      await mockSessionConversation(page, session.id, "waiting");
+      let settle!: () => void;
+      const pending = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      await page.route(`**/api/sessions/${session.id}/${action}`, async (route) => {
+        const body = route.request().postDataJSON() as { operationId: string };
+        session.lifecycle = lifecycleReceipt(body.operationId, session.id, action, "pending", 1);
+        await pending;
+        Object.assign(session, {
+          status: action === "restore" ? "running" : "errored",
+          state: action === "restore" ? "waiting" : "error",
+          runtimeAlive: action === "restore",
+          tmuxSession: action === "restore" ? `spur-${session.id}` : null,
+          lifecycle: lifecycleReceipt(
+            body.operationId,
+            session.id,
+            action,
+            action === "restore" ? "succeeded" : "failed",
+            2,
+          ),
+        });
+        await route.fulfill({ json: session });
+      });
+      await page.goto(`/sessions/${session.id}`);
+      await page.getByRole("button", { name: new RegExp(`^${action}$`, "i") }).click();
+      await expect(page.getByText("starting", { exact: true })).toBeVisible();
+      await expect(page.getByText("working", { exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: /^terminal$/i })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: /^handoff$/i })).toBeDisabled();
+      await expect(page.getByRole("button", { name: /^send now/i })).toHaveCount(0);
+      await expect(page.getByPlaceholder(/^Message\.\.\./)).toHaveCount(0);
+      await page.reload();
+      await expect(page.getByText("starting", { exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: /^handoff$/i })).toBeDisabled();
+      settle();
+      await expect(page.getByText("starting", { exact: true })).toHaveCount(0);
+      await expect(
+        page.getByText(action === "restore" ? "waiting" : "error", { exact: true }),
+      ).toBeVisible();
+      if (action === "restore") {
+        await expect(page.getByRole("button", { name: /^terminal$/i })).toBeEnabled();
+        await expect(page.getByRole("button", { name: /^pause$/i })).toBeEnabled();
+        await page.getByPlaceholder(/^Message\.\.\./).fill("Ready");
+        await expect(page.getByRole("button", { name: /^send now/i })).toBeEnabled();
+      } else {
+        await expect(page.getByRole("button", { name: /^restore$/i })).toBeEnabled();
+        await expect(page.getByRole("button", { name: /^terminal$/i })).toHaveCount(0);
+      }
+    });
+  }
 
   test("restores an exited agent from detail while the pane remains alive", async ({ page }) => {
     const session = makeStoppedSession({
@@ -3451,6 +3483,136 @@ test.describe("S4b: Artifacts section", () => {
     expect(scrollWidth).toBeLessThanOrEqual(innerWidth);
   });
 
+  test("filters artifacts by format", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-format",
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "notes.txt",
+          name: "notes.txt",
+          size: 1024,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const format = page.getByRole("tablist", { name: "Artifact format" });
+    await format.getByRole("button", { name: "PNG (1)" }).click();
+
+    await expect(page.getByText("notes.txt")).toBeHidden();
+    await expect(page.getByText("shot.png")).toBeVisible();
+    await expect(format.getByRole("button", { name: "PNG (1)" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  test("format control wraps without horizontal scroll on a narrow viewport", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-format-narrow",
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "notes.txt",
+          name: "notes.txt",
+          size: 1024,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "run.webm",
+          name: "run.webm",
+          size: 1024,
+          mimeType: "video/webm",
+          kind: "video",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "upload.txt",
+          name: "upload.txt",
+          size: 1024,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          addedByUser: true,
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "notes.md",
+          name: "notes.md",
+          size: 1024,
+          mimeType: "text/markdown",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "page.html",
+          name: "page.html",
+          size: 1024,
+          mimeType: "text/html",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "data.json",
+          name: "data.json",
+          size: 1024,
+          mimeType: "application/json",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("tablist", { name: "Artifact category" })).toBeVisible();
+    await expect(page.getByRole("tablist", { name: "Artifact format" })).toBeVisible();
+
+    const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+    const innerWidth = await page.evaluate(() => window.innerWidth);
+    expect(scrollWidth).toBeLessThanOrEqual(innerWidth);
+  });
+
   test("renders artifact names with a leading neutral character in original visual order", async ({
     page,
   }) => {
@@ -4735,7 +4897,8 @@ test.describe("S5: Runtime sidebar", () => {
       expect(pendingSession.lifecycle).toEqual(
         lifecycleReceipt(restoreBodies[0].operationId, session.id, "restore", "pending", 1),
       );
-      await expect(page.getByText(/^working$/i)).toBeVisible();
+      await expect(page.getByText(/^starting$/i)).toBeVisible();
+      await expect(page.getByText(/^working$/i)).toHaveCount(0);
       for (const name of ["Desk agent", "Handoff", "Kill"]) {
         const control = page.getByRole("button", { name, exact: true });
         await expect(control).toBeVisible();
@@ -4771,6 +4934,8 @@ test.describe("S5: Runtime sidebar", () => {
       await page.getByRole("button", { name: "Continue anyway" }).click();
       await expect.poll(() => Boolean(release)).toBe(true);
       release?.();
+      await expect(page.getByText(/^starting$/i)).toHaveCount(0);
+      await expect(page.getByText(/^working$/i)).toBeVisible();
       await expect(page.getByText("100 / 100")).toBeVisible();
       await expect(page.getByPlaceholder("Message...")).toBeEnabled();
       await page.getByLabel("Tokens: 100", { exact: true }).focus();

@@ -6,8 +6,8 @@ import type * as NodeOs from "node:os";
 import type * as Config from "../../src/config.js";
 import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
 
-// Ordinary boots materialize the host pin before serving sessions.
-// Matching isolated instances leave the host pin alone.
+// Default-instance boots materialize the host pin before serving sessions.
+// Non-default configs, isolated or not, leave the host pin alone.
 const callOrder: string[] = [];
 const fixtureHome = mkdtempSync(join(tmpdir(), "spur-daemon-pin-"));
 
@@ -98,6 +98,13 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => ({
   withTmuxSocketArgs: vi.fn((args: string[]) => args),
 }));
 
+function useDefaultInstanceConfig(): void {
+  ensureInstanceConfigMock.mockReturnValue({
+    configPath: join(fixtureHome, ".spur", "config.yaml"),
+    initialized: false,
+  });
+}
+
 async function parseCli(args: string[]): Promise<void> {
   const { createProgram } = await import("../../src/cli.js");
   await createProgram("/tmp/dist/cli.js").parseAsync(["node", "spur", ...args]);
@@ -177,7 +184,7 @@ describe("spur daemon CLI", () => {
   );
 
   it.each(["absent", "empty", "mismatched"])(
-    "refreshes the host pin for an ordinary non-default config with an %s marker",
+    "skips the host pin for an ordinary non-default config with an %s marker",
     async (kind) => {
       const configPath = join(fixtureHome, "isolated.yaml");
       writeFileSync(configPath, "{}");
@@ -189,7 +196,8 @@ describe("spur daemon CLI", () => {
 
       await parseCli(["daemon", "start", "--config", configPath, "--json"]);
 
-      expect(callOrder).toEqual(["ensureNpmPinFile", "startServer"]);
+      expect(ensureNpmPinFileMock).not.toHaveBeenCalled();
+      expect(callOrder).toEqual(["startServer"]);
     },
   );
 
@@ -233,6 +241,7 @@ describe("spur daemon CLI", () => {
   });
 
   it("reports pin and host-skill failures independently and still starts once", async () => {
+    useDefaultInstanceConfig();
     ensureNpmPinFileMock.mockImplementation(() => {
       throw new Error("pin denied");
     });
@@ -248,11 +257,23 @@ describe("spur daemon CLI", () => {
   });
 
   it("writes the npm pin file before starting the HTTP server", async () => {
+    useDefaultInstanceConfig();
     await parseCli(["daemon", "start", "--json"]);
 
     expect(ensureNpmPinFileMock).toHaveBeenCalledTimes(1);
     expect(startServerMock).toHaveBeenCalledTimes(1);
     expect(callOrder).toEqual(["ensureNpmPinFile", "startServer"]);
+  });
+
+  it("skips the npm pin file for a non-default instance config", async () => {
+    await parseCli(["daemon", "start", "--json"]);
+
+    expect(ensureNpmPinFileMock).not.toHaveBeenCalled();
+    expect(startServerMock).toHaveBeenCalledTimes(1);
+    expect(callOrder).toEqual(["startServer"]);
+    expect(writeStderrMock).not.toHaveBeenCalledWith(expect.stringContaining("pin file"));
+    expect(installHostSkillsForDaemonStartMock).toHaveBeenCalledTimes(1);
+    expect(installHostSkillsForDaemonStartMock).toHaveBeenCalledWith("/tmp/spur.yaml");
   });
 
   it("exports the resolved config path as SPUR_CONFIG so daemon children inherit it", async () => {
@@ -275,6 +296,7 @@ describe("spur daemon CLI", () => {
   });
 
   it("reports a pin-file write failure via stderr instead of aborting the boot", async () => {
+    useDefaultInstanceConfig();
     ensureNpmPinFileMock.mockImplementation(() => {
       throw new Error("EACCES: permission denied");
     });

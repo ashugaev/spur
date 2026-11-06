@@ -36,8 +36,7 @@
     },
     "rateLimit": {
       "limited": false,
-      "reason": "",
-      "codexAuthority": "unknown"
+      "reason": ""
     },
     "model": "gpt-5.5"
   },
@@ -72,8 +71,7 @@
     },
     "rateLimit": {
       "limited": false,
-      "reason": "",
-      "codexAuthority": "unknown"
+      "reason": ""
     }
   },
   "token-components.jsonl": {
@@ -143,8 +141,7 @@
     },
     "rateLimit": {
       "limited": false,
-      "reason": "",
-      "codexAuthority": "unknown"
+      "reason": ""
     },
     "model": "gpt-5.5"
   },
@@ -159,8 +156,7 @@
     },
     "rateLimit": {
       "limited": false,
-      "reason": "",
-      "codexAuthority": "unknown"
+      "reason": ""
     }
   },
   "working-spur-67c0-rollout-tail.jsonl": {
@@ -175,8 +171,7 @@
     },
     "rateLimit": {
       "limited": false,
-      "reason": "",
-      "codexAuthority": "unknown"
+      "reason": ""
     },
     "model": "gpt-5.5"
   },
@@ -189,6 +184,9 @@
       "callId": "call_unmatched_1",
       "filePath": "working-unmatched-tool-call-tail.jsonl"
     },
-    "rateLimit": null
+    "rateLimit": {
+      "limited": false,
+      "reason": ""
+    }
   }
 }

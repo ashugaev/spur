@@ -55,18 +55,19 @@ describe("published interface contracts", () => {
     // Surface names and flags only — behavioral semantics (TTLs, scope
     // rules, per-source control support) live in code + tests, not doc prose.
     const autoPing = commands.split("## auto-ping")[1]?.split("\n## ")[0] ?? "";
-    expect(autoPing).toContain("spur auto-ping unsubscribe");
-    for (const flag of ["--event", "--thread", "--subscription"]) expect(autoPing).toContain(flag);
+    for (const name of ["auto-ping mute", "auto-ping list", "auto-ping resume"])
+      expect(autoPing).toContain(`spur ${name}`);
+    for (const flag of ["--for", "--forever", "--reason", "--all"])
+      expect(autoPing).toContain(flag);
+    expect(autoPing).not.toContain("unsubscribe");
     expect(commands).toContain("SPUR_SESSION");
     expect(commands).toContain("--session");
     expect(daemonApi).toContain("GET /sessions/:id/auto-ping-suppressions");
+    expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/mute");
     expect(daemonApi).toMatch(
-      /POST \/sessions\/:id\/auto-ping-suppressions\/unsubscribe`[^\n]*409 grant_not_ready\|grant_consumed/,
+      /POST \/sessions\/:id\/auto-ping-suppressions\/resume`[^\n]*`400\|403\|404`/,
     );
-    expect(daemonApi).toMatch(
-      /POST \/sessions\/:id\/auto-ping-suppressions\/:suppressionId\/resume`[^\n]*`400\|403\|404`/,
-    );
-    expect(daemonApi).not.toMatch(/auto-ping-suppressions\/:suppressionId\/resume`[^\n]*409/);
+    expect(daemonApi).not.toContain("auto-ping-suppressions/unsubscribe");
     expect(daemonApi).toContain("POST /projects/:id/preflight-batches");
     expect(configuration).toContain("projects.<id>.tokenBudget");
     expect(configuration).toContain("projects.<id>.tokenBudgetWarnOnly");
@@ -81,8 +82,8 @@ describe("published interface contracts", () => {
     expect(configuration).toMatch(
       /github-ci[^\n]*no auto-ping controls|no auto-ping controls[^\n]*github-ci/,
     );
-    expect(agentSkill).toContain("Stop unwanted auto-pings with `spur auto-ping unsubscribe`");
-    expect(agentSkill).toContain("Scopes and resume: `docs/commands.md#auto-ping`");
+    expect(agentSkill).toContain("Mute unwanted auto-pings with `spur auto-ping mute <handle>`");
+    expect(agentSkill).toContain("Modes and resume: `docs/commands.md#auto-ping`");
     expect(agentSkill).toContain("API: `docs/daemon-api.md`");
     expect(claudeSkill).toBe(agentSkill);
   });
