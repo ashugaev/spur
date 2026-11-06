@@ -263,6 +263,7 @@ import {
   type SessionListItemView,
   type ScheduleSessionWakeRequest,
   type SendMessageRequest,
+  type SpawnSessionRequest,
   type SessionMemoryRecord,
   type SessionRecord,
   type TelegramBinding,
@@ -25492,11 +25493,23 @@ describe("SessionService", () => {
       });
     }
 
-    async function acceptThenDisposeBeforeLaunch() {
+    // Accept under free memory, dispose inside the accept view (before the
+    // run can launch), then recreate below the floor so the recovered intent
+    // waits for admission under its accepted id.
+    async function acceptThenDisposeBeforeLaunch(
+      options: {
+        request?: Partial<SpawnSessionRequest>;
+        initial?: SessionRecord[];
+        maxLiveSessions?: number;
+        beforeRestore?: (record: SessionRecord) => void;
+      } = {},
+    ) {
       mockClaudeJsonlState("waiting");
-      durableConfig();
+      const config = durableConfig();
+      if (options.maxLiveSessions !== undefined)
+        config.admission.maxLiveSessions = options.maxLiveSessions;
       setRecoveryMemory(20_000_000_000);
-      const sessions = createSessionStore();
+      const sessions = createSessionStore(...(options.initial ?? []));
       testAccounts = [
         {
           id: "selected",
@@ -25518,17 +25531,21 @@ describe("SessionService", () => {
         prompt: "recovered task",
         model: "opus",
         claudeAccountId: "selected",
+        ...options.request,
       });
       await first.settleBackgroundSpawns();
-      expect(sessions.get(accepted.id)?.spawnIntent?.phase).toBe("queued");
+      const persisted = clone(sessions.get(accepted.id));
+      expect(persisted?.spawnIntent?.phase).toBe("queued");
       expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      if (persisted) options.beforeRestore?.(persisted);
       setRecoveryMemory(7_000_000_000);
       const restored = new SessionService("/tmp/spur.yaml", "2026-03-18T10:06:00.000Z");
       const queue = restored as unknown as DurableService & {
         spawnAdmissionWaiters: Set<unknown>;
+        admissionReservations: Map<symbol, string>;
       };
       await queue.runMemoryShedTick();
-      return { sessions, accepted, restored, queue };
+      return { sessions, accepted, persisted, restored, queue };
     }
 
     it("holds a recovered accepted intent below the memory floor and launches it once on recovery", async () => {
@@ -25574,6 +25591,209 @@ describe("SessionService", () => {
         spawnIntent: { phase: "queued" },
       });
       expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("binds queued input, attachments, effort and subscriptions to a recovered intent", async () => {
+      mockTimerPromisesSleepWithFakeTimers();
+      const evidence = Buffer.from("durable evidence");
+      const { sessions, accepted, persisted, restored, queue } =
+        await acceptThenDisposeBeforeLaunch({
+          initial: [sessionRecord({ id: "watched-1", status: "completed" })],
+          request: {
+            model: "sonnet",
+            reasoningEffort: "high",
+            attachments: [{ name: "notes.txt", data: evidence.toString("base64") }],
+            subscriptions: [
+              { targetSessionId: "watched-1", states: ["needs_input"], message: "ping" },
+            ],
+          },
+          beforeRestore: (record) => {
+            const attachmentId = record.startupAttachmentIds?.[0];
+            if (!attachmentId) throw new Error("Missing accepted startup attachment");
+            const path = join(artifactDirForSession(record.id), attachmentId);
+            readSessionArtifactMock.mockImplementation(
+              (_dataDir: string, sessionId: string, artifactId: string) =>
+                sessionId === record.id && artifactId === attachmentId
+                  ? {
+                      id: artifactId,
+                      name: "notes.txt",
+                      path,
+                      kind: "text",
+                      size: evidence.length,
+                      mimeType: "text/plain",
+                      createdAt: "2026-03-18T10:05:00.000Z",
+                      updatedAt: "2026-03-18T10:05:00.000Z",
+                      origin: "intentional",
+                      addedByUser: true,
+                    }
+                  : null,
+            );
+          },
+        });
+      try {
+        expect(persisted).toMatchObject({ model: "sonnet", reasoningEffort: "high" });
+        expect(JSON.stringify(persisted?.spawnIntent)).not.toContain("/abs/selected");
+        expect(JSON.stringify(persisted?.spawnIntent)).not.toContain(evidence.toString("base64"));
+        const attachmentId = persisted?.startupAttachmentIds?.[0];
+        if (!attachmentId) throw new Error("Missing accepted startup attachment");
+        expect(readFileSync(join(artifactDirForSession(accepted.id), attachmentId))).toEqual(
+          evidence,
+        );
+        await vi.waitFor(() => expect(queue.spawnAdmissionWaiters.size).toBe(1));
+        await restored.send(accepted.id, { message: "follow up", queue: true });
+        expect(sessions.get(accepted.id)?.queuedMessages?.messages).toEqual(["follow up"]);
+        setRecoveryMemory(20_000_000_000);
+        await queue.runMemoryShedTick();
+        await vi.waitFor(() => expect(sessions.get(accepted.id)?.status).toBe("running"));
+        expect(sessions.get(accepted.id)?.stateSubscriptions).toEqual([
+          expect.objectContaining({ targetSessionId: "watched-1", message: "ping" }),
+        ]);
+        expect(buildAgentLaunchPlanMock.mock.calls.at(-1)?.[2]).toMatchObject({
+          model: "sonnet",
+          reasoningEffort: "high",
+        });
+        expect(String(buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1])).toContain(attachmentId);
+        await vi.waitFor(() =>
+          expect(
+            sendMessageToTmuxMock.mock.calls.filter(([, text]) => text === "follow up"),
+          ).toHaveLength(1),
+        );
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+      } finally {
+        restored.dispose();
+        await restored.settleBackgroundSpawns();
+      }
+    });
+
+    it("holds a missing accepted startup artifact once instead of replacing the session", async () => {
+      const { sessions, accepted, restored, queue } = await acceptThenDisposeBeforeLaunch({
+        request: {
+          attachments: [{ name: "notes.txt", data: Buffer.from("evidence").toString("base64") }],
+        },
+        beforeRestore: (record) => {
+          const artifactId = record.startupAttachmentIds?.[0];
+          if (!artifactId) throw new Error("Missing accepted artifact identity");
+          rmSync(join(artifactDirForSession(record.id), artifactId));
+        },
+      });
+      try {
+        await vi.waitFor(() =>
+          expect(sessions.get(accepted.id)?.error).toMatch(/Missing startup artifact/),
+        );
+        await queue.runMemoryShedTick();
+        await queue.runMemoryShedTick();
+        expect(sessions.get(accepted.id)?.spawnIntent).toBeDefined();
+        expect(
+          logSpurEventMock.mock.calls.filter(
+            ([, entry]) => entry.event === "session.spawn.recovery_held",
+          ),
+        ).toHaveLength(1);
+        expect(queue.spawnAdmissionWaiters.size).toBe(0);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+      } finally {
+        restored.dispose();
+        await restored.settleBackgroundSpawns();
+      }
+    });
+
+    it.each(["kill", "complete"] as const)(
+      "retires a waiting recovered intent on %s and keeps the terminal across recreation",
+      async (operation) => {
+        const { sessions, accepted, persisted, restored, queue } =
+          await acceptThenDisposeBeforeLaunch();
+        await vi.waitFor(() => expect(queue.spawnAdmissionWaiters.size).toBe(1));
+        if (operation === "kill")
+          await restored.kill(accepted.id, { skipPrCheck: true, force: true });
+        else
+          await restored.complete(
+            accepted.id,
+            { skipPrCheck: true },
+            { todoActor: { kind: "human", origin: "ui" } },
+          );
+        await restored.settleBackgroundSpawns();
+        expect(queue.spawnAdmissionWaiters.size).toBe(0);
+        expect(queue.admissionReservations.size).toBe(0);
+        const terminal = operation === "kill" ? "killed" : "completed";
+        expect(sessions.get(accepted.id)).toMatchObject({
+          status: terminal,
+          spawnReceipt: persisted?.spawnReceipt,
+        });
+        expect(sessions.get(accepted.id)?.spawnIntent).toBeUndefined();
+        restored.dispose();
+        await restored.settleBackgroundSpawns();
+        setRecoveryMemory(20_000_000_000);
+        const { SessionService } = await loadSessionServiceModule();
+        const again = new SessionService("/tmp/spur.yaml", "2026-03-18T10:08:00.000Z");
+        await (again as unknown as DurableService).runMemoryShedTick();
+        await again.settleBackgroundSpawns();
+        expect(sessions.get(accepted.id)?.status).toBe(terminal);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+        again.dispose();
+      },
+    );
+
+    it("keeps a recovered intent after a rejected dirty-worktree kill and launches it once", async () => {
+      const anchor = sessionRecord({ id: "api-anchor", worktree: true });
+      const { sessions, accepted, persisted, restored, queue } =
+        await acceptThenDisposeBeforeLaunch({
+          initial: [anchor],
+          maxLiveSessions: 2,
+          request: { reuseWorkspaceSessionId: anchor.id },
+        });
+      try {
+        await vi.waitFor(() => expect(queue.spawnAdmissionWaiters.size).toBe(1));
+        hasUncommittedChangesMock.mockResolvedValue(true);
+        await expect(restored.kill(accepted.id)).rejects.toThrow(/Kill confirmation required/);
+        expect(sessions.get(accepted.id)?.spawnIntent).toEqual(persisted?.spawnIntent);
+        hasUncommittedChangesMock.mockResolvedValue(false);
+        setRecoveryMemory(20_000_000_000);
+        await queue.runMemoryShedTick();
+        await vi.waitFor(() => expect(sessions.get(accepted.id)?.status).toBe("running"));
+        expect(sessions.get(accepted.id)?.workspaceId).toBe(anchor.id);
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+      } finally {
+        restored.dispose();
+        await restored.settleBackgroundSpawns();
+      }
+    });
+
+    it("grants freed capacity to a recovered waiter before a new request", async () => {
+      const occupant = sessionRecord({ id: "api-occupant", status: "running" });
+      const { sessions, accepted, restored, queue } = await acceptThenDisposeBeforeLaunch({
+        initial: [occupant],
+        maxLiveSessions: 2,
+      });
+      try {
+        restored.dispose();
+        await restored.settleBackgroundSpawns();
+        setRecoveryMemory(20_000_000_000);
+        durableConfig();
+        const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+        const capped = new SessionService("/tmp/spur.yaml", "2026-03-18T10:07:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        const cappedQueue = capped as unknown as typeof queue;
+        try {
+          await cappedQueue.runMemoryShedTick();
+          await vi.waitFor(() => expect(cappedQueue.spawnAdmissionWaiters.size).toBe(1));
+          sessions.set(occupant.id, { ...occupant, status: "stopped" });
+          await expect(capped.spawn({ project: "api", prompt: "new request" })).rejects.toThrow(
+            SessionAdmissionDeniedError,
+          );
+          await vi.waitFor(() => expect(sessions.get(accepted.id)?.status).toBe("running"));
+          expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+          expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+        } finally {
+          capped.dispose();
+          await capped.settleBackgroundSpawns();
+        }
+      } finally {
+        restored.dispose();
+      }
     });
 
     it("resumes the persisted worktree checkpoint without allocating another workspace or identity", async () => {
@@ -26306,6 +26526,190 @@ describe("SessionService", () => {
         expect(internals.admissionReservations.size).toBe(0);
         expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
         expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("retries a launch under new memory pressure without waiting for admission", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(queueConfig());
+      createSessionStore();
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+      captureAgentProcessesForLaunchMock.mockResolvedValue({
+        status: "ok",
+        processes: [],
+        complete: true,
+      });
+      createTmuxSessionMock
+        .mockImplementationOnce(async () => {
+          readHostMemoryMock.mockReturnValue({
+            totalBytes: 65_000_000 * 1024,
+            availableBytes: 7_000_000_000,
+            swapTotalBytes: 0,
+            swapFreeBytes: 0,
+          });
+          throw new Error("tmux boom");
+        })
+        .mockImplementationOnce(async () => {
+          tmuxSessionExistsMock.mockResolvedValue(true);
+        });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as QueueService & {
+        waitForSpawnAdmission(): Promise<symbol>;
+      };
+      const waits = vi.spyOn(internals, "waitForSpawnAdmission");
+      try {
+        const accepted = await service.spawnInBackground({ project: "api", prompt: "retry me" });
+        await vi.waitFor(() => expect(createTmuxSessionMock).toHaveBeenCalledTimes(2));
+        await service.settleBackgroundSpawns();
+        expect(waits).not.toHaveBeenCalled();
+        expect(internals.spawnAdmissionWaiters.size).toBe(0);
+        expect(internals.admissionReservations.size).toBe(0);
+        expect(
+          logSpurEventMock.mock.calls.filter(
+            ([, entry]) => entry.event === "session.spawn.retrying",
+          ),
+        ).toHaveLength(1);
+        expect(readSessionMock(TEST_DATA_DIR, accepted.id)?.status).toBe("running");
+        expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it.each(["memory floor", "cgroup headroom"] as const)(
+      "denies a background spawn under %s with 429 and no record",
+      async (pressure) => {
+        loadConfigMock.mockReturnValue(queueConfig());
+        const sessions = createSessionStore();
+        if (pressure === "memory floor")
+          readHostMemoryMock.mockReturnValue({
+            totalBytes: 65_000_000 * 1024,
+            availableBytes: 7_000_000_000,
+            swapTotalBytes: 0,
+            swapFreeBytes: 0,
+          });
+        else {
+          // Headroom 1e9 is inside the shed band E = 2e9 of baseConfig.
+          loadConfigMock.mockReturnValue(baseConfig());
+          readHostMemoryMock.mockReturnValue({
+            totalBytes: 65_000_000 * 1024,
+            availableBytes: 20_000_000_000,
+            swapTotalBytes: 0,
+            swapFreeBytes: 0,
+          });
+          readCgroupMemorySnapshotMock.mockReturnValue({
+            path: "/system.slice/spur-daemon.service",
+            currentBytes: 9_000_000_000,
+            highBytes: null,
+            maxBytes: 10_000_000_000,
+          });
+        }
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        const internals = service as unknown as QueueService;
+        try {
+          await expect(
+            service.spawnInBackground({ project: "api", prompt: "denied" }),
+          ).rejects.toMatchObject({ reason: "memory_guard", statusCode: 429 });
+          expect(sessions.size).toBe(0);
+          expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+          expect(internals.spawnAdmissionWaiters.size).toBe(0);
+          expect(internals.admissionReservations.size).toBe(0);
+        } finally {
+          service.dispose();
+        }
+      },
+    );
+
+    it.each(["unknown", "unready"] as const)(
+      "rejects a %s selected Claude account at background accept without a record",
+      async (readiness) => {
+        loadConfigMock.mockReturnValue(queueConfig());
+        const sessions = createSessionStore();
+        if (readiness === "unready")
+          testAccounts = [
+            {
+              id: "selected",
+              configDir: "/abs/selected",
+              createdAt: "2026-03-18T09:00:00.000Z",
+              authenticated: false,
+            },
+          ];
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = service as unknown as QueueService;
+        try {
+          await expect(
+            service.spawnInBackground({
+              project: "api",
+              prompt: "invalid",
+              claudeAccountId: "selected",
+            }),
+          ).rejects.toThrow(/not ready/);
+          expect(sessions.size).toBe(0);
+          expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+          expect(internals.admissionReservations.size).toBe(0);
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        } finally {
+          service.dispose();
+        }
+      },
+    );
+
+    it("exposes triggerOrigin and omits durable launch fields from session views", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(queueConfig());
+      const origin = {
+        triggerId: "review",
+        sourceId: "pr-watch",
+        externalId: "acme/api#7",
+        blockIndex: 0,
+      };
+      createSessionStore(
+        sessionRecord({
+          id: "api-tagged",
+          status: "spawning",
+          triggerOrigin: origin,
+          agentLaunchId: "launch-1",
+          codexRestoreLaunchId: "launch-1",
+          codexRestoreStartedAt: "2026-03-18T10:00:00.000Z",
+          spawnReceipt: { version: 1, acceptedAt: "2026-03-18T10:00:00.000Z" },
+          spawnIntent: {
+            version: 1,
+            phase: "queued",
+            request: { project: "api", prompt: "tagged" },
+            defaultBranch: "main",
+            preflightBatchId: "batch",
+            startupAttachments: [],
+            launchSelection: {},
+            submission: { state: "pending" },
+          },
+        }),
+      );
+      const service = await createDisposedSessionService();
+      try {
+        const views = [
+          await service.get("api-tagged"),
+          ...(await service.list()).filter((view) => view.id === "api-tagged"),
+        ];
+        expect(views).toHaveLength(2);
+        for (const view of views) {
+          expect(view).toMatchObject({ triggerOrigin: origin });
+          for (const field of [
+            "spawnIntent",
+            "spawnReceipt",
+            "agentLaunchId",
+            "codexRestoreLaunchId",
+            "codexRestoreStartedAt",
+          ])
+            expect(view).not.toHaveProperty(field);
+        }
       } finally {
         service.dispose();
       }
