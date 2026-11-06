@@ -195,7 +195,7 @@ describe("UsageModal closing", () => {
 describe("UsageModal quota", () => {
   it("renders header, count, level dot and source heads", async () => {
     await renderReady();
-    expect(screen.getByText("updated just now")).toBeInTheDocument();
+    expect(screen.queryByText(/^updated/)).not.toBeInTheDocument();
     expect(screen.getByText("1/2")).toBeInTheDocument();
     expect(screen.getByTestId("quota-dot")).toHaveAttribute("data-level", "attention");
     expect(screen.getAllByText("Claude").length).toBeGreaterThan(0);

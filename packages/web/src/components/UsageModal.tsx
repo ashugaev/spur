@@ -381,11 +381,6 @@ export function UsageModal({ onClose }: { onClose: () => void }) {
           >
             Usage
           </h2>
-          {state.status === "ready" ? (
-            <span className={TERTIARY_TEXT}>
-              updated {formatRelativeTime(state.data.generatedAt)}
-            </span>
-          ) : null}
           <span className="flex-1" />
           <button aria-label="Close usage" className={ACTION_CLASS} onClick={onClose} type="button">
             esc
