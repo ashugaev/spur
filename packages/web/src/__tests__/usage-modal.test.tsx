@@ -253,10 +253,7 @@ describe("UsageModal quota", () => {
   it("tones meters at 75 and 90", async () => {
     await renderReady();
     expect(screen.getByRole("meter", { name: "5h" })).toHaveAttribute("data-tone", "normal");
-    expect(screen.getByRole("meter", { name: "weekly" })).toHaveAttribute(
-      "data-tone",
-      "attention",
-    );
+    expect(screen.getByRole("meter", { name: "weekly" })).toHaveAttribute("data-tone", "attention");
     expect(screen.getByRole("meter", { name: "burst" })).toHaveAttribute("data-tone", "error");
     expect(screen.getByText("75% used")).toHaveClass("text-[var(--color-status-attention)]");
     expect(screen.getByText("90% used")).toHaveClass("text-[var(--color-status-error)]");
@@ -322,9 +319,7 @@ describe("UsageModal tokens", () => {
   it("shows the empty-window text", async () => {
     await renderReady();
     fireEvent.click(screen.getByRole("button", { name: "30D" }));
-    await waitFor(() =>
-      expect(screen.getByText("No sessions in this window")).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText("No sessions in this window")).toBeInTheDocument());
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
 });

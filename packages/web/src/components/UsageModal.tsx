@@ -38,13 +38,15 @@ const TOKEN_WINDOWS: { window: TokenUsageWindow; label: string }[] = [
   { window: "30d", label: "30D" },
 ];
 
-const PROVIDER_NAMES: Record<ProviderTokenUsage["provider"] | QuotaSourceResult["provider"], string> =
-  {
-    claude: "Claude",
-    codex: "Codex",
-    cursor: "Cursor",
-    opencode: "OpenCode",
-  };
+const PROVIDER_NAMES: Record<
+  ProviderTokenUsage["provider"] | QuotaSourceResult["provider"],
+  string
+> = {
+  claude: "Claude",
+  codex: "Codex",
+  cursor: "Cursor",
+  opencode: "OpenCode",
+};
 
 const LEVEL_COLOR: Record<QuotaLevel, string> = {
   ready: "var(--color-status-ready)",
@@ -381,7 +383,9 @@ export function UsageModal({ onClose }: { onClose: () => void }) {
             Usage
           </h2>
           {state.status === "ready" ? (
-            <span className={TERTIARY_TEXT}>updated {formatRelativeTime(state.data.generatedAt)}</span>
+            <span className={TERTIARY_TEXT}>
+              updated {formatRelativeTime(state.data.generatedAt)}
+            </span>
           ) : null}
           <span className="flex-1" />
           <button

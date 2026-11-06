@@ -26,7 +26,7 @@ Read-only host/config/daemon health check; `--scaffold` writes local `spur.yaml`
 
 ## usage
 
-`spur usage [--json]`: quota windows per Claude account and Codex, token totals today/7d/30d by provider and launch model; read-only, saved logins never refreshed; failing source prints an error row; quota cached 3 min per source; tokens from unarchived sessions dated by last activity — `v2/src/usage-report.ts`.
+`spur usage [--json]`: quota windows per Claude account and Codex, token totals today/7d/30d by provider and launch model; read-only, saved logins never refreshed; failing source prints an error row; quota cached 3 min per source; tokens from unarchived sessions dated by last activity — `v2/src/usage-report.ts`. Web: the footer Usage button shows the same report.
 
 ## disk-gc, artifacts-gc, cache
 

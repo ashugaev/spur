@@ -3784,9 +3784,7 @@ describe("StatusBar", () => {
     expect(cluster.children[1]).toBe(button);
     fireEvent.click(button);
     expect(onOpenUsage).toHaveBeenCalledTimes(1);
-    expect(fetchSpy.mock.calls.some(([input]) => String(input).includes("/api/usage"))).toBe(
-      false,
-    );
+    expect(fetchSpy.mock.calls.some(([input]) => String(input).includes("/api/usage"))).toBe(false);
   });
 
   function expectAggregatedStatusButtonHasIcon(): void {
@@ -4179,7 +4177,9 @@ describe("StatusBar", () => {
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
 
-    rtlRender(<StatusBar onOpenCron={() => undefined} onOpenUsage={() => undefined} />, { wrapper: Wrapper });
+    rtlRender(<StatusBar onOpenCron={() => undefined} onOpenUsage={() => undefined} />, {
+      wrapper: Wrapper,
+    });
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
@@ -4202,7 +4202,9 @@ describe("StatusBar", () => {
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
 
-    rtlRender(<StatusBar onOpenCron={() => undefined} onOpenUsage={() => undefined} />, { wrapper: Wrapper });
+    rtlRender(<StatusBar onOpenCron={() => undefined} onOpenUsage={() => undefined} />, {
+      wrapper: Wrapper,
+    });
 
     expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
       "data-status",
@@ -4223,7 +4225,9 @@ describe("StatusBar", () => {
     const Wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
-    return rtlRender(<StatusBar onOpenCron={() => undefined} onOpenUsage={() => undefined} />, { wrapper: Wrapper });
+    return rtlRender(<StatusBar onOpenCron={() => undefined} onOpenUsage={() => undefined} />, {
+      wrapper: Wrapper,
+    });
   }
 
   it("hides both provider badges when neither configured nor referenced by sessions", async () => {
@@ -4333,7 +4337,9 @@ describe("StatusBar", () => {
     const Wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
-    rtlRender(<StatusBar onOpenCron={() => undefined} onOpenUsage={() => undefined} />, { wrapper: Wrapper });
+    rtlRender(<StatusBar onOpenCron={() => undefined} onOpenUsage={() => undefined} />, {
+      wrapper: Wrapper,
+    });
 
     expect(screen.getByLabelText("GitHub connection checking")).toBeInTheDocument();
     expect(screen.getByLabelText("GitLab connection checking")).toBeInTheDocument();
