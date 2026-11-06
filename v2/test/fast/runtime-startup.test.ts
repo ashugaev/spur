@@ -1,10 +1,12 @@
-import type * as ChildProcess from "node:child_process";
+import * as ChildProcess from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRuntimeTestContext, type RuntimeTestContext } from "../helpers/runtime.js";
-import type * as Common from "../helpers/common.js";
+import * as Common from "../helpers/common.js";
 
 const spawn = vi.hoisted(() => vi.fn<typeof ChildProcess.spawn>());
 vi.mock("node:child_process", async (importOriginal) => ({
@@ -49,6 +51,135 @@ function failureOf(startup: Promise<unknown>): Promise<Error> {
       return error;
     },
   );
+}
+
+// Run the destructive safety-net probe in a fresh process/registry. Its filter
+// excludes the shared-context suite below, including that suite's setup hooks.
+if (process.env.SPUR_RUNTIME_CLEANUP_PROBE === "1") {
+  it("isolated global cleanup preserves unresolved startup fixtures", async () => {
+    const fixture = await createRuntimeTestContext(42424, { useFakeTools: false });
+    const successfulFixture = await createRuntimeTestContext(42425, { useFakeTools: false });
+    const control = await Common.createTempDir("spur-cleanup-control-");
+    const children = [new FakeChild(), new FakeChild(), new FakeChild(), new FakeChild()] as const;
+    const [first, second, laterSuccess, unrelatedSuccess] = children;
+    for (const owned of [first, second]) {
+      owned.kill.mockImplementation(() => {
+        owned.killed = true;
+        return true;
+      });
+    }
+    const fetchMock = vi.fn<typeof fetch>(() => new Promise(() => {}));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.useFakeTimers();
+    try {
+      spawn.mockReturnValue(first as unknown as ReturnType<typeof ChildProcess.spawn>);
+      const firstFailure = failureOf(fixture.startDaemon(`${fixture.rootDir}/first.yaml`));
+      await vi.advanceTimersByTimeAsync(22_250);
+      const firstError = await firstFailure;
+      spawn.mockReturnValue(second as unknown as ReturnType<typeof ChildProcess.spawn>);
+      const secondFailure = failureOf(fixture.startDaemon(`${fixture.rootDir}/second.yaml`));
+      await vi.advanceTimersByTimeAsync(22_250);
+      const secondError = await secondFailure;
+      fetchMock.mockImplementation(async () => new Response(JSON.stringify({ pid: 424242 })));
+      spawn.mockReturnValue(laterSuccess as unknown as ReturnType<typeof ChildProcess.spawn>);
+      expect((await fixture.startDaemon(`${fixture.rootDir}/later.yaml`)).child).toBe(laterSuccess);
+      laterSuccess.exit(0);
+      spawn.mockReturnValue(unrelatedSuccess as unknown as ReturnType<typeof ChildProcess.spawn>);
+      await successfulFixture.startDaemon(`${successfulFixture.rootDir}/success.yaml`);
+      unrelatedSuccess.exit(0);
+
+      await Common.cleanupTrackedTempDirs();
+      for (const directory of [fixture.rootDir, fixture.repoDir, fixture.originDir]) {
+        expect(
+          existsSync(directory),
+          "global safety net must preserve unresolved owned fixtures",
+        ).toBe(true);
+      }
+      for (const directory of [
+        control,
+        successfulFixture.rootDir,
+        successfulFixture.repoDir,
+        successfulFixture.originDir,
+      ]) {
+        expect(
+          existsSync(directory),
+          "unrelated and successful fixtures retain global cleanup",
+        ).toBe(false);
+      }
+      const cleanupError: unknown = await fixture.cleanup().catch((error: unknown) => error);
+      expect(cleanupError).toBeInstanceOf(Error);
+      expect((cleanupError as Error).message).toContain(firstError.message);
+      expect((cleanupError as Error).message).toContain(secondError.message);
+      first.exit(0);
+      await expect(fixture.cleanup()).rejects.toThrow("UNRESOLVED");
+      for (const directory of [fixture.rootDir, fixture.repoDir, fixture.originDir]) {
+        expect(existsSync(directory)).toBe(true);
+      }
+      second.exit(0);
+      await fixture.cleanup();
+      for (const directory of [fixture.rootDir, fixture.repoDir, fixture.originDir]) {
+        expect(existsSync(directory)).toBe(false);
+      }
+    } finally {
+      for (const owned of children) {
+        if (owned.exitCode === null && owned.signalCode === null) owned.exit(0);
+        owned.stdout.destroy();
+        owned.stderr.destroy();
+      }
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      await fixture.cleanup();
+      await successfulFixture.cleanup();
+      await rm(control, { recursive: true, force: true });
+    }
+  });
+} else {
+  it("runs global cleanup in an isolated registry", async () => {
+    const witness = await Common.createTempDir("spur-cleanup-parent-");
+    const parentFile = `${witness}/parent-owned`;
+    const resultsFile = `${witness}/results.json`;
+    try {
+      await writeFile(parentFile, "parent fixture");
+      const result = ChildProcess.spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL("../../node_modules/vitest/vitest.mjs", import.meta.url)),
+          "run",
+          "--config",
+          "vitest.fast.config.ts",
+          "--reporter=json",
+          "--outputFile",
+          resultsFile,
+          "test/fast/runtime-startup.test.ts",
+          "-t",
+          "^isolated global cleanup preserves unresolved startup fixtures$",
+        ],
+        {
+          cwd: fileURLToPath(new URL("../../", import.meta.url)),
+          env: { ...process.env, SPUR_RUNTIME_CLEANUP_PROBE: "1" },
+          timeout: 15_000,
+          stdio: "pipe",
+          encoding: "utf8",
+        },
+      );
+      let output = `${result.stdout}\n${result.stderr}`
+        .replaceAll(fileURLToPath(new URL("../../", import.meta.url)), "[test-root]")
+        .replaceAll(witness, "[parent-fixture]");
+      const homeDirectory = process.env.HOME;
+      if (homeDirectory) output = output.replaceAll(homeDirectory, "[home]");
+      expect(result.status, output).toBe(0);
+      let summary: unknown;
+      try {
+        summary = JSON.parse(await readFile(resultsFile, "utf8"));
+      } catch {
+        throw new Error("Isolated cleanup probe did not emit JSON test results");
+      }
+      expect(summary).toMatchObject({ numPassedTests: 1, numFailedTests: 0 });
+      expect(existsSync(parentFile), "child registry cannot delete parent fixtures").toBe(true);
+    } finally {
+      await rm(witness, { recursive: true, force: true });
+    }
+  });
 }
 
 describe("runtime daemon startup boundary", () => {

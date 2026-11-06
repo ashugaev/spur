@@ -7,7 +7,13 @@ import { fileURLToPath } from "node:url";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { readGitHubSourceSnapshot } from "../../src/metadata.js";
 import type { RuntimeInfo, TodoProjection } from "../../src/types.js";
-import { createTempDir, execFileAsync, pollUntil, processExists } from "./common.js";
+import {
+  createTempDir,
+  execFileAsync,
+  pollUntil,
+  processExists,
+  unregisterTempDir,
+} from "./common.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const V2_DIR = resolve(__dirname, "../..");
@@ -1549,7 +1555,10 @@ ${content}`,
           hasExited() ? "owned child exited" : "UNRESOLVED owned child has not exited"
         }${cleanupErrors.length ? ` (${cleanupErrors.join("; ")})` : ""}`,
       );
-      if (!hasExited()) failedStarts.set(child, { hasExited, failure });
+      if (!hasExited()) {
+        failedStarts.set(child, { hasExited, failure });
+        for (const directory of [rootDir, repoDir, originDir]) unregisterTempDir(directory);
+      }
       throw failure;
     } finally {
       clearTimeout(timer);

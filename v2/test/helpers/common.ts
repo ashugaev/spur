@@ -61,9 +61,12 @@ function isSameOrAncestorOrDescendant(a: string, b: string): boolean {
   return a.startsWith(withTrailingSep(b)) || b.startsWith(withTrailingSep(a));
 }
 
-// tracks every dir this process handed out, so a per-file safety net (see
-// test/setup/temp-dirs.ts) can sweep up whatever the test itself didn't.
+// Directories still owned by the per-file safety net (test/setup/temp-dirs.ts).
 const trackedTempDirs = new Set<string>();
+
+export function unregisterTempDir(dir: string): void {
+  trackedTempDirs.delete(dir);
+}
 
 export async function cleanupTrackedTempDirs(): Promise<void> {
   const dirs = [...trackedTempDirs];
