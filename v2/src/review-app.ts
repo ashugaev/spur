@@ -484,10 +484,10 @@ async function transitionReview(
         ? request.feedback
         : undefined,
     preparedFeedback: action === "prepare" || action === "recover" ? request.feedback : undefined,
-    feedbackPublication: { status: "unconfirmed" } as {
-      status: "unconfirmed" | "confirmed" | "failed";
-      error?: string;
-    },
+    feedbackPublication: { status: "unconfirmed" } as
+      | { status: "unconfirmed" | "confirmed" | "failed"; error?: string }
+      | null
+      | undefined,
   };
   let ownsAttempt = false;
   const save = async () => {
@@ -741,8 +741,8 @@ async function transitionReview(
             digest(priorFeedback) !== digest(request.feedback)
           )
             throw new ReviewAppError("attempt-conflict");
-          receipt.inputDigest = prior.inputDigest as string | null;
-          receipt.localVerdict = prior.localVerdict as "APPROVED" | "CHANGES_REQUESTED" | null;
+          receipt.inputDigest = prior.inputDigest;
+          receipt.localVerdict = prior.localVerdict;
           receipt.evidence = prior.evidence as Row[];
           receipt.coverage = prior.coverage as Request["coverage"];
           receipt.localFeedback =
