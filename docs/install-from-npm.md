@@ -4,7 +4,7 @@
 
 Run Spur on a fresh Linux server. This is the required path for coding-agent installs. Use source only for contributors/maintainers, and only when the user explicitly asks for source: [install-from-source.md](install-from-source.md).
 
-Package ships the web UI prebuilt — no on-box build.
+Package ships the web UI and Linux amd64/arm64 managed-auth binaries prebuilt; no host Go or on-box build.
 
 Verified on Ubuntu 24.04 LTS, down to a ~1GB-RAM box (no swap). Node version: range in [`package.json`](../package.json) `engines.node`. Node must sit at `/usr/bin/node` — the units hardcode that path (see gotchas). Ubuntu's apt build is too old; nodesource lands there:
 

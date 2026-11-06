@@ -29,7 +29,7 @@ WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 RUNTIME_ENTRIES=()
 while IFS= read -r entry || [[ -n "$entry" ]]; do
-  case "$entry" in dist/*) RUNTIME_ENTRIES+=("$entry") ;; esac
+  case "$entry" in dist/*|bin/auth-proxy/*|licenses/auth-proxy/*) RUNTIME_ENTRIES+=("$entry") ;; esac
 done <"$repo_root/v2/required-package-files.txt"
 
 make_tarball() {
@@ -59,7 +59,10 @@ make_large_tarball() {
   touch "$pkg_dir/deploy/spur-web.npm.service"
   touch "$pkg_dir/deploy/spur-mcp.npm.service"
   touch "$pkg_dir/deploy/spur-mcp-tunnel.npm.service"
-  for entry in "${RUNTIME_ENTRIES[@]}"; do touch "$pkg_dir/$entry"; done
+  for entry in "${RUNTIME_ENTRIES[@]}"; do
+    mkdir -p "$(dirname "$pkg_dir/$entry")"
+    touch "$pkg_dir/$entry"
+  done
   touch "$pkg_dir/web/dist-server/web-server.js"
   touch "$pkg_dir/spur.yaml.reference"
   touch "$pkg_dir/skills/spur/SKILL.md"
@@ -248,6 +251,24 @@ elif [[ "$out_mcp" == *"dist/mcp-http.js"* ]]; then
   ok "a-mcp: shared package manifest rejects missing MCP HTTP module"
 else
   bad "a-mcp: missing MCP module not identified"
+fi
+
+# A missing toolchain must fail before builds or npm installation.
+cat >"$FAKE_BIN/go" <<'GO'
+#!/usr/bin/env bash
+echo "auth toolchain unavailable" >&2
+exit 1
+GO
+chmod +x "$FAKE_BIN/go"
+rm -f "$MARKER"
+if preflight_out="$(HOME="$FAKE_HOME" SPUR_TEST_DEPLOY_PREFIX="$WORK_DIR/preflight-prefix" PATH="$FAKE_BIN:$PATH" bash "$test_deploy_script" 2>&1)"; then
+  bad "preflight: test deploy accepted unavailable Go toolchain"
+elif [[ -e "$MARKER" ]]; then
+  bad "preflight: build/install ran before toolchain refusal"
+elif [[ "$preflight_out" == *"auth toolchain unavailable"* ]]; then
+  ok "preflight: toolchain failure precedes builds/install"
+else
+  bad "preflight: unexpected toolchain failure"
 fi
 
 echo ""
