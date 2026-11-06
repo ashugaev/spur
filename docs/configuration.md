@@ -129,7 +129,7 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 ## Admission control
 
 Cap limits concurrent live sessions at spawn, restore, and the wake of a stale-parked or memory-shed session. Over cap: `429` naming stop candidates. Reporting route: [`GET /headroom`](daemon-api.md). CLI: [`spur doctor`](commands.md#doctor). Schema `v2/src/config.ts`, enforcement `v2/src/session-service.ts`.
-Accepted background spawns retain session id, launch intent, messages, attachments, and selected account across daemon restart; a recovered or retried intent waits for memory-guard or cap recovery under the same id; `v2/src/session-service.ts`, `v2/src/metadata.ts`.
+Accepted background spawns retain session id, launch intent, messages, attachments, and selected account across daemon restart; an intent recovered after restart waits for memory-guard or cap recovery under the same id; launch retries skip admission; `v2/src/session-service.ts`, `v2/src/metadata.ts`.
 Recovery adopts confirmed existing runtime; uncertain runtime or startup delivery holds and rechecks automatically — `v2/src/session-service.ts`.
 OpenCode recovery without a persisted native session id stays `session.spawn.recovery_held`; history and prompt acknowledgment cannot supply ownership; `v2/src/session-service.ts`.
 
