@@ -33,7 +33,7 @@ Read-only host/config/daemon health check; `--scaffold` writes local `spur.yaml`
 
 ## opencode-gc
 
-`spur opencode-gc [--execute]`: dry run by default; store rows, dead-worktree snapshots and logs; policy: [`opencodeGc.*`](configuration.md#field-reference); `v2/src/opencode-gc.ts`.
+`spur opencode-gc [--execute --older-than <days> --statuses <completed,killed,stopped> --limit <n> --no-sizes --json]`: dry run by default; store rows, dead-worktree snapshots and logs; flags override [`opencodeGc.*`](configuration.md#field-reference); `--no-sizes` skips `du`; `v2/src/opencode-gc.ts`.
 
 ## daemon
 
