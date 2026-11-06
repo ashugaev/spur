@@ -529,14 +529,21 @@ describe("startServer", () => {
       event: "daemon.registry.count",
       details: { read: 1, worktreeInternalDropped: 0 },
     });
-    expect(events[1]).toMatchObject({
+    const reconciledIndex = events.findIndex((entry) => entry.event === "daemon.startup.reconciled");
+    const attentionPollIndex = events.findIndex((entry) => entry.event === "gh.poll_cycle");
+    expect(events[reconciledIndex]).toMatchObject({
+      event: "daemon.startup.reconciled",
+      details: { scanned: 0, alive: 0, drifted: 0 },
+    });
+    expect(attentionPollIndex).toBeGreaterThan(reconciledIndex);
+    expect(events[attentionPollIndex]).toMatchObject({
       event: "gh.poll_cycle",
       details: { cycle: "attention", calls: 0 },
     });
     expect(events.map((entry) => entry.event)).toEqual([
       "daemon.registry.count",
-      "gh.poll_cycle",
       "daemon.startup.reconciled",
+      "gh.poll_cycle",
       "daemon.admission.startup",
       "daemon.started",
       "http.route.not_found",
