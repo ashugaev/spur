@@ -22426,7 +22426,7 @@ export class SessionService {
         if (!readySession) return false;
         let settleObservation = readySession;
         // Set by every settle pass: true only for plain waiting, not a wedge.
-        let holdable = false;
+        const settle = { holdable: false };
         // A live claude server-error wedge behaves like "waiting" for delivery
         // purposes: typing the queued message is exactly what un-wedges Claude
         // (the same mechanism as the reactivation nudge in processScheduledWakes),
@@ -22449,7 +22449,7 @@ export class SessionService {
             },
           );
           const state = this.queuedDeliveryState(classified);
-          holdable = state === "waiting" && !classified.serverError;
+          settle.holdable = state === "waiting" && !classified.serverError;
           if (state !== "waiting" && !classified.serverError) {
             return null;
           }
@@ -22472,7 +22472,7 @@ export class SessionService {
         }
 
         // Before the claim: nothing is typed and remove/flush never 409 here.
-        if (holdable && this.yieldsToTriggerBatch(sessionId)) {
+        if (settle.holdable && this.yieldsToTriggerBatch(sessionId)) {
           return false;
         }
 
