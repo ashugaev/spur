@@ -7,7 +7,7 @@ export const SCAN_CHUNK_BYTES = 1 << 20; // 1 MiB
 
 /**
  * Feed each non-empty trimmed line of `[offset, size)` to `onLine`, reading at
- * most SCAN_CHUNK_BYTES at a time. `size` defaults to the opened handle's size.
+ * most `chunkBytes` at a time. `size` defaults to the opened handle's size.
  *
  * `consumedBytes` counts whole terminated lines. A trailing unterminated line
  * is consumed only when `onLine(line, false)` returns true; a rejected one is
@@ -22,6 +22,7 @@ export async function scanJsonlLines(
   onLine: (line: string, terminated: boolean) => boolean,
   size?: number,
   onConsumed?: (bytes: Buffer) => void,
+  chunkBytes = SCAN_CHUNK_BYTES,
 ): Promise<{ consumedBytes: number; tail: Buffer } | null> {
   let fd: Awaited<ReturnType<typeof open>> | null = null;
   try {
@@ -37,7 +38,7 @@ export async function scanJsonlLines(
       );
     };
     while (position < end) {
-      const length = Math.min(SCAN_CHUNK_BYTES, end - position);
+      const length = Math.min(chunkBytes, end - position);
       const chunk = Buffer.alloc(length);
       const { bytesRead } = await fd.read(chunk, 0, length, position);
       if (bytesRead === 0) break;

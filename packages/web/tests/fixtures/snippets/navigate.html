@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<script type="application/spur-snippet+json">
+{
+  "protocolVersion": 1,
+  "snippetId": "navigate",
+  "ownerSessionId": "{{SESSION}}",
+  "instanceId": "{{INSTANCE}}",
+  "revision": {{REVISION}}{{RESPONDS}},
+  "title": "Navigates away",
+  "actions": [
+    {
+      "id": "noop",
+      "label": "Noop",
+      "payload": { "type": "object", "properties": { "x": { "type": "string", "maxLength": 10 } } }
+    }
+  ]
+}
+</script>
+<p>Leaves its page on the first connect.</p>
+<script>
+  window.spur.ready().then(function () {
+    setTimeout(function () { location.href = "data:text/html,<p>gone</p>"; }, 50);
+  });
+</script>

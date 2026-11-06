@@ -2,6 +2,7 @@ import {
   type Dir,
   type Dirent,
   type Stats,
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -19,6 +20,7 @@ import type { SessionArtifact, SessionArtifactKind, SessionArtifactOrigin } from
 
 const ARTIFACTS_DIR = "session-artifacts";
 const ARTIFACT_METADATA_FILE = ".spur-artifacts.json";
+const SESSION_WORK_DIR = ".spur-work";
 
 // Every entry pulled from a below-root directory costs one tick, and opening that
 // directory costs one tick too, whether the directory turns out empty, its entries become
@@ -121,7 +123,14 @@ function readArtifactMetadata(dir: string): ArtifactMetadataMap {
 function writeArtifactMetadata(dir: string, metadata: ArtifactMetadataMap): void {
   const metadataPath = join(dir, ARTIFACT_METADATA_FILE);
   if (Object.keys(metadata).length === 0) {
-    rmSync(metadataPath, { force: true });
+    try {
+      rmSync(metadataPath, { force: true });
+    } catch (error) {
+      // A stale empty-map file under an unwritable dir is harmless; cleanup must not fail.
+      if (!isPermissionError(error)) {
+        throw error;
+      }
+    }
     return;
   }
   writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf-8");
@@ -209,11 +218,72 @@ export function ensureSessionArtifactsDir(dataDir: string, sessionId: string): s
   return dir;
 }
 
+export function ensureSessionWorkDir(dataDir: string, sessionId: string): string {
+  const dir = join(sessionArtifactsDir(dataDir, sessionId), SESSION_WORK_DIR);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function isPermissionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === "EACCES" || code === "EPERM";
+}
+
+// Agents leave read-only directories behind (chmod, pytest caches). Restores the owner
+// write+exec bit on every directory this uid owns, never following symlinks. Directories
+// owned by another uid, or whose chmod fails, are left as-is.
+function restoreOwnerWriteOnDirs(dir: string): void {
+  const uid = process.getuid?.();
+  const stack = [dir];
+  while (stack.length > 0) {
+    const current = stack.pop() as string;
+    try {
+      const stats = lstatSync(current);
+      if (!stats.isDirectory()) {
+        continue;
+      }
+      if (stats.uid === uid) {
+        try {
+          chmodSync(current, stats.mode | 0o700);
+        } catch {
+          // Locked anyway (EPERM): still descend, children may be fixable.
+        }
+      }
+      for (const entry of readdirSync(current, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          stack.push(join(current, entry.name));
+        }
+      }
+    } catch {
+      // Unreadable or foreign directory: nothing this uid can fix here.
+    }
+  }
+}
+
+/**
+ * Removes the session's artifacts dir. Never throws on a permission error: read-only
+ * directories this uid owns are made writable and the removal retried; entries owned by
+ * another uid stay on disk and the rest is removed best-effort.
+ */
 export function deleteSessionArtifactsDir(dataDir: string, sessionId: string): void {
-  rmSync(sessionArtifactsDir(dataDir, sessionId), {
-    force: true,
-    recursive: true,
-  });
+  const dir = sessionArtifactsDir(dataDir, sessionId);
+  try {
+    rmSync(dir, { force: true, recursive: true });
+    return;
+  } catch (error) {
+    if (!isPermissionError(error)) {
+      throw error;
+    }
+  }
+  restoreOwnerWriteOnDirs(dir);
+  try {
+    rmSync(dir, { force: true, recursive: true });
+  } catch (error) {
+    if (!isPermissionError(error)) {
+      throw error;
+    }
+    deleteSessionArtifactsExcept(dataDir, sessionId, []);
+  }
 }
 
 /**
@@ -311,9 +381,17 @@ export function deleteSessionArtifactsExcept(
       if (relPath === ARTIFACT_METADATA_FILE || keep.has(relPath)) {
         continue;
       }
-      rmSync(entryPath, { force: true });
+      try {
+        rmSync(entryPath, { force: true });
+      } catch (error) {
+        // A file under a directory this uid cannot write stays; complete must not fail on it.
+        if (!isPermissionError(error)) {
+          throw error;
+        }
+      }
     }
   };
+  restoreOwnerWriteOnDirs(dir);
   walk(dir, "");
 
   for (const relPath of directories) {
@@ -412,7 +490,8 @@ function classifyUnknownDirent(
  * ancestor chain of resolved paths from the root down to its parent; a match means the link
  * re-enters a directory already on its own path and is skipped (not an error — an alias of
  * an ancestor, not lost work). Two distinct paths reaching the same physical directory
- * (neither on the other's chain) are both listed.
+ * (neither on the other's chain) are both listed. The root `.spur-work` entry (agent
+ * work dir) is never listed or walked.
  */
 export function listSessionArtifacts(dataDir: string, sessionId: string): ArtifactWalkResult {
   const dir = sessionArtifactsDir(dataDir, sessionId);
@@ -441,7 +520,7 @@ export function listSessionArtifacts(dataDir: string, sessionId: string): Artifa
   let nextLevel: { dir: string; relPath: string; chain: DirChain }[] = [];
 
   for (const entry of rootEntries) {
-    if (entry.name === ARTIFACT_METADATA_FILE) {
+    if (entry.name === ARTIFACT_METADATA_FILE || entry.name === SESSION_WORK_DIR) {
       continue;
     }
     if (entry.isFile()) {
@@ -760,11 +839,11 @@ export function withSessionArtifactInstructions(prompt: string): string {
   return `${prompt}
 
 Session artifacts:
-- Use \`$SPUR_SESSION_ARTIFACTS_DIR\` for temporary session-owned files you want Spur to track.
-- For screenshots, videos, traces, logs, and other test outputs, write the file to \`$SPUR_SESSION_ARTIFACTS_DIR\` instead of leaving it in the repo worktree.
-- If you generate an artifact you want the user to inspect in Spur UI, always put it in \`$SPUR_SESSION_ARTIFACTS_DIR\`.
-- Files written there are not committed from the repo workspace and are tied to this Spur session.
-- Images, videos, and text files (including .txt, .md, .json) written there appear inline in Spur UI. Other files appear as download links.
+- \`$SPUR_SESSION_ARTIFACTS_DIR\` is for the human: put only final files meant for user review there — test evidence (screenshots, videos), final reports, design exports for approval.
+- Write every other file you or other agents need — plans, drafts, specs, task memory, scratch logs, raw command output, intermediate data — to \`$SPUR_SESSION_WORK_DIR\`. Spur UI never shows it.
+- Both directories are tied to this Spur session and are not committed from the repo workspace. Never leave either kind of file in the repo worktree.
+- Images, videos, and text files (including .txt, .md, .json) in \`$SPUR_SESSION_ARTIFACTS_DIR\` appear inline in Spur UI. Other files appear as download links.
 - HTML files render as a live preview in Spur UI, with a button that opens the page standalone at its artifact URL.
-- A file written in a subfolder of \`$SPUR_SESSION_ARTIFACTS_DIR\` is listed under its path relative to that directory (for example \`design/design-spec.md\`).`;
+- A file in a subfolder of \`$SPUR_SESSION_ARTIFACTS_DIR\` is listed under its path relative to that directory (for example \`design/design-spec.md\`).
+- To give the user an interactive panel in Spur UI, write \`$SPUR_SESSION_ARTIFACTS_DIR/snippet.$SPUR_SESSION.<id>.html\`. User actions arrive as \`[spur-snippet-action v1]\` messages. Contract: https://raw.githubusercontent.com/ashugaev/spur/main/docs/snippets.md`;
 }

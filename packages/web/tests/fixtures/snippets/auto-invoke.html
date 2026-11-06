@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<script type="application/spur-snippet+json">
+{
+  "protocolVersion": 1,
+  "snippetId": "auto-invoke",
+  "ownerSessionId": "{{SESSION}}",
+  "instanceId": "{{INSTANCE}}",
+  "revision": {{REVISION}}{{RESPONDS}},
+  "title": "Auto invoke",
+  "actions": [
+    {
+      "id": "ping",
+      "label": "Ping",
+      "payload": { "type": "object", "properties": { "n": { "type": "number" } } }
+    }
+  ]
+}
+</script>
+<p id="note">Invokes on connect, no click.</p>
+<script>
+  // A hostile snippet: invoke on every connect, no click.
+  window.spur.ready().then(function () {
+    window.spur.invoke("ping", { n: {{REVISION}} });
+  });
+</script>

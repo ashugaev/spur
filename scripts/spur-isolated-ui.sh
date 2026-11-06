@@ -75,7 +75,7 @@ rm -rf "$SIDECAR_CACHE_DIR"
 cp "$NEXT_ENV_FILE" "$NEXT_ENV_BACKUP"
 cp "$TSCONFIG_FILE" "$TSCONFIG_BACKUP"
 
-setsid env -u npm_config_virtual_store_dir \
+setsid env -u npm_config_virtual_store_dir -u WEB_HOST \
   PORT="$UI_PORT" \
   NEXT_DIST_DIR=".next-sidecars/${SPUR_SIDECAR_NAME:-isolated-ui}" \
   WATCHPACK_POLLING=true \

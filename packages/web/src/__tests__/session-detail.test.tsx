@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState, type ReactElement, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SessionDetail } from "@/components/SessionDetail";
+import { buildSnippetActionPrompt } from "@/lib/snippets/snippet-protocol";
 import type { SpurSessionView } from "@/lib/types";
 
 // SessionDetail now reads the tag catalog via react-query (useTagCatalog), so
@@ -2719,6 +2720,318 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("keeps the older-page loading row when a tail response commits in the scroll batch", async () => {
+    vi.useFakeTimers();
+    const tailPage = conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true });
+    let resolveTailBody!: (value: typeof tailPage) => void;
+    const tailBody = new Promise<typeof tailPage>((resolve) => {
+      resolveTailBody = resolve;
+    });
+    let resolveOlderPage!: (value: Response) => void;
+    const olderPage = new Promise<Response>((resolve) => {
+      resolveOlderPage = resolve;
+    });
+    let tailCalls = 0;
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation?from=100") return olderPage;
+      if (url === "/api/sessions/api-a1/conversation") {
+        tailCalls += 1;
+        const response = new Response(JSON.stringify(tailPage), { status: 200 });
+        if (tailCalls > 1) vi.spyOn(response, "json").mockReturnValue(tailBody);
+        return response;
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    try {
+      await act(async () => {
+        render(<SessionDetail sessionId="api-a1" />);
+      });
+      expect(screen.getByText("Original prompt")).toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_000);
+      });
+      expect(tailCalls).toBe(2);
+
+      const scrollEl = screen.getByTestId("conversation-scroll");
+      Object.defineProperty(scrollEl, "scrollTop", {
+        configurable: true,
+        writable: true,
+        value: 0,
+      });
+      Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
+      Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
+      await act(async () => {
+        // The old tail read has already subscribed to this body. Commit its
+        // response before scrolling, while React still batches both updates.
+        resolveTailBody(tailPage);
+        await tailBody;
+        fireEvent.scroll(scrollEl);
+      });
+
+      expect(
+        fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/conversation?from=100")),
+      ).toHaveLength(1);
+      expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+
+      await act(async () => {
+        resolveOlderPage(
+          new Response(
+            JSON.stringify(
+              conversationFixture({ startIndex: 100, totalEntries: 500, hasMore: true }),
+            ),
+            { status: 200 },
+          ),
+        );
+      });
+      expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+    } finally {
+      await act(async () => {
+        resolveTailBody(tailPage);
+        resolveOlderPage(new Response(JSON.stringify(tailPage), { status: 200 }));
+      });
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the loading row when an accepted older-page response batches with an older-page request", async () => {
+    vi.useFakeTimers();
+    const acceptedIndex = 100;
+    const acceptedUrl = "/api/sessions/api-a1/conversation?from=100";
+    const olderUrl = `/api/sessions/api-a1/conversation?from=${acceptedIndex - 100}`;
+    let tailCalls = 0;
+    let resolveTail: (value: ReturnType<typeof conversationFixture>) => void = () => undefined;
+    const tailPayload = new Promise<ReturnType<typeof conversationFixture>>((resolve) => {
+      resolveTail = resolve;
+    });
+    const readTail = vi.fn(() => tailPayload);
+    let resolveOlder: (value: Response) => void = () => undefined;
+    const olderPage = new Promise<Response>((resolve) => {
+      resolveOlder = resolve;
+    });
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === olderUrl) return olderPage;
+      if (url === acceptedUrl) {
+        tailCalls += 1;
+        const response = new Response(
+          JSON.stringify(
+            conversationFixture({ startIndex: acceptedIndex, totalEntries: 500, hasMore: true }),
+          ),
+          { status: 200 },
+        );
+        if (tailCalls === 2) response.json = readTail;
+        return response;
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    try {
+      await act(async () => {
+        render(<SessionDetail sessionId="api-a1" />);
+      });
+      expect(screen.getByText("Original prompt")).toBeInTheDocument();
+      const scrollEl = screen.getByTestId("conversation-scroll");
+      Object.defineProperty(scrollEl, "scrollTop", {
+        configurable: true,
+        writable: true,
+        value: 0,
+      });
+      Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
+      Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
+      await act(async () => {
+        fireEvent.scroll(scrollEl);
+      });
+      expect(fetchMock).toHaveBeenCalledWith(acceptedUrl, expect.any(Object));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_000);
+      });
+      expect(readTail).toHaveBeenCalledOnce();
+
+      // Accept the prior page before the scroll, but commit both state updates
+      // together. That response does not own the new older-page spinner.
+      await act(async () => {
+        resolveTail(
+          conversationFixture({ startIndex: acceptedIndex, totalEntries: 500, hasMore: true }),
+        );
+        await tailPayload;
+        fireEvent.scroll(scrollEl);
+      });
+      expect(fetchMock).toHaveBeenCalledWith(olderUrl, expect.any(Object));
+      expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+
+      await act(async () => {
+        resolveOlder(
+          new Response(
+            JSON.stringify(
+              conversationFixture({
+                startIndex: acceptedIndex - 100,
+                totalEntries: 500,
+                hasMore: true,
+              }),
+            ),
+            { status: 200 },
+          ),
+        );
+      });
+      expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+    } finally {
+      await act(async () => {
+        resolveTail(
+          conversationFixture({ startIndex: acceptedIndex, totalEntries: 500, hasMore: true }),
+        );
+        resolveOlder(
+          new Response(JSON.stringify(conversationFixture({ startIndex: acceptedIndex - 100 })), {
+            status: 200,
+          }),
+        );
+      });
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["tail", false],
+    ["tail", true],
+    ["session", false],
+    ["session", true],
+    ["failure", true],
+  ] as const)(
+    "clears older loading cancellation on %s while discarding the cancelled response (error: %s)",
+    async (cancellation, oldFails) => {
+      let resolveOlder: (value: Response) => void = () => undefined;
+      const olderPage = new Promise<Response>((resolve) => {
+        resolveOlder = resolve;
+      });
+      let resolveReloaded: (value: Response) => void = () => undefined;
+      const reloadedPage = new Promise<Response>((resolve) => {
+        resolveReloaded = resolve;
+      });
+      let olderRequests = 0;
+      const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1" || url === "/api/sessions/api-b2") {
+          return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+        }
+        if (url.endsWith("/conversation?from=100")) {
+          olderRequests += 1;
+          return olderRequests === 1
+            ? olderPage
+            : reloadedPage.then((response) => response.clone());
+        }
+        if (url.includes("/conversation")) {
+          return new Response(
+            JSON.stringify(
+              conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true }),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      const { rerender } = render(<SessionDetail sessionId="api-a1" />);
+      await screen.findByText("Original prompt");
+      const scrollEl = screen.getByTestId("conversation-scroll");
+      Object.defineProperty(scrollEl, "scrollTop", {
+        configurable: true,
+        writable: true,
+        value: 0,
+      });
+      Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
+      Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
+      fireEvent.scroll(scrollEl);
+      await screen.findByLabelText("Loading older messages");
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/sessions/api-a1/conversation?from=100",
+        expect.any(Object),
+      );
+
+      if (cancellation === "session") {
+        rerender(<SessionDetail sessionId="api-b2" />);
+        await waitFor(() =>
+          expect(fetchMock).toHaveBeenCalledWith(
+            "/api/sessions/api-b2/conversation",
+            expect.any(Object),
+          ),
+        );
+      } else if (cancellation === "tail") {
+        scrollEl.scrollTop = 700;
+        fireEvent.scroll(scrollEl);
+      }
+      if (cancellation !== "failure") {
+        expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+        await screen.findByText("Original prompt");
+        const reloadedScroll = screen.getByTestId("conversation-scroll");
+        Object.defineProperty(reloadedScroll, "scrollTop", {
+          configurable: true,
+          writable: true,
+          value: 0,
+        });
+        fireEvent.scroll(reloadedScroll);
+        await screen.findByLabelText("Loading older messages");
+        expect(olderRequests).toBeGreaterThanOrEqual(2);
+      }
+      await act(async () => {
+        resolveOlder(
+          oldFails
+            ? new Response(null, { status: 500 })
+            : new Response(
+                JSON.stringify(
+                  conversationFixture({
+                    startIndex: 100,
+                    messages: [{ role: "assistant", text: "Cancelled older page", timestampMs: 1 }],
+                  }),
+                ),
+                { status: 200 },
+              ),
+        );
+      });
+      expect(screen.queryByText("Cancelled older page")).not.toBeInTheDocument();
+      if (cancellation !== "failure") {
+        expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+        await act(async () => {
+          resolveReloaded(
+            new Response(
+              JSON.stringify(
+                conversationFixture({
+                  startIndex: 100,
+                  messages: [{ role: "assistant", text: "Reloaded older page", timestampMs: 1 }],
+                }),
+              ),
+              { status: 200 },
+            ),
+          );
+        });
+        expect(screen.getByText("Reloaded older page")).toBeInTheDocument();
+      }
+      expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+    },
+  );
+
   it("keeps the loading row when a tail poll issued before the scroll resolves mid-flight", async () => {
     // Regression: a no-from poll in flight when the user scrolls to the top
     // used to win the race and overwrite `conversation`, which cleared the
@@ -2808,61 +3121,282 @@ describe("SessionDetail voice input", () => {
     });
   });
 
-  it("resets to a no-from conversation fetch on a session switch after loading an older page", async () => {
-    const fetchedUrls: string[] = [];
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      fetchedUrls.push(url);
-      if (url === "/api/sessions/api-a1") {
-        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+  describe("older-page request ownership", () => {
+    function deferred<T>() {
+      let resolve: (value: T) => void = () => {};
+      let reject: (error: Error) => void = () => {};
+      const promise = new Promise<T>((done, fail) => {
+        resolve = done;
+        reject = fail;
+      });
+      return { promise, resolve, reject };
+    }
+
+    function page(startIndex: number) {
+      return conversationFixture({
+        startIndex,
+        totalEntries: 500,
+        hasMore: startIndex > 0,
+        messages: [{ role: "user", text: `page-${startIndex}`, timestampMs: 1 }],
+      });
+    }
+
+    function response(startIndex: number) {
+      return new Response(JSON.stringify(page(startIndex)));
+    }
+
+    async function mountPaging(conversation: (url: string) => Promise<Response> | Response) {
+      const requests: string[] = [];
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        requests.push(url);
+        if (url === "/api/sessions/api-a1")
+          return new Response(JSON.stringify(sessionFixture({ state: "waiting" })));
+        if (url.startsWith("/api/sessions/api-a1/conversation")) return conversation(url);
+        if (url === "/api/runtime/voice")
+          return new Response(JSON.stringify({ available: false, modelPath: "" }));
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      let unmount = () => {};
+      await act(async () => {
+        ({ unmount } = render(<SessionDetail sessionId="api-a1" />));
+      });
+      expect(screen.getByText("page-200")).toBeInTheDocument();
+      const scroll = pagingScroll();
+      return { scroll, requests, unmount };
+    }
+
+    function pagingScroll() {
+      const scroll = screen.getByTestId("conversation-scroll");
+      Object.defineProperty(scroll, "scrollTop", { configurable: true, writable: true, value: 0 });
+      Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1000 });
+      Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 300 });
+      return scroll;
+    }
+
+    it("keeps older loading when a decoded tail and scroll share a React batch", async () => {
+      vi.useFakeTimers();
+      const heldTail = deferred<Response>();
+      const decoded = deferred<undefined>();
+      const older = deferred<Response>();
+      let tailCalls = 0;
+      const view = await mountPaging((url) => {
+        if (url.endsWith("?from=100")) return older.promise;
+        return ++tailCalls === 1 ? response(200) : heldTail.promise;
+      });
+      try {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expect(tailCalls).toBe(2);
+        const tail = response(200);
+        tail.json = async () => {
+          decoded.resolve(undefined);
+          return page(200);
+        };
+        await act(async () => {
+          heldTail.resolve(tail);
+          await decoded.promise;
+          await Promise.resolve();
+          fireEvent.scroll(view.scroll);
+        });
+        expect(view.requests.filter((url) => url.endsWith("?from=100"))).toHaveLength(1);
+        expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+        fireEvent.scroll(view.scroll);
+        expect(view.requests.filter((url) => url.endsWith("?from=100"))).toHaveLength(1);
+        await act(async () => {
+          older.resolve(response(100));
+        });
+        expect(screen.getByText("page-100")).toBeInTheDocument();
+        expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+      } finally {
+        view.unmount();
+        heldTail.resolve(response(200));
+        older.resolve(response(100));
+        vi.useRealTimers();
       }
-      if (url === "/api/sessions/api-b2") {
-        return new Response(JSON.stringify(sessionFixture({ id: "api-b2" })), { status: 200 });
-      }
-      if (url.startsWith("/api/sessions/api-a1/conversation")) {
-        return new Response(
-          JSON.stringify(
-            conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true }),
-          ),
-          { status: 200 },
-        );
-      }
-      if (url.startsWith("/api/sessions/api-b2/conversation")) {
-        return new Response(
-          JSON.stringify(conversationFixture({ startIndex: 0, totalEntries: 2, hasMore: false })),
-          { status: 200 },
-        );
-      }
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
     });
 
-    const { rerender } = render(<SessionDetail sessionId="api-a1" />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Original prompt")).toBeInTheDocument();
+    it("keeps loading owned by the newly requested older page", async () => {
+      vi.useFakeTimers();
+      const previous = deferred<Response>();
+      const decoded = deferred<undefined>();
+      const next = deferred<Response>();
+      let olderCalls = 0;
+      const view = await mountPaging((url) => {
+        if (url.endsWith("?from=0")) return next.promise;
+        if (url.endsWith("?from=100")) return ++olderCalls === 1 ? response(100) : previous.promise;
+        return response(200);
+      });
+      try {
+        await act(async () => fireEvent.scroll(view.scroll));
+        expect(screen.getByText("page-100")).toBeInTheDocument();
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expect(olderCalls).toBe(2);
+        const oldPage = response(100);
+        oldPage.json = async () => {
+          decoded.resolve(undefined);
+          return page(100);
+        };
+        await act(async () => {
+          fireEvent.scroll(view.scroll);
+          previous.resolve(oldPage);
+          await decoded.promise;
+          await Promise.resolve();
+        });
+        expect(view.requests.filter((url) => url.endsWith("?from=0"))).toHaveLength(1);
+        expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+        await act(async () => next.resolve(response(0)));
+        expect(screen.getByText("page-0")).toBeInTheDocument();
+        expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+      } finally {
+        view.unmount();
+        previous.resolve(response(100));
+        next.resolve(response(0));
+        vi.useRealTimers();
+      }
     });
 
-    const scrollEl = screen.getByTestId("conversation-scroll");
-    Object.defineProperty(scrollEl, "scrollTop", { configurable: true, writable: true, value: 0 });
-    Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
-    Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
-    fireEvent.scroll(scrollEl);
+    it.each(["non-OK response", "rejected fetch", "failed decode"])(
+      "clears older loading when its request fails: %s",
+      async (failure) => {
+        vi.useFakeTimers();
+        const failed = deferred<Response>();
+        const next = deferred<Response>();
+        let olderCalls = 0;
+        const view = await mountPaging((url) => {
+          if (url.endsWith("?from=0")) return next.promise;
+          if (url.endsWith("?from=100")) return ++olderCalls === 1 ? failed.promise : response(100);
+          return response(200);
+        });
+        try {
+          await act(async () => fireEvent.scroll(view.scroll));
+          expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+          await act(async () => {
+            if (failure === "rejected fetch") failed.reject(new Error("fetch failed"));
+            else if (failure === "non-OK response")
+              failed.resolve(new Response(null, { status: 500 }));
+            else {
+              const invalid = response(100);
+              invalid.json = async () => {
+                throw new Error("decode failed");
+              };
+              failed.resolve(invalid);
+            }
+          });
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(4_000);
+          });
+          expect(screen.getByText("page-100")).toBeInTheDocument();
+          expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+          await act(async () => fireEvent.scroll(pagingScroll()));
+          expect(view.requests.filter((url) => url.endsWith("?from=0"))).toHaveLength(1);
+          expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+          await act(async () => next.resolve(response(0)));
+        } finally {
+          view.unmount();
+          failed.resolve(response(100));
+          next.resolve(response(0));
+          vi.useRealTimers();
+        }
+      },
+    );
 
-    await waitFor(() => {
-      expect(fetchedUrls.some((url) => url === "/api/sessions/api-a1/conversation?from=100")).toBe(
-        true,
-      );
+    it("resets older loading when resuming the tail", async () => {
+      const previous = deferred<Response>();
+      const next = deferred<Response>();
+      let olderCalls = 0;
+      const view = await mountPaging((url) => {
+        if (url.endsWith("?from=100")) return ++olderCalls === 1 ? previous.promise : next.promise;
+        return response(200);
+      });
+      try {
+        await act(async () => fireEvent.scroll(view.scroll));
+        expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+        view.scroll.scrollTop = 700;
+        await act(async () => fireEvent.scroll(view.scroll));
+        expect(
+          view.requests.filter((url) => url === "/api/sessions/api-a1/conversation"),
+        ).toHaveLength(2);
+        expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+        view.scroll.scrollTop = 0;
+        await act(async () => fireEvent.scroll(view.scroll));
+        await act(async () => previous.resolve(response(100)));
+        expect(screen.getByText("page-200")).toBeInTheDocument();
+        expect(screen.queryByText("page-100")).not.toBeInTheDocument();
+        expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+        await act(async () => next.resolve(response(100)));
+        expect(screen.getByText("page-100")).toBeInTheDocument();
+        expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+      } finally {
+        view.unmount();
+        previous.resolve(response(100));
+        next.resolve(response(100));
+      }
     });
 
-    rerender(<SessionDetail sessionId="api-b2" />);
-
-    // The switched-to session's fromIndex settles back to null (no `from`)
-    // even though the prior session had an older page loaded.
-    await waitFor(() => {
-      expect(fetchedUrls.some((url) => url === "/api/sessions/api-b2/conversation")).toBe(true);
+    it("resets to a no-from conversation fetch on a session switch after loading an older page", async () => {
+      const fetchedUrls: string[] = [];
+      const previous = deferred<Response>();
+      const next = deferred<Response>();
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        fetchedUrls.push(url);
+        if (url === "/api/sessions/api-a1") {
+          return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+        }
+        if (url === "/api/sessions/api-b2") {
+          return new Response(JSON.stringify(sessionFixture({ id: "api-b2" })), { status: 200 });
+        }
+        if (url.startsWith("/api/sessions/api-a1/conversation")) {
+          if (url.endsWith("?from=100")) return previous.promise;
+          return new Response(
+            JSON.stringify(
+              conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true }),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/sessions/api-b2/conversation")) {
+          if (url.endsWith("?from=100")) return next.promise.then(() => response(100));
+          return response(200);
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      const { rerender, unmount } = render(<SessionDetail sessionId="api-a1" />);
+      try {
+        await waitFor(() => {
+          expect(screen.getByText("Original prompt")).toBeInTheDocument();
+        });
+        fireEvent.scroll(pagingScroll());
+        await waitFor(() => {
+          expect(fetchedUrls).toContain("/api/sessions/api-a1/conversation?from=100");
+        });
+        expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+        rerender(<SessionDetail sessionId="api-b2" />);
+        await waitFor(() => {
+          expect(fetchedUrls).toContain("/api/sessions/api-b2/conversation");
+          expect(screen.getByText("page-200")).toBeInTheDocument();
+        });
+        expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+        await act(async () => fireEvent.scroll(pagingScroll()));
+        expect(fetchedUrls).toContain("/api/sessions/api-b2/conversation?from=100");
+        await act(async () => previous.resolve(response(100)));
+        expect(screen.getByText("page-200")).toBeInTheDocument();
+        expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+        await act(async () => next.resolve(response(100)));
+        expect(screen.getByText("page-100")).toBeInTheDocument();
+        expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+      } finally {
+        unmount();
+        previous.resolve(response(100));
+        next.resolve(response(100));
+      }
     });
   });
 
@@ -6184,6 +6718,268 @@ describe("SessionDetail artifacts", () => {
     expect(screen.getAllByText("None.")).toHaveLength(1);
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
+
+  describe("artifact format filter", () => {
+    type ArtifactSpec = { name: string; addedByUser?: boolean };
+
+    function artifactsFor(specs: ArtifactSpec[]) {
+      return specs.map(({ name, addedByUser }) => ({
+        id: name,
+        name,
+        size: 100,
+        mimeType: name.endsWith(".png")
+          ? "image/png"
+          : name.endsWith(".jpg")
+            ? "image/jpeg"
+            : "text/plain; charset=utf-8",
+        kind:
+          name.endsWith(".png") || name.endsWith(".jpg")
+            ? ("image" as const)
+            : ("download" as const),
+        origin: "intentional" as const,
+        ...(addedByUser ? { addedByUser: true } : {}),
+        createdAt: "2026-04-02T10:00:00.000Z",
+        updatedAt: "2026-04-02T10:00:00.000Z",
+      }));
+    }
+
+    function stubSessions(payloads: Record<string, () => ArtifactSpec[]>) {
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        for (const [id, specs] of Object.entries(payloads)) {
+          if (url === `/api/sessions/${id}`) {
+            return new Response(
+              JSON.stringify(sessionFixture({ id, artifacts: artifactsFor(specs()) })),
+              { status: 200 },
+            );
+          }
+          if (url === `/api/sessions/${id}/conversation`) {
+            return new Response(JSON.stringify(conversationFixture({ state: "working" })), {
+              status: 200,
+            });
+          }
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+    }
+
+    const baseSpecs: ArtifactSpec[] = [
+      { name: "a.png" },
+      { name: "b.png" },
+      { name: "notes.txt" },
+      { name: "Makefile" },
+    ];
+    const allNames = ["a.png", "b.png", "notes.txt", "Makefile"];
+
+    function formatControl() {
+      return screen.getByRole("tablist", { name: "Artifact format" });
+    }
+    function formatButton(name: string) {
+      return within(formatControl()).getByRole("button", { name });
+    }
+    function headerCount() {
+      const h2 = screen.getByText("Artifacts", { selector: "h2" });
+      return within(h2).getByText(/^\d+$/).textContent;
+    }
+    function expectOnly(present: string[]) {
+      for (const name of allNames) {
+        if (present.includes(name)) {
+          expect(screen.getByText(name)).toBeInTheDocument();
+        } else {
+          expect(screen.queryByText(name)).not.toBeInTheDocument();
+        }
+      }
+    }
+
+    it("shows extension options and narrows the grid to the selected format", async () => {
+      stubSessions({ "api-a1": () => baseSpecs });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+
+      const buttons = within(formatControl()).getAllByRole("button");
+      expect(buttons.map((button) => button.textContent)).toEqual([
+        "All",
+        "FILE (1)",
+        "PNG (2)",
+        "TXT (1)",
+      ]);
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      expect(headerCount()).toBe("4");
+
+      fireEvent.click(formatButton("PNG (2)"));
+
+      expectOnly(["a.png", "b.png"]);
+      expect(formatButton("PNG (2)")).toHaveAttribute("aria-pressed", "true");
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "false");
+      expect(headerCount()).toBe("2");
+    });
+
+    it("clicking the active format or All restores the full set", async () => {
+      stubSessions({ "api-a1": () => baseSpecs });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+
+      fireEvent.click(formatButton("PNG (2)"));
+      expectOnly(["a.png", "b.png"]);
+      fireEvent.click(formatButton("PNG (2)"));
+      expectOnly(allNames);
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+
+      fireEvent.click(formatButton("PNG (2)"));
+      expectOnly(["a.png", "b.png"]);
+      fireEvent.click(formatButton("All"));
+      expectOnly(allNames);
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+    });
+
+    it("filters list view rows by format", async () => {
+      stubSessions({ "api-a1": () => baseSpecs });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+
+      fireEvent.click(
+        within(screen.getByRole("tablist", { name: "Artifact view" })).getByRole("button", {
+          name: "List",
+        }),
+      );
+      fireEvent.click(formatButton("PNG (2)"));
+
+      const table = screen.getByRole("table");
+      expect(within(table).getByText("a.png")).toBeInTheDocument();
+      expect(within(table).getByText("b.png")).toBeInTheDocument();
+      expect(within(table).queryByText("notes.txt")).not.toBeInTheDocument();
+      expect(within(table).queryByText("Makefile")).not.toBeInTheDocument();
+    });
+
+    it("hides the format control when the category has one extension", async () => {
+      stubSessions({ "api-a1": () => [{ name: "a.png" }, { name: "b.png" }] });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+
+      expect(screen.queryByRole("tablist", { name: "Artifact format" })).not.toBeInTheDocument();
+    });
+
+    it("resets to All when a poll removes the selected format and does not resurrect it", async () => {
+      let specs = baseSpecs;
+      stubSessions({ "api-a1": () => specs });
+      vi.useFakeTimers();
+      try {
+        render(<SessionDetail sessionId="api-a1" />);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        fireEvent.click(formatButton("PNG (2)"));
+        expectOnly(["a.png", "b.png"]);
+
+        specs = baseSpecs.filter((spec) => !spec.name.endsWith(".png"));
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expectOnly(["notes.txt", "Makefile"]);
+        expect(screen.queryByText("None.")).not.toBeInTheDocument();
+        expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+
+        specs = baseSpecs;
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expectOnly(allNames);
+        expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resets to All when a poll leaves one extension", async () => {
+      let specs = baseSpecs;
+      stubSessions({ "api-a1": () => specs });
+      vi.useFakeTimers();
+      try {
+        render(<SessionDetail sessionId="api-a1" />);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        fireEvent.click(formatButton("PNG (2)"));
+
+        specs = baseSpecs.filter((spec) => spec.name.endsWith(".png"));
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expect(screen.queryByRole("tablist", { name: "Artifact format" })).not.toBeInTheDocument();
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+
+        specs = baseSpecs;
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+        expectOnly(allNames);
+        expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resets to All on category change", async () => {
+      stubSessions({
+        "api-a1": () => [
+          { name: "a.png" },
+          { name: "notes.txt" },
+          { name: "c.png", addedByUser: true },
+          { name: "d.jpg", addedByUser: true },
+        ],
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+
+      fireEvent.click(formatButton("PNG (1)"));
+      expect(screen.queryByText("notes.txt")).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Attached (2)" }));
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      expect(screen.getByText("c.png")).toBeInTheDocument();
+      expect(screen.getByText("d.jpg")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Agent (2)" }));
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      expect(screen.getByText("a.png")).toBeInTheDocument();
+      expect(screen.getByText("notes.txt")).toBeInTheDocument();
+    });
+
+    it("resets to All when switching session", async () => {
+      stubSessions({
+        "api-a1": () => [{ name: "a1-shot.png" }, { name: "a1-notes.txt" }],
+        "api-b2": () => [{ name: "b2-shot.png" }, { name: "b2-notes.txt" }],
+      });
+      const { rerender } = render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a1-shot.png")).toBeInTheDocument();
+      });
+
+      fireEvent.click(formatButton("PNG (1)"));
+      expect(screen.queryByText("a1-notes.txt")).not.toBeInTheDocument();
+
+      rerender(<SessionDetail sessionId="api-b2" />);
+      await waitFor(() => {
+        expect(screen.getByText("b2-shot.png")).toBeInTheDocument();
+      });
+      expect(screen.getByText("b2-notes.txt")).toBeInTheDocument();
+      expect(formatButton("All")).toHaveAttribute("aria-pressed", "true");
+      expect(headerCount()).toBe("2");
+    });
+  });
 });
 
 describe("SessionDetail load state", () => {
@@ -6204,11 +7000,12 @@ describe("SessionDetail load state", () => {
     "preserves load error detail and recovers with Retry: %s",
     async (detail) => {
       let recovered = false;
+      const isStarting = detail === "Daemon is starting";
       vi.spyOn(global, "fetch").mockImplementation(async (input) => {
         const url = typeof input === "string" ? input : input.url;
         if (url === "/api/sessions/api-a1") {
           return new Response(JSON.stringify(recovered ? sessionFixture() : { error: detail }), {
-            status: recovered ? 200 : 503,
+            status: recovered ? 200 : isStarting ? 503 : 404,
             headers: { "content-type": "application/json" },
           });
         }
@@ -6224,17 +7021,19 @@ describe("SessionDetail load state", () => {
       });
 
       render(<SessionDetail sessionId="api-a1" />);
-      const card = await screen.findByRole("region", { name: "Unable to load this session." });
-      expect(card.querySelector("p")?.textContent).toBe(detail);
-      expect(card.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
-      expect(card.querySelector(".animate-spin")).toBeNull();
+      const testId = isStarting ? "session-load-starting" : "session-load-failed";
+      const card = await screen.findByTestId(testId);
+      if (!isStarting) {
+        expect(card).toHaveTextContent(detail.replace(/\n/, " "));
+      }
       expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
       expect(screen.getByRole("link", { name: /back/i })).toBeInTheDocument();
 
       recovered = true;
-      fireEvent.click(within(card).getByRole("button", { name: "Retry" }));
+      const buttonName = isStarting ? "Retry now" : "Retry";
+      fireEvent.click(within(card).getByRole("button", { name: buttonName }));
       await screen.findByRole("heading", { name: "Fix auth" });
-      expect(screen.queryByRole("region", { name: "Unable to load this session." })).toBeNull();
+      expect(screen.queryByTestId(testId)).toBeNull();
     },
   );
 
@@ -6278,14 +7077,216 @@ describe("SessionDetail load state", () => {
     rerender(<SessionDetail sessionId="api-b2" />);
 
     await waitFor(() => {
-      expect(screen.getByText("Unable to load this session.")).toBeInTheDocument();
+      expect(screen.getByRole("alert")).toHaveTextContent("Unable to load this session");
     });
     expect(screen.getByText("missing current session")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/runtime/info",
       expect.objectContaining({ cache: "no-store" }),
     );
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Fix auth" })).not.toBeInTheDocument();
+  });
+
+  it("shows the starting card on 503 and opens the session once the daemon is ready", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let sessionCalls = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        sessionCalls += 1;
+        if (sessionCalls <= 2) {
+          return new Response(JSON.stringify({ error: "Daemon is starting" }), {
+            headers: { "content-type": "application/json" },
+            status: 503,
+          });
+        }
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const card = await screen.findByRole("status", { name: "" });
+    expect(card).toHaveTextContent("Spur is starting…");
+    expect(card).toHaveTextContent("Retrying · attempt 1");
+    expect(screen.queryByText("Unable to load this session")).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(screen.getByText("Retrying · attempt 2")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Spur is starting…")).not.toBeInTheDocument();
+  });
+
+  it("retries immediately from the starting card", async () => {
+    let sessionCalls = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        sessionCalls += 1;
+        return new Response(JSON.stringify({ error: "Daemon is starting" }), {
+          headers: { "content-type": "application/json" },
+          status: 502,
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+    await screen.findByText("Retrying · attempt 1");
+    const before = sessionCalls;
+    fireEvent.click(screen.getByRole("button", { name: "Retry now" }));
+    await waitFor(() => {
+      expect(screen.getByText("Retrying · attempt 2")).toBeInTheDocument();
+    });
+    expect(sessionCalls).toBe(before + 1);
+  });
+
+  function mockSessionStatus(status: () => number) {
+    const calls = { session: 0 };
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        calls.session += 1;
+        const code = status();
+        return code === 200
+          ? new Response(JSON.stringify(sessionFixture()), { status: 200 })
+          : new Response(JSON.stringify({ error: "nope" }), {
+              headers: { "content-type": "application/json" },
+              status: code,
+            });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    return calls;
+  }
+
+  it("lets the card timer own retries while 503 and skips the 4s poll", async () => {
+    vi.useFakeTimers();
+    const calls = mockSessionStatus(() => 503);
+    render(<SessionDetail sessionId="api-a1" />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(calls.session).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(calls.session).toBe(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    // Card timer fires at 4s; the poll tick at 4s must not add a second call.
+    expect(calls.session).toBe(3);
+  });
+
+  it("stops the card timer when 503 turns into a non-transient error", async () => {
+    vi.useFakeTimers();
+    let code = 503;
+    const calls = mockSessionStatus(() => code);
+    render(<SessionDetail sessionId="api-a1" />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    code = 404;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(calls.session).toBe(2);
+    expect(screen.getByTestId("session-load-failed")).toBeInTheDocument();
+    // Only the poll may fetch now (4s after the settled retry); the card timer must be gone.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(calls.session).toBe(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(calls.session).toBe(3);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_000);
+    });
+    expect(calls.session).toBe(4);
+  });
+
+  it("resets the attempt counter to 1 when FAILED turns back into STARTING", async () => {
+    vi.useFakeTimers();
+    let code = 503;
+    mockSessionStatus(() => code);
+    render(<SessionDetail sessionId="api-a1" />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    code = 404;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(screen.getByTestId("session-load-failed")).toBeInTheDocument();
+    code = 503;
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByTestId("session-load-starting")).toHaveTextContent("Retrying · attempt 1");
+  });
+
+  it("stops the card timer on unmount", async () => {
+    vi.useFakeTimers();
+    const calls = mockSessionStatus(() => 503);
+    const { unmount } = render(<SessionDetail sessionId="api-a1" />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    unmount();
+    const before = calls.session;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(calls.session).toBe(before);
+  });
+
+  it("disables the retry button while the retry is in flight", async () => {
+    let release: (() => void) | null = null;
+    let sessionCalls = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url !== "/api/sessions/api-a1") throw new Error(`Unexpected fetch: ${url}`);
+      sessionCalls += 1;
+      if (sessionCalls > 1) await new Promise<void>((resolve) => (release = resolve));
+      return new Response(JSON.stringify({ error: "nope" }), {
+        headers: { "content-type": "application/json" },
+        status: 404,
+      });
+    });
+    render(<SessionDetail sessionId="api-a1" />);
+    const button = await screen.findByRole("button", { name: "Retry" });
+    fireEvent.click(button);
+    const busy = await screen.findByRole("button", { name: "Retrying…" });
+    expect(busy).toBeDisabled();
+    expect(busy).toHaveAttribute("aria-busy", "true");
+    fireEvent.click(busy);
+    expect(sessionCalls).toBe(2);
+    await act(async () => {
+      release?.();
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+    });
   });
 
   it("ignores stale session responses after navigation", async () => {
@@ -6378,12 +7379,14 @@ describe("SessionDetail load state", () => {
       expect(screen.getAllByText("temporary failure").length).toBeGreaterThan(0);
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
-
-    await waitFor(() => {
-      expect(screen.queryByText("temporary failure")).not.toBeInTheDocument();
-    });
-  });
+    // Pause holds its optimistic status, so the next poll is the successful reload.
+    await waitFor(
+      () => {
+        expect(screen.queryByText("temporary failure")).not.toBeInTheDocument();
+      },
+      { timeout: 6_000 },
+    );
+  }, 10_000);
 });
 
 describe("SessionDetail display state", () => {
@@ -7820,6 +8823,27 @@ describe("SessionDetail lifecycle operation", () => {
     },
   );
 
+  it.each(["restore", "reopen"] as const)(
+    "blocks immediate send during pending %s with an already live runtime",
+    async (action) => {
+      mockLifecycleFetch(
+        () => sessionFixture({ lifecycle: receipt("server-operation", "pending", 1, action) }),
+        async () => new Response("{}"),
+      );
+      render(<SessionDetail sessionId="api-a1" />);
+      await advance();
+      fireEvent.change(screen.getByPlaceholderText(/^Message\.\.\./), {
+        target: { value: "Wait for settlement" },
+      });
+      expect(screen.getByRole("button", { name: /Send now/ })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Queue" })).toBeDisabled();
+      expect(
+        screen.getByText("Session is starting. Queued messages send after launch."),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Terminal" })).toBeEnabled();
+    },
+  );
+
   it("hands a settled receipt to current Waiting before the restore POST resolves", async () => {
     const delivery = deferred<Response>();
     let current = sessionFixture({ status: "stopped", state: "stopped", runtimeAlive: false });
@@ -7836,8 +8860,21 @@ describe("SessionDetail lifecycle operation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Restore" }));
     await advance();
     expect(operationId).toMatch(/^[\da-f-]{36}$/);
+    expect(screen.getByText("starting")).toBeInTheDocument();
+    expect(screen.queryByText("working")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Terminal" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Handoff" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /Send now/ })).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/^Message\.\.\./)).not.toBeInTheDocument();
     current = sessionFixture({ state: "waiting", lifecycle: receipt(operationId, "succeeded", 2) });
     await advance(4_000);
+    expect(screen.queryByText("starting")).not.toBeInTheDocument();
+    expect(screen.getByText("waiting")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Terminal" })).toBeEnabled();
+    fireEvent.change(screen.getByPlaceholderText(/^Message\.\.\./), {
+      target: { value: "Ready" },
+    });
+    expect(screen.getByRole("button", { name: /Send now/ })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
     current = sessionFixture({
@@ -7873,10 +8910,14 @@ describe("SessionDetail lifecycle operation", () => {
     const mounted = render(<SessionDetail sessionId="api-a1" />);
     await advance();
     expect(screen.getByRole("button", { name: "Handoff" })).toBeDisabled();
+    expect(screen.getByText("starting")).toBeInTheDocument();
     mounted.unmount();
     render(<SessionDetail sessionId="api-a1" />);
     await advance();
     expect(screen.getByRole("button", { name: "Handoff" })).toBeDisabled();
+    expect(screen.getByText("starting")).toBeInTheDocument();
+    expect(screen.queryByText("working")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Terminal" })).not.toBeInTheDocument();
     current = sessionFixture({
       status: "errored",
       state: "error",
@@ -7885,6 +8926,8 @@ describe("SessionDetail lifecycle operation", () => {
     });
     await advance(4_000);
     expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
+    expect(screen.queryByText("starting")).not.toBeInTheDocument();
+    expect(screen.getByText("error")).toBeInTheDocument();
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
   });
 
@@ -7917,12 +8960,24 @@ describe("SessionDetail lifecycle operation", () => {
       current = { ...current, lifecycle: receipt(operationId, "pending", 1, action) };
       await advance(12_000);
       expect(posts).toBe(1);
+      if (action === "reopen") {
+        expect(screen.getByText("starting")).toBeInTheDocument();
+        expect(screen.queryByText("working")).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Terminal" })).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Handoff" })).toBeDisabled();
+        expect(screen.queryByRole("button", { name: /Send now/ })).not.toBeInTheDocument();
+      } else {
+        expect(screen.queryByText("starting")).not.toBeInTheDocument();
+      }
       current = sessionFixture({
         state: "waiting",
         lifecycle: receipt(operationId, "succeeded", 2, action),
       });
       await advance(4_000);
       expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+      expect(screen.queryByText("starting")).not.toBeInTheDocument();
+      expect(screen.getByText("waiting")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Terminal" })).toBeEnabled();
       current = sessionFixture({ lifecycle: receipt(operationId, "pending", 1, action) });
       await advance(4_000);
       expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
@@ -8046,5 +9101,233 @@ describe("SessionDetail header wrap", () => {
     expect(taskParagraph).toHaveClass("min-w-0");
     expect(taskParagraph).toHaveClass("whitespace-pre-wrap");
     expect(taskParagraph).toHaveClass("[overflow-wrap:anywhere]");
+  });
+});
+
+describe("SessionDetail snippets", () => {
+  const SID = "api-a1b2";
+  const artifact = (name: string, updatedAt = "2026-04-02T10:00:00.000Z", size = 400) => ({
+    id: name,
+    name,
+    size,
+    mimeType: name.endsWith(".html") ? "text/html; charset=utf-8" : "image/png",
+    kind: name.endsWith(".html") ? ("download" as const) : ("image" as const),
+    origin: "intentional" as const,
+    createdAt: updatedAt,
+    updatedAt,
+  });
+  const manifestHtml = (snippetId: string, title: string) =>
+    `<script type="application/spur-snippet+json">${JSON.stringify({
+      protocolVersion: 1,
+      snippetId,
+      ownerSessionId: SID,
+      instanceId: `inst-${snippetId}-0001`.slice(0, 20),
+      revision: 1,
+      title,
+      actions: [
+        {
+          id: "go",
+          label: "Go",
+          payload: { type: "object", properties: { note: { type: "string", maxLength: 20 } } },
+        },
+      ],
+    })}</script><p>body</p>`;
+
+  function mockSession(options: {
+    artifacts: ReturnType<typeof artifact>[];
+    queued?: string[];
+    files?: Record<string, string>;
+    onQueueRemove?: (message: string) => void;
+  }) {
+    return vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === `/api/sessions/${SID}`) {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              id: SID,
+              artifacts: options.artifacts,
+              queuedMessages: { messages: options.queued ?? [], awaitingPrompt: false },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === `/api/sessions/${SID}/conversation`) {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/snippets/spur-snippet-sdk.v1.js") return new Response("/* sdk */");
+      if (url.startsWith("/fonts/")) return new Response(new ArrayBuffer(4));
+      if (url === `/api/sessions/${SID}/queue/remove` && init?.method === "POST") {
+        options.onQueueRemove?.((JSON.parse(init.body as string) as { message: string }).message);
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      const prefix = `/api/sessions/${SID}/artifacts/`;
+      if (url.startsWith(prefix)) {
+        const body = options.files?.[decodeURIComponent(url.slice(prefix.length))];
+        if (body !== undefined) return new Response(body, { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    window.localStorage.clear();
+  });
+
+  it("keeps snippet files out of the Artifacts grid and counts, and keeps non-reserved snippet.* names", async () => {
+    mockSession({
+      artifacts: [
+        artifact(`snippet.${SID}.picker.html`),
+        artifact("snippet.sp-cd34.other.html"),
+        artifact(`snippet.${SID}.picker.html.tmp`),
+        artifact("snippet.png"),
+        artifact("shot.png"),
+      ],
+      files: { [`snippet.${SID}.picker.html`]: manifestHtml("picker", "Picker") },
+    });
+    render(<SessionDetail sessionId={SID} />);
+    await screen.findByAltText("shot.png");
+    expect(screen.getByAltText("snippet.png")).toBeInTheDocument();
+    const artifactsHeading = screen.getByRole("heading", { name: /^Artifacts/ });
+    expect(artifactsHeading).toHaveTextContent("2");
+    expect(screen.queryByText(`snippet.${SID}.picker.html`)).not.toBeInTheDocument();
+    expect(screen.queryByText("snippet.sp-cd34.other.html")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preview snippet.png" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: `Preview snippet.${SID}.picker.html` })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Preview snippet.sp-cd34.other.html" })).toBeNull();
+  });
+
+  it("renders the Snippets block between Dialog and Queued messages with the Dialog header classes", async () => {
+    mockSession({
+      artifacts: [artifact(`snippet.${SID}.picker.html`)],
+      queued: ["follow-up"],
+      files: { [`snippet.${SID}.picker.html`]: manifestHtml("picker", "Picker") },
+    });
+    render(<SessionDetail sessionId={SID} />);
+    const snippets = await screen.findByRole("heading", { name: /^Snippets/ });
+    const dialogHeading = screen.getByRole("heading", { name: /dialog/i });
+    const queued = screen.getByRole("heading", { name: /queued messages/i });
+    expect(
+      dialogHeading.compareDocumentPosition(snippets) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      snippets.compareDocumentPosition(queued) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(snippets.className).toBe(dialogHeading.className);
+    expect(snippets).toHaveTextContent("1");
+    const frame = await screen.findByTitle("Picker");
+    expect(frame.tagName).toBe("IFRAME");
+    expect(frame).toHaveAttribute("sandbox", "allow-scripts");
+  });
+
+  it("prunes snippet records older than 7 days on mount and keeps budget keys", async () => {
+    const day = 24 * 60 * 60 * 1000;
+    const record = (updatedAt: number) =>
+      JSON.stringify({
+        instanceId: "inst-0000001",
+        lastRevision: 1,
+        unconfirmedRevision: null,
+        state: { app: null, controls: [] },
+        action: null,
+        updatedAt,
+      });
+    window.localStorage.setItem("spur:snippet:v1:other-0000:old", record(Date.now() - 8 * day));
+    window.localStorage.setItem("spur:snippet:v1:other-0000:fresh", record(Date.now() - day));
+    window.localStorage.setItem(
+      "spur:snippet-budget:v1:other-0000",
+      JSON.stringify({ unconfirmed: 3, updatedAt: Date.now() - 30 * day }),
+    );
+    mockSession({ artifacts: [artifact("shot.png")] });
+    render(<SessionDetail sessionId={SID} />);
+    await screen.findByAltText("shot.png");
+    expect(window.localStorage.getItem("spur:snippet:v1:other-0000:old")).toBeNull();
+    expect(window.localStorage.getItem("spur:snippet:v1:other-0000:fresh")).not.toBeNull();
+    expect(window.localStorage.getItem("spur:snippet-budget:v1:other-0000")).not.toBeNull();
+  });
+
+  it("has no Snippets block without owned files", async () => {
+    mockSession({
+      artifacts: [artifact("snippet.sp-cd34.other.html"), artifact("shot.png")],
+    });
+    render(<SessionDetail sessionId={SID} />);
+    await screen.findByAltText("shot.png");
+    expect(screen.queryByRole("heading", { name: /^Snippets/ })).not.toBeInTheDocument();
+  });
+
+  it("mounts four snippets, lists the rest, and shows too_large and invalid manifest cards", async () => {
+    const names = ["a", "b", "c", "d", "e", "big", "bad"];
+    const updated = (index: number) => `2026-04-02T10:0${index}:00.000Z`;
+    mockSession({
+      artifacts: names.map((id, index) =>
+        artifact(`snippet.${SID}.${id}.html`, updated(9 - index), id === "big" ? 300 * 1024 : 400),
+      ),
+      files: {
+        [`snippet.${SID}.a.html`]: manifestHtml("a", "Alpha"),
+        [`snippet.${SID}.b.html`]: manifestHtml("b", "Bravo"),
+        [`snippet.${SID}.c.html`]: manifestHtml("c", "Charlie"),
+        [`snippet.${SID}.d.html`]: manifestHtml("d", "Delta"),
+      },
+    });
+    render(<SessionDetail sessionId={SID} />);
+    await screen.findByTitle("Alpha");
+    expect(screen.getByTitle("Delta")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^Snippets/ })).toHaveTextContent("7");
+    expect(screen.getByText(/Not mounted · limit 4/)).toBeInTheDocument();
+    expect(screen.getByText(/snippet\.api-a1b2\.big\.html · updated/)).toBeInTheDocument();
+    expect(screen.queryByTitle("Echo")).not.toBeInTheDocument();
+  });
+
+  it("shows a too_large card without fetching and a manifest card for a bad manifest", async () => {
+    const fetchMock = mockSession({
+      artifacts: [
+        artifact(`snippet.${SID}.big.html`, "2026-04-02T10:02:00.000Z", 300 * 1024),
+        artifact(`snippet.${SID}.bad.html`, "2026-04-02T10:01:00.000Z"),
+      ],
+      files: {
+        [`snippet.${SID}.bad.html`]: `<script type="application/spur-snippet+json">{"x":1}</script>`,
+      },
+    });
+    render(<SessionDetail sessionId={SID} />);
+    expect(await screen.findByText("Too large")).toBeInTheDocument();
+    expect(screen.getByText("File over 256 KiB. Not loaded.")).toBeInTheDocument();
+    expect(await screen.findByText("Manifest invalid")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reload" })).not.toBeInTheDocument();
+    const fetched = fetchMock.mock.calls.map(([input]) =>
+      typeof input === "string" ? input : (input as Request).url,
+    );
+    expect(fetched.some((url) => url.endsWith("snippet.api-a1b2.big.html"))).toBe(false);
+  });
+
+  it("renders a queued snippet prompt as a summary and removes the raw text", async () => {
+    const prompt = buildSnippetActionPrompt({
+      requestId: "11111111-2222-3333-4444-555555555555",
+      sessionId: SID,
+      snippetId: "picker",
+      instanceId: "inst-picker-0001",
+      revision: 3,
+      actionId: "go",
+      label: "Choose selected",
+      payload: { note: "hi" },
+    });
+    const removed: string[] = [];
+    mockSession({
+      artifacts: [],
+      queued: [prompt, "plain follow-up"],
+      onQueueRemove: (message) => removed.push(message),
+    });
+    render(<SessionDetail sessionId={SID} />);
+    await screen.findByText("plain follow-up");
+    const summary = document.querySelector("[data-snippet-action-summary]") as HTMLElement;
+    expect(summary.textContent).toBe("Snippet action Choose selected · picker r3");
+    const details = summary.parentElement?.querySelector("details") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    expect(details.textContent).toContain("[spur-snippet-action v1]");
+    fireEvent.click(screen.getByLabelText("Remove queued message #1"));
+    await waitFor(() => expect(removed).toEqual([prompt]));
   });
 });

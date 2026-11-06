@@ -1,4 +1,5 @@
 import { clearInterval, setInterval as startInterval } from "node:timers";
+import { logSpurEvent } from "../event-log.js";
 import {
   deleteReviewSourceSnapshot,
   listSessions,
@@ -14,12 +15,18 @@ import {
   type ReviewSourceConfig,
 } from "../types.js";
 import { reviewProvider } from "../review-providers/index.js";
+import { reviewSignalChanged } from "../review-providers/shared.js";
 import {
   isEligibleForSourcePoll,
   type SourceHandle,
   type SourceModule,
   type SourceStartDeps,
 } from "./types.js";
+
+// merge_conflict revisions are `<head>:<base>`.
+function revisionHead(revision: string): string {
+  return revision.split(":")[0] ?? revision;
+}
 
 function emitSignalsByKind(
   providerId: ReviewProviderId,
@@ -96,10 +103,18 @@ export function createReviewSourceModule(
                 collected.data.prNumber,
               );
               const next = collected.snapshot;
-              const changed = [...next.values()].filter((signal) => {
-                const prior = previous?.get(signal.key);
-                return !prior || prior.text !== signal.text;
-              });
+              const heldConflict = previous?.get("merge_conflict");
+              if (
+                collected.conflictHead &&
+                next.has("merge_conflict") &&
+                heldConflict?.revision &&
+                revisionHead(heldConflict.revision) === collected.conflictHead
+              ) {
+                next.set("merge_conflict", heldConflict);
+              }
+              const changed = [...next.values()].filter((signal) =>
+                reviewSignalChanged(previous?.get(signal.key), signal),
+              );
 
               // Built once, handed to both the in-memory map and the on-disk write
               // so the two copies cannot desync.
@@ -149,13 +164,30 @@ export function createReviewSourceModule(
         }
       };
 
+      // Fire-and-forget polls (tick, deferred start, runOnStart) end here: a throw is
+      // logged once for that cycle and the next tick polls again. The awaited startup
+      // poll is not routed through it, so start() still rejects there.
+      const reportPollCycleFailure = (error: unknown): void => {
+        const message = error instanceof Error ? error.message : String(error);
+        deps.logger.warn?.(
+          `[source:${deps.projectId}/${deps.sourceId}] poll cycle failed: ${message}`,
+        );
+        logSpurEvent(deps.dataDir, {
+          event: "source.poll_cycle.error",
+          level: "error",
+          projectId: deps.projectId,
+          sourceId: deps.sourceId,
+          message: `Poll cycle failed for ${deps.projectId}/${deps.sourceId}: ${message}`,
+        });
+      };
+
       const timer = startInterval(() => {
-        void poll(false);
+        poll(false).catch(reportPollCycleFailure);
       }, deps.config.intervalMs);
 
       if (!deps.config.runOnStart) {
         if (deps.deferInitialSync) {
-          void poll(false);
+          poll(false).catch(reportPollCycleFailure);
         } else {
           await poll(false);
         }
@@ -173,7 +205,7 @@ export function createReviewSourceModule(
         ...(deps.config.runOnStart
           ? {
               runOnStart(): void {
-                void poll(true);
+                poll(true).catch(reportPollCycleFailure);
               },
             }
           : {}),
