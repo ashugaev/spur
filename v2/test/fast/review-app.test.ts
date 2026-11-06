@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import type * as Crypto from "node:crypto";
 import {
@@ -422,6 +423,7 @@ test.each([
   });
   const result = await publishReview(f.config, request, draft.session, f.transport);
   expect(result.status).toBe(verdict);
+  assert.ok("localVerdict" in result);
   expect(result.localVerdict).toBe(verdict);
   expect(f.history).toHaveLength(1);
   expect(f.history[0]).toMatchObject({ state: verdict, commit_id: draft.H });
@@ -1015,6 +1017,7 @@ async function legacyRecoveryFixture() {
 test("legacy recovery archives exact bytes and retires both attempts without a native review", async () => {
   const f = await legacyRecoveryFixture();
   const result = await f.recover();
+  assert.ok("legacyRecovery" in result);
   expect(result).toMatchObject({
     status: "PENDING",
     localVerdict: null,
