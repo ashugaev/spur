@@ -1926,6 +1926,22 @@ function resolveCloseoutOwner(args: {
   return args.worktree;
 }
 
+// Terminal or hand-paused records no longer run the Stop-hook closeout. Daemon
+// stops (stale, memory, runtime_lost) leave the owner in place for handoff.
+function isReleasedCloseoutStatus(record: Pick<SessionRecord, "status" | "stopReason">): boolean {
+  switch (record.status) {
+    case "completed":
+    case "killed":
+    case "errored":
+    case "budget_limited":
+      return true;
+    case "stopped":
+      return record.stopReason === "manual_pause" || record.stopReason === "token_budget";
+    default:
+      return false;
+  }
+}
+
 async function setupSessionAgentHooks(args: {
   agent: AgentName;
   dataDir: string;
@@ -3304,6 +3320,7 @@ interface PreparedSpawn {
   sessionId: string;
   resolvedBranch?: ResolvedSpawnBranch;
   reuseWorkspacePath?: string;
+  closeoutTakenFrom?: string[];
   placeholder: SessionRecord;
   sessionToolDir: string;
   startupAttachments: StoredImageAttachment[];
@@ -8869,6 +8886,45 @@ export class SessionService {
     });
   }
 
+  /** Once per (owner, trigger): the claim is persisted before the send, so a restart never repeats it. */
+  noticeBlockedTrigger(sessionId: string, triggerId: string): void {
+    const record = readSession(this.config.dataDir, sessionId);
+    if (
+      !record ||
+      record.closeoutOwner !== true ||
+      record.blockedTriggerNotices?.includes(triggerId)
+    ) {
+      return;
+    }
+    writeSession(this.config.dataDir, {
+      ...record,
+      blockedTriggerNotices: [...(record.blockedTriggerNotices ?? []), triggerId],
+    });
+    this.stateCache.delete(sessionId);
+    const telegram = this.resolveTelegramNotice(sessionId) !== null;
+    this.logEvent("trigger.send.blocked_notice", {
+      level: "warn",
+      sessionId,
+      projectId: record.project,
+      message: `${sessionId} owns closeout but allowedTriggers blocks ${triggerId}`,
+      details: { triggerId, telegram },
+    });
+    if (telegram) void this.sendBlockedTriggerNotice(sessionId, triggerId);
+  }
+
+  private async sendBlockedTriggerNotice(sessionId: string, triggerId: string): Promise<void> {
+    try {
+      const view = await this.get(sessionId);
+      await this.pushTelegramNotice(
+        sessionId,
+        view,
+        `${telegramSessionLabel(view)} owns closeout; allowedTriggers blocks ${triggerId}, alert dropped. Fix: spur pause ${sessionId}, then spawn with reuseWorkspaceSessionId and allowedTriggers omitted.`,
+      );
+    } catch (error) {
+      this.logTelegramNoticeFailure(sessionId, "blocked-trigger notice", error);
+    }
+  }
+
   private async pushTelegramNotice(
     sessionId: string,
     topicSession: Pick<SessionView, "id" | "agent" | "state" | "slots">,
@@ -12924,6 +12980,7 @@ export class SessionService {
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let createdAt: string | undefined;
     let placeholderWritten = false;
+    let closeoutTakenFrom: string[] | null = null;
     let launchedRecord: SessionRecord | undefined;
     let launchCandidate: SessionRecord | undefined;
     let resolvedModel: string | undefined;
@@ -13151,7 +13208,11 @@ export class SessionService {
         originalTaskPrompt,
       };
       this.assertReuseAnchorPresent(reuseCtx);
-      writeSession(this.config.dataDir, placeholder);
+      closeoutTakenFrom = this.applyCloseoutTake(
+        placeholder,
+        reuseCtx,
+        !restrictWrites && worktree && options?.closeoutOwnerTransfer === undefined,
+      );
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
       placeholderWritten = true;
@@ -13673,6 +13734,7 @@ export class SessionService {
           if (persistedFailure) {
             writeSession(this.config.dataDir, persistedFailure);
           }
+          if (closeoutTakenFrom) this.returnTakenCloseout(sessionId, closeoutTakenFrom);
 
           this.logEvent("session.spawn.failed", {
             level: "error",
@@ -14109,6 +14171,7 @@ export class SessionService {
     let worktree = false;
     let createdAt: string | undefined;
     let placeholderWritten = false;
+    let closeoutTakenFrom: string[] | null = null;
     let ownedClaimBatchId: string | undefined;
     let prompt = "";
     let steps: string[] | undefined;
@@ -14228,7 +14291,11 @@ export class SessionService {
         originalTaskPrompt,
       };
       this.assertReuseAnchorPresent(reuseCtx);
-      writeSession(this.config.dataDir, placeholder);
+      closeoutTakenFrom = this.applyCloseoutTake(
+        placeholder,
+        reuseCtx,
+        !restrictWrites && worktree,
+      );
       ownedClaimBatchId = undefined;
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
@@ -14280,6 +14347,7 @@ export class SessionService {
         sessionId,
         ...(resolvedBranch ? { resolvedBranch } : {}),
         ...(reuseCtx ? { reuseWorkspacePath: reuseCtx.workspacePath } : {}),
+        ...(closeoutTakenFrom ? { closeoutTakenFrom } : {}),
         placeholder,
         sessionToolDir: this.prepareSessionTools(sessionId, agent, request.project),
         startupAttachments,
@@ -14323,6 +14391,7 @@ export class SessionService {
           error: message,
           errorSource: "other",
         });
+        if (closeoutTakenFrom) this.returnTakenCloseout(sessionId, closeoutTakenFrom);
       }
       if (ownedClaimBatchId !== undefined && sessionId) {
         try {
@@ -14887,6 +14956,9 @@ export class SessionService {
           });
       if (persistedFailure) {
         writeSession(this.config.dataDir, persistedFailure);
+      }
+      if (prepared.closeoutTakenFrom) {
+        this.returnTakenCloseout(sessionId, prepared.closeoutTakenFrom);
       }
       this.logEvent("session.spawn.failed", {
         level: "error",
@@ -19858,9 +19930,15 @@ export class SessionService {
     // "working" the way a genuine post-restore warmup intentionally does.
     this.restoreWarmupUntil.set(session.id, Date.now() + RESTORE_WARMUP_MS);
     this.launchesInFlight.add(session.id);
+    // The caller's record predates the awaits above; a reuse spawn can have
+    // taken closeout since, and env plus record writes must carry the flag.
+    const relaunchTarget: SessionRecord = {
+      ...session,
+      closeoutOwner: readSession(this.config.dataDir, session.id)?.closeoutOwner === true,
+    };
     let recovered: ReadySessionForSend;
     try {
-      recovered = await this.relaunchSessionInPlace(session, project, {
+      recovered = await this.relaunchSessionInPlace(relaunchTarget, project, {
         ...options,
         paneAlreadyOwned: options?.paneAlreadyOwned === true,
         ...(operation ? { operation } : {}),
@@ -21877,6 +21955,83 @@ export class SessionService {
     if (session?.closeoutOwner !== true) return;
     writeSession(this.config.dataDir, { ...session, closeoutOwner: false, updatedAt: nowIso() });
     this.stateCache.delete(sessionId);
+  }
+
+  private holdsCloseout(record: SessionRecord): boolean {
+    return (
+      record.closeoutOwner === true &&
+      (!isReleasedCloseoutStatus(record) ||
+        this.launchesInFlight.has(record.id) ||
+        this.handoffsInFlight.has(record.id) ||
+        this.lifecycle.snapshot(record.id).operation?.phase === "pending")
+    );
+  }
+
+  // Pure read: ids of the workspace's closeout owners when every one is
+  // released, null when nothing is takeable.
+  private takeReleasedCloseout(workspaceId: string, newSessionId: string): string[] | null {
+    const anchor = readSession(this.config.dataDir, workspaceId);
+    if (!anchor) return null;
+    const owners = this.listWorkspaceRuntimeMembers(
+      anchor,
+      listSessions(this.config.dataDir),
+    ).filter((member) => member.id !== newSessionId && member.closeoutOwner === true);
+    if (owners.length === 0 || owners.some((owner) => this.holdsCloseout(owner))) return null;
+    return owners.map((owner) => owner.id);
+  }
+
+  // Runs in the same sync span as the placeholder write; the old owners are
+  // cleared only after the write succeeded.
+  private applyCloseoutTake(
+    placeholder: SessionRecord,
+    reuseCtx: { workspaceId: string } | null,
+    takeAllowed: boolean,
+  ): string[] | null {
+    const takenFrom =
+      reuseCtx && takeAllowed
+        ? this.takeReleasedCloseout(reuseCtx.workspaceId, placeholder.id)
+        : null;
+    if (takenFrom) placeholder.closeoutOwner = true;
+    writeSession(this.config.dataDir, placeholder);
+    if (!takenFrom || !reuseCtx) return takenFrom;
+    for (const id of takenFrom) this.clearCloseoutOwner(id);
+    this.logEvent("session.closeout.taken", {
+      level: "info",
+      sessionId: placeholder.id,
+      projectId: placeholder.project,
+      message: `${placeholder.id} took closeout from ${takenFrom.join(", ")}`,
+      details: { workspaceId: reuseCtx.workspaceId, fromSessionIds: takenFrom },
+    });
+    return takenFrom;
+  }
+
+  // Sync with the failed-record write. A live launch retained by the failure
+  // path never reaches here.
+  private returnTakenCloseout(failedSessionId: string, takenFrom: readonly string[]): void {
+    const failed = readSession(this.config.dataDir, failedSessionId);
+    if (failed?.closeoutOwner === true) {
+      writeSession(this.config.dataDir, { ...failed, closeoutOwner: false });
+      this.stateCache.delete(failedSessionId);
+    }
+    if (!failed) return;
+    const members = this.listWorkspaceRuntimeMembers(failed, listSessions(this.config.dataDir));
+    for (const id of takenFrom) {
+      const record = members.find((member) => member.id === id);
+      if (
+        !record ||
+        record.closeoutOwner === true ||
+        !isReleasedCloseoutStatus(record) ||
+        this.launchesInFlight.has(id) ||
+        members.some(
+          (member) =>
+            member.id !== failedSessionId && member.id !== id && member.closeoutOwner === true,
+        )
+      ) {
+        continue;
+      }
+      writeSession(this.config.dataDir, { ...record, closeoutOwner: true });
+      this.stateCache.delete(id);
+    }
   }
 
   async respawn(sessionId: string, request: RespawnSessionRequest = {}): Promise<SessionView> {
@@ -25420,6 +25575,7 @@ export class SessionService {
       agentLaunchId: _agentLaunchId,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
+      blockedTriggerNotices: _blockedTriggerNotices,
       sidecarLaunches: _sidecarLaunches,
       branchSource: _branchSource,
       error: _error,
@@ -25830,6 +25986,7 @@ export class SessionService {
       agentLaunchId: _agentLaunchId,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
+      blockedTriggerNotices: _blockedTriggerNotices,
       sidecarLaunches: _sidecarLaunches,
       tokenUsage: _tokenUsage,
       preflightTokenUsage: _preflightTokenUsage,

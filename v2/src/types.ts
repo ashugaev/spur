@@ -1211,6 +1211,8 @@ export interface SessionRecord {
   closeoutOwner?: boolean;
   claudeAccountId?: string;
   allowedTriggers?: string[];
+  /** Send trigger ids already announced to the owner; one notice per id. */
+  blockedTriggerNotices?: string[];
   agentSessionId?: string;
   /** Cursor transcript position before the latest restore; excludes earlier activity from state. */
   cursorRestoreBoundary?: CursorRestoreBoundary;
@@ -1404,6 +1406,7 @@ export interface SessionView extends Omit<
   | "agentLaunchId"
   | "triggerBirthKey"
   | "triggerBirthRequest"
+  | "blockedTriggerNotices"
   | "sidecarLaunches"
   | "tokenUsage"
   | "preflightTokenUsage"
@@ -1461,6 +1464,7 @@ export type DashboardOmittedField =
   | "agentLaunchId"
   | "triggerBirthKey"
   | "triggerBirthRequest"
+  | "blockedTriggerNotices"
   | "sidecarLaunches"
   | "branchSource"
   | "tokenUsage"

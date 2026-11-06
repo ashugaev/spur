@@ -1244,6 +1244,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.allowedTriggers !== undefined
       ? { allowedTriggers: normalizedSession.allowedTriggers }
       : {}),
+    ...(Array.isArray(normalizedSession.blockedTriggerNotices) &&
+    normalizedSession.blockedTriggerNotices.every((id) => typeof id === "string")
+      ? { blockedTriggerNotices: normalizedSession.blockedTriggerNotices }
+      : {}),
     ...(normalizedSession.selfDestruct ? { selfDestruct: normalizedSession.selfDestruct } : {}),
     ...(normalizedSession.agentSessionId
       ? { agentSessionId: normalizedSession.agentSessionId }
