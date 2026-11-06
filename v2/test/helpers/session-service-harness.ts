@@ -404,6 +404,7 @@ const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDi
 const captureCodexRolloutBaselineMock: Mock = vi.fn();
 const findLatestCodexSessionFileMock: Mock = vi.fn();
 const readCodexRolloutStateMock: Mock = vi.fn();
+const codexRateLimitPermissionMock: Mock = vi.fn();
 const scanCodexRolloutForMessageMock: Mock = vi.fn();
 const ghMock: Mock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
@@ -743,6 +744,13 @@ vi.mock("../../src/agents/codex.js", async (importOriginal) => ({
   readCodexRolloutState: readCodexRolloutStateMock,
   readCodexConversationTail: readCodexConversationTailMock,
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
+}));
+vi.mock("../../src/agents/codex-rate-limits.js", () => ({
+  CodexRateLimitPoller: class {
+    permission = codexRateLimitPermissionMock;
+    prune = vi.fn();
+    dispose = vi.fn();
+  },
 }));
 
 vi.mock("../../src/agents/models.js", () => ({
@@ -1753,6 +1761,7 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
   findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
   readCodexRolloutStateMock.mockReset().mockResolvedValue({ rollout: null, rateLimit: null });
+  codexRateLimitPermissionMock.mockReset().mockReturnValue(null);
   // Default: a well-formed batched-lookup response that says "no PR for this
   // branch". An unparseable answer is no longer read as "no PR" — it is a
   // failed lookup, which blocks teardown on purpose.
@@ -2095,6 +2104,7 @@ export {
   sendDesktopNotificationMock,
   captureCodexRolloutBaselineMock,
   readCodexRolloutStateMock,
+  codexRateLimitPermissionMock,
   scanCodexRolloutForMessageMock,
   ghMock,
   TEST_ARTIFACTS_ROOT,

@@ -509,8 +509,17 @@ export function detectCodexMcpPermissionDialog(paneText: string): boolean {
 // banner — a ■-prefixed banner or a line-leading status banner — rejecting
 // diff/quote gutters and quoted code tokens. This keeps an agent whose pane
 // merely contains rate-limit vocabulary from being misclassified rate_limited.
-export function scanTmuxRateLimit(paneText: string): RateLimitDetection | null {
-  for (const line of paneText.split("\n")) {
+export function scanTmuxRateLimit(
+  paneText: string,
+  options?: { tailLines?: number },
+): RateLimitDetection | null {
+  const allLines = paneText.split("\n");
+  let end = allLines.length;
+  while (end > 0 && allLines[end - 1]?.trim() === "") end -= 1;
+  const lines = options?.tailLines
+    ? allLines.slice(Math.max(0, end - options.tailLines), end)
+    : allLines;
+  for (const line of lines) {
     const content = line.replace(/^\s+/, "");
     if (content.length === 0) {
       continue;
