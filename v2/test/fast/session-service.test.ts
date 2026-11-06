@@ -34245,7 +34245,7 @@ describe("SessionService", () => {
         projects: { api: { ...config.projects.api, restoreAfterReboot: true } },
       });
       readHostMemoryMock.mockReturnValue(null);
-      const sessions = createSessionStore(
+      createSessionStore(
         runningSession({ id: "api-1", workspaceId: "api-1", status: "stopped" }),
         runningSession({ id: "api-2", workspaceId: "api-1", status: "stopped" }),
       );

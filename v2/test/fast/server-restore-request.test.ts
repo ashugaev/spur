@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -15,9 +15,9 @@ import {
 } from "../../src/session-lifecycle.js";
 import { SessionService } from "../../src/session-service.js";
 import * as eventSources from "../../src/event-sources/index.js";
-import { writeSession } from "../../src/metadata.js";
+import { readSession, writeSession } from "../../src/metadata.js";
 import type { SessionRecord, SessionView } from "../../src/types.js";
-import { findFreePort } from "../helpers/common.js";
+import { createTempDir, findFreePort } from "../helpers/common.js";
 
 describe("parseRestoreSessionRequest", () => {
   it.each([parseCompleteSessionRequest, parseRestoreSessionRequest])(
@@ -58,6 +58,147 @@ describe("parseRestoreSessionRequest", () => {
 // A8: the override reaches the daemon over HTTP and is forwarded unchanged
 // to the service call — this is the only body either route reads.
 describe("POST /sessions/:id/restore and /reopen forward the force override", () => {
+  it("restores owner-first shared-workspace boot rows before background checks consume them", async () => {
+    const root = await createTempDir("spur-shared-reboot-");
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const configPath = join(root, "spur.yaml");
+    const ownerId = "demo-owner";
+    const memberId = "demo-member";
+    await mkdir(repoDir);
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${await findFreePort()}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${join(root, "worktrees")}`,
+        "admission:",
+        "  maxLiveSessions: 2",
+        "  memoryGuard:",
+        "    enforce: false",
+        "    enforceFloors: false",
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+        "    restoreAfterReboot: true",
+      ].join("\n"),
+    );
+    for (const [index, id] of [ownerId, memberId].entries()) {
+      writeSession(dataDir, {
+        id,
+        project: "demo",
+        agent: "claude",
+        prompt: "unit reboot",
+        branch: "main",
+        worktree: false,
+        worktreePath: repoDir,
+        workspaceId: ownerId,
+        tmuxSession: `shared-reboot-${id}`,
+        launchCommand: "claude",
+        agentSessionId: `fixture-native-${id}`,
+        status: "running",
+        createdAt: `2026-03-18T10:0${1 - index}:00.000Z`,
+        updatedAt: "2026-03-18T10:02:00.000Z",
+      });
+    }
+    const dead = {
+      runtimeAlive: false,
+      paneUsable: false,
+      processAlive: false,
+      tmuxActivityAt: null,
+      probeUnresponsive: false,
+    };
+    const live = { ...dead, runtimeAlive: true, paneUsable: true, processAlive: true };
+    const seam = SessionService.prototype as unknown as {
+      runDashboardCacheTick(): Promise<void>;
+      readRuntimeSnapshot(record: SessionRecord): Promise<typeof dead>;
+      restoreLocked(id: string): Promise<SessionView>;
+    };
+    const originalTick = seam.runDashboardCacheTick;
+    const originalReconcile = SessionService.prototype.reconcileStoppedSessions;
+    const restored = new Set<string>();
+    let enterBoot!: () => void;
+    const bootEntered = new Promise<void>((resolve) => {
+      enterBoot = resolve;
+    });
+    let reconciling = false;
+    let dashboardRunning = false;
+    let bootProbeStarted = false;
+    const dashboard = vi.spyOn(seam, "runDashboardCacheTick").mockImplementation(async function (
+      this: SessionService,
+    ) {
+      await bootEntered;
+      dashboardRunning = true;
+      try {
+        await originalTick.call(this);
+      } finally {
+        dashboardRunning = false;
+      }
+    });
+    const probe = vi.spyOn(seam, "readRuntimeSnapshot").mockImplementation(async function (
+      this: SessionService,
+      record,
+    ) {
+      if (reconciling && !dashboardRunning && !bootProbeStarted) {
+        bootProbeStarted = true;
+        expect(record.id).toBe(ownerId);
+        enterBoot();
+        const cache = (this as unknown as { dashboardCacheReady: Promise<void> | null })
+          .dashboardCacheReady;
+        if (cache) {
+          await cache;
+          expect(readSession(dataDir, memberId)?.status).toBe("stopped");
+        }
+        return dead;
+      }
+      return restored.has(record.id) || (dashboardRunning && reconciling && record.id === ownerId)
+        ? live
+        : dead;
+    });
+    const reconcile = vi
+      .spyOn(SessionService.prototype, "reconcileStoppedSessions")
+      .mockImplementation(async function (this: SessionService) {
+        reconciling = true;
+        try {
+          return await originalReconcile.call(this);
+        } finally {
+          reconciling = false;
+        }
+      });
+    const restoreBody = vi.spyOn(seam, "restoreLocked").mockImplementation(async (id) => {
+      const current = readSession(dataDir, id);
+      if (!current) throw new Error("Missing shared-workspace boot fixture");
+      const { stopReason: _stopped, ...base } = current;
+      const running = { ...base, status: "running" as const };
+      writeSession(dataDir, running);
+      restored.add(id);
+      return running as SessionView;
+    });
+    const restore = vi.spyOn(SessionService.prototype, "restore");
+    let server: StartedServer | undefined;
+    try {
+      server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+      expect(reconcile).toHaveBeenCalledOnce();
+      expect(restore.mock.calls.map(([id]) => id)).toEqual([ownerId, memberId]);
+      expect(readSession(dataDir, ownerId)?.status).toBe("running");
+      expect(readSession(dataDir, memberId)?.status).toBe("running");
+    } finally {
+      enterBoot();
+      try {
+        await server?.stop();
+      } finally {
+        restore.mockRestore();
+        restoreBody.mockRestore();
+        reconcile.mockRestore();
+        probe.mockRestore();
+        dashboard.mockRestore();
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("starts source automation only after startup reconcile while routes remain unready", async () => {
     let reconciled = false;
     const original = SessionService.prototype.reconcileStoppedSessions;
