@@ -24288,7 +24288,13 @@ export class SessionService {
       },
     });
     this.scheduleHealedSidecarRestart(updated);
-    if (shouldClear && this.shouldRunDelivery(updated)) this.scheduleDeliveryRunner(updated.id);
+    if (
+      !updated.error &&
+      !updated.serverErrorAt &&
+      !this.restoreOwnsRuntimeRecovery(updated.id) &&
+      this.shouldRunDelivery(updated)
+    )
+      this.scheduleDeliveryRunner(updated.id);
     return updated;
   }
 
@@ -25574,28 +25580,14 @@ export class SessionService {
     readExists: () => Promise<boolean> = () => tmuxSessionExists(tmuxSession),
   ): Promise<{ exists: boolean; paneDead: boolean; diagnostic?: string }> {
     const probeRevision = session && this.lifecycle.snapshot(session.id).revision;
+    let exists: boolean;
+    let paneDead: boolean;
     try {
-      const exists = await readExists();
+      exists = await readExists();
       if (session && !readSession(this.config.dataDir, session.id)) {
         throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
       }
-      const paneDead = exists && (await tmuxPaneDead(tmuxSession));
-      if (session) {
-        const latest = readSession(this.config.dataDir, session.id);
-        if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
-        if (
-          exists &&
-          !paneDead &&
-          !isTerminalSessionStatus(latest.status) &&
-          sameSessionRuntimeOwner(latest, session) &&
-          latest.error?.startsWith(`${REPORTING_DETECTION_ERROR_PREFIX}${tmuxSession}: `)
-        ) {
-          const { error: _error, errorSource: _errorSource, ...recovered } = latest;
-          writeSession(this.config.dataDir, { ...recovered, updatedAt: nowIso() });
-          this.stateCache.delete(session.id);
-        }
-      }
-      return { exists, paneDead };
+      paneDead = exists && (await tmuxPaneDead(tmuxSession));
     } catch (error) {
       if (!(error instanceof TmuxProbeUnknownError)) throw error;
       if (session && probeRevision !== undefined)
@@ -25607,6 +25599,68 @@ export class SessionService {
         );
       return { exists: false, paneDead: false, diagnostic: error.message };
     }
+    if (session && probeRevision !== undefined) {
+      const latest = readSession(this.config.dataDir, session.id);
+      if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+      if (
+        !isTerminalSessionStatus(latest.status) &&
+        sameSessionRuntimeOwner(latest, session) &&
+        latest.agentLaunchId === session.agentLaunchId &&
+        this.lifecycle.snapshot(session.id).revision === probeRevision &&
+        latest.error?.startsWith(`${REPORTING_DETECTION_ERROR_PREFIX}${tmuxSession}: `)
+      ) {
+        const { error: _error, errorSource: _errorSource, ...recovered } = latest;
+        const cleared = { ...recovered, updatedAt: nowIso() };
+        writeSession(this.config.dataDir, cleared);
+        this.stateCache.delete(session.id);
+        if (
+          !cleared.serverErrorAt &&
+          !this.restoreOwnsRuntimeRecovery(cleared.id) &&
+          this.shouldRunDelivery(cleared)
+        ) {
+          let runtime: SessionRuntimeSnapshot;
+          try {
+            runtime = await this.readRuntimeSnapshot(cleared, { fresh: true });
+          } catch (error) {
+            this.retainDetectionError(
+              cleared,
+              error instanceof Error ? error.message : String(error),
+              "runtime_probe",
+              probeRevision,
+            );
+            return { exists, paneDead };
+          }
+          const workspace = probeWorkspace(cleared.worktreePath);
+          if (runtime.probeUnresponsive || workspace.diagnostic) {
+            this.retainDetectionError(
+              cleared,
+              runtime.diagnostic ?? workspace.diagnostic ?? "runtime state unknown",
+              "runtime_probe",
+              probeRevision,
+            );
+          } else if (
+            workspace.exists &&
+            runtime.runtimeAlive &&
+            runtime.paneUsable &&
+            runtime.processAlive
+          ) {
+            const current = readSession(this.config.dataDir, session.id);
+            if (
+              current &&
+              !current.error &&
+              !current.serverErrorAt &&
+              sameSessionRuntimeOwner(current, cleared) &&
+              current.agentLaunchId === cleared.agentLaunchId &&
+              this.lifecycleStateMatches(current, this.lifecycleStamp(cleared)) &&
+              this.lifecycle.snapshot(session.id).revision === probeRevision &&
+              this.shouldRunDelivery(current)
+            )
+              this.scheduleDeliveryRunner(current.id);
+          }
+        }
+      }
+    }
+    return { exists, paneDead };
   }
 
   private withReportingError(session: SessionRecord): SessionRecord {
