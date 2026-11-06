@@ -1339,27 +1339,154 @@ ${content}`,
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
+    const tailLimit = 4096;
     let stdout = "";
+    let stderr = "";
     child.stdout.on("data", (chunk: Buffer | string) => {
-      stdout += chunk.toString();
+      stdout = (stdout + chunk.toString()).slice(-tailLimit);
+    });
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      stderr = (stderr + chunk.toString()).slice(-tailLimit);
     });
 
-    const info = await pollUntil(
-      async () => {
-        try {
-          return await fetchJson<RuntimeInfo>("/info");
-        } catch {
-          return null;
+    // Keep fixture paths and inherited credentials out of CI failure output.
+    const privateValues = [
+      rootDir,
+      repoDir,
+      originDir,
+      V2_DIR,
+      process.env.HOME,
+      ...Object.entries(env)
+        .filter(([key]) => /token|secret|password|credential|api_?key|auth/i.test(key))
+        .map(([, value]) => value),
+    ].filter((value): value is string => Boolean(value));
+    const safe = (value: string): string => {
+      for (const privateValue of privateValues) {
+        value = value.replaceAll(privateValue, "[redacted]");
+      }
+      return value
+        .replace(/https?:\/\/[^\s"'<>]+/g, "[url]")
+        .replace(/\/(?:home|Users)\/[^\s"'<>:)]+/g, "[path]")
+        .replace(
+          /\b(token|secret|password|authorization|api[_-]?key)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+          "$1=[redacted]",
+        )
+        .slice(-tailLimit);
+    };
+    const errorText = (error: unknown): string => {
+      if (!(error instanceof Error)) return safe(String(error));
+      const cause = error.cause;
+      const code =
+        typeof cause === "object" && cause !== null && "code" in cause ? String(cause.code) : "";
+      return safe(`${error.name}: ${error.message}${code ? ` (${code})` : ""}`);
+    };
+    const controller = new AbortController();
+    const readinessMs = 20_000;
+    let interruption = new Error(`daemon info readiness deadline exceeded (${readinessMs}ms)`);
+    const interrupt = (error: Error): void => {
+      if (controller.signal.aborted) return;
+      interruption = error;
+      controller.abort(error);
+    };
+    const interrupted = new Promise<never>((_, reject) => {
+      controller.signal.addEventListener("abort", () => reject(interruption), { once: true });
+    });
+    let spawnError: Error | undefined;
+    let exited = false;
+    const exit = new Promise<void>((resolveExit) => {
+      child.once("exit", (code, signal) => {
+        exited = true;
+        resolveExit();
+        interrupt(new Error(`daemon exited before readiness: code=${code}, signal=${signal}`));
+      });
+      child.on("error", (error) => {
+        spawnError = error;
+        if (child.pid === undefined) {
+          exited = true;
+          resolveExit();
         }
-      },
-      {
-        timeoutMs: 20_000,
-        accept: (value): value is RuntimeInfo => value !== null,
-        label: "daemon info",
-      },
-    );
-    // pollUntil throws before returning null, so info is guaranteed non-null here.
-    return { child, stdout, info: info as RuntimeInfo };
+        interrupt(new Error(`daemon process error: ${errorText(error)}`));
+      });
+    });
+    const hasExited = (): boolean => exited || child.exitCode !== null || child.signalCode !== null;
+    const waitForExit = async (): Promise<boolean> => {
+      if (hasExited()) return true;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          exit.then(() => true),
+          new Promise<false>((resolveTimeout) => {
+            timeout = setTimeout(() => resolveTimeout(false), 1000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
+    let lastHttp = "no response";
+    let lastHttpError = "none";
+    const deadline = Date.now() + readinessMs;
+    const timer = setTimeout(() => interrupt(interruption), readinessMs);
+    try {
+      const info = await pollUntil(
+        async () => {
+          if (Date.now() >= deadline) interrupt(interruption);
+          try {
+            return await Promise.race([
+              (async () => {
+                const response = await fetch(`http://127.0.0.1:${port}/info`, {
+                  signal: controller.signal,
+                });
+                lastHttp = `HTTP ${response.status}`;
+                const text = await response.text();
+                if (!response.ok) throw new Error(lastHttp);
+                return JSON.parse(text) as RuntimeInfo | null;
+              })(),
+              interrupted,
+            ]);
+          } catch (error) {
+            if (controller.signal.aborted) throw interruption;
+            lastHttpError = errorText(error);
+            return null;
+          }
+        },
+        {
+          timeoutMs: readinessMs,
+          accept: (value): value is RuntimeInfo => value !== null,
+          label: "daemon info",
+          signal: controller.signal,
+        },
+      );
+      return { child, stdout, info: info as RuntimeInfo };
+    } catch (error) {
+      const diagnostics = JSON.stringify({
+        failure: errorText(error),
+        spawnError: spawnError ? errorText(spawnError) : null,
+        exitCode: child.exitCode,
+        signal: child.signalCode,
+        lastHttp,
+        lastHttpError,
+        stdout: safe(stdout),
+        stderr: safe(stderr),
+      });
+      const cleanupErrors: string[] = [];
+      for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+        if (hasExited()) break;
+        try {
+          if (!child.kill(signal)) cleanupErrors.push(`${signal} was not delivered`);
+        } catch (cleanupError) {
+          cleanupErrors.push(`${signal}: ${errorText(cleanupError)}`);
+        }
+        if (await waitForExit()) break;
+      }
+      throw new Error(
+        `Daemon startup failed: ${diagnostics}; cleanup: ${
+          hasExited() ? "owned child exited" : "UNRESOLVED owned child has not exited"
+        }${cleanupErrors.length ? ` (${cleanupErrors.join("; ")})` : ""}`,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
   };
 
   const stopDaemon = async (
