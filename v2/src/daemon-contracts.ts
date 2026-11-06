@@ -119,7 +119,7 @@ const spawn = body("SpawnSessionRequest", [
   field(
     "reuseWorkspaceSessionId",
     "string",
-    "Reuse the named session workspace. Takes closeout from a completed, killed, errored, budget-limited or manually paused owner.",
+    "Reuse the named session workspace. Takes closeout from a completed, killed, errored, budget-limited, token-budget-stopped or manually paused owner.",
   ),
   field("originalTaskPrompt", "string", "Original task retained across task handoffs."),
   field("bareSpawnMessage", "boolean", "Use the supplied task without normal spawn wrapping."),
