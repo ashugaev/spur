@@ -402,9 +402,10 @@ export function StatusBar({
             strokeWidth="2"
             viewBox="0 0 24 24"
           >
-            <path d="M4 16a8 8 0 0 1 16 0" />
-            <path d="M12 16l4.5-4.5" />
-            <path d="M4 20h16" />
+            <path d="M5 20v-6" />
+            <path d="M10 20V8" />
+            <path d="M15 20v-9" />
+            <path d="M20 20V4" />
           </svg>
         </button>
         <ThemeToggle />
