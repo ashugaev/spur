@@ -16,7 +16,7 @@ ATTEMPT
   Use caller's trusted `spur review-app` executable outside reviewed checkout for every transition.
   Missing capability blocks live publication; workspace-write/top-level bypass alone proves no child access outside workspace.
   Capture repository, PR, lane, designated session, unique attempt, head H and base B.
-  Register new attempt before live work with `spur review-app prepare`; caller App config owns receiptRoot and canonical repository/PR/lane receipt. Request schema: v2/src/review-app.ts.
+  Register new attempt before live work with `spur review-app prepare`; caller App config owns receiptRoot and canonical repository/PR/lane receipt.
   Prepare identity/H/B/digest and intended-check feedback before checkout/QA; final verdict/evidence follows checks.
   Require confirmed App-authored public PENDING before required scenario execution/publication; failed transport blocks those steps, not independent static inspection/findings or authorized owner fixes.
   Request/receipt schema and feedback publication outcome: v2/src/review-app.ts.
