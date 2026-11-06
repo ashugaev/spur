@@ -65,12 +65,18 @@ const REPORT: UsageReport = {
   ],
 };
 
-async function mockUsage(
-  page: Page,
-  ...responses: { status: number; body: unknown }[]
-): Promise<string[]> {
-  const urls: string[] = [];
-  const queue = [...responses];
+interface MockResponse {
+  status: number;
+  body: unknown;
+}
+
+// Returns the URLs of /api/usage requests that completed. Requests aborted by
+// the dev-mode StrictMode double effect fire requestfailed, not requestfinished.
+async function mockUsage(page: Page, respond: () => MockResponse): Promise<string[]> {
+  const finished: string[] = [];
+  page.on("requestfinished", (request) => {
+    if (new URL(request.url()).pathname === "/api/usage") finished.push(request.url());
+  });
   await page.route("**/api/claude-accounts", async (route) => {
     await route.fulfill({
       status: 200,
@@ -79,32 +85,33 @@ async function mockUsage(
     });
   });
   await page.route("**/api/usage", async (route) => {
-    urls.push(route.request().url());
-    const next = queue.length > 1 ? queue.shift() : queue[0];
+    const next = respond();
     await route.fulfill({
-      status: next?.status ?? 500,
+      status: next.status,
       contentType: "application/json",
-      body: JSON.stringify(next?.body ?? {}),
+      body: JSON.stringify(next.body),
     });
   });
-  return urls;
+  return finished;
 }
+
+const ok = (body: unknown = REPORT): MockResponse => ({ status: 200, body });
 
 test.describe("Usage modal", () => {
   test("footer Usage opens the modal, loads only on open, closes on Escape", async ({ page }) => {
     await mockSessions(page, [], PROJECTS);
-    const urls = await mockUsage(page, { status: 200, body: REPORT });
+    const finished = await mockUsage(page, () => ok());
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto("/");
     await expect(page.getByRole("button", { name: "Usage" })).toBeVisible();
-    expect(urls).toHaveLength(0);
+    expect(finished).toHaveLength(0);
 
     await page.getByRole("button", { name: "Usage" }).click();
     const dialog = page.getByRole("dialog", { name: "Usage" });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByText("96% used")).toBeVisible();
     await expect(dialog.getByRole("table")).toBeVisible();
-    expect(urls).toHaveLength(1);
+    await expect.poll(() => finished.length).toBeGreaterThanOrEqual(1);
 
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
@@ -112,7 +119,7 @@ test.describe("Usage modal", () => {
 
   test("renders error sources with chips and no meter", async ({ page }) => {
     await mockSessions(page, [], PROJECTS);
-    await mockUsage(page, { status: 200, body: { ...REPORT, quotas: ERROR_SOURCES } });
+    await mockUsage(page, () => ok({ ...REPORT, quotas: ERROR_SOURCES }));
     await page.goto("/");
     await page.getByRole("button", { name: "Usage" }).click();
     const dialog = page.getByRole("dialog", { name: "Usage" });
@@ -124,10 +131,7 @@ test.describe("Usage modal", () => {
 
   test("shows empty windows", async ({ page }) => {
     await mockSessions(page, [], PROJECTS);
-    await mockUsage(page, {
-      status: 200,
-      body: { ...REPORT, quotas: [{ ...OK_SOURCE, windows: [] }] },
-    });
+    await mockUsage(page, () => ok({ ...REPORT, quotas: [{ ...OK_SOURCE, windows: [] }] }));
     await page.goto("/");
     await page.getByRole("button", { name: "Usage" }).click();
     const dialog = page.getByRole("dialog", { name: "Usage" });
@@ -138,17 +142,19 @@ test.describe("Usage modal", () => {
 
   test("shows the failure state and recovers on Retry", async ({ page }) => {
     await mockSessions(page, [], PROJECTS);
-    await mockUsage(page, { status: 502, body: { error: "down" } }, { status: 200, body: REPORT });
+    let recovered = false;
+    await mockUsage(page, () => (recovered ? ok() : { status: 502, body: { error: "down" } }));
     await page.goto("/");
     await page.getByRole("button", { name: "Usage" }).click();
     await expect(page.getByText("Could not load usage")).toBeVisible();
+    recovered = true;
     await page.getByRole("button", { name: "Retry" }).click();
     await expect(page.getByText("96% used")).toBeVisible();
   });
 
   test("hides optional token columns and stays inside the viewport on mobile", async ({ page }) => {
     await mockSessions(page, [], PROJECTS);
-    await mockUsage(page, { status: 200, body: REPORT });
+    await mockUsage(page, () => ok());
     await page.setViewportSize({ width: 390, height: 800 });
     await page.goto("/");
     await page.getByRole("button", { name: "Usage" }).click();
