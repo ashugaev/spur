@@ -51,7 +51,9 @@ OUTPUT
     Conclusion: <code-review verdict in one sentence>
 
 RULES
-  - Return CHANGES_REQUESTED for evidenced defects, including attributable targeted-check failures; missing environment/evidence blocks affected approval, not available inspection.
+  - Request changes for confirmed attributable defects; reserve BLOCKED for review capability constraints, never confirmed technical failures.
+  - Apply trusted contract FEEDBACK to every non-APPROVED live status; publish reason/check/evidence and next action/actor, including PENDING intended checks.
+  - State uncertain fixture observations and unproven attribution; private receipts/session sends never satisfy public feedback.
   - Finish lane on verified native APPROVED or CHANGES_REQUESTED; publication/notification failures never erase local conclusion.
   - Never APPROVE with open MUST FIX or uncovered requirements.
   - Prohibit source edits; permit checkout/evidence writes.
