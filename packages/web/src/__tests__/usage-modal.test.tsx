@@ -174,6 +174,57 @@ describe("UsageModal load states", () => {
   });
 });
 
+describe("UsageModal focus", () => {
+  function renderWithOpener() {
+    stubFetch(jsonResponse(REPORT));
+    const opener = document.createElement("button");
+    document.body.append(opener);
+    opener.focus();
+    const view = render(<UsageModal onClose={vi.fn()} />);
+    return { opener, ...view };
+  }
+
+  it("moves focus into the dialog on open", async () => {
+    const { opener } = renderWithOpener();
+    await screen.findByText("Quota");
+    expect(screen.getByRole("dialog")).toContainElement(document.activeElement as HTMLElement);
+    opener.remove();
+  });
+
+  it("wraps Tab from the last control to the first and Shift+Tab back", async () => {
+    const { opener } = renderWithOpener();
+    await screen.findByText("Quota");
+    const first = screen.getByRole("button", { name: "Close usage" });
+    const last = screen.getByRole("button", { name: "30D" });
+
+    last.focus();
+    fireEvent.keyDown(window, { key: "Tab" });
+    expect(first).toHaveFocus();
+
+    fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+    expect(last).toHaveFocus();
+    opener.remove();
+  });
+
+  it("pulls focus back inside when it is outside the dialog", async () => {
+    const { opener } = renderWithOpener();
+    await screen.findByText("Quota");
+    opener.focus();
+    fireEvent.keyDown(window, { key: "Tab" });
+    expect(screen.getByRole("button", { name: "Close usage" })).toHaveFocus();
+    opener.remove();
+  });
+
+  it("restores focus to the opener on close", async () => {
+    const { opener, unmount } = renderWithOpener();
+    await screen.findByText("Quota");
+    expect(opener).not.toHaveFocus();
+    unmount();
+    expect(opener).toHaveFocus();
+    opener.remove();
+  });
+});
+
 describe("UsageModal closing", () => {
   it("closes on Escape, backdrop click and the esc button", async () => {
     const onClose = await renderReady();

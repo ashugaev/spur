@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { CenteredLoader } from "@/components/CenteredLoader";
 import { formatRelativeTime, formatShortTimestamp, formatTokenCount } from "@/lib/format";
 import type {
@@ -334,12 +334,46 @@ function UsageContent({ data }: { data: UsageReport }) {
 export function UsageModal({ onClose }: { onClose: () => void }) {
   const [state, setState] = useState<LoadState>({ status: "pending" });
   const [attempt, setAttempt] = useState(0);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const opener = document.activeElement;
+    closeRef.current?.focus();
+    return () => {
+      if (opener instanceof HTMLElement) opener.focus();
+    };
+  }, []);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      onClose();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusable = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !last) return;
+      const active = document.activeElement;
+      if (!(active instanceof Node) || !dialog.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && active === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
@@ -371,6 +405,7 @@ export function UsageModal({ onClose }: { onClose: () => void }) {
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
+      ref={dialogRef}
       role="dialog"
     >
       <div className="flex max-h-[calc(100dvh-16px)] w-[min(720px,100%)] flex-col border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] sm:max-h-[80vh]">
@@ -382,7 +417,13 @@ export function UsageModal({ onClose }: { onClose: () => void }) {
             Usage
           </h2>
           <span className="flex-1" />
-          <button aria-label="Close usage" className={ACTION_CLASS} onClick={onClose} type="button">
+          <button
+            aria-label="Close usage"
+            className={ACTION_CLASS}
+            onClick={onClose}
+            ref={closeRef}
+            type="button"
+          >
             esc
           </button>
         </div>

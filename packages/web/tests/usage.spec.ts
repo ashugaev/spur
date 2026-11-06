@@ -119,6 +119,29 @@ test.describe("Usage modal", () => {
     await expect(dialog).toBeHidden();
   });
 
+  test("keyboard open traps Tab inside the dialog and restores focus on close", async ({
+    page,
+  }) => {
+    await mockSessions(page, [], PROJECTS);
+    await mockUsage(page, () => ok());
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto("/");
+    const trigger = page.getByRole("button", { name: "Usage" });
+    await trigger.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", { name: "Usage" });
+    await expect(dialog.getByRole("table")).toBeVisible();
+
+    for (let i = 0; i < 8; i++) {
+      await page.keyboard.press("Tab");
+      await expect(dialog.locator(":focus")).toHaveCount(1);
+    }
+
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+  });
+
   test("renders error sources with chips and no meter", async ({ page }) => {
     await mockSessions(page, [], PROJECTS);
     await mockUsage(page, () => ok({ ...REPORT, quotas: ERROR_SOURCES }));
