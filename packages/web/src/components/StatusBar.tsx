@@ -249,7 +249,13 @@ function PlatformStatusButton({
   );
 }
 
-export function StatusBar({ onOpenCron }: { onOpenCron: () => void }) {
+export function StatusBar({
+  onOpenCron,
+  onOpenUsage,
+}: {
+  onOpenCron: () => void;
+  onOpenUsage: () => void;
+}) {
   const githubStatus = usePlatformStatus<GitHubStatusResponse>(
     "/api/github-status",
     "GitHub status unavailable",
@@ -378,6 +384,27 @@ export function StatusBar({ onOpenCron }: { onOpenCron: () => void }) {
           >
             <circle cx="12" cy="12" r="9" />
             <path d="M12 7v5l3 2" />
+          </svg>
+        </button>
+        <button
+          aria-label="Usage"
+          className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
+          onClick={onOpenUsage}
+          title="Usage"
+          type="button"
+        >
+          <svg
+            aria-hidden="true"
+            className="h-4 w-4"
+            fill="none"
+            stroke="currentColor"
+            strokeLinecap="round"
+            strokeWidth="2"
+            viewBox="0 0 24 24"
+          >
+            <path d="M4 16a8 8 0 0 1 16 0" />
+            <path d="M12 16l4.5-4.5" />
+            <path d="M4 20h16" />
           </svg>
         </button>
         <ThemeToggle />
