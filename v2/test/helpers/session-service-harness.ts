@@ -1311,6 +1311,7 @@ type SessionServiceInternals = {
     runtimeAlive: boolean;
     paneUsable: boolean;
     processAlive: boolean;
+    tmuxActivityAt?: Date | null;
     probeUnresponsive: boolean;
     diagnostic?: string;
   }>;
