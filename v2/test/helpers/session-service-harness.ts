@@ -1267,6 +1267,7 @@ type SessionServiceInternals = {
     windowMs: number,
   ): Promise<{ found: boolean; lastScannedFile: string | null }>;
   paneGenerationMatches(session: SessionRecord, expected: unknown): Promise<boolean>;
+  retainLaunchedError(session: SessionRecord, error: unknown): Promise<SessionRecord>;
   sendAgentMessage(
     session: {
       id: string;

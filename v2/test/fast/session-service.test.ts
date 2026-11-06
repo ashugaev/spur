@@ -4339,7 +4339,13 @@ describe("SessionService", () => {
       ["stopped", { stopReason: "runtime_lost" }],
       ["stopped", { stopReason: undefined }],
     ] as const)("keeps closeout on a holding %s owner (%j)", async (status, extra) => {
-      const sessions = seedWorkspace({ status, ...extra });
+      const sessions = seedWorkspace({ status });
+      const owner = { ...sessions.get("api-1")! };
+      if ("stopReason" in extra) {
+        if (extra.stopReason === undefined) delete owner.stopReason;
+        else owner.stopReason = extra.stopReason;
+      }
+      sessions.set("api-1", owner);
       reserveNextSessionIdMock.mockResolvedValue("api-3");
       const service = await newService();
 

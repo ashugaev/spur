@@ -14993,7 +14993,7 @@ export class SessionService {
 
   async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
     const prepared = await this.prepareBackgroundSpawn(request);
-    let placeholder: SessionView;
+    let placeholder: Promise<SessionView>;
     try {
       this.spawnsInFlight.add(prepared.placeholder.id);
       placeholder = this.enrich(prepared.placeholder);
