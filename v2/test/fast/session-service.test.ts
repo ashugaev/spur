@@ -74815,6 +74815,19 @@ describe("SessionService", () => {
           return { removedBindings };
         },
       );
+      writeTelegramBindingsMock.mockImplementation(
+        (_dir: string, _project: string, _source: string, _bindings: unknown, opts) => {
+          for (const key of (opts as { removeKeys?: string[] }).removeKeys ?? []) {
+            for (const entry of state.values()) {
+              if (`-1001:${entry.thread}` === key) entry.binding = false;
+            }
+          }
+        },
+      );
+      deleteTelegramReplyTargetMock.mockImplementation((_dir: string, id: string) => {
+        const entry = state.get(id);
+        if (entry) entry.target = false;
+      });
       listTelegramTopicSessionIdsMock.mockImplementation(
         () => new Set([...state.values()].filter((e) => e.binding || e.target).map((e) => e.id)),
       );
@@ -75257,6 +75270,68 @@ describe("SessionService", () => {
 
       expect(failures.value).toEqual({ "api-1": 2 });
       expect(writeTelegramTopicGcFailuresMock).toHaveBeenCalledTimes(1);
+      service.dispose();
+    });
+
+    it("T21 retires each topic independently when another topic keeps failing", async () => {
+      seedGc([], { clockAgeMs: 25 * 60 * 60_000 });
+      const bindings = new Map([
+        [22, true],
+        [23, true],
+      ]);
+      readTelegramBindingsMock.mockImplementation(
+        () =>
+          new Map(
+            [...bindings]
+              .filter(([, held]) => held)
+              .map(([thread]) => [
+                `-1001:${thread}`,
+                { chatId: -1001, messageThreadId: thread, sessionId: "api-missing" },
+              ]),
+          ),
+      );
+      readTelegramReplyTargetMock.mockReturnValue(null);
+      listTelegramTopicSessionIdsMock.mockImplementation(
+        () => new Set([...bindings.values()].some(Boolean) ? ["api-missing"] : []),
+      );
+      writeTelegramBindingsMock.mockImplementation(
+        (_dir: string, _project: string, _source: string, _bindings: unknown, opts) => {
+          for (const key of (opts as { removeKeys?: string[] }).removeKeys ?? []) {
+            bindings.set(Number(key.split(":")[1]), false);
+          }
+        },
+      );
+      deleteTelegramSourceStateForSessionMock.mockImplementation(() => {
+        for (const thread of bindings.keys()) bindings.set(thread, false);
+        return { removedBindings: [] };
+      });
+      deleteTelegramTopicMock.mockImplementation(async (_source, _chat, topic: number) => {
+        if (topic === 23) throw new Error("Telegram 500");
+        return "deleted";
+      });
+      const service = await startService();
+      await tick();
+
+      expect(bindings.get(22)).toBe(false);
+      expect(bindings.get(23)).toBe(true);
+      expect(gcNotices()).toHaveLength(1);
+      expect(gcNotices()[0]?.[2]).toContain("topic 22");
+
+      await nextDaySweep();
+      expect(bindings.get(23)).toBe(true);
+      expect(gcNotices()).toHaveLength(1);
+      expect(deleteTelegramTopicMock.mock.calls.filter(([, , topic]) => topic === 22)).toHaveLength(
+        1,
+      );
+
+      await nextDaySweep();
+      expect(bindings.get(23)).toBe(false);
+      expect(gcNotices()).toHaveLength(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => (entry as { event?: string }).event === "source.telegram.topic_gc.gave_up",
+        ),
+      ).toHaveLength(1);
       service.dispose();
     });
 

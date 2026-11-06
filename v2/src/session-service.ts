@@ -8786,9 +8786,12 @@ export class SessionService {
     targets: { target: TelegramReplyTarget; owned: boolean }[],
     publicationFailure = false,
     notice: "terminal" | "gc" = "terminal",
-  ): Promise<{ failed: boolean; removed: { source: TelegramSourceConfig; topicId: number }[] }> {
+  ): Promise<{
+    failed: TelegramReplyTarget[];
+    removed: { source: TelegramSourceConfig; topicId: number }[];
+  }> {
     const outcome = {
-      failed: false,
+      failed: [] as TelegramReplyTarget[],
       removed: [] as { source: TelegramSourceConfig; topicId: number }[],
     };
     const groups = new Map<number, { source: TelegramSourceConfig; results: string[] }>();
@@ -8829,7 +8832,7 @@ export class SessionService {
         outcome.removed.push({ source, topicId });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Telegram request failed";
-        outcome.failed = true;
+        outcome.failed.push(target);
         group?.results.push(`Topic ${topicId} could not be deleted: ${message}.`);
         this.logTelegramNoticeFailure(session.id, "topic deletion", error);
       } finally {
@@ -8918,27 +8921,23 @@ export class SessionService {
       }
     }
     if (latest) targets.push({ target: latest, owned: true });
+    const bound = targets.filter(({ target }) => target !== latest).map(({ target }) => target);
     const outcome = await this.retireTelegramTopics(owner, targets, false, "gc");
-    const failures = readTelegramTopicGcFailures(dataDir);
-    const failedSweeps = (failures[owner.id] ?? 0) + 1;
-    if (outcome.failed && failedSweeps < TELEGRAM_TOPIC_GC_MAX_FAILED_SWEEPS) {
-      writeTelegramTopicGcFailures(dataDir, { ...failures, [owner.id]: failedSweeps });
-      return;
-    }
-    for (const projectId of projectIds) {
-      deleteTelegramSourceStateForSession(dataDir, projectId, owner.id);
-    }
-    if (owner.id in failures) {
-      const { [owner.id]: _cleared, ...rest } = failures;
-      writeTelegramTopicGcFailures(dataDir, rest);
-    }
-    if (outcome.failed) {
-      this.logEvent("source.telegram.topic_gc.gave_up", {
-        level: "warn",
-        sessionId: owner.id,
-        message: `Telegram topic GC gave up on ${owner.id} after ${failedSweeps} failed sweeps`,
+    // Each topic settles on its own: its locator goes once the topic is gone
+    // (or retained by another owner); a failed topic keeps its locator.
+    const failedKeys = new Set(
+      outcome.failed.map((target) => telegramBindingKey(target.chatId, target.messageThreadId)),
+    );
+    for (const target of bound) {
+      const key = telegramBindingKey(target.chatId, target.messageThreadId);
+      if (failedKeys.has(key)) continue;
+      writeTelegramBindings(dataDir, target.projectId, target.sourceId, [], {
+        preserveExisting: true,
+        removeKeys: [key],
       });
-      return;
+    }
+    if (latest && !failedKeys.has(telegramBindingKey(latest.chatId, latest.messageThreadId))) {
+      deleteTelegramReplyTarget(dataDir, owner.id);
     }
     for (const { source, topicId } of outcome.removed) {
       if (source.chatId === undefined || source.chatId > 0) continue;
@@ -8956,6 +8955,26 @@ export class SessionService {
           new Error("Telegram notice failed or timed out"),
         );
       }
+    }
+    const failures = readTelegramTopicGcFailures(dataDir);
+    const failedSweeps = (failures[owner.id] ?? 0) + 1;
+    if (outcome.failed.length > 0 && failedSweeps < TELEGRAM_TOPIC_GC_MAX_FAILED_SWEEPS) {
+      writeTelegramTopicGcFailures(dataDir, { ...failures, [owner.id]: failedSweeps });
+      return;
+    }
+    for (const projectId of projectIds) {
+      deleteTelegramSourceStateForSession(dataDir, projectId, owner.id);
+    }
+    if (owner.id in failures) {
+      const { [owner.id]: _cleared, ...rest } = failures;
+      writeTelegramTopicGcFailures(dataDir, rest);
+    }
+    if (outcome.failed.length > 0) {
+      this.logEvent("source.telegram.topic_gc.gave_up", {
+        level: "warn",
+        sessionId: owner.id,
+        message: `Telegram topic GC gave up on ${owner.id} after ${failedSweeps} failed sweeps`,
+      });
     }
   }
 
