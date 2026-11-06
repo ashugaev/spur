@@ -19,10 +19,11 @@ const requestHeader = "X-Spur-Auth-Request"
 const requestMetadata = "spur_auth_request"
 
 type admission struct {
-	SessionID       string
-	Binding         binding
-	DispatchedEpoch uint64
-	LastAccount     string
+	SessionID        string
+	Binding          binding
+	DispatchedEpoch  uint64
+	LastAccount      string
+	SelectedAccounts map[string]bool
 }
 
 func authFileID(id string) string    { return id + ".json" }
@@ -31,7 +32,7 @@ func profileID(authID string) string { return strings.TrimSuffix(authID, ".json"
 func (r *router) rotateLocked(b *binding, candidates map[string]bool) error {
 	current := b.Session.EffectiveAccountID
 	p := b.Session.Provider
-	if r.accounts[current].Provider != p || r.readyAccount == nil || !r.readyAccount(current, p) {
+	if r.removing[current] || r.accounts[current].Provider != p || r.readyAccount == nil || !r.readyAccount(current, p) {
 		return errors.New("selected account requires sign in")
 	}
 	if !r.state.Cooldowns[current].After(time.Now()) {
@@ -117,6 +118,10 @@ func (r *router) Pick(_ context.Context, requestedProvider, _ string, opts coree
 		}
 	}
 	a.LastAccount = a.Binding.Session.EffectiveAccountID
+	if a.SelectedAccounts == nil {
+		a.SelectedAccounts = map[string]bool{}
+	}
+	a.SelectedAccounts[a.LastAccount] = true
 	a.DispatchedEpoch = a.Binding.Episode.Epoch
 	for _, auth := range auths {
 		if auth.ID == authFileID(a.LastAccount) {

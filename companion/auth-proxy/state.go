@@ -91,6 +91,7 @@ type router struct {
 	configured   bool
 	requests     map[string]*admission
 	sessionLocks map[string]*sync.Mutex
+	removing     map[string]bool
 	readyAccount func(string, provider) bool
 	fatal        error
 }
@@ -115,7 +116,7 @@ func openRouter(dir string) (*router, error) {
 		_ = lock.Close()
 		return nil, errors.New("another auth proxy owns this data directory")
 	}
-	r := &router{dir: dir, lock: lock, accounts: map[string]accountInput{}, pools: map[provider]poolInput{}, requests: map[string]*admission{}, sessionLocks: map[string]*sync.Mutex{}}
+	r := &router{dir: dir, lock: lock, accounts: map[string]accountInput{}, pools: map[provider]poolInput{}, requests: map[string]*admission{}, sessionLocks: map[string]*sync.Mutex{}, removing: map[string]bool{}}
 	r.state = runtimeState{Schema: 1, DataDir: dir, Sessions: map[string]binding{}, Cooldowns: map[string]time.Time{}}
 	path := filepath.Join(dir, "auth-proxy-state.json")
 	raw, err := os.ReadFile(path)
@@ -274,7 +275,7 @@ func (r *router) configure(accounts []accountInput, pools []poolInput, p policy)
 }
 
 func (r *router) eligibleLocked(id string, p provider) bool {
-	return r.accounts[id].Provider == p && r.readyAccount != nil && r.readyAccount(id, p) && !r.state.Cooldowns[id].After(time.Now())
+	return !r.removing[id] && r.accounts[id].Provider == p && r.readyAccount != nil && r.readyAccount(id, p) && !r.state.Cooldowns[id].After(time.Now())
 }
 
 func (r *router) register(sessionID string, p provider, accountID *string, change bool) (registration, error) {

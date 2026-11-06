@@ -15,6 +15,7 @@ import (
 	"time"
 
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -79,6 +80,11 @@ func (l *loginManager) status(id string) loginStatus {
 func (l *loginManager) start(parent context.Context, id string, p provider) (loginStatus, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.active == id {
+		if attempt := l.attempts[id]; attempt != nil && attempt.status.Status == "pending" {
+			return attempt.status, nil
+		}
+	}
 	if l.active != "" {
 		return loginStatus{}, errors.New("another account sign-in is pending")
 	}
@@ -185,7 +191,7 @@ func (l *loginManager) waitRegistered(ctx context.Context, id string) error {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if auth, ok := l.manager.GetByID(authFileID(id)); ok && usableAuth(auth) {
+		if auth, ok := l.manager.GetByID(authFileID(id)); ok && usableAuth(auth) && len(cliproxy.GlobalModelRegistry().GetModelsForClient(auth.ID)) > 0 {
 			return nil
 		}
 		select {

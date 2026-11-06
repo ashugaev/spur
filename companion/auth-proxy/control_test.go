@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,6 +95,56 @@ func TestExplicitDefaultGenerationChangesNextAdmission(t *testing.T) {
 	}
 	if r.state.Sessions["pinned"].Session.EffectiveAccountID != "account-a" {
 		t.Fatal("provider default changed explicit pin")
+	}
+}
+
+func TestAccountRemovalKeepsAdmittedSnapshotCredential(t *testing.T) {
+	r := testRouter(t)
+	a, b := "account-a", "account-b"
+	if _, err := r.register("session-a", codex, &a, false); err != nil {
+		t.Fatal(err)
+	}
+	admitted := testAdmission(t, r, "session-a")
+	pickForTest(t, r, admitted, a, b)
+	if _, err := r.register("session-a", codex, &b, true); err != nil {
+		t.Fatal(err)
+	}
+	c := &control{router: r}
+	if err := c.removeAccount(context.Background(), a); err == nil {
+		t.Fatal("account removed while old admission retained it")
+	}
+	if got := pickForTest(t, r, admitted, a, b).ID; got != authFileID(a) {
+		t.Fatal("rejected removal changed admitted account")
+	}
+}
+
+func TestAccountRemovalBlocksRacingAdmission(t *testing.T) {
+	r := testRouter(t)
+	store := tokenStore(r.dir)
+	manager := coreauth.NewManager(store, nil, nil)
+	started := make(chan struct{})
+	done := make(chan struct{})
+	l := &loginManager{manager: manager, store: store, active: "account-a", attempts: map[string]*loginAttempt{"account-a": {status: loginStatus{AccountID: "account-a", Status: "pending"}, cancel: func() { close(started) }, done: done}}}
+	c := &control{router: r, logins: l}
+	removed := make(chan error, 1)
+	go func() { removed <- c.removeAccount(context.Background(), "account-a") }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("removal did not reach cancellation barrier")
+	}
+	id := "account-a"
+	if _, err := r.register("racing", codex, &id, false); err == nil {
+		t.Fatal("new admission raced credential deletion")
+	}
+	close(done)
+	select {
+	case err := <-removed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("removal stalled")
 	}
 }
 
@@ -196,6 +247,9 @@ func TestCompanionControlLifecycleAndEndpointHydration(t *testing.T) {
 			t.Fatalf("configure failed: %+v", result.Error)
 		}
 		state := f.request(t, `{"id":2,"method":"getState","params":{}}`)
+		if strings.Contains(string(state.Result), reg.Token) {
+			t.Fatal("routing key leaked into public summaries")
+		}
 		var summary stateSummary
 		if err := json.Unmarshal(state.Result, &summary); err != nil {
 			t.Fatal(err)

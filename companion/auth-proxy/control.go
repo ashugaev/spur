@@ -244,13 +244,25 @@ func (c *control) handle(ctx context.Context, req controlRequest) {
 func (c *control) removeAccount(ctx context.Context, id string) error {
 	r := c.router
 	r.mu.Lock()
+	if r.removing[id] {
+		r.mu.Unlock()
+		return errors.New("account removal is already pending")
+	}
 	for _, b := range r.state.Sessions {
 		if b.Session.EffectiveAccountID == id || b.Session.AccountID != nil && *b.Session.AccountID == id {
 			r.mu.Unlock()
 			return errors.New("account is referenced by a managed session")
 		}
 	}
+	for _, request := range r.requests {
+		if request.Binding.Session.EffectiveAccountID == id || request.LastAccount == id || request.SelectedAccounts[id] || request.Binding.Session.AccountID != nil && *request.Binding.Session.AccountID == id {
+			r.mu.Unlock()
+			return errors.New("account is referenced by an active request")
+		}
+	}
+	r.removing[id] = true
 	r.mu.Unlock()
+	defer func() { r.mu.Lock(); delete(r.removing, id); r.mu.Unlock() }()
 	if _, err := c.logins.cancel(id); err != nil {
 		return err
 	}

@@ -56,7 +56,7 @@ func TestProviderIdentityDedupAndTenantIsolation(t *testing.T) {
 func TestMissingIdentityCannotBecomeReady(t *testing.T) {
 	for _, test := range []struct{ organization, account string }{{"", "user-one"}, {"org-one", ""}} {
 		auth := identityFixture(t, "first", test.organization, test.account)
-		if _, err := identityFingerprint(auth); err == nil {
+		if _, err := validatedIdentity(auth); err == nil {
 			t.Fatal("incomplete tenant/account identity accepted")
 		}
 	}
@@ -64,16 +64,16 @@ func TestMissingIdentityCannotBecomeReady(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"provider":"codex","metadata":{"email":"same@example.invalid"}}`), &auth); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := identityFingerprint(&auth); err == nil {
+	if _, err := validatedIdentity(&auth); err == nil {
 		t.Fatal("Codex email used as account identity")
 	}
 	auth.Metadata["account_id"] = "workspace-one"
-	first, err := identityFingerprint(&auth)
+	first, err := validatedIdentity(&auth)
 	if err != nil {
 		t.Fatal(err)
 	}
 	auth.Metadata["account_id"] = "workspace-two"
-	second, err := identityFingerprint(&auth)
+	second, err := validatedIdentity(&auth)
 	if err != nil {
 		t.Fatal(err)
 	}

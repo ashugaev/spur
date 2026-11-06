@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -19,12 +17,14 @@ const missingIdentity = "SPUR_LOGIN_IDENTITY_MISSING"
 const duplicateIdentity = "SPUR_LOGIN_IDENTITY_DUPLICATE"
 const changedIdentity = "SPUR_LOGIN_IDENTITY_CHANGED"
 
-func identityFingerprint(auth *coreauth.Auth) (string, error) {
-	var identity struct {
-		Provider       string
-		OrganizationID string
-		AccountID      string
-	}
+type providerIdentity struct {
+	Provider       string
+	OrganizationID string
+	AccountID      string
+}
+
+func validatedIdentity(auth *coreauth.Auth) (providerIdentity, error) {
+	var identity providerIdentity
 	identity.Provider = auth.Provider
 	accountID, _ := auth.Metadata["account_id"].(string)
 	switch provider(auth.Provider) {
@@ -32,22 +32,17 @@ func identityFingerprint(auth *coreauth.Auth) (string, error) {
 		identity.OrganizationID, _ = auth.Metadata["organization_uuid"].(string)
 		identity.AccountID, _ = auth.Metadata["account_uuid"].(string)
 		if strings.TrimSpace(identity.OrganizationID) == "" {
-			return "", &identityError{missingIdentity}
+			return identity, &identityError{missingIdentity}
 		}
 	case codex:
 		identity.AccountID = accountID
 	default:
-		return "", &identityError{missingIdentity}
+		return identity, &identityError{missingIdentity}
 	}
 	if strings.TrimSpace(identity.AccountID) == "" {
-		return "", &identityError{missingIdentity}
+		return identity, &identityError{missingIdentity}
 	}
-	raw, err := json.Marshal(identity)
-	if err != nil {
-		return "", err
-	}
-	hash := sha256.Sum256(raw)
-	return hex.EncodeToString(hash[:]), nil
+	return identity, nil
 }
 
 func hydrateCodexIdentity(auth *coreauth.Auth) error {
@@ -76,7 +71,7 @@ func hydrateCodexIdentity(auth *coreauth.Auth) error {
 }
 
 func validateProfileIdentity(ctx context.Context, store coreauth.Store, auth *coreauth.Auth, id string) error {
-	identity, err := identityFingerprint(auth)
+	identity, err := validatedIdentity(auth)
 	if err != nil {
 		return err
 	}
@@ -88,21 +83,17 @@ func validateProfileIdentity(ctx context.Context, store coreauth.Store, auth *co
 		if previous.Provider != auth.Provider {
 			continue
 		}
-		fingerprint, _ := previous.Metadata["spur_identity"].(string)
-		if fingerprint == "" {
-			fingerprint, _ = identityFingerprint(previous)
-		}
-		if fingerprint == "" {
+		previousIdentity, err := validatedIdentity(previous)
+		if err != nil {
 			continue
 		}
 		if previous.ID == authFileID(id) {
-			if fingerprint != identity {
+			if previousIdentity != identity {
 				return &identityError{changedIdentity}
 			}
-		} else if fingerprint == identity {
+		} else if previousIdentity == identity {
 			return &identityError{duplicateIdentity}
 		}
 	}
-	auth.Metadata["spur_identity"] = identity
 	return nil
 }

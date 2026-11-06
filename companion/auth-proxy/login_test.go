@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -127,5 +128,40 @@ func TestSuccessfulLoginStatusDoesNotHideRenewalFailure(t *testing.T) {
 	manager.Remove(context.Background(), auth.ID)
 	if l.status("account-a").Status != "sign-in-required" {
 		t.Fatal("cached login success hid missing credentials")
+	}
+}
+
+func TestRepeatedLoginReusesSamePendingWorker(t *testing.T) {
+	attempt := &loginAttempt{status: loginStatus{AccountID: "account-a", Status: "pending", URL: "https://claude.ai/oauth/authorize"}}
+	l := &loginManager{active: "account-a", attempts: map[string]*loginAttempt{"account-a": attempt}}
+	for range 2 {
+		status, err := l.start(context.Background(), "account-a", claude)
+		if err != nil || status.Status != "pending" || l.attempts["account-a"] != attempt {
+			t.Fatal("repeated login did not reuse pending worker")
+		}
+	}
+	if _, err := l.start(context.Background(), "account-b", claude); err == nil {
+		t.Fatal("different profile started a concurrent login")
+	}
+}
+
+func TestLoginWaitsForRuntimeModelRegistration(t *testing.T) {
+	store := tokenStore(t.TempDir())
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := identityFixture(t, "login-ready", "org-one", "user-one")
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatal(err)
+	}
+	l := &loginManager{manager: manager, store: store}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := l.waitRegistered(ctx, "login-ready"); err == nil {
+		t.Fatal("credentials alone counted as runtime-ready login")
+	}
+	registry := cliproxy.GlobalModelRegistry()
+	registry.RegisterClient(auth.ID, "claude", []*cliproxy.ModelInfo{{ID: "fixture-model"}})
+	t.Cleanup(func() { registry.UnregisterClient(auth.ID) })
+	if err := l.waitRegistered(context.Background(), "login-ready"); err != nil {
+		t.Fatal(err)
 	}
 }
