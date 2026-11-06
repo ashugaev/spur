@@ -142,10 +142,12 @@ function QuotaSource({ quota }: { quota: QuotaSourceResult }) {
         <span className={`font-bold ${PRIMARY_TEXT}`}>{PROVIDER_NAMES[quota.provider]}</span>
         <span className={SECONDARY_TEXT}>{quota.label}</span>
         {quota.status === "ok" && quota.plan ? (
-          <span className={`uppercase ${TERTIARY_TEXT}`}>{quota.plan}</span>
+          <span className={`min-w-0 truncate uppercase ${TERTIARY_TEXT}`}>{quota.plan}</span>
         ) : null}
         <span className="flex-1" />
-        <span className={TERTIARY_TEXT}>{formatRelativeTime(quota.fetchedAt)}</span>
+        <span className={`shrink-0 whitespace-nowrap ${TERTIARY_TEXT}`}>
+          {formatRelativeTime(quota.fetchedAt)}
+        </span>
       </div>
       {quota.status === "error" ? (
         <div className="flex flex-wrap items-center gap-2">
@@ -302,8 +304,8 @@ function UsageContent({ data }: { data: UsageReport }) {
                 } ${
                   tab === entry.window
                     ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]"
-                    : SECONDARY_TEXT
-                }`}
+                    : `${SECONDARY_TEXT} hover:text-[var(--color-text-primary)] focus-visible:bg-[var(--color-bg-surface)] focus-visible:text-[var(--color-accent)]`
+                } ${tab === entry.window ? "focus-visible:underline" : ""}`}
                 key={entry.window}
                 onClick={() => setTab(entry.window)}
                 type="button"
@@ -387,6 +389,7 @@ export function UsageModal({ onClose }: { onClose: () => void }) {
           ) : null}
           <span className="flex-1" />
           <button
+            aria-busy={refreshing}
             className={ACTION_CLASS}
             disabled={state.status !== "ready" || refreshing}
             onClick={() => reload(true)}
@@ -407,7 +410,7 @@ export function UsageModal({ onClose }: { onClose: () => void }) {
             <div className="flex flex-col items-center gap-2.5 px-[13px] py-6">
               <span className="text-[var(--color-status-error)]">Could not load usage</span>
               <button
-                className={`border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase ${PRIMARY_TEXT}`}
+                className={`border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase outline-none hover:border-[var(--color-accent)] focus-visible:border-[var(--color-accent)] ${PRIMARY_TEXT}`}
                 onClick={() => reload(false)}
                 type="button"
               >
