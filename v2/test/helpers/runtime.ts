@@ -7,7 +7,13 @@ import { fileURLToPath } from "node:url";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { readGitHubSourceSnapshot } from "../../src/metadata.js";
 import type { RuntimeInfo, TodoProjection } from "../../src/types.js";
-import { createTempDir, execFileAsync, pollUntil, processExists } from "./common.js";
+import {
+  createTempDir,
+  execFileAsync,
+  pollUntil,
+  processExists,
+  unregisterTempDir,
+} from "./common.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const V2_DIR = resolve(__dirname, "../..");
@@ -1346,6 +1352,10 @@ ${content}`,
     return JSON.parse(text) as T;
   };
 
+  const failedStarts = new Map<
+    ChildProcessByStdio<null, Readable, Readable>,
+    { hasExited(): boolean; failure: Error }
+  >();
   const startDaemon = async (configPath: string) => {
     const child = spawn(
       process.execPath,
@@ -1356,27 +1366,220 @@ ${content}`,
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
+    const tailLimit = 4096;
     let stdout = "";
+    let stderr = "";
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: Buffer | string) => {
       stdout += chunk.toString();
+      stdoutTruncated ||= stdout.length > tailLimit;
+      stdout = stdout.slice(-tailLimit);
+    });
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+      stderrTruncated ||= stderr.length > tailLimit;
+      stderr = stderr.slice(-tailLimit);
     });
 
-    const info = await pollUntil(
-      async () => {
-        try {
-          return await fetchJson<RuntimeInfo>("/info");
-        } catch {
-          return null;
+    // Keep fixture paths and inherited credentials out of CI failure output.
+    const privateValues = [
+      rootDir,
+      repoDir,
+      originDir,
+      V2_DIR,
+      process.env.HOME,
+      ...Object.entries(env)
+        .filter(([key]) => /token|secret|password|credential|api_?key|auth/i.test(key))
+        .map(([, value]) => value),
+    ].filter((value): value is string => Boolean(value));
+    const safe = (value: string, truncated = false): string => {
+      // A capped tail may start inside a private value; an interrupted stream
+      // may end before that value is complete. Mask both fragments, not just
+      // complete matches. Retain no extra raw stream buffer across chunks.
+      truncated ||= value.length > tailLimit;
+      value = value.slice(-tailLimit);
+      const hidden = new Uint8Array(value.length);
+      // Decoder EOF may replace an unfinished character after a private prefix.
+      const fragmentEnd = value.replace(/\uFFFD+$/u, "").length;
+      for (const privateValue of privateValues) {
+        for (
+          let index = value.indexOf(privateValue);
+          index !== -1;
+          index = value.indexOf(privateValue, index + 1)
+        ) {
+          hidden.fill(1, index, index + privateValue.length);
         }
-      },
-      {
-        timeoutMs: 20_000,
-        accept: (value): value is RuntimeInfo => value !== null,
-        label: "daemon info",
-      },
-    );
-    // pollUntil throws before returning null, so info is guaranteed non-null here.
-    return { child, stdout, info: info as RuntimeInfo };
+        if (truncated) {
+          let size = Math.min(privateValue.length, value.length);
+          while (size > 0 && !privateValue.includes(value.slice(0, size))) size--;
+          hidden.fill(1, 0, size);
+        }
+        let size = Math.min(privateValue.length - 1, fragmentEnd);
+        while (size > 0 && !privateValue.startsWith(value.slice(fragmentEnd - size, fragmentEnd))) {
+          size--;
+        }
+        if (size > 0) hidden.fill(1, fragmentEnd - size);
+      }
+      let redacted = "";
+      for (let index = 0; index < value.length; index++) {
+        if (!hidden[index]) redacted += value[index];
+        else if (index === 0 || !hidden[index - 1]) redacted += "[redacted]";
+      }
+      return redacted
+        .replace(/https?:\/\/[^\s"'<>]+/g, "[url]")
+        .replace(/\/(?:home|Users)\/[^\s"'<>:)]+/g, "[path]")
+        .replace(
+          /\b(token|secret|password|authorization|api[_-]?key)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+          "$1=[redacted]",
+        )
+        .slice(-tailLimit);
+    };
+    const errorText = (error: unknown): string => {
+      if (!(error instanceof Error)) return safe(String(error));
+      const cause = error.cause;
+      const code =
+        typeof cause === "object" && cause !== null && "code" in cause ? String(cause.code) : "";
+      return safe(`${error.name}: ${error.message}${code ? ` (${code})` : ""}`);
+    };
+    const controller = new AbortController();
+    const readinessMs = 20_000;
+    let interruption = new Error(`daemon info readiness deadline exceeded (${readinessMs}ms)`);
+    const interrupt = (error: Error): void => {
+      if (controller.signal.aborted) return;
+      interruption = error;
+      controller.abort(error);
+    };
+    const interrupted = new Promise<never>((_, reject) => {
+      controller.signal.addEventListener("abort", () => reject(interruption), { once: true });
+    });
+    let spawnError: Error | undefined;
+    let exited = false;
+    let outputClosed = false;
+    const outputClose = new Promise<void>((resolveClose) => {
+      child.once("close", () => {
+        outputClosed = true;
+        resolveClose();
+      });
+    });
+    const exit = new Promise<void>((resolveExit) => {
+      child.once("exit", (code, signal) => {
+        exited = true;
+        failedStarts.delete(child);
+        resolveExit();
+        interrupt(new Error(`daemon exited before readiness: code=${code}, signal=${signal}`));
+      });
+      child.on("error", (error) => {
+        spawnError = error;
+        if (child.pid === undefined) {
+          exited = true;
+          resolveExit();
+        }
+        interrupt(new Error(`daemon process error: ${errorText(error)}`));
+      });
+    });
+    const hasExited = (): boolean => exited || child.exitCode !== null || child.signalCode !== null;
+    const waitForExit = async (): Promise<boolean> => {
+      if (hasExited()) return true;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          exit.then(() => true),
+          new Promise<false>((resolveTimeout) => {
+            timeout = setTimeout(() => resolveTimeout(false), 1000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
+    let lastHttp = "no response";
+    let lastHttpError = "none";
+    const deadline = Date.now() + readinessMs;
+    const timer = setTimeout(() => interrupt(interruption), readinessMs);
+    try {
+      const info = await pollUntil(
+        async () => {
+          if (Date.now() >= deadline) interrupt(interruption);
+          try {
+            return await Promise.race([
+              (async () => {
+                const response = await fetch(`http://127.0.0.1:${port}/info`, {
+                  signal: controller.signal,
+                });
+                lastHttp = `HTTP ${response.status}`;
+                const text = await response.text();
+                if (!response.ok) throw new Error(lastHttp);
+                return JSON.parse(text) as RuntimeInfo | null;
+              })(),
+              interrupted,
+            ]);
+          } catch (error) {
+            if (controller.signal.aborted) throw interruption;
+            lastHttpError = errorText(error);
+            return null;
+          }
+        },
+        {
+          timeoutMs: readinessMs,
+          accept: (value): value is RuntimeInfo => value !== null,
+          label: "daemon info",
+          signal: controller.signal,
+        },
+      );
+      return { child, stdout, info: info as RuntimeInfo };
+    } catch (error) {
+      const diagnostics = {
+        failure: errorText(error),
+        spawnError: spawnError ? errorText(spawnError) : null,
+        exitCode: child.exitCode,
+        signal: child.signalCode,
+        lastHttp,
+        lastHttpError,
+      };
+      const cleanupErrors: string[] = [];
+      for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+        if (hasExited()) break;
+        try {
+          if (!child.kill(signal)) cleanupErrors.push(`${signal} was not delivered`);
+        } catch (cleanupError) {
+          cleanupErrors.push(`${signal}: ${errorText(cleanupError)}`);
+        }
+        if (await waitForExit()) break;
+      }
+      if (!outputClosed) {
+        let drainTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            outputClose,
+            new Promise<void>((resolveDrain) => {
+              drainTimer = setTimeout(resolveDrain, 250);
+            }),
+          ]);
+        } finally {
+          clearTimeout(drainTimer);
+        }
+      }
+      const failure = new Error(
+        `Daemon startup failed: ${JSON.stringify({
+          ...diagnostics,
+          stdout: safe(stdout, stdoutTruncated),
+          stderr: safe(stderr, stderrTruncated),
+          outputClosed,
+        })}; cleanup: ${
+          hasExited() ? "owned child exited" : "UNRESOLVED owned child has not exited"
+        }${cleanupErrors.length ? ` (${cleanupErrors.join("; ")})` : ""}`,
+      );
+      if (!hasExited()) {
+        failedStarts.set(child, { hasExited, failure });
+        for (const directory of [rootDir, repoDir, originDir]) unregisterTempDir(directory);
+      }
+      throw failure;
+    } finally {
+      clearTimeout(timer);
+    }
   };
 
   const stopDaemon = async (
@@ -1396,6 +1599,15 @@ ${content}`,
   };
 
   const cleanup = async (): Promise<void> => {
+    for (const [child, failed] of failedStarts) {
+      if (failed.hasExited()) failedStarts.delete(child);
+    }
+    if (failedStarts.size > 0) {
+      const failures = [...failedStarts.values()].map(({ failure }) => failure.message).join("\n");
+      throw new Error(
+        `Runtime fixture cleanup blocked: UNRESOLVED owned startup child\n${failures}`,
+      );
+    }
     _resetGhPathCacheForTests();
     if (useFakeTools) {
       // Tear down the isolated tmux server and re-arm the guard so the next
