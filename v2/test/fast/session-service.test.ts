@@ -34260,7 +34260,7 @@ describe("SessionService", () => {
           () => true,
         );
         if (id === "api-1") {
-          const external = internals.lifecycle.begin("stop", ["api-1"]);
+          const external = internals.lifecycle.begin("complete", ["api-1"]);
           internals.lifecycle.settle(
             external,
             true,
