@@ -529,7 +529,9 @@ describe("startServer", () => {
       event: "daemon.registry.count",
       details: { read: 1, worktreeInternalDropped: 0 },
     });
-    const reconciledIndex = events.findIndex((entry) => entry.event === "daemon.startup.reconciled");
+    const reconciledIndex = events.findIndex(
+      (entry) => entry.event === "daemon.startup.reconciled",
+    );
     const attentionPollIndex = events.findIndex((entry) => entry.event === "gh.poll_cycle");
     expect(events[reconciledIndex]).toMatchObject({
       event: "daemon.startup.reconciled",
