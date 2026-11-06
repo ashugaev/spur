@@ -1,6 +1,7 @@
 import { expect, test, vi } from "vitest";
 import { pathToFileURL } from "node:url";
 import type * as GateModule from "../../src/review-gate.js";
+import { plan, capability } from "./review-feedback.fixture.js";
 import {
   evaluateSnapshot,
   changedEvidenceCategories,
@@ -1201,6 +1202,7 @@ test.each([
         body: stateBody({
           ...readStateBody(String(snapshot.comments[0]?.body)),
           status: "BLOCKED",
+          feedback: capability,
         }),
       };
     if (mode === "reason-changed") snapshot.unresolved = 1;
@@ -1330,6 +1332,7 @@ test.each([
               body: stateBody({
                 ...readStateBody(String(snapshot.comments[0]?.body)),
                 status: "BLOCKED",
+                feedback: capability,
               }),
             };
           }
@@ -1550,6 +1553,7 @@ test.each(["PENDING", "BLOCKED"] as const)(
         H,
         B,
         status,
+        feedback: status === "PENDING" ? plan : capability,
         evidenceDigest: "c".repeat(64),
         reviewId: null,
         assessment: null,
@@ -1573,7 +1577,7 @@ test.each(["version", "missing-close", "duplicate"])(
     if (!prior) throw new Error("missing fixture state");
     const value = readStateBody(String(prior.body));
     prior.body = `Spur review state v1\n${JSON.stringify(value)}`;
-    const hidden = stateBody({ ...value, status: "PENDING" });
+    const hidden = stateBody({ ...value, status: "PENDING", feedback: plan });
     const body =
       fault === "version"
         ? hidden.replace("state v1", "state v2")

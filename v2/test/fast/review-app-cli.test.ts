@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerReviewApp } from "../../src/review-app.js";
 import { createProgram } from "../../src/cli.js";
+import { plan, capability } from "./review-feedback.fixture.js";
+import { object, readJson } from "../../src/github-app.js";
 
 const faults = vi.hoisted(() => ({ pattern: "" }));
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -77,6 +79,7 @@ test.each(["prepare", "block"])(
           B: "b".repeat(40),
           contractDigest: "c".repeat(64),
           receipt: join(dir, "fixture", "repo", "1", "code.json"),
+          feedback: plan,
         }),
       );
       const run = (name: string) =>
@@ -91,11 +94,16 @@ test.each(["prepare", "block"])(
           request,
           "--json",
         ]);
-      if (action === "block") await run("prepare");
+      if (action === "block") {
+        await run("prepare");
+        const input = object(await readJson(request));
+        await writeFile(request, JSON.stringify({ ...input, feedback: capability }));
+      }
       faults.pattern = action === "prepare" ? '"status": "PENDING"' : '"reason": "review-blocked"';
       process.exitCode = undefined;
       await run(action);
       expect(process.exitCode).toBe(1);
+      expect(output.mock.calls.at(-1)?.[0]).toContain('"feedbackPublication":{"status":"failed"');
     } finally {
       faults.pattern = "";
       output.mockRestore();
@@ -288,6 +296,7 @@ test.each(["verified-pending", "announcement-failure", "write-failure"])(
           B: "b".repeat(40),
           contractDigest: "c".repeat(64),
           receipt,
+          feedback: plan,
         }),
       );
       process.env["SPUR_SESSION"] = "fixture-session";

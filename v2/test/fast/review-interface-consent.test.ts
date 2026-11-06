@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { capability } from "./review-feedback.fixture.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -437,7 +438,11 @@ describe("semantic interface consent", () => {
         laneComments.push({
           ...first,
           id: 3,
-          body: state.stateBody({ ...state.readStateBody(first.body), status: "BLOCKED" }),
+          body: state.stateBody({
+            ...state.readStateBody(first.body),
+            status: "BLOCKED",
+            feedback: capability,
+          }),
         });
       }
       const reviews = [
