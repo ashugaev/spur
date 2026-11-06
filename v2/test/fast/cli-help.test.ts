@@ -35,6 +35,7 @@ describe("spur help", () => {
     expect(help).toContain("reopen [options] <sessionId>");
     expect(help).toContain("session-memory <sessionId>");
     expect(help).toContain("memory <set|get|list|rm>");
+    expect(help).toContain("usage [options]");
     expect(help).toContain("service");
     expect(help).toContain("source");
     expect(help).toContain("subscribe [options] [targetSessionId]");

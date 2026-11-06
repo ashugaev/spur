@@ -25,16 +25,14 @@ Read-only host/config/daemon health check; `--scaffold` writes local `spur.yaml`
 
 `spur disk [--json]` reports disk usage, writes `<dataDir>/disk-budget.json` ([disk budget](configuration.md#disk-budget)).
 
-## disk-gc
+## usage
+
+`spur usage [--json]`: quota windows per Claude account and Codex, token totals today/7d/30d by provider and launch model; read-only, saved logins never refreshed; failing source prints an error row; quota cached 3 min per source; tokens from unarchived sessions dated by last activity — `v2/src/usage-report.ts`. Web: the footer Usage button shows the same report.
+
+## disk-gc, artifacts-gc, cache
 
 `spur disk-gc [--execute --browser-revisions --older-than <days> --limit <n> --json]` reclaims stale playwright profiles and terminal-worktree build caches.
-
-## artifacts-gc
-
 `spur artifacts-gc [--execute --older-than <days> --max-bytes <bytes> --max-files <n> --project <id> --limit <n> --json]` prunes `agent-history-*.jsonl`. See [Artifact retention](configuration.md#artifact-retention).
-
-## cache
-
 `spur cache [--prune --yes]` reports/prunes host caches outside `~/.spur`.
 
 ## daemon

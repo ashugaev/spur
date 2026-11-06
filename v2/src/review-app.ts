@@ -659,9 +659,9 @@ async function transitionReview(
         reviewId: receipt.reviewId,
         assessment:
           receipt.status !== "PENDING" && "assessment" in request ? request.assessment : null,
-        ...(receipt.status === "APPROVED" || receipt.feedback === undefined
-          ? {}
-          : { feedback: receipt.feedback }),
+        ...(receipt.status !== "APPROVED" && receipt.feedback !== undefined
+          ? { feedback: receipt.feedback }
+          : {}),
       });
       receipt.feedbackPublication = { status: "confirmed" };
     } catch (error) {
@@ -898,8 +898,8 @@ async function transitionReview(
             digest(priorFeedback) !== digest(request.feedback)
           )
             throw new ReviewAppError("attempt-conflict");
-          receipt.inputDigest = prior.inputDigest as string | null;
-          receipt.localVerdict = prior.localVerdict as "APPROVED" | "CHANGES_REQUESTED" | null;
+          receipt.inputDigest = prior.inputDigest;
+          receipt.localVerdict = prior.localVerdict;
           receipt.evidence = prior.evidence as Row[];
           receipt.coverage = prior.coverage as Request["coverage"];
           receipt.localFeedback =
@@ -1063,7 +1063,7 @@ export function registerReviewApp(program: Command): void {
         if (
           (action === "prepare" && result.status !== "PENDING") ||
           (action === "block" && result.reason !== "review-blocked") ||
-          result.feedbackPublication?.status !== "confirmed"
+          result.feedbackPublication.status !== "confirmed"
         )
           process.exitCode = 1;
       });
@@ -1083,7 +1083,7 @@ export function registerReviewApp(program: Command): void {
         options.legacySha256,
       );
       process.stdout.write(`${JSON.stringify(result)}\n`);
-      if (result.status !== "PENDING" || result.feedbackPublication?.status !== "confirmed")
+      if (result.status !== "PENDING" || result.feedbackPublication.status !== "confirmed")
         process.exitCode = 1;
     });
   command
