@@ -707,6 +707,40 @@ interface FoundWorkItemSession {
   accepted?: boolean;
 }
 
+// Re-reads an errored session that discard left in place: a restore or
+// relaunch may own it now, so it still stands for the block. "declined" means
+// a takeover started during cleanup: the survivor is held even while it reads
+// errored or cannot be read. "skipped" means the record was already not
+// discardable: only a non-replace owner stands. Undefined: nothing stands.
+async function discardSurvivor(
+  ctx: WorkItemClaimContext,
+  service: SessionService,
+  sessionId: string,
+  discarded: "declined" | "skipped",
+  logFailure: (message: string) => void,
+): Promise<FoundWorkItemSession | "stale" | undefined> {
+  try {
+    const view = await getWorkItemSessionIfPresent(service, sessionId);
+    if (!ctx.controllerCurrent()) return "stale";
+    if (!view) return undefined;
+    const record = readSession(ctx.dataDir, sessionId);
+    const outcome = classifyWorkItemOwner(view, record);
+    if (outcome === "replace" && discarded === "skipped") return undefined;
+    return {
+      sessionId,
+      outcome: outcome === "replace" ? "pending" : outcome,
+      accepted: isAcceptedWorkItemRecord(record),
+    };
+  } catch (error) {
+    if (!ctx.controllerCurrent()) return "stale";
+    const message = error instanceof Error ? error.message : String(error);
+    logFailure(
+      `Discard of failed spawn ${sessionId} was ${discarded}; survivor lookup failed: ${message}`,
+    );
+    return discarded === "declined" ? { sessionId, outcome: "pending" } : undefined;
+  }
+}
+
 // A session tagged with this exact block of the item by one of `triggerIds`
 // that still stands for it. With `discardErrored`, errored records of the block are discarded when none
 // stands (the pre-spawn scan: they are about to be replaced).
@@ -751,15 +785,14 @@ async function findTaggedWorkItemSession(
   if (discardErrored) {
     for (const sessionId of erroredIds) {
       if (!ctx.controllerCurrent()) return undefined;
-      const logDiscardFailed = (error: unknown): void => {
-        const message = error instanceof Error ? error.message : String(error);
+      const logDiscardFailed = (message: string): void => {
         logTriggerEvent(ctx.dataDir, "trigger.spawn.discard_failed", {
           level: "warn",
           sessionId,
           projectId: ctx.projectId,
           sourceId: ctx.sourceId,
           triggerId: ctx.triggerId,
-          message: `Could not discard failed spawn ${sessionId}: ${message}`,
+          message,
         });
       };
       let discarded: Awaited<ReturnType<SessionService["discardFailedSpawn"]>> | undefined;
@@ -768,30 +801,13 @@ async function findTaggedWorkItemSession(
         if (!ctx.controllerCurrent()) return undefined;
       } catch (error) {
         if (!ctx.controllerCurrent()) return undefined;
-        logDiscardFailed(error);
+        const message = error instanceof Error ? error.message : String(error);
+        logDiscardFailed(`Could not discard failed spawn ${sessionId}: ${message}`);
       }
-      if (discarded !== "declined") continue;
-      // A restore or relaunch took the errored session over during cleanup:
-      // it still stands for the block, so adopt it, or wait on it while its
-      // takeover is unresolved, instead of spawning a second.
-      let record: SessionRecord | null | undefined;
-      try {
-        const view = await getWorkItemSessionIfPresent(service, sessionId);
-        if (!ctx.controllerCurrent()) return undefined;
-        if (!view) continue;
-        record = readSession(ctx.dataDir, sessionId);
-        const outcome = classifyWorkItemOwner(view, record);
-        return {
-          sessionId,
-          outcome: outcome === "replace" ? "pending" : outcome,
-          accepted: isAcceptedWorkItemRecord(record),
-        };
-      } catch (error) {
-        if (!ctx.controllerCurrent()) return undefined;
-        logDiscardFailed(error);
-        // The survivor stands even when it cannot be read: hold the block.
-        return { sessionId, outcome: "pending", accepted: isAcceptedWorkItemRecord(record) };
-      }
+      if (discarded !== "declined" && discarded !== "skipped") continue;
+      const survivor = await discardSurvivor(ctx, service, sessionId, discarded, logDiscardFailed);
+      if (survivor === "stale") return undefined;
+      if (survivor) return survivor;
     }
   }
   return undefined;
