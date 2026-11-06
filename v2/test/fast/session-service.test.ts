@@ -4770,29 +4770,34 @@ describe("SessionService", () => {
       expect(ownerIds(sessions)).toEqual(["api-1"]);
     });
 
-    it("settles the closeout take after a failed background preparation", async () => {
-      const sessions = seedWorkspace();
-      reserveNextSessionIdMock.mockResolvedValue("api-3");
-      findAgentSessionIdMock.mockResolvedValue("session-uuid");
-      mockExitedThenRestoredProcess();
-      const todo = await import("../../src/todo.js");
-      vi.mocked(todo.ensureTodoLedger).mockImplementationOnce(() => {
-        throw new Error("ledger boom");
-      });
-      const service = await newService();
-
-      await expect(
-        service.spawnInBackground({
+    it.each(["spawn", "spawnInBackground"] as const)(
+      "%s gives closeout back when the todo ledger write fails after the take",
+      async (path) => {
+        const sessions = seedWorkspace();
+        reserveNextSessionIdMock.mockResolvedValue("api-3");
+        findAgentSessionIdMock.mockResolvedValue("session-uuid");
+        mockExitedThenRestoredProcess();
+        const todo = await import("../../src/todo.js");
+        vi.mocked(todo.ensureTodoLedger).mockImplementationOnce(() => {
+          throw new Error("ledger boom");
+        });
+        const service = await newService();
+        const request = {
           project: "api",
           prompt: "continue the task",
           reuseWorkspaceSessionId: "api-1",
-        }),
-      ).rejects.toThrow("ledger boom");
-      await expect(service.restore("api-1")).resolves.toBeDefined();
+        };
 
-      expect(lastLaunchEnv()?.SPUR_CLOSEOUT_OWNER).toBe("0");
-      expect(sessions.get("api-1")).toBeDefined();
-    });
+        await expect(
+          path === "spawn" ? service.spawn(request) : service.spawnInBackground(request),
+        ).rejects.toThrow("ledger boom");
+        await expect(service.restore("api-1")).resolves.toBeDefined();
+
+        expect(lastLaunchEnv()?.SPUR_CLOSEOUT_OWNER).toBe("1");
+        expect(ownerIds(sessions)).toEqual(["api-1"]);
+        expect(sessions.get("api-3")?.closeoutOwner).not.toBe(true);
+      },
+    );
 
     it("handoff of a former closeout owner waits for a failing taking launch", async () => {
       const sessions = seedWorkspace();

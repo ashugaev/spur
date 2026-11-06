@@ -13220,9 +13220,9 @@ export class SessionService {
         reuseCtx,
         !restrictWrites && worktree && options?.closeoutOwnerTransfer === undefined,
       );
+      placeholderWritten = true;
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
-      placeholderWritten = true;
       // Before the launch prompt exists: an agent that replies ahead of the
       // source's own bind step must answer the chat that asked for it.
       if (options?.telegramOrigin) {
@@ -14304,10 +14304,10 @@ export class SessionService {
         reuseCtx,
         !restrictWrites && worktree,
       );
+      placeholderWritten = true;
       ownedClaimBatchId = undefined;
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
-      placeholderWritten = true;
       this.admissionReservations.delete(admissionReservation);
       admissionReserved = false;
 
@@ -14363,45 +14363,48 @@ export class SessionService {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (sessionId && project && placeholderWritten) {
-        const erroredWorkspaceId = reuseCtx?.workspaceId ?? sessionId;
-        const claimedPreflightUsage = readSession(
-          this.config.dataDir,
-          sessionId,
-        )?.preflightTokenUsage;
-        this.removeSessionArtifacts({
-          id: sessionId,
-          project: request.project,
-          workspaceId: erroredWorkspaceId,
-        });
-        const erroredBranchSource =
-          resolvedBranch?.branchSource ?? (worktree && explicitBranch ? "explicit" : undefined);
-        writeSession(this.config.dataDir, {
-          id: sessionId,
-          project: request.project,
-          workspaceId: erroredWorkspaceId,
-          agent: agent ?? resolveSpawnAgent(request.agent, project, this.config),
-          prompt,
-          branch: resolvedBranch?.branch ?? explicitBranch ?? sessionId,
-          ...(erroredBranchSource ? { branchSource: erroredBranchSource } : {}),
-          worktree,
-          worktreePath: reuseCtx
-            ? reuseCtx.workspacePath
-            : worktree
-              ? join(this.config.worktreeDir, request.project, sessionId)
-              : project.path,
-          tmuxSession: sessionId,
-          launchCommand: "",
-          status: "errored",
-          ...(claimedPreflightUsage ? { preflightTokenUsage: claimedPreflightUsage } : {}),
-          createdAt: createdAt ?? nowIso(),
-          updatedAt: nowIso(),
-          error: message,
-          errorSource: "other",
-        });
-        if (closeoutTakenFrom) this.returnTakenCloseout(sessionId, closeoutTakenFrom);
+      try {
+        if (sessionId && project && placeholderWritten) {
+          const erroredWorkspaceId = reuseCtx?.workspaceId ?? sessionId;
+          const claimedPreflightUsage = readSession(
+            this.config.dataDir,
+            sessionId,
+          )?.preflightTokenUsage;
+          this.removeSessionArtifacts({
+            id: sessionId,
+            project: request.project,
+            workspaceId: erroredWorkspaceId,
+          });
+          const erroredBranchSource =
+            resolvedBranch?.branchSource ?? (worktree && explicitBranch ? "explicit" : undefined);
+          writeSession(this.config.dataDir, {
+            id: sessionId,
+            project: request.project,
+            workspaceId: erroredWorkspaceId,
+            agent: agent ?? resolveSpawnAgent(request.agent, project, this.config),
+            prompt,
+            branch: resolvedBranch?.branch ?? explicitBranch ?? sessionId,
+            ...(erroredBranchSource ? { branchSource: erroredBranchSource } : {}),
+            worktree,
+            worktreePath: reuseCtx
+              ? reuseCtx.workspacePath
+              : worktree
+                ? join(this.config.worktreeDir, request.project, sessionId)
+                : project.path,
+            tmuxSession: sessionId,
+            launchCommand: "",
+            status: "errored",
+            ...(claimedPreflightUsage ? { preflightTokenUsage: claimedPreflightUsage } : {}),
+            createdAt: createdAt ?? nowIso(),
+            updatedAt: nowIso(),
+            error: message,
+            errorSource: "other",
+          });
+          if (closeoutTakenFrom) this.returnTakenCloseout(sessionId, closeoutTakenFrom);
+        }
+      } finally {
+        if (sessionId) this.settleCloseoutTake(sessionId);
       }
-      if (sessionId) this.settleCloseoutTake(sessionId);
       if (ownedClaimBatchId !== undefined && sessionId) {
         try {
           if (readSession(this.config.dataDir, sessionId) === null) {
