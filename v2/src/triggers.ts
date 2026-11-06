@@ -685,7 +685,10 @@ export function dropsQueuedSend(
     isClosedState(session.state) &&
     !(session.state === "stopped" && session.status === "running") &&
     !isLiveServerErrorWedge(session) &&
-    !(session.state === "stopped" && session.stopReason === "memory_shed")
+    !(
+      session.state === "stopped" &&
+      (session.stopReason === "memory_shed" || session.stopReason === "manual_pause")
+    )
   );
 }
 
