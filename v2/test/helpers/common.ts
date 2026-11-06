@@ -205,6 +205,8 @@ export async function pollUntil<T>(
     intervalMs?: number;
     accept?: (value: T) => boolean;
     label?: string;
+    /** Abort stops polling: rejects with `signal.reason` before the next `fn` call or mid-sleep. */
+    signal?: AbortSignal;
   },
 ): Promise<T> {
   const {
@@ -212,8 +214,10 @@ export async function pollUntil<T>(
     intervalMs = 250,
     accept = (value) => Boolean(value),
     label = "condition",
+    signal,
   } = opts;
   const deadline = Date.now() + timeoutMs;
+  signal?.throwIfAborted();
   let last = await fn();
   while (!accept(last)) {
     if (Date.now() >= deadline) {
@@ -227,8 +231,25 @@ export async function pollUntil<T>(
         `pollUntil timed out after ${timeoutMs}ms waiting for ${label}; last value: ${serialized}`,
       );
     }
-    await sleep(intervalMs);
+    await (signal ? abortableSleep(intervalMs, signal) : sleep(intervalMs));
+    signal?.throwIfAborted();
     last = await fn();
   }
+  signal?.throwIfAborted();
   return last;
+}
+
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
 }

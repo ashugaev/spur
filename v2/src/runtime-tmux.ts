@@ -275,6 +275,9 @@ interface FleetPaneEntry {
   // isProcessRunningInTmux uses these to recognize a wrapper-exec'd agent by
   // parentage (ppid is a pane pid) when name matching misses (issue #806).
   allPanePids: number[];
+  // allPanePids minus panes tmux reports dead (remain-on-exit): a dead pane's
+  // pid can be recycled, so only these may root ownership capture.
+  livePanePids: number[];
 }
 
 // `readable: false` means the `list-panes` fork itself failed, so the empty
@@ -332,6 +335,7 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
           activePanePid: null,
           allTtys: [],
           allPanePids: [],
+          livePanePids: [],
         };
         if (paneTty) {
           entry.allTtys.push(paneTty);
@@ -341,6 +345,9 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
           Number.isFinite(parsedPanePid) && parsedPanePid > 0 ? parsedPanePid : null;
         if (panePidValue !== null) {
           entry.allPanePids.push(panePidValue);
+          if (paneDead === "0") {
+            entry.livePanePids.push(panePidValue);
+          }
         }
         // window_active + pane_active together identify the exact pane a
         // no-window/no-pane target (`=name:`) resolves to.
@@ -864,12 +871,36 @@ export async function lookupTmuxPanePid(
   if (!readable) {
     return { status: "unavailable" };
   }
-  const entry = panes.get(sessionName);
+  const pane = panes.get(sessionName);
   return {
     status: "ok",
-    panePid: entry?.activePanePid ?? null,
-    paneDead: entry?.activePaneDead ?? false,
+    panePid: pane?.activePanePid ?? null,
+    paneDead: pane?.activePaneDead ?? false,
   };
+}
+
+export type TmuxSessionPanesLookup =
+  | { status: "ok"; panePids: readonly number[] }
+  | { status: "unavailable" };
+
+// Every live pane pid of the session (all windows). Ownership capture and the
+// foreign-agent guard use this instead of the active pane so an agent left in
+// a non-active pane stays owned. Dead (remain-on-exit) panes are left out: a
+// dead pane's pid can be recycled by an unrelated process, whose descendants
+// must never be captured, signalled, or excluded as this session's own. "ok"
+// with `panePids: []` means tmux replied and the session has no live pane.
+export async function lookupTmuxSessionPanePids(
+  sessionName: string,
+  options?: { fresh?: boolean },
+): Promise<TmuxSessionPanesLookup> {
+  if (options?.fresh) {
+    fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
+  }
+  const { readable, panes } = await getFleetPaneSnapshot();
+  if (!readable) {
+    return { status: "unavailable" };
+  }
+  return { status: "ok", panePids: panes.get(sessionName)?.livePanePids ?? [] };
 }
 
 interface PsRow {
@@ -1215,7 +1246,7 @@ export async function createTmuxSession(input: {
   beforeLaunch?: () => void;
 }): Promise<void> {
   input.operation?.assertActive();
-  const paneEnv = buildPaneEnv(input.env);
+  const paneEnv = buildPaneEnv({ DISABLE_AUTO_UPDATE: "true", ...input.env });
   const scriptPath = writeAgentLaunchScript(input.launchScriptDir, input.launchCommand);
   // Env file lives in the session tool dir, so it goes away with the session
   // if the pane never starts; the pane deletes it on start otherwise.
@@ -1274,8 +1305,9 @@ function writeAgentLaunchScript(dir: string, launchCommand: string): string {
 // prompt (oh-my-zsh's "update? [Y/n]") ate the first typed character, so
 // codex started as `ODEX_HOME=...` on the default home and Spur never saw
 // its rollout. The login+interactive shell keeps the user's rc environment
-// (PATH, nvm, exported keys) exactly as a typed launch had; an rc prompt now
-// waits visibly in the pane instead of corrupting the command. Sourcing the
+// (PATH, nvm, exported keys) exactly as a typed launch had. Pane env sets
+// DISABLE_AUTO_UPDATE=true: suppresses the omz update prompt. Other rc
+// prompts still wait visibly in the pane, show in ready-timeout tail. Sourcing the
 // script keeps the agent a direct child of the pane shell, and the pane
 // drops to the same login shell when the agent exits.
 // The env file launcher runs first, so the env lands before any rc file, as

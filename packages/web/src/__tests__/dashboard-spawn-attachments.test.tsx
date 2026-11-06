@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
 import { fileAttachmentsFromFiles, type FileAttachment } from "@/lib/file-attachments";
 import type * as FileAttachmentsModule from "@/lib/file-attachments";
+import { SPAWN_DRAFT_STORAGE_KEY, writeSpawnDraft } from "@/lib/spawn-draft";
 import type { SpurSessionView } from "@/lib/types";
 
 vi.mock("@/lib/file-attachments", async (importOriginal) => ({
@@ -56,6 +57,11 @@ describe("Dashboard spawn photo preparation", () => {
   let requests: RequestInit[];
   let spawnFails: boolean;
   let spawnResponse: Promise<Response> | undefined;
+  let previewResponse: Promise<Response> | undefined;
+  let spawnConflict: "spawn_in_progress" | "spawn_committed" | "spawn_failed" | undefined;
+  let batchRequests: number;
+  let sessionsGate: Promise<void> | undefined;
+  let sessionsFailures: number;
   beforeEach(() => {
     vi.clearAllMocks();
     window.localStorage.clear();
@@ -63,9 +69,19 @@ describe("Dashboard spawn photo preparation", () => {
     requests = [];
     spawnFails = false;
     spawnResponse = undefined;
+    previewResponse = undefined;
+    spawnConflict = undefined;
+    batchRequests = 0;
+    sessionsGate = undefined;
+    sessionsFailures = 0;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/sessions")
+      if (url === "/api/sessions") {
+        await sessionsGate;
+        if (sessionsFailures > 0) {
+          sessionsFailures -= 1;
+          return Response.json({ error: "unavailable" }, { status: 503 });
+        }
         return Response.json({
           lifecycleInstanceId: "test-instance",
           projects: [
@@ -73,15 +89,32 @@ describe("Dashboard spawn photo preparation", () => {
           ],
           sessions: [],
         });
+      }
       if (url.startsWith("/api/models"))
         return Response.json({ models: [{ id: "sonnet", label: "Sonnet" }] });
       if (url.includes("spawn-defaults")) return Response.json({ model: null, worktree: false });
-      if (url === "/api/projects/demo/preflight-batches")
-        return Response.json({ preflightBatchId: "photo-test-batch" });
-      if (url === "/api/preflight") return Response.json({ branch: null });
+      if (url === "/api/projects/demo/preflight-batches") {
+        batchRequests += 1;
+        return Response.json({ preflightBatchId: `batch-${batchRequests}` });
+      }
+      if (url === "/api/preflight") {
+        if (previewResponse) return previewResponse;
+        return Response.json({ branch: null });
+      }
       if (url === "/api/spawn") {
         requests.push(init ?? {});
         if (spawnResponse) return spawnResponse;
+        if (spawnConflict) {
+          const conflict = spawnConflict;
+          return Response.json(
+            {
+              error: `Session demo-7 conflict ${conflict}`,
+              code: conflict,
+              sessionId: "demo-7",
+            },
+            { status: 409 },
+          );
+        }
         return spawnFails
           ? Response.json({ error: "Spawn failed" }, { status: 502 })
           : Response.json(spawnedSession, { status: 201 });
@@ -168,6 +201,276 @@ describe("Dashboard spawn photo preparation", () => {
       expect(screen.queryByRole("dialog")).toBeNull();
     });
   }
+
+  function sentBatchId(index: number): unknown {
+    return (JSON.parse(String(requests[index]?.body)) as { preflightBatchId?: unknown })
+      .preflightBatchId;
+  }
+
+  it("allocates a preflight batch before spawn when the preview has not run", async () => {
+    await mount();
+    fireEvent.change(screen.getByLabelText("Prompt..."), { target: { value: "Fast submit" } });
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(batchRequests).toBe(1);
+    expect(sentBatchId(0)).toBe("batch-1");
+  });
+
+  it("keeps Close locked through a delayed preview and sends one spawn request", async () => {
+    await mount();
+    let resolvePreview!: (response: Response) => void;
+    previewResponse = new Promise<Response>((accept) => {
+      resolvePreview = accept;
+    });
+    fireEvent.change(screen.getByLabelText("Prompt..."), { target: { value: "Slow preview" } });
+    const read = pendingRead();
+    attach();
+    await act(async () => read.resolve([photo()]));
+    await waitFor(() => expect(batchRequests).toBe(1));
+    fireEvent.click(submit());
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByRole("button", { name: "Close", exact: true })).toBeDisabled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close", exact: true }));
+    fireEvent.click(dialog);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBe(dialog);
+    expect(requests).toHaveLength(0);
+    await act(async () => resolvePreview(Response.json({ branch: null })));
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(JSON.parse(String(requests[0].body))).toMatchObject({
+      preflightBatchId: "batch-1",
+      attachments: [{ name: "photo.png" }],
+    });
+  });
+
+  it("keeps prompt, photo and batch after spawn_in_progress", async () => {
+    await mount();
+    fireEvent.change(screen.getByLabelText("Prompt..."), { target: { value: "Keep all" } });
+    const read = pendingRead();
+    attach();
+    await act(async () => read.resolve([photo()]));
+    spawnConflict = "spawn_in_progress";
+    fireEvent.click(submit());
+    await waitFor(() =>
+      expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent("demo-7"),
+    );
+    expect(screen.getByLabelText("Prompt...")).toHaveValue("Keep all");
+    expect(screen.getByRole("button", { name: "Remove photo.png" })).toBeVisible();
+    spawnConflict = undefined;
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(sentBatchId(1)).toBe(sentBatchId(0));
+    expect(batchRequests).toBe(1);
+  });
+
+  it.each(["spawn_committed", "spawn_failed"] as const)(
+    "keeps prompt and photo and rotates the batch after %s",
+    async (code) => {
+      await mount();
+      fireEvent.change(screen.getByLabelText("Prompt..."), { target: { value: "Keep all" } });
+      const read = pendingRead();
+      attach();
+      await act(async () => read.resolve([photo()]));
+      spawnConflict = code;
+      fireEvent.click(submit());
+      await waitFor(() =>
+        expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent("demo-7"),
+      );
+      expect(screen.getByLabelText("Prompt...")).toHaveValue("Keep all");
+      expect(screen.getByRole("button", { name: "Remove photo.png" })).toBeVisible();
+      spawnConflict = undefined;
+      fireEvent.click(submit());
+      await waitFor(() => expect(requests).toHaveLength(2));
+      expect(sentBatchId(0)).toBe("batch-1");
+      expect(sentBatchId(1)).toBe("batch-2");
+      expect(JSON.parse(String(requests[1].body))).toMatchObject({
+        prompt: "Keep all",
+        attachments: [{ name: "photo.png" }],
+      });
+    },
+  );
+
+  it("persists the allocated batch to the draft before the spawn request settles", async () => {
+    await mount();
+    fireEvent.change(screen.getByLabelText("Prompt..."), { target: { value: "Persist batch" } });
+    let resolve!: (response: Response) => void;
+    spawnResponse = new Promise<Response>((accept) => {
+      resolve = accept;
+    });
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(JSON.parse(String(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)))).toMatchObject({
+      preflightBatchId: "batch-1",
+      preflightBatchProjectId: "demo",
+    });
+    await act(async () => resolve(Response.json(spawnedSession, { status: 201 })));
+  });
+
+  function saveBatchDraft(batchProjectId: string) {
+    writeSpawnDraft({
+      prompt: "Retry after reload",
+      agent: "claude",
+      model: null,
+      branch: "",
+      branchIsExplicit: false,
+      workspaceMode: "shared",
+      workspaceModeConfirmedFor: null,
+      defaultBranch: "",
+      planMode: false,
+      selfDestruct: false,
+      selfDestructConditions: "",
+      steps: [],
+      trackerUrl: null,
+      sessionMode: null,
+      preflightBatchId: "saved-batch",
+      preflightBatchProjectId: batchProjectId,
+    });
+  }
+
+  async function openBeforeProjectsLoad(batchProjectId: string) {
+    await openDraftBeforeProjectsLoad(batchProjectId);
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(1));
+  }
+
+  async function openDraftBeforeProjectsLoad(batchProjectId: string) {
+    saveBatchDraft(batchProjectId);
+    let releaseSessions!: () => void;
+    sessionsGate = new Promise<void>((accept) => {
+      releaseSessions = accept;
+    });
+    render(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <Dashboard />
+      </QueryClientProvider>,
+    );
+    fireEvent.click((await screen.findAllByRole("button", { name: "Spawn Session" }))[0]);
+    expect(screen.getByLabelText("Prompt...")).toHaveValue("Retry after reload");
+    await act(async () => releaseSessions());
+    await waitFor(() => expect(submit()).not.toBeDisabled());
+  }
+
+  it("reuses the saved batch when the modal opens before projects load", async () => {
+    await openBeforeProjectsLoad("demo");
+    expect(sentBatchId(0)).toBe("saved-batch");
+    expect(batchRequests).toBe(0);
+  });
+
+  it("keeps the draft project over the URL project when opened before projects load", async () => {
+    window.history.replaceState(null, "", "/?project=other");
+    await openBeforeProjectsLoad("demo");
+    expect(JSON.parse(String(requests[0].body))).toMatchObject({ projectId: "demo" });
+  });
+
+  it("keeps the saved batch when the first sessions read fails", async () => {
+    saveBatchDraft("demo");
+    sessionsFailures = 1;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <Dashboard />
+      </QueryClientProvider>,
+    );
+    fireEvent.click((await screen.findAllByRole("button", { name: "Spawn Session" }))[0]);
+    expect(screen.getByLabelText("Prompt...")).toHaveValue("Retry after reload");
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 700));
+    });
+    expect(JSON.parse(String(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)))).toMatchObject({
+      preflightBatchId: "saved-batch",
+      preflightBatchProjectId: "demo",
+    });
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["sessions"] });
+    });
+    await waitFor(() => expect(submit()).not.toBeDisabled());
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(sentBatchId(0)).toBe("saved-batch");
+    expect(batchRequests).toBe(0);
+  });
+
+  function previewConflict(code: "spawn_in_progress" | "spawn_committed" | "spawn_failed") {
+    return Response.json(
+      { error: `Session demo-7 conflict ${code}`, code, sessionId: "demo-7" },
+      { status: 409 },
+    );
+  }
+
+  it("shows the created session and rotates the batch when preview hits a claimed batch", async () => {
+    previewResponse = Promise.resolve(
+      Response.json(
+        {
+          error: "Session demo-7 was already created from this submission",
+          code: "spawn_committed",
+          sessionId: "demo-7",
+        },
+        { status: 409 },
+      ),
+    );
+    await openDraftBeforeProjectsLoad("demo");
+    const dialog = screen.getByRole("dialog");
+    await waitFor(() =>
+      expect(within(dialog).getByRole("alert")).toHaveTextContent("demo-7 was already created"),
+    );
+    expect(within(dialog).queryByText(/Branch preview failed/)).toBeNull();
+    await waitFor(() =>
+      expect(
+        JSON.parse(String(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY))),
+      ).toMatchObject({ preflightBatchId: null }),
+    );
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(sentBatchId(0)).toBe("batch-1");
+  });
+
+  it("rotates the batch when preview hits a failed batch", async () => {
+    previewResponse = Promise.resolve(previewConflict("spawn_failed"));
+    await openDraftBeforeProjectsLoad("demo");
+    await waitFor(() =>
+      expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent("demo-7"),
+    );
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(sentBatchId(0)).toBe("batch-1");
+    expect(batchRequests).toBe(1);
+  });
+
+  it("keeps the batch when preview hits a batch still spawning", async () => {
+    previewResponse = Promise.resolve(previewConflict("spawn_in_progress"));
+    await openDraftBeforeProjectsLoad("demo");
+    await waitFor(() =>
+      expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent("demo-7"),
+    );
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(sentBatchId(0)).toBe("saved-batch");
+    expect(batchRequests).toBe(0);
+  });
+
+  it("keeps the batch when a preview conflict lands during submit", async () => {
+    let resolvePreview!: (response: Response) => void;
+    previewResponse = new Promise<Response>((accept) => {
+      resolvePreview = accept;
+    });
+    await openDraftBeforeProjectsLoad("demo");
+    await waitFor(() =>
+      expect(vi.mocked(fetch).mock.calls.some(([input]) => input === "/api/preflight")).toBe(true),
+    );
+    fireEvent.click(submit());
+    await act(async () => resolvePreview(previewConflict("spawn_committed")));
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(sentBatchId(0)).toBe("saved-batch");
+    expect(batchRequests).toBe(0);
+  });
+
+  it("rotates the saved batch when its project is gone once projects load", async () => {
+    await openBeforeProjectsLoad("removed");
+    expect(sentBatchId(0)).toBe("batch-1");
+    expect(JSON.parse(String(requests[0].body))).toMatchObject({ projectId: "demo" });
+  });
 
   it("closes and resets after an in-flight spawn succeeds", async () => {
     await mount();

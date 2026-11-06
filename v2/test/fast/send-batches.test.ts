@@ -135,12 +135,6 @@ describe("live submission identity", () => {
         parse(githubEventData(shape === "URL to repo" ? { prUrl: url } : { repo: "acme/api" })),
         "queue",
       );
-      queue.attachAutoPing({
-        occurrenceId: "old",
-        routeFingerprint: "route",
-        destination: { kind: "session", sessionId: "api-1" },
-        createGrant: () => "old-handle",
-      });
       const newUrl = "https://new.example/other/api/pull/42";
       const incoming = requireBatch(
         parse(
@@ -153,7 +147,6 @@ describe("live submission identity", () => {
       );
       expect(queue.merge(incoming)).toEqual({ retiredItemPrefix: '["github",42,' });
       expect(queue.retryItems().map((item) => item.key)).toEqual(["comment:2"]);
-      expect(queue.serialize().autoPing?.items["comment:1"]).toBeUndefined();
       if (shape === "URL to repo") {
         expect(queue.serialize()).not.toHaveProperty("prUrl");
         const unresolved = requireBatch(parse(queue.serialize()), "unresolved");
@@ -230,19 +223,14 @@ describe("live submission identity", () => {
     },
   );
 
-  it("recovers a matching legacy binding and removes failed/deleted controls through filterItems", async () => {
+  it("recovers a matching legacy binding and removes deleted items through filterItems", async () => {
     ghMock.mockReset().mockRejectedValue(new Error("HTTP 404"));
     const queue = requireBatch(parse(githubEventData({ repo: "acme/api" })), "queue");
-    queue.attachAutoPing({
-      occurrenceId: "occurrence",
-      routeFingerprint: "route",
-      destination: { kind: "session", sessionId: "api-1" },
-      createGrant: () => "handle",
-    });
     expect(await queue.refresh?.("/tmp/daemon-data", binding)).toEqual([
       { status: "deleted", key: "comment:1" },
     ]);
-    expect(queue.serialize()).toMatchObject({ prUrl: url, autoPing: { items: {} } });
+    expect(queue.serialize()).toMatchObject({ prUrl: url });
+    expect(queue.isEmpty()).toBe(true);
   });
 });
 
@@ -388,6 +376,18 @@ describe("createSendBatchParser", () => {
 });
 
 describe("Telegram batch", () => {
+  it("preserves attachment references through merge and persistence", () => {
+    const parse = createSendBatchParser("telegram", "proj", "src-1");
+    const first = "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/one.csv]\nread this";
+    const second = "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/two.zip]";
+    const batch = requireBatch(parse(telegramEventData({ text: first })), "first");
+    batch.merge(requireBatch(parse(telegramEventData({ messageId: 100, text: second })), "second"));
+    const restored = requireBatch(restoreSendBatch(structuredClone(batch.serialize())), "restored");
+    expect(restored.format()).toContain(first);
+    expect(restored.format()).toContain(second);
+    expect(restored.serialize()).toEqual(batch.serialize());
+  });
+
   function makeBatch(prompt?: string) {
     const parse = createSendBatchParser("telegram", "proj", "src-1", prompt);
     return requireBatch(parse(telegramEventData()), "expected telegram batch");
@@ -649,87 +649,186 @@ describe("Service batch", () => {
   });
 });
 
-describe("automatic ping controls", () => {
-  it("filters one suppressed thread item while preserving its sibling and one subscription control", () => {
-    const parse = createSendBatchParser("github", "proj", "src-1");
-    const batch = requireBatch(
-      parse(
-        githubEventData({
-          signals: [
-            {
-              key: "review-comment:1",
-              kind: "comment",
-              text: "inline",
-              providerThreadTarget: { kind: "github-review-thread", threadId: "thread-1" },
-            },
-            { key: "ready_for_review", kind: "ready_for_review", text: "ready" },
-          ],
-        }),
-      ),
-      "expected review batch",
-    );
-    let grant = 0;
-    batch.attachAutoPing({
-      occurrenceId: "occurrence",
-      routeFingerprint: "route",
-      destination: { kind: "session", sessionId: "api-1" },
-      createGrant: () => `ap1_${String(++grant).padStart(43, "a")}`,
-    });
-    batch.filterAutoPing(
-      (_occurrenceId, threadTarget) =>
-        threadTarget?.kind === "github-review-thread" && threadTarget.threadId === "thread-1",
-    );
+const HANDLE = `ap1_${"a".repeat(43)}`;
+const TOOL = '"$SPUR_SESSION_TOOL_DIR/spur" auto-ping mute';
 
+function reviewBatchWith(signals: Array<Record<string, unknown>>, providerId = "github") {
+  return requireBatch(
+    createSendBatchParser(providerId as "github", "proj", "src-1")(githubEventData({ signals })),
+    "expected review batch",
+  );
+}
+
+describe("automatic ping mute footer", () => {
+  it("appends a three-line footer after the body once a handle is attached", () => {
+    const batch = reviewBatchWith([
+      { key: "ci_failed", kind: "ci_failed", text: "CI is failing: build.", changeKey: "head-a" },
+    ]);
+    expect(batch.format()).not.toContain("Can't act now?");
+    batch.attachHandle(HANDLE);
+    const lines = batch.format().split("\n");
+    const footerAt = lines.indexOf("Can't act now? Mute — pings resume on their own:");
+    expect(footerAt).toBeGreaterThan(0);
+    expect(lines.slice(footerAt + 1)).toEqual([
+      `  until next commit   ${TOOL} ${HANDLE}`,
+      `  for a while   ${TOOL} ${HANDLE} --for 2h --reason "<why>"   (max 24h)`,
+      `  forever   ${TOOL} ${HANDLE} --forever --reason "<why>"  (only: trigger wrong for this session or broken)`,
+    ]);
+    expect(lines.slice(0, footerAt).join("\n")).toContain("CI is failing: build.");
+  });
+
+  it.each([
+    ["merge_conflict", "until next commit here or on base"],
+    ["changes_requested", "until next commit"],
+    ["review_requested", "until next commit"],
+    ["ready_for_review", "until next commit"],
+    ["approved", "until next commit"],
+  ])("labels %s as %s", (kind, label) => {
+    const batch = reviewBatchWith([{ key: kind, kind, text: kind, changeKey: "k" }]);
+    batch.attachHandle(HANDLE);
+    expect(batch.format()).toContain(`  ${label}   ${TOOL} ${HANDLE}\n`);
+  });
+
+  it("labels threads, PR comments and merge request notes", () => {
+    const thread = reviewBatchWith([
+      {
+        key: "review-comment:1",
+        kind: "comment",
+        text: "inline",
+        changeKey: "1:false",
+        providerThreadTarget: { kind: "github-review-thread", threadId: "t1" },
+      },
+    ]);
+    thread.attachHandle(HANDLE);
+    expect(thread.format()).toContain("  until new reply in this thread   ");
+    const comment = reviewBatchWith([
+      { key: "comment:1", kind: "comment", text: "hi", changeKey: "1" },
+    ]);
+    comment.attachHandle(HANDLE);
+    expect(comment.format()).toContain("  until new comment on this PR   ");
+    const note = reviewBatchWith(
+      [{ key: "comment:1", kind: "comment", text: "hi", changeKey: "1" }],
+      "gitlab",
+    );
+    note.attachHandle(HANDLE);
+    expect(note.format()).toContain("  until new comment on this merge request   ");
+  });
+
+  it("uses a generic label for mixed kinds and omits the line without change keys", () => {
+    const mixed = reviewBatchWith([
+      { key: "ci_failed", kind: "ci_failed", text: "ci", changeKey: "h" },
+      { key: "merge_conflict", kind: "merge_conflict", text: "mc", changeKey: "h:b" },
+    ]);
+    mixed.attachHandle(HANDLE);
+    expect(mixed.format()).toContain(`  until it changes   ${TOOL} ${HANDLE}\n`);
+    expect(mixed.muteGrant().untilChange).toBe(true);
+
+    const keyless = reviewBatchWith([{ key: "ci_failed", kind: "ci_failed", text: "ci" }]);
+    keyless.attachHandle(HANDLE);
+    expect(keyless.muteGrant().untilChange).toBe(false);
+    const lines = keyless.format().split("\n");
+    expect(lines.slice(-2).every((line) => /^ {2}(for a while|forever) {3}/.test(line))).toBe(true);
+    expect(keyless.format()).not.toContain("until next commit   ");
+  });
+
+  it("offers no until-change line for Telegram and service batches", () => {
+    const telegram = requireBatch(
+      createSendBatchParser("telegram", "proj", "src-1")(telegramEventData()),
+      "Telegram batch",
+    );
+    telegram.attachHandle(HANDLE);
+    expect(telegram.muteGrant().untilChange).toBe(false);
+    const telegramLines = telegram.format().split("\n");
+    expect(telegramLines.slice(-3)[0]).toBe("Can't act now? Mute — pings resume on their own:");
+    expect(telegramLines).toHaveLength(telegram.format().split("\n").length);
+    expect(telegramLines.slice(-2).every((line) => line.includes(TOOL))).toBe(true);
+
+    const service = requireBatch(
+      createSendBatchParser(
+        "service",
+        "proj",
+        "src-1",
+      )({
+        sessionId: "api-1",
+        serviceId: "web",
+        ruleId: "crash",
+      }),
+      "service batch",
+    );
+    service.attachHandle(HANDLE);
+    expect(service.muteGrant().untilChange).toBe(false);
+    expect(service.format().split("\n").slice(-3)[0]).toBe(
+      "Can't act now? Mute — pings resume on their own:",
+    );
+  });
+
+  it("exposes subjects: PR-level and thread-level signals mute separately", () => {
+    const batch = reviewBatchWith([
+      { key: "ci_failed", kind: "ci_failed", text: "ci", changeKey: "h" },
+      {
+        key: "review-comment:1",
+        kind: "comment",
+        text: "inline",
+        changeKey: "9:false",
+        providerThreadTarget: { kind: "github-review-thread", threadId: "t1" },
+      },
+    ]);
+    const subjects = batch.muteGrant().items.map((item) => item.subject);
+    expect(subjects[0]).toMatch(/^review:github:.*#42$/);
+    expect(subjects[1]).toBe('thread:{"kind":"github-review-thread","threadId":"t1"}');
+  });
+
+  it("filters muted items and keeps their siblings", () => {
+    const batch = reviewBatchWith([
+      { key: "ci_failed", kind: "ci_failed", text: "ci", changeKey: "h" },
+      { key: "ready_for_review", kind: "ready_for_review", text: "ready", changeKey: "h" },
+    ]);
+    const muted: string[] = [];
+    batch.filterMuted(
+      (item) => (item.kind === "ci_failed" ? { mode: "forever", suppressionId: "s1" } : null),
+      (key) => muted.push(key),
+    );
+    expect(muted).toEqual(["ci_failed"]);
     expect(batch.format()).toContain("ready");
-    expect(batch.format()).not.toContain("inline");
-    expect(batch.formatAutoPingControls()).toContain("--event");
-    expect(batch.formatAutoPingControls().match(/--subscription/g)).toHaveLength(1);
-    expect(batch.formatAutoPingControls()).not.toContain("--thread");
+    expect(batch.format()).not.toContain("- ci");
     expect(restoreSendBatch(batch.serialize())?.format()).toContain("ready");
+  });
+
+  it("never serializes the handle", () => {
+    const batch = reviewBatchWith([{ key: "ci_failed", kind: "ci_failed", text: "ci" }]);
+    batch.attachHandle(HANDLE);
+    expect(JSON.stringify(batch.serialize())).not.toContain(HANDLE);
+  });
+
+  it("changes the retry fingerprint with the signal revision", () => {
+    const base = { key: "ci_failed", kind: "ci_failed", text: "ci" };
+    const a = reviewBatchWith([{ ...base, revision: "A:r1" }]).retryItems()[0];
+    const same = reviewBatchWith([{ ...base, revision: "A:r1" }]).retryItems()[0];
+    const b = reviewBatchWith([{ ...base, revision: "B:r1" }]).retryItems()[0];
+    expect(a?.fingerprint).toBe(same?.fingerprint);
+    expect(a?.fingerprint).not.toBe(b?.fingerprint);
+  });
+
+  it("surfaces CI head and failing checks on the retry item", () => {
+    const item = reviewBatchWith([
+      { key: "ci_failed", kind: "ci_failed", text: "ci", ciRun: { head: "A", checks: ["build"] } },
+    ]).retryItems()[0];
+    expect(item?.ci).toEqual({ prNumber: 42, head: "A", checks: ["build"] });
   });
 });
 
 describe("restoreSendBatch", () => {
-  it("rejects present policy state that omits targets for a restored payload", () => {
+  it("ignores a legacy persisted auto-ping policy block", () => {
     const batch = requireBatch(
       createSendBatchParser("github", "proj", "src")(githubEventData()),
       "review batch",
     );
-    expect(
-      restoreSendBatch({
-        ...batch.serialize(),
-        autoPing: {
-          routeFingerprint: "route",
-          destination: { kind: "session", sessionId: "api-1" },
-          subscriptionHandle: "subscription",
-          items: {},
-        },
-      }),
-    ).toBeNull();
-    expect(restoreSendBatch(batch.serialize())).not.toBeNull();
-  });
-  it.each([
-    null,
-    {},
-    { occurrenceId: "event", eventHandle: 1 },
-    { occurrenceId: "event", eventHandle: "handle", threadTarget: { kind: "subscription" } },
-    { occurrenceId: "event", eventHandle: "handle", threadHandle: "orphan" },
-  ])("rejects malformed persisted auto-ping items: %j", (item) => {
-    const batch = requireBatch(
-      createSendBatchParser("github", "proj", "src")(githubEventData()),
-      "review batch",
-    );
-    expect(
-      restoreSendBatch({
-        ...batch.serialize(),
-        autoPing: {
-          routeFingerprint: "route",
-          destination: { kind: "session", sessionId: "api-1" },
-          subscriptionHandle: "subscription",
-          items: { "comment:1": item },
-        },
-      }),
-    ).toBeNull();
+    const restored = restoreSendBatch({
+      ...batch.serialize(),
+      autoPing: { routeFingerprint: "route", subscriptionHandle: "legacy", items: {} },
+    });
+    expect(restored).not.toBeNull();
+    expect(JSON.stringify(restored?.serialize())).not.toContain("autoPing");
   });
   it("reserves retained conflict replay budgets for GitHub without capping later GitLab episodes", () => {
     const data = githubEventData({

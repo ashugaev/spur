@@ -290,6 +290,8 @@ type GitHubPrStatusSummary = GitHubPrSummary & {
   statusCheckRollupState: string;
   draft: boolean;
   state: string;
+  headRefOid: string;
+  baseRefOid: string;
 };
 
 type ReviewEntry = {
@@ -304,6 +306,8 @@ export type GitHubCollectedSignals = {
   snapshot: Map<string, ReviewSignal>;
   ciActive: boolean;
   ciCheckFetchFailed: boolean;
+  /** Mergeability still UNKNOWN after the recheck: absence of a conflict is not proof. */
+  mergeableUnknown: boolean;
 };
 
 export type GitHubSignalBatchResult =
@@ -379,6 +383,8 @@ function readPrStatusSummary(value: unknown): GitHubPrStatusSummary | null {
     statusCheckRollupState: readRollupState(value.statusCheckRollup),
     draft: value.isDraft === true,
     state: readString(value.state) ?? "",
+    headRefOid: readString(value.headRefOid) ?? "",
+    baseRefOid: readString(value.baseRefOid) ?? "",
   };
 }
 
@@ -445,11 +451,21 @@ function latestChecksByName(checks: GitHubRunCheck[]): GitHubRunCheck[] {
     .map(({ check }) => check);
 }
 
-export function summarizeFailingCi(checks: GitHubRunCheck[]): string | null {
-  const failing = latestChecksByName(checks).filter((check) => {
+function failingCiChecks(
+  checks: GitHubRunCheck[],
+  ignoreChecks: readonly string[] = [],
+): GitHubRunCheck[] {
+  return latestChecksByName(checks).filter((check) => {
     const state = normalizeReviewState(check.conclusion ?? check.state);
-    return FAILING_GITHUB_CI_STATES.has(state);
+    return FAILING_GITHUB_CI_STATES.has(state) && !ignoreChecks.includes(check.name);
   });
+}
+
+export function summarizeFailingCi(
+  checks: GitHubRunCheck[],
+  ignoreChecks: readonly string[] = [],
+): string | null {
+  const failing = failingCiChecks(checks, ignoreChecks);
   return failing.length > 0
     ? `CI is failing: ${failing.map((check) => check.name).join(", ")}.`
     : null;
@@ -505,14 +521,14 @@ function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | 
 
 const GITHUB_REVIEW_THREAD_FIELDS = `id isResolved comments(last:100){nodes{databaseId body path line author{login}} pageInfo{hasPreviousPage startCursor}}`;
 const GITHUB_CHECK_CONTEXT_FIELDS = `... on CheckRun{name conclusion status checkSuite{databaseId createdAt app{databaseId} workflowRun{event workflow{databaseId}}}} ... on StatusContext{context state createdAt creator{login}}`;
-const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName headRepository{nameWithOwner} author{login} reviewDecision mergeable mergeStateStatus isDraft state
+const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName headRefOid baseRef{target{oid}} headRepository{nameWithOwner} author{login} reviewDecision mergeable mergeStateStatus isDraft state
   commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{
     ${GITHUB_CHECK_CONTEXT_FIELDS}
   } pageInfo{hasPreviousPage startCursor}}}}}}
   reviewThreads(last:100){nodes{${GITHUB_REVIEW_THREAD_FIELDS}} pageInfo{hasPreviousPage startCursor}}
   reviews(last:100){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}
   latestOpinionatedReviews(last:100){nodes{state author{login}} pageInfo{hasPreviousPage}}
-  comments(last:100){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}
+  comments(last:100){nodes{databaseId body author{__typename login}} pageInfo{hasPreviousPage startCursor}}
   reviewRequests(last:${GITHUB_REVIEW_REQUEST_COUNT}){nodes{requestedReviewer{... on User{login}}}}`;
 
 function reviewBatchTargetLimit(bound: boolean): number {
@@ -644,6 +660,9 @@ function issueCommentsFromPrNode(value: Record<string, unknown>): IssueComment[]
     const id = readNumber(raw.databaseId);
     const body = readString(raw.body);
     if (id === null || body === null) return [];
+    // GitHub App and Actions posts (`__typename: "Bot"`) are status chatter, not
+    // PR feedback; dropping them here keeps them from waking the bound session.
+    if (isRecord(raw.author) && raw.author.__typename === "Bot") return [];
     const author = isRecord(raw.author) ? readString(raw.author.login) : null;
     return [{ id, body, user: { login: author } }];
   });
@@ -668,7 +687,17 @@ function summaryAndNode(
 ): { summary: GitHubPrStatusSummary; node: Record<string, unknown> } | null {
   if (!isRecord(value)) return null;
   const checks = checksFromPrNode(value);
-  const summary = readPrStatusSummary({ ...value, statusCheckRollup: checks });
+  // Current base branch tip, not PullRequest.baseRefOid: that one lags at the
+  // merge-base, so a base-only push would never change the conflict key.
+  const baseTip =
+    isRecord(value.baseRef) && isRecord(value.baseRef.target)
+      ? readString(value.baseRef.target.oid)
+      : undefined;
+  const summary = readPrStatusSummary({
+    ...value,
+    statusCheckRollup: checks,
+    baseRefOid: baseTip,
+  });
   return summary ? { summary, node: value } : null;
 }
 
@@ -700,7 +729,7 @@ export async function resolvePrSummary(
     "--state",
     "all",
     "--json",
-    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft",
+    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft,headRefOid,baseRefOid",
   );
   const parsed = parseJson(raw);
   const prs = Array.isArray(parsed)
@@ -708,48 +737,66 @@ export async function resolvePrSummary(
     : [];
   const pr = selectPrSummary(prs);
   if (!pr) return null;
-
-  let mergeable = pr.mergeable;
-  let mergeStateStatus = pr.mergeStateStatus;
-  if (
-    normalizeReviewState(mergeable) === "UNKNOWN" ||
-    normalizeReviewState(mergeStateStatus) === "UNKNOWN"
-  ) {
-    try {
-      const rawView = await gh(
-        worktreePath,
-        "pr",
-        "view",
-        String(pr.number),
-        "--json",
-        "mergeable,mergeStateStatus,statusCheckRollup",
-      );
-      const view = parseJson(rawView);
-      if (isRecord(view)) {
-        const viewMergeable = readString(view.mergeable);
-        const viewMergeStateStatus = readString(view.mergeStateStatus);
-        if (viewMergeable) mergeable = viewMergeable;
-        if (viewMergeStateStatus) mergeStateStatus = viewMergeStateStatus;
-        const statusCheckRollupState = readRollupState(view.statusCheckRollup);
-        if (statusCheckRollupState) pr.statusCheckRollupState = statusCheckRollupState;
-      }
-    } catch {
-      // Leave UNKNOWN; next poll retries.
-    }
-  }
-
+  const rechecked = await recheckUnknownMergeable(worktreePath, pr);
   return {
     number: pr.number,
     title: pr.title,
     url: pr.url,
     reviewDecision: normalizeReviewDecision(pr.reviewDecision),
     repo: parseRepoFromUrl(pr.url),
-    mergeable,
-    mergeStateStatus,
-    statusCheckRollupState: pr.statusCheckRollupState,
+    mergeable: rechecked.mergeable,
+    mergeStateStatus: rechecked.mergeStateStatus,
+    statusCheckRollupState: rechecked.statusCheckRollupState,
     draft: pr.draft,
     state: pr.state,
+    headRefOid: pr.headRefOid,
+    baseRefOid: pr.baseRefOid,
   };
+}
+
+function isMergeabilityUnknown(pr: Pick<GitHubPrStatusSummary, "mergeable" | "mergeStateStatus">) {
+  return (
+    normalizeReviewState(pr.mergeable) === "UNKNOWN" ||
+    normalizeReviewState(pr.mergeStateStatus) === "UNKNOWN"
+  );
+}
+
+// GitHub computes mergeability lazily: the list and batch reads can report
+// UNKNOWN for a PR that has a conflict. A single `gh pr view` usually settles
+// it. Still UNKNOWN (or a failed view) leaves the summary's own values; the
+// next poll retries.
+async function recheckUnknownMergeable(
+  worktreePath: string,
+  pr: GitHubPrStatusSummary,
+): Promise<{ mergeable: string; mergeStateStatus: string; statusCheckRollupState: string }> {
+  const result = {
+    mergeable: pr.mergeable,
+    mergeStateStatus: pr.mergeStateStatus,
+    statusCheckRollupState: pr.statusCheckRollupState,
+  };
+  if (!isMergeabilityUnknown(pr)) return result;
+  try {
+    const rawView = await gh(
+      worktreePath,
+      "pr",
+      "view",
+      String(pr.number),
+      "--json",
+      "mergeable,mergeStateStatus,statusCheckRollup",
+    );
+    const view = parseJson(rawView);
+    if (isRecord(view)) {
+      const viewMergeable = readString(view.mergeable);
+      const viewMergeStateStatus = readString(view.mergeStateStatus);
+      if (viewMergeable) result.mergeable = viewMergeable;
+      if (viewMergeStateStatus) result.mergeStateStatus = viewMergeStateStatus;
+      const statusCheckRollupState = readRollupState(view.statusCheckRollup);
+      if (statusCheckRollupState) result.statusCheckRollupState = statusCheckRollupState;
+    }
+  } catch {
+    // Leave UNKNOWN; next poll retries.
+  }
+  return result;
 }
 
 export async function resolveBoundPrSummary(
@@ -762,7 +809,7 @@ export async function resolveBoundPrSummary(
     "view",
     String(pr.number),
     "--json",
-    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft",
+    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft,headRefOid,baseRefOid",
   );
   const summary = readPrStatusSummary(parseJson(raw));
   if (!summary) {
@@ -780,6 +827,8 @@ export async function resolveBoundPrSummary(
     statusCheckRollupState: summary.statusCheckRollupState,
     draft: summary.draft,
     state: summary.state,
+    headRefOid: summary.headRefOid,
+    baseRefOid: summary.baseRefOid,
   };
 }
 
@@ -1080,6 +1129,7 @@ function collectSignalsFromNode(
   sourceId: string,
   viewerLogin: string | null,
   selfMarker?: string,
+  ignoreChecks?: readonly string[],
 ): GitHubCollectedSignals {
   const ignored = readIgnoredGitHubFeedback(dataDir, projectId, sourceId, session.id, pr.number);
   const newlyIgnored: string[] = [];
@@ -1128,7 +1178,7 @@ function collectSignalsFromNode(
   const ciText =
     normalizeReviewState(pr.statusCheckRollupState) === "SUCCESS"
       ? null
-      : summarizeFailingCi(checks);
+      : summarizeFailingCi(checks, ignoreChecks);
   const headRepository = isRecord(node.headRepository)
     ? readString(node.headRepository.nameWithOwner)
     : null;
@@ -1221,6 +1271,7 @@ function collectSignalsFromNode(
   for (const signal of [...reviewSignals, ...commentSignals, ...approvalSignals]) {
     snapshot.set(signal.key, signal);
   }
+  annotateChangeKeys(snapshot, pr, node, failingCiChecks(checks, ignoreChecks), reviews);
 
   return {
     data: {
@@ -1234,7 +1285,71 @@ function collectSignalsFromNode(
     snapshot,
     ciActive: hasActiveChecks(checks),
     ciCheckFetchFailed: false,
+    mergeableUnknown: isMergeabilityUnknown(pr) && !hasMergeConflict(pr),
   };
+}
+
+// Thread key: newest comment id plus the resolved flag, so a new reply or a
+// resolve flip moves it.
+function reviewThreadChangeKeys(node: Record<string, unknown>): Map<string, string> {
+  const keys = new Map<string, string>();
+  for (const thread of connectionNodes(node.reviewThreads)) {
+    if (!isRecord(thread)) continue;
+    const id = readString(thread.id);
+    const last = connectionNodes(thread.comments).at(-1);
+    const lastId = isRecord(last) ? readNumber(last.databaseId) : null;
+    if (id && lastId !== null) keys.set(id, `${lastId}:${thread.isResolved === true}`);
+  }
+  return keys;
+}
+
+// Until-change mute keys and occurrence identity per signal. Without a head
+// commit id a signal carries none: its ping then offers no until-change mute.
+function annotateChangeKeys(
+  snapshot: Map<string, ReviewSignal>,
+  pr: GitHubPrStatusSummary,
+  node: Record<string, unknown>,
+  failing: GitHubRunCheck[],
+  reviews: ReviewEntry[],
+): void {
+  const head = pr.headRefOid;
+  const base = pr.baseRefOid;
+  const threadKeys = reviewThreadChangeKeys(node);
+  const issueCommentIds = issueCommentsFromPrNode(node).map((comment) => comment.id);
+  const reviewIds = reviews.flatMap((review) => (typeof review.id === "number" ? [review.id] : []));
+  // Issue comment and review ids are separate id spaces: track each maximum.
+  const latestCommentKey =
+    issueCommentIds.length + reviewIds.length > 0
+      ? `ic:${String(Math.max(0, ...issueCommentIds))}|rv:${String(Math.max(0, ...reviewIds))}`
+      : undefined;
+  for (const [key, signal] of snapshot) {
+    let annotated: ReviewSignal = signal;
+    if (signal.kind === "ci_failed") {
+      if (head) {
+        const checks = [...new Set(failing.map((check) => check.name))].sort();
+        annotated = {
+          ...signal,
+          changeKey: head,
+          revision: `${head}:${checks.join(",")}`,
+          ciRun: { head, checks },
+        };
+      }
+    } else if (signal.kind === "merge_conflict") {
+      if (head && base) {
+        annotated = { ...signal, changeKey: `${head}:${base}`, revision: `${head}:${base}` };
+      }
+    } else if (signal.kind === "comment") {
+      const target = signal.providerThreadTarget;
+      const changeKey =
+        target?.kind === "github-review-thread"
+          ? threadKeys.get(target.threadId)
+          : latestCommentKey;
+      if (changeKey !== undefined) annotated = { ...signal, changeKey };
+    } else if (signal.kind !== "merged" && signal.kind !== "closed" && head) {
+      annotated = { ...signal, changeKey: head };
+    }
+    if (annotated !== signal) snapshot.set(key, annotated);
+  }
 }
 
 function parseRepoName(repo: string): { owner: string; name: string } | null {
@@ -1676,7 +1791,7 @@ function signalPageField(index: number, page: PullRequestSignalPage): string {
       ? `commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100,before:$before${index}){nodes{${GITHUB_CHECK_CONTEXT_FIELDS}} pageInfo{hasPreviousPage startCursor}}}}}}`
       : page.kind === "reviews"
         ? `reviews(last:100,before:$before${index}){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}`
-        : `comments(last:100,before:$before${index}){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}`;
+        : `comments(last:100,before:$before${index}){nodes{databaseId body author{__typename login}} pageInfo{hasPreviousPage startCursor}}`;
   return `s${index}:node(id:$id${index}){... on PullRequest{${connection}}}`;
 }
 
@@ -1775,6 +1890,7 @@ async function runReviewRepoBatch(
   maxTargets: number,
   expectedHeads: Map<string, Promise<PrRepoSlug | null>>,
   selfMarker?: string,
+  ignoreChecks?: readonly string[],
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
   const slug = targets[0]?.slug;
@@ -1999,6 +2115,10 @@ async function runReviewRepoBatch(
       }
       continue;
     }
+    const recheckCwd = matchingTargets[0]?.session.worktreePath;
+    const summary: GitHubPrStatusSummary = recheckCwd
+      ? { ...selected.summary, ...(await recheckUnknownMergeable(recheckCwd, selected.summary)) }
+      : selected.summary;
     for (const matching of matchingTargets) {
       const session = matching.session;
       let expectedHead: PrRepoSlug | null = null;
@@ -2018,7 +2138,7 @@ async function runReviewRepoBatch(
           status: "ok",
           collected: collectSignalsFromNode(
             session,
-            selected.summary,
+            summary,
             selected.node,
             expectedHead,
             matching.slug.host,
@@ -2027,6 +2147,7 @@ async function runReviewRepoBatch(
             sourceId,
             viewerLogin,
             selfMarker,
+            ignoreChecks,
           ),
         });
       } catch (error) {
@@ -2044,6 +2165,7 @@ export async function collectGitHubSignalsBatch(
   sourceId: string,
   maxTargets?: number,
   selfMarker?: string,
+  ignoreChecks?: readonly string[],
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
   const expectedHeads = new Map<string, Promise<PrRepoSlug | null>>();
@@ -2143,6 +2265,7 @@ export async function collectGitHubSignalsBatch(
             limit,
             expectedHeads,
             selfMarker,
+            ignoreChecks,
           ),
         );
         if (admission.status === "blocked") {

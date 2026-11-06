@@ -381,7 +381,7 @@ export function VersionMenu() {
       >
         <span
           key={heartbeatPulse.key}
-          className={`w-[21ch] truncate text-center ${
+          className={`max-w-[24ch] truncate ${
             heartbeatPulse.key === 0
               ? ""
               : "motion-safe:animate-pulse motion-safe:[animation-duration:800ms] motion-safe:[animation-iteration-count:1]"

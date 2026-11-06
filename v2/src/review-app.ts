@@ -1,10 +1,26 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import {
+  link,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { Command } from "commander";
 import { digest, parseAssessment, type InterfaceAssessment } from "./review-interface.js";
-import { publishLaneState } from "./review-state.js";
+import {
+  feedbackSummary,
+  parseFeedback,
+  publishLaneState,
+  type ReviewFeedback,
+} from "./review-state.js";
 import {
   GitHubApp,
   ReviewAppError,
@@ -37,6 +53,7 @@ interface Attempt {
   B: string;
   contractDigest: string;
   receipt: string;
+  feedback?: ReviewFeedback;
 }
 interface Request extends Attempt {
   assessment: InterfaceAssessment;
@@ -44,6 +61,13 @@ interface Request extends Attempt {
   verdict: "APPROVED" | "CHANGES_REQUESTED";
   coverage: { challenger: string; output: string; omissionsClosed: boolean } | null;
   rows: Row[];
+}
+interface LegacyRecovery {
+  version: 1;
+  digest: string;
+  attempts: string[];
+  session: string;
+  publication: "unknown";
 }
 export function parseAttempt(value: unknown): Attempt {
   const data = object(value);
@@ -58,6 +82,18 @@ export function parseAttempt(value: unknown): Attempt {
     B: hash(data.B, 40),
     contractDigest: hash(data.contractDigest, 64),
     receipt: string(data.receipt),
+    ...(data.feedback === undefined
+      ? {}
+      : {
+          feedback: parseFeedback(
+            data.feedback,
+            object(data.feedback).kind === "plan"
+              ? "PENDING"
+              : object(data.feedback).kind === "capability"
+                ? "BLOCKED"
+                : "CHANGES_REQUESTED",
+          ),
+        }),
   };
 }
 
@@ -120,6 +156,11 @@ export function parseRequest(value: unknown): Request {
   }
   if (data.verdict === "APPROVED" && rows.some((row) => row.status !== "passed"))
     throw new ReviewAppError("failed-scenarios");
+  if (data.verdict === "CHANGES_REQUESTED") {
+    parseFeedback(data.feedback, "CHANGES_REQUESTED");
+    if (!rows.some((row) => row.status === "failed"))
+      throw new ReviewAppError("missing-failed-evidence");
+  }
   return {
     ...attempt,
     assessment: parseAssessment(data.assessment),
@@ -128,6 +169,170 @@ export function parseRequest(value: unknown): Request {
     coverage,
     rows,
   };
+}
+
+function recognizeLegacy(raw: Buffer, request: Attempt): { session: string; attempts: string[] } {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw.toString("utf8")) as unknown;
+  } catch {
+    throw new ReviewAppError("legacy-receipt-invalid");
+  }
+  const legacy = object(value);
+  const keys = new Set([
+    "repository",
+    "pr",
+    "lane",
+    "session",
+    "attempt",
+    "H",
+    "B",
+    "contractDigest",
+    "status",
+    "evidence",
+    "reviewId",
+    "environment",
+    "delta",
+    "scenarioMatrix",
+    "exclusions",
+    "coverageChallenge",
+    "publicationPrerequisite",
+    "checks",
+    "localVerdict",
+    "publicationVerdict",
+    "updatedAt",
+    "blockers",
+    "publication",
+    "freshness",
+    "screenshotSelfAnalysis",
+    "manualChecks",
+    "notification",
+    "selfVerify",
+    "wakeReconciliation",
+    "previousAttempt",
+    "newEnvironmentScope",
+    "resolvedBlockers",
+    "retainedEvidence",
+    "excludedEvidence",
+    "cleanupEvidence",
+    "ledger",
+  ]);
+  if (
+    Object.keys(legacy).some((key) => !keys.has(key)) ||
+    legacy.repository !== request.repo ||
+    legacy.pr !== request.pr ||
+    legacy.lane !== request.lane ||
+    legacy.status !== "BLOCKED" ||
+    legacy.localVerdict !== "FAIL" ||
+    legacy.publicationVerdict !== "BLOCKED" ||
+    legacy.reviewId !== null ||
+    !Array.isArray(legacy.evidence)
+  )
+    throw new ReviewAppError("legacy-receipt-invalid");
+  hash(legacy.H, 40);
+  hash(legacy.B, 40);
+  hash(legacy.contractDigest, 64);
+  if (legacy.wakeReconciliation !== undefined) {
+    const wake = object(legacy.wakeReconciliation);
+    if (wake.newAttempt !== undefined && typeof wake.newAttempt !== "boolean")
+      throw new ReviewAppError("legacy-receipt-invalid");
+  }
+  const attempts = [identifier(legacy.attempt)];
+  if (legacy.previousAttempt !== undefined) attempts.push(identifier(legacy.previousAttempt));
+  return { session: identifier(legacy.session), attempts: [...new Set(attempts)] };
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  const directory = await open(path, "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
+
+function legacyArchive(canonical: string, sha256: string): string {
+  return `${canonical}.legacy-${sha256}`;
+}
+
+async function readLegacyArchive(path: string): Promise<Buffer> {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const metadata = await file.stat();
+    if (!metadata.isFile() || (metadata.mode & 0o077) !== 0)
+      throw new ReviewAppError("legacy-archive-invalid");
+    return await file.readFile();
+  } finally {
+    await file.close();
+  }
+}
+
+async function archiveLegacy(canonical: string, sha256: string, raw: Buffer): Promise<void> {
+  const archive = legacyArchive(canonical, sha256);
+  let stage: string | undefined;
+  try {
+    try {
+      if (!(await readLegacyArchive(archive)).equals(raw))
+        throw new ReviewAppError("legacy-archive-invalid");
+      await syncDirectory(dirname(canonical));
+      return;
+    } catch (error) {
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT")
+        throw error;
+    }
+    stage = await mkdtemp(join(dirname(canonical), ".review-"));
+    const temp = join(stage, "legacy.json");
+    await writeFile(temp, raw, { mode: 0o600, flag: "wx", flush: true });
+    try {
+      await link(temp, archive);
+    } catch (error) {
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "EEXIST")
+        throw error;
+    }
+    if (!(await readLegacyArchive(archive)).equals(raw))
+      throw new ReviewAppError("legacy-archive-invalid");
+    await syncDirectory(dirname(canonical));
+  } catch {
+    throw new ReviewAppError("legacy-archive-invalid");
+  } finally {
+    if (stage) await rm(stage, { recursive: true, force: true });
+  }
+}
+
+async function validateLegacyRecovery(
+  value: unknown,
+  canonical: string,
+  request: Attempt,
+  retired: string[],
+): Promise<LegacyRecovery> {
+  const recovery = object(value);
+  if (
+    Object.keys(recovery).some(
+      (key) => !["version", "digest", "attempts", "session", "publication"].includes(key),
+    ) ||
+    recovery.version !== 1 ||
+    recovery.publication !== "unknown" ||
+    !Array.isArray(recovery.attempts) ||
+    recovery.attempts.length === 0 ||
+    !recovery.attempts.every(
+      (attempt) => typeof attempt === "string" && /^[a-zA-Z0-9_.-]+$/.test(attempt),
+    ) ||
+    new Set(recovery.attempts).size !== recovery.attempts.length ||
+    !recovery.attempts.every((attempt) => retired.includes(attempt))
+  )
+    throw new ReviewAppError("receipt-state-invalid");
+  const sha256 = hash(recovery.digest, 64);
+  const session = identifier(recovery.session);
+  const raw = await readLegacyArchive(legacyArchive(canonical, sha256));
+  if (createHash("sha256").update(raw).digest("hex") !== sha256)
+    throw new ReviewAppError("legacy-archive-invalid");
+  const legacy = recognizeLegacy(raw, request);
+  if (
+    session !== legacy.session ||
+    JSON.stringify(recovery.attempts) !== JSON.stringify(legacy.attempts)
+  )
+    throw new ReviewAppError("receipt-state-invalid");
+  return { version: 1, digest: sha256, attempts: legacy.attempts, session, publication: "unknown" };
 }
 
 function client(config: Config, repo: string, lane: Lane, transport?: typeof fetch): GitHubApp {
@@ -180,14 +385,33 @@ export function blockReview(
 ) {
   return transitionReview(config, request, session, "block", transport);
 }
+export function recoverReview(
+  config: Config,
+  request: Attempt,
+  session: string | undefined,
+  legacySha256: string,
+  transport?: typeof fetch,
+) {
+  hash(legacySha256, 64);
+  return transitionReview(config, request, session, "recover", transport, legacySha256);
+}
 async function transitionReview(
   config: Config,
   request: Attempt | Request,
   session: string | undefined,
-  action: "prepare" | "block" | "publish",
+  action: "prepare" | "block" | "publish" | "recover",
   transport?: typeof fetch,
+  legacySha256?: string,
 ) {
   if (session !== request.session) throw new ReviewAppError("session-mismatch");
+  if (action === "recover") hash(legacySha256, 64);
+  request =
+    action === "publish"
+      ? parseRequest(request)
+      : {
+          ...parseAttempt(request),
+          feedback: parseFeedback(request.feedback, action === "block" ? "BLOCKED" : "PENDING"),
+        };
   const app = client(config, request.repo, request.lane, transport);
   const path = `/repos/${request.repo}/pulls/${request.pr}`;
   const expand = (path: string) =>
@@ -253,6 +477,17 @@ async function transitionReview(
     reviewBlocked: false,
     mutationStarted: false,
     supersededAttempts: [] as string[],
+    legacyRecovery: undefined as LegacyRecovery | undefined,
+    feedback: action === "publish" ? undefined : request.feedback,
+    localFeedback:
+      action === "publish" && "verdict" in request && request.verdict === "CHANGES_REQUESTED"
+        ? request.feedback
+        : undefined,
+    preparedFeedback: action === "prepare" || action === "recover" ? request.feedback : undefined,
+    feedbackPublication: { status: "unconfirmed" } as {
+      status: "unconfirmed" | "confirmed" | "failed";
+      error?: string;
+    },
   };
   let ownsAttempt = false;
   const save = async () => {
@@ -266,6 +501,10 @@ async function transitionReview(
         flush: true,
       });
       await rename(temp, canonical);
+      if (action === "recover") {
+        ownsAttempt = true;
+        await syncDirectory(dirname(canonical));
+      }
     } catch {
       throw new ReviewAppError("receipt-write");
     } finally {
@@ -276,20 +515,40 @@ async function transitionReview(
     }
   };
   const announce = async () => {
-    await publishLaneState(app, {
-      version: 1,
-      repo: request.repo,
-      pr: request.pr,
-      lane: request.lane,
-      session: request.session,
-      attempt: request.attempt,
-      H: request.H,
-      B: request.B,
-      status: receipt.status as "PENDING" | "BLOCKED" | "APPROVED" | "CHANGES_REQUESTED",
-      evidenceDigest: digest({ rows: receipt.evidence, coverage: receipt.coverage }),
-      reviewId: receipt.reviewId,
-      assessment: "assessment" in request ? request.assessment : null,
-    });
+    receipt.feedbackPublication = { status: "unconfirmed" };
+    try {
+      await publishLaneState(app, {
+        version: 1,
+        repo: request.repo,
+        pr: request.pr,
+        lane: request.lane,
+        session: request.session,
+        attempt: request.attempt,
+        H: request.H,
+        B: request.B,
+        status: receipt.status as "PENDING" | "BLOCKED" | "APPROVED" | "CHANGES_REQUESTED",
+        evidenceDigest: digest(
+          receipt.status === "PENDING"
+            ? { rows: [], coverage: null }
+            : { rows: receipt.evidence, coverage: receipt.coverage },
+        ),
+        reviewId: receipt.reviewId,
+        assessment:
+          receipt.status !== "PENDING" && "assessment" in request ? request.assessment : null,
+        ...(receipt.status !== "APPROVED" && receipt.feedback !== undefined
+          ? { feedback: receipt.feedback }
+          : {}),
+      });
+      receipt.feedbackPublication = { status: "confirmed" };
+    } catch (error) {
+      receipt.feedbackPublication = {
+        status: "failed",
+        error: error instanceof ReviewAppError ? error.category : "internal",
+      };
+      await save();
+      throw error;
+    }
+    await save();
   };
   const fresh = async (actor: string) => {
     const pr = object(await app.request(path));
@@ -304,8 +563,27 @@ async function transitionReview(
   try {
     let previous: unknown;
     try {
-      previous = JSON.parse(await readFile(canonical, "utf8")) as unknown;
+      const raw = await readFile(canonical);
+      if (
+        action === "recover" &&
+        legacySha256 !== undefined &&
+        createHash("sha256").update(raw).digest("hex") === legacySha256
+      ) {
+        const legacy = recognizeLegacy(raw, request);
+        if (legacy.attempts.includes(request.attempt))
+          throw new ReviewAppError("attempt-superseded");
+        await archiveLegacy(canonical, legacySha256, raw);
+        receipt.supersededAttempts = legacy.attempts;
+        receipt.legacyRecovery = {
+          version: 1,
+          digest: legacySha256,
+          attempts: legacy.attempts,
+          session: legacy.session,
+          publication: "unknown",
+        };
+      } else previous = JSON.parse(raw.toString("utf8")) as unknown;
     } catch (error) {
+      if (action === "recover" && error instanceof ReviewAppError) throw error;
       if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT")
         throw new ReviewAppError("receipt-state-invalid");
     }
@@ -384,9 +662,57 @@ async function transitionReview(
         !["PENDING", "BLOCKED", "APPROVED", "CHANGES_REQUESTED"].includes(String(prior.status))
       )
         throw new ReviewAppError("receipt-state-invalid");
+      if (prior.legacyRecovery !== undefined) {
+        receipt.legacyRecovery = await validateLegacyRecovery(
+          prior.legacyRecovery,
+          canonical,
+          request,
+          prior.supersededAttempts,
+        );
+      }
       receipt.supersededAttempts = prior.supersededAttempts;
+      const priorFeedback =
+        prior.feedback === undefined
+          ? undefined
+          : parseFeedback(
+              prior.feedback,
+              prior.status as "PENDING" | "BLOCKED" | "APPROVED" | "CHANGES_REQUESTED",
+            );
+      const preparedFeedback =
+        prior.preparedFeedback === undefined
+          ? undefined
+          : parseFeedback(prior.preparedFeedback, "PENDING");
+      const localFeedback =
+        prior.localFeedback === undefined
+          ? undefined
+          : parseFeedback(prior.localFeedback, "CHANGES_REQUESTED");
       if (receipt.supersededAttempts.includes(request.attempt))
         throw new ReviewAppError("attempt-superseded");
+      if (action === "recover") {
+        if (
+          prior.attempt !== request.attempt ||
+          prior.H !== request.H ||
+          prior.B !== request.B ||
+          prior.session !== request.session ||
+          prior.contractDigest !== request.contractDigest ||
+          prior.appId !== receipt.appId ||
+          prior.status !== "PENDING" ||
+          prior.localVerdict !== null ||
+          prior.evidence.length !== 0 ||
+          prior.coverage !== null ||
+          prior.reviewId !== null ||
+          prior.inputDigest !== null ||
+          prior.mutationStarted ||
+          prior.reviewBlocked ||
+          receipt.legacyRecovery?.digest !== legacySha256
+        )
+          throw new ReviewAppError("receipt-state-invalid");
+        if (preparedFeedback && digest(preparedFeedback) !== digest(request.feedback))
+          throw new ReviewAppError("attempt-conflict");
+        ownsAttempt = true;
+        await announce();
+        return receipt;
+      }
       if (prior.attempt === request.attempt) {
         if (
           prior.H !== request.H ||
@@ -396,7 +722,12 @@ async function transitionReview(
           prior.appId !== receipt.appId
         )
           throw new ReviewAppError("attempt-conflict");
-        if (action === "prepare") throw new ReviewAppError("attempt-already-active");
+        if (action === "prepare") {
+          if (preparedFeedback && digest(preparedFeedback) !== digest(request.feedback))
+            throw new ReviewAppError("attempt-conflict");
+          if (prior.status !== "PENDING" || prior.inputDigest !== null)
+            return { ...receipt, ...prior };
+        }
         if (action === "publish" && prior.reviewBlocked)
           throw new ReviewAppError("attempt-blocked");
         if (
@@ -405,28 +736,49 @@ async function transitionReview(
           prior.inputDigest !== receipt.inputDigest
         )
           throw new ReviewAppError("attempt-conflict");
-        if (action === "block") receipt.inputDigest = prior.inputDigest;
+        if (action === "block") {
+          if (
+            prior.reason === "review-blocked" &&
+            priorFeedback &&
+            digest(priorFeedback) !== digest(request.feedback)
+          )
+            throw new ReviewAppError("attempt-conflict");
+          receipt.inputDigest = prior.inputDigest;
+          receipt.localVerdict = prior.localVerdict;
+          receipt.evidence = prior.evidence as Row[];
+          receipt.coverage = prior.coverage as Request["coverage"];
+          receipt.localFeedback =
+            localFeedback ?? (priorFeedback?.kind === "defect" ? priorFeedback : undefined);
+        }
+        receipt.preparedFeedback =
+          preparedFeedback ?? (action === "prepare" ? request.feedback : undefined);
+        if (action === "publish") receipt.feedback = receipt.preparedFeedback;
         receipt.mutationStarted = prior.mutationStarted;
         receipt.reviewId = prior.reviewId === null ? null : integer(prior.reviewId);
       } else {
         if (action !== "prepare") throw new ReviewAppError("attempt-not-current");
         receipt.supersededAttempts = [...receipt.supersededAttempts, prior.attempt];
       }
-    } else if (action !== "prepare") throw new ReviewAppError("attempt-not-prepared");
-    ownsAttempt = true;
+    } else if (action !== "prepare" && !receipt.legacyRecovery)
+      throw new ReviewAppError("attempt-not-prepared");
+    ownsAttempt = action !== "recover";
     if (action === "block") {
       receipt.status = "BLOCKED";
       receipt.reason = "review-blocked";
       receipt.reviewBlocked = true;
     }
     await save();
-    await announce();
+    if (action !== "publish" || !receipt.mutationStarted) await announce();
     if (action !== "publish") return receipt;
     if (!("body" in request)) throw new ReviewAppError("invalid-request");
     const access = await app.authenticate();
     await fresh(access.actor);
     const marker = `Spur review attempt: ${request.attempt}`;
-    const body = `${request.body}\n\n${marker}\nLane: ${request.lane}\nH: ${request.H}\nB: ${request.B}\nContractDigest: ${request.contractDigest}\nStatus: ${request.verdict}\nScenario evidence: ${JSON.stringify(request.rows)}\nCoverage: ${JSON.stringify(request.coverage)}\n\nWritten by Spur · ${request.session}`;
+    const explanation =
+      request.verdict === "CHANGES_REQUESTED"
+        ? `\n\n${feedbackSummary(parseFeedback(request.feedback, "CHANGES_REQUESTED"))}`
+        : "";
+    const body = `${request.body}${explanation}\n\n${marker}\nLane: ${request.lane}\nH: ${request.H}\nB: ${request.B}\nContractDigest: ${request.contractDigest}\nStatus: ${request.verdict}\nScenario evidence: ${JSON.stringify(request.rows)}\nCoverage: ${JSON.stringify(request.coverage)}\n\nWritten by Spur · ${request.session}`;
     const state = request.verdict === "APPROVED" ? "APPROVED" : "CHANGES_REQUESTED";
     const matching = (value: unknown) => {
       const review = object(value);
@@ -437,8 +789,6 @@ async function transitionReview(
         review.state === state
       );
     };
-    receipt.status = "BLOCKED";
-    await save();
     // Reconcile before mutation too: rerunning a completed attempt must not duplicate its review.
     const history = await app.history(`${path}/reviews`);
     const effective = (rows: unknown[]) => effectiveNativeReview(rows, { login: access.actor });
@@ -506,19 +856,33 @@ async function transitionReview(
       throw new ReviewAppError("native-verdict-superseded");
     await fresh(access.actor);
     receipt.status = request.verdict;
+    receipt.feedback = request.verdict === "CHANGES_REQUESTED" ? request.feedback : undefined;
     await announce();
-    await save();
     return receipt;
   } catch (error) {
     if (!ownsAttempt) throw error;
     receipt.status = "BLOCKED";
     receipt.reason = error instanceof ReviewAppError ? error.category : "internal";
+    receipt.feedback = {
+      kind: "capability",
+      constraint: "publication",
+      reason: `Review operation unconfirmed: ${receipt.reason}`,
+      check: `review-app ${action}`,
+      observed: `Operation failed with ${receipt.reason}`,
+      expected: "Authenticated publication and exact readback for the pinned revision",
+      evidence: `Attempt ${request.attempt}; native review ${receipt.reviewId ?? "unconfirmed"}; local verdict ${receipt.localVerdict ?? "not reached"}`,
+      unproven:
+        "This failure does not establish a technical code defect or revoke an existing native review",
+      action:
+        "Restore review publication capability, verify the current revision and reconcile this attempt",
+      actor: "Reviewer and repository operator",
+    };
     if (action !== "publish") receipt.reviewBlocked = true;
     await save();
     try {
       await announce();
     } catch {
-      /* Unconfirmed external state blocks continuation; cannot revoke an unseen old vote. */
+      /* announce retained the explicit failed publication outcome. */
     }
     return receipt;
   } finally {
@@ -543,11 +907,30 @@ export function registerReviewApp(program: Command): void {
         process.stdout.write(`${JSON.stringify(result)}\n`);
         if (
           (action === "prepare" && result.status !== "PENDING") ||
-          (action === "block" && result.reason !== "review-blocked")
+          (action === "block" && result.reason !== "review-blocked") ||
+          result.feedbackPublication.status !== "confirmed"
         )
           process.exitCode = 1;
       });
   }
+  command
+    .command("recover")
+    .description("Recover a recognized legacy BLOCKED receipt as verified PENDING.")
+    .requiredOption("--app-config <file>")
+    .requiredOption("--request <file>")
+    .requiredOption("--legacy-sha256 <digest>", "Exact SHA256 of the legacy receipt bytes")
+    .option("--json")
+    .action(async (options: { appConfig: string; request: string; legacySha256: string }) => {
+      const result = await recoverReview(
+        parseConfig(await readJson(options.appConfig)),
+        parseAttempt(await readJson(options.request)),
+        process.env["SPUR_SESSION"],
+        options.legacySha256,
+      );
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+      if (result.status !== "PENDING" || result.feedbackPublication.status !== "confirmed")
+        process.exitCode = 1;
+    });
   command
     .command("status")
     .requiredOption("--app-config <file>")

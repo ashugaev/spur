@@ -1,50 +1,40 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { appendMuteHistory, readMuteHistory } from "./auto-ping-history.js";
 import type {
   AutoPingDestination,
+  AutoPingMuteEndReason,
+  AutoPingMuteItem,
+  AutoPingMuteMode,
+  AutoPingMuteRequest,
+  AutoPingMuteView,
+  AutoPingResumeRequest,
   AutoPingRouteDescriptor,
-  AutoPingScope,
-  AutoPingSuppressionView,
-  AutoPingTarget,
 } from "./types.js";
 
-const STATE_VERSION = 1;
-const EVENT_GRACE_MS = 24 * 60 * 60 * 1_000;
+const STATE_VERSION = 2;
 const CREDENTIAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const GC_INTERVAL_MS = 60 * 60 * 1_000;
 const HANDLE_PATTERN = /^ap1_[A-Za-z0-9_-]{43}$/;
 const MERGE_CONFLICT_MAX_ATTEMPTS = 3;
-
-type GrantState = "pending" | "bound" | "consumed" | "revoked";
+const DELIVERED_KEYS_MAX = 16;
+const MUTE_FOR_MIN_MS = 60_000;
+export const AUTO_PING_MUTE_FOR_MAX_MS = 24 * 60 * 60 * 1_000;
+const REASON_MAX_LENGTH = 500;
 
 interface PersistedGrant {
   handleHash: string;
-  scope: AutoPingScope;
   routeFingerprint: string;
   destination: AutoPingDestination;
-  target: AutoPingTarget;
-  canonicalKey: string;
   createdAt: string;
-  state: GrantState;
-  actorSessionId?: string;
-  suppressionId?: string;
-  invalidatedAt?: string;
-}
-
-interface PersistedSuppression extends AutoPingSuppressionView {
-  canonicalKey: string;
   actorSessionId: string;
-  resumedAt?: string;
-  unreferencedAt?: string;
+  items: AutoPingMuteItem[];
+  untilChange: boolean;
 }
 
-interface AutoPingState {
-  version: 1;
-  routes: PersistedRoute[];
-  grants: PersistedGrant[];
-  suppressions: PersistedSuppression[];
-  mergeConflicts: PersistedMergeConflict[];
+interface PersistedSuppression extends AutoPingMuteView {
+  handleHash: string;
 }
 
 interface PersistedMergeConflict {
@@ -52,7 +42,23 @@ interface PersistedMergeConflict {
   prNumber: number;
   fingerprint: string;
   attempts: number;
-  lastAppliedClearId?: string;
+  deliveredKeys: string[];
+}
+
+interface PersistedCiSeen {
+  routeFingerprint: string;
+  prNumber: number;
+  head: string;
+  checks: string[];
+}
+
+interface AutoPingState {
+  version: typeof STATE_VERSION;
+  routes: PersistedRoute[];
+  grants: PersistedGrant[];
+  suppressions: PersistedSuppression[];
+  mergeConflicts: PersistedMergeConflict[];
+  ciSeen: PersistedCiSeen[];
 }
 
 interface PersistedRoute {
@@ -72,10 +78,8 @@ export class AutoPingError extends Error {
       | "forbidden"
       | "session_not_found"
       | "grant_not_found"
-      | "grant_not_ready"
-      | "grant_consumed"
       | "suppression_not_found",
-    readonly status: 400 | 403 | 404 | 409,
+    readonly status: 400 | 403 | 404,
     message: string,
   ) {
     super(message);
@@ -87,12 +91,20 @@ interface AutoPingServiceOptions {
   now?: () => number;
   setInterval?: typeof globalThis.setInterval;
   clearInterval?: typeof globalThis.clearInterval;
+  log?: (event: string, sessionId: string | undefined, details: Record<string, unknown>) => void;
 }
 
 export interface CreatedAutoPingGrant {
   handle: string;
   handleHash: string;
 }
+
+export interface AutoPingMuteMatch {
+  mode: AutoPingMuteMode;
+  suppressionId: string;
+}
+
+export type MergeConflictClaim = "accepted" | "exhausted" | "already_delivered";
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -127,36 +139,12 @@ function routeAuthority(route: AutoPingRouteDescriptor): string {
   });
 }
 
-function suppressionCanonicalKey(
-  scope: AutoPingScope,
-  routeFingerprint: string,
-  destination: AutoPingDestination,
-  target: AutoPingTarget,
-): string {
-  return sha256(canonical({ scope, routeFingerprint, destination, target }));
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isDestination(value: unknown): value is AutoPingDestination {
   return isRecord(value) && value.kind === "session" && typeof value.sessionId === "string";
-}
-
-export function isAutoPingTarget(value: unknown): value is AutoPingTarget {
-  if (!isRecord(value) || typeof value.kind !== "string") return false;
-  if (value.kind === "occurrence") return typeof value.occurrenceId === "string";
-  if (value.kind === "subscription") return true;
-  if (value.kind === "github-review-thread") return typeof value.threadId === "string";
-  if (value.kind === "gitlab-discussion") {
-    return typeof value.mergeRequestIid === "number" && typeof value.discussionId === "string";
-  }
-  return (
-    value.kind === "telegram-topic" &&
-    typeof value.chatId === "number" &&
-    typeof value.messageThreadId === "number"
-  );
 }
 
 function isRouteDescriptor(value: unknown): value is AutoPingRouteDescriptor {
@@ -178,134 +166,122 @@ function isDate(value: unknown): value is string {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
-function matchesScope(scope: unknown, target: AutoPingTarget): boolean {
-  return scope === "event"
-    ? target.kind === "occurrence"
-    : scope === "subscription"
-      ? target.kind === "subscription"
-      : scope === "thread" && target.kind !== "occurrence" && target.kind !== "subscription";
+function isMuteItem(value: unknown): value is AutoPingMuteItem {
+  return (
+    isRecord(value) &&
+    typeof value.subject === "string" &&
+    typeof value.kind === "string" &&
+    typeof value.label === "string" &&
+    (value.changeKey === undefined || typeof value.changeKey === "string")
+  );
 }
 
-// Drops legacy spawn-route records (destination `{kind: "trigger"}`, route
-// descriptors with `actionKind: "spawn"`) before validation. Spawn triggers
-// no longer issue auto-ping controls; these are relics of daemons that ran
-// an earlier version. Filtering here, rather than relying on gc, keeps the
-// narrowed `isDestination`/`isRouteDescriptor` guards from throwing at boot
-// on a still-live on-disk file.
-function isLegacySpawnDestination(value: unknown): boolean {
-  return isRecord(value) && value.kind === "trigger";
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
-interface RawAutoPingRecords {
-  grants: unknown[];
-  suppressions: unknown[];
-  routes: unknown[] | undefined;
+interface ParsedState {
+  state: AutoPingState;
+  migration?: { grants: number; suppressions: number };
+  droppedCiSeen: number;
 }
 
-function dropLegacySpawnRecords(input: RawAutoPingRecords): RawAutoPingRecords & {
-  migrated: boolean;
-} {
-  let migrated = false;
-  const filterOut = <T extends unknown[] | undefined>(
-    array: T,
-    isLegacy: (value: Record<string, unknown>) => boolean,
-  ): T => {
-    if (!Array.isArray(array)) return array;
-    return array.filter((value) => {
-      if (!isRecord(value) || !isLegacy(value)) return true;
-      migrated = true;
-      return false;
-    }) as T;
-  };
-  return {
-    grants: filterOut(input.grants, (value) => isLegacySpawnDestination(value.destination)),
-    suppressions: filterOut(input.suppressions, (value) =>
-      isLegacySpawnDestination(value.destination),
-    ),
-    routes: filterOut(
-      input.routes,
-      (value) => isRecord(value.descriptor) && value.descriptor.actionKind === "spawn",
-    ),
-    migrated,
-  };
+function isCiSeen(value: unknown): value is PersistedCiSeen {
+  return (
+    isRecord(value) &&
+    typeof value.routeFingerprint === "string" &&
+    Number.isInteger(value.prNumber) &&
+    typeof value.head === "string" &&
+    isStringArray(value.checks)
+  );
 }
 
-function parseState(raw: unknown): { state: AutoPingState; migrated: boolean } {
+// Routes of daemons that ran an earlier version can carry `actionKind: "spawn"`;
+// filtering them keeps the narrowed route guard from throwing on a live file.
+function parseRoutes(raw: unknown): PersistedRoute[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) throw new Error("Invalid auto-ping policy state");
+  return raw
+    .filter(
+      (value) =>
+        !(isRecord(value) && isRecord(value.descriptor) && value.descriptor.actionKind === "spawn"),
+    )
+    .map((value) => {
+      if (
+        !isRecord(value) ||
+        typeof value.routeFingerprint !== "string" ||
+        !isRouteDescriptor(value.descriptor)
+      ) {
+        throw new Error("Invalid auto-ping route state");
+      }
+      return value as unknown as PersistedRoute;
+    });
+}
+
+function parseState(raw: unknown): ParsedState {
   if (
     !isRecord(raw) ||
-    raw.version !== STATE_VERSION ||
+    (raw.version !== 1 && raw.version !== STATE_VERSION) ||
     !Array.isArray(raw.grants) ||
-    !Array.isArray(raw.suppressions) ||
-    (raw.routes !== undefined && !Array.isArray(raw.routes))
+    !Array.isArray(raw.suppressions)
   ) {
     throw new Error("Invalid auto-ping policy state");
   }
-  const filtered = dropLegacySpawnRecords({
-    grants: raw.grants,
-    suppressions: raw.suppressions,
-    routes: raw.routes,
-  });
-  const migrated = filtered.migrated;
-  const grants: PersistedGrant[] = filtered.grants.map((value) => {
+  const routes = parseRoutes(raw.routes);
+  if (raw.version === 1) {
+    // v1 scopes (event/thread/subscription) have no v2 equivalent: nothing a
+    // user could see survives, and an in-flight event mute costs at most one
+    // repeat delivery.
+    return {
+      state: {
+        version: STATE_VERSION,
+        routes,
+        grants: [],
+        suppressions: [],
+        mergeConflicts: [],
+        ciSeen: [],
+      },
+      migration: { grants: raw.grants.length, suppressions: raw.suppressions.length },
+      droppedCiSeen: 0,
+    };
+  }
+  const grants = raw.grants.map((value: unknown) => {
     if (
       !isRecord(value) ||
       typeof value.handleHash !== "string" ||
-      !["event", "thread", "subscription"].includes(String(value.scope)) ||
       typeof value.routeFingerprint !== "string" ||
       !isDestination(value.destination) ||
-      !isAutoPingTarget(value.target) ||
-      !matchesScope(value.scope, value.target) ||
-      typeof value.canonicalKey !== "string" ||
       !isDate(value.createdAt) ||
-      (value.invalidatedAt !== undefined && !isDate(value.invalidatedAt)) ||
-      ((value.state === "bound" ||
-        (value.state === "consumed" && value.invalidatedAt === undefined)) &&
-        typeof value.actorSessionId !== "string") ||
-      (value.actorSessionId !== undefined && typeof value.actorSessionId !== "string") ||
-      (value.state === "consumed" && typeof value.suppressionId !== "string") ||
-      (value.state !== "consumed" && value.suppressionId !== undefined) ||
-      ((value.state === "pending" || value.state === "revoked") &&
-        value.actorSessionId !== undefined) ||
-      !["pending", "bound", "consumed", "revoked"].includes(String(value.state))
+      typeof value.actorSessionId !== "string" ||
+      !Array.isArray(value.items) ||
+      !value.items.every(isMuteItem) ||
+      typeof value.untilChange !== "boolean"
     ) {
       throw new Error("Invalid auto-ping grant state");
     }
     return value as unknown as PersistedGrant;
   });
-  const suppressions: PersistedSuppression[] = filtered.suppressions.map((value) => {
+  const suppressions = raw.suppressions.map((value: unknown) => {
     if (
       !isRecord(value) ||
       typeof value.suppressionId !== "string" ||
-      !["event", "thread", "subscription"].includes(String(value.scope)) ||
+      typeof value.handleHash !== "string" ||
+      !["until_change", "for", "forever"].includes(String(value.mode)) ||
       typeof value.routeFingerprint !== "string" ||
       !isDestination(value.destination) ||
-      !isAutoPingTarget(value.target) ||
-      !matchesScope(value.scope, value.target) ||
-      typeof value.canonicalKey !== "string" ||
       typeof value.actorSessionId !== "string" ||
+      !Array.isArray(value.items) ||
+      !value.items.every(isMuteItem) ||
       !isDate(value.createdAt) ||
-      (value.resumedAt !== undefined && !isDate(value.resumedAt)) ||
-      (value.unreferencedAt !== undefined && !isDate(value.unreferencedAt))
+      (value.expiresAt !== undefined && !isDate(value.expiresAt)) ||
+      (value.endedAt !== undefined && !isDate(value.endedAt)) ||
+      (value.reason !== undefined && typeof value.reason !== "string")
     ) {
       throw new Error("Invalid auto-ping suppression state");
     }
     return value as unknown as PersistedSuppression;
   });
-  const routes = Array.isArray(filtered.routes)
-    ? filtered.routes.map((value) => {
-        if (
-          !isRecord(value) ||
-          typeof value.routeFingerprint !== "string" ||
-          !isRouteDescriptor(value.descriptor)
-        ) {
-          throw new Error("Invalid auto-ping route state");
-        }
-        return value as unknown as PersistedRoute;
-      })
-    : [];
-  if (raw.mergeConflicts !== undefined && !Array.isArray(raw.mergeConflicts))
-    throw new Error("Invalid auto-ping conflict state");
-  const mergeConflicts: PersistedMergeConflict[] = (raw.mergeConflicts ?? []).map(
+  const mergeConflicts = (Array.isArray(raw.mergeConflicts) ? raw.mergeConflicts : []).map(
     (value: unknown) => {
       if (
         !isRecord(value) ||
@@ -315,52 +291,61 @@ function parseState(raw: unknown): { state: AutoPingState; migrated: boolean } {
         !Number.isInteger(value.attempts) ||
         Number(value.attempts) < 0 ||
         Number(value.attempts) > MERGE_CONFLICT_MAX_ATTEMPTS ||
-        (value.lastAppliedClearId !== undefined && typeof value.lastAppliedClearId !== "string")
+        !isStringArray(value.deliveredKeys)
       )
         throw new Error("Invalid auto-ping conflict state");
       return value as unknown as PersistedMergeConflict;
     },
   );
+  // Dedupe cache: an unreadable entry costs one repeat ping, never a failed start.
+  const rawCiSeen: unknown[] = Array.isArray(raw.ciSeen) ? raw.ciSeen : [];
+  const ciSeen = rawCiSeen.filter(isCiSeen);
   return {
-    state: { version: STATE_VERSION, routes, grants, suppressions, mergeConflicts },
-    migrated,
+    state: { version: STATE_VERSION, routes, grants, suppressions, mergeConflicts, ciSeen },
+    droppedCiSeen: rawCiSeen.length - ciSeen.length,
   };
 }
 
-function view(record: PersistedSuppression): AutoPingSuppressionView {
-  return {
-    suppressionId: record.suppressionId,
-    scope: record.scope,
-    routeFingerprint: record.routeFingerprint,
-    destination: record.destination,
-    target: record.target,
-    createdAt: record.createdAt,
-  };
+function view(record: PersistedSuppression): AutoPingMuteView {
+  const { handleHash: _handleHash, ...rest } = record;
+  void _handleHash;
+  return { ...rest, items: rest.items.map((item) => ({ ...item })) };
 }
 
 export class AutoPingService {
   private readonly path: string;
   private readonly now: () => number;
   private readonly clearIntervalFn: typeof globalThis.clearInterval;
+  private readonly log: NonNullable<AutoPingServiceOptions["log"]>;
   private state: AutoPingState;
   private readonly routeTails = new Map<string, Promise<void>>();
   private readonly leases = new Map<string, RouteLease>();
   private readonly configuredRoutes = new Set<string>();
   private readonly configuredRouteAuthorities = new Set<string>();
-  private readonly occurrenceReferences = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | null;
   private disposed = false;
 
-  constructor(dataDir: string, options: AutoPingServiceOptions = {}) {
+  constructor(
+    private readonly dataDir: string,
+    options: AutoPingServiceOptions = {},
+  ) {
     this.path = join(dataDir, "auto-ping.json");
     this.now = options.now ?? Date.now;
     this.clearIntervalFn = options.clearInterval ?? globalThis.clearInterval;
+    this.log = options.log ?? (() => undefined);
     if (existsSync(this.path)) {
-      const { state, migrated } = parseState(
+      const { state, migration, droppedCiSeen } = parseState(
         JSON.parse(readFileSync(this.path, "utf8")) as unknown,
       );
       this.state = state;
-      if (migrated) this.persist();
+      if (droppedCiSeen > 0) this.log("auto-ping.ci_seen_dropped", undefined, { droppedCiSeen });
+      if (migration) {
+        this.persist();
+        this.log("auto-ping.migrated", undefined, {
+          droppedGrants: migration.grants,
+          droppedSuppressions: migration.suppressions,
+        });
+      }
     } else {
       this.state = {
         version: STATE_VERSION,
@@ -368,6 +353,7 @@ export class AutoPingService {
         grants: [],
         suppressions: [],
         mergeConflicts: [],
+        ciSeen: [],
       };
     }
     const setIntervalFn = options.setInterval ?? globalThis.setInterval;
@@ -437,146 +423,121 @@ export class AutoPingService {
     this.gc();
   }
 
+  // One grant per delivered ping. `items` are the mute subjects of that ping;
+  // `untilChange` is false when any item lacks a change key or the source
+  // offers no until-change mute.
   createGrant(input: {
-    scope: AutoPingScope;
     routeFingerprint: string;
     destination: AutoPingDestination;
-    target: AutoPingTarget;
-    actorSessionId?: string;
+    actorSessionId: string;
+    items: AutoPingMuteItem[];
+    untilChange: boolean;
   }): CreatedAutoPingGrant {
     const handle = `ap1_${randomBytes(32).toString("base64url")}`;
     const handleHash = sha256(handle);
-    const createdAt = new Date(this.now()).toISOString();
     this.state.grants.push({
       handleHash,
-      scope: input.scope,
       routeFingerprint: input.routeFingerprint,
       destination: input.destination,
-      target: input.target,
-      canonicalKey: suppressionCanonicalKey(
-        input.scope,
-        input.routeFingerprint,
-        input.destination,
-        input.target,
-      ),
-      createdAt,
-      state: input.actorSessionId ? "bound" : "pending",
-      ...(input.actorSessionId ? { actorSessionId: input.actorSessionId } : {}),
+      createdAt: new Date(this.now()).toISOString(),
+      actorSessionId: input.actorSessionId,
+      items: input.items,
+      untilChange: input.untilChange,
     });
     this.persist();
     return { handle, handleHash };
   }
 
-  bindGrant(handleHash: string, actorSessionId: string): void {
-    const grant = this.state.grants.find((entry) => entry.handleHash === handleHash);
-    if (!grant || grant.state !== "pending") return;
-    grant.state = "bound";
-    grant.actorSessionId = actorSessionId;
-    this.persist();
-  }
-
-  revokeGrant(handleHash: string): void {
-    const grant = this.state.grants.find((entry) => entry.handleHash === handleHash);
-    if (!grant || grant.state === "consumed") return;
-    grant.state = "revoked";
-    delete grant.actorSessionId;
-    this.persist();
-  }
-
-  async unsubscribe(
-    actorSessionId: string,
-    scope: AutoPingScope,
-    handle: string,
-  ): Promise<{ record: AutoPingSuppressionView; created: boolean }> {
+  private findGrant(actorSessionId: string, handle: string): PersistedGrant {
     if (!HANDLE_PATTERN.test(handle)) {
       throw new AutoPingError("invalid_request", 400, "Invalid auto-ping handle");
     }
     const handleHash = sha256(handle);
-    const snapshot = this.state.grants.find((entry) => entry.handleHash === handleHash);
-    if (!snapshot || snapshot.state === "revoked" || this.isExpired(snapshot.createdAt)) {
+    const grant = this.state.grants.find((entry) => entry.handleHash === handleHash);
+    if (!grant || this.isExpired(grant.createdAt)) {
       throw new AutoPingError("grant_not_found", 404, "Auto-ping grant not found");
     }
-    if (snapshot.scope !== scope) {
-      throw new AutoPingError("invalid_request", 400, "Auto-ping scope does not match handle");
+    if (grant.actorSessionId !== actorSessionId) {
+      throw new AutoPingError("forbidden", 403, "Auto-ping grant belongs to another session");
     }
-    if (snapshot.state === "pending") {
-      throw new AutoPingError(
-        "grant_not_ready",
-        409,
-        "Grant activation is still finishing; retry the same command",
-      );
+    return grant;
+  }
+
+  async mute(
+    actorSessionId: string,
+    input: AutoPingMuteRequest,
+  ): Promise<{ record: AutoPingMuteView; created: boolean }> {
+    const { mode } = input;
+    if (!["until_change", "for", "forever"].includes(mode)) {
+      throw new AutoPingError("invalid_request", 400, "Auto-ping mute mode is invalid");
     }
+    const reason = input.reason?.trim();
+    if (mode !== "until_change" && !reason) {
+      throw new AutoPingError("invalid_request", 400, "Auto-ping mute reason is required");
+    }
+    if (reason && reason.length > REASON_MAX_LENGTH) {
+      throw new AutoPingError("invalid_request", 400, "Auto-ping mute reason is too long");
+    }
+    if (mode === "for") {
+      const duration = input.durationMs;
+      if (!Number.isInteger(duration) || duration === undefined || duration < MUTE_FOR_MIN_MS) {
+        throw new AutoPingError("invalid_request", 400, "Auto-ping mute duration is invalid");
+      }
+      if (duration > AUTO_PING_MUTE_FOR_MAX_MS) {
+        throw new AutoPingError("invalid_request", 400, "Auto-ping mute duration max is 24h");
+      }
+    } else if (input.durationMs !== undefined) {
+      throw new AutoPingError("invalid_request", 400, "Auto-ping duration applies to mode for");
+    }
+    const snapshot = this.findGrant(actorSessionId, input.handle);
     return this.withRouteLock(snapshot.routeFingerprint, async () => {
-      const grant = this.state.grants.find((entry) => entry.handleHash === handleHash);
-      if (!grant || grant.state === "revoked" || this.isExpired(grant.createdAt)) {
-        throw new AutoPingError("grant_not_found", 404, "Auto-ping grant not found");
-      }
-      if (grant.scope !== scope) {
-        throw new AutoPingError("invalid_request", 400, "Auto-ping scope does not match handle");
-      }
-      if (grant.state === "pending") {
+      const grant = this.findGrant(actorSessionId, input.handle);
+      if (mode === "until_change" && !grant.untilChange) {
         throw new AutoPingError(
-          "grant_not_ready",
-          409,
-          "Grant activation is still finishing; retry the same command",
+          "invalid_request",
+          400,
+          "Auto-ping until-change mute is not offered for this ping",
         );
       }
-      if (grant.actorSessionId !== actorSessionId) {
-        throw new AutoPingError("forbidden", 403, "Auto-ping grant belongs to another session");
-      }
-      if (grant.state === "consumed") {
-        const existing = this.state.suppressions.find(
-          (entry) => entry.suppressionId === grant.suppressionId,
-        );
-        if (!existing || existing.resumedAt) {
-          throw new AutoPingError("grant_consumed", 409, "Auto-ping grant was already consumed");
-        }
-        return { record: view(existing), created: false };
-      }
-      let suppression = this.state.suppressions.find(
-        (entry) => entry.canonicalKey === grant.canonicalKey && !entry.resumedAt,
+      this.sweep();
+      const existing = this.state.suppressions.find(
+        (entry) => entry.handleHash === grant.handleHash && !entry.endedAt,
       );
-      const created = !suppression;
-      if (!suppression) {
-        const createdAt = new Date(this.now()).toISOString();
-        const occurrenceKey =
-          grant.target.kind === "occurrence"
-            ? `${grant.routeFingerprint}:${grant.target.occurrenceId}`
-            : null;
-        suppression = {
-          suppressionId: randomUUID(),
-          scope: grant.scope,
-          routeFingerprint: grant.routeFingerprint,
-          destination: grant.destination,
-          target: grant.target,
-          canonicalKey: grant.canonicalKey,
-          actorSessionId,
-          createdAt,
-          ...(grant.scope === "event" &&
-          occurrenceKey !== null &&
-          !this.occurrenceReferences.has(occurrenceKey)
-            ? { unreferencedAt: createdAt }
-            : {}),
-        };
-        this.state.suppressions.push(suppression);
-      } else if (suppression.actorSessionId !== actorSessionId) {
-        throw new AutoPingError(
-          "forbidden",
-          403,
-          "Auto-ping suppression belongs to another session",
-        );
-      }
-      grant.state = "consumed";
-      grant.suppressionId = suppression.suppressionId;
+      if (existing?.mode === mode) return { record: view(existing), created: false };
+      if (existing) this.endMute(existing, "resumed");
+      const nowMs = this.now();
+      const record: PersistedSuppression = {
+        suppressionId: randomUUID(),
+        handleHash: grant.handleHash,
+        mode,
+        routeFingerprint: grant.routeFingerprint,
+        destination: grant.destination,
+        actorSessionId,
+        items: grant.items.map((item) => ({ ...item })),
+        ...(reason ? { reason } : {}),
+        createdAt: new Date(nowMs).toISOString(),
+        ...(mode === "for" && input.durationMs !== undefined
+          ? { expiresAt: new Date(nowMs + input.durationMs).toISOString() }
+          : {}),
+      };
+      appendMuteHistory(this.dataDir, actorSessionId, "muted", view(record));
+      this.state.suppressions.push(record);
       this.persist();
-      this.gc();
-      return { record: view(suppression), created };
+      this.log("auto-ping.muted", actorSessionId, {
+        suppressionId: record.suppressionId,
+        mode,
+        reason,
+        expiresAt: record.expiresAt,
+        items: record.items.map((item) => ({ subject: item.subject, kind: item.kind })),
+      });
+      return { record: view(record), created: true };
     });
   }
 
-  list(actorSessionId: string): AutoPingSuppressionView[] {
+  list(actorSessionId: string): AutoPingMuteView[] {
+    this.sweep();
     return this.state.suppressions
-      .filter((entry) => entry.actorSessionId === actorSessionId && !entry.resumedAt)
+      .filter((entry) => entry.actorSessionId === actorSessionId && !entry.endedAt)
       .sort(
         (left, right) =>
           left.createdAt.localeCompare(right.createdAt) ||
@@ -585,20 +546,35 @@ export class AutoPingService {
       .map(view);
   }
 
+  history(actorSessionId: string): AutoPingMuteView[] {
+    this.sweep();
+    return readMuteHistory(this.dataDir, actorSessionId);
+  }
+
   async resume(
     actorSessionId: string,
-    suppressionId: string,
-  ): Promise<{ records: AutoPingSuppressionView[]; removed: boolean }> {
-    const snapshot = this.state.suppressions.find((entry) => entry.suppressionId === suppressionId);
-    if (!snapshot || (snapshot.resumedAt && this.isExpired(snapshot.resumedAt))) {
-      throw new AutoPingError("suppression_not_found", 404, "Auto-ping suppression not found");
+    target: AutoPingResumeRequest,
+  ): Promise<{ records: AutoPingMuteView[]; removed: boolean }> {
+    if ((target.handle === undefined) === (target.suppressionId === undefined)) {
+      throw new AutoPingError(
+        "invalid_request",
+        400,
+        "Auto-ping resume needs exactly one of handle or suppressionId",
+      );
     }
-    if (snapshot.actorSessionId !== actorSessionId) {
-      throw new AutoPingError("forbidden", 403, "Auto-ping suppression belongs to another session");
-    }
-    return this.withRouteLock(snapshot.routeFingerprint, async () => {
+    const locate = (): {
+      routeFingerprint: string;
+      match: (entry: PersistedSuppression) => boolean;
+    } => {
+      if (target.handle !== undefined) {
+        const grant = this.findGrant(actorSessionId, target.handle);
+        return {
+          routeFingerprint: grant.routeFingerprint,
+          match: (entry) => entry.handleHash === grant.handleHash,
+        };
+      }
       const suppression = this.state.suppressions.find(
-        (entry) => entry.suppressionId === suppressionId,
+        (entry) => entry.suppressionId === target.suppressionId,
       );
       if (!suppression) {
         throw new AutoPingError("suppression_not_found", 404, "Auto-ping suppression not found");
@@ -610,68 +586,84 @@ export class AutoPingService {
           "Auto-ping suppression belongs to another session",
         );
       }
-      const removed = !suppression.resumedAt;
-      if (removed) {
-        const resumedAt = new Date(this.now()).toISOString();
-        suppression.resumedAt = resumedAt;
-        for (const grant of this.state.grants) {
-          if (grant.canonicalKey !== suppression.canonicalKey) continue;
-          if (Date.parse(grant.createdAt) > this.now()) continue;
-          grant.state = "consumed";
-          grant.suppressionId = suppressionId;
-          grant.invalidatedAt = resumedAt;
-        }
-        this.persist();
-        this.gc();
+      return {
+        routeFingerprint: suppression.routeFingerprint,
+        match: (entry) => entry.suppressionId === target.suppressionId,
+      };
+    };
+    return this.withRouteLock(locate().routeFingerprint, async () => {
+      const { match } = locate();
+      this.sweep();
+      let removed = false;
+      for (const entry of this.state.suppressions) {
+        if (!match(entry) || entry.endedAt) continue;
+        this.endMute(entry, "resumed");
+        removed = true;
       }
+      if (removed) this.persist();
       return { records: this.list(actorSessionId), removed };
     });
   }
 
-  isSuppressed(
+  // Returns the active mute covering `item`, if any. An until-change mute whose
+  // change key moved drops that item (and ends once empty) as a side effect.
+  matchMute(
     routeFingerprint: string,
     destination: AutoPingDestination,
-    occurrenceId: string,
-    threadTarget?: AutoPingTarget,
-  ): boolean {
-    return this.state.suppressions.some((entry) => {
-      if (entry.resumedAt || entry.routeFingerprint !== routeFingerprint) return false;
-      if (canonical(entry.destination) !== canonical(destination)) return false;
-      if (entry.scope === "subscription") return true;
-      if (entry.scope === "event") {
-        return entry.target.kind === "occurrence" && entry.target.occurrenceId === occurrenceId;
+    item: AutoPingMuteItem,
+  ): AutoPingMuteMatch | null {
+    this.sweep();
+    let result: AutoPingMuteMatch | null = null;
+    let dirty = false;
+    for (const entry of this.state.suppressions) {
+      if (entry.endedAt || entry.routeFingerprint !== routeFingerprint) continue;
+      if (canonical(entry.destination) !== canonical(destination)) continue;
+      if (entry.mode === "forever") {
+        result ??= { mode: entry.mode, suppressionId: entry.suppressionId };
+        continue;
       }
-      return threadTarget !== undefined && canonical(entry.target) === canonical(threadTarget);
-    });
+      const covered = entry.items.find(
+        (candidate) => candidate.subject === item.subject && candidate.kind === item.kind,
+      );
+      if (!covered) continue;
+      if (entry.mode === "for") {
+        result ??= { mode: entry.mode, suppressionId: entry.suppressionId };
+        continue;
+      }
+      if (covered.changeKey !== undefined && covered.changeKey === item.changeKey) {
+        result ??= { mode: entry.mode, suppressionId: entry.suppressionId };
+        continue;
+      }
+      dirty = true;
+      if (entry.items.length === 1) this.endMute(entry, "changed");
+      else entry.items = entry.items.filter((candidate) => candidate !== covered);
+    }
+    if (dirty) this.persist();
+    return result;
   }
 
   claimMergeConflict(
     routeFingerprint: string,
     prNumber: number,
     fingerprint: string,
-    clearId?: string,
-  ): boolean {
+  ): MergeConflictClaim {
     let budget = this.state.mergeConflicts.find(
       (entry) => entry.routeFingerprint === routeFingerprint,
     );
     if (!budget) {
-      budget = { routeFingerprint, prNumber, fingerprint, attempts: 0 };
+      budget = { routeFingerprint, prNumber, fingerprint, attempts: 0, deliveredKeys: [] };
       this.state.mergeConflicts.push(budget);
     }
-    if (
-      budget.prNumber !== prNumber ||
-      budget.fingerprint !== fingerprint ||
-      (clearId !== undefined && budget.lastAppliedClearId !== clearId)
-    ) {
+    if (budget.prNumber !== prNumber || budget.fingerprint !== fingerprint) {
       budget.attempts = 0;
       budget.prNumber = prNumber;
       budget.fingerprint = fingerprint;
     }
-    if (clearId !== undefined) budget.lastAppliedClearId = clearId;
-    if (budget.attempts >= MERGE_CONFLICT_MAX_ATTEMPTS) return false;
+    if (budget.deliveredKeys.includes(fingerprint)) return "already_delivered";
+    if (budget.attempts >= MERGE_CONFLICT_MAX_ATTEMPTS) return "exhausted";
     budget.attempts += 1;
     this.persist();
-    return true;
+    return "accepted";
   }
 
   refundMergeConflict(routeFingerprint: string): void {
@@ -683,44 +675,52 @@ export class AutoPingService {
     this.persist();
   }
 
-  addOccurrenceReference(routeFingerprint: string, occurrenceId: string): void {
-    const key = `${routeFingerprint}:${occurrenceId}`;
-    this.occurrenceReferences.set(key, (this.occurrenceReferences.get(key) ?? 0) + 1);
-    for (const suppression of this.state.suppressions) {
-      if (
-        suppression.routeFingerprint === routeFingerprint &&
-        suppression.target.kind === "occurrence" &&
-        suppression.target.occurrenceId === occurrenceId
-      ) {
-        delete suppression.unreferencedAt;
-      }
+  markMergeConflictDelivered(routeFingerprint: string, fingerprint: string): void {
+    const budget = this.state.mergeConflicts.find(
+      (entry) => entry.routeFingerprint === routeFingerprint,
+    );
+    if (!budget || budget.deliveredKeys.includes(fingerprint)) return;
+    budget.deliveredKeys = [...budget.deliveredKeys, fingerprint].slice(-DELIVERED_KEYS_MAX);
+    this.persist();
+  }
+
+  // True when `head` is new for the route or any failing check name was never delivered on it.
+  isCiNew(
+    routeFingerprint: string,
+    prNumber: number,
+    head: string,
+    checks: readonly string[],
+  ): boolean {
+    const seen = this.state.ciSeen.find(
+      (entry) => entry.routeFingerprint === routeFingerprint && entry.prNumber === prNumber,
+    );
+    if (!seen || seen.head !== head) return true;
+    return checks.some((name) => !seen.checks.includes(name));
+  }
+
+  markCiDelivered(
+    routeFingerprint: string,
+    prNumber: number,
+    head: string,
+    checks: readonly string[],
+  ): void {
+    const seen = this.state.ciSeen.find(
+      (entry) => entry.routeFingerprint === routeFingerprint && entry.prNumber === prNumber,
+    );
+    if (!seen) {
+      this.state.ciSeen.push({ routeFingerprint, prNumber, head, checks: [...new Set(checks)] });
+    } else if (seen.head !== head) {
+      seen.head = head;
+      seen.checks = [...new Set(checks)];
+    } else {
+      seen.checks = [...new Set([...seen.checks, ...checks])];
     }
     this.persist();
   }
 
-  releaseOccurrenceReference(routeFingerprint: string, occurrenceId: string): void {
-    const key = `${routeFingerprint}:${occurrenceId}`;
-    const next = Math.max(0, (this.occurrenceReferences.get(key) ?? 0) - 1);
-    if (next === 0) this.occurrenceReferences.delete(key);
-    else this.occurrenceReferences.set(key, next);
-    if (next === 0) {
-      const at = new Date(this.now()).toISOString();
-      for (const suppression of this.state.suppressions) {
-        if (
-          !suppression.unreferencedAt &&
-          suppression.routeFingerprint === routeFingerprint &&
-          suppression.target.kind === "occurrence" &&
-          suppression.target.occurrenceId === occurrenceId
-        ) {
-          suppression.unreferencedAt = at;
-        }
-      }
-      this.persist();
-    }
-  }
-
   gc(): void {
     const now = this.now();
+    this.sweep();
     const liveRoute = (fingerprint: string): boolean =>
       this.configuredRoutes.has(fingerprint) ||
       [...this.leases.values()].some((lease) => lease.routeFingerprint === fingerprint) ||
@@ -729,33 +729,63 @@ export class AutoPingService {
           route.routeFingerprint === fingerprint &&
           this.configuredRouteAuthorities.has(routeAuthority(route.descriptor)),
       );
-    this.state.grants = this.state.grants.filter((grant) => {
-      if (!liveRoute(grant.routeFingerprint)) return false;
-      const ageFrom = grant.invalidatedAt ?? grant.createdAt;
-      return now - Date.parse(ageFrom) < CREDENTIAL_RETENTION_MS;
-    });
+    this.state.grants = this.state.grants.filter(
+      (grant) =>
+        liveRoute(grant.routeFingerprint) &&
+        now - Date.parse(grant.createdAt) < CREDENTIAL_RETENTION_MS,
+    );
     this.state.suppressions = this.state.suppressions.filter((suppression) => {
-      if (!liveRoute(suppression.routeFingerprint)) return false;
-      if (suppression.resumedAt)
-        return now - Date.parse(suppression.resumedAt) < CREDENTIAL_RETENTION_MS;
-      if (suppression.scope !== "event") return true;
-      if (!suppression.unreferencedAt) return true;
-      return now - Date.parse(suppression.unreferencedAt) < EVENT_GRACE_MS;
+      if (!liveRoute(suppression.routeFingerprint)) {
+        if (!suppression.endedAt) this.endMute(suppression, "route_removed");
+        return false;
+      }
+      if (suppression.endedAt)
+        return now - Date.parse(suppression.endedAt) < CREDENTIAL_RETENTION_MS;
+      return true;
     });
     this.state.mergeConflicts = this.state.mergeConflicts.filter((entry) =>
       liveRoute(entry.routeFingerprint),
     );
+    this.state.ciSeen = this.state.ciSeen.filter((entry) => liveRoute(entry.routeFingerprint));
     const liveFingerprints = new Set([
       ...this.configuredRoutes,
       ...[...this.leases.values()].map((lease) => lease.routeFingerprint),
       ...this.state.grants.map((grant) => grant.routeFingerprint),
       ...this.state.suppressions.map((suppression) => suppression.routeFingerprint),
       ...this.state.mergeConflicts.map((entry) => entry.routeFingerprint),
+      ...this.state.ciSeen.map((entry) => entry.routeFingerprint),
     ]);
     this.state.routes = this.state.routes.filter((route) =>
       liveFingerprints.has(route.routeFingerprint),
     );
     this.persist();
+  }
+
+  // Ends every `for` mute past its expiry.
+  private sweep(): void {
+    const now = this.now();
+    let ended = false;
+    for (const entry of this.state.suppressions) {
+      if (entry.endedAt || entry.mode !== "for" || entry.expiresAt === undefined) continue;
+      if (Date.parse(entry.expiresAt) > now) continue;
+      this.endMute(entry, "expired");
+      ended = true;
+    }
+    if (ended) this.persist();
+  }
+
+  private endMute(entry: PersistedSuppression, endReason: AutoPingMuteEndReason): void {
+    entry.endedAt =
+      endReason === "expired" && entry.expiresAt !== undefined
+        ? entry.expiresAt
+        : new Date(this.now()).toISOString();
+    entry.endReason = endReason;
+    appendMuteHistory(this.dataDir, entry.actorSessionId, "ended", view(entry));
+    this.log("auto-ping.unmuted", entry.actorSessionId, {
+      suppressionId: entry.suppressionId,
+      mode: entry.mode,
+      endReason,
+    });
   }
 
   private isExpired(at: string): boolean {

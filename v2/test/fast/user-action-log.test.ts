@@ -86,23 +86,23 @@ describe("appendUserAction dual-write", () => {
 });
 
 describe("auto-ping actions", () => {
-  it("records unsubscribe scope without the credential or its hash", () => {
+  it("records mute mode without the credential or its hash", () => {
     const handle = `ap1_${"s".repeat(43)}`;
     const handleHash = createHash("sha256").update(handle).digest("hex");
     const action = buildUserActionRecord({
       method: "POST",
-      path: "/sessions/demo-1/auto-ping-suppressions/unsubscribe",
+      path: "/sessions/demo-1/auto-ping-suppressions/mute",
       origin: "cli",
-      body: { scope: "thread", handle },
+      body: { mode: "forever", reason: "wrong trigger", handle },
       statusCode: 200,
       latencyMs: 5,
       error: `failed ${handle}`,
     });
 
     expect(action).toMatchObject({
-      action: "session.auto_ping_unsubscribe",
+      action: "session.auto_ping_mute",
       sessionId: "demo-1",
-      params: { scope: "thread" },
+      params: { mode: "forever" },
       error: "failed [auto-ping-handle]",
     });
     expect(JSON.stringify(action)).not.toContain(handle);

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AutoPingSuppressionView } from "../../src/types.js";
+import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
+import type { AutoPingMuteView } from "../../src/types.js";
 
 const getJsonMock = vi.fn();
 const postJsonMock = vi.fn();
@@ -38,7 +39,8 @@ vi.mock("../../src/io.js", () => ({
   writeStdout: writeStdoutMock,
 }));
 
-vi.mock("../../src/runtime-tmux.js", () => ({
+vi.mock("../../src/runtime-tmux.js", async (importOriginal) => ({
+  TmuxProbeUnknownError: (await importOriginal<typeof RuntimeTmuxModule>()).TmuxProbeUnknownError,
   setTmuxSocketName: setTmuxSocketNameMock,
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   withTmuxSocketArgs: vi.fn((args: string[]) => args),
@@ -53,23 +55,29 @@ function outputText(): string {
   return writeStdoutMock.mock.calls.map((call) => String(call[0])).join("\n");
 }
 
-function suppression(
+const HANDLE = `ap1_${"h".repeat(43)}`;
+
+function mute(
   suppressionId: string,
-  scope: "event" | "thread" | "subscription",
-): AutoPingSuppressionView {
-  const target: AutoPingSuppressionView["target"] =
-    scope === "event"
-      ? { kind: "occurrence", occurrenceId: "occurrence-1" }
-      : scope === "thread"
-        ? { kind: "github-review-thread", threadId: "thread-1" }
-        : { kind: "subscription" };
+  mode: AutoPingMuteView["mode"],
+  overrides: Partial<AutoPingMuteView> = {},
+): AutoPingMuteView {
   return {
     suppressionId,
-    scope,
+    mode,
     routeFingerprint: "route-1",
     destination: { kind: "session", sessionId: "ses-1" },
-    target,
+    actorSessionId: "ses-1",
+    items: [
+      {
+        subject: "review:github:o/r#7",
+        kind: "ci_failed",
+        label: "until next commit",
+        changeKey: "head",
+      },
+    ],
     createdAt: "2026-09-01T00:00:00.000Z",
+    ...overrides,
   };
 }
 
@@ -88,69 +96,101 @@ describe("auto-ping CLI", () => {
     delete process.env["SPUR_SESSION"];
   });
 
-  it("posts an event unsubscribe with the session from SPUR_SESSION", async () => {
+  it("posts an until-change mute with the session from SPUR_SESSION and renders the undo line", async () => {
     process.env["SPUR_SESSION"] = "ses-1";
-    postJsonMock.mockResolvedValue({
-      record: suppression("sup-1", "event"),
-      created: true,
-    });
+    postJsonMock.mockResolvedValue({ record: mute("sup-1", "until_change"), created: true });
 
-    await parseAutoPing(["auto-ping", "unsubscribe", "--event", "ap1_event"]);
+    await parseAutoPing(["auto-ping", "mute", HANDLE]);
 
     expect(postJsonMock).toHaveBeenCalledWith(
       "/tmp/dist/cli.js",
-      "/sessions/ses-1/auto-ping-suppressions/unsubscribe",
-      { scope: "event", handle: "ap1_event" },
+      "/sessions/ses-1/auto-ping-suppressions/mute",
+      { handle: HANDLE, mode: "until_change" },
       "/tmp/spur.yaml",
     );
-    expect(outputText()).toContain("Created auto-ping event suppression sup-1.");
+    expect(outputText()).toBe(
+      `Muted ci_failed on PR #7 until next commit. Undo: "$SPUR_SESSION_TOOL_DIR/spur" auto-ping resume ${HANDLE}`,
+    );
   }, 15_000);
 
-  it("requires exactly one unsubscribe scope flag", async () => {
-    await expect(
-      parseAutoPing([
-        "auto-ping",
-        "unsubscribe",
-        "--event",
-        "ap1_event",
-        "--thread",
-        "ap1_thread",
-        "--session",
-        "ses-1",
-      ]),
-    ).rejects.toThrow(/exactly one/);
+  it("posts --for with a duration in milliseconds and a reason", async () => {
+    process.env["SPUR_SESSION"] = "ses-1";
+    postJsonMock.mockResolvedValue({
+      record: mute("sup-2", "for", { expiresAt: "2026-09-01T02:00:00.000Z" }),
+      created: true,
+    });
 
+    await parseAutoPing(["auto-ping", "mute", HANDLE, "--for", "2h", "--reason", "waiting"]);
+
+    expect(postJsonMock).toHaveBeenCalledWith(
+      "/tmp/dist/cli.js",
+      "/sessions/ses-1/auto-ping-suppressions/mute",
+      { handle: HANDLE, mode: "for", durationMs: 7_200_000, reason: "waiting" },
+      "/tmp/spur.yaml",
+    );
+    expect(outputText()).toContain("Muted ci_failed on PR #7 for 2h. Undo:");
+  });
+
+  it("posts --forever with a reason", async () => {
+    process.env["SPUR_SESSION"] = "ses-1";
+    postJsonMock.mockResolvedValue({ record: mute("sup-3", "forever"), created: true });
+
+    await parseAutoPing(["auto-ping", "mute", HANDLE, "--forever", "--reason", "wrong trigger"]);
+
+    expect(postJsonMock).toHaveBeenCalledWith(
+      "/tmp/dist/cli.js",
+      "/sessions/ses-1/auto-ping-suppressions/mute",
+      { handle: HANDLE, mode: "forever", reason: "wrong trigger" },
+      "/tmp/spur.yaml",
+    );
+    expect(outputText()).toContain("Muted ci_failed on PR #7 forever. Undo:");
+  });
+
+  it("rejects missing reasons and durations over 24h before any request", async () => {
+    process.env["SPUR_SESSION"] = "ses-1";
+    await expect(parseAutoPing(["auto-ping", "mute", HANDLE, "--forever"])).rejects.toThrow(
+      "--reason is required.",
+    );
+    await expect(parseAutoPing(["auto-ping", "mute", HANDLE, "--for", "2h"])).rejects.toThrow(
+      "--reason is required.",
+    );
+    await expect(
+      parseAutoPing(["auto-ping", "mute", HANDLE, "--for", "25h", "--reason", "x"]),
+    ).rejects.toThrow("--for max is 24h.");
+    await expect(
+      parseAutoPing(["auto-ping", "mute", HANDLE, "--for", "2h", "--forever", "--reason", "x"]),
+    ).rejects.toThrow(/only one of/);
     expect(postJsonMock).not.toHaveBeenCalled();
   });
 
   it("requires --session outside a Spur session", async () => {
-    await expect(
-      parseAutoPing(["auto-ping", "unsubscribe", "--subscription", "ap1_sub"]),
-    ).rejects.toThrow(/--session is required/);
-
+    await expect(parseAutoPing(["auto-ping", "mute", HANDLE])).rejects.toThrow(
+      /--session is required/,
+    );
     expect(postJsonMock).not.toHaveBeenCalled();
   });
 
   it("rejects a --session that differs from SPUR_SESSION", async () => {
     process.env["SPUR_SESSION"] = "ses-env";
-
     await expect(
-      parseAutoPing([
-        "auto-ping",
-        "unsubscribe",
-        "--subscription",
-        "ap1_sub",
-        "--session",
-        "ses-other",
-      ]),
+      parseAutoPing(["auto-ping", "mute", HANDLE, "--session", "ses-other"]),
     ).rejects.toThrow(/different session/);
-
     expect(postJsonMock).not.toHaveBeenCalled();
   });
 
-  it("lists suppression ids accepted by resume", async () => {
+  it("no longer offers unsubscribe", async () => {
+    await expect(
+      parseAutoPing(["auto-ping", "unsubscribe", "--event", HANDLE, "--session", "ses-1"]),
+    ).rejects.toThrow();
+    expect(postJsonMock).not.toHaveBeenCalled();
+  });
+
+  it("lists active mutes with mode, kind, until label and reason", async () => {
     getJsonMock.mockResolvedValue({
-      records: [suppression("sup-list-1", "subscription"), suppression("sup-list-2", "event")],
+      records: [
+        mute("sup-list-1", "forever", { reason: "broken trigger" }),
+        mute("sup-list-2", "until_change"),
+      ],
     });
 
     await parseAutoPing(["auto-ping", "list", "--session", "ses-1"]);
@@ -160,39 +200,83 @@ describe("auto-ping CLI", () => {
       "/sessions/ses-1/auto-ping-suppressions",
       "/tmp/spur.yaml",
     );
-    expect(outputText()).toContain("sup-list-1\tsubscription\tses-1");
-
-    postJsonMock.mockResolvedValue({
-      records: [suppression("sup-list-2", "event")],
-      removed: true,
-    });
-    await parseAutoPing(["auto-ping", "resume", "sup-list-1", "--session", "ses-1"]);
-    expect(postJsonMock).toHaveBeenCalledWith(
-      "/tmp/dist/cli.js",
-      "/sessions/ses-1/auto-ping-suppressions/sup-list-1/resume",
-      {},
-      "/tmp/spur.yaml",
+    expect(outputText()).toContain(
+      "sup-list-1\tforever\tci_failed\treview:github:o/r#7\tforever\tbroken trigger",
     );
-    expect(outputText()).toContain("Resumed auto-ping suppression sup-list-1.");
-    expect(outputText()).not.toContain("Resumed auto-ping suppression sup-list-2.");
+    expect(outputText()).toContain("sup-list-2\tuntil_change\tci_failed");
+    expect(outputText()).toContain("until next commit");
   });
 
-  it("posts resume and preserves the raw JSON response under --json", async () => {
-    postJsonMock.mockResolvedValue({
-      records: [suppression("sup-1", "thread")],
-      removed: false,
+  it("lists history with --all", async () => {
+    getJsonMock.mockResolvedValue({
+      records: [],
+      history: [
+        mute("old-1", "for", {
+          expiresAt: "2026-09-01T02:00:00.000Z",
+          endedAt: "2026-09-01T02:00:00.000Z",
+          endReason: "expired",
+        }),
+      ],
     });
+
+    await parseAutoPing(["auto-ping", "list", "--session", "ses-1", "--all"]);
+
+    expect(getJsonMock).toHaveBeenCalledWith(
+      "/tmp/dist/cli.js",
+      "/sessions/ses-1/auto-ping-suppressions?all=1",
+      "/tmp/spur.yaml",
+    );
+    expect(outputText()).toContain("No active auto-ping mutes.");
+    expect(outputText()).toContain("History:");
+    expect(outputText()).toContain("old-1\tfor");
+    expect(outputText()).toContain("ended expired 2026-09-01T02:00:00.000Z");
+  });
+
+  it("labels an ended until-change history row without the item label", async () => {
+    getJsonMock.mockResolvedValue({
+      records: [],
+      history: [
+        mute("old-2", "until_change", {
+          endedAt: "2026-09-01T02:00:00.000Z",
+          endReason: "resumed",
+        }),
+      ],
+    });
+
+    await parseAutoPing(["auto-ping", "list", "--session", "ses-1", "--all"]);
+
+    expect(outputText()).toContain("until it changes");
+    expect(outputText()).not.toContain("until next commit");
+  });
+
+  it("resumes by handle and by mute id", async () => {
+    postJsonMock.mockResolvedValue({ records: [], removed: true });
+
+    await parseAutoPing(["auto-ping", "resume", HANDLE, "--session", "ses-1"]);
+    expect(postJsonMock).toHaveBeenLastCalledWith(
+      "/tmp/dist/cli.js",
+      "/sessions/ses-1/auto-ping-suppressions/resume",
+      { handle: HANDLE },
+      "/tmp/spur.yaml",
+    );
+    expect(outputText()).toContain(`Resumed auto-ping mute ${HANDLE}.`);
+
+    await parseAutoPing(["auto-ping", "resume", "sup-9", "--session", "ses-1"]);
+    expect(postJsonMock).toHaveBeenLastCalledWith(
+      "/tmp/dist/cli.js",
+      "/sessions/ses-1/auto-ping-suppressions/resume",
+      { suppressionId: "sup-9" },
+      "/tmp/spur.yaml",
+    );
+  });
+
+  it("preserves the raw JSON response under --json", async () => {
+    postJsonMock.mockResolvedValue({ records: [mute("sup-1", "forever")], removed: false });
 
     await parseAutoPing(["auto-ping", "resume", "sup-1", "--session", "ses-1", "--json"]);
 
-    expect(postJsonMock).toHaveBeenCalledWith(
-      "/tmp/dist/cli.js",
-      "/sessions/ses-1/auto-ping-suppressions/sup-1/resume",
-      {},
-      "/tmp/spur.yaml",
-    );
     expect(JSON.parse(outputText())).toEqual({
-      records: [suppression("sup-1", "thread")],
+      records: [mute("sup-1", "forever")],
       removed: false,
     });
   });

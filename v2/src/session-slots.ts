@@ -1,8 +1,10 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentStateStrategy } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
+import { spurInstallLockPath } from "./install-lock.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "./self-destruct.js";
 import type {
   AgentName,
@@ -21,11 +23,15 @@ const CLI_ENTRYPOINT = existsSync(DIST_CLI_ENTRYPOINT)
   ? DIST_CLI_ENTRYPOINT
   : fileURLToPath(new URL("./cli.js", import.meta.url));
 
+const INSTALL_LOCK_WAIT_SECONDS = 90;
+
 export const SLOT_TOOL_NAME = "spur-slots";
 export const AGENT_STATE_TOOL_NAME = "spur-agent-state";
 const AGENT_STATE_UPDATER_NAME = "spur-agent-state-updater.mjs";
 const SPUR_WRAPPER_NAME = "spur";
 const GIT_WRAPPER_NAME = "git";
+// Every generated git wrapper carries this text; wrappers detect each other by it.
+const GIT_WRAPPER_SIGNATURE = "Spur git wrapper could not find git";
 const BRANCH_TOOL_NAME = "spur-branch";
 export const TODO_TOOL_NAME = "spur-todo";
 export const MANUAL_TITLE_LOCK_MESSAGE =
@@ -319,6 +325,24 @@ function shouldWriteAgentStateTools(agent: AgentName | undefined): boolean {
   return agentStateStrategy(agent) === "hook";
 }
 
+// Tool wrappers are re-written while the owner agent may be live; truncate-then-write
+// would let a concurrent exec read a partial script. Same-dir temp + rename is atomic.
+function writeToolFileAtomic(
+  path: string,
+  content: string,
+  options: { encoding: "utf8"; mode: number },
+): void {
+  const tmpPath = `${path}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`;
+  try {
+    writeFileSync(tmpPath, content, options);
+    chmodSync(tmpPath, options.mode);
+    renameSync(tmpPath, path);
+  } catch (error) {
+    rmSync(tmpPath, { force: true });
+    throw error;
+  }
+}
+
 export function ensureSessionSlotTool(args: {
   dataDir: string;
   sessionId: string;
@@ -326,19 +350,24 @@ export function ensureSessionSlotTool(args: {
   projectId?: string;
   branchNamingRegex?: string;
   agent?: AgentName;
+  installLockPath?: string;
 }): string {
   const toolDir = slotToolDir(args.dataDir, args.sessionId);
   const stateFilePath = join(args.dataDir, "session-agent-state", `${args.sessionId}.json`);
+  const lockPath = shellEscape(args.installLockPath ?? spurInstallLockPath());
+  // Shared probe: waits while an update writer holds the exclusive lock. Never creates the lock file.
+  const installLockWait = `if [[ -e ${lockPath} ]] && command -v flock >/dev/null 2>&1; then flock -s -w ${INSTALL_LOCK_WAIT_SECONDS} ${lockPath} true 2>/dev/null || true; fi`;
   mkdirSync(toolDir, { recursive: true });
-  writeFileSync(
+  writeToolFileAtomic(
     join(toolDir, SPUR_WRAPPER_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
+${installLockWait}
 exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );
-  writeFileSync(
+  writeToolFileAtomic(
     join(toolDir, SLOT_TOOL_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
@@ -347,7 +376,7 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" slots --session ${shellEscape(args.sessi
 `,
     { encoding: "utf8", mode: 0o755 },
   );
-  writeFileSync(
+  writeToolFileAtomic(
     join(toolDir, SELF_DESTRUCT_TOOL_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
@@ -356,7 +385,7 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" self-destruct ${shellEscape(args.session
 `,
     { encoding: "utf8", mode: 0o755 },
   );
-  writeFileSync(
+  writeToolFileAtomic(
     join(toolDir, TODO_TOOL_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
@@ -366,7 +395,7 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" todo "$@" --session ${shellEscape(args.s
     { encoding: "utf8", mode: 0o755 },
   );
   if (args.projectId && args.branchNamingRegex) {
-    writeFileSync(
+    writeToolFileAtomic(
       join(toolDir, BRANCH_TOOL_NAME),
       `#!/usr/bin/env bash
 set -euo pipefail
@@ -383,22 +412,31 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" branch "$action" --project ${shellEscape
 `,
       { encoding: "utf8", mode: 0o755 },
     );
-    writeFileSync(
+    writeToolFileAtomic(
       join(toolDir, GIT_WRAPPER_NAME),
       `#!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
-path_without_wrapper=""
+REAL_GIT=""
 IFS=: read -r -a path_parts <<< "\${PATH:-}"
+if [[ -z "\${PATH:-}" ]]; then
+  path_parts=("")
+fi
 for path_part in "\${path_parts[@]}"; do
-  if [[ "$path_part" == "$SCRIPT_DIR" ]]; then
+  candidate="\${path_part:-.}/git"
+  if [[ ! -f "$candidate" || ! -x "$candidate" ]]; then
     continue
   fi
-  path_without_wrapper="\${path_without_wrapper:+$path_without_wrapper:}$path_part"
+  header=""
+  IFS= read -r -d '' -n 4096 header 2>/dev/null < "$candidate" || true
+  if [[ "$header" == *"${GIT_WRAPPER_SIGNATURE}"* ]]; then
+    continue
+  fi
+  REAL_GIT="$candidate"
+  break
 done
-REAL_GIT=$(PATH="$path_without_wrapper" command -v git || true)
 if [[ -z "$REAL_GIT" ]]; then
-  echo "Spur git wrapper could not find git outside $SCRIPT_DIR" >&2
+  echo "${GIT_WRAPPER_SIGNATURE} outside Spur git wrappers" >&2
   exit 127
 fi
 git_command=""
@@ -444,7 +482,7 @@ exec "$REAL_GIT" "$@"
   }
   // Claude uses JSONL-based state classification — no hook state scripts needed.
   if (shouldWriteAgentStateTools(args.agent)) {
-    writeFileSync(
+    writeToolFileAtomic(
       join(toolDir, AGENT_STATE_UPDATER_NAME),
       `#!/usr/bin/env node
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -576,7 +614,7 @@ try {
 `,
       { encoding: "utf8", mode: 0o755 },
     );
-    writeFileSync(
+    writeToolFileAtomic(
       join(toolDir, AGENT_STATE_TOOL_NAME),
       `#!/usr/bin/env bash
 set -euo pipefail
@@ -585,10 +623,11 @@ exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UP
       { encoding: "utf8", mode: 0o755 },
     );
   }
-  writeFileSync(
+  writeToolFileAtomic(
     join(toolDir, "spur-sidecar"),
     `#!/usr/bin/env bash
 set -euo pipefail
+${installLockWait}
 action="start"
 if [[ "\${1-}" == "start" || "\${1-}" == "stop" || "\${1-}" == "ports" ]]; then
   action="$1"

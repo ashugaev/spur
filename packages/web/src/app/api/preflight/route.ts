@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isSpurDaemonError, spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
-import { spurErrorResponse } from "@/lib/spur-error-response";
+import { spawnBatchConflictResponse, spurErrorResponse } from "@/lib/spur-error-response";
 import type { AgentName } from "@/lib/agents";
 import type { SpawnOverrides, SpurPreflightTokenUsageView } from "@/lib/types";
 
@@ -46,6 +46,8 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(result);
   } catch (error) {
+    const conflict = spawnBatchConflictResponse(error);
+    if (conflict) return conflict;
     const message = error instanceof Error ? error.message : "Failed to run preflight";
     if (isSpurDaemonError(error)) {
       const payload = error.payload;
