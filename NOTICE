@@ -1,2 +1,6 @@
 Spur
 Copyright 2025 Spur contributors
+
+Managed authorization binaries include CLIProxyAPI and its Go dependencies.
+Their license texts and notices ship under licenses/auth-proxy/.
+Go runtime terms ship under licenses/auth-proxy/go/.
