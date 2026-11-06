@@ -3,7 +3,7 @@
 > Scope: CLI usage index, names and syntax only. Full behavior: `v2/src/cli.ts`, the command's own source file, or `spur <cmd> --help`. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md). CI scheduling: [ci-admission.md](ci-admission.md).
 
 Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance; fallback: [configuration.md](configuration.md).
-`review-app prepare|block|recover|status|publish`: daemon-free lane lifecycle, required non-APPROVED public feedback, explicit feedback-publication outcome; prepare/recover need intended checks, final verdicts need row evidence; `recover --legacy-sha256 <digest>` requires exact legacy bytes; request/receipt schema: `v2/src/review-app.ts`.
+`review-app prepare|block|recover|status|publish`, `recover --legacy-sha256 <digest>`: daemon-free review lifecycle, non-APPROVED public feedback and publication outcomes; request/receipt contracts: `v2/src/review-app.ts`.
 `review-gate evaluate`: approval aggregation with `GITHUB_TOKEN` and `--policy`; `v2/src/review-gate.ts`.
 `mcp [--http]`, `mcp-tunnel`: daemon MCP, durable backend restart receipts, bounded daemon logs, cache-only attached PR status; `v2/src/mcp.ts`, `v2/src/mcp-tunnel.ts`; [contracts/setup](mcp.md).
 
