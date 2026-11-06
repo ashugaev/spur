@@ -352,6 +352,7 @@ async function requestQuota(
   } catch {
     return fail("network_error");
   }
+  if (!response.ok) await response.body?.cancel().catch(() => undefined);
   if (response.status === 401 || response.status === 403)
     return fail("unauthorized", response.status);
   if (response.status === 429) {
@@ -360,10 +361,7 @@ async function requestQuota(
       Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, MAX_RETRY_AFTER_S) : null;
     return fail("rate_limited", 429, retryAfterS);
   }
-  if (!response.ok) {
-    await response.body?.cancel().catch(() => undefined);
-    return fail("http_error", response.status);
-  }
+  if (!response.ok) return fail("http_error", response.status);
   let body: unknown;
   try {
     body = await response.json();
