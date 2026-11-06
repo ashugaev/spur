@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
@@ -9,7 +10,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { Readable } from "node:stream";
 import { finished } from "node:stream/promises";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL, URL } from "node:url";
 import { promisify } from "node:util";
 import { createGunzip } from "node:zlib";
 
@@ -258,6 +259,14 @@ const paxKeys = new Set([
   "SCHILY.nlink",
 ]);
 
+function hasControlOrReplacement(text) {
+  for (const character of text) {
+    const code = character.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f || code === 0xfffd) return true;
+  }
+  return false;
+}
+
 function metadataRecord(text) {
   if (typeof text !== "string" || text.includes("\uFFFD"))
     refuse("replacement character in metadata");
@@ -279,8 +288,7 @@ function metadataRecord(text) {
     )
       refuse("metadata length framing");
     const field = bytes.subarray(space + 1, end - 1).toString("utf8");
-    if (/[\u0000-\u001f\u007f\uFFFD]/u.test(field))
-      refuse("metadata control or replacement character");
+    if (hasControlOrReplacement(field)) refuse("metadata control or replacement character");
     const equal = field.indexOf("=");
     const key = field.slice(0, equal);
     if (equal <= 0 || !paxKeys.has(key) || keys.has(key))
@@ -295,7 +303,8 @@ function memberName(path, directory) {
   if (
     typeof path !== "string" ||
     !path ||
-    /[\\\u0000-\u001f\u007f\uFFFD]/u.test(path) ||
+    path.includes("\\") ||
+    hasControlOrReplacement(path) ||
     /(?:^|\/)[a-zA-Z]:/.test(path) ||
     path.startsWith("/")
   )
@@ -649,7 +658,7 @@ async function officialCommander() {
       "https://registry.npmjs.org/commander/-/commander-13.1.0.tgz",
       {
         headers: { Accept: "application/octet-stream" },
-        signal: AbortSignal.timeout(30_000),
+        signal: globalThis.AbortSignal.timeout(30_000),
       },
       (response) => {
         if (response.statusCode !== 200) {
@@ -964,6 +973,7 @@ export async function executeFrozenClosure(root, files, edges) {
     TEMP: temporary,
     PATH: path,
     NODE_ENV: "test",
+    NODE_V8_COVERAGE: undefined,
     SPUR_SESSION: "package-fixture",
     LANG: "C",
     LC_ALL: "C",
@@ -1039,7 +1049,7 @@ async function checkoutHead(root) {
   } else if (!stat.isDirectory()) refuse("invalid checkout identity");
   const head = (await dataFile(join(git, "HEAD"), "missing checkout HEAD")).toString("utf8").trim();
   if (/^[a-f0-9]{40}$/.test(head)) return head;
-  if (!/^ref: refs\/heads\/[a-zA-Z0-9_.\/-]+$/.test(head) || head.split("/").includes(".."))
+  if (!/^ref: refs\/heads\/[a-zA-Z0-9_./-]+$/.test(head) || head.split("/").includes(".."))
     refuse("invalid checkout ref");
   let common = git;
   try {

@@ -145,7 +145,7 @@ chmod +x "$C_BIN/npm"
 
 rm -f "$C_MARKER"
 set +e
-c_out="$(HOME="$C_HOME" PATH="$C_BIN:$PATH" timeout 10 bash "$ONBOARDING_SCRIPT" 2>&1)"
+c_out="$(HOME="$C_HOME" PATH="$C_BIN:$PATH" timeout --foreground 10 bash "$ONBOARDING_SCRIPT" 2>&1)"
 c_rc=$?
 set -e
 

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type * as ChildProcess from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { lstat, mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import type * as FileSystem from "node:fs/promises";
@@ -9,6 +10,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createGzip, gzipSync } from "node:zlib";
+import type * as Zlib from "node:zlib";
 import type * as Tar from "tar";
 import type * as TypeScript from "typescript";
 import { afterEach, expect, test, vi } from "vitest";
@@ -122,7 +124,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   };
 });
 vi.mock("node:child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:child_process")>();
+  const actual = await importOriginal<typeof ChildProcess>();
   const { promisify } = await import("node:util");
   const original = promisify(actual.execFile);
   const execFile = Object.assign(
@@ -140,7 +142,7 @@ vi.mock("node:child_process", async (importOriginal) => {
   return { ...actual, execFile };
 });
 vi.mock("node:zlib", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:zlib")>();
+  const actual = await importOriginal<typeof Zlib>();
   const { Transform } = await import("node:stream");
   return {
     ...actual,

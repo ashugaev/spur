@@ -1726,10 +1726,15 @@ test.each(["wrong-bytes", "public-mode", "symlink"])(
   async (mode) => {
     const f = await registeredFixture();
     if (mode === "symlink") await symlink(f.request.receipt, f.archive);
-    else
+    else {
       await writeFile(f.archive, mode === "wrong-bytes" ? "conflict" : f.raw, {
-        mode: mode === "public-mode" ? 0o644 : 0o600,
+        mode: 0o600,
       });
+      if (mode === "public-mode") {
+        await chmod(f.archive, 0o644);
+        expect((await stat(f.archive)).mode & 0o777).toBe(0o644);
+      }
+    }
     const archived = await readFile(f.archive);
     await expect(f.recover()).rejects.toThrow("legacy-archive-invalid");
     expect(await readFile(f.request.receipt)).toEqual(f.raw);
