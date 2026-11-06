@@ -337,10 +337,11 @@ describe("discardFailedSpawn", () => {
           readWorkItemLifecycles(f.dataDir, "api", "pr-watch").get(item.externalId)?.members[0],
         ).toMatchObject({ state: "running", sessionId: "api-1" }),
       );
+      // Existing survivor-adopt accounting: the claim's attempt stays spent.
       expect(
         readWorkItemLifecycles(f.dataDir, "api", "pr-watch").get(item.externalId)?.members[0]
           ?.attempts,
-      ).toBe(1);
+      ).toBe(2);
       expect(spawn).not.toHaveBeenCalled();
       expect(readSession(f.dataDir, "api-1")).toMatchObject({ status: "running" });
       expect(existsSync(archivedPath(f, "api-1"))).toBe(false);

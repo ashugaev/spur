@@ -758,15 +758,15 @@ async function findTaggedWorkItemSession(
           // A restore or relaunch took the errored session over during
           // cleanup: it still stands for the block, so adopt it, or wait on it
           // while its takeover is unresolved, instead of spawning a second.
-          // No spawn happens for this claim, so its attempt is refunded.
           const view = await getWorkItemSessionIfPresent(service, sessionId);
           if (!ctx.controllerCurrent()) return undefined;
           if (!view) continue;
-          const outcome = classifyWorkItemOwner(view, readSession(ctx.dataDir, sessionId));
+          const record = readSession(ctx.dataDir, sessionId);
+          const outcome = classifyWorkItemOwner(view, record);
           return {
             sessionId,
             outcome: outcome === "replace" ? "pending" : outcome,
-            accepted: true,
+            accepted: isAcceptedWorkItemRecord(record),
           };
         }
       } catch (error) {
