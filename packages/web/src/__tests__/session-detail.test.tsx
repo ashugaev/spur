@@ -7377,16 +7377,17 @@ describe("SessionDetail load state", () => {
     });
     expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
 
+    // The next 4s poll fails: the toast shows, the following poll backs off to 8s.
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Pause" }));
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(4_000);
     });
     expect(screen.getAllByText("temporary failure").length).toBeGreaterThan(0);
 
-    // Pause holds its optimistic status, so the next poll is the successful reload,
-    // backed off to 2x the 4s base after the failed read.
+    // Pause's follow-up read lands now, ahead of the backed-off poll and the 8s
+    // toast auto-dismiss, so only the successful reload can clear the toast.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(8_000);
+      fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+      await vi.advanceTimersByTimeAsync(0);
     });
     expect(screen.queryByText("temporary failure")).not.toBeInTheDocument();
   });
