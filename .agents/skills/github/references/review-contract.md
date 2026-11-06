@@ -17,9 +17,9 @@ ATTEMPT
   Missing capability blocks live publication; workspace-write/top-level bypass alone proves no child access outside workspace.
   Capture repository, PR, lane, designated session, unique attempt, head H and base B.
   Register new attempt before live work with `spur review-app prepare`; caller App config owns receiptRoot and canonical repository/PR/lane receipt. Request schema: v2/src/review-app.ts.
-  Prepare identity/H/B/digest before checkout/QA; add verdict/body/evidence to separate publication input afterward.
+  Prepare identity/H/B/digest and intended-check feedback before checkout/QA; final verdict/evidence follows checks.
   Require confirmed App-authored public PENDING before required scenario execution/publication; failed transport blocks those steps, not independent static inspection/findings or authorized owner fixes.
-  Receipt fields: session, attempt, H, B, contractDigest, status, evidence, reviewId; use repository owner/name namespaces.
+  Request/receipt schema and feedback publication outcome: v2/src/review-app.ts.
   Persist review blocker through `spur review-app block`; changed blocker requires fresh unique prepare. Utility owns receipt transitions/locks; prohibit manual receipt replacement.
   Receipt write failure blocks; notify owner. Never recover eligibility from historical approval alone.
   Checkout H; bind test environment and artifacts to H/B. Record configuration/environment fingerprints.
@@ -36,7 +36,7 @@ SCENARIOS
   Require browser rows only for actual UI-flow changes; drive isolated UI and inspect saved artifacts.
   Review prompt/docs/tooling changes statically in both lanes; publish each lane's own verdict without runtime/browser rows.
   Keep required live/browser evidence for changed flows; targeted tests never replace those rows.
-  Return CHANGES_REQUESTED for evidenced defects/attributable targeted-check failures. Missing required environment/evidence blocks approval; retain available findings and bounded exclusions.
+  Classify findings per FEEDBACK; retain available findings and bounded exclusions.
   Attest every changed path/caller as internal or semantic interface scope; assessment schema: v2/src/review-interface.ts. Missing, unknown or disagreeing lanes block exemption.
 
 DELTA
@@ -49,6 +49,15 @@ DELTA
   Failed prepare/explicit review blocker requires fresh prepare after recovery. Publication-only failure reuses exact attempt/request for reconciliation; never replace uncertain mutation to force another POST.
   Regression requests changes; missing evidence blocks and attempts permitted dismissal of prior own approval.
   Record failed dismissal without claiming revocation; durable BLOCKED defeats older APPROVED.
+
+FEEDBACK
+
+  Require public human-readable feedback for every non-APPROVED live status, including PENDING intended checks before final evidence exists.
+  Attach reason, check, observed/expected result, evidence and next action/actor to PR discussion, review thread or status reply; private receipts/session sends never suffice.
+  Use CHANGES_REQUESTED for confirmed attributable defects/failing supported behavior; request concrete fix with evidence.
+  Reserve BLOCKED for access, credentials, environment or evidence constraints; state uncertain fixture observations and unproven attribution.
+  Publish through runtime-validated feedback schema; retain local findings and report feedback-publication failure without claiming publication.
+  Reconcile unchanged attempts without duplicate comments; preserve trusted tool pins and native freshness checks.
 
 PUBLICATION
 

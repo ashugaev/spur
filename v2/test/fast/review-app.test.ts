@@ -4,6 +4,8 @@ import type * as FileSystem from "node:fs/promises";
 import type * as ReviewState from "../../src/review-state.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { transpileModule, ModuleKind, ScriptTarget } from "typescript";
 import { afterEach, expect, test, vi } from "vitest";
 import {
   parseConfig,
@@ -16,10 +18,14 @@ import {
 import { publishLaneState } from "../../src/review-state.js";
 import { execFileAsync } from "../helpers/common.js";
 import { readJson } from "../../src/github-app.js";
+import { plan, capability, defect } from "./review-feedback.fixture.js";
 
 const dirs: string[] = [];
 const faults = vi.hoisted(() => ({ approvedWrite: false, recovery: "", writes: 0 }));
-vi.mock("../../src/review-state.js", () => ({ publishLaneState: vi.fn(async () => undefined) }));
+vi.mock("../../src/review-state.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof ReviewState>()),
+  publishLaneState: vi.fn(async () => undefined),
+}));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof FileSystem>();
   return {
@@ -81,6 +87,7 @@ const draft = {
   contractDigest: "c".repeat(64),
   body: "Code Review Conclusion",
   verdict: "APPROVED",
+  feedback: plan,
   coverage: { challenger: "critic-1", output: "matrix.txt", omissionsClosed: true },
   rows: [{ status: "passed", evidence: "proof.png" }],
   assessment: {
@@ -115,6 +122,30 @@ test("accepts optional legacy coverage and blocks malformed coverage or failed r
       browser: { appId: 1, keyPath: "k" },
     }),
   ).toThrow("duplicate-apps");
+});
+test("final defects require attributable feedback and failed evidence", () => {
+  expect(() => parseRequest({ ...draft, receipt: "r", verdict: "CHANGES_REQUESTED" })).toThrow(
+    "invalid-review-feedback",
+  );
+  expect(() =>
+    parseRequest({ ...draft, receipt: "r", verdict: "CHANGES_REQUESTED", feedback: defect }),
+  ).toThrow("missing-failed-evidence");
+});
+test("exported action helpers reject bare or misclassified input before network", async () => {
+  const network = vi.fn<typeof fetch>();
+  const config = parseConfig({
+    repositories: ["owner/repo"],
+    receiptRoot: "/unused",
+    code: { appId: 1, keyPath: "unused" },
+    browser: { appId: 2, keyPath: "unused" },
+  });
+  const { feedback: _feedback, ...bare } = parseRequest({ ...draft, receipt: "unused" });
+  await expect(prepareReview(config, bare, draft.session, network)).rejects.toThrow();
+  await expect(
+    blockReview(config, { ...bare, feedback: defect }, draft.session, network),
+  ).rejects.toThrow();
+  expect(network).not.toHaveBeenCalled();
+  expect(publishLaneState).not.toHaveBeenCalled();
 });
 test("publishes and reconciles completed approval without a challenger", async () => {
   const f = await lifecycleFixture();
@@ -331,6 +362,7 @@ test.each([
   const request = parseRequest({
     ...f.request,
     verdict,
+    feedback: verdict === "APPROVED" ? plan : defect,
     rows: [
       { status: verdict === "APPROVED" ? "passed" : "failed", evidence: "targeted-check.txt" },
     ],
@@ -395,8 +427,14 @@ test("superseded attempt cannot overwrite newer BLOCKED; new reviewed attempt ca
 test("superseded attempt cannot restore approval after newer request-changes", async () => {
   const f = await lifecycleFixture();
   await publishReview(f.config, f.request, draft.session, f.transport);
-  const newer = { ...f.request, attempt: "attempt-2", verdict: "CHANGES_REQUESTED" as const };
-  await prepareReview(f.config, newer, draft.session);
+  const newer = {
+    ...f.request,
+    attempt: "attempt-2",
+    verdict: "CHANGES_REQUESTED" as const,
+    feedback: defect,
+    rows: [{ status: "failed" as const, evidence: "attributable assertion" }],
+  };
+  await prepareReview(f.config, { ...newer, feedback: plan }, draft.session);
   expect((await publishReview(f.config, newer, draft.session, f.transport)).status).toBe(
     "CHANGES_REQUESTED",
   );
@@ -417,10 +455,12 @@ test("prepare invalidates old approval before QA and block ends current attempt 
     status: "PENDING",
     inputDigest: null,
   });
-  await expect(blockReview(f.config, f.request, draft.session)).rejects.toThrow(
-    "attempt-superseded",
-  );
-  expect(await blockReview(f.config, newer, draft.session)).toMatchObject({
+  await expect(
+    blockReview(f.config, { ...f.request, feedback: capability }, draft.session),
+  ).rejects.toThrow("attempt-superseded");
+  expect(
+    await blockReview(f.config, { ...newer, feedback: capability }, draft.session),
+  ).toMatchObject({
     status: "BLOCKED",
     reviewBlocked: true,
   });
@@ -580,6 +620,18 @@ test.skipIf(process.platform === "win32").each(["legacy", "pending"])(
       await rm(f.archive);
     }
     await execFileAsync("mkfifo", ["-m", "600", f.archive], { timeout: 2_000 });
+    for (const name of ["review-app", "review-state", "review-interface", "github-app"]) {
+      const source = await readFile(new URL(`../../src/${name}.ts`, import.meta.url), "utf8");
+      await writeFile(
+        join(f.dir, `${name}.mjs`),
+        transpileModule(source, {
+          compilerOptions: { module: ModuleKind.ESNext, target: ScriptTarget.ES2022 },
+        }).outputText.replace(
+          /from "\.\/(review-state|review-interface|github-app)\.js"/g,
+          'from "./$1.mjs"',
+        ),
+      );
+    }
     const child = `
       import { readFile, lstat, access } from "node:fs/promises";
       try {
@@ -610,7 +662,7 @@ test.skipIf(process.platform === "win32").each(["legacy", "pending"])(
         "--input-type=module",
         "-e",
         child,
-        new URL("../../dist/review-app.js", import.meta.url).href,
+        pathToFileURL(join(f.dir, "review-app.mjs")).href,
         JSON.stringify(f.config),
         JSON.stringify(f.request),
         f.sha256,
@@ -936,20 +988,26 @@ test("legacy recovery archives exact bytes and retires both attempts without a n
 });
 
 test.each(["success", "announcement-failure"])(
-  "legacy recovery G1 %s preserves converted PENDING bytes",
+  "legacy recovery G1 %s retains archive and reports feedback publication",
   async (mode) => {
     const f = await legacyRecoveryFixture();
     await f.recover();
     const current = await readFile(f.request.receipt);
     expect(createHash("sha256").update(current).digest("hex")).not.toBe(f.sha256);
-    const writes = faults.writes;
     if (mode === "announcement-failure") {
       f.comments.splice(0);
       f.failReadback();
-      await expect(f.recover()).rejects.toThrow("state-publication-mismatch");
-    } else expect(await f.recover()).toMatchObject({ status: "PENDING" });
-    expect(faults.writes).toBe(writes);
-    expect(await readFile(f.request.receipt)).toEqual(current);
+      expect(await f.recover()).toMatchObject({
+        status: "BLOCKED",
+        feedbackPublication: { status: "failed", error: "state-publication-mismatch" },
+      });
+    } else {
+      expect(await f.recover()).toMatchObject({
+        status: "PENDING",
+        feedbackPublication: { status: "confirmed" },
+      });
+      expect(await readFile(f.request.receipt)).toEqual(current);
+    }
     expect(await readFile(f.archive)).toEqual(f.raw);
     expect(f.posts()).toBe(0);
   },
@@ -1199,7 +1257,19 @@ test.each(["APPROVED", "CHANGES_REQUESTED"] as const)(
     const f = await legacyRecoveryFixture();
     await f.recover();
     expect(
-      await publishReview(f.config, { ...f.request, verdict }, f.request.session, f.transport),
+      await publishReview(
+        f.config,
+        {
+          ...f.request,
+          verdict,
+          feedback: verdict === "APPROVED" ? plan : defect,
+          rows: [
+            { status: verdict === "APPROVED" ? "passed" : "failed", evidence: "named attribution" },
+          ],
+        },
+        f.request.session,
+        f.transport,
+      ),
     ).toMatchObject({ status: verdict });
     const current = await readFile(f.request.receipt);
     const posts = f.posts();
