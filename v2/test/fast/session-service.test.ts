@@ -26671,7 +26671,7 @@ describe("SessionService", () => {
         externalId: "acme/api#7",
         blockIndex: 0,
       };
-      createSessionStore(
+      const sessions = createSessionStore(
         sessionRecord({
           id: "api-tagged",
           status: "spawning",
@@ -26694,11 +26694,14 @@ describe("SessionService", () => {
       );
       const service = await createDisposedSessionService();
       try {
+        const record = sessions.get("api-tagged");
+        if (!record) throw new Error("Missing tagged fixture record");
         const views = [
           await service.get("api-tagged"),
           ...(await service.list()).filter((view) => view.id === "api-tagged"),
+          await sessionServiceInternals(service).enrichDashboard(record),
         ];
-        expect(views).toHaveLength(2);
+        expect(views).toHaveLength(3);
         for (const view of views) {
           expect(view).toMatchObject({ triggerOrigin: origin });
           for (const field of [
