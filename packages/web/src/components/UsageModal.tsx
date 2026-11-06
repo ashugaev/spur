@@ -48,7 +48,8 @@ const PROVIDER_NAMES: Record<
   opencode: "OpenCode",
 };
 
-const DOT_COLOR: Record<QuotaLevel | "working", string> = {
+const DOT_COLOR: Record<QuotaLevel | "working" | "neutral", string> = {
+  neutral: "var(--color-text-tertiary)",
   ready: "var(--color-status-ready)",
   attention: "var(--color-status-attention)",
   error: "var(--color-status-error)",
@@ -74,7 +75,7 @@ function SectionHeader({
   label,
   right,
 }: {
-  dot: QuotaLevel | "working";
+  dot: keyof typeof DOT_COLOR;
   label: string;
   right: ReactNode;
 }) {
@@ -280,7 +281,7 @@ function UsageContent({ data }: { data: UsageReport }) {
   return (
     <div className="pb-2">
       <SectionHeader
-        dot={level}
+        dot={data.quotas.length === 0 ? "neutral" : level}
         label="Quota"
         right={
           <span className={`tabular-nums ${SECONDARY_TEXT}`}>
@@ -288,9 +289,13 @@ function UsageContent({ data }: { data: UsageReport }) {
           </span>
         }
       />
-      {data.quotas.map((quota) => (
-        <QuotaSource key={`${quota.provider}/${quota.source}`} quota={quota} />
-      ))}
+      {data.quotas.length === 0 ? (
+        <div className={`px-[13px] pb-2 pt-1.5 ${TERTIARY_TEXT}`}>No quota sources</div>
+      ) : (
+        data.quotas.map((quota) => (
+          <QuotaSource key={`${quota.provider}/${quota.source}`} quota={quota} />
+        ))
+      )}
       <SectionHeader
         dot="working"
         label="Tokens"
@@ -299,13 +304,13 @@ function UsageContent({ data }: { data: UsageReport }) {
             {TOKEN_WINDOWS.map((entry, index) => (
               <button
                 aria-pressed={tab === entry.window}
-                className={`px-2 py-0.5 font-bold uppercase tracking-[0.08em] outline-none ${
+                className={`px-2 py-0.5 font-bold uppercase tracking-[0.08em] focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-[var(--color-accent)] ${
                   index > 0 ? "border-l border-[var(--color-border-default)]" : ""
                 } ${
                   tab === entry.window
                     ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]"
-                    : `${SECONDARY_TEXT} hover:text-[var(--color-text-primary)] focus-visible:bg-[var(--color-bg-surface)] focus-visible:text-[var(--color-accent)]`
-                } ${tab === entry.window ? "focus-visible:underline" : ""}`}
+                    : `${SECONDARY_TEXT} hover:text-[var(--color-text-primary)]`
+                }`}
                 key={entry.window}
                 onClick={() => setTab(entry.window)}
                 type="button"

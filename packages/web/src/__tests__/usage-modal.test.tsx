@@ -235,6 +235,13 @@ describe("UsageModal quota", () => {
     expect(screen.getByTestId("quota-dot")).toHaveAttribute("data-level", "error");
   });
 
+  it("shows a neutral dot and empty text when there are no quota sources", async () => {
+    await renderReady({ ...REPORT, quotas: [] });
+    expect(screen.getByText("No quota sources")).toBeInTheDocument();
+    expect(screen.getByText("0/0")).toBeInTheDocument();
+    expect(screen.getByTestId("quota-dot")).toHaveAttribute("data-level", "neutral");
+  });
+
   it("omits the plan when null", async () => {
     await renderReady({ ...REPORT, quotas: [{ ...okSource, plan: null }] });
     expect(screen.queryByText("max")).not.toBeInTheDocument();
