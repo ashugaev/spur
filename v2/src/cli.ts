@@ -59,6 +59,7 @@ import {
 import { checkAgentProcessOwnership } from "./agent-processes.js";
 import { recordReviewCommentsSeen } from "./comment-seen.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
+import type { UsageReport } from "./usage-report.js";
 import { appendAgentIssue, readAgentIssueLog, type AgentIssueRecord } from "./agent-issue-log.js";
 import type { UserActionRecord } from "./user-action-log.js";
 import {
@@ -1504,6 +1505,42 @@ export function renderSessionGcResult(report: GcReport): string {
   }
   if (report.dryRun) {
     lines.push(dimText("Dry run — nothing removed. Re-run with --execute to apply."));
+  }
+  return lines.join("\n");
+}
+
+export function renderUsageReport(report: UsageReport): string {
+  const lines = [boldText("Quota")];
+  for (const quota of report.quotas) {
+    const name = `${quota.provider} ${quota.label}`;
+    if (quota.status === "error") {
+      lines.push(`  ${accent(name)}  ${quota.error}  ${dimText(quota.message)}`);
+      continue;
+    }
+    lines.push(`  ${accent(name)}${quota.plan ? `  ${dimText(quota.plan)}` : ""}`);
+    if (quota.windows.length === 0) lines.push(`    ${dimText("no windows reported")}`);
+    for (const window of quota.windows) {
+      const used = `${Math.round(window.usedPercent)}% used`;
+      const left = `${Math.round(window.remainingPercent)}% left`;
+      lines.push(
+        `    ${window.label.padEnd(18)}  ${used.padStart(9)}  ${left.padStart(8)}  ${dimText(window.resetsAt ? `resets ${window.resetsAt}` : "no reset time")}`,
+      );
+    }
+  }
+  lines.push("", boldText("Tokens"));
+  for (const summary of report.tokens) {
+    lines.push(`  ${accent(summary.window)}`);
+    if (summary.byProvider.length === 0) lines.push(`    ${dimText("no sessions")}`);
+    for (const provider of summary.byProvider) {
+      lines.push(
+        `    ${provider.provider}  ${provider.totals.totalTokens} tokens  ${provider.sessionCount} sessions`,
+      );
+      for (const entry of provider.byModel) {
+        lines.push(
+          `      ${(entry.model ?? "default").padEnd(24)}  ${entry.totals.totalTokens} tokens  ${entry.sessionCount} sessions`,
+        );
+      }
+    }
   }
   return lines.join("\n");
 }
@@ -3056,6 +3093,22 @@ export function createProgram(cliEntrypoint: string): Command {
         },
         render: renderSessionGcResult,
         exitCode: (report) => (report.totals.errors > 0 ? 1 : undefined),
+      });
+    });
+
+  program
+    .command("usage")
+    .description(
+      "Show provider quota windows (Claude accounts, Codex) and session token totals for today, 7 days, 30 days. Read-only; never refreshes saved logins.",
+    )
+    .option("--json", "Print raw JSON")
+    .action(async (options: { json?: boolean }, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading usage",
+        action: () => getJson<UsageReport>(cliEntrypoint, "/usage", configPath),
+        render: renderUsageReport,
       });
     });
 
