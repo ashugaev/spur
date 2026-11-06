@@ -1591,14 +1591,25 @@ test.each(["code", "browser"] as const)(
   },
 );
 
-test.each([undefined, capability, {}])("registered recovery refuses invalid fresh plan %j before transport", async (feedback) => {
-  const f = await registeredFixture();
-  const writes = faults.writes;
-  await expect(recoverReview(f.config, { ...f.request, feedback } as typeof f.request, f.request.session, f.sha256, f.transport)).rejects.toThrow(feedback === undefined ? "invalid-response" : "invalid-review-feedback");
-  expect(await readFile(f.request.receipt)).toEqual(f.raw);
-  expect(faults.writes).toBe(writes);
-  expect(f.calls).toEqual([]);
-});
+test.each([undefined, capability, {}])(
+  "registered recovery refuses invalid fresh plan %j before transport",
+  async (feedback) => {
+    const f = await registeredFixture();
+    const writes = faults.writes;
+    await expect(
+      recoverReview(
+        f.config,
+        { ...f.request, feedback } as typeof f.request,
+        f.request.session,
+        f.sha256,
+        f.transport,
+      ),
+    ).rejects.toThrow(feedback === undefined ? "invalid-response" : "invalid-review-feedback");
+    expect(await readFile(f.request.receipt)).toEqual(f.raw);
+    expect(faults.writes).toBe(writes);
+    expect(f.calls).toEqual([]);
+  },
+);
 
 test("registered replay confirms feedback transiently and refuses a different prepared plan", async () => {
   const f = await registeredFixture();
@@ -1608,7 +1619,10 @@ test("registered replay confirms feedback transiently and refuses a different pr
   await writeFile(f.request.receipt, JSON.stringify(current));
   const pending = await readFile(f.request.receipt);
   const writes = faults.writes;
-  expect(await f.recover()).toMatchObject({ status: "PENDING", feedbackPublication: { status: "confirmed" } });
+  expect(await f.recover()).toMatchObject({
+    status: "PENDING",
+    feedbackPublication: { status: "confirmed" },
+  });
   expect(await readFile(f.request.receipt)).toEqual(pending);
   expect(faults.writes).toBe(writes);
   f.request.feedback = { ...plan, reason: "Different fresh plan" };
@@ -1766,36 +1780,44 @@ test.each(["authentication", "history", "fresh", "archive", "stage", "delete"])(
 
 test.each(
   ["confirmed", "failed"].flatMap((outcome) =>
-    ["await-replace", "await-delete", "stage-replace", "stage-delete"].map((phase) => ({ outcome, phase })),
+    ["await-replace", "await-delete", "stage-replace", "stage-delete"].map((phase) => ({
+      outcome,
+      phase,
+    })),
   ),
-)("registered conversion $outcome feedback save preserves $phase external state", async ({ outcome, phase }) => {
-  const f = await registeredFixture();
-  const external = Buffer.from("external owner after first rename");
-  let changed = false;
-  const change = async () => {
-    if (changed) return;
-    changed = true;
-    if (phase.endsWith("delete")) await rm(f.request.receipt);
-    else await writeFile(f.request.receipt, external);
-  };
-  if (outcome === "failed") f.controls.mode = "readback";
-  if (phase.startsWith("stage")) {
-    let stages = 0;
-    faults.afterWrite = async (path) => {
-      if (path.endsWith("receipt.json") && ++stages === 2) await change();
+)(
+  "registered conversion $outcome feedback save preserves $phase external state",
+  async ({ outcome, phase }) => {
+    const f = await registeredFixture();
+    const external = Buffer.from("external owner after first rename");
+    let changed = false;
+    const change = async () => {
+      if (changed) return;
+      changed = true;
+      if (phase.endsWith("delete")) await rm(f.request.receipt);
+      else await writeFile(f.request.receipt, external);
     };
-  } else f.controls.intercept = async (url) => {
-    if (url.pathname.includes("/issues/comments/")) await change();
-    return undefined;
-  };
-  await expect(f.recover()).rejects.toThrow("receipt-write");
-  expect(changed).toBe(true);
-  if (phase.endsWith("delete")) await expect(readFile(f.request.receipt)).rejects.toMatchObject({ code: "ENOENT" });
-  else expect(await readFile(f.request.receipt)).toEqual(external);
-  expect(await readFile(f.archive)).toEqual(f.raw);
-  await expect(stat(`${f.request.receipt}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
-  expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
-});
+    if (outcome === "failed") f.controls.mode = "readback";
+    if (phase.startsWith("stage")) {
+      let stages = 0;
+      faults.afterWrite = async (path) => {
+        if (path.endsWith("receipt.json") && ++stages === 2) await change();
+      };
+    } else
+      f.controls.intercept = async (url) => {
+        if (url.pathname.includes("/issues/comments/")) await change();
+        return undefined;
+      };
+    await expect(f.recover()).rejects.toThrow("receipt-write");
+    expect(changed).toBe(true);
+    if (phase.endsWith("delete"))
+      await expect(readFile(f.request.receipt)).rejects.toMatchObject({ code: "ENOENT" });
+    else expect(await readFile(f.request.receipt)).toEqual(external);
+    expect(await readFile(f.archive)).toEqual(f.raw);
+    await expect(stat(`${f.request.receipt}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
+  },
+);
 
 test.each(["preflight-drift", "announce-drift", "readback"])(
   "mocked-admission replay %s never saves canonical",
