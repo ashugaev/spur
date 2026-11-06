@@ -583,7 +583,7 @@ describe("runtime daemon startup boundary", () => {
     async (phase) => {
       if (phase === "body") {
         const response = new Response("unused");
-        response.text = () => new Promise(() => {});
+        vi.spyOn(response, "text").mockImplementation(() => new Promise<string>(() => {}));
         fetchMock.mockResolvedValue(response);
       }
       fetchMock.mockResolvedValueOnce(new Response("starting", { status: 503 }));
