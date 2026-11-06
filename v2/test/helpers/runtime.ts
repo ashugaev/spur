@@ -1329,6 +1329,10 @@ ${content}`,
     return JSON.parse(text) as T;
   };
 
+  const failedStarts = new Map<
+    ChildProcessByStdio<null, Readable, Readable>,
+    { hasExited(): boolean; failure: Error }
+  >();
   const startDaemon = async (configPath: string) => {
     const child = spawn(
       process.execPath,
@@ -1440,6 +1444,7 @@ ${content}`,
     const exit = new Promise<void>((resolveExit) => {
       child.once("exit", (code, signal) => {
         exited = true;
+        failedStarts.delete(child);
         resolveExit();
         interrupt(new Error(`daemon exited before readiness: code=${code}, signal=${signal}`));
       });
@@ -1534,7 +1539,7 @@ ${content}`,
           clearTimeout(drainTimer);
         }
       }
-      throw new Error(
+      const failure = new Error(
         `Daemon startup failed: ${JSON.stringify({
           ...diagnostics,
           stdout: safe(stdout, stdoutTruncated),
@@ -1544,6 +1549,8 @@ ${content}`,
           hasExited() ? "owned child exited" : "UNRESOLVED owned child has not exited"
         }${cleanupErrors.length ? ` (${cleanupErrors.join("; ")})` : ""}`,
       );
+      if (!hasExited()) failedStarts.set(child, { hasExited, failure });
+      throw failure;
     } finally {
       clearTimeout(timer);
     }
@@ -1566,6 +1573,15 @@ ${content}`,
   };
 
   const cleanup = async (): Promise<void> => {
+    for (const [child, failed] of failedStarts) {
+      if (failed.hasExited()) failedStarts.delete(child);
+    }
+    if (failedStarts.size > 0) {
+      const failures = [...failedStarts.values()].map(({ failure }) => failure.message).join("\n");
+      throw new Error(
+        `Runtime fixture cleanup blocked: UNRESOLVED owned startup child\n${failures}`,
+      );
+    }
     _resetGhPathCacheForTests();
     if (useFakeTools) {
       // Tear down the isolated tmux server and re-arm the guard so the next

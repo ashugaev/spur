@@ -1,5 +1,6 @@
 import type * as ChildProcess from "node:child_process";
 import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRuntimeTestContext, type RuntimeTestContext } from "../helpers/runtime.js";
@@ -19,6 +20,7 @@ class FakeChild extends EventEmitter {
   pid: number | undefined = 424242;
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
+  killed = false;
   stdout = new PassThrough();
   stderr = new PassThrough();
   kill = vi.fn<(signal: NodeJS.Signals) => boolean>(() => true);
@@ -70,6 +72,9 @@ describe("runtime daemon startup boundary", () => {
   });
 
   afterEach(() => {
+    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+      child.exit(0);
+    }
     child.stdout.destroy();
     child.stderr.destroy();
     vi.useRealTimers();
@@ -132,6 +137,127 @@ describe("runtime daemon startup boundary", () => {
     expect(error.message.length).toBeLessThan(9000);
     expect(child.kill).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("native browser probe: masks stderr ending two bytes into the credential emoji", async () => {
+    context.env.CI_STARTUP_TEST_TOKEN = "private-🔐-credential";
+    const failure = failureOf(context.startDaemon(`${context.rootDir}/test.yaml`));
+    const bytes = Buffer.from(context.env.CI_STARTUP_TEST_TOKEN);
+    child.stderr.write(bytes.subarray(0, bytes.indexOf(Buffer.from("🔐")) + 2));
+    child.exitCode = 2;
+    child.emit("exit", 2, null);
+    child.stdout.end();
+    child.stderr.end();
+    child.emit("close", 2, null);
+    const error = await failure;
+    expect(error.message).not.toContain("private-");
+    expect(error.message).toContain('"outputClosed":true');
+  });
+
+  it.each([false, true])(
+    "preserves all fixtures while failed-start child signal delivery is %s",
+    async (delivered) => {
+      const fixture = await createRuntimeTestContext(42424, { useFakeTools: false });
+      child.kill.mockImplementation(() => {
+        child.killed = delivered;
+        return delivered;
+      });
+      try {
+        const failure = failureOf(fixture.startDaemon(`${fixture.rootDir}/test.yaml`));
+        await vi.advanceTimersByTimeAsync(22_250);
+        const startupError = await failure;
+        expect(startupError.message).toContain("UNRESOLVED owned child has not exited");
+        expect(child.kill.mock.calls).toEqual([["SIGTERM"], ["SIGKILL"]]);
+        expect(child.exitCode).toBeNull();
+        expect(child.signalCode).toBeNull();
+        const cleanupError: unknown = await fixture.cleanup().catch((error: unknown) => error);
+        for (const directory of [fixture.rootDir, fixture.repoDir, fixture.originDir]) {
+          expect(
+            existsSync(directory),
+            "live failed-start child still owns fixture directories",
+          ).toBe(true);
+        }
+        expect(cleanupError).toBeInstanceOf(Error);
+        expect((cleanupError as Error).message).toContain(startupError.message);
+        // Repeated ordinary cleanup must neither signal again nor discard ownership.
+        await expect(fixture.cleanup()).rejects.toThrow("UNRESOLVED");
+        expect(child.kill.mock.calls).toEqual([["SIGTERM"], ["SIGKILL"]]);
+        child.exit(0);
+        await fixture.cleanup();
+        for (const directory of [fixture.rootDir, fixture.repoDir, fixture.originDir]) {
+          expect(existsSync(directory)).toBe(false);
+        }
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) child.exit(0);
+        await fixture.cleanup();
+      }
+    },
+  );
+
+  it("retains earlier failed-start ownership after a later successful launch", async () => {
+    const fixture = await createRuntimeTestContext(42424, { useFakeTools: false });
+    const successfulChild = new FakeChild();
+    successfulChild.pid = 424243;
+    child.kill.mockReturnValue(false);
+    try {
+      const failure = failureOf(fixture.startDaemon(`${fixture.rootDir}/first.yaml`));
+      await vi.advanceTimersByTimeAsync(22_250);
+      const startupError = await failure;
+      spawn.mockReturnValue(successfulChild as unknown as ReturnType<typeof ChildProcess.spawn>);
+      fetchMock.mockResolvedValue(new Response(JSON.stringify({ pid: successfulChild.pid })));
+      const result = await fixture.startDaemon(`${fixture.rootDir}/second.yaml`);
+      expect(result.child).toBe(successfulChild);
+      expect(successfulChild.kill).not.toHaveBeenCalled();
+      const cleanupError: unknown = await fixture.cleanup().catch((error: unknown) => error);
+      expect(cleanupError).toBeInstanceOf(Error);
+      expect((cleanupError as Error).message).toContain(startupError.message);
+      for (const directory of [fixture.rootDir, fixture.repoDir, fixture.originDir]) {
+        expect(existsSync(directory)).toBe(true);
+      }
+    } finally {
+      child.exit(0);
+      successfulChild.exit(0);
+      await fixture.cleanup();
+    }
+  });
+
+  it("retains each original startup failure until every failed child has actually exited", async () => {
+    const fixture = await createRuntimeTestContext(42424, { useFakeTools: false });
+    const secondChild = new FakeChild();
+    secondChild.pid = 424243;
+    child.kill.mockReturnValue(false);
+    secondChild.kill.mockReturnValue(false);
+    try {
+      fetchMock.mockRejectedValue(new Error("fetch failed", { cause: { code: "FIRST_FAILURE" } }));
+      const first = failureOf(fixture.startDaemon(`${fixture.rootDir}/first.yaml`));
+      await vi.advanceTimersByTimeAsync(22_250);
+      await first;
+      spawn.mockReturnValue(secondChild as unknown as ReturnType<typeof ChildProcess.spawn>);
+      fetchMock.mockRejectedValue(new Error("fetch failed", { cause: { code: "SECOND_FAILURE" } }));
+      const second = failureOf(fixture.startDaemon(`${fixture.rootDir}/second.yaml`));
+      await vi.advanceTimersByTimeAsync(22_250);
+      await second;
+      let cleanupError: unknown = await fixture.cleanup().catch((error: unknown) => error);
+      expect(cleanupError).toBeInstanceOf(Error);
+      expect((cleanupError as Error).message).toContain("FIRST_FAILURE");
+      expect((cleanupError as Error).message).toContain("SECOND_FAILURE");
+      child.exit(0);
+      cleanupError = await fixture.cleanup().catch((error: unknown) => error);
+      expect(cleanupError).toBeInstanceOf(Error);
+      expect((cleanupError as Error).message).toContain("SECOND_FAILURE");
+      for (const directory of [fixture.rootDir, fixture.repoDir, fixture.originDir]) {
+        expect(existsSync(directory)).toBe(true);
+      }
+      secondChild.exit(0);
+      await fixture.cleanup();
+      for (const directory of [fixture.rootDir, fixture.repoDir, fixture.originDir]) {
+        expect(existsSync(directory)).toBe(false);
+      }
+    } finally {
+      if (child.exitCode === null) child.exit(0);
+      if (secondChild.exitCode === null) secondChild.exit(0);
+      await fixture.cleanup();
+    }
   });
 
   it("retains the last transport failure and its connection error code", async () => {
