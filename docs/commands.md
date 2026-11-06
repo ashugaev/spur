@@ -26,18 +26,12 @@ Read-only host/config/daemon health check; `--scaffold` writes local `spur.yaml`
 
 ## usage
 
-`spur usage [--json]` prints quota windows per Claude account and Codex, and token totals for today, 7d, 30d by provider and launch model. Read-only; saved logins never refreshed. Per-source errors print as rows. Quota cached 3 min per source. Sessions dated by last activity, unarchived only. `v2/src/usage-report.ts`.
+`spur usage [--json]`: quota windows per Claude account and Codex, token totals today/7d/30d by provider and launch model; read-only, saved logins never refreshed; failing source prints an error row; quota cached 3 min per source; tokens from unarchived sessions dated by last activity — `v2/src/usage-report.ts`.
 
-## disk-gc
+## disk-gc, artifacts-gc, cache
 
 `spur disk-gc [--execute --browser-revisions --older-than <days> --limit <n> --json]` reclaims stale playwright profiles and terminal-worktree build caches.
-
-## artifacts-gc
-
 `spur artifacts-gc [--execute --older-than <days> --max-bytes <bytes> --max-files <n> --project <id> --limit <n> --json]` prunes `agent-history-*.jsonl`. See [Artifact retention](configuration.md#artifact-retention).
-
-## cache
-
 `spur cache [--prune --yes]` reports/prunes host caches outside `~/.spur`.
 
 ## daemon
