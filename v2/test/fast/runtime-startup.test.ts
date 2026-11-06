@@ -199,6 +199,29 @@ describe("runtime daemon startup boundary", () => {
     expect(error.message).not.toContain("�");
   });
 
+  it.each([
+    ["private-é", 1],
+    ["private-€", 1],
+    ["private-€", 2],
+    ["private-🔐-credential", 1],
+    ["private-🔐-credential", 2],
+    ["private-🔐-credential", 3],
+  ] as const)("redacts %s interrupted after %s character bytes at close", async (secret, count) => {
+    context.env.CI_STARTUP_TEST_TOKEN = secret;
+    const failure = failureOf(context.startDaemon(`${context.rootDir}/test.yaml`));
+    const bytes = Buffer.from(secret);
+    const split = Buffer.byteLength("private-") + count;
+    child.stdout.write(bytes.subarray(0, split));
+    child.stderr.write(bytes.subarray(0, split));
+    child.exit(2);
+    const error = await failure;
+    expect(error.message).not.toContain("private-");
+    expect(error.message).toContain("[redacted]");
+    expect(error.message).toContain('"outputClosed":true');
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("redacts an unfinished credential split across chunks longer than the retained tail", async () => {
     const middle = "s".repeat(6000);
     context.env.CI_STARTUP_TEST_TOKEN = `private-start-${middle}-private-end`;

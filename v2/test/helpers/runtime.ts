@@ -1375,6 +1375,8 @@ ${content}`,
       truncated ||= value.length > tailLimit;
       value = value.slice(-tailLimit);
       const hidden = new Uint8Array(value.length);
+      // Decoder EOF may replace an unfinished character after a private prefix.
+      const fragmentEnd = value.replace(/\uFFFD+$/u, "").length;
       for (const privateValue of privateValues) {
         for (
           let index = value.indexOf(privateValue);
@@ -1388,9 +1390,11 @@ ${content}`,
           while (size > 0 && !privateValue.includes(value.slice(0, size))) size--;
           hidden.fill(1, 0, size);
         }
-        let size = Math.min(privateValue.length - 1, value.length);
-        while (size > 0 && !privateValue.startsWith(value.slice(-size))) size--;
-        hidden.fill(1, value.length - size);
+        let size = Math.min(privateValue.length - 1, fragmentEnd);
+        while (size > 0 && !privateValue.startsWith(value.slice(fragmentEnd - size, fragmentEnd))) {
+          size--;
+        }
+        if (size > 0) hidden.fill(1, fragmentEnd - size);
       }
       let redacted = "";
       for (let index = 0; index < value.length; index++) {
