@@ -75226,6 +75226,40 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("T19 prunes failure counts of reopened sessions and ids with no Telegram state", async () => {
+      const { failures, state } = seedGc(
+        [{ id: "api-1", thread: 22, binding: true, target: true }],
+        {
+          live: [gcRecord("api-1", "running")],
+          clockAgeMs: 25 * 60 * 60_000,
+        },
+      );
+      failures.value = { "api-1": 2, "api-gone": 1 };
+      const service = await startService();
+      await tick();
+
+      expect(failures.value).toEqual({});
+      expect(writeTelegramTopicGcFailuresMock).toHaveBeenCalledTimes(1);
+      expect(deleteTelegramTopicMock).not.toHaveBeenCalled();
+      expect(state.get("api-1")).toMatchObject({ binding: true, target: true });
+      service.dispose();
+    });
+
+    it("T20 leaves the failure file alone when nothing is stale", async () => {
+      const { failures } = seedGc([{ id: "api-1", thread: 22, binding: true, target: true }], {
+        live: [gcRecord("api-1", "killed")],
+        clockAgeMs: 25 * 60 * 60_000,
+      });
+      failures.value = { "api-1": 1 };
+      deleteTelegramTopicMock.mockRejectedValue(new Error("Telegram 500"));
+      const service = await startService();
+      await tick();
+
+      expect(failures.value).toEqual({ "api-1": 2 });
+      expect(writeTelegramTopicGcFailuresMock).toHaveBeenCalledTimes(1);
+      service.dispose();
+    });
+
     it("T15 a session reopened after the scan keeps its topic", async () => {
       const { state } = seedGc([{ id: "api-1", thread: 22, binding: true, target: true }], {
         clockAgeMs: 25 * 60 * 60_000,

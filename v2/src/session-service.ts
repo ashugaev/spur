@@ -8979,6 +8979,26 @@ export class SessionService {
     return project ? { id: sessionId, project, status: "missing" } : null;
   }
 
+  // Drops failure counts of ids that left the scan (state removed elsewhere) or
+  // are no longer dead (reopened). An unreadable record keeps its count.
+  private pruneTelegramTopicGcFailures(scanned: ReadonlySet<string>): void {
+    const dataDir = this.config.dataDir;
+    const failures = readTelegramTopicGcFailures(dataDir);
+    const kept: Record<string, number> = {};
+    for (const [id, count] of Object.entries(failures)) {
+      if (!scanned.has(id)) continue;
+      try {
+        if (!this.classifyTelegramTopicOwner(id)) continue;
+      } catch {
+        // unknown: keep
+      }
+      kept[id] = count;
+    }
+    if (Object.keys(kept).length !== Object.keys(failures).length) {
+      writeTelegramTopicGcFailures(dataDir, kept);
+    }
+  }
+
   // Daily daemon sweep of Telegram topics whose session is dead. Rides the
   // session GC tick; the clock is persisted so restarts never re-sweep.
   private async runTelegramTopicGcSweep(): Promise<void> {
@@ -9000,9 +9020,9 @@ export class SessionService {
       writeTelegramTopicGcClock(dataDir, now);
       const candidates: string[] = [];
       const skipped: string[] = [];
-      for (const id of [
-        ...listTelegramTopicSessionIds(dataDir, Object.keys(this.config.projects)),
-      ].sort()) {
+      const scanned = listTelegramTopicSessionIds(dataDir, Object.keys(this.config.projects));
+      this.pruneTelegramTopicGcFailures(scanned);
+      for (const id of [...scanned].sort()) {
         if (candidates.length >= TELEGRAM_TOPIC_GC_MAX_SESSIONS) break;
         try {
           if (this.classifyTelegramTopicOwner(id)) candidates.push(id);
