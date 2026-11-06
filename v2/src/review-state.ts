@@ -4,8 +4,6 @@ import { parseAssessment, type InterfaceAssessment } from "./review-interface.js
 export const stateMarker = "Spur review state v1\n";
 const BODY_LIMIT = 256 * 1024;
 const RESERVED = /(?:^|\n)(?:<!--[ \t]*)?Spur (?:review state|interface consent) v/g;
-// eslint-disable-next-line no-control-regex -- Normalize intentional ASCII control characters in feedback.
-const FEEDBACK_WHITESPACE = /[\x00-\x20\x7f]+/g;
 function recognizesBody(body: string, marker: string): boolean {
   const prefix = marker.slice(0, marker.indexOf("v1")) + "v";
   return (
@@ -93,7 +91,7 @@ export function parseFeedback(value: unknown, status: LaneState["status"]): Revi
   if (status === "APPROVED" || data.kind !== kind)
     throw new ReviewAppError("invalid-review-feedback");
   const text = (value: unknown) => {
-    if (typeof value !== "string" || !value.replace(FEEDBACK_WHITESPACE, " ").trim())
+    if (typeof value !== "string" || !value.replace(/[\0-\x20\x7f]+/g, " ").trim())
       throw new ReviewAppError("invalid-review-feedback");
     return value.trim();
   };
@@ -133,7 +131,7 @@ export function parseFeedback(value: unknown, status: LaneState["status"]): Revi
 export function feedbackSummary(feedback: ReviewFeedback): string {
   const visible = (value: string) =>
     value
-      .replace(FEEDBACK_WHITESPACE, " ")
+      .replace(/[\0-\x20\x7f]+/g, " ")
       .replace(/[<>&\\`*_[\]~|!]/g, (character) => `&#${character.charCodeAt(0)};`);
   const fields: [string, string][] = [
     ["Reason", feedback.reason],

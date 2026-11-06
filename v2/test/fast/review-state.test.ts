@@ -9,6 +9,8 @@ import {
   isConsentBody,
   publishConsentState,
   publishLaneState,
+  parseFeedback,
+  feedbackSummary,
   readStateBody,
   stateBody,
   stateMarker,
@@ -88,8 +90,7 @@ test("new bare statuses fail before authentication; historical bare state remain
 });
 test("feedback rejects blanks, misclassification and safely displays delimiter injection", () => {
   for (const field of ["reason", "check", "observed", "expected", "evidence", "action", "actor"])
-    for (const blank of [" \n\t", "\x00\x01\x7f"])
-      expect(() => stateBody({ ...state, feedback: { ...plan, [field]: blank } })).toThrow();
+    expect(() => stateBody({ ...state, feedback: { ...plan, [field]: " \n\t" } })).toThrow();
   for (const control of ["\u0000", "\u001f", " ", "\u007f"]) {
     expect(() => stateBody({ ...state, feedback: { ...plan, reason: control } })).toThrow();
     const feedback = { ...plan, reason: `left${control}right` };
@@ -106,11 +107,33 @@ test("feedback rejects blanks, misclassification and safely displays delimiter i
   expect(body.split("\n\n<!--")[0]).not.toMatch(/<!--|<span>|\[hide\]|`code`|\*text\*/);
   expect(readStateBody(body).feedback).toEqual(malicious);
 });
-test("feedback normalizes ASCII controls in summaries without changing the payload", () => {
-  const feedback = { ...plan, reason: "visible\x00\x01\x7fnext café" };
-  const body = stateBody({ ...state, feedback });
-  expect(body.split("\n\n<!--")[0]).toContain("Reason: visible next café;");
-  expect(readStateBody(body).feedback).toEqual(feedback);
+test("feedback rejects the entire ASCII control-only range and retains other text", () => {
+  const codes = [...Array.from({ length: 33 }, (_, index) => index), 127];
+  for (const code of codes) {
+    const value = String.fromCharCode(code).repeat(3);
+    for (const field of ["reason", "check", "observed", "expected", "evidence", "action", "actor"])
+      expect(() => parseFeedback({ ...plan, [field]: value }, "PENDING")).toThrow(
+        "invalid-review-feedback",
+      );
+    expect(() => parseFeedback({ ...capability, unproven: value }, "BLOCKED")).toThrow(
+      "invalid-review-feedback",
+    );
+  }
+  for (let code = 33; code < 127; code++) {
+    const reason = `x${String.fromCharCode(code)}y`;
+    expect(parseFeedback({ ...plan, reason }, "PENDING").reason).toBe(reason);
+  }
+  expect(parseFeedback({ ...plan, reason: "  x\u0085y\u00a0z\u2003w  " }, "PENDING").reason).toBe(
+    "x\u0085y\u00a0z\u2003w",
+  );
+});
+test("feedback summaries collapse runs across the exact ASCII range without Unicode normalization", () => {
+  const controls = String.fromCharCode(...Array.from({ length: 33 }, (_, index) => index), 127);
+  const feedback = parseFeedback(
+    { ...plan, reason: `x${controls}y${controls}z`, check: "x\u0085y\u00a0z\u2003w" },
+    "PENDING",
+  );
+  expect(feedbackSummary(feedback)).toContain("Reason: x y z; Check: x\u0085y\u00a0z\u2003w;");
 });
 test("malformed reserved records and evidence-free approvals fail", () => {
   expect(() => readStateBody("Spur review state v1\n{broken}")).toThrow();
