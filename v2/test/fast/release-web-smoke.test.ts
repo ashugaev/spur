@@ -22,10 +22,12 @@ const {
 const directories: string[] = [];
 // Event-driven phases settle on the child's own signal, so their budget only caps
 // a stalled child; a loaded runner can take seconds to boot the fixture.
+// Every budget stays below the fixture's 25s self-exit, so a stall reports its phase timeout.
 const options = { startupTimeoutMs: 20_000, upgradeTimeoutMs: 10_000 };
 // A case that expects one phase to time out gets a short budget for that phase only.
 const readinessTimeout = { ...options, startupTimeoutMs: 2_000 };
-const httpTimeout = { ...options, startupTimeoutMs: 5_000 };
+// Startup budget covers readiness and the HTTP check, so readiness under load must fit too.
+const httpTimeout = { ...options, startupTimeoutMs: 15_000 };
 const upgradeTimeout = { ...options, upgradeTimeoutMs: 1_000 };
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -55,7 +57,7 @@ import { existsSync, writeFileSync } from "node:fs";
 const cfg = ${JSON.stringify({ mode, pid, port, release })};
 writeFileSync(cfg.pid, String(process.pid));
 writeFileSync(cfg.port, process.env.PORT);
-setTimeout(() => process.exit(99), 10_000).unref();
+setTimeout(() => process.exit(99), 25_000).unref();
 if (cfg.mode === "exit-before") process.exit(7);
 if (cfg.mode === "ignore-term") process.on("SIGTERM", () => {});
 const server = createServer((request, response) => {
