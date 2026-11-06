@@ -90,6 +90,13 @@ test("feedback rejects blanks, misclassification and safely displays delimiter i
   for (const field of ["reason", "check", "observed", "expected", "evidence", "action", "actor"])
     for (const blank of [" \n\t", "\x00\x01\x7f"])
       expect(() => stateBody({ ...state, feedback: { ...plan, [field]: blank } })).toThrow();
+  for (const control of ["\u0000", "\u001f", " ", "\u007f"]) {
+    expect(() => stateBody({ ...state, feedback: { ...plan, reason: control } })).toThrow();
+    const feedback = { ...plan, reason: `left${control}right` };
+    const body = stateBody({ ...state, feedback });
+    expect(body.split("\n\n<!--")[0]).toContain("Reason: left right");
+    expect(readStateBody(body).feedback).toEqual(feedback);
+  }
   expect(() => stateBody({ ...state, status: "BLOCKED", feedback: defect })).toThrow();
   const malicious = {
     ...plan,
