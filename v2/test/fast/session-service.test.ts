@@ -4528,6 +4528,28 @@ describe("SessionService", () => {
       expect(sessions.get("api-3")?.closeoutOwner).toBe(true);
     });
 
+    it("spawnInBackground settles the take when response enrichment rejects", async () => {
+      const sessions = seedWorkspace();
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      reserveNextSessionIdMock.mockResolvedValue("api-3");
+      const service = await newService();
+      vi.spyOn(
+        service as unknown as { enrich(record: SessionRecord): Promise<SessionView> },
+        "enrich",
+      ).mockRejectedValueOnce(new Error("response projection unavailable"));
+
+      await expect(reuseSpawn(service, "spawnInBackground")).rejects.toThrow(
+        "response projection unavailable",
+      );
+      await service.settleBackgroundSpawns();
+      mockExitedThenRestoredProcess();
+      await service.restore("api-1");
+
+      expect(lastLaunchEnv()?.SPUR_CLOSEOUT_OWNER).toBe("0");
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+      expect(sessions.get("api-3")?.closeoutOwner).toBe(true);
+    });
+
     it("takes no closeout while the released owner is restoring", async () => {
       const sessions = seedWorkspace();
       findAgentSessionIdMock.mockResolvedValue("session-uuid");

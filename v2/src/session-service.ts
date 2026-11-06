@@ -14993,15 +14993,8 @@ export class SessionService {
 
   async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
     const prepared = await this.prepareBackgroundSpawn(request);
-    let placeholder: Promise<SessionView>;
-    try {
-      this.spawnsInFlight.add(prepared.placeholder.id);
-      placeholder = this.enrich(prepared.placeholder);
-    } catch (error) {
-      this.spawnsInFlight.delete(prepared.placeholder.id);
-      this.settleCloseoutTake(prepared.placeholder.id);
-      throw error;
-    }
+    this.spawnsInFlight.add(prepared.placeholder.id);
+    const placeholder = this.enrich(prepared.placeholder);
     const run = new Promise<void>((resolve) => {
       queueMicrotask(() => {
         void (async () => {
