@@ -268,6 +268,8 @@ import {
   listTelegramTopicSessionIds,
   readTelegramTopicGcClock,
   writeTelegramTopicGcClock,
+  readTelegramTopicGcFailures,
+  writeTelegramTopicGcFailures,
   retireTelegramLegacyState,
   readServiceInstance,
   readSession,
@@ -834,6 +836,7 @@ const REAP_INTERVAL_MS = 5 * 60 * 1000;
 const SESSION_GC_TICK_MS = 5 * 60_000;
 const TELEGRAM_TOPIC_GC_INTERVAL_MS = 24 * 60 * 60_000;
 const TELEGRAM_TOPIC_GC_MAX_SESSIONS = 20;
+const TELEGRAM_TOPIC_GC_MAX_FAILED_SWEEPS = 3;
 
 // Session-like owner of Telegram topic state; "missing" = no record on disk.
 type TelegramTopicOwner = Pick<SessionRecord, "id" | "project" | "slots"> & {
@@ -8783,7 +8786,11 @@ export class SessionService {
     targets: { target: TelegramReplyTarget; owned: boolean }[],
     publicationFailure = false,
     notice: "terminal" | "gc" = "terminal",
-  ): Promise<void> {
+  ): Promise<{ failed: boolean; removed: { source: TelegramSourceConfig; topicId: number }[] }> {
+    const outcome = {
+      failed: false,
+      removed: [] as { source: TelegramSourceConfig; topicId: number }[],
+    };
     const groups = new Map<number, { source: TelegramSourceConfig; results: string[] }>();
     const seen = new Set<string>();
     for (const { target, owned } of targets) {
@@ -8819,31 +8826,17 @@ export class SessionService {
         group?.results.push(
           `Topic ${topicId} ${result === "deleted" ? "deleted with the agent" : "already deleted"}.`,
         );
-        if (notice === "gc" && group && source.chatId !== undefined) {
-          try {
-            await sendTelegramReply(
-              source,
-              { chatId: source.chatId },
-              `Session ${session.status === "missing" ? session.id : telegramSessionLabel(session)} topic ${topicId} removed by daily cleanup (status: ${session.status}).`,
-              { lifecycle: true },
-            );
-          } catch {
-            this.logTelegramNoticeFailure(
-              session.id,
-              "lifecycle notice",
-              new Error("Telegram notice failed or timed out"),
-            );
-          }
-        }
+        outcome.removed.push({ source, topicId });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Telegram request failed";
+        outcome.failed = true;
         group?.results.push(`Topic ${topicId} could not be deleted: ${message}.`);
         this.logTelegramNoticeFailure(session.id, "topic deletion", error);
       } finally {
         release();
       }
     }
-    if (notice === "gc") return;
+    if (notice === "gc") return outcome;
     for (const [chatId, { source, results }] of groups) {
       try {
         await sendTelegramReply(
@@ -8860,12 +8853,10 @@ export class SessionService {
         );
       }
     }
+    return outcome;
   }
 
-  private async cleanupTerminalTelegram(
-    session: TelegramTopicOwner,
-    notice: "terminal" | "gc" = "terminal",
-  ): Promise<void> {
+  private async cleanupTerminalTelegram(session: SessionRecord): Promise<void> {
     const latest = readTelegramReplyTarget(this.config.dataDir, session.id);
     const targets: { target: TelegramReplyTarget; owned: boolean }[] = [];
     const projectIds = new Set([
@@ -8893,11 +8884,79 @@ export class SessionService {
           target.chatId === latest.chatId && target.messageThreadId === latest.messageThreadId,
       )
     ) {
-      // The GC sweep owns an orphaned reply-target topic; retireTelegramTopics
-      // still retains it when another session's binding holds it.
-      targets.push({ target: latest, owned: notice === "gc" });
+      targets.push({ target: latest, owned: false });
     }
-    await this.retireTelegramTopics(session, targets, false, notice);
+    await this.retireTelegramTopics(session, targets);
+  }
+
+  // GC variant of the terminal cleanup: Telegram state is the retry locator,
+  // so it is removed only after every topic delete is confirmed (or the retry
+  // budget is spent). An orphaned reply-target topic counts as owned;
+  // retireTelegramTopics still retains it when another session's binding holds it.
+  private async cleanupOrphanedTelegram(owner: TelegramTopicOwner): Promise<void> {
+    const dataDir = this.config.dataDir;
+    const latest = readTelegramReplyTarget(dataDir, owner.id);
+    const projectIds = new Set([
+      ...Object.keys(this.config.projects),
+      owner.project,
+      ...(latest ? [latest.projectId] : []),
+    ]);
+    const targets: { target: TelegramReplyTarget; owned: boolean }[] = [];
+    for (const projectId of projectIds) {
+      const sourceIds = new Set([
+        ...Object.keys(this.config.projects[projectId]?.sources ?? {}),
+        ...(latest?.projectId === projectId ? [latest.sourceId] : []),
+      ]);
+      for (const sourceId of sourceIds) {
+        for (const binding of readTelegramBindings(dataDir, projectId, sourceId).values()) {
+          if (binding.sessionId !== owner.id) continue;
+          targets.push({
+            target: { ...binding, projectId, sourceId, updatedAt: nowIso() },
+            owned: true,
+          });
+        }
+      }
+    }
+    if (latest) targets.push({ target: latest, owned: true });
+    const outcome = await this.retireTelegramTopics(owner, targets, false, "gc");
+    const failures = readTelegramTopicGcFailures(dataDir);
+    const failedSweeps = (failures[owner.id] ?? 0) + 1;
+    if (outcome.failed && failedSweeps < TELEGRAM_TOPIC_GC_MAX_FAILED_SWEEPS) {
+      writeTelegramTopicGcFailures(dataDir, { ...failures, [owner.id]: failedSweeps });
+      return;
+    }
+    for (const projectId of projectIds) {
+      deleteTelegramSourceStateForSession(dataDir, projectId, owner.id);
+    }
+    if (owner.id in failures) {
+      const { [owner.id]: _cleared, ...rest } = failures;
+      writeTelegramTopicGcFailures(dataDir, rest);
+    }
+    if (outcome.failed) {
+      this.logEvent("source.telegram.topic_gc.gave_up", {
+        level: "warn",
+        sessionId: owner.id,
+        message: `Telegram topic GC gave up on ${owner.id} after ${failedSweeps} failed sweeps`,
+      });
+      return;
+    }
+    for (const { source, topicId } of outcome.removed) {
+      if (source.chatId === undefined || source.chatId > 0) continue;
+      try {
+        await sendTelegramReply(
+          source,
+          { chatId: source.chatId },
+          `Session ${owner.status === "missing" ? owner.id : telegramSessionLabel(owner)} topic ${topicId} removed by daily cleanup (status: ${owner.status}).`,
+          { lifecycle: true },
+        );
+      } catch {
+        this.logTelegramNoticeFailure(
+          owner.id,
+          "lifecycle notice",
+          new Error("Telegram notice failed or timed out"),
+        );
+      }
+    }
   }
 
   // Dead = completed | killed (live or archived record) | missing. A read
@@ -8957,7 +9016,7 @@ export class SessionService {
           await this.withWorkspaceLifecycleLocks(id, async () => {
             const owner = this.classifyTelegramTopicOwner(id);
             if (!owner) return;
-            await this.cleanupTerminalTelegram(owner, "gc");
+            await this.cleanupOrphanedTelegram(owner);
             retired.push(id);
           });
         } catch {

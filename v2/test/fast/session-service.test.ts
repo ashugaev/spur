@@ -182,6 +182,8 @@ import {
   listTelegramTopicSessionIdsMock,
   readTelegramTopicGcClockMock,
   writeTelegramTopicGcClockMock,
+  readTelegramTopicGcFailuresMock,
+  writeTelegramTopicGcFailuresMock,
   sendTelegramReplyMock,
   sendTelegramChatActionMock,
   editTelegramTopicMock,
@@ -74820,12 +74822,19 @@ describe("SessionService", () => {
       writeTelegramTopicGcClockMock.mockImplementation((_dir: string, at: number) => {
         clock.value = at;
       });
+      const failures = { value: {} as Record<string, number> };
+      readTelegramTopicGcFailuresMock.mockImplementation(() => ({ ...failures.value }));
+      writeTelegramTopicGcFailuresMock.mockImplementation(
+        (_dir: string, next: Record<string, number>) => {
+          failures.value = { ...next };
+        },
+      );
       createSessionStore(...(options.live ?? []));
       const archived = new Map((options.archived ?? []).map((record) => [record.id, record]));
       readArchivedSessionMock.mockImplementation(
         (_dir: string, id: string) => archived.get(id) ?? null,
       );
-      return { state, clock, telegramSource };
+      return { state, clock, failures, telegramSource };
     }
 
     const gcNotices = () =>
@@ -75135,6 +75144,85 @@ describe("SessionService", () => {
         ([, entry]) => (entry as { event?: string }).event === "source.telegram.topic_gc.failed",
       );
       expect(failed).toHaveLength(1);
+      service.dispose();
+    });
+
+    async function nextDaySweep(): Promise<void> {
+      vi.setSystemTime(Date.now() + 25 * 60 * 60_000);
+      await tick();
+    }
+
+    it("T16 a failed delete keeps the retry locator and retries on the next due sweep", async () => {
+      const { state, failures } = seedGc(
+        [{ id: "api-missing", thread: 22, binding: true, target: true }],
+        {
+          clockAgeMs: 25 * 60 * 60_000,
+        },
+      );
+      deleteTelegramTopicMock.mockRejectedValue(new Error("Telegram 500"));
+      const service = await startService();
+      await tick();
+
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(1);
+      expect(state.get("api-missing")).toMatchObject({ binding: true, target: true });
+      expect(failures.value).toEqual({ "api-missing": 1 });
+      expect(gcNotices()).toHaveLength(0);
+
+      await nextDaySweep();
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(2);
+      service.dispose();
+    });
+
+    it("T17 gives up after 3 failed sweeps, drops state and logs once", async () => {
+      const { state, failures } = seedGc(
+        [{ id: "api-missing", thread: 22, binding: true, target: true }],
+        {
+          clockAgeMs: 25 * 60 * 60_000,
+        },
+      );
+      deleteTelegramTopicMock.mockRejectedValue(new Error("Telegram 500"));
+      const service = await startService();
+      await tick();
+      await nextDaySweep();
+      expect(state.get("api-missing")?.binding).toBe(true);
+      await nextDaySweep();
+
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(3);
+      expect(state.get("api-missing")).toMatchObject({ binding: false, target: false });
+      expect(failures.value).toEqual({});
+      expect(gcNotices()).toHaveLength(0);
+      const gaveUp = () =>
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => (entry as { event?: string }).event === "source.telegram.topic_gc.gave_up",
+        );
+      expect(gaveUp()).toHaveLength(1);
+
+      await nextDaySweep();
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(3);
+      expect(gaveUp()).toHaveLength(1);
+      service.dispose();
+    });
+
+    it("T18 posts the notice only after the delete succeeds", async () => {
+      const { state, failures } = seedGc(
+        [{ id: "api-missing", thread: 22, binding: true, target: true }],
+        {
+          clockAgeMs: 25 * 60 * 60_000,
+        },
+      );
+      deleteTelegramTopicMock.mockRejectedValueOnce(new Error("Telegram 500"));
+      const service = await startService();
+      await tick();
+      expect(gcNotices()).toHaveLength(0);
+
+      await nextDaySweep();
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(2);
+      expect(state.get("api-missing")).toMatchObject({ binding: false, target: false });
+      expect(failures.value).toEqual({});
+      expect(gcNotices()).toHaveLength(1);
+      expect(gcNotices()[0]?.[2]).toBe(
+        "Session api-missing topic 22 removed by daily cleanup (status: missing).",
+      );
       service.dispose();
     });
 

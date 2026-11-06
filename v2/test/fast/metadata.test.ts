@@ -17,6 +17,8 @@ import {
   readArchivedSession,
   readTelegramTopicGcClock,
   writeTelegramTopicGcClock,
+  readTelegramTopicGcFailures,
+  writeTelegramTopicGcFailures,
   deletePendingSendBatch,
   deletePendingSendBatchConditional,
   deleteTelegramSourceStateForSession,
@@ -3038,5 +3040,17 @@ describe("telegram topic gc state", () => {
     expect(readTelegramTopicGcClock(dataDir)).toBe(1234);
     await writeFile(join(dataDir, "source-state", "telegram-topic-gc.json"), "{nope");
     expect(readTelegramTopicGcClock(dataDir)).toBeNull();
+  });
+
+  it("round-trips GC failure counts and ignores invalid entries", async () => {
+    const dataDir = await newDataDir();
+    expect(readTelegramTopicGcFailures(dataDir)).toEqual({});
+    writeTelegramTopicGcFailures(dataDir, { "api-1": 2 });
+    expect(readTelegramTopicGcFailures(dataDir)).toEqual({ "api-1": 2 });
+    await writeFile(
+      join(dataDir, "source-state", "telegram-topic-gc-failures.json"),
+      JSON.stringify({ "api-1": "x", "api-2": 1.5, "api-3": 1 }),
+    );
+    expect(readTelegramTopicGcFailures(dataDir)).toEqual({ "api-3": 1 });
   });
 });

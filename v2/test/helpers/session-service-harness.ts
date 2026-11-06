@@ -422,6 +422,8 @@ const readArchivedSessionMock: Mock = vi.fn();
 const listTelegramTopicSessionIdsMock: Mock = vi.fn();
 const readTelegramTopicGcClockMock: Mock = vi.fn();
 const writeTelegramTopicGcClockMock: Mock = vi.fn();
+const readTelegramTopicGcFailuresMock: Mock = vi.fn();
+const writeTelegramTopicGcFailuresMock: Mock = vi.fn();
 const sendTelegramReplyMock: Mock = vi.fn();
 const sendTelegramChatActionMock: Mock = vi.fn();
 const editTelegramTopicMock: Mock = vi.fn();
@@ -708,6 +710,8 @@ vi.mock("../../src/metadata.js", () => ({
   listTelegramTopicSessionIds: listTelegramTopicSessionIdsMock,
   readTelegramTopicGcClock: readTelegramTopicGcClockMock,
   writeTelegramTopicGcClock: writeTelegramTopicGcClockMock,
+  readTelegramTopicGcFailures: readTelegramTopicGcFailuresMock,
+  writeTelegramTopicGcFailures: writeTelegramTopicGcFailuresMock,
   recordTelegramMessages: recordTelegramMessagesMock,
   requestGitHubMergeConflictRestoreReplay: requestGitHubMergeConflictRestoreReplayMock,
   writeTelegramBindings: writeTelegramBindingsMock,
@@ -1572,6 +1576,8 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   listTelegramTopicSessionIdsMock.mockReset().mockReturnValue(new Set());
   readTelegramTopicGcClockMock.mockReset().mockReturnValue(null);
   writeTelegramTopicGcClockMock.mockReset();
+  readTelegramTopicGcFailuresMock.mockReset().mockReturnValue({});
+  writeTelegramTopicGcFailuresMock.mockReset();
   sendTelegramReplyMock.mockReset().mockResolvedValue({ messageIds: [] });
   recordTelegramMessagesMock.mockReset();
   sendTelegramChatActionMock.mockReset().mockResolvedValue({});
@@ -2134,6 +2140,8 @@ export {
   listTelegramTopicSessionIdsMock,
   readTelegramTopicGcClockMock,
   writeTelegramTopicGcClockMock,
+  readTelegramTopicGcFailuresMock,
+  writeTelegramTopicGcFailuresMock,
   sendTelegramReplyMock,
   sendTelegramChatActionMock,
   editTelegramTopicMock,

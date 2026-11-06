@@ -2844,6 +2844,35 @@ export function writeTelegramTopicGcClock(dataDir: string, lastSweepAt: number):
   writePrivateJsonFile(telegramTopicGcClockPath(dataDir), { lastSweepAt });
 }
 
+function telegramTopicGcFailuresPath(dataDir: string): string {
+  return join(dataDir, "source-state", "telegram-topic-gc-failures.json");
+}
+
+// Failed GC sweeps per session id; restart-safe retry budget.
+export function readTelegramTopicGcFailures(dataDir: string): Record<string, number> {
+  const path = telegramTopicGcFailuresPath(dataDir);
+  if (!existsSync(path)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, number] =>
+          typeof entry[1] === "number" && Number.isInteger(entry[1]) && entry[1] > 0,
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+export function writeTelegramTopicGcFailures(
+  dataDir: string,
+  failures: Record<string, number>,
+): void {
+  writePrivateJsonFile(telegramTopicGcFailuresPath(dataDir), failures);
+}
+
 export function writeTelegramReplyTarget(
   dataDir: string,
   target: Omit<TelegramReplyTarget, "updatedAt">,
