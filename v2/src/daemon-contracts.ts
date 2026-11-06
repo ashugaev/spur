@@ -445,6 +445,12 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
   ),
   operation("get_headroom", "GET", "/headroom", "Host/session admission capacity."),
   operation(
+    "get_usage",
+    "GET",
+    "/usage",
+    "Provider quota windows and session token totals; tokens excluded.",
+  ),
+  operation(
     "list_deploy_versions",
     "GET",
     "/deploy/versions",

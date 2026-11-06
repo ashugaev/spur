@@ -1,5 +1,6 @@
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { homedir } from "node:os";
 import { basename } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { URL } from "node:url";
@@ -64,6 +65,7 @@ import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import { captureTmuxPane } from "./runtime-tmux.js";
 import { getReleases } from "./releases-cache.js";
+import { buildUsageReport } from "./usage-report.js";
 import {
   AgentExitedBeforeSendError,
   GithubPrCheckUnavailableError,
@@ -1116,6 +1118,24 @@ export async function startServer(
 
       if (method === "GET" && path === "/headroom") {
         sendJson(response, 200, await service.getHeadroom());
+        return;
+      }
+
+      if (method === "GET" && path === "/usage") {
+        const nowMs = Date.now();
+        const todayStart = new Date(nowMs);
+        todayStart.setHours(0, 0, 0, 0);
+        sendJson(
+          response,
+          200,
+          await buildUsageReport({
+            fetch: globalThis.fetch,
+            homeDir: homedir(),
+            dataDir: service.config.dataDir,
+            nowMs,
+            todayStartMs: todayStart.getTime(),
+          }),
+        );
         return;
       }
 
