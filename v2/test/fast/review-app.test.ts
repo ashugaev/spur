@@ -155,6 +155,9 @@ test("publishes and reconciles completed approval without a challenger", async (
     status: "APPROVED",
     coverage: null,
   });
+  const publishedState = vi.mocked(publishLaneState).mock.lastCall?.[1];
+  expect(publishedState).toMatchObject({ status: "APPROVED" });
+  expect(publishedState).not.toHaveProperty("feedback");
   expect(JSON.parse(await readFile(request.receipt, "utf8"))).toMatchObject({
     status: "APPROVED",
     coverage: null,
@@ -395,6 +398,10 @@ test.each([
   const result = await publishReview(f.config, request, draft.session, f.transport);
   expect(result.status).toBe(verdict);
   expect(result.localVerdict).toBe(verdict);
+  const publishedState = vi.mocked(publishLaneState).mock.lastCall?.[1];
+  expect(publishedState).toMatchObject({ status: verdict });
+  if (verdict === "APPROVED") expect(publishedState).not.toHaveProperty("feedback");
+  else expect(publishedState?.feedback).toEqual(defect);
   expect(f.history).toHaveLength(1);
   expect(f.history[0]).toMatchObject({ state: verdict, commit_id: draft.H });
   expect(JSON.parse(await readFile(request.receipt, "utf8"))).toMatchObject({
@@ -480,6 +487,10 @@ test("prepare invalidates old approval before QA and block ends current attempt 
     status: "PENDING",
     inputDigest: null,
   });
+  expect(vi.mocked(publishLaneState).mock.lastCall?.[1]).toMatchObject({
+    status: "PENDING",
+    feedback: plan,
+  });
   await expect(
     blockReview(f.config, { ...f.request, feedback: capability }, draft.session),
   ).rejects.toThrow("attempt-superseded");
@@ -488,6 +499,10 @@ test("prepare invalidates old approval before QA and block ends current attempt 
   ).toMatchObject({
     status: "BLOCKED",
     reviewBlocked: true,
+  });
+  expect(vi.mocked(publishLaneState).mock.lastCall?.[1]).toMatchObject({
+    status: "BLOCKED",
+    feedback: capability,
   });
   await expect(publishReview(f.config, newer, draft.session, f.transport)).rejects.toThrow(
     "attempt-blocked",
