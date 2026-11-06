@@ -25570,9 +25570,7 @@ describe("SessionService", () => {
         expect(sessions.get(accepted.id)?.spawnIntent).toBeUndefined();
         expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
         expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
-        expect(String(buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1])).toContain(
-          "recovered task",
-        );
+        expect(String(buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1])).toContain("recovered task");
       } finally {
         restored.dispose();
         await restored.settleBackgroundSpawns();

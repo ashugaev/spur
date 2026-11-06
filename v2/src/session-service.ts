@@ -15562,7 +15562,9 @@ export class SessionService {
     return settled;
   }
 
-  private async observeDurableRuntime(record: SessionRecord): Promise<
+  private async observeDurableRuntime(
+    record: SessionRecord,
+  ): Promise<
     | { state: "absent" }
     | { state: "matching"; generation: PaneGeneration }
     | { state: "unknown"; reason: string }
