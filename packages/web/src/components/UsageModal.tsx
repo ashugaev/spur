@@ -26,7 +26,7 @@ import {
 type LoadState =
   | { status: "pending" }
   | { status: "error" }
-  | { status: "ready"; data: UsageReport; refreshing: boolean };
+  | { status: "ready"; data: UsageReport };
 
 const PRIMARY_TEXT = "text-[var(--color-text-primary)]";
 const SECONDARY_TEXT = "text-[var(--color-text-secondary)]";
@@ -333,7 +333,7 @@ function UsageContent({ data }: { data: UsageReport }) {
 
 export function UsageModal({ onClose }: { onClose: () => void }) {
   const [state, setState] = useState<LoadState>({ status: "pending" });
-  const [refresh, setRefresh] = useState(0);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -349,25 +349,19 @@ export function UsageModal({ onClose }: { onClose: () => void }) {
     const controller = new AbortController();
     fetchUsage(controller.signal).then(
       (data) => {
-        if (!controller.signal.aborted) setState({ status: "ready", data, refreshing: false });
+        if (!controller.signal.aborted) setState({ status: "ready", data });
       },
       () => {
         if (!controller.signal.aborted) setState({ status: "error" });
       },
     );
     return () => controller.abort();
-  }, [refresh]);
+  }, [attempt]);
 
-  const reload = (keepData: boolean) => {
-    setState((current) =>
-      keepData && current.status === "ready"
-        ? { ...current, refreshing: true }
-        : { status: "pending" },
-    );
-    setRefresh((value) => value + 1);
+  const retry = () => {
+    setState({ status: "pending" });
+    setAttempt((value) => value + 1);
   };
-
-  const refreshing = state.status === "ready" && state.refreshing;
 
   return (
     <div
@@ -393,15 +387,6 @@ export function UsageModal({ onClose }: { onClose: () => void }) {
             </span>
           ) : null}
           <span className="flex-1" />
-          <button
-            aria-busy={refreshing}
-            className={ACTION_CLASS}
-            disabled={state.status !== "ready" || refreshing}
-            onClick={() => reload(true)}
-            type="button"
-          >
-            {refreshing ? "…" : "refresh"}
-          </button>
           <button aria-label="Close usage" className={ACTION_CLASS} onClick={onClose} type="button">
             esc
           </button>
@@ -416,7 +401,7 @@ export function UsageModal({ onClose }: { onClose: () => void }) {
               <span className="text-[var(--color-status-error)]">Could not load usage</span>
               <button
                 className={`border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase outline-none hover:border-[var(--color-accent)] focus-visible:border-[var(--color-accent)] ${PRIMARY_TEXT}`}
-                onClick={() => reload(false)}
+                onClick={retry}
                 type="button"
               >
                 Retry

@@ -150,33 +150,13 @@ describe("UsageModal load states", () => {
     expect(await screen.findByText("Quota")).toBeInTheDocument();
   });
 
-  it("keeps data visible and disables refresh while refreshing", async () => {
-    const second = deferred<Response>();
-    stubFetch(jsonResponse(REPORT), second.promise);
+  it("loads once per open and has no refresh control", async () => {
+    const fetchMock = stubFetch(jsonResponse(REPORT));
     render(<UsageModal onClose={vi.fn()} />);
     await screen.findByText("Quota");
 
-    fireEvent.click(screen.getByRole("button", { name: "refresh" }));
-    const busy = screen.getByRole("button", { name: "…" });
-    expect(busy).toBeDisabled();
-    expect(screen.getByText("Quota")).toBeInTheDocument();
-    expect(screen.getByText("opus")).toBeInTheDocument();
-
-    await act(async () =>
-      second.resolve(jsonResponse({ ...REPORT, quotas: [okSource, okSource, okSource] })),
-    );
-    expect(await screen.findByText("3/3")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "refresh" })).toBeEnabled();
-  });
-
-  it("replaces content with the error state when refresh fails", async () => {
-    stubFetch(jsonResponse(REPORT), jsonResponse({ error: "x" }, 500));
-    render(<UsageModal onClose={vi.fn()} />);
-    await screen.findByText("Quota");
-
-    fireEvent.click(screen.getByRole("button", { name: "refresh" }));
-    expect(await screen.findByText("Could not load usage")).toBeInTheDocument();
-    expect(screen.queryByText("Quota")).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: /refresh/i })).not.toBeInTheDocument();
   });
 
   it("aborts the in-flight request on unmount", () => {
