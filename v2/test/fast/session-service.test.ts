@@ -4661,6 +4661,155 @@ describe("SessionService", () => {
         await spawning;
       }
     });
+
+    function deferredTakingLaunch(sessions: Map<string, SessionRecord>) {
+      let settleGate: (outcome: "reject" | "resolve") => void = () => {};
+      const gate = new Promise<void>((resolve, reject) => {
+        settleGate = (outcome) =>
+          outcome === "reject" ? reject(new Error("tmux boom")) : resolve();
+      });
+      const api1Tmux = sessions.get("api-1")!.tmuxSession;
+      let api1Created = false;
+      createTmuxSessionMock.mockImplementation(async ({ sessionName }: { sessionName: string }) => {
+        if (sessionName === api1Tmux) {
+          api1Created = true;
+          return;
+        }
+        if (sessionName === "api-3") await gate;
+      });
+      isProcessRunningInTmuxMock.mockImplementation(
+        async (name: string) => name !== api1Tmux || api1Created,
+      );
+      return {
+        settleGate,
+        api1Launches: () =>
+          createTmuxSessionMock.mock.calls.filter(([args]) => args.sessionName === api1Tmux),
+        api1LaunchEnv: () =>
+          createTmuxSessionMock.mock.calls.find(([args]) => args.sessionName === api1Tmux)?.[0]
+            ?.env,
+      };
+    }
+
+    function startTakingSpawn(service: Awaited<ReturnType<typeof newService>>, path: SpawnPath) {
+      const request = {
+        project: "api",
+        prompt: "continue the task",
+        reuseWorkspaceSessionId: "api-1",
+      };
+      if (path === "spawn") return service.spawn(request).catch((error: unknown) => error);
+      return (async () => {
+        await service.spawnInBackground(request);
+        await service.settleBackgroundSpawns();
+      })().catch((error: unknown) => error);
+    }
+
+    it.each([
+      ["spawn", "reject"],
+      ["spawn", "resolve"],
+      ["spawnInBackground", "reject"],
+      ["spawnInBackground", "resolve"],
+    ] as const)(
+      "%s restore of a former closeout owner during a %s taking launch keeps exactly one owner",
+      async (path, outcome) => {
+        const sessions = seedWorkspace();
+        reserveNextSessionIdMock.mockResolvedValue("api-3");
+        findAgentSessionIdMock.mockResolvedValue("session-uuid");
+        const { settleGate, api1Launches, api1LaunchEnv } = deferredTakingLaunch(sessions);
+        const service = await newService();
+
+        const spawning = startTakingSpawn(service, path);
+        await vi.waitFor(() => {
+          expect(sessions.get("api-3")?.closeoutOwner).toBe(true);
+          expect(
+            createTmuxSessionMock.mock.calls.some(([args]) => args.sessionName === "api-3"),
+          ).toBe(true);
+        });
+        const restoring = service.restore("api-1");
+        await expect(
+          vi.waitFor(() => expect(api1Launches()).toHaveLength(1), { timeout: 1000 }),
+        ).rejects.toThrow();
+
+        settleGate(outcome);
+        await spawning;
+        await restoring;
+
+        if (outcome === "reject") {
+          expect(ownerIds(sessions)).toEqual(["api-1"]);
+          expect(api1LaunchEnv()?.SPUR_CLOSEOUT_OWNER).toBe("1");
+          expect(sessions.get("api-3")?.closeoutOwner).not.toBe(true);
+        } else {
+          expect(ownerIds(sessions)).toEqual(["api-3"]);
+          expect(api1LaunchEnv()?.SPUR_CLOSEOUT_OWNER).toBe("0");
+          expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+        }
+        expect(sessions.get("api-2")?.closeoutOwner).toBe(false);
+      },
+    );
+
+    it("send relaunch of a former closeout owner refuses while the take is in flight", async () => {
+      const sessions = seedWorkspace();
+      reserveNextSessionIdMock.mockResolvedValue("api-3");
+      const { settleGate, api1Launches } = deferredTakingLaunch(sessions);
+      const { SessionService, SessionStartingError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const captured = clone(sessions.get("api-1")!);
+      const internals = service as unknown as {
+        ensureSessionReadyForSend(record: SessionRecord): Promise<unknown>;
+      };
+
+      const spawning = startTakingSpawn(service, "spawn");
+      await vi.waitFor(() => expect(sessions.get("api-3")?.closeoutOwner).toBe(true));
+      const relaunch = internals.ensureSessionReadyForSend(captured);
+      await expect(relaunch).rejects.toBeInstanceOf(SessionStartingError);
+      await expect(relaunch).rejects.toThrow(/closeout is moving to api-3/);
+      expect(api1Launches()).toHaveLength(0);
+
+      settleGate("reject");
+      await spawning;
+
+      expect(ownerIds(sessions)).toEqual(["api-1"]);
+    });
+
+    it("settles the closeout take after a failed background preparation", async () => {
+      const sessions = seedWorkspace();
+      reserveNextSessionIdMock.mockResolvedValue("api-3");
+      findAgentSessionIdMock.mockResolvedValue("session-uuid");
+      mockExitedThenRestoredProcess();
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockImplementationOnce(() => {
+        throw new Error("ledger boom");
+      });
+      const service = await newService();
+
+      await expect(
+        service.spawnInBackground({
+          project: "api",
+          prompt: "continue the task",
+          reuseWorkspaceSessionId: "api-1",
+        }),
+      ).rejects.toThrow("ledger boom");
+      await expect(service.restore("api-1")).resolves.toBeDefined();
+
+      expect(lastLaunchEnv()?.SPUR_CLOSEOUT_OWNER).toBe("0");
+      expect(sessions.get("api-1")).toBeDefined();
+    });
+
+    it("handoff of a former closeout owner waits for a failing taking launch", async () => {
+      const sessions = seedWorkspace();
+      reserveNextSessionIdMock.mockResolvedValueOnce("api-3").mockResolvedValueOnce("api-4");
+      const { settleGate } = deferredTakingLaunch(sessions);
+      const service = await newService();
+
+      const spawning = startTakingSpawn(service, "spawn");
+      await vi.waitFor(() => expect(sessions.get("api-3")?.closeoutOwner).toBe(true));
+      const handingOff = service.handoff("api-1", { agent: "cursor" });
+      settleGate("reject");
+      await spawning;
+      await handingOff;
+
+      expect(sessions.get("api-4")?.closeoutOwner).toBe(true);
+      expect(ownerIds(sessions)).toEqual(["api-4"]);
+    });
   });
 
   describe("closeout notice", () => {

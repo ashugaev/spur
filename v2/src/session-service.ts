@@ -1937,7 +1937,9 @@ function isReleasedCloseoutStatus(record: Pick<SessionRecord, "status" | "stopRe
       return true;
     case "stopped":
       return record.stopReason === "manual_pause" || record.stopReason === "token_budget";
-    default:
+    case "spawning":
+    case "running":
+    case "paused":
       return false;
   }
 }
@@ -3865,6 +3867,11 @@ export class SessionService {
   // before the agent reaches its prompt and settles the record itself, so a
   // not-yet-started agent must not be reconciled to errored meanwhile.
   private readonly launchesInFlight = new Set<string>();
+  // Key = taking session id. Open from the take until the taking spawn exits.
+  private readonly closeoutTakesInFlight = new Map<
+    string,
+    { from: readonly string[]; settled: Promise<void>; settle: () => void }
+  >();
   private readonly triggerBirthsInFlight = new Map<
     string,
     { request: SpawnSessionRequest; result: Promise<SessionView> }
@@ -13806,6 +13813,7 @@ export class SessionService {
       }
       if (sessionId) {
         this.spawnsInFlight.delete(sessionId);
+        this.settleCloseoutTake(sessionId);
       }
     }
   }
@@ -14393,6 +14401,7 @@ export class SessionService {
         });
         if (closeoutTakenFrom) this.returnTakenCloseout(sessionId, closeoutTakenFrom);
       }
+      if (sessionId) this.settleCloseoutTake(sessionId);
       if (ownedClaimBatchId !== undefined && sessionId) {
         try {
           if (readSession(this.config.dataDir, sessionId) === null) {
@@ -14981,8 +14990,15 @@ export class SessionService {
 
   async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
     const prepared = await this.prepareBackgroundSpawn(request);
-    this.spawnsInFlight.add(prepared.placeholder.id);
-    const placeholder = this.enrich(prepared.placeholder);
+    let placeholder: SessionView;
+    try {
+      this.spawnsInFlight.add(prepared.placeholder.id);
+      placeholder = this.enrich(prepared.placeholder);
+    } catch (error) {
+      this.spawnsInFlight.delete(prepared.placeholder.id);
+      this.settleCloseoutTake(prepared.placeholder.id);
+      throw error;
+    }
     const run = new Promise<void>((resolve) => {
       queueMicrotask(() => {
         void (async () => {
@@ -14995,6 +15011,7 @@ export class SessionService {
             }
           } finally {
             this.spawnsInFlight.delete(prepared.placeholder.id);
+            this.settleCloseoutTake(prepared.placeholder.id);
             resolve();
           }
         })();
@@ -19919,6 +19936,15 @@ export class SessionService {
       );
     }
 
+    // Caller holds this session's lifecycle lock, so waiting on the take would
+    // deadlock against the taking spawn; refuse before anything destructive.
+    const closeoutTake = this.closeoutTakeFrom(session.id);
+    if (closeoutTake) {
+      throw new SessionStartingError(
+        `Session ${session.id} closeout is moving to ${closeoutTake.takerId}; retry after it launches`,
+      );
+    }
+
     const project = this.getProject(session.project);
     // Same restore-warmup protection as restore() above: relaunchSessionInPlace
     // starts the MCP sidecar before this session's status is guaranteed
@@ -20558,6 +20584,9 @@ export class SessionService {
     request: RestoreSessionRequest,
     operation?: RestoreOperationContext,
   ): Promise<SessionView> {
+    // No lock held here. A failed taking spawn gives closeout back before it
+    // settles, so the launch below reads the final flag.
+    await this.waitForCloseoutTakeFrom(sessionId, operation);
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     return this.withPaneWriteLock(
@@ -21995,6 +22024,11 @@ export class SessionService {
     writeSession(this.config.dataDir, placeholder);
     if (!takenFrom || !reuseCtx) return takenFrom;
     for (const id of takenFrom) this.clearCloseoutOwner(id);
+    let settle = (): void => undefined;
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    this.closeoutTakesInFlight.set(placeholder.id, { from: takenFrom, settled, settle });
     this.logEvent("session.closeout.taken", {
       level: "info",
       sessionId: placeholder.id,
@@ -22003,6 +22037,35 @@ export class SessionService {
       details: { workspaceId: reuseCtx.workspaceId, fromSessionIds: takenFrom },
     });
     return takenFrom;
+  }
+
+  private settleCloseoutTake(takerId: string): void {
+    this.closeoutTakesInFlight.get(takerId)?.settle();
+    this.closeoutTakesInFlight.delete(takerId);
+  }
+
+  private closeoutTakeFrom(
+    sessionId: string,
+  ): { takerId: string; settled: Promise<void> } | undefined {
+    for (const [takerId, take] of this.closeoutTakesInFlight) {
+      if (take.from.includes(sessionId)) return { takerId, settled: take.settled };
+    }
+    return undefined;
+  }
+
+  // Loops: a new take cannot start from a pending session, but the loop keeps
+  // the wait correct if one was already registered. Hold no lock while waiting.
+  private async waitForCloseoutTakeFrom(
+    sessionId: string,
+    operation?: RestoreOperationContext,
+  ): Promise<void> {
+    for (
+      let take = this.closeoutTakeFrom(sessionId);
+      take;
+      take = this.closeoutTakeFrom(sessionId)
+    ) {
+      await (operation ? operation.wait(take.settled) : take.settled);
+    }
   }
 
   // Sync with the failed-record write. A live launch retained by the failure
@@ -22144,6 +22207,7 @@ export class SessionService {
     request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
   ): Promise<SessionView> {
+    await this.waitForCloseoutTakeFrom(sessionId);
     const prepared = await this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.prepareHandoffLocked(sessionId, request, options),
     );
