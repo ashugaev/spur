@@ -242,7 +242,6 @@ import type { TelegramPhoto } from "../../src/telegram-source-state.js";
 import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
 import type * as claudeModule from "../../src/agents/claude.js";
 import type * as codexModule from "../../src/agents/codex.js";
-import type * as agentHookStateModule from "../../src/agent-hook-state.js";
 import type * as agentIndexModule from "../../src/agents/index.js";
 import type * as openCodeModule from "../../src/agents/opencode.js";
 import type * as runtimeTmuxModule from "../../src/runtime-tmux.js";
@@ -4884,9 +4883,13 @@ describe("SessionService", () => {
     ]);
   });
 
-  it.each(["resolve", "reject"] as const)(
-    "dispatches one background executor before response enrichment can %s",
-    async (viewOutcome) => {
+  it.each([
+    { viewOutcome: "resolve", agent: "claude" },
+    { viewOutcome: "reject", agent: "claude" },
+    { viewOutcome: "resolve", agent: "codex" },
+  ] as const)(
+    "dispatches one $agent background executor before response enrichment can $viewOutcome",
+    async ({ viewOutcome, agent }) => {
       const sessions = createSessionStore();
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
@@ -4920,6 +4923,15 @@ describe("SessionService", () => {
       const worker = vi
         .spyOn(internals, "runBackgroundSpawnAttempt")
         .mockImplementation(async () => {
+          // A launch stamps its owner while the accept view is still pending.
+          const launching = sessions.get("api-1");
+          if (launching)
+            sessions.set("api-1", {
+              ...launching,
+              agentLaunchId: "launch-1",
+              codexRestoreLaunchId: "launch-1",
+              codexRestoreStartedAt: new Date(Date.now()).toISOString(),
+            });
           await workerGate;
           // A real completed attempt retires its durable intent.
           const current = sessions.get("api-1");
@@ -4929,7 +4941,7 @@ describe("SessionService", () => {
           }
           return "completed";
         });
-      const response = service.spawnInBackground({ project: "api", prompt: "hello" }).then(
+      const response = service.spawnInBackground({ project: "api", prompt: "hello", agent }).then(
         (view) => ({ ok: true as const, view }),
         (error: unknown) => ({ ok: false as const, error }),
       );
@@ -7590,7 +7602,8 @@ describe("SessionService", () => {
         const record = sessions.get("api-1");
         if (!record) throw new Error("Missing launch fixture record");
         expect(record?.codexRestoreLaunchId).toBe(record?.agentLaunchId);
-        expect(record?.codexRestoreStartedAt).toBe(new Date(Date.now()).toISOString());
+        // Persisted before creation; a concurrent accept view may advance the clock.
+        expect(Date.parse(record.codexRestoreStartedAt ?? "")).toBeLessThanOrEqual(Date.now());
         attempts.push({ ...record });
       });
       if (failReady) waitForTmuxReadyMock.mockRejectedValueOnce(new Error("ready failure"));
@@ -20363,7 +20376,7 @@ describe("SessionService", () => {
         captureTmuxPaneMock.mockResolvedValue(CODEX_MCP_PANE);
         expect((await internals.classifySessionRecord(before)).state).toBe("needs_input");
         const peer = structuredClone(internals.codexMcpDialogOverrides.get(session.id));
-        expect(peer?.kind).toBe("mcp");
+        expect(peer).toBeDefined();
         const history = structuredClone(
           (
             service as unknown as { stateHistory: Map<string, SessionStateTransition[]> }
@@ -23323,7 +23336,6 @@ describe("SessionService", () => {
         nativeId: undefined,
         launchId: undefined,
         startedAt: null,
-        kind: "mcp",
         expiresAt: Date.now() + 10_000,
       });
       readAgentHookStateMock.mockReturnValue({
@@ -25435,8 +25447,6 @@ describe("SessionService", () => {
           await internals.recoverDurableSpawns();
           expect(sessions.size).toBe(1);
           expect(internals.durableSpawnRuns.size).toBe(1);
-          expect(createWorktreeMock).not.toHaveBeenCalled();
-          expect(createTmuxSessionMock).not.toHaveBeenCalled();
           release();
           const result = await outcome;
           if (mode === "view failure") expect(result).toEqual({ error: viewError });
@@ -25482,6 +25492,90 @@ describe("SessionService", () => {
         swapFreeBytes: 0,
       });
     }
+
+    async function acceptThenDisposeBeforeLaunch() {
+      mockClaudeJsonlState("waiting");
+      durableConfig();
+      setRecoveryMemory(20_000_000_000);
+      const sessions = createSessionStore();
+      testAccounts = [
+        {
+          id: "selected",
+          configDir: "/abs/selected",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+      ];
+      const { SessionService } = await loadSessionServiceModule();
+      const first = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = first as unknown as { enrich(record: SessionRecord): Promise<SessionView> };
+      const enrich = internals.enrich.bind(first);
+      vi.spyOn(internals, "enrich").mockImplementationOnce(async (record) => {
+        first.dispose();
+        return enrich(record);
+      });
+      const accepted = await first.spawnInBackground({
+        project: "api",
+        prompt: "recovered task",
+        model: "opus",
+        claudeAccountId: "selected",
+      });
+      await first.settleBackgroundSpawns();
+      expect(sessions.get(accepted.id)?.spawnIntent?.phase).toBe("queued");
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      setRecoveryMemory(7_000_000_000);
+      const restored = new SessionService("/tmp/spur.yaml", "2026-03-18T10:06:00.000Z");
+      const queue = restored as unknown as DurableService & {
+        spawnAdmissionWaiters: Set<unknown>;
+      };
+      await queue.runMemoryShedTick();
+      return { sessions, accepted, restored, queue };
+    }
+
+    it("holds a recovered accepted intent below the memory floor and launches it once on recovery", async () => {
+      const { sessions, accepted, restored, queue } = await acceptThenDisposeBeforeLaunch();
+      try {
+        await vi.waitFor(() => expect(queue.spawnAdmissionWaiters.size).toBe(1));
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(sessions.get(accepted.id)).toMatchObject({
+          id: accepted.id,
+          status: "spawning",
+          spawnIntent: { phase: "queued" },
+        });
+        setRecoveryMemory(20_000_000_000);
+        await queue.runMemoryShedTick();
+        await vi.waitFor(() => expect(sessions.get(accepted.id)?.status).toBe("running"));
+        await restored.settleBackgroundSpawns();
+        expect(sessions.get(accepted.id)).toMatchObject({
+          id: accepted.id,
+          model: "opus",
+          claudeAccountId: "selected",
+        });
+        expect(sessions.get(accepted.id)?.spawnIntent).toBeUndefined();
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+        expect(String(buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1])).toContain(
+          "recovered task",
+        );
+      } finally {
+        restored.dispose();
+        await restored.settleBackgroundSpawns();
+      }
+    });
+
+    it("cancels a recovered admission waiter on dispose and keeps its accepted intent", async () => {
+      const { sessions, accepted, restored, queue } = await acceptThenDisposeBeforeLaunch();
+      await vi.waitFor(() => expect(queue.spawnAdmissionWaiters.size).toBe(1));
+      restored.dispose();
+      await restored.settleBackgroundSpawns();
+      expect(queue.spawnAdmissionWaiters.size).toBe(0);
+      expect(sessions.get(accepted.id)).toMatchObject({
+        id: accepted.id,
+        status: "spawning",
+        spawnIntent: { phase: "queued" },
+      });
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
 
     it("resumes the persisted worktree checkpoint without allocating another workspace or identity", async () => {
       mockClaudeJsonlState("waiting");
@@ -25733,527 +25827,6 @@ describe("SessionService", () => {
         expect(createTmuxSessionMock).not.toHaveBeenCalled();
         expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
         expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
-      },
-    );
-  });
-
-  describe("launch-owned primary Codex retirement", () => {
-    type BoundService = {
-      runMemoryShedTick(): Promise<void>;
-      recoverDurableRuntime(record: SessionRecord): Promise<void>;
-      proveTaggedDurableLaunch(record: SessionRecord): Promise<SessionRecord | null>;
-      startAutoStartSidecars(record: SessionRecord, project: unknown): Promise<SessionRecord>;
-      codexMcpDialogOverrides: SessionServiceInternals["codexMcpDialogOverrides"];
-      stateHistory: Map<string, SessionStateTransition[]>;
-      recoverDurableSpawns(): Promise<void>;
-      startMemoryShedLoop(): void;
-      durableSpawnIds: Set<string>;
-    };
-    async function fixture() {
-      vi.useRealTimers();
-      const config = baseConfig();
-      config.admission.memoryGuard.shedEnabled = false;
-      config.projects.api.path = process.cwd();
-      config.projects.api.worktree = false;
-      loadConfigMock.mockReturnValue(config);
-      readHostMemoryMock.mockReturnValue({
-        totalBytes: 65_000_000 * 1024,
-        availableBytes: 7_000_000_000,
-        swapTotalBytes: 0,
-        swapFreeBytes: 0,
-      });
-      const sessions = createSessionStore();
-      const nativeId = "4b8a0091-3931-4f1f-8c48-0162ff0fa940";
-      findAgentSessionIdMock.mockResolvedValue(nativeId);
-      const codex = await vi.importActual<typeof codexModule>("../../src/agents/codex.js");
-      const hooks = await vi.importActual<typeof agentHookStateModule>(
-        "../../src/agent-hook-state.js",
-      );
-      const slots = await vi.importActual<typeof sessionSlotsModule>("../../src/session-slots.js");
-      readCodexRolloutStateMock.mockImplementation(codex.readCodexRolloutState);
-      readAgentHookStateMock.mockImplementation(hooks.readAgentHookState);
-      const { readProcessStarttime } = await import("../../src/sidecars/reap.js");
-      const starttime = await readProcessStarttime(process.pid);
-      if (starttime === null) throw new Error("Missing owned unit process starttime");
-      const processRef = { pid: process.pid, identity: String(starttime) };
-      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
-      captureAgentProcessesForLaunchMock.mockResolvedValue({
-        status: "ok",
-        processes: [processRef],
-        complete: true,
-      });
-      capturePaneAgentProcessesMock.mockResolvedValue({ status: "ok", processes: [processRef] });
-      const now = new Date().toISOString();
-      const agentLaunchId = randomUUID();
-      const manual = runningSession({
-        id: "api-1",
-        agent: "codex",
-        agentSessionId: nativeId,
-        agentLaunchId,
-        codexRestoreLaunchId: agentLaunchId,
-        codexRestoreStartedAt: now,
-        worktreePath: process.cwd(),
-        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
-        triggerOrigin: {
-          triggerId: "review",
-          sourceId: "pull-requests",
-          externalId: "fixture/repo#1",
-          blockIndex: 0,
-        },
-        spawnReceipt: { version: 1, acceptedAt: now },
-        spawnIntent: {
-          version: 1,
-          phase: "submitted",
-          request: { project: "api", prompt: "original Codex review", agent: "codex" },
-          defaultBranch: "main",
-          preflightBatchId: "unit-batch",
-          startupAttachments: [],
-          launchSelection: {},
-          submission: { state: "confirmed" },
-          pane: { pid: process.pid, starttime },
-        },
-      });
-      const { SessionService } = await loadSessionServiceModule({ realPaneGeneration: true });
-      const service = new SessionService("/tmp/spur.yaml", new Date().toISOString(), {
-        deferBackgroundLoops: true,
-      });
-      await service.settleBackgroundSpawns();
-      sessions.set(manual.id, manual);
-      const record = sessions.get("api-1");
-      if (!record?.spawnIntent || !record.agentLaunchId)
-        throw new Error("Missing retained Codex launch");
-      expect(record.spawnIntent.submission.state).toBe("confirmed");
-      const root = join(TEST_DATA_DIR, "session-tools", record.id, "codex-home", "sessions");
-      mkdirSync(root, { recursive: true });
-      const path = join(root, "primary.jsonl");
-      const writeRollout = (
-        options: { child?: boolean; turnId?: string; timestamp?: string } = {},
-      ) => {
-        writeFileSync(
-          path,
-          [
-            JSON.stringify({
-              type: "session_meta",
-              timestamp: new Date(Date.now() - 86_400_000).toISOString(),
-              payload: {
-                id: nativeId,
-                source: "cli",
-                thread_source: options.child ? "subagent" : "user",
-                cwd: process.cwd(),
-              },
-            }),
-            JSON.stringify({
-              type: "event_msg",
-              timestamp: options.timestamp ?? new Date().toISOString(),
-              payload: { type: "task_complete", turn_id: options.turnId ?? "current-launch-turn" },
-            }),
-          ].join("\n") + "\n",
-        );
-      };
-      const writeHook = (
-        stamp: string | undefined = record.agentLaunchId,
-        turnId = "current-launch-turn",
-      ) => {
-        const dir = slots.ensureSessionSlotTool({
-          dataDir: TEST_DATA_DIR,
-          sessionId: record.id,
-          configPath: "/tmp/spur.yaml",
-          agent: "codex",
-        });
-        const env = { ...process.env };
-        delete env["SPUR_AGENT_LAUNCH_ID"];
-        if (stamp !== undefined) env["SPUR_AGENT_LAUNCH_ID"] = stamp;
-        execFileSync(join(dir, "spur-agent-state"), {
-          env,
-          input: JSON.stringify({ hook_event_name: "Stop", turn_id: turnId }),
-        });
-      };
-      const internals = service as unknown as BoundService;
-      return {
-        service,
-        sessions,
-        record,
-        root,
-        path,
-        writeRollout,
-        writeHook,
-        internals,
-        nativeId,
-        SessionService,
-      };
-    }
-
-    it.each([
-      "missing stamp",
-      "foreign stamp",
-      "wrong hook turn",
-      "wrong native",
-      "wrong pair",
-      "no turn",
-      "future turn",
-      "prelaunch turn",
-      "child",
-      "second primary",
-      "unknown runtime",
-      "partial runtime",
-      "absent runtime",
-    ])("retains the same accepted intent for %s without new input", async (mode) => {
-      const f = await fixture();
-      f.writeRollout({
-        child: mode === "child",
-        turnId: mode === "no turn" ? "" : "current-launch-turn",
-        ...(mode === "future turn"
-          ? { timestamp: new Date(Date.now() + 60_000).toISOString() }
-          : {}),
-        ...(mode === "prelaunch turn"
-          ? {
-              timestamp: new Date(
-                Date.parse(f.record.codexRestoreStartedAt ?? "") - 1,
-              ).toISOString(),
-            }
-          : {}),
-      });
-      f.writeHook(
-        mode === "missing stamp"
-          ? ""
-          : mode === "foreign stamp"
-            ? "foreign-launch"
-            : f.record.agentLaunchId,
-        mode === "wrong hook turn" ? "other-turn" : "current-launch-turn",
-      );
-      if (mode === "wrong native")
-        f.sessions.set(f.record.id, { ...f.record, agentSessionId: "other-native" });
-      if (mode === "wrong pair")
-        f.sessions.set(f.record.id, { ...f.record, codexRestoreLaunchId: "foreign-launch" });
-      if (mode === "second primary")
-        writeFileSync(
-          join(f.root, "second.jsonl"),
-          JSON.stringify({
-            type: "session_meta",
-            timestamp: new Date().toISOString(),
-            payload: { id: "second-native", source: "cli", thread_source: "user" },
-          }) + "\n",
-        );
-      if (mode === "unknown runtime")
-        captureAgentProcessesForLaunchMock.mockResolvedValue({ status: "unavailable" });
-      if (mode === "partial runtime")
-        captureAgentProcessesForLaunchMock.mockResolvedValue({
-          status: "ok",
-          processes: [{ pid: process.pid, identity: "unit-partial" }],
-          complete: false,
-        });
-      if (mode === "absent runtime") {
-        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
-        captureAgentProcessesForLaunchMock.mockResolvedValue({
-          status: "ok",
-          processes: [],
-          complete: true,
-        });
-      }
-      const current = f.sessions.get(f.record.id);
-      if (!current) throw new Error("Missing pending unit launch");
-      const before = clone(current);
-      expect(await f.internals.proveTaggedDurableLaunch(current)).toBeNull();
-      expect(f.sessions.get(f.record.id)).toEqual(before);
-      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-      expect(createTmuxSessionMock).not.toHaveBeenCalled();
-    });
-
-    const changes = [
-      "owner",
-      "native",
-      "intent",
-      "error",
-      "errorSource",
-      "raw start",
-      "raw launch",
-      "episode",
-      "mcp expiry",
-      "pause",
-      "revision",
-    ] as const;
-    const barriers = [
-      "reader",
-      "process roster",
-      "birth",
-      "pane",
-      "cwd",
-      "reread",
-      "sidecar",
-    ] as const;
-    it.each(barriers.flatMap((barrier) => changes.map((change) => ({ barrier, change }))))(
-      "preserves peer $change across $barrier await",
-      async ({ barrier, change }) => {
-        const f = await fixture();
-        f.writeRollout();
-        f.writeHook();
-        const cacheBase = {
-          nativeId: f.record.agentSessionId,
-          launchId: f.record.agentLaunchId,
-          startedAt: Date.parse(f.record.codexRestoreStartedAt ?? ""),
-        };
-        f.internals.codexMcpDialogOverrides.set(f.record.id, {
-          ...cacheBase,
-          kind: "mcp",
-          expiresAt: Date.now() + 15_000,
-        });
-        const history = clone(f.internals.stateHistory.get(f.record.id));
-        let peer: SessionRecord | undefined;
-        let writes = -1;
-        const mutate = () => {
-          const current = f.sessions.get(f.record.id);
-          if (!current?.spawnIntent) throw new Error("Missing peer-bound unit launch");
-          peer = clone(current);
-          if (change === "owner") peer.agentLaunchId = "peer-launch";
-          if (change === "native") peer.agentSessionId = "peer-native";
-          if (change === "intent")
-            peer.spawnIntent = {
-              ...current.spawnIntent,
-              request: { ...current.spawnIntent.request, prompt: "peer intent" },
-            };
-          if (change === "error") peer.error = "peer diagnostic";
-          if (change === "errorSource") peer.errorSource = "runtime_probe";
-          if (change === "raw start")
-            peer.codexRestoreStartedAt = new Date(Date.now() + 1).toISOString();
-          if (change === "raw launch") peer.codexRestoreLaunchId = "peer-launch";
-          if (change === "episode") peer.rateLimitedAt = new Date().toISOString();
-          if (change === "pause") {
-            peer.status = "stopped";
-            peer.stopReason = "manual_pause";
-          }
-          if (change === "revision")
-            sessionServiceInternals(f.service).lifecycle.begin("restore", [f.record.id]);
-          const cached = f.internals.codexMcpDialogOverrides.get(f.record.id);
-          if (cached && change === "mcp expiry")
-            f.internals.codexMcpDialogOverrides.set(f.record.id, {
-              ...cached,
-              expiresAt: cached.expiresAt + 1,
-            });
-          f.sessions.set(f.record.id, peer);
-          writes = writeSessionMock.mock.calls.length;
-        };
-        const codex = await vi.importActual<typeof codexModule>("../../src/agents/codex.js");
-        if (barrier === "reader" || barrier === "reread") {
-          let calls = 0;
-          readCodexRolloutStateMock.mockImplementation(
-            async (...args: Parameters<typeof codex.readCodexRolloutState>) => {
-              const result = await codex.readCodexRolloutState(...args);
-              if (++calls === (barrier === "reader" ? 1 : 2)) mutate();
-              return result;
-            },
-          );
-        }
-        if (barrier === "process roster") {
-          const pane = f.record.spawnIntent?.pane;
-          if (!pane) throw new Error("Missing unit launch process generation");
-          const result = {
-            status: "ok" as const,
-            processes: [{ pid: pane.pid, identity: String(pane.starttime) }],
-            complete: true,
-          };
-          captureAgentProcessesForLaunchMock.mockImplementationOnce(async () => {
-            mutate();
-            return result;
-          });
-        }
-        if (barrier === "pane") {
-          const pane = f.record.spawnIntent?.pane;
-          if (!pane) throw new Error("Missing unit launch pane generation");
-          const result = {
-            status: "ok" as const,
-            processes: [{ pid: pane.pid, identity: String(pane.starttime) }],
-            complete: true,
-          };
-          capturePaneAgentProcessesMock.mockImplementationOnce(async () => {
-            mutate();
-            return result;
-          });
-        }
-        if (barrier === "birth" || barrier === "cwd") {
-          const reap = await import("../../src/sidecars/reap.js");
-          if (barrier === "birth") {
-            const original = reap.readProcessStarttime;
-            vi.spyOn(reap, "readProcessStarttime").mockImplementationOnce(async (pid) => {
-              const value = await original(pid);
-              mutate();
-              return value;
-            });
-          } else {
-            const tree = await import("../../src/process-tree.js");
-            const original = tree.readProcessCwd;
-            vi.spyOn(tree, "readProcessCwd").mockImplementationOnce(async (pid) => {
-              const value = await original(pid);
-              mutate();
-              return value;
-            });
-          }
-        }
-        if (barrier === "sidecar")
-          vi.spyOn(f.internals, "startAutoStartSidecars").mockImplementationOnce(async (record) => {
-            mutate();
-            return record;
-          });
-        const current = f.sessions.get(f.record.id);
-        if (!current) throw new Error("Missing current unit launch");
-        await expect(
-          barrier === "sidecar"
-            ? f.internals.recoverDurableRuntime(current)
-            : f.internals.proveTaggedDurableLaunch(current),
-        ).rejects.toThrow("observation changed");
-        expect(peer).toBeDefined();
-        expect(f.sessions.get(f.record.id)).toEqual(peer);
-        expect(writeSessionMock.mock.calls.length).toBe(writes);
-        expect(f.internals.stateHistory.get(f.record.id)).toEqual(history);
-        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-      },
-    );
-
-    it.each(["before recovery", "during sidecar"])(
-      "preserves unrelated diagnostic %s",
-      async (mode) => {
-        const f = await fixture();
-        f.writeRollout();
-        f.writeHook();
-        const peer = {
-          ...f.record,
-          error: "unrelated probe failure",
-          errorSource: "runtime_probe" as const,
-        };
-        if (mode === "before recovery") f.sessions.set(f.record.id, peer);
-        else
-          vi.spyOn(f.internals, "startAutoStartSidecars").mockImplementationOnce(async (record) => {
-            f.sessions.set(f.record.id, {
-              ...(f.sessions.get(f.record.id) ?? record),
-              error: peer.error,
-              errorSource: peer.errorSource,
-            });
-            return record;
-          });
-        const recovery = f.internals.recoverDurableRuntime(f.sessions.get(f.record.id) ?? f.record);
-        if (mode === "during sidecar")
-          await expect(recovery).rejects.toThrow("observation changed");
-        else await recovery;
-        expect(f.sessions.get(f.record.id)).toMatchObject({
-          error: peer.error,
-          errorSource: peer.errorSource,
-        });
-        expect(f.sessions.get(f.record.id)?.spawnIntent === undefined).toBe(
-          mode === "before recovery",
-        );
-        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-      },
-    );
-
-    it.each(["prelaunch", "future"])("holds %s hook timestamps", async (mode) => {
-      const f = await fixture();
-      f.writeRollout();
-      f.writeHook();
-      const hooks = await vi.importActual<typeof agentHookStateModule>(
-        "../../src/agent-hook-state.js",
-      );
-      const current = hooks.readAgentHookState(TEST_DATA_DIR, f.record.id);
-      if (!current) throw new Error("Missing generated hook frame");
-      writeFileSync(
-        join(TEST_DATA_DIR, "session-agent-state", `${f.record.id}.json`),
-        JSON.stringify({
-          ...current,
-          updatedAt: new Date(
-            mode === "future"
-              ? Date.now() + 60_000
-              : Date.parse(f.record.codexRestoreStartedAt ?? "") - 1,
-          ).toISOString(),
-        }),
-      );
-      expect(await f.internals.proveTaggedDurableLaunch(f.record)).toBeNull();
-      expect(f.sessions.get(f.record.id)?.spawnIntent).toEqual(f.record.spawnIntent);
-      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-    });
-
-    it.each(["process probe", "final synchronous read"])(
-      "holds hook replacement at %s",
-      async (mode) => {
-        const f = await fixture();
-        f.writeRollout();
-        f.writeHook();
-        if (mode === "process probe") {
-          const pane = f.record.spawnIntent?.pane;
-          if (!pane) throw new Error("Missing unit process generation");
-          captureAgentProcessesForLaunchMock.mockImplementationOnce(async () => {
-            f.writeHook(f.record.agentLaunchId, "replaced-turn");
-            return {
-              status: "ok",
-              processes: [{ pid: pane.pid, identity: String(pane.starttime) }],
-              complete: true,
-            };
-          });
-        } else {
-          const hooks = await vi.importActual<typeof agentHookStateModule>(
-            "../../src/agent-hook-state.js",
-          );
-          let calls = 0;
-          readAgentHookStateMock.mockImplementation(
-            (...args: Parameters<typeof hooks.readAgentHookState>) => {
-              if (++calls === 3) f.writeHook(f.record.agentLaunchId, "replaced-turn");
-              return hooks.readAgentHookState(...args);
-            },
-          );
-        }
-        expect(await f.internals.proveTaggedDurableLaunch(f.record)).toBeNull();
-        expect(f.sessions.get(f.record.id)?.spawnIntent).toEqual(f.record.spawnIntent);
-        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-      },
-    );
-
-    it.each(["peer error", "peer MCP", "absent", "paused"])(
-      "keeps the actual retained-intent reconciler from replacing %s",
-      async (mode) => {
-        const f = await fixture();
-        f.writeRollout();
-        f.writeHook();
-        const current: SessionRecord = {
-          ...f.record,
-          error: "peer diagnostic",
-          errorSource: "runtime_probe",
-          ...(mode === "paused" ? { status: "stopped", stopReason: "manual_pause" } : {}),
-        };
-        f.sessions.set(current.id, current);
-        f.internals.durableSpawnIds.add(current.id);
-        let peer = clone(current);
-        if (mode === "peer error" || mode === "peer MCP") {
-          const pane = current.spawnIntent?.pane;
-          if (!pane) throw new Error("Missing retained unit generation");
-          captureAgentProcessesForLaunchMock.mockImplementationOnce(async () => {
-            if (mode === "peer error") {
-              peer = { ...current, error: "deferred peer diagnostic" };
-              f.sessions.set(current.id, peer);
-            } else
-              f.internals.codexMcpDialogOverrides.set(current.id, {
-                nativeId: current.agentSessionId,
-                launchId: current.agentLaunchId,
-                startedAt: Date.parse(current.codexRestoreStartedAt ?? ""),
-                kind: "mcp",
-                expiresAt: Date.now() + 15_000,
-              });
-            return {
-              status: "ok",
-              processes: [{ pid: pane.pid, identity: String(pane.starttime) }],
-              complete: true,
-            };
-          });
-        }
-        if (mode === "absent") {
-          lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
-          captureAgentProcessesForLaunchMock.mockResolvedValue({
-            status: "ok",
-            processes: [],
-            complete: true,
-          });
-        }
-        await f.internals.recoverDurableSpawns();
-        expect(f.sessions.get(current.id)).toEqual(peer);
-        expect(f.sessions.get(current.id)?.spawnIntent).toEqual(current.spawnIntent);
-        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-        expect(createTmuxSessionMock).not.toHaveBeenCalled();
       },
     );
   });
@@ -66872,7 +66445,6 @@ describe("SessionService", () => {
           nativeId: undefined,
           launchId: undefined,
           startedAt: null,
-          kind: "mcp",
           expiresAt: Date.now(),
         });
         internals.claudeCompactingOverrides.set(id, Date.now());
@@ -67221,7 +66793,6 @@ describe("SessionService", () => {
         nativeId: undefined,
         launchId: undefined,
         startedAt: null,
-        kind: "mcp",
         expiresAt: Date.now(),
       });
 

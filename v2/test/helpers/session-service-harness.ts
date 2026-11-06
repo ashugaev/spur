@@ -1280,7 +1280,6 @@ type SessionServiceInternals = {
       nativeId: string | undefined;
       launchId: string | undefined;
       startedAt: number | null;
-      kind: "mcp";
       expiresAt: number;
     }
   >;

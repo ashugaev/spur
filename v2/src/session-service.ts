@@ -46,7 +46,6 @@ import {
   buildAgentResumePlan,
   createAgentSubmitAckBinding,
   findAgentSessionId,
-  extractCommandBinary,
   invalidateAgentState,
   parseAgentName,
   readAgentConversation,
@@ -127,8 +126,6 @@ import {
   type CodexConversationReaderState,
   type CodexRolloutReaderState,
   type CodexRolloutStateRecord,
-  type CodexLaunchProofContext,
-  type CodexLaunchProof,
 } from "./agents/codex.js";
 import { CodexRateLimitPoller } from "./agents/codex-rate-limits.js";
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
@@ -707,8 +704,6 @@ const PANE_WRITE_FENCE_MS = 30_000;
 // any realistic single inference. 300s makes a false flip on a live inference highly unlikely while
 // still clearing an indefinite-"working" hang.
 const CODEX_HUNG_AFTER_TOOLS_MS = 300_000;
-const TAGGED_NATIVE_LAUNCH_UNCERTAIN = "Tagged native launch remains uncertain";
-const QUEUED_TELEGRAM_TOPIC_UNRESOLVED = "Queued Telegram topic creation remains unresolved";
 // Hookless turns have no hook to rule out a running tool, so require longer rollout silence (pure inference observed to ~312s).
 const CODEX_HOOKLESS_HUNG_MS = 600_000;
 const RESTORE_WARMUP_MS = 30_000;
@@ -1768,7 +1763,6 @@ type CodexPaneOverride = {
   nativeId: string | undefined;
   launchId: string | undefined;
   startedAt: number | null;
-  kind: "mcp";
   expiresAt: number;
 };
 
@@ -3646,17 +3640,6 @@ interface TelegramReplyTargetChanges {
 interface ResolvedTelegramNotice {
   target: TelegramReplyTarget;
   source: TelegramSourceConfig;
-}
-
-interface PreparedTelegramTopicCreation {
-  kind: "create";
-  session: SessionRecord;
-  source: TelegramSourceConfig;
-  token: string;
-  target: TelegramReplyTarget;
-  stored: TelegramReplyTarget | null;
-  queued: boolean;
-  revision: number;
 }
 
 function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" | "slots">): string {
@@ -13035,20 +13018,6 @@ export class SessionService {
     const persisted = readSession(this.config.dataDir, record.id);
     if (
       record.spawnIntent &&
-      persisted?.spawnIntent?.telegramOrigin &&
-      (persisted.status !== "spawning" ||
-        persisted.error !== undefined ||
-        persisted.errorSource !== undefined ||
-        !isDeepStrictEqual(persisted.spawnReceipt, record.spawnReceipt) ||
-        !isDeepStrictEqual(
-          persisted.spawnIntent.telegramOrigin,
-          record.spawnIntent.telegramOrigin,
-        ) ||
-        !isDeepStrictEqual(persisted.spawnIntent.request, record.spawnIntent.request))
-    )
-      throw new InvalidSourceReplyInputError(persisted.error ?? QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
-    if (
-      record.spawnIntent &&
       persisted?.spawnReceipt &&
       (!persisted.spawnIntent ||
         ((persisted.spawnIntent.phase === "launching" ||
@@ -14659,7 +14628,6 @@ export class SessionService {
   private async runBackgroundSpawnAttempt(
     prepared: PreparedSpawn,
     attempt: number,
-    assertTopic?: (agentLaunchId?: string) => void,
   ): Promise<BackgroundSpawnAttemptResult> {
     const {
       agent,
@@ -14678,22 +14646,14 @@ export class SessionService {
     let initialPromptSent = false;
     let launchedRecord: SessionRecord | undefined;
     let launchCandidate: SessionRecord | undefined;
-    let stampedLaunchId: string | undefined;
-    const checkpoint: typeof this.checkpointSpawn = (...args) => {
-      assertTopic?.(stampedLaunchId);
-      return this.checkpointSpawn(...args);
-    };
-    const write = (record: SessionRecord): SessionRecord => {
-      assertTopic?.(stampedLaunchId);
-      return this.writeSpawnRecord(record);
-    };
+    const checkpoint = this.checkpointSpawn.bind(this);
+    const write = this.writeSpawnRecord.bind(this);
     try {
       this.assertSpawnNotKilled(sessionId);
-      assertTopic?.();
       const current = readSession(this.config.dataDir, sessionId);
       if (current?.spawnIntent) {
         prepared.placeholder = { ...current };
-        if (current.error !== undefined && !assertTopic) {
+        if (current.error !== undefined) {
           delete prepared.placeholder.error;
           delete prepared.placeholder.errorSource;
           writeSession(this.config.dataDir, prepared.placeholder);
@@ -14739,7 +14699,6 @@ export class SessionService {
               );
               this.assertSpawnNotKilled(sessionId);
               prepared.placeholder = { ...prepared.placeholder, preflightTokenUsage: usage };
-              assertTopic?.();
               writeSession(this.config.dataDir, prepared.placeholder);
               if (executionError) {
                 throw executionError instanceof Error
@@ -14911,10 +14870,7 @@ export class SessionService {
             this.config.tags,
             project.branchNaming?.regex,
             selfDestruct,
-            telegramAgentInstructions(
-              project,
-              prepared.placeholder.spawnIntent?.telegramOrigin !== undefined,
-            ),
+            telegramAgentInstructions(project, false),
             githubPostInstructions(project, sessionId),
           );
       const budgetLimited = this.holdBudgetLimitedLaunch({
@@ -15029,7 +14985,6 @@ export class SessionService {
         stage = attempt > 1 ? `retry.${attempt}.tmux.create` : "tmux.create";
         await this.withWorkspaceLifecycleLocks(sessionId, async () => {
           this.assertSpawnNotKilled(sessionId);
-          assertTopic?.();
           const latest = readSession(this.config.dataDir, launchSessionId);
           if (latest)
             runningRecord = withQueuedMessages(runningRecord, queuedMessages(latest), true);
@@ -15044,7 +14999,6 @@ export class SessionService {
               ? { ...launchSubmission, state: promptDeliveredOnLaunch ? "uncertain" : "pending" }
               : launchSubmission,
           );
-          stampedLaunchId = agentLaunchId;
           prepared.placeholder = runningRecord;
         });
         launchCandidate = runningRecord;
@@ -15054,14 +15008,10 @@ export class SessionService {
           launchCommand: launchPlan.launchCommand,
           launchScriptDir: sessionToolDir,
           env: sessionEnv,
-          beforeLaunch: () => {
-            this.assertSpawnNotKilled(sessionId);
-            assertTopic?.(agentLaunchId);
-          },
+          beforeLaunch: () => this.assertSpawnNotKilled(sessionId),
         });
         await this.withWorkspaceLifecycleLocks(sessionId, async () => {
           this.assertSpawnNotKilled(sessionId);
-          assertTopic?.(agentLaunchId);
         });
         const current = readSession(this.config.dataDir, runningRecord.id);
         if (current && hasQueuedMessages(current)) {
@@ -15214,20 +15164,7 @@ export class SessionService {
       updatedRecord = write(updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       if (updatedRecord.spawnIntent?.submission.state === "confirmed") {
-        if (updatedRecord.triggerOrigin) {
-          const settled = await this.withWorkspaceLifecycleLocks(updatedRecord.id, async () => {
-            const proven = await this.proveTaggedDurableLaunch(updatedRecord);
-            if (!proven) {
-              this.holdDurableSpawn(updatedRecord.id, TAGGED_NATIVE_LAUNCH_UNCERTAIN);
-              return null;
-            }
-            return proven.spawnIntent ? this.retireDurableSpawn(proven) : proven;
-          });
-          if (!settled) return "completed";
-          updatedRecord = settled;
-        } else {
-          updatedRecord = this.retireDurableSpawn(updatedRecord);
-        }
+        updatedRecord = this.retireDurableSpawn(updatedRecord);
       }
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
@@ -15250,12 +15187,6 @@ export class SessionService {
     } catch (error) {
       const interrupted = readSession(this.config.dataDir, sessionId);
       if (
-        error instanceof CodexEvidenceInvalidatedError &&
-        interrupted?.agent === "codex" &&
-        interrupted.triggerOrigin
-      )
-        return "completed";
-      if (
         (this.admissionStopped && interrupted?.spawnIntent) ||
         error instanceof SpawnAdmissionCancelledError ||
         (interrupted?.spawnReceipt && !interrupted.spawnIntent)
@@ -15276,8 +15207,6 @@ export class SessionService {
         }
         return "completed";
       }
-      if (assertTopic && (error instanceof InvalidSourceReplyInputError || !launchCandidate))
-        throw error;
       let launchProvenAbsent = false;
       if (interrupted?.spawnIntent?.phase === "launching") {
         const evidence = await this.observeDurableRuntime(interrupted);
@@ -15344,7 +15273,6 @@ export class SessionService {
           spawnIntent: { ...intent, phase: "queued", submission: { state: "pending" } },
         };
         writeSession(this.config.dataDir, prepared.placeholder);
-        this.pendingSpawnIds.add(sessionId);
         this.logEvent("session.spawn.retrying", {
           level: "warn",
           sessionId,
@@ -15404,22 +15332,16 @@ export class SessionService {
     }
     this.registerDurableSpawn(prepared.placeholder);
     const acceptedView = Promise.resolve().then(() => this.enrich(prepared.placeholder));
-    void this.startBackgroundSpawn(
-      prepared,
-      reservation,
-      prepared.agent === "codex" ? acceptedView : undefined,
-    );
+    void this.startBackgroundSpawn(prepared, reservation);
     return acceptedView;
   }
 
   // `heldReservation`: admission a new request already reserved at accept
   // time; the first attempt consumes it instead of waiting. Recovered intents
-  // pass none and wait for admission. `acceptedView`: a Codex accepted view
-  // is fenced against record writes, so its launch waits for that view.
+  // pass none and wait for admission. Retry attempts never re-check admission.
   private startBackgroundSpawn(
     prepared: PreparedSpawn,
     heldReservation?: symbol,
-    acceptedView?: Promise<SessionView>,
   ): Promise<SessionView> {
     if (this.admissionStopped) {
       if (heldReservation) this.admissionReservations.delete(heldReservation);
@@ -15449,36 +15371,19 @@ export class SessionService {
       queueMicrotask(() => {
         void (async () => {
           try {
-            if (acceptedView)
-              await Promise.race([
-                acceptedView.then(
-                  () => undefined,
-                  () => undefined,
-                ),
-                completion.promise,
-              ]);
-            const origin = prepared.placeholder.spawnIntent?.telegramOrigin;
-            const assertTopic = origin
-              ? this.queuedTelegramLaunchGuard(prepared.placeholder)
-              : undefined;
-            if (origin) {
-              await this.ensureTelegramTopic(prepared.sessionId, origin);
-              assertTopic?.();
-              const current = readSession(this.config.dataDir, prepared.sessionId);
-              if (!current?.spawnIntent) throw new SpawnAdmissionCancelledError("killed");
-              prepared.placeholder = { ...current };
-            }
             for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
               const reservation =
-                attempt === 1 && heldReservation
-                  ? heldReservation
-                  : await this.waitForSpawnAdmission(prepared.request.project, {
+                attempt > 1
+                  ? undefined
+                  : (heldReservation ??
+                    (await this.waitForSpawnAdmission(prepared.request.project, {
                       sessionId: prepared.sessionId,
-                    });
+                    })));
               try {
                 await this.withWorkspaceLifecycleLocks(prepared.sessionId, async () => {
-                  assertTopic?.();
-                  this.consumeSpawnAdmission(reservation);
+                  if (reservation) this.consumeSpawnAdmission(reservation);
+                  else if (this.admissionStopped)
+                    throw new SpawnAdmissionCancelledError("disposed");
                   const current = readSession(this.config.dataDir, prepared.sessionId);
                   if (!current || current.status !== "spawning") {
                     throw new SpawnAdmissionCancelledError("killed");
@@ -15486,9 +15391,9 @@ export class SessionService {
                   this.pendingSpawnIds.delete(prepared.sessionId);
                 });
               } finally {
-                this.admissionReservations.delete(reservation);
+                if (reservation) this.admissionReservations.delete(reservation);
               }
-              const result = await this.runBackgroundSpawnAttempt(prepared, attempt, assertTopic);
+              const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
               if (result === "completed") {
                 return;
               }
@@ -15499,12 +15404,6 @@ export class SessionService {
                 prepared.sessionId,
                 error instanceof Error ? error.message : String(error),
               );
-            }
-            if (prepared.placeholder.spawnIntent?.telegramOrigin) {
-              this.spawnCompletions
-                .get(prepared.sessionId)
-                ?.reject(error instanceof Error ? error : new Error(String(error)));
-              this.spawnCompletions.delete(prepared.sessionId);
             }
           } finally {
             if (heldReservation) this.admissionReservations.delete(heldReservation);
@@ -15567,19 +15466,6 @@ export class SessionService {
     const current = readSession(this.config.dataDir, sessionId);
     if (!current?.spawnIntent || isTerminalSessionStatus(current.status)) return;
     this.registerDurableSpawn(current);
-    if (
-      current.spawnIntent.telegramOrigin &&
-      (current.error !== undefined || current.errorSource !== undefined)
-    )
-      return;
-    if (current.agent === "codex" && current.triggerOrigin) {
-      if (
-        current.error &&
-        !(current.errorSource === "other" && current.error === TAGGED_NATIVE_LAUNCH_UNCERTAIN)
-      )
-        return;
-      reason = TAGGED_NATIVE_LAUNCH_UNCERTAIN;
-    }
     if (current.error === reason) return;
     writeSession(this.config.dataDir, { ...current, error: reason, errorSource: "other" });
     this.logEvent("session.spawn.recovery_held", {
@@ -15676,134 +15562,7 @@ export class SessionService {
     return settled;
   }
 
-  private hasTrustedTaggedNativeBinding(record: SessionRecord): boolean {
-    const intent = record.spawnIntent;
-    if (
-      record.agent !== "claude" ||
-      !record.agentSessionId ||
-      !record.agentLaunchId ||
-      !record.spawnReceipt ||
-      !intent ||
-      intent.submission.state !== "confirmed"
-    )
-      return false;
-    const word = String.raw`'(?:[^'\r\n\u0000]|'\\'')*'`;
-    const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
-    const effort = intent.launchSelection.reasoningEffort;
-    const command = new RegExp(
-      `^(?:CLAUDE_CONFIG_DIR=${word} )?([A-Za-z0-9_./:+-]+)` +
-        " --dangerously-skip-permissions(?: --permission-mode plan)?" +
-        "(?: --disallowed-tools Edit --disallowed-tools Write --disallowed-tools MultiEdit --disallowed-tools NotebookEdit)?" +
-        `(?: --settings ${word})?(?: --mcp-config ${word} --strict-mcp-config)?` +
-        `(?: --model ${word})? --session-id '(${uuid})'` +
-        (effort === undefined ? "" : ` --effort ${effort}`) +
-        "$",
-    );
-    const match = command.exec(record.launchCommand);
-    return (
-      match !== null &&
-      match[0].length === record.launchCommand.length &&
-      match[1] === extractCommandBinary(record.launchCommand, "") &&
-      match[2] === record.agentSessionId
-    );
-  }
-
-  private assertTaggedCodexObservation(observation?: PreparedSessionObservation): void {
-    if (!observation) return;
-    const current = readSession(this.config.dataDir, observation.session.id);
-    if (
-      !current ||
-      !this.preparedSessionObservationCurrent(observation, current) ||
-      !isDeepStrictEqual(current.triggerOrigin, observation.session.triggerOrigin) ||
-      !isDeepStrictEqual(current.spawnReceipt, observation.session.spawnReceipt) ||
-      !isDeepStrictEqual(current.spawnIntent, observation.session.spawnIntent)
-    )
-      throw new CodexEvidenceInvalidatedError("Tagged Codex observation changed");
-  }
-
-  private async proveTaggedDurableLaunch(
-    record: SessionRecord,
-    prepared?: PreparedSessionObservation,
-  ): Promise<SessionRecord | null> {
-    const observation =
-      record.agent === "codex" ? (prepared ?? this.prepareSessionObservation(record)) : undefined;
-    this.assertTaggedCodexObservation(observation);
-    const owns = (current: SessionRecord): boolean =>
-      !this.admissionStopped &&
-      !isTerminalSessionStatus(current.status) &&
-      current.status === record.status &&
-      current.agentLaunchId === record.agentLaunchId &&
-      sameSessionRuntimeOwner(current, record) &&
-      isDeepStrictEqual(current.triggerOrigin, record.triggerOrigin) &&
-      isDeepStrictEqual(current.spawnReceipt, record.spawnReceipt) &&
-      isDeepStrictEqual(current.spawnIntent, record.spawnIntent);
-    const before = readSession(this.config.dataDir, record.id);
-    if (!before || !owns(before)) throw new SpawnAdmissionCancelledError("killed");
-    if (before.agent === "codex") {
-      if (before.status === "stopped") return null;
-      try {
-        const sinceMs = codexLaunchStartedAt(before);
-        if (
-          !before.triggerOrigin ||
-          !before.agentSessionId ||
-          !before.agentLaunchId ||
-          !before.spawnReceipt ||
-          before.spawnIntent?.submission.state !== "confirmed" ||
-          sinceMs === null
-        )
-          return null;
-        const native = await this.classifyCodexState(before, { sinceMs, nowMs: Date.now() });
-        this.assertTaggedCodexObservation(observation);
-        const hook = native.hookState;
-        const proof = native.launchProof;
-        if (
-          proof?.kind !== "primary" ||
-          proof.threadId !== before.agentSessionId ||
-          !hook ||
-          hook.agentLaunchId !== before.agentLaunchId ||
-          hook.turnId !== proof.turnId ||
-          Date.parse(hook.updatedAt) < sinceMs ||
-          Date.parse(hook.updatedAt) > Date.now()
-        )
-          return null;
-        const evidence = await this.observeDurableRuntime(before, observation);
-        this.assertTaggedCodexObservation(observation);
-        if (evidence.state !== "matching") return null;
-        const verified = await this.classifyCodexState(before, { sinceMs, nowMs: Date.now() });
-        this.assertTaggedCodexObservation(observation);
-        if (
-          !isDeepStrictEqual(verified.launchProof, proof) ||
-          !isDeepStrictEqual(verified.hookState, hook)
-        )
-          return null;
-        const finalHook = readAgentHookState(this.config.dataDir, record.id);
-        const current = readSession(this.config.dataDir, record.id);
-        this.assertTaggedCodexObservation(observation);
-        if (!current || !owns(current) || !isDeepStrictEqual(finalHook, hook)) return null;
-        const settled: SessionRecord = { ...current, status: "running" };
-        if (settled.errorSource === "other" && settled.error === TAGGED_NATIVE_LAUNCH_UNCERTAIN) {
-          delete settled.error;
-          delete settled.errorSource;
-        }
-        const retired = this.retireDurableSpawn(settled);
-        if (observation) this.advancePreparedObservation(observation, retired);
-        return retired;
-      } catch (error) {
-        this.assertTaggedCodexObservation(observation);
-        throw error;
-      }
-    }
-    if (!this.hasTrustedTaggedNativeBinding(before)) return null;
-    const evidence = await this.observeDurableRuntime(before);
-    const current = readSession(this.config.dataDir, record.id);
-    if (!current || !owns(current)) throw new SpawnAdmissionCancelledError("killed");
-    return evidence.state === "matching" ? current : null;
-  }
-
-  private async observeDurableRuntime(
-    record: SessionRecord,
-    observation?: PreparedSessionObservation,
-  ): Promise<
+  private async observeDurableRuntime(record: SessionRecord): Promise<
     | { state: "absent" }
     | { state: "matching"; generation: PaneGeneration }
     | { state: "unknown"; reason: string }
@@ -15821,12 +15580,7 @@ export class SessionService {
         recovery: true,
       }),
     ]);
-    this.assertTaggedCodexObservation(observation);
-    if (
-      pane.status !== "ok" ||
-      capture.status !== "ok" ||
-      (observation && capture.complete !== true)
-    ) {
+    if (pane.status !== "ok" || capture.status !== "ok") {
       return { state: "unknown", reason: `Launch ownership probe unavailable for ${record.id}` };
     }
     if (pane.panePid === null && capture.complete === true && capture.processes.length === 0) {
@@ -15840,7 +15594,6 @@ export class SessionService {
       return { state: "unknown", reason: `Launch ownership remains uncertain for ${record.id}` };
     }
     const starttime = await readProcessStarttime(pane.panePid);
-    this.assertTaggedCodexObservation(observation);
     const paneCapture = await capturePaneAgentProcesses({
       sessionId: record.id,
       agentLaunchId: record.agentLaunchId,
@@ -15848,7 +15601,6 @@ export class SessionService {
       paneDead: pane.paneDead,
       processMatchers: agentProcessMatchers(record.agent, record.launchCommand),
     });
-    this.assertTaggedCodexObservation(observation);
     if (
       starttime === null ||
       paneCapture.status !== "ok" ||
@@ -15863,7 +15615,6 @@ export class SessionService {
     }
     for (const process of capture.processes) {
       const cwd = await readProcessCwd(process.pid);
-      this.assertTaggedCodexObservation(observation);
       if (!cwd || tryRealpath(cwd) !== tryRealpath(record.worktreePath)) {
         return {
           state: "unknown",
@@ -15884,215 +15635,161 @@ export class SessionService {
   private async recoverDurableRuntime(record: SessionRecord): Promise<void> {
     const intent = record.spawnIntent;
     if (!intent) return;
-    const observation =
-      record.agent === "codex" && record.triggerOrigin
-        ? this.prepareSessionObservation(record)
-        : undefined;
-    this.assertTaggedCodexObservation(observation);
-    try {
-      if (observation && record.status === "stopped") return;
-      if (record.agent === "opencode" && !record.agentSessionId) {
-        throw new Error(`OpenCode native launch identity remains uncertain for ${record.id}`);
-      }
-      const evidence = await this.observeDurableRuntime(record, observation);
-      this.assertTaggedCodexObservation(observation);
-      if (evidence.state === "unknown") throw new Error(evidence.reason);
-      const openCodeLaunchConfirmed =
-        record.agent === "opencode" &&
-        record.agentSessionId !== undefined &&
-        (await waitForOpenCodeLaunchMessage(record.agentSessionId, record.worktreePath, 0));
-      if (evidence.state === "absent") {
-        if (observation && intent.submission.state !== "pending")
-          throw new Error(TAGGED_NATIVE_LAUNCH_UNCERTAIN);
-        await this.withWorkspaceLifecycleLocks(record.id, async () => {
-          this.assertTaggedCodexObservation(observation);
-          const current = readSession(this.config.dataDir, record.id);
-          if (
-            !current?.spawnIntent ||
-            isTerminalSessionStatus(current.status) ||
-            current.agentLaunchId !== record.agentLaunchId
-          )
-            return;
-          const submission = current.spawnIntent.submission;
-          if (submission.state !== "pending") {
-            const binding = submission.ackBaseline
-              ? await resumeAgentSubmitAckBinding(
-                  current.agent,
-                  this.submitAckContext(current),
-                  submission.ackBaseline,
-                )
-              : null;
-            this.assertTaggedCodexObservation(observation);
-            if (
-              submission.state === "confirmed" ||
-              openCodeLaunchConfirmed ||
-              (binding && submission.message && (await binding.scan(submission.message)).found)
-            ) {
-              const stopped: SessionRecord = { ...current, status: "stopped", updatedAt: nowIso() };
-              delete stopped.error;
-              delete stopped.errorSource;
-              const settled = this.retireDurableSpawn(stopped, true);
-              const completion = this.spawnCompletions.get(record.id);
-              if (completion) completion.resolve(await this.enrich(settled));
-              this.spawnCompletions.delete(record.id);
-              return;
-            }
-            throw new Error(`Startup submission remains uncertain for ${record.id}`);
-          }
-          const { agentLaunchId: _launch, agentSessionId: _provider, ...unlaunched } = current;
-          const { pane: _pane, ...baseIntent } = current.spawnIntent;
-          const resumed: SessionRecord = {
-            ...unlaunched,
-            launchCommand: "",
-            status: "spawning",
-            spawnIntent: {
-              ...baseIntent,
-              phase: "workspace_ready",
-              submission: { state: "pending" },
-            },
-          };
-          if (!observation) {
-            delete resumed.error;
-            delete resumed.errorSource;
-          }
-          writeSession(this.config.dataDir, resumed);
-          if (observation) this.advancePreparedObservation(observation, resumed);
-          this.registerDurableSpawn(resumed);
-          void this.startBackgroundSpawn(await this.prepareRecoveredSpawn(resumed));
-        });
-        return;
-      }
-      const { panePid, processStarttime: starttime } = evidence.generation;
-      if (intent.submission.state !== "confirmed" && !openCodeLaunchConfirmed) {
-        const binding = intent.submission.ackBaseline
-          ? await resumeAgentSubmitAckBinding(
-              record.agent,
-              this.submitAckContext(record),
-              intent.submission.ackBaseline,
-            )
-          : null;
-        this.assertTaggedCodexObservation(observation);
-        const message = intent.submission.message;
-        if (intent.submission.state === "pending" && message?.trim()) {
-          const freshBinding = await createAgentSubmitAckBinding(record.agent, {
-            ...this.submitAckContext(record),
-            freshLaunch: true,
-          });
-          this.assertTaggedCodexObservation(observation);
-          if (!freshBinding)
-            throw new Error(`Startup provider identity unavailable for ${record.id}`);
-          const generation = {
-            tmuxSession: record.tmuxSession,
-            panePid,
-            processStarttime: starttime,
-          };
-          const uncertain = await this.withWorkspaceLifecycleLocks(record.id, async () => {
-            this.assertTaggedCodexObservation(observation);
-            const current = readSession(this.config.dataDir, record.id);
-            if (
-              !current?.spawnIntent ||
-              isTerminalSessionStatus(current.status) ||
-              current.agentLaunchId !== record.agentLaunchId ||
-              !(await this.paneGenerationMatches(current, generation))
-            ) {
-              throw new SpawnAdmissionCancelledError("killed");
-            }
-            this.assertTaggedCodexObservation(observation);
-            const checkpoint = this.checkpointSpawn(current, "launching", {
-              state: "uncertain",
-              uncertainAt: nowIso(),
-              message,
-              ackBaseline: freshBinding.baseline,
-            });
-            if (observation) this.advancePreparedObservation(observation, checkpoint);
-            return checkpoint;
-          });
-          const sent = await this.sendAgentMessageWithGeneration(
-            uncertain,
-            message,
-            { freshLaunch: true },
-            (actual) => {
-              this.assertTaggedCodexObservation(observation);
-              const latest = readSession(this.config.dataDir, record.id);
-              if (
-                this.admissionStopped ||
-                !latest?.spawnIntent ||
-                isTerminalSessionStatus(latest.status) ||
-                latest.agentLaunchId !== record.agentLaunchId ||
-                actual.panePid !== generation.panePid ||
-                actual.processStarttime !== generation.processStarttime
-              )
-                throw new SpawnAdmissionCancelledError("killed");
-            },
-          );
-          this.assertTaggedCodexObservation(observation);
-          if (sent.outcome !== "submitted")
-            throw new Error(`Startup submission remains uncertain for ${record.id}`);
-        } else if (!binding || !message || !(await binding.scan(message)).found) {
-          throw new Error(`Startup submission remains uncertain for ${record.id}`);
-        }
-      }
-      this.assertTaggedCodexObservation(observation);
+    if (record.agent === "opencode" && !record.agentSessionId) {
+      throw new Error(`OpenCode native launch identity remains uncertain for ${record.id}`);
+    }
+    const evidence = await this.observeDurableRuntime(record);
+    if (evidence.state === "unknown") throw new Error(evidence.reason);
+    const openCodeLaunchConfirmed =
+      record.agent === "opencode" &&
+      record.agentSessionId !== undefined &&
+      (await waitForOpenCodeLaunchMessage(record.agentSessionId, record.worktreePath, 0));
+    if (evidence.state === "absent") {
       await this.withWorkspaceLifecycleLocks(record.id, async () => {
-        this.assertTaggedCodexObservation(observation);
         const current = readSession(this.config.dataDir, record.id);
         if (
-          this.admissionStopped ||
           !current?.spawnIntent ||
           isTerminalSessionStatus(current.status) ||
           current.agentLaunchId !== record.agentLaunchId
         )
           return;
-        if (
-          !(await this.paneGenerationMatches(current, {
-            tmuxSession: current.tmuxSession,
-            panePid,
-            processStarttime: starttime,
-          }))
-        )
-          throw new Error(`Launch generation changed for ${record.id}`);
-        this.assertTaggedCodexObservation(observation);
-        const project = this.getProject(current.project);
-        let launched: SessionRecord = { ...current, status: "running", updatedAt: nowIso() };
-        delete launched.submitUnconfirmedAt;
-        if (!observation) {
-          delete launched.error;
-          delete launched.errorSource;
-        } else {
-          launched = this.checkpointSpawn(launched, "submitted", {
-            ...launched.spawnIntent?.submission,
-            state: "confirmed",
-          });
-          this.advancePreparedObservation(observation, launched);
-        }
-        launched = await this.startAutoStartSidecars(launched, project);
-        this.assertTaggedCodexObservation(observation);
-        if (observation) launched = readSession(this.config.dataDir, record.id) ?? launched;
-        launched = this.applyRequestedStateSubscriptions(launched, intent.request.subscriptions);
-        this.assertTaggedCodexObservation(observation);
-        if (launched.triggerOrigin) {
-          if (!observation)
-            launched = this.checkpointSpawn(launched, "submitted", {
-              ...launched.spawnIntent?.submission,
-              state: "confirmed",
-            });
-          const proven = await this.proveTaggedDurableLaunch(launched, observation);
-          if (!proven) {
-            this.holdDurableSpawn(record.id, TAGGED_NATIVE_LAUNCH_UNCERTAIN);
+        const submission = current.spawnIntent.submission;
+        if (submission.state !== "pending") {
+          const binding = submission.ackBaseline
+            ? await resumeAgentSubmitAckBinding(
+                current.agent,
+                this.submitAckContext(current),
+                submission.ackBaseline,
+              )
+            : null;
+          if (
+            submission.state === "confirmed" ||
+            openCodeLaunchConfirmed ||
+            (binding && submission.message && (await binding.scan(submission.message)).found)
+          ) {
+            const stopped: SessionRecord = { ...current, status: "stopped", updatedAt: nowIso() };
+            delete stopped.error;
+            delete stopped.errorSource;
+            const settled = this.retireDurableSpawn(stopped, true);
+            const completion = this.spawnCompletions.get(record.id);
+            if (completion) completion.resolve(await this.enrich(settled));
+            this.spawnCompletions.delete(record.id);
             return;
           }
-          launched = proven;
+          throw new Error(`Startup submission remains uncertain for ${record.id}`);
         }
-        if (launched.spawnIntent) launched = this.retireDurableSpawn(launched);
-        const completion = this.spawnCompletions.get(record.id);
-        if (completion) completion.resolve(await this.enrich(launched));
-        this.spawnCompletions.delete(record.id);
-        if (this.shouldRunDelivery(launched)) this.scheduleDeliveryRunner(launched.id);
+        const { agentLaunchId: _launch, agentSessionId: _provider, ...unlaunched } = current;
+        const { pane: _pane, ...baseIntent } = current.spawnIntent;
+        const resumed: SessionRecord = {
+          ...unlaunched,
+          launchCommand: "",
+          status: "spawning",
+          spawnIntent: {
+            ...baseIntent,
+            phase: "workspace_ready",
+            submission: { state: "pending" },
+          },
+        };
+        delete resumed.error;
+        delete resumed.errorSource;
+        writeSession(this.config.dataDir, resumed);
+        this.registerDurableSpawn(resumed);
+        void this.startBackgroundSpawn(await this.prepareRecoveredSpawn(resumed));
       });
-    } catch (error) {
-      this.assertTaggedCodexObservation(observation);
-      throw error;
+      return;
     }
+    const { panePid, processStarttime: starttime } = evidence.generation;
+    if (intent.submission.state !== "confirmed" && !openCodeLaunchConfirmed) {
+      const binding = intent.submission.ackBaseline
+        ? await resumeAgentSubmitAckBinding(
+            record.agent,
+            this.submitAckContext(record),
+            intent.submission.ackBaseline,
+          )
+        : null;
+      const message = intent.submission.message;
+      if (intent.submission.state === "pending" && message?.trim()) {
+        const freshBinding = await createAgentSubmitAckBinding(record.agent, {
+          ...this.submitAckContext(record),
+          freshLaunch: true,
+        });
+        if (!freshBinding)
+          throw new Error(`Startup provider identity unavailable for ${record.id}`);
+        const generation = {
+          tmuxSession: record.tmuxSession,
+          panePid,
+          processStarttime: starttime,
+        };
+        const uncertain = await this.withWorkspaceLifecycleLocks(record.id, async () => {
+          const current = readSession(this.config.dataDir, record.id);
+          if (
+            !current?.spawnIntent ||
+            isTerminalSessionStatus(current.status) ||
+            current.agentLaunchId !== record.agentLaunchId ||
+            !(await this.paneGenerationMatches(current, generation))
+          ) {
+            throw new SpawnAdmissionCancelledError("killed");
+          }
+          return this.checkpointSpawn(current, "launching", {
+            state: "uncertain",
+            uncertainAt: nowIso(),
+            message,
+            ackBaseline: freshBinding.baseline,
+          });
+        });
+        const sent = await this.sendAgentMessageWithGeneration(
+          uncertain,
+          message,
+          { freshLaunch: true },
+          (actual) => {
+            const latest = readSession(this.config.dataDir, record.id);
+            if (
+              this.admissionStopped ||
+              !latest?.spawnIntent ||
+              isTerminalSessionStatus(latest.status) ||
+              latest.agentLaunchId !== record.agentLaunchId ||
+              actual.panePid !== generation.panePid ||
+              actual.processStarttime !== generation.processStarttime
+            )
+              throw new SpawnAdmissionCancelledError("killed");
+          },
+        );
+        if (sent.outcome !== "submitted")
+          throw new Error(`Startup submission remains uncertain for ${record.id}`);
+      } else if (!binding || !message || !(await binding.scan(message)).found) {
+        throw new Error(`Startup submission remains uncertain for ${record.id}`);
+      }
+    }
+    await this.withWorkspaceLifecycleLocks(record.id, async () => {
+      const current = readSession(this.config.dataDir, record.id);
+      if (
+        this.admissionStopped ||
+        !current?.spawnIntent ||
+        isTerminalSessionStatus(current.status) ||
+        current.agentLaunchId !== record.agentLaunchId
+      )
+        return;
+      if (
+        !(await this.paneGenerationMatches(current, {
+          tmuxSession: current.tmuxSession,
+          panePid,
+          processStarttime: starttime,
+        }))
+      )
+        throw new Error(`Launch generation changed for ${record.id}`);
+      const project = this.getProject(current.project);
+      let launched: SessionRecord = { ...current, status: "running", updatedAt: nowIso() };
+      delete launched.submitUnconfirmedAt;
+      delete launched.error;
+      delete launched.errorSource;
+      launched = await this.startAutoStartSidecars(launched, project);
+      launched = this.applyRequestedStateSubscriptions(launched, intent.request.subscriptions);
+      if (launched.spawnIntent) launched = this.retireDurableSpawn(launched);
+      const completion = this.spawnCompletions.get(record.id);
+      if (completion) completion.resolve(await this.enrich(launched));
+      this.spawnCompletions.delete(record.id);
+      if (this.shouldRunDelivery(launched)) this.scheduleDeliveryRunner(launched.id);
+    });
   }
 
   private async recoverDurableSpawns(): Promise<void> {
@@ -16116,14 +15813,7 @@ export class SessionService {
         await this.recoverDurableRuntime(record);
       }
     } catch (error) {
-      if (
-        !(
-          error instanceof CodexEvidenceInvalidatedError &&
-          record.agent === "codex" &&
-          record.triggerOrigin
-        )
-      )
-        this.holdDurableSpawn(sessionId, error instanceof Error ? error.message : String(error));
+      this.holdDurableSpawn(sessionId, error instanceof Error ? error.message : String(error));
     } finally {
       this.durableRecoveryBusy = false;
     }
@@ -16751,80 +16441,9 @@ export class SessionService {
     sessionId: string,
     origin?: TelegramSpawnOrigin,
   ): Promise<TelegramConversation> {
-    if (this.isQueuedTelegramTopicSpawn(readSession(this.config.dataDir, sessionId))) {
-      const run = this.ensureQueuedTelegramTopic(sessionId, origin);
-      void this.trackBackgroundLoop(
-        run.then(
-          () => undefined,
-          () => undefined,
-        ),
-      );
-      return run;
-    }
     return this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.ensureTelegramTopicLocked(sessionId, origin),
     );
-  }
-
-  private isQueuedTelegramTopicSpawn(session: SessionRecord | null): boolean {
-    return (
-      session?.spawnIntent?.telegramOrigin !== undefined &&
-      (session.spawnIntent.phase === "queued" || session.spawnIntent.phase === "workspace_ready")
-    );
-  }
-
-  private queuedTelegramLaunchGuard(
-    session: SessionRecord,
-  ): ((agentLaunchId?: string) => void) | undefined {
-    const origin = session.spawnIntent?.telegramOrigin;
-    if (!origin) return undefined;
-    const source = this.config.projects[origin.projectId]?.sources[origin.sourceId];
-    if (!source || source.type !== "telegram" || source.chatId === undefined || source.chatId >= 0)
-      return undefined;
-    const token = source.token;
-    const chatId = source.chatId;
-    const owner = structuredClone(session);
-    const revision = this.lifecycle.snapshot(session.id).revision;
-    return (agentLaunchId) => {
-      const current = readSession(this.config.dataDir, session.id);
-      const target = current ? this.telegramReplyTarget(current) : null;
-      const currentSource = this.config.projects[origin.projectId]?.sources[origin.sourceId];
-      if (
-        this.admissionStopped ||
-        !current ||
-        current.status !== "spawning" ||
-        !current.spawnIntent ||
-        current.error !== undefined ||
-        current.errorSource !== undefined ||
-        this.lifecycle.snapshot(session.id).revision !== revision ||
-        !isDeepStrictEqual(current.spawnReceipt, owner.spawnReceipt) ||
-        !isDeepStrictEqual(current.spawnIntent.request, owner.spawnIntent?.request) ||
-        !isDeepStrictEqual(current.spawnIntent.telegramOrigin, owner.spawnIntent?.telegramOrigin) ||
-        (agentLaunchId !== undefined && current.agentLaunchId !== agentLaunchId) ||
-        currentSource !== source ||
-        source.token !== token ||
-        source.chatId !== chatId ||
-        !target ||
-        target.sessionId !== session.id ||
-        target.projectId !== origin.projectId ||
-        target.sourceId !== origin.sourceId ||
-        target.chatId !== chatId ||
-        this.telegramTopicHasOtherOwner(current, target)
-      )
-        throw new InvalidSourceReplyInputError(current?.error ?? QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
-    };
-  }
-
-  private async ensureQueuedTelegramTopic(
-    sessionId: string,
-    origin?: TelegramSpawnOrigin,
-  ): Promise<TelegramConversation> {
-    const prepared = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
-      if (!this.isQueuedTelegramTopicSpawn(readSession(this.config.dataDir, sessionId)))
-        throw new InvalidSourceReplyInputError(QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
-      return this.prepareTelegramTopic(sessionId, origin, true);
-    });
-    return prepared.kind === "create" ? this.createPreparedTelegramTopic(prepared) : prepared;
   }
 
   private telegramAssignmentMatches(
@@ -16845,23 +16464,10 @@ export class SessionService {
     sessionId: string,
     origin?: TelegramSpawnOrigin,
   ): Promise<TelegramConversation> {
-    if (this.isQueuedTelegramTopicSpawn(readSession(this.config.dataDir, sessionId)))
-      throw new InvalidSourceReplyInputError(QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
-    const prepared = this.prepareTelegramTopic(sessionId, origin, false);
-    return prepared.kind === "create" ? this.createPreparedTelegramTopic(prepared) : prepared;
-  }
-
-  private prepareTelegramTopic(
-    sessionId: string,
-    origin: TelegramSpawnOrigin | undefined,
-    queued: boolean,
-  ): TelegramConversation | PreparedTelegramTopicCreation {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     if (isTerminalSessionStatus(session.status))
       throw new InvalidSourceReplyInputError(`Session ${sessionId} is ${session.status}`);
-    if (queued && (this.admissionStopped || session.status !== "spawning"))
-      throw new InvalidSourceReplyInputError(session.error ?? QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
     const stored = readTelegramReplyTarget(this.config.dataDir, sessionId);
     if (
       origin &&
@@ -16884,8 +16490,6 @@ export class SessionService {
       source.chatId === undefined ||
       source.chatId >= 0
     ) {
-      if (queued && session.error === QUEUED_TELEGRAM_TOPIC_UNRESOLVED)
-        throw new InvalidSourceReplyInputError(QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
       retireTelegramLegacyState(this.config.dataDir, projectId, sourceId, sessionId);
       writeTelegramReplyTarget(this.config.dataDir, {
         sessionId,
@@ -16895,24 +16499,13 @@ export class SessionService {
       });
       return { kind: "disabled" };
     }
-    if (
-      queued &&
-      (session.error !== undefined || session.errorSource !== undefined) &&
-      !(session.error === QUEUED_TELEGRAM_TOPIC_UNRESOLVED && session.errorSource === "other")
-    )
-      throw new InvalidSourceReplyInputError(session.error ?? QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
     const existing = this.telegramReplyTarget(session, stored);
     if (
       existing &&
-      (!queued ||
-        (existing.sessionId === sessionId &&
-          existing.projectId === session.spawnIntent?.telegramOrigin?.projectId &&
-          existing.sourceId === session.spawnIntent.telegramOrigin.sourceId)) &&
       existing.messageThreadId !== undefined &&
       !this.telegramTopicHasOtherOwner(session, existing)
     ) {
       retireTelegramLegacyState(this.config.dataDir, projectId, sourceId, sessionId, existing);
-      if (queued) this.clearQueuedTelegramTopicHold(session);
       return {
         kind: "topic",
         projectId,
@@ -16921,142 +16514,66 @@ export class SessionService {
         messageThreadId: existing.messageThreadId,
       };
     }
-    if (queued) {
-      const partial =
-        stored?.messageThreadId !== undefined ||
-        [...readTelegramBindings(this.config.dataDir, projectId, sourceId).values()].some(
-          (binding) => binding.sessionId === sessionId,
-        );
-      if (session.error === QUEUED_TELEGRAM_TOPIC_UNRESOLVED)
-        throw new InvalidSourceReplyInputError(QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
-      writeSession(this.config.dataDir, {
-        ...session,
-        error: QUEUED_TELEGRAM_TOPIC_UNRESOLVED,
-        errorSource: "other",
-      });
-      if (partial) throw new InvalidSourceReplyInputError(QUEUED_TELEGRAM_TOPIC_UNRESOLVED);
-    }
     const name = telegramTopicName({
       id: session.id,
       agent: session.agent,
       state: session.status === "errored" ? "error" : "working",
       ...(session.slots ? { slots: session.slots } : {}),
     });
-    return {
-      kind: "create",
-      session: structuredClone(session),
-      source,
-      token: source.token,
-      target: {
-        sessionId,
+    const chatId = source.chatId;
+    const creationSource = { token: source.token };
+    const topicId = await createTelegramTopic(creationSource, chatId, name);
+    const target: TelegramReplyTarget = {
+      sessionId,
+      projectId,
+      sourceId,
+      chatId,
+      messageThreadId: topicId,
+      topicName: name,
+      updatedAt: nowIso(),
+    };
+    try {
+      const current = readSession(this.config.dataDir, sessionId);
+      const currentSource = this.config.projects[projectId]?.sources[sourceId];
+      if (
+        !current ||
+        isTerminalSessionStatus(current.status) ||
+        !currentSource ||
+        currentSource.type !== "telegram" ||
+        currentSource.chatId !== chatId ||
+        currentSource.token !== creationSource.token ||
+        this.telegramTopicHasOtherOwner(current, target) ||
+        telegramTopicIsDeleting(this.config.dataDir, target.chatId, topicId)
+      )
+        throw new InvalidSourceReplyInputError("Telegram conversation changed during creation");
+      this.bindTelegramChatIfFree(target, sessionId);
+      writeTelegramReplyTarget(this.config.dataDir, target);
+      retireTelegramLegacyState(this.config.dataDir, projectId, sourceId, sessionId, target);
+      return {
+        kind: "topic",
         projectId,
         sourceId,
-        chatId: source.chatId,
-        topicName: name,
-        updatedAt: nowIso(),
-      },
-      stored: stored ? structuredClone(stored) : null,
-      queued,
-      revision: this.lifecycle.snapshot(sessionId).revision,
-    };
-  }
-
-  private clearQueuedTelegramTopicHold(session: SessionRecord): void {
-    if (session.error !== QUEUED_TELEGRAM_TOPIC_UNRESOLVED || session.errorSource !== "other")
-      return;
-    const { error: _error, errorSource: _source, ...cleared } = session;
-    writeSession(this.config.dataDir, cleared);
-  }
-
-  private async createPreparedTelegramTopic(
-    prepared: PreparedTelegramTopicCreation,
-  ): Promise<TelegramConversation> {
-    const { session, queued, token } = prepared;
-    const { sessionId, projectId, sourceId, chatId } = prepared.target;
-    const creationSource = { token };
-    const topicId = await createTelegramTopic(
-      creationSource,
-      chatId,
-      prepared.target.topicName ?? "",
-    );
-    const target = { ...prepared.target, messageThreadId: topicId };
-    const publication = { bound: false, written: false, complete: false };
-    try {
-      const publish = async (): Promise<TelegramConversation> => {
-        const current = readSession(this.config.dataDir, sessionId);
-        const currentSource = this.config.projects[projectId]?.sources[sourceId];
-        if (
-          !current ||
-          isTerminalSessionStatus(current.status) ||
-          !currentSource ||
-          currentSource.type !== "telegram" ||
-          currentSource.chatId !== chatId ||
-          currentSource.token !== creationSource.token ||
-          (queued &&
-            (this.admissionStopped ||
-              current.status !== "spawning" ||
-              this.lifecycle.snapshot(sessionId).revision !== prepared.revision ||
-              !isDeepStrictEqual(current.spawnIntent, session.spawnIntent) ||
-              !isDeepStrictEqual(current.spawnReceipt, session.spawnReceipt) ||
-              !isDeepStrictEqual(
-                current.spawnIntent?.telegramOrigin,
-                session.spawnIntent?.telegramOrigin,
-              ) ||
-              current.error !== QUEUED_TELEGRAM_TOPIC_UNRESOLVED ||
-              current.errorSource !== "other" ||
-              currentSource !== prepared.source ||
-              !isDeepStrictEqual(
-                readTelegramReplyTarget(this.config.dataDir, sessionId),
-                prepared.stored,
-              ))) ||
-          this.telegramTopicHasOtherOwner(current, target) ||
-          telegramTopicIsDeleting(this.config.dataDir, target.chatId, topicId)
-        )
-          throw new InvalidSourceReplyInputError("Telegram conversation changed during creation");
-        this.bindTelegramChatIfFree(target, sessionId);
-        publication.bound = true;
-        writeTelegramReplyTarget(this.config.dataDir, target);
-        publication.written = true;
-        publication.complete = true;
-        retireTelegramLegacyState(this.config.dataDir, projectId, sourceId, sessionId, target);
-        if (queued) this.clearQueuedTelegramTopicHold(current);
-        return {
-          kind: "topic",
-          projectId,
-          sourceId,
-          chatId: target.chatId,
-          messageThreadId: topicId,
-        };
+        chatId: target.chatId,
+        messageThreadId: topicId,
       };
-      return queued ? await this.withWorkspaceLifecycleLocks(sessionId, publish) : await publish();
     } catch (error) {
-      if (!queued || !publication.complete) {
-        try {
-          const bindings = readTelegramBindings(this.config.dataDir, projectId, sourceId);
-          const key = telegramBindingKey(target.chatId, topicId);
-          if ((!queued || publication.bound) && bindings.get(key)?.sessionId === sessionId) {
-            bindings.delete(key);
-            writeTelegramBindings(this.config.dataDir, projectId, sourceId, bindings.values());
-          }
-          if (
-            (!queued || publication.written) &&
-            readTelegramReplyTarget(this.config.dataDir, sessionId)?.messageThreadId === topicId
-          )
-            deleteTelegramReplyTarget(this.config.dataDir, sessionId);
-        } catch (cleanupError) {
-          this.logTelegramNoticeFailure(sessionId, "unpublished topic metadata", cleanupError);
+      try {
+        const bindings = readTelegramBindings(this.config.dataDir, projectId, sourceId);
+        const key = telegramBindingKey(target.chatId, topicId);
+        if (bindings.get(key)?.sessionId === sessionId) {
+          bindings.delete(key);
+          writeTelegramBindings(this.config.dataDir, projectId, sourceId, bindings.values());
         }
-        try {
-          if (
-            !this.telegramTopicHasOtherOwner(session, target) &&
-            (!queued ||
-              publication.written ||
-              readTelegramReplyTarget(this.config.dataDir, sessionId)?.messageThreadId !== topicId)
-          )
-            await deleteTelegramTopic(creationSource, target.chatId, topicId);
-        } catch (cleanupError) {
-          this.logTelegramNoticeFailure(sessionId, "unpublished topic deletion", cleanupError);
-        }
+        if (readTelegramReplyTarget(this.config.dataDir, sessionId)?.messageThreadId === topicId)
+          deleteTelegramReplyTarget(this.config.dataDir, sessionId);
+      } catch (cleanupError) {
+        this.logTelegramNoticeFailure(sessionId, "unpublished topic metadata", cleanupError);
+      }
+      try {
+        if (!this.telegramTopicHasOtherOwner(session, target))
+          await deleteTelegramTopic(creationSource, target.chatId, topicId);
+      } catch (cleanupError) {
+        this.logTelegramNoticeFailure(sessionId, "unpublished topic deletion", cleanupError);
       }
       throw error;
     }
@@ -21152,10 +20669,12 @@ export class SessionService {
   }
 
   private prepareSessionObservation(session: SessionRecord): PreparedSessionObservation {
+    // An unlaunched placeholder carries no Codex evidence to fence.
+    const unlaunched = session.status === "spawning" && !session.agentLaunchId;
     return {
       session: session.agent === "codex" ? structuredClone(session) : session,
       revision: this.lifecycle.snapshot(session.id).revision,
-      ...(session.agent === "codex" && !isTerminalSessionStatus(session.status)
+      ...(session.agent === "codex" && !isTerminalSessionStatus(session.status) && !unlaunched
         ? {
             codex: {
               restoreLaunchId: session.codexRestoreLaunchId,
@@ -24696,7 +24215,6 @@ export class SessionService {
       SessionRecord,
       "id" | "agentSessionId" | "agentLaunchId" | "codexRestoreLaunchId" | "codexRestoreStartedAt"
     >,
-    proofContext?: CodexLaunchProofContext,
   ): Promise<{
     state: SessionState;
     source: StateSource;
@@ -24709,7 +24227,6 @@ export class SessionService {
     model?: string;
     tokenUsage?: ProviderTokenUsageSample;
     tokenUsages?: ProviderTokenUsageSample[];
-    launchProof?: CodexLaunchProof;
   }> {
     const hookState = readAgentHookState(this.config.dataDir, session.id);
     const rolloutReader = this.codexRolloutReaders.get(session.id) ?? { files: new Map() };
@@ -24718,7 +24235,6 @@ export class SessionService {
       this.codexSessionsDir(session.id),
       rolloutReader,
       session.agentSessionId,
-      ...(proofContext ? ([proofContext] as const) : ([] as const)),
     );
     const rolloutState = rolloutRead.rollout;
     let state: SessionState = hookState?.state ?? "waiting";
@@ -24789,7 +24305,6 @@ export class SessionService {
         : {}),
       activityMs,
       ...(rolloutRead.threadId ? { threadId: rolloutRead.threadId } : {}),
-      ...(rolloutRead.launchProof ? { launchProof: rolloutRead.launchProof } : {}),
       ...(rolloutRead.model ? { model: rolloutRead.model } : {}),
       ...(rolloutRead.tokenUsage ? { tokenUsage: rolloutRead.tokenUsage } : {}),
       ...(rolloutRead.tokenUsages ? { tokenUsages: rolloutRead.tokenUsages } : {}),
@@ -26890,7 +26405,6 @@ export class SessionService {
               nativeId: session.agentSessionId,
               launchId: session.agentLaunchId,
               startedAt: codexLaunchStartedAt(session),
-              kind: "mcp",
               expiresAt: Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
             });
             classifiedDetail = "State: needs_input (codex MCP permission dialog)";

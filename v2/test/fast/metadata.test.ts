@@ -1415,7 +1415,6 @@ describe("durable spawn metadata", () => {
           reasoningVariantNames: ["high"],
         },
         submission: { state: "pending" },
-        telegramOrigin: { projectId: "api", sourceId: "tg", chatId: -123, messageThreadId: 7 },
       },
     };
   }

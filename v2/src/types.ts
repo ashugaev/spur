@@ -1648,7 +1648,6 @@ export interface DurableSpawnIntent {
     ackBaseline?: SubmitAckBaseline;
   };
   pane?: { pid: number; starttime: number };
-  telegramOrigin?: TelegramSpawnOrigin;
 }
 
 /**
