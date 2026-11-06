@@ -258,8 +258,6 @@ export async function collectJsonlFiles(
   const files: string[] = [];
   for (const entry of entries) {
     const filePath = join(dir, entry);
-    if (requireComplete && (await lstat(filePath)).isSymbolicLink())
-      throw new Error("Escaped rollout directory entry");
     if (entry.endsWith(".jsonl")) {
       files.push(filePath);
       continue;
@@ -316,7 +314,6 @@ async function* readRolloutLines(
   range?: { handle: FileHandle; end: number },
 ): AsyncGenerator<string> {
   if (range) {
-    const decoder = new TextDecoder("utf-8", { fatal: true });
     let position = start;
     let pending: Buffer = Buffer.alloc(0);
     while (position < range.end) {
@@ -331,7 +328,7 @@ async function* readRolloutLines(
         newline >= 0;
         newline = combined.indexOf(10, offset)
       ) {
-        yield decoder.decode(combined.subarray(offset, newline));
+        yield combined.subarray(offset, newline).toString("utf8");
         offset = newline + 1;
       }
       pending = combined.subarray(offset);
