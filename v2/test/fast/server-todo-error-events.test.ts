@@ -244,11 +244,11 @@ describe("todo error branches log http.request.failed", () => {
     const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
     runningServers.push(server);
     const response = await fetch(
-      `http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions/unsubscribe`,
+      `http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions/mute`,
       {
         method: "POST",
         headers: { "content-type": "application/json", "x-spur-origin": "ui" },
-        body: JSON.stringify({ scope: "event", handle: "h-1" }),
+        body: JSON.stringify({ handle: "h-1", mode: "until_change" }),
       },
     );
     expect(response.status).toBe(404);
@@ -263,7 +263,7 @@ describe("todo error branches log http.request.failed", () => {
           event: "http.request.failed",
           level: "warn",
           method: "POST",
-          path: "/sessions/demo-1/auto-ping-suppressions/unsubscribe",
+          path: "/sessions/demo-1/auto-ping-suppressions/mute",
           message: "Auto-ping target session not found",
         }),
       ]),

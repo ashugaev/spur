@@ -25,7 +25,7 @@ INTERFACES
   Spur ToDo: ledger starts empty, no code path seeds an item; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses an agent's own completion, self-destruct, and handoff — `todo_ledger_empty`/`todo_open_work` (409); a human `complete`/`handoff` from the CLI or UI is never blocked. Contract: `docs/commands.md#todo`.
   Telegram: bot DM for commands/spawn; agent communication in assigned forum topics; completion deletes owned topics. Source identity: `docs/commands.md#source`; attachments/binding: `docs/configuration.md#telegram-binding`; sends: `docs/commands.md#source-reply`.
   Native Telegram calls to sandbox Shepherd: docs/telegram-calls.md.
-  Stop unwanted auto-pings with `spur auto-ping unsubscribe`. A thread that keeps coming back takes `--thread`; `--event` binds to one emitted occurrence only. Scopes and resume: `docs/commands.md#auto-ping`; API: `docs/daemon-api.md`.
+  Mute unwanted auto-pings with `spur auto-ping mute <handle>`, handle from the ping footer. `--for <dur>` and `--forever` need `--reason`. Modes and resume: `docs/commands.md#auto-ping`; API: `docs/daemon-api.md`.
 
 SAFETY
 
@@ -49,7 +49,7 @@ DOCS
   Any path under `docs/` resolves as https://raw.githubusercontent.com/ashugaev/spur/main/<path>
   Commands, session tools and variables: docs/commands.md
   Cursor send correlation and retained acknowledgement baselines: docs/commands.md, docs/daemon-api.md.
-  Reviewer publication evidence and trusted legacy receipt recovery: docs/commands.md
+  Reviewer status feedback, publication evidence and trusted legacy receipt recovery: docs/commands.md
   Routes, bounded conversation pages, pre-flight batches, lifecycle receipts, restore cancellation: docs/daemon-api.md
   Config, admission, trigger-spawn retry, reviewer App/consent, pane-child fallback: docs/configuration.md; events: docs/configuration.md#events
   GitHub PR feedback ownership, quotes and post marker: docs/configuration.md#field-reference

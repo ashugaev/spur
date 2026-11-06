@@ -110,6 +110,7 @@ import {
   type DisconnectProjectConfigRequest,
   type SessionLifecycleSnapshot,
   type KillSessionRequest,
+  type AutoPingMuteMode,
   type OpenPrAction,
   type PreflightRequest,
   type HandoffSessionRequest,
@@ -872,7 +873,17 @@ export async function startServer(
   if (ghPathState.status === "unavailable") {
     logger.warn?.(`${ghPathState.message}; GitHub automation disabled until gh is available`);
   }
-  const autoPing = new AutoPingService(service.config.dataDir);
+  const autoPing = new AutoPingService(service.config.dataDir, {
+    log: (event, sessionId, details) => {
+      logSpurEvent(service.config.dataDir, {
+        event,
+        level: "info",
+        ...(sessionId !== undefined ? { sessionId } : {}),
+        message: event,
+        details,
+      });
+    },
+  });
   let ready = false;
   const switchStatePath = deploySwitchStatePath(service.config.dataDir);
   const switchLedgerPath = updateLedgerPath(service.config.dataDir);
@@ -1932,15 +1943,18 @@ export async function startServer(
           targetSessionId,
           lookup: (sessionId) => service.get(sessionId),
         });
-        sendJson(response, 200, { records: autoPing.list(targetSessionId) });
+        sendJson(response, 200, {
+          records: autoPing.list(targetSessionId),
+          ...(url.searchParams.get("all") === "1"
+            ? { history: autoPing.history(targetSessionId) }
+            : {}),
+        });
         return;
       }
 
-      const autoPingUnsubscribeMatch = path.match(
-        /^\/sessions\/([^/]+)\/auto-ping-suppressions\/unsubscribe$/,
-      );
-      if (method === "POST" && autoPingUnsubscribeMatch?.[1]) {
-        const targetSessionId = decodeAutoPingPathSegment(autoPingUnsubscribeMatch[1]);
+      const autoPingMuteMatch = path.match(/^\/sessions\/([^/]+)\/auto-ping-suppressions\/mute$/);
+      if (method === "POST" && autoPingMuteMatch?.[1]) {
+        const targetSessionId = decodeAutoPingPathSegment(autoPingMuteMatch[1]);
         await authorizeAutoPingTarget({
           origin,
           callerHeader: request.headers["x-spur-caller-session"],
@@ -1952,23 +1966,30 @@ export async function startServer(
         });
         if (
           !isRecord(body) ||
-          (body.scope !== "event" && body.scope !== "thread" && body.scope !== "subscription") ||
-          typeof body.handle !== "string"
+          typeof body.handle !== "string" ||
+          typeof body.mode !== "string" ||
+          (body.durationMs !== undefined && typeof body.durationMs !== "number") ||
+          (body.reason !== undefined && typeof body.reason !== "string")
         ) {
-          throw new AutoPingError("invalid_request", 400, "Auto-ping unsubscribe body is invalid");
+          throw new AutoPingError("invalid_request", 400, "Auto-ping mute body is invalid");
         }
         sendJson(
           response,
           200,
-          await autoPing.unsubscribe(targetSessionId, body.scope, body.handle),
+          await autoPing.mute(targetSessionId, {
+            handle: body.handle,
+            mode: body.mode as AutoPingMuteMode,
+            ...(body.durationMs !== undefined ? { durationMs: body.durationMs } : {}),
+            ...(body.reason !== undefined ? { reason: body.reason } : {}),
+          }),
         );
         return;
       }
 
       const autoPingResumeMatch = path.match(
-        /^\/sessions\/([^/]+)\/auto-ping-suppressions\/([^/]+)\/resume$/,
+        /^\/sessions\/([^/]+)\/auto-ping-suppressions\/resume$/,
       );
-      if (method === "POST" && autoPingResumeMatch?.[1] && autoPingResumeMatch[2]) {
+      if (method === "POST" && autoPingResumeMatch?.[1]) {
         const targetSessionId = decodeAutoPingPathSegment(autoPingResumeMatch[1]);
         await authorizeAutoPingTarget({
           origin,
@@ -1976,14 +1997,24 @@ export async function startServer(
           targetSessionId,
           lookup: (sessionId) => service.get(sessionId),
         });
-        const suppressionId = decodeAutoPingPathSegment(autoPingResumeMatch[2]);
         const body = await readJsonBody<unknown>(request).catch(() => {
           throw new AutoPingError("invalid_request", 400, "Auto-ping body must be valid JSON");
         });
-        if (!isRecord(body) || Object.keys(body).length !== 0) {
-          throw new AutoPingError("invalid_request", 400, "Auto-ping resume body must be empty");
+        if (
+          !isRecord(body) ||
+          (body.handle !== undefined && typeof body.handle !== "string") ||
+          (body.suppressionId !== undefined && typeof body.suppressionId !== "string")
+        ) {
+          throw new AutoPingError("invalid_request", 400, "Auto-ping resume body is invalid");
         }
-        sendJson(response, 200, await autoPing.resume(targetSessionId, suppressionId));
+        sendJson(
+          response,
+          200,
+          await autoPing.resume(targetSessionId, {
+            ...(body.handle !== undefined ? { handle: body.handle } : {}),
+            ...(body.suppressionId !== undefined ? { suppressionId: body.suppressionId } : {}),
+          }),
+        );
         return;
       }
 

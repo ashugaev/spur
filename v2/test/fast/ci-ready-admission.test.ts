@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { Script, constants } from "node:vm";
 import { expect, test, vi } from "vitest";
 import { parse } from "yaml";
+import { plan, capability } from "./review-feedback.fixture.js";
 import { manifestDigest, baselineDigest, parseAssessment } from "../../src/review-interface.js";
 import {
   consentBody,
@@ -294,7 +295,7 @@ const mutations: [string, (value: ReturnType<typeof fixture>) => void][] = [
       f.comments.push({
         ...row,
         id: 999,
-        body: stateBody({ ...readStateBody(row.body), status: "PENDING" }),
+        body: stateBody({ ...readStateBody(row.body), status: "PENDING", feedback: plan }),
       });
     },
   ],
@@ -305,7 +306,7 @@ const mutations: [string, (value: ReturnType<typeof fixture>) => void][] = [
       f.comments.push({
         ...row,
         id: 999,
-        body: stateBody({ ...readStateBody(row.body), status: "BLOCKED" }),
+        body: stateBody({ ...readStateBody(row.body), status: "BLOCKED", feedback: capability }),
       });
     },
   ],

@@ -406,6 +406,7 @@ const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDi
 const captureCodexRolloutBaselineMock: Mock = vi.fn();
 const findLatestCodexSessionFileMock: Mock = vi.fn();
 const readCodexRolloutStateMock: Mock = vi.fn();
+const codexRateLimitPermissionMock: Mock = vi.fn();
 const scanCodexRolloutForMessageMock: Mock = vi.fn();
 const ghMock: Mock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
@@ -550,9 +551,9 @@ vi.mock("node:crypto", async (importOriginal) => {
   };
 });
 
-// Partial mock: unlisted exports (DEFERRED_CONTROLS_ACK_WINDOW_MS and every
-// other constant) stay the real values from agents/index.ts, so a test
-// asserting one checks the source constant, not a test literal.
+// Partial mock: unlisted exports (every constant) stay the real values from
+// agents/index.ts, so a test asserting one checks the source constant, not a
+// test literal.
 vi.mock("../../src/agents/index.js", async (importOriginal) => ({
   ...(await importOriginal<typeof agentsIndexModule>()),
   buildAgentLaunchPlan: buildAgentLaunchPlanMock,
@@ -746,6 +747,13 @@ vi.mock("../../src/agents/codex.js", async (importOriginal) => ({
   readCodexConversationTail: readCodexConversationTailMock,
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
 }));
+vi.mock("../../src/agents/codex-rate-limits.js", () => ({
+  CodexRateLimitPoller: class {
+    permission = codexRateLimitPermissionMock;
+    prune = vi.fn();
+    dispose = vi.fn();
+  },
+}));
 
 vi.mock("../../src/agents/models.js", () => ({
   resolveAgentReasoningEffort: resolveAgentReasoningEffortMock,
@@ -901,6 +909,11 @@ vi.mock("../../src/session-slots.js", async (importOriginal) => ({
 vi.mock("../../src/session-artifacts.js", () => ({
   ensureSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
     const dir = artifactDirForSession(sessionId);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }),
+  ensureSessionWorkDir: vi.fn((_dataDir: string, sessionId: string) => {
+    const dir = join(artifactDirForSession(sessionId), ".spur-work");
     mkdirSync(dir, { recursive: true });
     return dir;
   }),
@@ -1750,6 +1763,7 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
   findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
   readCodexRolloutStateMock.mockReset().mockResolvedValue({ rollout: null, rateLimit: null });
+  codexRateLimitPermissionMock.mockReset().mockReturnValue(null);
   // Default: a well-formed batched-lookup response that says "no PR for this
   // branch". An unparseable answer is no longer read as "no PR" — it is a
   // failed lookup, which blocks teardown on purpose.
@@ -2092,6 +2106,7 @@ export {
   sendDesktopNotificationMock,
   captureCodexRolloutBaselineMock,
   readCodexRolloutStateMock,
+  codexRateLimitPermissionMock,
   scanCodexRolloutForMessageMock,
   ghMock,
   TEST_ARTIFACTS_ROOT,
