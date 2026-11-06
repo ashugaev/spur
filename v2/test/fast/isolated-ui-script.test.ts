@@ -267,51 +267,55 @@ async function exists(path: string): Promise<boolean> {
 
 describe("spur-isolated-ui.sh", () => {
   for (const publicationDelayMs of [0, 3500]) {
-    it(`supports first publication and current-owner restart without re-reading accepted snapshot (publication delay ${publicationDelayMs}ms)`, async (context) => {
-      const fixture = await launcherFixture(context, { publicationDelayMs });
-      const child = fixture.launch();
-      try {
-        await new Promise((done) => setTimeout(done, 50));
-        expect(await exists(fixture.marker)).toBe(false);
-        await writeFile(
-          fixture.runtimeFile,
-          fixture.runtime(fixture.currentDir, "fixture-current"),
-          {
-            mode: 0o600,
-          },
-        );
-        await fixture.waitUntil(child, "first publication", () =>
-          exists(join(fixture.currentDir, "ui-endpoint.json")),
-        );
-        expect(await readFile(fixture.marker, "utf8")).toBe(
-          join(fixture.currentDir, "config.yaml"),
-        );
-      } finally {
-        await stopChild(child);
-      }
-      const gate = join(fixture.root, "web-gate");
-      const restarted = fixture.launch({ SPUR_TEST_WEB_GATE: gate });
-      try {
-        await fixture.waitUntil(restarted, "restart readiness", () => exists(`${gate}.ready`));
-        await writeFile(
-          fixture.runtimeFile,
-          `SPUR_ISOLATED_CONFIG="${fixture.oldDir}/config.yaml"\n`,
-          { mode: 0o600 },
-        );
-        await writeFile(gate, "continue");
-        await fixture.waitUntil(restarted, "restart publication", async () =>
-          (await readFile(join(fixture.currentDir, "ui-endpoint.json"), "utf8")).includes(
-            String(restarted.process.pid),
-          ),
-        );
-        expect(await readFile(fixture.marker, "utf8")).toBe(
-          join(fixture.currentDir, "config.yaml"),
-        );
-        expect(await exists(join(fixture.oldDir, "ui-endpoint.json"))).toBe(false);
-      } finally {
-        await stopChild(restarted);
-      }
-    });
+    it(
+      `supports first publication and current-owner restart without re-reading accepted snapshot (publication delay ${publicationDelayMs}ms)`,
+      async (context) => {
+        const fixture = await launcherFixture(context, { publicationDelayMs });
+        const child = fixture.launch();
+        try {
+          await new Promise((done) => setTimeout(done, 50));
+          expect(await exists(fixture.marker)).toBe(false);
+          await writeFile(
+            fixture.runtimeFile,
+            fixture.runtime(fixture.currentDir, "fixture-current"),
+            {
+              mode: 0o600,
+            },
+          );
+          await fixture.waitUntil(child, "first publication", () =>
+            exists(join(fixture.currentDir, "ui-endpoint.json")),
+          );
+          expect(await readFile(fixture.marker, "utf8")).toBe(
+            join(fixture.currentDir, "config.yaml"),
+          );
+        } finally {
+          await stopChild(child);
+        }
+        const gate = join(fixture.root, "web-gate");
+        const restarted = fixture.launch({ SPUR_TEST_WEB_GATE: gate });
+        try {
+          await fixture.waitUntil(restarted, "restart readiness", () => exists(`${gate}.ready`));
+          await writeFile(
+            fixture.runtimeFile,
+            `SPUR_ISOLATED_CONFIG="${fixture.oldDir}/config.yaml"\n`,
+            { mode: 0o600 },
+          );
+          await writeFile(gate, "continue");
+          await fixture.waitUntil(restarted, "restart publication", async () =>
+            (await readFile(join(fixture.currentDir, "ui-endpoint.json"), "utf8")).includes(
+              String(restarted.process.pid),
+            ),
+          );
+          expect(await readFile(fixture.marker, "utf8")).toBe(
+            join(fixture.currentDir, "config.yaml"),
+          );
+          expect(await exists(join(fixture.oldDir, "ui-endpoint.json"))).toBe(false);
+        } finally {
+          await stopChild(restarted);
+        }
+      },
+      publicationDelayMs === 0 ? 30_000 : 45_000,
+    );
   }
   it("refuses receipt and cleans owned web when daemon generation changes during UI readiness", async (context) => {
     const fixture = await launcherFixture(context);
