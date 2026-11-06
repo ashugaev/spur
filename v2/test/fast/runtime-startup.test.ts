@@ -23,10 +23,17 @@ class FakeChild extends EventEmitter {
   stderr = new PassThrough();
   kill = vi.fn<(signal: NodeJS.Signals) => boolean>(() => true);
 
-  exit(code: number | null, signal: NodeJS.Signals | null = null): void {
+  exit(code: number | null, signal: NodeJS.Signals | null = null, close = true): void {
     this.exitCode = code;
     this.signalCode = signal;
     this.emit("exit", code, signal);
+    if (close) this.close();
+  }
+
+  close(): void {
+    this.stdout.end();
+    this.stderr.end();
+    this.emit("close", this.exitCode, this.signalCode);
   }
 }
 
@@ -144,10 +151,117 @@ describe("runtime daemon startup boundary", () => {
     expect(error.message).toContain('"lastHttp":"no response"');
   });
 
+  it.each(["one chunk", "split chunks"])(
+    "redacts secrets crossing the tail cutoff in %s",
+    async (mode) => {
+      const secret = "cutoff-private-prefix-private-suffix";
+      context.env.CI_STARTUP_TEST_TOKEN = secret;
+      const failure = failureOf(context.startDaemon(`${context.rootDir}/test.yaml`));
+      const padding = "x".repeat(4096 - "private-suffix".length);
+      for (const stream of [child.stdout, child.stderr]) {
+        if (mode === "one chunk") stream.write(`discard${secret}${padding}`);
+        else {
+          stream.write(`discard${secret.slice(0, 25)}`);
+          stream.write(`${secret.slice(25)}${padding}`);
+        }
+      }
+      child.exit(2);
+      const error = await failure;
+      expect(error.message).not.toContain(secret);
+      expect(error.message).not.toContain("private-suffix");
+      expect(error.message).not.toContain("cutoff-private");
+      expect(error.message.length).toBeLessThan(9000);
+    },
+  );
+
+  it("masks overlapping fixture-path and credential matches without exposing either suffix", async () => {
+    context.env.CI_STARTUP_TEST_TOKEN = `${context.rootDir}/overlapping-private-suffix`;
+    const failure = failureOf(context.startDaemon(`${context.rootDir}/test.yaml`));
+    child.stderr.write(`startup ${context.env.CI_STARTUP_TEST_TOKEN}`);
+    child.exit(2);
+    const error = await failure;
+    expect(error.message).not.toContain(context.rootDir);
+    expect(error.message).not.toContain("overlapping-private-suffix");
+  });
+
+  it("redacts a credential split inside a UTF-8 stream character", async () => {
+    const secret = "private-🔐-credential";
+    context.env.CI_STARTUP_TEST_TOKEN = secret;
+    const failure = failureOf(context.startDaemon(`${context.rootDir}/test.yaml`));
+    const bytes = Buffer.from(secret);
+    const split = bytes.indexOf(Buffer.from("🔐")) + 2;
+    child.stderr.write(bytes.subarray(0, split));
+    child.stderr.write(bytes.subarray(split));
+    child.exit(2);
+    const error = await failure;
+    expect(error.message).not.toContain("private-");
+    expect(error.message).not.toContain("-credential");
+    expect(error.message).not.toContain("�");
+  });
+
+  it("redacts an unfinished credential split across chunks longer than the retained tail", async () => {
+    const middle = "s".repeat(6000);
+    context.env.CI_STARTUP_TEST_TOKEN = `private-start-${middle}-private-end`;
+    const failure = failureOf(context.startDaemon(`${context.rootDir}/test.yaml`));
+    child.stderr.write(`context private-start-${middle.slice(0, 3000)}`);
+    child.stderr.write(middle.slice(3000));
+    child.exit(2);
+    const error = await failure;
+    expect(error.message).not.toContain("s".repeat(20));
+    expect(error.message).toContain("[redacted]");
+    expect(error.message.length).toBeLessThan(9000);
+  });
+
+  it("redacts a credential prefix when failure interrupts a stream chunk boundary", async () => {
+    context.env.CI_STARTUP_TEST_TOKEN = "unfinished-private-credential";
+    const failure = failureOf(context.startDaemon(`${context.rootDir}/test.yaml`));
+    child.stderr.write("startup unfinished-private-");
+    child.exit(2);
+    expect((await failure).message).not.toContain("unfinished-private-");
+  });
+
+  it("retains stderr arriving after exit and waits for pipe closure before rejecting", async () => {
+    let settled = false;
+    const failure = failureOf(context.startDaemon(`${context.rootDir}/test.yaml`)).then((error) => {
+      settled = true;
+      return error;
+    });
+    child.exit(2, null, false);
+    setTimeout(() => child.stderr.write("late startup error\n"), 100);
+    setTimeout(() => child.close(), 200);
+    await vi.advanceTimersByTimeAsync(199);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await failure;
+    expect(error.message).toContain("late startup error");
+    expect(error.message).toContain('"exitCode":2');
+    expect(error.message).toContain('"outputClosed":true');
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("bounds post-exit drainage when a pipe stays open", async () => {
+    let settled = false;
+    const failure = failureOf(context.startDaemon(`${context.rootDir}/test.yaml`)).then((error) => {
+      settled = true;
+      return error;
+    });
+    child.exit(2, null, false);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await failure;
+    expect(error.message).toContain('"exitCode":2');
+    expect(error.message).toContain('"outputClosed":false');
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("retains spawn failure without signaling a child that never acquired a PID", async () => {
     const failure = failureOf(context.startDaemon(`${context.rootDir}/test.yaml`));
     child.pid = undefined;
     child.emit("error", new Error(`spawn ENOENT ${context.rootDir}/test.yaml`));
+    child.close();
     const error = await failure;
     expect(error.message).toContain("spawn ENOENT");
     expect(error.message).toContain('"spawnError":');
@@ -240,12 +354,12 @@ describe("runtime daemon startup boundary", () => {
       });
       const started = Date.now();
       const failure = failureOf(context.startDaemon(`${context.rootDir}/test.yaml`));
-      await vi.advanceTimersByTimeAsync(22_000);
+      await vi.advanceTimersByTimeAsync(22_250);
       const error = await failure;
       expect(error.message).toContain("20000ms");
       expect(error.message).toContain("UNRESOLVED owned child has not exited");
       expect(error.message).toContain(mode === "denied" ? "EPERM" : "was not delivered");
-      expect(Date.now() - started).toBe(22_000);
+      expect(Date.now() - started).toBe(22_250);
       expect(child.kill.mock.calls).toEqual([["SIGTERM"], ["SIGKILL"]]);
       expect(vi.getTimerCount()).toBe(0);
     },

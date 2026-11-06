@@ -1342,11 +1342,19 @@ ${content}`,
     const tailLimit = 4096;
     let stdout = "";
     let stderr = "";
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: Buffer | string) => {
-      stdout = (stdout + chunk.toString()).slice(-tailLimit);
+      stdout += chunk.toString();
+      stdoutTruncated ||= stdout.length > tailLimit;
+      stdout = stdout.slice(-tailLimit);
     });
     child.stderr.on("data", (chunk: Buffer | string) => {
-      stderr = (stderr + chunk.toString()).slice(-tailLimit);
+      stderr += chunk.toString();
+      stderrTruncated ||= stderr.length > tailLimit;
+      stderr = stderr.slice(-tailLimit);
     });
 
     // Keep fixture paths and inherited credentials out of CI failure output.
@@ -1360,11 +1368,36 @@ ${content}`,
         .filter(([key]) => /token|secret|password|credential|api_?key|auth/i.test(key))
         .map(([, value]) => value),
     ].filter((value): value is string => Boolean(value));
-    const safe = (value: string): string => {
+    const safe = (value: string, truncated = false): string => {
+      // A capped tail may start inside a private value; an interrupted stream
+      // may end before that value is complete. Mask both fragments, not just
+      // complete matches. Retain no extra raw stream buffer across chunks.
+      truncated ||= value.length > tailLimit;
+      value = value.slice(-tailLimit);
+      const hidden = new Uint8Array(value.length);
       for (const privateValue of privateValues) {
-        value = value.replaceAll(privateValue, "[redacted]");
+        for (
+          let index = value.indexOf(privateValue);
+          index !== -1;
+          index = value.indexOf(privateValue, index + 1)
+        ) {
+          hidden.fill(1, index, index + privateValue.length);
+        }
+        if (truncated) {
+          let size = Math.min(privateValue.length, value.length);
+          while (size > 0 && !privateValue.includes(value.slice(0, size))) size--;
+          hidden.fill(1, 0, size);
+        }
+        let size = Math.min(privateValue.length - 1, value.length);
+        while (size > 0 && !privateValue.startsWith(value.slice(-size))) size--;
+        hidden.fill(1, value.length - size);
       }
-      return value
+      let redacted = "";
+      for (let index = 0; index < value.length; index++) {
+        if (!hidden[index]) redacted += value[index];
+        else if (index === 0 || !hidden[index - 1]) redacted += "[redacted]";
+      }
+      return redacted
         .replace(/https?:\/\/[^\s"'<>]+/g, "[url]")
         .replace(/\/(?:home|Users)\/[^\s"'<>:)]+/g, "[path]")
         .replace(
@@ -1393,6 +1426,13 @@ ${content}`,
     });
     let spawnError: Error | undefined;
     let exited = false;
+    let outputClosed = false;
+    const outputClose = new Promise<void>((resolveClose) => {
+      child.once("close", () => {
+        outputClosed = true;
+        resolveClose();
+      });
+    });
     const exit = new Promise<void>((resolveExit) => {
       child.once("exit", (code, signal) => {
         exited = true;
@@ -1459,16 +1499,14 @@ ${content}`,
       );
       return { child, stdout, info: info as RuntimeInfo };
     } catch (error) {
-      const diagnostics = JSON.stringify({
+      const diagnostics = {
         failure: errorText(error),
         spawnError: spawnError ? errorText(spawnError) : null,
         exitCode: child.exitCode,
         signal: child.signalCode,
         lastHttp,
         lastHttpError,
-        stdout: safe(stdout),
-        stderr: safe(stderr),
-      });
+      };
       const cleanupErrors: string[] = [];
       for (const signal of ["SIGTERM", "SIGKILL"] as const) {
         if (hasExited()) break;
@@ -1479,8 +1517,26 @@ ${content}`,
         }
         if (await waitForExit()) break;
       }
+      if (!outputClosed) {
+        let drainTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            outputClose,
+            new Promise<void>((resolveDrain) => {
+              drainTimer = setTimeout(resolveDrain, 250);
+            }),
+          ]);
+        } finally {
+          clearTimeout(drainTimer);
+        }
+      }
       throw new Error(
-        `Daemon startup failed: ${diagnostics}; cleanup: ${
+        `Daemon startup failed: ${JSON.stringify({
+          ...diagnostics,
+          stdout: safe(stdout, stdoutTruncated),
+          stderr: safe(stderr, stderrTruncated),
+          outputClosed,
+        })}; cleanup: ${
           hasExited() ? "owned child exited" : "UNRESOLVED owned child has not exited"
         }${cleanupErrors.length ? ` (${cleanupErrors.join("; ")})` : ""}`,
       );
