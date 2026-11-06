@@ -60153,7 +60153,7 @@ describe("SessionService", () => {
           entered = resolve;
         });
         const send = vi
-          .spyOn(service, "send")
+          .spyOn(service as unknown as { sendAndWait: typeof service.send }, "sendAndWait")
           .mockImplementationOnce(async () => {
             entered();
             await gate;
@@ -62010,6 +62010,143 @@ describe("SessionService", () => {
         ["paused", "interval"],
         ["paused", "daily"],
       ] as const;
+
+      const warmingWakeCases = [
+        ...ordinaryWakeCases,
+        ["parked", "scheduled"],
+        ["shed", "scheduled"],
+      ] as const;
+
+      function warmingWakeRecord(
+        status: (typeof warmingWakeCases)[number][0],
+        kind: (typeof warmingWakeCases)[number][1],
+      ): SessionRecord {
+        const due = "2026-03-18T10:00:00.000Z";
+        return stoppedRecord("api-1", {
+          status: status === "paused" ? "paused" : "stopped",
+          ...(status === "paused"
+            ? { stopReason: "manual_pause" }
+            : status === "parked"
+              ? { stopReason: "stale_timeout" }
+              : status === "shed"
+                ? { stopReason: "memory_shed" }
+                : {}),
+          ...(kind === "interval"
+            ? {
+                intervalWake: {
+                  nextDueAt: due,
+                  intervalMs: 60_000,
+                  message: "warming interval",
+                  stopCondition: "Done",
+                },
+              }
+            : kind === "daily"
+              ? {
+                  dailyWake: {
+                    dailyAt: ["10:00"],
+                    nextDueAt: due,
+                    message: "warming daily",
+                    stopCondition: "Done",
+                  },
+                }
+              : { scheduledWake: { dueAt: due, message: "warming scheduled" } }),
+        });
+      }
+
+      function holdWakeLaunch(service: unknown, panes: Set<string>, fail = false) {
+        let releaseLaunch!: () => void;
+        const barrier = new Promise<void>((resolve) => {
+          releaseLaunch = resolve;
+        });
+        let signalLaunch!: () => void;
+        const launchStarted = new Promise<void>((resolve) => {
+          signalLaunch = resolve;
+        });
+        createTmuxSessionMock.mockImplementation(
+          async ({ sessionName }: { sessionName: string }) => {
+            if (sessionName === "api-1") {
+              signalLaunch();
+              await barrier;
+              if (fail) throw new Error("held wake launch failed");
+            }
+            panes.add(sessionName);
+          },
+        );
+        return { launchStarted, releaseLaunch, pendingWake: tick(service) };
+      }
+
+      describe.each([2, 3])("wake warmup at cap %i", (cap) => {
+        it.each(warmingWakeCases)(
+          "counts the %s %s wake once while admitting the remaining slot",
+          async (status, kind) => {
+            capAt(cap);
+            const panes = trackRuntimes(cap === 3 ? ["api-2"] : []);
+            mockClaudeJsonlState("waiting");
+            reserveNextSessionIdMock.mockResolvedValue("api-3");
+            const sessions = createSessionStore(
+              warmingWakeRecord(status, kind),
+              ...(cap === 3 ? [runningSession({ id: "api-2" })] : []),
+            );
+            const service = await createDisposedSessionService();
+            const internals = service as unknown as {
+              admissionReservations: Map<symbol, string>;
+              countLiveSessions(): { total: number };
+            };
+            const held = holdWakeLaunch(service, panes);
+            try {
+              await held.launchStarted;
+              expect(internals.countLiveSessions().total).toBe(cap - 1);
+              const spawned = await service.spawn({ project: "api", prompt: "remaining slot" });
+              expect(spawned.id).toBe("api-3");
+              expect(internals.countLiveSessions().total).toBe(cap);
+              expect(internals.admissionReservations.size).toBe(0);
+              await expect(
+                service.spawn({ project: "api", prompt: "over cap" }),
+              ).rejects.toMatchObject({ statusCode: 429, reason: "cap" });
+              held.releaseLaunch();
+              await held.pendingWake;
+              expect(sessions.get("api-1")?.status).toBe("running");
+              expect(internals.countLiveSessions().total).toBe(cap);
+              expect(internals.admissionReservations.size).toBe(0);
+            } finally {
+              held.releaseLaunch();
+              await held.pendingWake;
+              service.dispose();
+            }
+          },
+        );
+      });
+
+      it.each(warmingWakeCases)(
+        "releases the %s %s wake slot after a held launch failure",
+        async (status, kind) => {
+          capAt(2);
+          const panes = trackRuntimes([]);
+          mockClaudeJsonlState("waiting");
+          reserveNextSessionIdMock.mockResolvedValue("api-3");
+          createSessionStore(warmingWakeRecord(status, kind));
+          const service = await createDisposedSessionService();
+          const internals = service as unknown as {
+            admissionReservations: Map<symbol, string>;
+            countLiveSessions(): { total: number };
+          };
+          const held = holdWakeLaunch(service, panes, true);
+          try {
+            await held.launchStarted;
+            expect(internals.countLiveSessions().total).toBe(1);
+            held.releaseLaunch();
+            await held.pendingWake;
+            expect(internals.countLiveSessions().total).toBe(0);
+            expect(internals.admissionReservations.size).toBe(0);
+            const spawned = await service.spawn({ project: "api", prompt: "after launch failure" });
+            expect(spawned.id).toBe("api-3");
+          } finally {
+            held.releaseLaunch();
+            await held.pendingWake;
+            service.dispose();
+          }
+        },
+      );
 
       it.each(ordinaryWakeCases)(
         "reserves an ordinary %s %s wake slot across the runtime probe and counts the live result",

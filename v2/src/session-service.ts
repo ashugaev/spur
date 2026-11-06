@@ -20223,6 +20223,9 @@ export class SessionService {
     // "working" the way a genuine post-restore warmup intentionally does.
     this.restoreWarmupUntil.set(session.id, Date.now() + RESTORE_WARMUP_MS);
     this.launchesInFlight.add(session.id);
+    // Transfer the reservation to the counted warmup without yielding.
+    if (options?.wakeClaim) this.releaseScheduledWakeAdmission(options.wakeClaim);
+    this.releaseAdmissionReservation(options?.wakeAdmissionReservation);
     let recovered: ReadySessionForSend;
     try {
       recovered = await this.relaunchSessionInPlace(session, project, {
@@ -20247,13 +20250,8 @@ export class SessionService {
       this.restoreWarmupUntil.delete(session.id);
       this.launchesInFlight.delete(session.id);
     }
-    try {
-      operation?.assertActive();
-      recovered.session = this.writeRecoverySession(recovered.session, options?.wakeClaim, options);
-    } finally {
-      if (options?.wakeClaim) this.releaseScheduledWakeAdmission(options.wakeClaim);
-      this.releaseAdmissionReservation(options?.wakeAdmissionReservation);
-    }
+    operation?.assertActive();
+    recovered.session = this.writeRecoverySession(recovered.session, options?.wakeClaim, options);
     // After the running record is on disk: a project sidecar can take tens of
     // seconds to come up, and the reaper's running|spawning filter must cover
     // that whole window without relying on the warmup cleared just above.

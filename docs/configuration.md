@@ -126,7 +126,7 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 
 ## Admission control
 
-Admission gates spawn and restore. Background interval/daily wakes gate stopped/paused, stale-parked and memory-shed relaunches; manual interval/daily dispatch gates only stale-parked and memory-shed relaunches. Policy: `v2/src/session-service.ts`; capacity: [`GET /headroom`](daemon-api.md); diagnostics: [`spur doctor`](commands.md#doctor).
+Cap limits concurrent live sessions at spawn, restore, and the wake of a stale-parked or memory-shed session (including one-shot wakes and relaunching sends). Ordinary stopped/paused interval/daily relaunches: background gated, manual ungated. Over cap: `429` naming stop candidates. Reporting route: [`GET /headroom`](daemon-api.md). CLI: [`spur doctor`](commands.md#doctor). Schema `v2/src/config.ts`, enforcement `v2/src/session-service.ts`.
 
 `stopReason: "runtime_lost"`: confirmed runtime loss becomes restorable `stopped`, retains error evidence, releases capacity; unknown probes retain capacity (`v2/src/session-service.ts`).
 
