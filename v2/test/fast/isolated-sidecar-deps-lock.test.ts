@@ -471,7 +471,7 @@ describe("AC3 owned daemon boundary", () => {
   }
 
   function syntheticDaemon() {
-    const settlement = deferred<void>();
+    const settlement = deferred<undefined>();
     const stdout = new PassThrough();
     const stdin = new PassThrough();
     const daemon = Object.assign(settlement.promise, { child: { stdout, stdin } });
@@ -497,7 +497,7 @@ describe("AC3 owned daemon boundary", () => {
     await waiting;
     expect(ready).toBe(true);
     expectDisposed(child);
-    child.resolve();
+    child.resolve(undefined);
   });
 
   it("fails missing readiness at20s and disposes resources", async () => {
@@ -511,7 +511,7 @@ describe("AC3 owned daemon boundary", () => {
     await vi.advanceTimersByTimeAsync(1);
     await failure;
     expectDisposed(child);
-    child.resolve();
+    child.resolve(undefined);
   });
 
   for (const outcome of ["exit", "reject"] as const) {
@@ -519,7 +519,7 @@ describe("AC3 owned daemon boundary", () => {
       vi.useFakeTimers();
       const child = syntheticDaemon();
       const failure = expect(waitForAc3Ready(child.daemon)).rejects.toThrow();
-      if (outcome === "exit") child.resolve();
+      if (outcome === "exit") child.resolve(undefined);
       else child.reject(new Error("synthetic private detail"));
       await failure;
       expectDisposed(child);
@@ -529,7 +529,7 @@ describe("AC3 owned daemon boundary", () => {
   it("keeps the daemon parked beyond25s until actual UI success and release settlement", async () => {
     vi.useFakeTimers();
     const child = syntheticDaemon();
-    const ui = deferred<void>();
+    const ui = deferred<undefined>();
     let complete = false;
     const running = runAc3(child.daemon, () => ui.promise).then(() => {
       complete = true;
@@ -538,11 +538,11 @@ describe("AC3 owned daemon boundary", () => {
     await vi.advanceTimersByTimeAsync(26_000);
     expect(complete).toBe(false);
     expect(child.stdin.writableEnded).toBe(false);
-    ui.resolve();
+    ui.resolve(undefined);
     await vi.advanceTimersByTimeAsync(0);
     expect(child.stdin.writableEnded).toBe(true);
     expect(complete).toBe(false);
-    child.resolve();
+    child.resolve(undefined);
     await running;
     expect(complete).toBe(true);
     expectDisposed(child);
@@ -565,7 +565,7 @@ describe("AC3 owned daemon boundary", () => {
       );
       child.stdout.write("daemon-ready\n");
       await vi.advanceTimersByTimeAsync(0);
-      if (mode === "primary") child.resolve();
+      if (mode === "primary") child.resolve(undefined);
       else child.reject(privateError);
       const message = await result;
       expect(message).not.toBe("success");
