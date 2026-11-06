@@ -26,7 +26,7 @@ function validateArguments(program: Command, argv: string[]): void {
     }
     const flag = token.split("=", 1)[0];
     const option = command.options.find((value) => value.long === flag || value.short === flag);
-    if (!option) command.error(`unknown argument '${token}'`);
+    if (!option) return command.error(`unknown argument '${token}'`);
     if (option.required && !token.includes("=")) index++;
   }
 }

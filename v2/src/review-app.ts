@@ -855,7 +855,12 @@ async function transitionReview(
           await checkSnapshot(previousRaw);
           await announce(false);
           await checkSnapshot(previousRaw);
-          return { ...prior, feedbackPublication: receipt.feedbackPublication };
+          return {
+            ...prior,
+            status: prior.status,
+            reason: prior.reason,
+            feedbackPublication: receipt.feedbackPublication,
+          };
         }
         ownsAttempt = true;
         await announce();

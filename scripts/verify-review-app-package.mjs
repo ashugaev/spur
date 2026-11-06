@@ -126,17 +126,25 @@ export async function preflightDependencies(root = repositoryRoot) {
       refuse(`owner package main/imports mismatch: ${name}`);
     if (name === "typescript" && (metadata.exports !== undefined || metadata.type !== undefined))
       refuse("TypeScript public metadata mismatch");
-    if (name === "tar" && (metadata.type !== "module" || !sameData(
-      object(metadata.exports, "missing tar exports")["."],
-      {
-        import: { types: "./dist/esm/index.d.ts", default: "./dist/esm/index.min.js" },
-        require: { types: "./dist/commonjs/index.d.ts", default: "./dist/commonjs/index.min.js" },
-      },
-    ))) refuse("tar public exports mismatch");
-    if (name === "yaml" && (metadata.type !== "commonjs" || !sameData(
-      object(metadata.exports, "missing yaml exports")["."],
-      { types: "./dist/index.d.ts", node: "./dist/index.js", default: "./browser/index.js" },
-    ))) refuse("yaml public exports mismatch");
+    if (
+      name === "tar" &&
+      (metadata.type !== "module" ||
+        !sameData(object(metadata.exports, "missing tar exports")["."], {
+          import: { types: "./dist/esm/index.d.ts", default: "./dist/esm/index.min.js" },
+          require: { types: "./dist/commonjs/index.d.ts", default: "./dist/commonjs/index.min.js" },
+        }))
+    )
+      refuse("tar public exports mismatch");
+    if (
+      name === "yaml" &&
+      (metadata.type !== "commonjs" ||
+        !sameData(object(metadata.exports, "missing yaml exports")["."], {
+          types: "./dist/index.d.ts",
+          node: "./dist/index.js",
+          default: "./browser/index.js",
+        }))
+    )
+      refuse("yaml public exports mismatch");
     let publicTarget;
     try {
       publicTarget = await realpath(require.resolve(name));
@@ -146,7 +154,10 @@ export async function preflightDependencies(root = repositoryRoot) {
     } catch {
       refuse(`public package resolution failed: ${name}`);
     }
-    if (!beneath(packageRoot, publicTarget) || relative(packageRoot, publicTarget) !== identity.entry)
+    if (
+      !beneath(packageRoot, publicTarget) ||
+      relative(packageRoot, publicTarget) !== identity.entry
+    )
       refuse(`unexpected public entry: ${name}`);
     packages[name] = {
       root: packageRoot,
@@ -176,7 +187,10 @@ export async function preflightDependencies(root = repositoryRoot) {
     (await realpath(resolve(root, "node_modules", modules.virtualStoreDir))) !== store
   )
     refuse("unsupported installed pnpm layout");
-  const importer = object(object(lock.importers, "missing lock importers").v2, "missing v2 importer");
+  const importer = object(
+    object(lock.importers, "missing lock importers").v2,
+    "missing v2 importer",
+  );
   const records = object(lock.packages, "missing locked package records");
   const snapshots = object(lock.snapshots, "missing locked snapshots");
   for (const [name, identity] of Object.entries(identities)) {
@@ -187,7 +201,10 @@ export async function preflightDependencies(root = repositoryRoot) {
     if (entry.specifier !== identity.specifier || entry.version !== identity.version)
       refuse(`stale direct importer: ${name}`);
     const key = `${name}@${identity.version}`;
-    const resolution = object(object(records[key], "missing locked package").resolution, "missing SRI");
+    const resolution = object(
+      object(records[key], "missing locked package").resolution,
+      "missing SRI",
+    );
     if (resolution.integrity !== identity.integrity) refuse(`locked integrity mismatch: ${name}`);
     object(snapshots[key], "missing dependency snapshot");
   }
@@ -225,29 +242,49 @@ const archiveLimits = {
   ratio: 1000,
 };
 const paxKeys = new Set([
-  "path", "size", "uid", "gid", "uname", "gname", "mtime", "atime", "ctime",
-  "charset", "comment", "SCHILY.dev", "SCHILY.ino", "SCHILY.nlink",
+  "path",
+  "size",
+  "uid",
+  "gid",
+  "uname",
+  "gname",
+  "mtime",
+  "atime",
+  "ctime",
+  "charset",
+  "comment",
+  "SCHILY.dev",
+  "SCHILY.ino",
+  "SCHILY.nlink",
 ]);
 
 function metadataRecord(text) {
-  if (typeof text !== "string" || text.includes("\uFFFD")) refuse("replacement character in metadata");
+  if (typeof text !== "string" || text.includes("\uFFFD"))
+    refuse("replacement character in metadata");
   const bytes = Buffer.from(text, "utf8");
   if (bytes.length > archiveLimits.metadata) refuse("metadata limit");
   const keys = new Set();
-  for (let offset = 0; offset < bytes.length;) {
+  for (let offset = 0; offset < bytes.length; ) {
     const space = bytes.indexOf(32, offset);
     if (space < 0) refuse("metadata length framing");
     const decimal = bytes.subarray(offset, space).toString("ascii");
     if (!/^[1-9][0-9]*$/.test(decimal)) refuse("metadata length framing");
     const length = Number(decimal);
     const end = offset + length;
-    if (!Number.isSafeInteger(length) || end > bytes.length || end <= space + 1 || bytes[end - 1] !== 10)
+    if (
+      !Number.isSafeInteger(length) ||
+      end > bytes.length ||
+      end <= space + 1 ||
+      bytes[end - 1] !== 10
+    )
       refuse("metadata length framing");
     const field = bytes.subarray(space + 1, end - 1).toString("utf8");
-    if (/[\u0000-\u001f\u007f\uFFFD]/u.test(field)) refuse("metadata control or replacement character");
+    if (/[\u0000-\u001f\u007f\uFFFD]/u.test(field))
+      refuse("metadata control or replacement character");
     const equal = field.indexOf("=");
     const key = field.slice(0, equal);
-    if (equal <= 0 || !paxKeys.has(key) || keys.has(key)) refuse("unsupported or duplicate metadata key");
+    if (equal <= 0 || !paxKeys.has(key) || keys.has(key))
+      refuse("unsupported or duplicate metadata key");
     keys.add(key);
     offset = end;
   }
@@ -256,16 +293,21 @@ function metadataRecord(text) {
 
 function memberName(path, directory) {
   if (
-    typeof path !== "string" || !path ||
+    typeof path !== "string" ||
+    !path ||
     /[\\\u0000-\u001f\u007f\uFFFD]/u.test(path) ||
-    /(?:^|\/)[a-zA-Z]:/.test(path) || path.startsWith("/")
-  ) refuse("unsafe member path");
+    /(?:^|\/)[a-zA-Z]:/.test(path) ||
+    path.startsWith("/")
+  )
+    refuse("unsafe member path");
   const name = directory && path.endsWith("/") ? path.slice(0, -1) : path;
   const parts = name.split("/");
   if (
-    parts[0] !== "package" || (!directory && parts.length < 2) ||
+    parts[0] !== "package" ||
+    (!directory && parts.length < 2) ||
     parts.some((part) => !part || part === "." || part === "..")
-  ) refuse("noncanonical package member");
+  )
+    refuse("noncanonical package member");
   return name;
 }
 
@@ -303,8 +345,14 @@ export async function readArchive(input, references = new Map()) {
   };
   const ended = new Promise((accept, reject) => {
     parser.once("end", accept);
-    parser.on("error", (error) => { failure ??= error; reject(error); });
-    parser.on("abort", (error) => { failure ??= error; reject(error); });
+    parser.on("error", (error) => {
+      failure ??= error;
+      reject(error);
+    });
+    parser.on("abort", (error) => {
+      failure ??= error;
+      reject(error);
+    });
   });
   // Errors can precede the final await while streaming; retain them without an unhandled rejection.
   void ended.catch(() => undefined);
@@ -322,7 +370,9 @@ export async function readArchive(input, references = new Map()) {
     try {
       if (++count > archiveLimits.entries || pendingMetadata) refuse("metadata count or chain");
       pendingMetadata = metadataRecord(text);
-    } catch (error) { fail(error); }
+    } catch (error) {
+      fail(error);
+    }
   });
   parser.on("eof", () => {
     if (pendingMetadata) fail("dangling metadata");
@@ -332,32 +382,51 @@ export async function readArchive(input, references = new Map()) {
     try {
       if (++count > archiveLimits.entries) refuse("entry limit");
       const directory = entry.type === "Directory";
-      if (!directory && entry.type !== "File" && entry.type !== "OldFile") refuse("unsupported member type");
-      if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.linkpath || (directory && entry.size !== 0))
+      if (!directory && entry.type !== "File" && entry.type !== "OldFile")
+        refuse("unsupported member type");
+      if (
+        !Number.isSafeInteger(entry.size) ||
+        entry.size < 0 ||
+        entry.linkpath ||
+        (directory && entry.size !== 0)
+      )
         refuse("invalid member size or link");
-      if (entry.globalExtended || (pendingMetadata && !entry.extended) || (!pendingMetadata && entry.extended))
+      if (
+        entry.globalExtended ||
+        (pendingMetadata && !entry.extended) ||
+        (!pendingMetadata && entry.extended)
+      )
         refuse("invalid effective metadata ownership");
       pendingMetadata = undefined;
       const name = memberName(entry.path, directory);
-      if (members.has(name) || (!directory && descendants.has(name))) refuse("duplicate or ancestor member");
+      if (members.has(name) || (!directory && descendants.has(name)))
+        refuse("duplicate or ancestor member");
       const parts = name.split("/");
       for (let index = 1; index < parts.length; index++) {
         const parent = parts.slice(0, index).join("/");
-        if (members.has(parent) && members.get(parent).type !== "Directory") refuse("file ancestor");
+        if (members.has(parent) && members.get(parent).type !== "Directory")
+          refuse("file ancestor");
         descendants.add(parent);
       }
       const member = { type: entry.type, size: entry.size };
       members.set(name, member);
       const bodyHash = createHash("sha256");
       entry.on("data", (chunk) => bodyHash.update(chunk));
-      entry.once("end", () => { member.sha256 = bodyHash.digest("hex"); });
+      entry.once("end", () => {
+        member.sha256 = bodyHash.digest("hex");
+      });
       const expected = references.get(name);
       if (expected) {
         if (
-          directory || !Number.isSafeInteger(entry.mode) || entry.mode < 0 ||
-          entry.mode > 0o7777 || (entry.mode & 0o7022) !== 0 || entry.size > expected.length ||
+          directory ||
+          !Number.isSafeInteger(entry.mode) ||
+          entry.mode < 0 ||
+          entry.mode > 0o7777 ||
+          (entry.mode & 0o7022) !== 0 ||
+          entry.size > expected.length ||
           (name !== "package/package.json" && entry.size !== expected.length)
-        ) refuse("unsafe selected member mode or length");
+        )
+          refuse("unsafe selected member mode or length");
         const chunks = [];
         let size = 0;
         entry.on("data", (chunk) => {
@@ -368,7 +437,10 @@ export async function readArchive(input, references = new Map()) {
         });
         entry.once("end", () => {
           const bytes = Buffer.concat(chunks);
-          if (bytes.length !== entry.size || (name !== "package/package.json" && !bytes.equals(expected)))
+          if (
+            bytes.length !== entry.size ||
+            (name !== "package/package.json" && !bytes.equals(expected))
+          )
             fail("selected bytes differ from reference");
           else captured.set(name, bytes);
         });
@@ -385,14 +457,16 @@ export async function readArchive(input, references = new Map()) {
   let decoded = 0;
   let remainder = Buffer.alloc(0);
   const hash = createHash("sha256");
-  const source = Readable.from((async function* () {
-    for await (const bytes of compressedInput(input)) {
-      compressed += bytes.length;
-      if (compressed > archiveLimits.compressed) refuse("compressed limit");
-      hash.update(bytes);
-      yield bytes;
-    }
-  })());
+  const source = Readable.from(
+    (async function* () {
+      for await (const bytes of compressedInput(input)) {
+        compressed += bytes.length;
+        if (compressed > archiveLimits.compressed) refuse("compressed limit");
+        hash.update(bytes);
+        yield bytes;
+      }
+    })(),
+  );
   const gzip = createGunzip();
   source.on("error", (error) => gzip.destroy(error));
   source.pipe(gzip);
@@ -404,14 +478,21 @@ export async function readArchive(input, references = new Map()) {
       while (remainder.length >= 512) {
         const block = remainder.subarray(0, 512);
         remainder = remainder.subarray(512);
-        if (decoded - remainder.length === 512 &&
-          ["1f8b", "425a68", "fd377a585a00", "28b52ffd"].some((magic) => block.subarray(0, magic.length / 2).toString("hex") === magic))
+        if (
+          decoded - remainder.length === 512 &&
+          ["1f8b", "425a68", "fd377a585a00", "28b52ffd"].some(
+            (magic) => block.subarray(0, magic.length / 2).toString("hex") === magic,
+          )
+        )
           refuse("nested compression");
         if (eof) {
           if (block.some((value) => value !== 0)) refuse("nonzero archive tail");
         } else {
           let drained;
-          const drain = new Promise((accept) => { drained = accept; parser.once("drain", drained); });
+          const drain = new Promise((accept) => {
+            drained = accept;
+            parser.once("drain", drained);
+          });
           if (!parser.write(block)) await Promise.race([drain, ended]);
           parser.removeListener("drain", drained);
           await nextTurn();
@@ -425,7 +506,8 @@ export async function readArchive(input, references = new Map()) {
     await ended;
     if (failure) throw failure;
     if (!eof || pendingMetadata) refuse("missing complete archive EOF");
-    for (const name of references.keys()) if (!captured.has(name)) refuse(`missing selected member: ${name}`);
+    for (const name of references.keys())
+      if (!captured.has(name)) refuse(`missing selected member: ${name}`);
     return { members, captured, archiveSHA256: hash.digest("hex"), compressed, decoded, count };
   } catch (error) {
     fail(error);
@@ -444,16 +526,29 @@ export function assertRequiredEntries(index, entries) {
   for (const entry of entries) {
     if (!entry || entry.startsWith("#")) continue;
     const member = index.members.get(`package/${entry}`);
-    if (!member || !["File", "OldFile"].includes(member.type)) refuse(`missing required member: package/${entry}`);
+    if (!member || !["File", "OldFile"].includes(member.type))
+      refuse(`missing required member: package/${entry}`);
   }
 }
 
 const utilityFiles = [
-  "review-app-cli.js", "review-app.js", "review-interface.js", "review-state.js", "github-app.js",
+  "review-app-cli.js",
+  "review-app.js",
+  "review-interface.js",
+  "review-state.js",
+  "github-app.js",
 ];
 const commanderFiles = [
-  "esm.mjs", "index.js", "lib/argument.js", "lib/command.js", "lib/error.js",
-  "lib/help.js", "lib/option.js", "lib/suggestSimilar.js", "package.json", "LICENSE",
+  "esm.mjs",
+  "index.js",
+  "lib/argument.js",
+  "lib/command.js",
+  "lib/error.js",
+  "lib/help.js",
+  "lib/option.js",
+  "lib/suggestSimilar.js",
+  "package.json",
+  "LICENSE",
 ];
 const commanderIntegrity =
   "sha512-/rFeCpNJQbhSZjGVwO9RFV3xPqbnERS8MmIQzCtD/zl6gpJuV/bMLuN92oG3F7d8oDEHHRrujSXNUr8fpjntKw==";
@@ -462,24 +557,37 @@ async function regularBytes(root, name) {
   const parts = name.split("/");
   for (let index = 1; index < parts.length; index++) {
     const stat = await lstat(join(root, ...parts.slice(0, index)));
-    if (!stat.isDirectory() || stat.isSymbolicLink()) refuse("symlink or nondirectory reference ancestor");
+    if (!stat.isDirectory() || stat.isSymbolicLink())
+      refuse("symlink or nondirectory reference ancestor");
   }
-  const file = await open(join(root, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const file = await open(
+    join(root, name),
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
   try {
     if (!(await file.stat()).isFile()) refuse("nonregular reference file");
     return await file.readFile();
-  } finally { await file.close(); }
+  } finally {
+    await file.close();
+  }
 }
 
 function jsonBytes(bytes, label) {
-  try { return object(JSON.parse(bytes.toString("utf8")), label); }
-  catch { refuse(label); }
+  try {
+    return object(JSON.parse(bytes.toString("utf8")), label);
+  } catch {
+    refuse(label);
+  }
 }
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
   if (value && typeof value === "object")
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, stable(value[key])]),
+    );
   return value;
 }
 
@@ -490,8 +598,11 @@ function sameData(left, right) {
 function commanderMetadata(bytes) {
   const metadata = jsonBytes(bytes, "invalid Commander metadata");
   if (
-    metadata.name !== "commander" || metadata.version !== "13.1.0" ||
-    metadata.main !== "./index.js" || metadata.type !== "commonjs" || metadata.imports !== undefined ||
+    metadata.name !== "commander" ||
+    metadata.version !== "13.1.0" ||
+    metadata.main !== "./index.js" ||
+    metadata.type !== "commonjs" ||
+    metadata.imports !== undefined ||
     !sameData(metadata.exports, {
       ".": {
         require: { types: "./typings/index.d.ts", default: "./index.js" },
@@ -501,9 +612,12 @@ function commanderMetadata(bytes) {
       "./esm.mjs": { types: "./typings/esm.d.mts", import: "./esm.mjs" },
     }) ||
     [metadata.dependencies, metadata.optionalDependencies, metadata.peerDependencies].some(
-      (value) => value !== undefined && Object.keys(object(value, "invalid Commander dependencies")).length !== 0,
+      (value) =>
+        value !== undefined &&
+        Object.keys(object(value, "invalid Commander dependencies")).length !== 0,
     )
-  ) refuse("Commander package resolution metadata mismatch");
+  )
+    refuse("Commander package resolution metadata mismatch");
   return metadata;
 }
 
@@ -531,25 +645,30 @@ export function assertCommanderIntegrity(bytes) {
 
 async function officialCommander() {
   const bytes = await new Promise((accept, reject) => {
-    const request = get("https://registry.npmjs.org/commander/-/commander-13.1.0.tgz", {
-      headers: { Accept: "application/octet-stream" },
-      signal: AbortSignal.timeout(30_000),
-    }, (response) => {
-      if (response.statusCode !== 200) {
-        response.destroy();
-        reject(new Error("review-app-package: official Commander acquisition failed"));
-        return;
-      }
-      const chunks = [];
-      let count = 0;
-      response.on("data", (chunk) => {
-        count += chunk.length;
-        if (count > 16 * 1024 ** 2) response.destroy(new Error("review-app-package: Commander download limit"));
-        else chunks.push(chunk);
-      });
-      response.once("end", () => accept(Buffer.concat(chunks)));
-      response.once("error", reject);
-    });
+    const request = get(
+      "https://registry.npmjs.org/commander/-/commander-13.1.0.tgz",
+      {
+        headers: { Accept: "application/octet-stream" },
+        signal: AbortSignal.timeout(30_000),
+      },
+      (response) => {
+        if (response.statusCode !== 200) {
+          response.destroy();
+          reject(new Error("review-app-package: official Commander acquisition failed"));
+          return;
+        }
+        const chunks = [];
+        let count = 0;
+        response.on("data", (chunk) => {
+          count += chunk.length;
+          if (count > 16 * 1024 ** 2)
+            response.destroy(new Error("review-app-package: Commander download limit"));
+          else chunks.push(chunk);
+        });
+        response.once("end", () => accept(Buffer.concat(chunks)));
+        response.once("error", reject);
+      },
+    );
     request.once("error", reject);
   });
   assertCommanderIntegrity(bytes);
@@ -562,7 +681,9 @@ export function verifyGraph(files, typescript) {
   const dependencyRoot = "node_modules/commander/";
   const allowed = new Set([
     ...utilityFiles.map((name) => `dist/${name}`),
-    ...commanderFiles.filter((name) => /\.(?:js|mjs)$/.test(name)).map((name) => dependencyRoot + name),
+    ...commanderFiles
+      .filter((name) => /\.(?:js|mjs)$/.test(name))
+      .map((name) => dependencyRoot + name),
   ]);
   const seen = new Set();
   const edges = [];
@@ -570,22 +691,34 @@ export function verifyGraph(files, typescript) {
     if (seen.has(name)) return;
     if (!allowed.has(name) || !files.has(name)) refuse("graph outside frozen closure");
     seen.add(name);
-    const syntax = typescript.createSourceFile(name, files.get(name).toString("utf8"), typescript.ScriptTarget.Latest, true, typescript.ScriptKind.JS);
+    const syntax = typescript.createSourceFile(
+      name,
+      files.get(name).toString("utf8"),
+      typescript.ScriptTarget.Latest,
+      true,
+      typescript.ScriptKind.JS,
+    );
     if (syntax.parseDiagnostics.length) refuse("JavaScript parse error");
     const commander = name.startsWith(dependencyRoot);
     const edge = (specifier, requireCall) => {
       if (isBuiltin(specifier)) {
-        if (["module", "node:module", "vm", "node:vm"].includes(specifier)) refuse("loader/eval builtin");
+        if (["module", "node:module", "vm", "node:vm"].includes(specifier))
+          refuse("loader/eval builtin");
         return;
       }
       let target;
       if (specifier === "commander" && !commander)
         target = dependencyRoot + (requireCall ? "index.js" : "esm.mjs");
       else if (specifier.startsWith("./") || specifier.startsWith("../")) {
-        target = relative("/", resolve("/", dirname(name), specifier)).split(sep).join("/");
+        target = relative("/", resolve("/", dirname(name), specifier))
+          .split(sep)
+          .join("/");
         if (!files.has(target) && requireCall && files.has(`${target}.js`)) target += ".js";
       } else refuse("external or aliased graph edge");
-      if (!allowed.has(target) || (!commander && target.startsWith("node_modules/") && !target.startsWith(dependencyRoot)))
+      if (
+        !allowed.has(target) ||
+        (!commander && target.startsWith("node_modules/") && !target.startsWith(dependencyRoot))
+      )
         refuse("graph outside frozen closure");
       edges.push({ from: name, specifier, target, requireCall });
       visitFile(target);
@@ -597,28 +730,45 @@ export function verifyGraph(files, typescript) {
           edge(node.moduleSpecifier.text, false);
         }
       }
-      if (typescript.isIdentifier(node) && ["eval", "Function", "createRequire", "createRequireFromPath"].includes(node.text))
+      if (
+        typescript.isIdentifier(node) &&
+        ["eval", "Function", "createRequire", "createRequireFromPath"].includes(node.text)
+      )
         refuse("eval or loader alias");
-      if (typescript.isElementAccessExpression(node) && typescript.isStringLiteral(node.argumentExpression) &&
-        ["require", "eval", "Function", "createRequire"].includes(node.argumentExpression.text))
+      if (
+        typescript.isElementAccessExpression(node) &&
+        typescript.isStringLiteral(node.argumentExpression) &&
+        ["require", "eval", "Function", "createRequire"].includes(node.argumentExpression.text)
+      )
         refuse("computed loader alias");
       if (typescript.isIdentifier(node) && node.text === "require") {
         const parent = node.parent;
         const call = typescript.isCallExpression(parent) && parent.expression === node;
-        const main = commander && typescript.isPropertyAccessExpression(parent) && parent.expression === node && parent.name.text === "main";
+        const main =
+          commander &&
+          typescript.isPropertyAccessExpression(parent) &&
+          parent.expression === node &&
+          parent.name.text === "main";
         if (!call && !main) refuse("require alias");
       }
       if (typescript.isCallExpression(node)) {
         const expression = node.expression;
-        if (expression.kind === typescript.SyntaxKind.ImportKeyword ||
-          (typescript.isIdentifier(expression) && expression.text === "require")) {
-          if (node.arguments.length !== 1 || !typescript.isStringLiteral(node.arguments[0])) refuse("computed import/require");
+        if (
+          expression.kind === typescript.SyntaxKind.ImportKeyword ||
+          (typescript.isIdentifier(expression) && expression.text === "require")
+        ) {
+          if (node.arguments.length !== 1 || !typescript.isStringLiteral(node.arguments[0]))
+            refuse("computed import/require");
           edge(node.arguments[0].text, expression.kind !== typescript.SyntaxKind.ImportKeyword);
         }
         if (typescript.isPropertyAccessExpression(expression)) {
-          if (["require", "eval", "createRequire", "_load"].includes(expression.name.text)) refuse("loader alias");
-          if (!commander && (expression.name.text === "addCommand" ||
-            (expression.name.text === "command" && node.arguments.length !== 1)))
+          if (["require", "eval", "createRequire", "_load"].includes(expression.name.text))
+            refuse("loader alias");
+          if (
+            !commander &&
+            (expression.name.text === "addCommand" ||
+              (expression.name.text === "command" && node.arguments.length !== 1))
+          )
             refuse("executable-style command registration");
         }
       }
@@ -651,14 +801,17 @@ async function materialize(root, files) {
 async function physicalGraph(root, files, edges) {
   for (const name of files.keys()) {
     const path = join(root, name);
-    if ((await realpath(path)) !== path || !(await lstat(path)).isFile()) refuse("nonphysical closure member");
+    if ((await realpath(path)) !== path || !(await lstat(path)).isFile())
+      refuse("nonphysical closure member");
   }
   for (const { from, specifier, target, requireCall } of edges) {
     const require = createRequire(join(root, from));
-    const resolved = specifier === "commander" && !requireCall
-      ? join(root, "node_modules/commander/esm.mjs")
-      : require.resolve(specifier);
-    if ((await realpath(resolved)) !== join(root, target)) refuse("physical resolution escaped closure");
+    const resolved =
+      specifier === "commander" && !requireCall
+        ? join(root, "node_modules/commander/esm.mjs")
+        : require.resolve(specifier);
+    if ((await realpath(resolved)) !== join(root, target))
+      refuse("physical resolution escaped closure");
   }
 }
 
@@ -777,50 +930,101 @@ export async function executeFrozenClosure(root, files, edges) {
   const poison = `#!${process.execPath}\nrequire("node:fs").writeFileSync(${JSON.stringify(marker)}, "effect"); process.exit(91);\n`;
   for (const name of ["spur", "git", "npm", "pnpm", "node", "opencode"])
     await writeFile(join(path, name), poison, { mode: 0o700, flag: "wx" });
-  await writeFile(join(working, "spur.yaml"), "script: never-execute\n", { mode: 0o600, flag: "wx" });
-  await writeFile(join(working, ".env"), "NODE_OPTIONS=--require ./poison.cjs\n", { mode: 0o600, flag: "wx" });
-  await writeFile(join(working, "poison.cjs"), "throw new Error('preload executed');", { mode: 0o600, flag: "wx" });
+  await writeFile(join(working, "spur.yaml"), "script: never-execute\n", {
+    mode: 0o600,
+    flag: "wx",
+  });
+  await writeFile(join(working, ".env"), "NODE_OPTIONS=--require ./poison.cjs\n", {
+    mode: 0o600,
+    flag: "wx",
+  });
+  await writeFile(join(working, "poison.cjs"), "throw new Error('preload executed');", {
+    mode: 0o600,
+    flag: "wx",
+  });
   // An ancestor package must not supply any missing selected dependency.
   const ancestor = join(root, "node_modules/commander");
   await mkdir(ancestor, { recursive: true, mode: 0o700 });
-  await writeFile(join(ancestor, "package.json"), JSON.stringify({ name: "commander", main: "poison.cjs" }), { mode: 0o600, flag: "wx" });
-  await writeFile(join(ancestor, "poison.cjs"), "throw new Error('ancestor Commander executed');", { mode: 0o600, flag: "wx" });
+  await writeFile(
+    join(ancestor, "package.json"),
+    JSON.stringify({ name: "commander", main: "poison.cjs" }),
+    { mode: 0o600, flag: "wx" },
+  );
+  await writeFile(join(ancestor, "poison.cjs"), "throw new Error('ancestor Commander executed');", {
+    mode: 0o600,
+    flag: "wx",
+  });
   const packageRoot = join(root, "package");
   await physicalGraph(packageRoot, files, edges);
   const entry = join(packageRoot, "dist/review-app-cli.js");
   const env = {
-    HOME: home, TMPDIR: temporary, TMP: temporary, TEMP: temporary,
-    PATH: path, NODE_ENV: "test", SPUR_SESSION: "package-fixture", LANG: "C", LC_ALL: "C",
+    HOME: home,
+    TMPDIR: temporary,
+    TMP: temporary,
+    TEMP: temporary,
+    PATH: path,
+    NODE_ENV: "test",
+    SPUR_SESSION: "package-fixture",
+    LANG: "C",
+    LC_ALL: "C",
   };
   const child = async (args, success) => {
     try {
       const output = await execFileAsync(process.execPath, args, {
-        cwd: working, env, timeout: 5_000, killSignal: "SIGKILL", maxBuffer: 256 * 1024,
+        cwd: working,
+        env,
+        timeout: 5_000,
+        killSignal: "SIGKILL",
+        maxBuffer: 256 * 1024,
       });
       if (!success) refuse("forbidden command unexpectedly succeeded");
       return output;
     } catch (error) {
-      if (success || error.killed || error.signal || !Number.isInteger(error.code) || error.code === 0)
+      if (
+        success ||
+        error.killed ||
+        error.signal ||
+        !Number.isInteger(error.code) ||
+        error.code === 0
+      )
         refuse("isolated child failed or exceeded its bound");
       return { stdout: error.stdout ?? "", stderr: error.stderr ?? "" };
     }
   };
   const help = await child([entry, "--help"], true);
-  if (!help.stdout.includes("review-app") || help.stdout.includes("daemon start")) refuse("wrong entry help");
+  if (!help.stdout.includes("review-app") || help.stdout.includes("daemon start"))
+    refuse("wrong entry help");
   for (const args of [
-    ["daemon", "--help"], ["--help", "daemon"], ["review-gate", "--help"],
-    ["--config", "poison.yaml", "--help"], ["review-app", "daemon", "--help"], ["--version"],
-  ]) await child([entry, ...args], false);
+    ["daemon", "--help"],
+    ["--help", "daemon"],
+    ["review-gate", "--help"],
+    ["--config", "poison.yaml", "--help"],
+    ["review-app", "daemon", "--help"],
+    ["--version"],
+  ])
+    await child([entry, ...args], false);
   const harness = join(root, "fake-execution.mjs");
   await writeFile(harness, executionHarness, { mode: 0o600, flag: "wx" });
   const output = await child([harness, entry, temporary], true);
   const line = output.stdout.split("\n").find((value) => value.startsWith("SPUR_PACKAGE_PROOF="));
   if (!line) refuse("missing isolated fake proof");
-  const proof = jsonBytes(Buffer.from(line.slice("SPUR_PACKAGE_PROOF=".length)), "invalid isolated fake proof");
-  if (["status", "recover", "pending", "replay", "session", "readback", "error"].some((key) => proof[key] !== true) || proof.nativePosts !== 0)
+  const proof = jsonBytes(
+    Buffer.from(line.slice("SPUR_PACKAGE_PROOF=".length)),
+    "invalid isolated fake proof",
+  );
+  if (
+    ["status", "recover", "pending", "replay", "session", "readback", "error"].some(
+      (key) => proof[key] !== true,
+    ) ||
+    proof.nativePosts !== 0
+  )
     refuse("incomplete isolated fake proof");
-  try { await lstat(marker); refuse("poison PATH was executed"); }
-  catch (error) { if (error.code !== "ENOENT") throw error; }
+  try {
+    await lstat(marker);
+    refuse("poison PATH was executed");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
   return proof;
 }
 
@@ -838,9 +1042,14 @@ async function checkoutHead(root) {
   if (!/^ref: refs\/heads\/[a-zA-Z0-9_.\/-]+$/.test(head) || head.split("/").includes(".."))
     refuse("invalid checkout ref");
   let common = git;
-  try { common = resolve(git, (await readFile(join(git, "commondir"), "utf8")).trim()); }
-  catch (error) { if (error.code !== "ENOENT") throw error; }
-  const value = (await dataFile(join(common, head.slice(5)), "missing checkout ref")).toString("utf8").trim();
+  try {
+    common = resolve(git, (await readFile(join(git, "commondir"), "utf8")).trim());
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const value = (await dataFile(join(common, head.slice(5)), "missing checkout ref"))
+    .toString("utf8")
+    .trim();
   if (!/^[a-f0-9]{40}$/.test(value)) refuse("invalid checkout commit");
   return value;
 }
@@ -848,16 +1057,31 @@ async function checkoutHead(root) {
 /** Phase API: synthetic references prove mechanics, never actual-artifact provenance. */
 export async function verifyClosure(index, references, commanderArchive) {
   const dependencies = await preflightDependencies();
-  const metadata = jsonBytes(index.captured.get("package/package.json"), "invalid package manifest");
-  const expected = jsonBytes(references.utility.get("package/package.json"), "invalid source manifest");
-  if (typeof metadata.version !== "string" || !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?(?:\+[a-zA-Z0-9.-]+)?$/.test(metadata.version))
+  const metadata = jsonBytes(
+    index.captured.get("package/package.json"),
+    "invalid package manifest",
+  );
+  const expected = jsonBytes(
+    references.utility.get("package/package.json"),
+    "invalid source manifest",
+  );
+  if (
+    typeof metadata.version !== "string" ||
+    !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?(?:\+[a-zA-Z0-9.-]+)?$/.test(metadata.version)
+  )
     refuse("invalid release-managed package version");
-  if (!sameData({ ...metadata, version: expected.version }, expected)) refuse("package metadata differs from reviewed source");
-  if (!commanderArchive.captured.get("package/package.json").equals(references.commander.get("package/package.json")))
+  if (!sameData({ ...metadata, version: expected.version }, expected))
+    refuse("package metadata differs from reviewed source");
+  if (
+    !commanderArchive.captured
+      .get("package/package.json")
+      .equals(references.commander.get("package/package.json"))
+  )
     refuse("official and installed Commander metadata differ");
   commanderMetadata(commanderArchive.captured.get("package/package.json"));
   const files = new Map([...index.captured].map(([name, bytes]) => [name.slice(8), bytes]));
-  for (const [name, bytes] of commanderArchive.captured) files.set(`node_modules/commander/${name.slice(8)}`, bytes);
+  for (const [name, bytes] of commanderArchive.captured)
+    files.set(`node_modules/commander/${name.slice(8)}`, bytes);
   const edges = verifyGraph(files, dependencies.typescript);
   return { files, edges };
 }
@@ -866,8 +1090,11 @@ export async function verifyReviewAppPackage(tarball) {
   const dependencies = await preflightDependencies();
   const references = await referencesFromCheckout(repositoryRoot);
   const index = await readArchive(tarball, references.utility);
-  const required = (await dataFile(join(repositoryRoot, "v2/required-package-files.txt"), "missing required list"))
-    .toString("utf8").split(/\r?\n/);
+  const required = (
+    await dataFile(join(repositoryRoot, "v2/required-package-files.txt"), "missing required list")
+  )
+    .toString("utf8")
+    .split(/\r?\n/);
   assertRequiredEntries(index, required);
   const commanderArchive = await readArchive(await officialCommander(), references.commander);
   const { files, edges } = await verifyClosure(index, references, commanderArchive);
@@ -884,7 +1111,9 @@ export async function verifyReviewAppPackage(tarball) {
       selectedSHA256: Object.fromEntries([...files].map(([path, bytes]) => [path, sha256(bytes)])),
       execution,
     };
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
@@ -896,10 +1125,16 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
     const dependencies = {
       owner: result.dependencies.owner,
       lockSHA256: result.dependencies.lockSHA256,
-      packages: Object.fromEntries(Object.entries(result.dependencies.packages).map(([name, value]) => [
-        name,
-        { version: value.version, publicTarget: identities[name].entry, publicSHA256: value.publicSHA256 },
-      ])),
+      packages: Object.fromEntries(
+        Object.entries(result.dependencies.packages).map(([name, value]) => [
+          name,
+          {
+            version: value.version,
+            publicTarget: identities[name].entry,
+            publicSHA256: value.publicSHA256,
+          },
+        ]),
+      ),
     };
     process.stdout.write(`${JSON.stringify({ ...result, dependencies })}\n`);
   } catch {
