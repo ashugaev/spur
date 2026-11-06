@@ -590,6 +590,31 @@ describe("snapshot leaf selection (AC6)", () => {
     expect(parseGitConfigWorktree("[core]\n\tbare = true\n")).toBeNull();
   });
 
+  // Git quotes any value holding #, ;, a quote or a backslash. Keeping the
+  // quotes makes the live worktree stat as gone, which hands its snapshot to
+  // the planner — the one thing the GC must never do.
+  it("decodes the quoting git applies to a worktree path", () => {
+    const quoted = (value: string) => `[core]\n\tworktree = ${value}\n`;
+
+    expect(parseGitConfigWorktree(quoted('"/projects/pr#887"'))).toBe("/projects/pr#887");
+    expect(parseGitConfigWorktree(quoted('"/projects/a;b"'))).toBe("/projects/a;b");
+    expect(parseGitConfigWorktree(quoted('"/projects/say \\"hi\\""'))).toBe('/projects/say "hi"');
+    expect(parseGitConfigWorktree(quoted('"/projects/back\\\\slash"'))).toBe(
+      "/projects/back\\slash",
+    );
+    expect(parseGitConfigWorktree(quoted('"/projects/with space"/trailing'))).toBe(
+      "/projects/with space/trailing",
+    );
+    // A comment after an unquoted value is not part of the path.
+    expect(parseGitConfigWorktree(quoted("/projects/x # set by spur"))).toBe("/projects/x");
+    expect(parseGitConfigWorktree(quoted("/projects/x ; note"))).toBe("/projects/x");
+    // Undecodable values fail closed, which the collector reads as present.
+    expect(parseGitConfigWorktree(quoted('"/projects/unterminated'))).toBeNull();
+    expect(parseGitConfigWorktree(quoted('"/projects/bad\\q"'))).toBeNull();
+    expect(parseGitConfigWorktree(quoted(""))).toBeNull();
+    expect(parseGitConfigWorktree(quoted("# only a comment"))).toBeNull();
+  });
+
   it("selects only the leaf whose recorded worktree is gone", async () => {
     const root = await createTempDir("opencode-gc-snapshot");
     const storeRoot = join(root, "store");

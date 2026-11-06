@@ -332,6 +332,56 @@ export function parseOpenCodeStoreSessions(
   return sessions;
 }
 
+const GIT_CONFIG_ESCAPES: Record<string, string> = {
+  '"': '"',
+  "\\": "\\",
+  n: "\n",
+  t: "\t",
+  b: "\b",
+};
+
+/**
+ * Decodes one git-config value the way git writes it: `#`/`;` outside quotes
+ * open a comment, trailing unquoted whitespace is dropped, and a quoted run
+ * carries the five escapes git recognizes. A path git had to quote — one
+ * holding `#`, `;`, a quote or a backslash — reaches us wrapped, and the raw
+ * spelling never stats: the live worktree would read as gone and its snapshot
+ * would be selected for deletion. Anything this cannot decode returns null,
+ * which the caller treats as "worktree present" rather than "missing".
+ */
+function parseGitConfigValue(raw: string): string | null {
+  let out = "";
+  let quoted = false;
+  let trailing = "";
+  for (let index = 0; index < raw.length; index++) {
+    const char = raw[index];
+    if (char === '"') {
+      quoted = !quoted;
+      out += trailing;
+      trailing = "";
+      continue;
+    }
+    if (char === "\\") {
+      const escape = raw[++index];
+      if (escape === undefined) return null;
+      const decoded = GIT_CONFIG_ESCAPES[escape];
+      if (decoded === undefined) return null;
+      out += trailing + decoded;
+      trailing = "";
+      continue;
+    }
+    if (!quoted && (char === "#" || char === ";")) break;
+    if (!quoted && (char === " " || char === "\t")) {
+      trailing += char;
+      continue;
+    }
+    out += trailing + (char ?? "");
+    trailing = "";
+  }
+  if (quoted) return null;
+  return out;
+}
+
 /** First `worktree = <path>` under `[core]`. Never shells out to git. */
 export function parseGitConfigWorktree(text: string): string | null {
   let inCore = false;
@@ -342,8 +392,10 @@ export function parseGitConfigWorktree(text: string): string | null {
       continue;
     }
     if (!inCore) continue;
-    const match = /^worktree\s*=\s*(.+)$/i.exec(line);
-    if (match?.[1]) return match[1].trim();
+    const match = /^worktree\s*=\s*(.*)$/i.exec(line);
+    if (!match) continue;
+    const value = parseGitConfigValue(match[1] ?? "");
+    return value === null || value === "" ? null : value;
   }
   return null;
 }
