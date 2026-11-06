@@ -282,6 +282,23 @@ describe("discardFailedSpawn", () => {
     expect(existsSync(archivedPath(f, "api-1"))).toBe(false);
   });
 
+  it("keeps an errored record whose launch identity changed during branch cleanup", async () => {
+    const f = await createFixture();
+    await git(f.repoPath, "branch", "api-1");
+    writeSession(f.dataDir, erroredRecord("api-1"));
+    f.duringCleanup(() =>
+      writeSession(f.dataDir, erroredRecord("api-1", { agentLaunchId: "peer-launch" })),
+    );
+
+    await f.discard("api-1");
+
+    expect(readSession(f.dataDir, "api-1")).toMatchObject({
+      status: "errored",
+      agentLaunchId: "peer-launch",
+    });
+    expect(existsSync(archivedPath(f, "api-1"))).toBe(false);
+  });
+
   it("keeps an errored record while a restore is still pending", async () => {
     const f = await createFixture();
     writeSession(f.dataDir, erroredRecord("api-1", { branch: "feature/other" }));
