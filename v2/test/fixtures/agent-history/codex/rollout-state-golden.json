@@ -183,6 +183,9 @@
       "callId": "call_unmatched_1",
       "filePath": "working-unmatched-tool-call-tail.jsonl"
     },
-    "rateLimit": null
+    "rateLimit": {
+      "limited": false,
+      "reason": ""
+    }
   }
 }
