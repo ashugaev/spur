@@ -111,9 +111,7 @@ export function summarizeTokenUsageWindows(
     ["30d", nowMs - 30 * DAY_MS],
   ];
   return windows.map(([window, sinceMs]) => {
-    const inWindow = sessions.filter(
-      (s) => Number.isFinite(s.activityMs) && s.activityMs >= sinceMs,
-    );
+    const inWindow = sessions.filter((s) => s.activityMs >= sinceMs);
     const providers = [...new Set(inWindow.map((s) => s.tokenUsage.provider))].sort();
     const byProvider = providers.map((provider) => {
       const entries = inWindow.filter((s) => s.tokenUsage.provider === provider);

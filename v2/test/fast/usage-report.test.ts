@@ -173,6 +173,25 @@ describe("parseCodexUsage", () => {
     expect(parsed?.windows[1]?.resetsAt).toBeNull();
   });
 
+  it("out-of-range reset yields null resetsAt and the report still resolves", async () => {
+    const parsed = parseCodexUsage({
+      rate_limit: { primary_window: { used_percent: 1, reset_at: 1e20 } },
+    });
+    expect(parsed?.windows[0]?.resetsAt).toBeNull();
+    const s = await setup();
+    await mkdir(join(s.home, ".codex"), { recursive: true });
+    await writeFile(
+      join(s.home, ".codex", "auth.json"),
+      JSON.stringify({ tokens: { access_token: "cx" } }),
+    );
+    const f = (async () =>
+      json({
+        rate_limit: { primary_window: { used_percent: 1, reset_at: 1e20 } },
+      })) as unknown as typeof fetch;
+    const report = await buildUsageReport(s.deps(f));
+    expect(report.quotas[0]).toMatchObject({ provider: "codex", status: "ok" });
+  });
+
   it("rejects unknown shapes", () => {
     expect(parseCodexUsage({ plan_type: "x" })).toBeNull();
     expect(parseCodexUsage("x")).toBeNull();
@@ -300,6 +319,30 @@ describe("buildUsageReport quotas", () => {
       [stalePath, homePath].map(async (p) => [await readFile(p, "utf8"), (await stat(p)).mtimeMs]),
     );
     expect(after).toEqual(before);
+  });
+
+  it("ranks a missing expiresAt below a dated token", async () => {
+    const s = await setup();
+    const accountDir = join(s.home, "acct-b");
+    await mkdir(accountDir, { recursive: true });
+    await writeFile(
+      join(accountDir, ".credentials.json"),
+      JSON.stringify({ claudeAiOauth: { accessToken: "undated-token" } }),
+    );
+    await writeClaudeCreds(
+      join(s.dataDir, "session-tools", "sess-2", "claude-home"),
+      FUTURE,
+      "dated-token",
+    );
+    await writeFile(
+      join(s.dataDir, "claude-accounts.json"),
+      JSON.stringify([{ id: "b", configDir: accountDir, createdAt: "2026-01-01T00:00:00Z" }]),
+    );
+    writeSession(s.dataDir, session("sess-2", { claudeAccountId: "b" }));
+    const fetchMock = vi.fn(async () => json(CLAUDE_BODY));
+    await buildUsageReport(s.deps(fetchMock as unknown as typeof fetch));
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(init.headers).toMatchObject({ Authorization: "Bearer dated-token" });
   });
 
   it("caches within 180 s, shares in-flight requests, holds 429 per Retry-After", async () => {

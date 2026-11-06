@@ -214,7 +214,9 @@ function codexWindow(raw: unknown, fallback: string, prefix: string): QuotaWindo
   const used = finiteNumber(raw.used_percent);
   if (used === undefined) return null;
   const reset = finiteNumber(raw.reset_at) ?? finiteNumber(raw.resets_at);
-  const resetsAt = reset === undefined ? null : new Date(reset * 1000).toISOString();
+  const resetDate = reset === undefined ? null : new Date(reset * 1000);
+  const resetsAt =
+    resetDate && Number.isFinite(resetDate.getTime()) ? resetDate.toISOString() : null;
   const label = codexLabel(raw.limit_window_seconds, fallback);
   return makeWindow(prefix === "" ? label : `${prefix} ${label}`, used, resetsAt);
 }
@@ -260,7 +262,7 @@ async function readJson(path: string): Promise<unknown> {
 
 interface ClaudeCredential {
   accessToken: string;
-  expiresAt: number;
+  expiresAt: number | null;
   plan: string | null;
 }
 
@@ -272,7 +274,7 @@ async function readClaudeCredential(path: string): Promise<ClaudeCredential | nu
   }
   return {
     accessToken: oauth.accessToken,
-    expiresAt: finiteNumber(oauth.expiresAt) ?? Number.POSITIVE_INFINITY,
+    expiresAt: finiteNumber(oauth.expiresAt) ?? null,
     plan: typeof oauth.subscriptionType === "string" ? oauth.subscriptionType : null,
   };
 }
@@ -358,14 +360,22 @@ async function requestQuota(
       Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, MAX_RETRY_AFTER_S) : null;
     return fail("rate_limited", 429, retryAfterS);
   }
-  if (!response.ok) return fail("http_error", response.status);
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    return fail("http_error", response.status);
+  }
   let body: unknown;
   try {
     body = await response.json();
   } catch {
     return fail("unparsable");
   }
-  const parsed = parse(body);
+  let parsed: ReturnType<typeof parse>;
+  try {
+    parsed = parse(body);
+  } catch {
+    return fail("unparsable");
+  }
   if (!parsed) return fail("unparsable");
   return {
     result: {
@@ -424,8 +434,11 @@ async function claudeSource(
     (credential): credential is ClaudeCredential => credential !== null,
   );
   if (found.length === 0) return errorResult(base, deps.nowMs, "no_credentials");
-  const best = found.reduce((a, b) => (b.expiresAt > a.expiresAt ? b : a));
-  if (best.expiresAt <= deps.nowMs) return errorResult(base, deps.nowMs, "expired");
+  const best = found.reduce((a, b) =>
+    (b.expiresAt ?? -Infinity) > (a.expiresAt ?? -Infinity) ? b : a,
+  );
+  if (best.expiresAt !== null && best.expiresAt <= deps.nowMs)
+    return errorResult(base, deps.nowMs, "expired");
   return cached(`claude:${account.id}`, deps.nowMs, () =>
     requestQuota(
       deps,
@@ -478,13 +491,13 @@ async function tokenActivity(
       if (!session.tokenUsage) return null;
       let mtimeMs = Number.NaN;
       try {
-        mtimeMs = (await stat(sessionFilePath(deps.dataDir, session.project, session.id)))
-          .mtimeMs;
+        mtimeMs = (await stat(sessionFilePath(deps.dataDir, session.project, session.id))).mtimeMs;
       } catch {
         // updatedAt alone
       }
+      const updatedMs = Date.parse(session.updatedAt);
       const activityMs = Math.max(
-        Number.isFinite(Date.parse(session.updatedAt)) ? Date.parse(session.updatedAt) : -Infinity,
+        Number.isFinite(updatedMs) ? updatedMs : -Infinity,
         Number.isFinite(mtimeMs) ? mtimeMs : -Infinity,
       );
       if (!Number.isFinite(activityMs)) return null;
