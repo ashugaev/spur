@@ -20221,7 +20221,8 @@ export class SessionService {
     // (send, tryDeliverQueuedMessage, switchAuth) classify the session's real
     // state right after this returns and must not have that forced to
     // "working" the way a genuine post-restore warmup intentionally does.
-    this.restoreWarmupUntil.set(session.id, Date.now() + RESTORE_WARMUP_MS);
+    // This frame clears the marker in finally; a pending launch must not age out of capacity.
+    this.restoreWarmupUntil.set(session.id, Number.POSITIVE_INFINITY);
     this.launchesInFlight.add(session.id);
     // Transfer the reservation to the counted warmup without yielding.
     if (options?.wakeClaim) this.releaseScheduledWakeAdmission(options.wakeClaim);

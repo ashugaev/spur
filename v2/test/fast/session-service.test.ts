@@ -62075,14 +62075,19 @@ describe("SessionService", () => {
         return { launchStarted, releaseLaunch, pendingWake: tick(service) };
       }
 
-      describe.each([2, 3])("wake warmup at cap %i", (cap) => {
+      describe.each([
+        [2, 0],
+        [3, 0],
+        [2, 31_000],
+        [3, 31_000],
+      ] as const)("wake warmup at cap %i after %ims", (cap, elapsed) => {
         it.each(warmingWakeCases)(
           "counts the %s %s wake once while admitting the remaining slot",
           async (status, kind) => {
             capAt(cap);
             const panes = trackRuntimes(cap === 3 ? ["api-2"] : []);
             mockClaudeJsonlState("waiting");
-            reserveNextSessionIdMock.mockResolvedValue("api-3");
+            reserveNextSessionIdMock.mockResolvedValueOnce("api-3").mockResolvedValue("api-4");
             const sessions = createSessionStore(
               warmingWakeRecord(status, kind),
               ...(cap === 3 ? [runningSession({ id: "api-2" })] : []),
@@ -62095,14 +62100,14 @@ describe("SessionService", () => {
             const held = holdWakeLaunch(service, panes);
             try {
               await held.launchStarted;
-              expect(internals.countLiveSessions().total).toBe(cap - 1);
+              vi.setSystemTime(Date.now() + elapsed);
               const spawned = await service.spawn({ project: "api", prompt: "remaining slot" });
               expect(spawned.id).toBe("api-3");
-              expect(internals.countLiveSessions().total).toBe(cap);
-              expect(internals.admissionReservations.size).toBe(0);
               await expect(
                 service.spawn({ project: "api", prompt: "over cap" }),
               ).rejects.toMatchObject({ statusCode: 429, reason: "cap" });
+              expect(internals.countLiveSessions().total).toBe(cap);
+              expect(internals.admissionReservations.size).toBe(0);
               held.releaseLaunch();
               await held.pendingWake;
               expect(sessions.get("api-1")?.status).toBe("running");
@@ -62133,6 +62138,7 @@ describe("SessionService", () => {
           const held = holdWakeLaunch(service, panes, true);
           try {
             await held.launchStarted;
+            vi.setSystemTime(Date.now() + 31_000);
             expect(internals.countLiveSessions().total).toBe(1);
             held.releaseLaunch();
             await held.pendingWake;
