@@ -751,26 +751,7 @@ async function findTaggedWorkItemSession(
   if (discardErrored) {
     for (const sessionId of erroredIds) {
       if (!ctx.controllerCurrent()) return undefined;
-      try {
-        const discarded = await service.discardFailedSpawn(sessionId);
-        if (!ctx.controllerCurrent()) return undefined;
-        if (discarded === "declined") {
-          // A restore or relaunch took the errored session over during
-          // cleanup: it still stands for the block, so adopt it, or wait on it
-          // while its takeover is unresolved, instead of spawning a second.
-          const view = await getWorkItemSessionIfPresent(service, sessionId);
-          if (!ctx.controllerCurrent()) return undefined;
-          if (!view) continue;
-          const record = readSession(ctx.dataDir, sessionId);
-          const outcome = classifyWorkItemOwner(view, record);
-          return {
-            sessionId,
-            outcome: outcome === "replace" ? "pending" : outcome,
-            accepted: isAcceptedWorkItemRecord(record),
-          };
-        }
-      } catch (error) {
-        if (!ctx.controllerCurrent()) return undefined;
+      const logDiscardFailed = (error: unknown): void => {
         const message = error instanceof Error ? error.message : String(error);
         logTriggerEvent(ctx.dataDir, "trigger.spawn.discard_failed", {
           level: "warn",
@@ -780,6 +761,36 @@ async function findTaggedWorkItemSession(
           triggerId: ctx.triggerId,
           message: `Could not discard failed spawn ${sessionId}: ${message}`,
         });
+      };
+      let discarded: Awaited<ReturnType<SessionService["discardFailedSpawn"]>> | undefined;
+      try {
+        discarded = await service.discardFailedSpawn(sessionId);
+        if (!ctx.controllerCurrent()) return undefined;
+      } catch (error) {
+        if (!ctx.controllerCurrent()) return undefined;
+        logDiscardFailed(error);
+      }
+      if (discarded !== "declined") continue;
+      // A restore or relaunch took the errored session over during cleanup:
+      // it still stands for the block, so adopt it, or wait on it while its
+      // takeover is unresolved, instead of spawning a second.
+      let record: SessionRecord | null | undefined;
+      try {
+        const view = await getWorkItemSessionIfPresent(service, sessionId);
+        if (!ctx.controllerCurrent()) return undefined;
+        if (!view) continue;
+        record = readSession(ctx.dataDir, sessionId);
+        const outcome = classifyWorkItemOwner(view, record);
+        return {
+          sessionId,
+          outcome: outcome === "replace" ? "pending" : outcome,
+          accepted: isAcceptedWorkItemRecord(record),
+        };
+      } catch (error) {
+        if (!ctx.controllerCurrent()) return undefined;
+        logDiscardFailed(error);
+        // The survivor stands even when it cannot be read: hold the block.
+        return { sessionId, outcome: "pending", accepted: isAcceptedWorkItemRecord(record) };
       }
     }
   }
