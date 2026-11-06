@@ -91,7 +91,7 @@ export function parseFeedback(value: unknown, status: LaneState["status"]): Revi
   if (status === "APPROVED" || data.kind !== kind)
     throw new ReviewAppError("invalid-review-feedback");
   const text = (value: unknown) => {
-    if (typeof value !== "string" || !value.replace(/[\x00-\x20\x7f]+/g, " ").trim())
+    if (typeof value !== "string" || !value.replace(/[\0-\x20\x7f]+/g, " ").trim())
       throw new ReviewAppError("invalid-review-feedback");
     return value.trim();
   };
@@ -131,7 +131,7 @@ export function parseFeedback(value: unknown, status: LaneState["status"]): Revi
 export function feedbackSummary(feedback: ReviewFeedback): string {
   const visible = (value: string) =>
     value
-      .replace(/[\x00-\x20\x7f]+/g, " ")
+      .replace(/[\0-\x20\x7f]+/g, " ")
       .replace(/[<>&\\`*_[\]~|!]/g, (character) => `&#${character.charCodeAt(0)};`);
   const fields: [string, string][] = [
     ["Reason", feedback.reason],
