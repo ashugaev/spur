@@ -211,7 +211,7 @@ import type * as timersPromisesModule from "node:timers/promises";
 import type * as childProcessModule from "node:child_process";
 import type * as fsPromisesModule from "node:fs/promises";
 import type * as fsModule from "node:fs";
-import { execFileSync, spawn as spawnChildProcess } from "node:child_process";
+import { spawn as spawnChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   appendFileSync,
@@ -266,7 +266,6 @@ import {
   type SpawnSessionRequest,
   type SessionMemoryRecord,
   type SessionRecord,
-  type TelegramBinding,
   type SessionLifecycleSnapshot,
   type SessionSidecarView,
   type SessionState,
@@ -25761,7 +25760,7 @@ describe("SessionService", () => {
 
     it("grants freed capacity to a recovered waiter before a new request", async () => {
       const occupant = sessionRecord({ id: "api-occupant", status: "running" });
-      const { sessions, accepted, restored, queue } = await acceptThenDisposeBeforeLaunch({
+      const { sessions, accepted, restored } = await acceptThenDisposeBeforeLaunch({
         initial: [occupant],
         maxLiveSessions: 2,
       });
@@ -25774,7 +25773,9 @@ describe("SessionService", () => {
         const capped = new SessionService("/tmp/spur.yaml", "2026-03-18T10:07:00.000Z", {
           deferBackgroundLoops: true,
         });
-        const cappedQueue = capped as unknown as typeof queue;
+        const cappedQueue = capped as unknown as DurableService & {
+          spawnAdmissionWaiters: Set<unknown>;
+        };
         try {
           await cappedQueue.runMemoryShedTick();
           await vi.waitFor(() => expect(cappedQueue.spawnAdmissionWaiters.size).toBe(1));
@@ -30193,7 +30194,7 @@ describe("SessionService", () => {
       state: "waiting",
       updatedAt: new Date(startedAt - 1_000).toISOString(),
     });
-    const actualCodex = await vi.importActual<typeof CodexModule>("../../src/agents/codex.js");
+    const actualCodex = await vi.importActual<typeof codexModule>("../../src/agents/codex.js");
     readCodexRolloutStateMock.mockImplementation(actualCodex.readCodexRolloutState);
     const sessionsDir = join(TEST_DATA_DIR, "session-tools", "api-1", "codex-home", "sessions");
     mkdirSync(sessionsDir, { recursive: true });
@@ -30272,7 +30273,7 @@ describe("SessionService", () => {
       state: "waiting",
       updatedAt: new Date(observedAt - 1_000).toISOString(),
     });
-    const actualCodex = await vi.importActual<typeof CodexModule>("../../src/agents/codex.js");
+    const actualCodex = await vi.importActual<typeof codexModule>("../../src/agents/codex.js");
     readCodexRolloutStateMock.mockImplementation(actualCodex.readCodexRolloutState);
     const sessionsDir = join(TEST_DATA_DIR, "session-tools", "api-1", "codex-home", "sessions");
     mkdirSync(sessionsDir, { recursive: true });
@@ -30345,7 +30346,7 @@ describe("SessionService", () => {
       });
       const sessions = createSessionStore(session);
       readAgentHookStateMock.mockReturnValue(null);
-      const actualCodex = await vi.importActual<typeof CodexModule>("../../src/agents/codex.js");
+      const actualCodex = await vi.importActual<typeof codexModule>("../../src/agents/codex.js");
       readCodexRolloutStateMock.mockImplementation(actualCodex.readCodexRolloutState);
       const sessionsDir = join(TEST_DATA_DIR, "session-tools", "api-1", "codex-home", "sessions");
       mkdirSync(sessionsDir, { recursive: true });

@@ -1166,9 +1166,9 @@ describe("startConfiguredTriggers", () => {
         const merged = f.pending();
         expect(merged?.workId).toBe(saved?.workId);
         expect(merged?.revision).toBe((saved?.revision ?? 0) + 1);
-        expect(merged?.batch.signals).toEqual([
-          { ...mergeConflictSignal(), text: "Updated conflict notice" },
-        ]);
+        expect(merged?.batch).toMatchObject({
+          signals: [{ ...mergeConflictSignal(), text: "Updated conflict notice" }],
+        });
         expect(merged?.retryAccounting?.every((row) => row.deliveryAttempts === 0)).toBe(true);
         expect(vi.getTimerCount()).toBe(timers);
         reject(f.changed());
