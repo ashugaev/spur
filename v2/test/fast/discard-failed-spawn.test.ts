@@ -598,6 +598,96 @@ describe("discardFailedSpawn", () => {
     }
   });
 
+  it("releases the claim when a skipped discard's survivor lookup fails", async () => {
+    const f = await createFixture();
+    const item = {
+      externalId: triggerOrigin.externalId,
+      url: "https://example.invalid/7",
+      number: 7,
+      title: "fixture",
+      repo: "acme/api",
+      autoComplete: false,
+      createdAt: new Date().toISOString(),
+    };
+    const failed = {
+      triggerId: "review",
+      blockIndex: 0,
+      state: "failed" as const,
+      claimedAt: "2026-05-11T10:00:00.000Z",
+      nextRetryAt: "2026-05-11T10:45:00.000Z",
+      attempts: 1,
+      deferrals: 0,
+    };
+    updateWorkItemMembers(f.dataDir, "api", "pr-watch", item, () => [failed]);
+    await git(f.repoPath, "branch", "api-1");
+    writeSession(f.dataDir, erroredRecord("api-1"));
+    const restored = erroredRecord("api-1", {
+      status: "running",
+      launchCommand: "claude --resume",
+      agentLaunchId: "restore-launch",
+      agentSessionId: "restore-native",
+    });
+    delete restored.error;
+    const discard = vi.fn(f.discard);
+    // The scan reads the errored record and the restore lands before discard
+    // reads it (skipped); the survivor lookup then refuses mid-restore.
+    const get = vi
+      .fn()
+      .mockImplementationOnce(async (id: string) => {
+        const view = { ...readSession(f.dataDir, id), state: "error", workspaceExists: true };
+        writeSession(f.dataDir, restored);
+        return view;
+      })
+      .mockRejectedValue(new Error("Session changed while assembling its lifecycle snapshot"));
+    const spawn = vi.fn().mockResolvedValue({ id: "api-new" });
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: {
+        dataDir: f.dataDir,
+        projects: {
+          api: {
+            sources: { "pr-watch": { type: "github", query: "is:pr is:open" } },
+            triggers: {
+              review: {
+                source: "pr-watch",
+                event: "github:work_item.new",
+                spawn: { blocks: [{ prompt: "review {{url}}" }] },
+              },
+            },
+          },
+        },
+      } as never,
+      bus,
+      autoPing: new AutoPingService(f.dataDir),
+      sessionService: { get, spawn, discardFailedSpawn: discard } as never,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      bus.emit({
+        occurrenceId: "skipped-lookup-fails",
+        projectId: "api",
+        sourceId: "pr-watch",
+        name: "github:work_item.new",
+        data: item,
+      });
+      await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+      await expect(discard.mock.results[0]?.value).resolves.toBe("skipped");
+      // Released claim: the prior failed member is back, unbound.
+      await vi.waitFor(() =>
+        expect(
+          readWorkItemLifecycles(f.dataDir, "api", "pr-watch").get(item.externalId)?.members,
+        ).toEqual([expect.objectContaining(failed)]),
+      );
+      expect(
+        readWorkItemLifecycles(f.dataDir, "api", "pr-watch").get(item.externalId)?.members[0],
+      ).not.toHaveProperty("sessionId");
+      expect(spawn).not.toHaveBeenCalled();
+      expect(readSession(f.dataDir, "api-1")).toMatchObject(restored);
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("keeps a record a restore took over during branch cleanup", async () => {
     const f = await createFixture();
     await git(f.repoPath, "branch", "api-1");

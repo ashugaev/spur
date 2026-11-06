@@ -711,7 +711,8 @@ interface FoundWorkItemSession {
 // relaunch may own it now, so it still stands for the block. "declined" means
 // a takeover started during cleanup: the survivor is held even while it reads
 // errored or cannot be read. "skipped" means the record was already not
-// discardable: only a non-replace owner stands. Undefined: nothing stands.
+// discardable: only a non-replace owner stands, and a failed lookup fails the
+// scan. Undefined: nothing stands.
 async function discardSurvivor(
   ctx: WorkItemClaimContext,
   service: SessionService,
@@ -733,11 +734,15 @@ async function discardSurvivor(
     };
   } catch (error) {
     if (!ctx.controllerCurrent()) return "stale";
+    // A skipped record may be mid-restore (its lookup then refuses with a
+    // lifecycle 503): fail the scan like its own lookup errors, so the caller
+    // releases the claim and logs instead of spawning a replacement.
+    if (discarded === "skipped") throw error;
     const message = error instanceof Error ? error.message : String(error);
     logFailure(
-      `Discard of failed spawn ${sessionId} was ${discarded}; survivor lookup failed: ${message}`,
+      `Discard of failed spawn ${sessionId} was declined; survivor lookup failed: ${message}`,
     );
-    return discarded === "declined" ? { sessionId, outcome: "pending" } : undefined;
+    return { sessionId, outcome: "pending" };
   }
 }
 
