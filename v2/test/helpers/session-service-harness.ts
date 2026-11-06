@@ -28,6 +28,9 @@ import type * as jsonlLogIoModule from "../../src/jsonl-log-io.js";
 import type * as agentsIndexModule from "../../src/agents/index.js";
 import type * as claudeModule from "../../src/agents/claude.js";
 import type * as codexModule from "../../src/agents/codex.js";
+import type * as authAccountsModule from "../../src/auth-accounts.js";
+import type { AuthAccountsState } from "../../src/auth-accounts.js";
+import type { AuthRegistration } from "../../src/auth-proxy.js";
 import type * as openCodeModule from "../../src/agents/opencode.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
@@ -363,6 +366,19 @@ const touchAccountUsedMock: Mock = vi.fn();
 const ensureDefaultAccountMock: Mock = vi.fn();
 const seedSessionHomeMock: Mock = vi.fn();
 const swapSessionCredentialsMock: Mock = vi.fn();
+const authAccountsReadMock: Mock = vi.fn();
+const authAccountsRemoveMock: Mock = vi.fn();
+const authProxyConfigureMock: Mock = vi.fn();
+const authProxyGetStateMock: Mock = vi.fn();
+const authProxyRegisterSessionMock: Mock = vi.fn();
+const authProxySwitchSessionMock: Mock = vi.fn();
+const authProxyRevokeSessionMock: Mock = vi.fn();
+const authProxyRecoverMock: Mock = vi.fn();
+const authProxyDisposeMock: Mock = vi.fn();
+const authProxyLoginMock: Mock = vi.fn();
+const authProxyLoginStatusMock: Mock = vi.fn();
+const authProxyCancelLoginMock: Mock = vi.fn();
+const authProxyRemoveAccountMock: Mock = vi.fn();
 
 interface TestAccount {
   id: string;
@@ -394,6 +410,67 @@ function resetAccountStoreMocks(accounts: () => TestAccount[]): void {
   ensureDefaultAccountMock.mockReset();
   seedSessionHomeMock.mockReset();
   swapSessionCredentialsMock.mockReset();
+  authAccountsReadMock.mockReset().mockImplementation(
+    (): AuthAccountsState => ({
+      schema: 1,
+      accounts: accounts().map(({ id, label, createdAt }) => ({
+        id,
+        provider: "claude",
+        ...(label ? { label } : {}),
+        createdAt,
+      })),
+      pools: accounts().length
+        ? {
+            claude: {
+              defaultAccountId: accounts()[0]!.id,
+              defaultGeneration: 0,
+              autoRotate: false,
+            },
+          }
+        : {},
+    }),
+  );
+  authAccountsRemoveMock.mockReset();
+  authProxyConfigureMock.mockReset().mockResolvedValue(undefined);
+  authProxyGetStateMock.mockReset().mockImplementation(async () => ({
+    accounts: accounts().map(({ id, authenticated }) => ({
+      id,
+      provider: "claude",
+      status: authenticated ? "ready" : "sign-in-required",
+    })),
+    sessions: [],
+  }));
+  authProxyRegisterSessionMock.mockReset().mockImplementation(
+    async (input: {
+      sessionId: string;
+      provider: "claude" | "codex";
+      accountId: string | null;
+    }): Promise<AuthRegistration> => ({
+      ...input,
+      mode: input.accountId === null ? "auto" : "pinned",
+      effectiveAccountId: input.accountId ?? "default-profile",
+      generation: 1,
+      endpoint: "http://127.0.0.1:9999",
+      token: "fixture-routing-key",
+    }),
+  );
+  authProxySwitchSessionMock.mockReset();
+  authProxyRevokeSessionMock.mockReset().mockResolvedValue(undefined);
+  authProxyRecoverMock.mockReset().mockResolvedValue(undefined);
+  authProxyDisposeMock.mockReset();
+  authProxyLoginMock
+    .mockReset()
+    .mockImplementation(async (accountId: string) => ({ accountId, status: "pending" }));
+  authProxyLoginStatusMock.mockReset().mockImplementation(async (accountId: string) => ({
+    accountId,
+    status: accounts().find((account) => account.id === accountId)?.authenticated
+      ? "ready"
+      : "sign-in-required",
+  }));
+  authProxyCancelLoginMock
+    .mockReset()
+    .mockImplementation(async (accountId: string) => ({ accountId, status: "sign-in-required" }));
+  authProxyRemoveAccountMock.mockReset().mockResolvedValue(undefined);
 }
 const readCursorJsonlStateMock: Mock = vi.fn();
 const readCursorTokenUsageMock: Mock = vi.fn();
@@ -401,6 +478,7 @@ const configureCursorTurnEndedStoreMock: Mock = vi.fn();
 const sendDesktopNotificationMock: Mock = vi.fn();
 const findLatestClaudeSessionFileMock: Mock = vi.fn();
 const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDir}/codex-home`);
+const readCodexUserConfigMock: Mock = vi.fn();
 const captureCodexRolloutBaselineMock: Mock = vi.fn();
 const findLatestCodexSessionFileMock: Mock = vi.fn();
 const readCodexRolloutStateMock: Mock = vi.fn();
@@ -500,7 +578,36 @@ vi.mock("../../src/claude-accounts.js", () => ({
   ensureDefaultAccount: ensureDefaultAccountMock,
   seedSessionHome: seedSessionHomeMock,
   swapSessionCredentials: swapSessionCredentialsMock,
+  ensureAccountProjectsLink: vi.fn(),
   sessionClaudeHome: (sessionToolDir: string) => `${sessionToolDir}/claude-home`,
+}));
+
+vi.mock("../../src/auth-accounts.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof authAccountsModule>()),
+  AuthAccounts: class {
+    read = authAccountsReadMock;
+    remove = authAccountsRemoveMock;
+    add = vi.fn();
+    rename = vi.fn();
+    updatePool = vi.fn();
+  },
+}));
+
+vi.mock("../../src/auth-proxy.js", () => ({
+  AuthProxy: class {
+    configure = authProxyConfigureMock;
+    getState = authProxyGetStateMock;
+    registerSession = authProxyRegisterSessionMock;
+    switchSession = authProxySwitchSessionMock;
+    revokeSession = authProxyRevokeSessionMock;
+    recover = authProxyRecoverMock;
+    dispose = authProxyDisposeMock;
+    login = authProxyLoginMock;
+    loginInput = vi.fn();
+    loginStatus = authProxyLoginStatusMock;
+    cancelLogin = authProxyCancelLoginMock;
+    removeAccount = authProxyRemoveAccountMock;
+  },
 }));
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
@@ -738,6 +845,7 @@ vi.mock("../../src/agent-hook-state.js", () => ({
 vi.mock("../../src/agents/codex.js", async (importOriginal) => ({
   ...(await importOriginal<typeof codexModule>()),
   codexHookHomePath: codexHookHomePathMock,
+  readCodexUserConfig: readCodexUserConfigMock,
   captureCodexRolloutBaseline: captureCodexRolloutBaselineMock,
   findLatestCodexSessionFile: findLatestCodexSessionFileMock,
   readCodexRolloutState: readCodexRolloutStateMock,
@@ -1358,6 +1466,7 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   timerPromisesSleepMock.mockReset().mockImplementation((ms) => timersPromises.setTimeout(ms));
   rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
   resetAccountStoreMocks(accounts);
+  readCodexUserConfigMock.mockReset().mockResolvedValue("");
 
   upsertConfigRegistryPathMock.mockReset().mockReturnValue(["/tmp/spur.yaml"]);
   addUnconfiguredProjectMock.mockReset().mockReturnValue([]);
@@ -2090,6 +2199,19 @@ export {
   ensureDefaultAccountMock,
   seedSessionHomeMock,
   swapSessionCredentialsMock,
+  authAccountsReadMock,
+  authAccountsRemoveMock,
+  authProxyConfigureMock,
+  authProxyGetStateMock,
+  authProxyRegisterSessionMock,
+  authProxySwitchSessionMock,
+  authProxyRevokeSessionMock,
+  authProxyRecoverMock,
+  authProxyDisposeMock,
+  authProxyLoginMock,
+  authProxyLoginStatusMock,
+  authProxyCancelLoginMock,
+  authProxyRemoveAccountMock,
   readCursorJsonlStateMock,
   readCursorTokenUsageMock,
   sendDesktopNotificationMock,
