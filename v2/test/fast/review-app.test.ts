@@ -1,15 +1,28 @@
+import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { chmod, mkdtemp, writeFile, rm, readFile, symlink, link, stat } from "node:fs/promises";
+import type * as Crypto from "node:crypto";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  writeFile,
+  rm,
+  readFile,
+  symlink,
+  link,
+  stat,
+} from "node:fs/promises";
 import type * as FileSystem from "node:fs/promises";
 import type * as ReviewState from "../../src/review-state.js";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { transpileModule, ModuleKind, ScriptTarget } from "typescript";
 import { Command } from "commander";
 import { afterEach, expect, test, vi } from "vitest";
 import {
   parseConfig,
+  parseAttempt,
   parseRequest,
   prepareReview,
   blockReview,
@@ -23,7 +36,38 @@ import { object, readJson } from "../../src/github-app.js";
 import { plan, capability, defect } from "./review-feedback.fixture.js";
 
 const dirs: string[] = [];
-const faults = vi.hoisted(() => ({ approvedWrite: false, recovery: "", writes: 0 }));
+const faults = vi.hoisted(() => ({
+  approvedWrite: false,
+  recovery: "",
+  writes: 0,
+  afterWrite: undefined as ((path: string) => Promise<void>) | undefined,
+}));
+// Mocked admission only: public sanitized bytes cannot prove real registry membership.
+const admittedBytes = vi.hoisted(() => new Map<string, string>());
+vi.mock("node:crypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof Crypto>();
+  return {
+    ...actual,
+    createHash: (...args: Parameters<typeof actual.createHash>) => {
+      const hash = actual.createHash(...args);
+      const update = hash.update.bind(hash);
+      const digest = hash.digest.bind(hash);
+      const chunks: Buffer[] = [];
+      vi.spyOn(hash, "update").mockImplementation((data, encoding) => {
+        chunks.push(typeof data === "string" ? Buffer.from(data, encoding) : Buffer.from(data));
+        if (typeof data === "string") update(data, encoding);
+        else update(data);
+        return hash;
+      });
+      vi.spyOn(hash, "digest").mockImplementation(((encoding?: Crypto.BinaryToTextEncoding) => {
+        const admitted = admittedBytes.get(Buffer.concat(chunks).toString("base64"));
+        if (args[0] === "sha256" && admitted && encoding === "hex") return admitted;
+        return encoding === undefined ? digest() : digest(encoding);
+      }) as typeof hash.digest);
+      return hash;
+    },
+  };
+});
 vi.mock("../../src/review-state.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ReviewState>()),
   publishLaneState: vi.fn(async () => undefined),
@@ -43,11 +87,12 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       }
       if (
         faults.approvedWrite &&
-        typeof args[1] === "string" &&
-        args[1].includes('"status": "APPROVED"')
+        (typeof args[1] === "string" || Buffer.isBuffer(args[1])) &&
+        args[1].toString().includes('"status": "APPROVED"')
       )
         throw new Error("fixture final save denied");
-      return actual.writeFile(...args);
+      await actual.writeFile(...args);
+      await faults.afterWrite?.(String(args[0]));
     },
     link: async (...args: Parameters<typeof actual.link>) => {
       if (faults.recovery === "archive-link") {
@@ -58,6 +103,12 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     },
     open: async (...args: Parameters<typeof actual.open>) => {
       const file = await actual.open(...args);
+      if (faults.recovery === "registered-canonical-sync" && String(args[0]).endsWith("/1061"))
+        faults.recovery = "registered-sync";
+      else if (faults.recovery === "registered-sync" && String(args[0]).endsWith("/1061")) {
+        faults.recovery = "";
+        vi.spyOn(file, "sync").mockRejectedValueOnce(new Error("fixture directory sync denied"));
+      }
       if (faults.recovery === "canonical-sync" && String(args[0]).endsWith("/4")) {
         faults.recovery = "canonical-sync-ready";
       } else if (
@@ -75,6 +126,9 @@ afterEach(async () => {
   faults.approvedWrite = false;
   faults.recovery = "";
   faults.writes = 0;
+  faults.afterWrite = undefined;
+  admittedBytes.clear();
+  vi.unstubAllGlobals();
   vi.mocked(publishLaneState).mockReset().mockResolvedValue(undefined);
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
@@ -399,6 +453,7 @@ test.each([
   });
   const result = await publishReview(f.config, request, draft.session, f.transport);
   expect(result.status).toBe(verdict);
+  assert.ok("localVerdict" in result);
   expect(result.localVerdict).toBe(verdict);
   const publishedState = vi.mocked(publishLaneState).mock.lastCall?.[1];
   expect(publishedState).toMatchObject({ status: verdict });
@@ -738,76 +793,91 @@ test.each(["network", "http-403", "http-404"])(
   },
 );
 
+let sourceLoader: string | undefined;
+function fifoSourceLoader() {
+  if (!sourceLoader) {
+    const require = createRequire(new URL("../../../packages/web/package.json", import.meta.url));
+    sourceLoader = pathToFileURL(require.resolve("tsx/esm")).href;
+  }
+  return sourceLoader;
+}
+
 test.skipIf(process.platform === "win32").each(["legacy", "pending"])(
   "legacy recovery rejects FIFO archive during %s without hanging the canonical lock",
   async (mode) => {
     const f = await legacyRecoveryFixture();
     if (mode === "pending") {
       await f.recover();
+      expect(
+        createHash("sha256")
+          .update(await readFile(f.archive))
+          .digest("hex"),
+      ).toBe(f.sha256);
       await rm(f.archive);
     }
     await execFileAsync("mkfifo", ["-m", "600", f.archive], { timeout: 2_000 });
-    for (const name of ["review-app", "review-state", "review-interface", "github-app"]) {
-      const source = await readFile(new URL(`../../src/${name}.ts`, import.meta.url), "utf8");
-      await writeFile(
-        join(f.dir, `${name}.mjs`),
-        transpileModule(source, {
-          compilerOptions: { module: ModuleKind.ESNext, target: ScriptTarget.ES2022 },
-        }).outputText.replace(
-          /from "\.\/(review-state|review-interface|github-app)\.js"/g,
-          'from "./$1.mjs"',
-        ),
-      );
-    }
+    const calls = f.calls.length;
     const child = `
       import { readFile, lstat, access } from "node:fs/promises";
       try {
       const [moduleUrl, configuration, attempt, sha256, archive] = process.argv.slice(1);
-      let network = 0;
+      let network = 0, explicitNetwork = 0;
       globalThis.fetch = async () => { network++; throw new Error("unexpected fixture network"); };
+      const transport = async () => { explicitNetwork++; throw new Error("unexpected explicit network"); };
       const { recoverReview } = await import(moduleUrl);
       const request = JSON.parse(attempt);
       const before = await readFile(request.receipt);
       const original = await lstat(archive);
       let rejected = false;
-      try { await recoverReview(JSON.parse(configuration), request, request.session, sha256); }
+      try { await recoverReview(JSON.parse(configuration), request, request.session, sha256, transport); }
       catch (error) { rejected = error?.category === "legacy-archive-invalid"; }
       const after = await lstat(archive);
       let locked = true;
       try { await access(request.receipt + ".lock"); } catch { locked = false; }
-      console.log(JSON.stringify({ rejected, network, locked,
+      console.log(JSON.stringify({ rejected, network, explicitNetwork, locked,
         unchanged: before.equals(await readFile(request.receipt)),
-        fifo: after.isFIFO(), sameArchive: original.ino === after.ino && original.dev === after.dev }));
+        fifo: after.isFIFO(), privateMode: (after.mode & 0o777) === 0o600,
+        sameArchive: original.ino === after.ino && original.dev === after.dev && original.mode === after.mode }));
       } catch (error) {
         console.error(error);
         process.exitCode = 1;
       }
     `;
-    const result = await execFileAsync(
-      process.execPath,
-      [
-        "--input-type=module",
-        "-e",
-        child,
-        pathToFileURL(join(f.dir, "review-app.mjs")).href,
-        JSON.stringify(f.config),
-        JSON.stringify(f.request),
-        f.sha256,
-        f.archive,
-      ],
-      { timeout: 2_000, killSignal: "SIGKILL" },
-    );
-    expect(result.stdout.trim()).toBe(
-      JSON.stringify({
-        rejected: true,
-        network: 0,
-        locked: false,
-        unchanged: true,
-        fifo: true,
-        sameArchive: true,
-      }),
-    );
-    expect(f.posts()).toBe(0);
+    try {
+      const result = await execFileAsync(
+        process.execPath,
+        [
+          "--import",
+          fifoSourceLoader(),
+          "--input-type=module",
+          "-e",
+          child,
+          new URL("../../src/review-app.ts", import.meta.url).href,
+          JSON.stringify(f.config),
+          JSON.stringify(f.request),
+          f.sha256,
+          f.archive,
+        ],
+        { timeout: 2_000, killSignal: "SIGKILL" },
+      );
+      expect(result.stdout.trim()).toBe(
+        JSON.stringify({
+          rejected: true,
+          network: 0,
+          explicitNetwork: 0,
+          locked: false,
+          unchanged: true,
+          fifo: true,
+          privateMode: true,
+          sameArchive: true,
+        }),
+      );
+      expect(result.stderr).toBe("");
+      expect(f.calls).toHaveLength(calls);
+      expect(f.posts()).toBe(0);
+    } finally {
+      await rm(f.archive, { force: true });
+    }
   },
 );
 
@@ -1073,6 +1143,7 @@ async function legacyRecoveryFixture() {
 test("legacy recovery archives exact bytes and retires both attempts without a native review", async () => {
   const f = await legacyRecoveryFixture();
   const result = await f.recover();
+  assert.ok("legacyRecovery" in result);
   expect(result).toMatchObject({
     status: "PENDING",
     localVerdict: null,
@@ -1444,3 +1515,592 @@ test.each([
   expect(f.calls).toEqual([]);
   expect(await readFile(f.request.receipt)).toEqual(raw);
 });
+
+const registeredDigests = {
+  code: "372b4eef865e8bf7c5fe196105d90ed2e8ac76533bc504dc37a9f65b352f473f",
+  browser: "f74d0a206c31a3d5069a2895f4d951288a8d80749dcfdc2924c9a3270601badc",
+};
+
+async function registeredFixture(lane: "code" | "browser" = "code") {
+  const f = await lifecycleFixture();
+  const request = parseAttempt({
+    ...draft,
+    repo: "ashugaev/spur",
+    pr: 1061,
+    lane,
+    receipt: join(f.dir, "ashugaev", "spur", "1061", `${lane}.json`),
+  });
+  const config = { ...f.config, repositories: [request.repo] };
+  const legacy: Record<string, unknown> = {
+    repository: request.repo,
+    pr: request.pr,
+    lane,
+    session: "historical-review",
+    attempt: "historical-attempt",
+    H: "f61a0b6f9eb437cdc84037ca4d8d9b54c6b400a9",
+    B: "85c9d9e7487a6918fe6da0be1323107d0734e96d",
+    contractDigest: "379384c38ef273c111a2576abc5c090b3fe08a3bd68af35de0580b45897f030a",
+    status: "BLOCKED",
+    reviewId: null,
+    updatedAt: "2026-10-04T05:33:00Z",
+    ...(lane === "code"
+      ? {
+          localVerdict: "APPROVED",
+          publication: "DENIED: self-author 422 on pinned APPROVE; needs non-author credential",
+          evidence: ["sanitized historical diagnostic"],
+          notification: "SENT task",
+          lastDeltaCheck: "2026-11-04T05:23:08Z",
+          deltaNote: "historical delta",
+        }
+      : {
+          localConclusion: "APPROVED",
+          publicationBlockReason:
+            "self-author restriction: active GitHub account example is PR author; non-author credential required for publication",
+          evidence: [
+            {
+              id: "SC-01",
+              boundary: "Dashboard",
+              action: "Open dashboard",
+              expected: "Loads",
+              status: "PASS",
+              artifact: "dashboard.png",
+            },
+          ],
+          ownerNotification: "SENT task",
+        }),
+  };
+  const raw = Buffer.from(JSON.stringify(legacy));
+  await mkdir(join(f.dir, "ashugaev", "spur", "1061"), { recursive: true });
+  await writeFile(request.receipt, raw);
+  const sha256 = registeredDigests[lane];
+  admittedBytes.set(raw.toString("base64"), sha256);
+  const archive = `${request.receipt}.legacy-${sha256}`;
+  const calls: string[] = [];
+  const comments: { id: number; body: string; user: { login: string } }[] = [];
+  const controls: {
+    mode: string;
+    intercept?: (url: URL, options?: RequestInit) => Promise<Response | undefined>;
+  } = { mode: "" };
+  let freshReads = 0;
+  const transport: typeof fetch = async (input, options) => {
+    const url = new URL(String(input));
+    const path = url.pathname;
+    const method = options?.method ?? "GET";
+    calls.push(`${method} ${path}${url.search}`);
+    const intercepted = await controls.intercept?.(url, options);
+    if (intercepted) return intercepted;
+    const mode = controls.mode;
+    if (method === "GET" && path === "/app")
+      return Response.json({ id: mode === "wrong-app" ? 99 : config[lane].appId, slug: lane });
+    if (method === "GET" && path === `/repos/${request.repo}/installation`)
+      return Response.json({ id: 3, app_id: mode === "installation" ? 99 : config[lane].appId });
+    if (method === "POST" && path === "/app/installations/3/access_tokens")
+      return Response.json({
+        token: "fixture-token",
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+        permissions: {
+          pull_requests: mode === "permissions" ? "read" : "write",
+          metadata: "read",
+        },
+      });
+    if (method === "GET" && path === `/repos/${request.repo}`)
+      return Response.json({
+        id: 4,
+        full_name: mode === "repository" ? "other/repo" : request.repo,
+      });
+    if (method === "GET" && path === `/repos/${request.repo}/pulls/1061`) {
+      freshReads++;
+      return Response.json({
+        state: mode === "closed" ? "closed" : "open",
+        head: {
+          sha:
+            mode === "H" || (mode === "second-fresh" && freshReads === 2)
+              ? "d".repeat(40)
+              : request.H,
+        },
+        base: { sha: mode === "B" ? "d".repeat(40) : request.B },
+        user: { login: mode === "author" ? `${lane}[bot]` : "author" },
+      });
+    }
+    if (method === "GET" && path === `/repos/${request.repo}/pulls/1061/reviews`) {
+      if (mode === "malformed-history") return Response.json({ reviews: [] });
+      if (mode === "history") return Response.json([{ state: "PENDING" }]);
+      if (["later-page", "failed-page"].includes(mode)) {
+        if (url.searchParams.get("page") === "1")
+          return Response.json(Array(100).fill({ state: "COMMENTED" }));
+        return mode === "failed-page"
+          ? new Response("failed", { status: 503 })
+          : Response.json([{ state: "APPROVED" }]);
+      }
+      return Response.json([]);
+    }
+    if (path === `/repos/${request.repo}/issues/1061/comments`) {
+      if (method === "GET") return Response.json(comments);
+      if (method === "POST") {
+        let payload: { body: string };
+        try {
+          payload = JSON.parse(String(options?.body)) as { body: string };
+        } catch {
+          throw new Error("Invalid fixture body");
+        }
+        const row = {
+          id: comments.length + 1,
+          body: payload.body,
+          user: { login: `${lane}[bot]` },
+        };
+        comments.push(row);
+        return Response.json(row);
+      }
+    }
+    if (method === "GET" && path === `/repos/${request.repo}/issues/comments/${comments.length}`)
+      return Response.json(mode === "readback" ? {} : comments.at(-1));
+    throw new Error(`Unexpected fixture request ${method} ${path}`);
+  };
+  vi.mocked(publishLaneState).mockImplementation(
+    (await vi.importActual<typeof ReviewState>("../../src/review-state.js")).publishLaneState,
+  );
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      throw new Error("Unexpected global network");
+    }),
+  );
+  return {
+    config,
+    request,
+    raw,
+    legacy,
+    sha256,
+    archive,
+    calls,
+    comments,
+    controls,
+    recover: () => recoverReview(config, request, request.session, sha256, transport),
+    transport,
+  };
+}
+
+test.each(["code", "browser"] as const)(
+  "mocked-admission %s denial resets authority and replays exact archives",
+  async (lane) => {
+    const f = await registeredFixture(lane);
+    expect(await f.recover()).toMatchObject({
+      status: "PENDING",
+      localVerdict: null,
+      evidence: [],
+      coverage: null,
+      reviewId: null,
+      inputDigest: null,
+      mutationStarted: false,
+      supersededAttempts: ["historical-attempt"],
+      legacyRecovery: { digest: f.sha256, publication: "unknown" },
+      feedbackPublication: { status: "confirmed" },
+    });
+    expect(await readFile(f.archive)).toEqual(f.raw);
+    expect((await stat(f.archive)).mode & 0o077).toBe(0);
+    const pending = await readFile(f.request.receipt);
+    const writes = faults.writes;
+    expect(await f.recover()).toMatchObject({
+      status: "PENDING",
+      feedbackPublication: { status: "confirmed" },
+    });
+    expect(faults.writes).toBe(writes);
+    expect(await readFile(f.request.receipt)).toEqual(pending);
+    expect(f.comments).toHaveLength(1);
+    expect(f.calls.filter((row) => row.includes("/reviews?"))).toHaveLength(2);
+    f.calls.splice(0);
+    const next = { ...f.request, attempt: "next-attempt" };
+    expect(await prepareReview(f.config, next, next.session, f.transport)).toMatchObject({
+      status: "PENDING",
+    });
+    expect(f.calls.some((row) => row.includes("/reviews"))).toBe(false);
+    await expect(f.recover()).rejects.toThrow();
+    expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+  },
+);
+
+test.each([undefined, capability, {}])(
+  "registered recovery refuses invalid fresh plan %j before transport",
+  async (feedback) => {
+    const f = await registeredFixture();
+    const writes = faults.writes;
+    await expect(
+      recoverReview(
+        f.config,
+        { ...f.request, feedback } as typeof f.request,
+        f.request.session,
+        f.sha256,
+        f.transport,
+      ),
+    ).rejects.toThrow(feedback === undefined ? "invalid-response" : "invalid-review-feedback");
+    expect(await readFile(f.request.receipt)).toEqual(f.raw);
+    expect(faults.writes).toBe(writes);
+    expect(f.calls).toEqual([]);
+  },
+);
+
+test("registered replay confirms feedback transiently and refuses a different prepared plan", async () => {
+  const f = await registeredFixture();
+  await f.recover();
+  const current = (await readJson(f.request.receipt)) as Record<string, unknown>;
+  current.feedbackPublication = { status: "unconfirmed" };
+  await writeFile(f.request.receipt, JSON.stringify(current));
+  const pending = await readFile(f.request.receipt);
+  const writes = faults.writes;
+  expect(await f.recover()).toMatchObject({
+    status: "PENDING",
+    feedbackPublication: { status: "confirmed" },
+  });
+  expect(await readFile(f.request.receipt)).toEqual(pending);
+  expect(faults.writes).toBe(writes);
+  f.request.feedback = { ...plan, reason: "Different fresh plan" };
+  f.calls.splice(0);
+  await expect(f.recover()).rejects.toThrow("attempt-conflict");
+  expect(await readFile(f.request.receipt)).toEqual(pending);
+  expect(await readFile(f.archive)).toEqual(f.raw);
+  expect(faults.writes).toBe(writes);
+  expect(f.calls).toEqual([]);
+});
+
+test.each(["code", "browser"] as const)(
+  "real-hash %s sanitized lookalike and original digest both reject",
+  async (lane) => {
+    const f = await registeredFixture(lane);
+    admittedBytes.clear();
+    const realDigest = createHash("sha256").update(f.raw).digest("hex");
+    expect(realDigest).not.toBe(f.sha256);
+    for (const sha256 of [realDigest, f.sha256]) {
+      await expect(
+        recoverReview(f.config, f.request, f.request.session, sha256, f.transport),
+      ).rejects.toThrow();
+      expect(await readFile(f.request.receipt)).toEqual(f.raw);
+      await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    expect(f.calls).toEqual([]);
+  },
+);
+
+test.each(["code", "browser"] as const)(
+  "mocked-admission %s profile independently refuses malformed authority",
+  async (lane) => {
+    const f = await registeredFixture(lane);
+    for (const change of [
+      { extra: true },
+      { repository: "other/repo" },
+      { pr: 7 },
+      { lane: lane === "code" ? "browser" : "code" },
+      { H: draft.H },
+      { B: draft.B },
+      { contractDigest: draft.contractDigest },
+      { reviewId: 8 },
+      { status: "PENDING" },
+      { mutationStarted: true },
+      { inputDigest: "a".repeat(64) },
+      { publication: "UNKNOWN" },
+      { evidence: [lane === "code" ? {} : { status: "PASS" }] },
+      { updatedAt: false },
+      lane === "code" ? { localVerdict: "FAIL" } : { localConclusion: "FAIL" },
+      lane === "code" ? { publication: "DENIED" } : { publicationBlockReason: "self-author" },
+    ]) {
+      const raw = Buffer.from(JSON.stringify({ ...f.legacy, ...change }));
+      admittedBytes.set(raw.toString("base64"), f.sha256);
+      await writeFile(f.request.receipt, raw);
+      await expect(f.recover()).rejects.toThrow();
+      expect(await readFile(f.request.receipt)).toEqual(raw);
+      await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    expect(f.calls).toEqual([]);
+  },
+);
+
+test.each([
+  "wrong-app",
+  "installation",
+  "permissions",
+  "repository",
+  "author",
+  "closed",
+  "H",
+  "B",
+  "history",
+  "malformed-history",
+  "later-page",
+  "failed-page",
+  "second-fresh",
+])("mocked-admission preflight %s preserves original and replay bytes", async (mode) => {
+  const f = await registeredFixture();
+  f.controls.mode = mode;
+  await expect(f.recover()).rejects.toThrow();
+  expect(await readFile(f.request.receipt)).toEqual(f.raw);
+  await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+  expect(f.comments).toHaveLength(0);
+  if (["later-page", "failed-page"].includes(mode))
+    expect(f.calls.some((row) => row.includes("page=2"))).toBe(true);
+  f.controls.mode = "";
+  await f.recover();
+  const pending = await readFile(f.request.receipt);
+  f.controls.mode = mode === "second-fresh" ? "H" : mode;
+  const writes = faults.writes;
+  await expect(f.recover()).rejects.toThrow();
+  expect(await readFile(f.request.receipt)).toEqual(pending);
+  expect(faults.writes).toBe(writes);
+  expect(await readFile(f.archive)).toEqual(f.raw);
+  expect(f.comments).toHaveLength(1);
+  expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
+});
+
+test.each(["wrong-bytes", "public-mode", "symlink"])(
+  "mocked-admission %s archive rejects before network",
+  async (mode) => {
+    const f = await registeredFixture();
+    if (mode === "symlink") await symlink(f.request.receipt, f.archive);
+    else {
+      await writeFile(f.archive, mode === "wrong-bytes" ? "conflict" : f.raw, {
+        mode: 0o600,
+      });
+      if (mode === "public-mode") {
+        await chmod(f.archive, 0o644);
+        expect((await stat(f.archive)).mode & 0o777).toBe(0o644);
+      }
+    }
+    const archived = await readFile(f.archive);
+    await expect(f.recover()).rejects.toThrow("legacy-archive-invalid");
+    expect(await readFile(f.request.receipt)).toEqual(f.raw);
+    expect(await readFile(f.archive)).toEqual(archived);
+    expect(f.calls).toEqual([]);
+  },
+);
+
+test.each(["authentication", "history", "fresh", "archive", "stage", "delete"])(
+  "mocked-admission detects canonical drift during %s and releases lock",
+  async (phase) => {
+    const f = await registeredFixture();
+    const external = Buffer.from("external owner bytes");
+    let changed = false;
+    const change = async () => {
+      if (changed) return;
+      changed = true;
+      if (phase === "delete") await rm(f.request.receipt);
+      else await writeFile(f.request.receipt, external);
+    };
+    if (phase === "archive" || phase === "stage") {
+      faults.afterWrite = async (path) => {
+        if (path.endsWith(phase === "archive" ? "legacy.json" : "receipt.json")) await change();
+      };
+    } else {
+      let reads = 0;
+      f.controls.intercept = async (url) => {
+        if (url.pathname.endsWith("/pulls/1061")) reads++;
+        if (
+          (phase === "authentication" && url.pathname === "/app") ||
+          (["history", "delete"].includes(phase) && url.pathname.endsWith("/reviews")) ||
+          (phase === "fresh" && reads === 2)
+        )
+          await change();
+        return undefined;
+      };
+    }
+    await expect(f.recover()).rejects.toThrow();
+    expect(changed).toBe(true);
+    if (phase === "delete")
+      await expect(readFile(f.request.receipt)).rejects.toMatchObject({ code: "ENOENT" });
+    else expect(await readFile(f.request.receipt)).toEqual(external);
+    await expect(stat(`${f.request.receipt}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(f.comments).toHaveLength(0);
+    if (["archive", "stage"].includes(phase)) expect(await readFile(f.archive)).toEqual(f.raw);
+  },
+);
+
+test.each(
+  ["confirmed", "failed"].flatMap((outcome) =>
+    ["await-replace", "await-delete", "stage-replace", "stage-delete"].map((phase) => ({
+      outcome,
+      phase,
+    })),
+  ),
+)(
+  "registered conversion $outcome feedback save preserves $phase external state",
+  async ({ outcome, phase }) => {
+    const f = await registeredFixture();
+    const external = Buffer.from("external owner after first rename");
+    let changed = false;
+    const change = async () => {
+      if (changed) return;
+      changed = true;
+      if (phase.endsWith("delete")) await rm(f.request.receipt);
+      else await writeFile(f.request.receipt, external);
+    };
+    if (outcome === "failed") f.controls.mode = "readback";
+    if (phase.startsWith("stage")) {
+      let stages = 0;
+      faults.afterWrite = async (path) => {
+        if (path.endsWith("receipt.json") && ++stages === 2) await change();
+      };
+    } else
+      f.controls.intercept = async (url) => {
+        if (url.pathname.includes("/issues/comments/")) await change();
+        return undefined;
+      };
+    await expect(f.recover()).rejects.toThrow("receipt-write");
+    expect(changed).toBe(true);
+    if (phase.endsWith("delete"))
+      await expect(readFile(f.request.receipt)).rejects.toMatchObject({ code: "ENOENT" });
+    else expect(await readFile(f.request.receipt)).toEqual(external);
+    expect(await readFile(f.archive)).toEqual(f.raw);
+    await expect(stat(`${f.request.receipt}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
+  },
+);
+
+test.each(["preflight-drift", "announce-drift", "readback"])(
+  "mocked-admission replay %s never saves canonical",
+  async (mode) => {
+    const f = await registeredFixture();
+    await f.recover();
+    const before = await readFile(f.request.receipt);
+    const external = Buffer.from("external replay state");
+    let changed = false;
+    if (mode === "readback") {
+      f.controls.mode = "readback";
+      f.comments.splice(0);
+    } else
+      f.controls.intercept = async (url) => {
+        if (
+          !changed &&
+          (mode === "preflight-drift"
+            ? url.pathname.endsWith("/reviews")
+            : url.pathname.endsWith("/comments"))
+        ) {
+          changed = true;
+          await writeFile(f.request.receipt, external);
+        }
+        return undefined;
+      };
+    const writes = faults.writes;
+    await expect(f.recover()).rejects.toThrow();
+    expect(await readFile(f.request.receipt)).toEqual(mode === "readback" ? before : external);
+    expect(faults.writes).toBe(writes + (changed ? 1 : 0));
+    expect(await readFile(f.archive)).toEqual(f.raw);
+  },
+);
+
+test.each([
+  "archive-write",
+  "archive-link",
+  "directory-sync",
+  "canonical-write",
+  "canonical-sync",
+  "readback",
+])("mocked-admission %s fault retains archive and ownership rules", async (mode) => {
+  const f = await registeredFixture();
+  if (mode === "readback" || mode === "canonical-sync") {
+    if (mode === "readback") f.controls.mode = mode;
+    else faults.recovery = "registered-canonical-sync";
+    expect(await f.recover()).toMatchObject({ status: "BLOCKED", reviewBlocked: true });
+    await expect(f.recover()).rejects.toThrow();
+  } else {
+    faults.recovery = mode;
+    if (mode === "directory-sync") faults.recovery = "registered-sync";
+    await expect(f.recover()).rejects.toThrow();
+    expect(await readFile(f.request.receipt)).toEqual(f.raw);
+    expect(await f.recover()).toMatchObject({ status: "PENDING" });
+  }
+  expect(await readFile(f.archive)).toEqual(f.raw);
+  expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
+});
+
+test.each(["conversion", "replay"])(
+  "mocked-admission %s refuses unsafe configured key",
+  async (phase) => {
+    const f = await registeredFixture();
+    if (phase === "replay") await f.recover();
+    const before = await readFile(f.request.receipt);
+    f.calls.splice(0);
+    await chmod(f.config.code.keyPath, 0o644);
+    await expect(f.recover()).rejects.toThrow("unsafe-key-permissions");
+    expect(await readFile(f.request.receipt)).toEqual(before);
+    expect(f.calls).toEqual([]);
+  },
+);
+
+test("mocked-admission holds canonical alias lock during preflight and refuses stale owner", async () => {
+  const f = await registeredFixture();
+  const alias = `${f.config.receiptRoot}-alias`;
+  await symlink(f.config.receiptRoot, alias);
+  dirs.push(alias);
+  let entered!: () => void;
+  let release!: () => void;
+  const paused = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let didPause = false;
+  f.controls.intercept = async (url) => {
+    if (!didPause && url.pathname.endsWith("/reviews")) {
+      didPause = true;
+      entered();
+      await held;
+    }
+    return undefined;
+  };
+  const first = f.recover();
+  await paused;
+  try {
+    const request = {
+      ...f.request,
+      receipt: join(alias, "ashugaev", "spur", "1061", "code.json"),
+    };
+    await expect(
+      recoverReview(
+        { ...f.config, receiptRoot: alias },
+        request,
+        request.session,
+        f.sha256,
+        f.transport,
+      ),
+    ).rejects.toThrow("attempt-locked");
+    expect(await readFile(f.request.receipt)).toEqual(f.raw);
+  } finally {
+    release();
+  }
+  expect(await first).toMatchObject({ status: "PENDING" });
+  const next = { ...f.request, attempt: "next-attempt" };
+  await prepareReview(f.config, next, next.session, f.transport);
+  const newer = await readFile(f.request.receipt);
+  f.calls.splice(0);
+  await expect(f.recover()).rejects.toThrow();
+  expect(await readFile(f.request.receipt)).toEqual(newer);
+  expect(f.calls).toEqual([]);
+});
+
+test.each(["evidence", "verdict", "mutation", "review-id", "lineage", "unknown", "raw-current"])(
+  "mocked-admission refuses touched registered PENDING %s before network",
+  async (mode) => {
+    const f = await registeredFixture();
+    await f.recover();
+    const current = (await readJson(f.request.receipt)) as Record<string, unknown>;
+    if (mode === "evidence")
+      current.evidence = [{ status: "passed", evidence: "already assessed" }];
+    if (mode === "verdict") current.localVerdict = "APPROVED";
+    if (mode === "mutation" || mode === "review-id") {
+      current.mutationStarted = true;
+      current.inputDigest = "d".repeat(64);
+    }
+    if (mode === "review-id") current.reviewId = 1;
+    if (mode === "lineage") current.supersededAttempts = [];
+    if (mode === "unknown") current.status = "UNKNOWN";
+    const raw = Buffer.from(JSON.stringify(current));
+    await writeFile(f.request.receipt, raw);
+    f.calls.splice(0);
+    const hash = mode === "raw-current" ? createHash("sha256").update(raw).digest("hex") : f.sha256;
+    await expect(
+      recoverReview(f.config, f.request, f.request.session, hash, f.transport),
+    ).rejects.toThrow();
+    expect(await readFile(f.request.receipt)).toEqual(raw);
+    expect(await readFile(f.archive)).toEqual(f.raw);
+    expect(f.calls).toEqual([]);
+  },
+);

@@ -266,6 +266,12 @@ import {
   listServiceInstancesForSession,
   listSessions,
   readTelegramBindings,
+  readArchivedSession,
+  listTelegramTopicSessionIds,
+  readTelegramTopicGcClock,
+  writeTelegramTopicGcClock,
+  readTelegramTopicGcFailures,
+  writeTelegramTopicGcFailures,
   retireTelegramLegacyState,
   readServiceInstance,
   readSession,
@@ -853,6 +859,14 @@ const REAP_INTERVAL_MS = 5 * 60 * 1000;
 // this.config on every tick, so a config-only reload takes effect without a
 // daemon restart).
 const SESSION_GC_TICK_MS = 5 * 60_000;
+const TELEGRAM_TOPIC_GC_INTERVAL_MS = 24 * 60 * 60_000;
+const TELEGRAM_TOPIC_GC_MAX_SESSIONS = 20;
+const TELEGRAM_TOPIC_GC_MAX_FAILED_SWEEPS = 3;
+
+// Session-like owner of Telegram topic state; "missing" = no record on disk.
+type TelegramTopicOwner = Pick<SessionRecord, "id" | "project" | "slots"> & {
+  status: SessionStatus | "missing";
+};
 // isTerminalSessionStatus deliberately excludes "stopped" (used to gate live
 // polling loops that must keep tracking a stopped-but-not-yet-reconciled
 // session). The reaper needs the full set of statuses that mean "this
@@ -3879,6 +3893,8 @@ export class SessionService {
   private compactCursor = 0;
   private sessionGcTimer: NodeJS.Timeout | null = null;
   private sessionGcRunning = false;
+  private telegramTopicGcRunning = false;
+  private telegramTopicGcClaimAt: number | null = null;
   private backgroundLoopsStarted = false;
   // Construction time, not epoch 0: a daemon restart must not treat "never
   // swept before" as "due immediately" — the first tick after a restart
@@ -8505,6 +8521,7 @@ export class SessionService {
       void this.runSessionGcSweep();
       void this.runDiskBudgetSweep();
       this.runArtifactRetentionSweep();
+      void this.runTelegramTopicGcSweep();
     }, SESSION_GC_TICK_MS);
     this.sessionGcTimer.unref();
   }
@@ -9019,7 +9036,10 @@ export class SessionService {
     return { target, source };
   }
 
-  private telegramTopicHasOtherOwner(session: SessionRecord, target: TelegramReplyTarget): boolean {
+  private telegramTopicHasOtherOwner(
+    session: Pick<SessionRecord, "id" | "project">,
+    target: TelegramReplyTarget,
+  ): boolean {
     const projects = new Set([
       ...Object.keys(this.config.projects),
       session.project,
@@ -9041,10 +9061,18 @@ export class SessionService {
   }
 
   private async retireTelegramTopics(
-    session: SessionRecord,
+    session: TelegramTopicOwner,
     targets: { target: TelegramReplyTarget; owned: boolean }[],
     publicationFailure = false,
-  ): Promise<void> {
+    notice: "terminal" | "gc" = "terminal",
+  ): Promise<{
+    failed: TelegramReplyTarget[];
+    removed: { source: TelegramSourceConfig; topicId: number }[];
+  }> {
+    const outcome = {
+      failed: [] as TelegramReplyTarget[],
+      removed: [] as { source: TelegramSourceConfig; topicId: number }[],
+    };
     const groups = new Map<number, { source: TelegramSourceConfig; results: string[] }>();
     const seen = new Set<string>();
     for (const { target, owned } of targets) {
@@ -9080,14 +9108,17 @@ export class SessionService {
         group?.results.push(
           `Topic ${topicId} ${result === "deleted" ? "deleted with the agent" : "already deleted"}.`,
         );
+        outcome.removed.push({ source, topicId });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Telegram request failed";
+        outcome.failed.push(target);
         group?.results.push(`Topic ${topicId} could not be deleted: ${message}.`);
         this.logTelegramNoticeFailure(session.id, "topic deletion", error);
       } finally {
         release();
       }
     }
+    if (notice === "gc") return outcome;
     for (const [chatId, { source, results }] of groups) {
       try {
         await sendTelegramReply(
@@ -9104,6 +9135,7 @@ export class SessionService {
         );
       }
     }
+    return outcome;
   }
 
   private async cleanupTerminalTelegram(session: SessionRecord): Promise<void> {
@@ -9137,6 +9169,198 @@ export class SessionService {
       targets.push({ target: latest, owned: false });
     }
     await this.retireTelegramTopics(session, targets);
+  }
+
+  // GC variant of the terminal cleanup: Telegram state is the retry locator,
+  // so it is removed only after every topic delete is confirmed (or the retry
+  // budget is spent). An orphaned reply-target topic counts as owned;
+  // retireTelegramTopics still retains it when another session's binding holds it.
+  private async cleanupOrphanedTelegram(owner: TelegramTopicOwner): Promise<void> {
+    const dataDir = this.config.dataDir;
+    const latest = readTelegramReplyTarget(dataDir, owner.id);
+    const projectIds = new Set([
+      ...Object.keys(this.config.projects),
+      owner.project,
+      ...(latest ? [latest.projectId] : []),
+    ]);
+    const targets: { target: TelegramReplyTarget; owned: boolean }[] = [];
+    for (const projectId of projectIds) {
+      const sourceIds = new Set([
+        ...Object.keys(this.config.projects[projectId]?.sources ?? {}),
+        ...(latest?.projectId === projectId ? [latest.sourceId] : []),
+      ]);
+      for (const sourceId of sourceIds) {
+        for (const binding of readTelegramBindings(dataDir, projectId, sourceId).values()) {
+          if (binding.sessionId !== owner.id) continue;
+          targets.push({
+            target: { ...binding, projectId, sourceId, updatedAt: nowIso() },
+            owned: true,
+          });
+        }
+      }
+    }
+    if (latest) targets.push({ target: latest, owned: true });
+    const bound = targets.filter(({ target }) => target !== latest).map(({ target }) => target);
+    const outcome = await this.retireTelegramTopics(owner, targets, false, "gc");
+    // Each topic settles on its own: its locator goes once the topic is gone
+    // (or retained by another owner); a failed topic keeps its locator.
+    const failedKeys = new Set(
+      outcome.failed.map((target) => telegramBindingKey(target.chatId, target.messageThreadId)),
+    );
+    for (const target of bound) {
+      const key = telegramBindingKey(target.chatId, target.messageThreadId);
+      if (failedKeys.has(key)) continue;
+      writeTelegramBindings(dataDir, target.projectId, target.sourceId, [], {
+        preserveExisting: true,
+        removeKeys: [key],
+      });
+    }
+    if (latest && !failedKeys.has(telegramBindingKey(latest.chatId, latest.messageThreadId))) {
+      deleteTelegramReplyTarget(dataDir, owner.id);
+    }
+    for (const { source, topicId } of outcome.removed) {
+      if (source.chatId === undefined || source.chatId > 0) continue;
+      try {
+        await sendTelegramReply(
+          source,
+          { chatId: source.chatId },
+          `Session ${owner.status === "missing" ? owner.id : telegramSessionLabel(owner)} topic ${topicId} removed by daily cleanup (status: ${owner.status}).`,
+          { lifecycle: true },
+        );
+      } catch {
+        this.logTelegramNoticeFailure(
+          owner.id,
+          "lifecycle notice",
+          new Error("Telegram notice failed or timed out"),
+        );
+      }
+    }
+    const failures = readTelegramTopicGcFailures(dataDir);
+    const failedSweeps = (failures[owner.id] ?? 0) + 1;
+    if (outcome.failed.length > 0 && failedSweeps < TELEGRAM_TOPIC_GC_MAX_FAILED_SWEEPS) {
+      writeTelegramTopicGcFailures(dataDir, { ...failures, [owner.id]: failedSweeps });
+      return;
+    }
+    for (const projectId of projectIds) {
+      deleteTelegramSourceStateForSession(dataDir, projectId, owner.id);
+    }
+    if (owner.id in failures) {
+      const { [owner.id]: _cleared, ...rest } = failures;
+      writeTelegramTopicGcFailures(dataDir, rest);
+    }
+    if (outcome.failed.length > 0) {
+      this.logEvent("source.telegram.topic_gc.gave_up", {
+        level: "warn",
+        sessionId: owner.id,
+        message: `Telegram topic GC gave up on ${owner.id} after ${failedSweeps} failed sweeps`,
+      });
+    }
+  }
+
+  // Dead = completed | killed (live or archived record) | missing. A read
+  // failure throws: unknown is never dead.
+  private classifyTelegramTopicOwner(sessionId: string): TelegramTopicOwner | null {
+    const record =
+      readSession(this.config.dataDir, sessionId) ??
+      readArchivedSession(this.config.dataDir, sessionId);
+    if (record) {
+      return record.status === "completed" || record.status === "killed"
+        ? {
+            id: record.id,
+            project: record.project,
+            ...(record.slots ? { slots: record.slots } : {}),
+            status: record.status,
+          }
+        : null;
+    }
+    const project = Object.keys(this.config.projects)[0];
+    return project ? { id: sessionId, project, status: "missing" } : null;
+  }
+
+  // Drops failure counts of ids that left the scan (state removed elsewhere) or
+  // are no longer dead (reopened). An unreadable record keeps its count.
+  private pruneTelegramTopicGcFailures(scanned: ReadonlySet<string>): void {
+    const dataDir = this.config.dataDir;
+    const failures = readTelegramTopicGcFailures(dataDir);
+    const kept: Record<string, number> = {};
+    for (const [id, count] of Object.entries(failures)) {
+      if (!scanned.has(id)) continue;
+      try {
+        if (!this.classifyTelegramTopicOwner(id)) continue;
+      } catch {
+        // unknown: keep
+      }
+      kept[id] = count;
+    }
+    if (Object.keys(kept).length !== Object.keys(failures).length) {
+      writeTelegramTopicGcFailures(dataDir, kept);
+    }
+  }
+
+  // Daily daemon sweep of Telegram topics whose session is dead. Rides the
+  // session GC tick; the clock is persisted so restarts never re-sweep.
+  private async runTelegramTopicGcSweep(): Promise<void> {
+    if (this.telegramTopicGcRunning) return;
+    this.telegramTopicGcRunning = true;
+    try {
+      const dataDir = this.config.dataDir;
+      const now = Date.now();
+      // The in-memory claim is set before the write, so a failing write still
+      // defers the next sweep (and its warning) by a full interval.
+      const last = this.telegramTopicGcClaimAt ?? readTelegramTopicGcClock(dataDir);
+      if (last === null) {
+        this.telegramTopicGcClaimAt = now;
+        writeTelegramTopicGcClock(dataDir, now);
+        return;
+      }
+      if (now - last < TELEGRAM_TOPIC_GC_INTERVAL_MS) return;
+      this.telegramTopicGcClaimAt = now;
+      writeTelegramTopicGcClock(dataDir, now);
+      const candidates: string[] = [];
+      const skipped: string[] = [];
+      const scanned = listTelegramTopicSessionIds(dataDir, Object.keys(this.config.projects));
+      this.pruneTelegramTopicGcFailures(scanned);
+      for (const id of [...scanned].sort()) {
+        if (candidates.length >= TELEGRAM_TOPIC_GC_MAX_SESSIONS) break;
+        try {
+          if (this.classifyTelegramTopicOwner(id)) candidates.push(id);
+        } catch {
+          skipped.push(id);
+        }
+      }
+      const retired: string[] = [];
+      for (const id of candidates) {
+        try {
+          await this.withWorkspaceLifecycleLocks(id, async () => {
+            const owner = this.classifyTelegramTopicOwner(id);
+            if (!owner) return;
+            await this.cleanupOrphanedTelegram(owner);
+            retired.push(id);
+          });
+        } catch {
+          skipped.push(id);
+        }
+      }
+      if (skipped.length > 0) {
+        this.logEvent("source.telegram.topic_gc.failed", {
+          level: "warn",
+          message: `Telegram topic GC skipped ${skipped.length} session(s): ${skipped.join(", ")}`,
+        });
+      }
+      if (retired.length > 0) {
+        this.logEvent("source.telegram.topic_gc.completed", {
+          level: "info",
+          message: `Telegram topic GC retired ${retired.join(", ")}`,
+        });
+      }
+    } catch (error) {
+      this.logEvent("source.telegram.topic_gc.failed", {
+        level: "warn",
+        message: `Telegram topic GC failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    } finally {
+      this.telegramTopicGcRunning = false;
+    }
   }
 
   private logTelegramNoticeFailure(sessionId: string, context: string, error: unknown): void {

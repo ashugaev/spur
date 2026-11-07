@@ -11,6 +11,11 @@ dist/mcp-tunnel.js
 dist/installed-instance.js
 dist/build-identity.js
 dist/daemon-contracts.js
+dist/review-app-cli.js
+dist/review-app.js
+dist/review-interface.js
+dist/review-state.js
+dist/github-app.js
 web/dist-server/web-server.js
 spur.yaml.reference
 skills/spur/SKILL.md
