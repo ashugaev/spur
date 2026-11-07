@@ -26429,7 +26429,7 @@ describe("SessionService", () => {
   });
 
   describe("session views", () => {
-    it("exposes triggerOrigin in session views", async () => {
+    it("keeps triggerOrigin out of session views", async () => {
       mockClaudeJsonlState("waiting");
       const config = baseConfig();
       config.admission.memoryGuard.shedEnabled = false;
@@ -26468,7 +26468,11 @@ describe("SessionService", () => {
           await sessionServiceInternals(service).enrichDashboard(record),
         ];
         expect(views).toHaveLength(3);
-        for (const view of views) expect(view).toMatchObject({ triggerOrigin: origin });
+        expect(record.triggerOrigin).toEqual(origin);
+        for (const view of views) {
+          expect(view).toMatchObject({ id: "api-tagged" });
+          expect(view).not.toHaveProperty("triggerOrigin");
+        }
       } finally {
         service.dispose();
       }
