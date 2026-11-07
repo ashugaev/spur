@@ -374,13 +374,48 @@ export async function readBranchDestination(
     if (!remote || !target?.startsWith(prefix)) return null;
     const remoteBranch = target.slice(prefix.length);
     if (!remoteBranch || (!allowUpstream && remoteBranch !== branch)) return null;
-    const fetch = await runGit(
+    const mappings = await runGit(
       repoPath,
-      ["config", "--get-all", `remote.${remote}.fetch`],
+      ["config", "--get-regexp", "^remote\\..*\\.(fetch|push)$"],
       GIT_READ_TIMEOUT_MS,
     );
+    const fetches: string[] = [];
+    const pushSpecs: string[] = [];
+    for (const line of mappings.split("\n")) {
+      const [key, value = ""] = line.split(/\s+/, 2);
+      if (key === `remote.${remote}.fetch`) fetches.push(value);
+      if (key === `remote.${remote}.push`) pushSpecs.push(value);
+    }
     const canonicalFetch = `refs/heads/*:refs/remotes/${remote}/*`;
-    if (fetch !== canonicalFetch && fetch !== `+${canonicalFetch}`) return null;
+    if (
+      fetches.length !== 1 ||
+      (fetches[0] !== canonicalFetch && fetches[0] !== `+${canonicalFetch}`)
+    ) {
+      return null;
+    }
+    const pushTargets = new Set<string>();
+    for (const pushSpec of pushSpecs) {
+      const spec = pushSpec.startsWith("+") ? pushSpec.slice(1) : pushSpec;
+      if (spec === "refs/heads/*:refs/heads/*") {
+        pushTargets.add(ref);
+        continue;
+      }
+      const [source, destination = source, ...extra] = spec.split(":");
+      if (!source || extra.length > 0 || source.includes("*")) return null;
+      if (source !== ref && source !== branch) {
+        if (source.startsWith("refs/heads/") || source.startsWith("refs/tags/")) continue;
+        return null;
+      }
+      if (!destination || destination.includes("*")) return null;
+      pushTargets.add(destination.startsWith("refs/") ? destination : `refs/heads/${destination}`);
+    }
+    if (
+      pushTargets.size > 1 ||
+      (pushTargets.size === 1 && !pushTargets.has(`refs/heads/${remoteBranch}`)) ||
+      (pushing && pushSpecs.length > 0 && pushTargets.size === 0)
+    ) {
+      return null;
+    }
     const urls = await runGit(
       repoPath,
       ["remote", "get-url", ...(pushing ? ["--push"] : []), "--all", remote],

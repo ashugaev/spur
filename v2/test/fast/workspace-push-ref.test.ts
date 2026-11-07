@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readBranchPushUrl } from "../../src/workspace.js";
+import { readBranchDestination, readBranchPushUrl } from "../../src/workspace.js";
 import { execFileAsync } from "../helpers/common.js";
 
 describe("branch push destination", () => {
@@ -38,6 +38,56 @@ describe("branch push destination", () => {
     });
     return stdout;
   }
+
+  it.each([
+    { targets: ["first"], expected: "first", extra: false },
+    { targets: ["first", "second"], expected: null, extra: false },
+    { targets: ["first", "first"], expected: "first", extra: false },
+    { targets: ["first"], expected: "first", extra: true },
+    { targets: [branch], expected: branch, extra: true },
+    { targets: [branch, "second"], expected: null, extra: false },
+    { targets: [], expected: branch, extra: false, mirror: true },
+    { targets: ["first"], expected: null, extra: false, mirror: true },
+  ])("proves unique configured push mappings ($targets, $extra)", async (case_) => {
+    const { repo, remote } = await createRepo();
+    await execFileAsync("git", ["config", `branch.${branch}.remote`, "origin"], { cwd: repo });
+    await execFileAsync("git", ["config", `branch.${branch}.merge`, "refs/heads/first"], {
+      cwd: repo,
+    });
+    for (const target of ["first", "second", branch]) {
+      await execFileAsync("git", ["update-ref", `refs/remotes/origin/${target}`, "HEAD"], {
+        cwd: repo,
+      });
+    }
+    for (const target of case_.targets) {
+      await execFileAsync(
+        "git",
+        ["config", "--add", "remote.origin.push", `refs/heads/${branch}:refs/heads/${target}`],
+        { cwd: repo },
+      );
+    }
+    if (case_.extra) {
+      await execFileAsync(
+        "git",
+        ["config", "--add", "remote.origin.push", "refs/heads/main:refs/heads/unrelated"],
+        { cwd: repo },
+      );
+    }
+    if (case_.mirror) {
+      await execFileAsync(
+        "git",
+        ["config", "--add", "remote.origin.push", "refs/heads/*:refs/heads/*"],
+        { cwd: repo },
+      );
+    }
+
+    await expect(readBranchDestination(repo, branch)).resolves.toEqual(
+      case_.expected ? { url: remote, branch: case_.expected } : null,
+    );
+    await expect(readBranchPushUrl(repo, branch)).resolves.toBe(
+      case_.expected === branch ? remote : null,
+    );
+  });
 
   it("accepts a current-mode push to the same branch", async () => {
     const { repo, remote } = await createRepo();

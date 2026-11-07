@@ -1276,7 +1276,7 @@ describe("git read probes", () => {
   ])("preserves the mapped remote branch destination (%s)", async (push, upstream, pushing) => {
     mockGitSuccess(`refs/heads/new\torigin\t${push}`);
     if (!pushing) mockGitSuccess(`refs/heads/new\t${upstream}`);
-    mockGitSuccess("+refs/heads/*:refs/remotes/origin/*");
+    mockGitSuccess("remote.origin.fetch +refs/heads/*:refs/remotes/origin/*");
     mockGitSuccess("git@github.com:acme/api.git");
 
     await expect(readBranchDestination("/wt", "new")).resolves.toEqual({
@@ -1311,7 +1311,7 @@ describe("git read probes", () => {
 
   it("reads the exact branch's configured push URL", async () => {
     mockGitSuccess("refs/heads/feature/issue\torigin\trefs/remotes/origin/feature/issue");
-    mockGitSuccess("+refs/heads/*:refs/remotes/origin/*");
+    mockGitSuccess("remote.origin.fetch +refs/heads/*:refs/remotes/origin/*");
     mockGitSuccess("git@github.com:acme/api.git");
 
     await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBe(
@@ -1330,7 +1330,7 @@ describe("git read probes", () => {
     expect(mockExecFileAsync).toHaveBeenNthCalledWith(
       2,
       "git",
-      ["config", "--get-all", "remote.origin.fetch"],
+      ["config", "--get-regexp", "^remote\\..*\\.(fetch|push)$"],
       readOpts,
     );
     expect(mockExecFileAsync).toHaveBeenNthCalledWith(
@@ -1367,7 +1367,12 @@ describe("git read probes", () => {
     ["", false],
   ])("checks fetch mapping %s", async (fetch, accepted) => {
     mockGitSuccess("refs/heads/feature/issue\torigin\trefs/remotes/origin/feature/issue");
-    mockGitSuccess(fetch);
+    mockGitSuccess(
+      fetch
+        .split("\n")
+        .map((value) => `remote.origin.fetch ${value}`)
+        .join("\n"),
+    );
     if (accepted) mockGitSuccess("git@github.com:acme/api.git");
     await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBe(
       accepted ? "git@github.com:acme/api.git" : null,
@@ -1377,7 +1382,7 @@ describe("git read probes", () => {
 
   it("rejects multiple push URLs and Git failures", async () => {
     mockGitSuccess("refs/heads/feature/issue\torigin\trefs/remotes/origin/feature/issue");
-    mockGitSuccess("+refs/heads/*:refs/remotes/origin/*");
+    mockGitSuccess("remote.origin.fetch +refs/heads/*:refs/remotes/origin/*");
     mockGitSuccess("git@github.com:acme/api.git\nhttps://github.com/other/api.git");
     await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBeNull();
 
