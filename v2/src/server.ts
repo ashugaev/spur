@@ -943,6 +943,8 @@ export async function startServer(
       sessionService: service,
       autoPing,
       memoryHoldEngaged: () => service.memoryHoldEngaged(),
+      noticeBlockedTrigger: (sessionId, triggerId) =>
+        service.noticeBlockedTrigger(sessionId, triggerId),
       logger: {
         warn: logger.warn ?? writeStderr,
         ...(logger.info ? { info: logger.info } : {}),

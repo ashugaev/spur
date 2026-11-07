@@ -269,6 +269,7 @@ import {
   type SessionState,
   type SessionStateTransition,
   type SessionView,
+  type SpawnSessionRequest,
   type StateSource,
   type TodoProjection,
 } from "../../src/types.js";
@@ -4234,6 +4235,1063 @@ describe("SessionService", () => {
     expect(createWorktreeMock).not.toHaveBeenCalled();
     expect(createTmuxSessionMock).not.toHaveBeenCalled();
     service.dispose();
+  });
+
+  describe("closeout ownership", () => {
+    const worktreePath = "/tmp/spur-worktrees/api/api-1";
+    type SpawnPath = "spawn" | "spawnInBackground";
+
+    function seedWorkspace(owner: Partial<SessionRecord> = {}) {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "stopped",
+          stopReason: "manual_pause",
+          closeoutOwner: true,
+          worktree: true,
+          worktreePath,
+          ...owner,
+        }),
+      );
+      sessions.set(
+        "api-2",
+        sessionRecord({
+          id: "api-2",
+          workspaceId: "api-1",
+          closeoutOwner: false,
+          worktree: true,
+          worktreePath,
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      tmuxSessionExistsMock.mockImplementation(async (name: string) => name === "api-2");
+      // Conclusive absence: a failed launch is retired, not held for recovery.
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+      captureAgentProcessesForLaunchMock.mockResolvedValue({
+        status: "ok",
+        processes: [],
+        complete: true,
+      });
+      mockClaudeJsonlState("waiting");
+      return sessions;
+    }
+
+    async function newService() {
+      const { SessionService } = await loadSessionServiceModule();
+      return new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    }
+
+    async function reuseSpawn(
+      service: Awaited<ReturnType<typeof newService>>,
+      path: SpawnPath,
+      extra: Partial<SpawnSessionRequest> = {},
+    ) {
+      const request = {
+        project: "api",
+        prompt: "continue the task",
+        reuseWorkspaceSessionId: "api-1",
+        ...extra,
+      };
+      if (path === "spawn") return service.spawn(request);
+      const placeholder = await service.spawnInBackground(request);
+      await service.settleBackgroundSpawns();
+      return placeholder;
+    }
+
+    function takenEvents(): unknown[] {
+      return logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "session.closeout.taken");
+    }
+
+    function lastLaunchEnv(): Record<string, string> | undefined {
+      return createTmuxSessionMock.mock.calls.at(-1)?.[0]?.env;
+    }
+
+    function ownerIds(sessions: Map<string, SessionRecord>): string[] {
+      return [...sessions.values()].filter((s) => s.closeoutOwner === true).map((s) => s.id);
+    }
+
+    it.each(["spawn", "spawnInBackground"] as const)(
+      "%s takes closeout ownership from a manually paused owner on reuse spawn",
+      async (path) => {
+        const sessions = seedWorkspace();
+        reserveNextSessionIdMock.mockResolvedValueOnce("api-3").mockResolvedValueOnce("api-4");
+        const service = await newService();
+
+        await reuseSpawn(service, path, { allowedTriggers: [] });
+
+        expect(sessions.get("api-3")?.closeoutOwner).toBe(true);
+        expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+        expect(sessions.get("api-2")?.closeoutOwner).toBe(false);
+        expect(lastLaunchEnv()?.SPUR_CLOSEOUT_OWNER).toBe("1");
+        expect(takenEvents()).toEqual([
+          expect.objectContaining({
+            sessionId: "api-3",
+            details: { workspaceId: "api-1", fromSessionIds: ["api-1"] },
+          }),
+        ]);
+
+        await reuseSpawn(service, path, { reuseWorkspaceSessionId: "api-3" });
+
+        expect(sessions.get("api-4")?.closeoutOwner).toBe(false);
+        expect(sessions.get("api-3")?.closeoutOwner).toBe(true);
+        expect(takenEvents()).toHaveLength(1);
+      },
+    );
+
+    it.each([
+      ["completed", {}],
+      ["killed", {}],
+      ["errored", {}],
+      ["budget_limited", {}],
+      ["stopped", { stopReason: "token_budget" }],
+    ] as const)("takes closeout from a %s owner", async (status, extra) => {
+      const sessions = seedWorkspace({ status, ...extra });
+      reserveNextSessionIdMock.mockResolvedValue("api-3");
+      const service = await newService();
+
+      await reuseSpawn(service, "spawn");
+
+      expect(sessions.get("api-3")?.closeoutOwner).toBe(true);
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+    });
+
+    it.each([
+      ["running", {}],
+      ["spawning", {}],
+      ["paused", {}],
+      ["stopped", { stopReason: "stale_timeout" }],
+      ["stopped", { stopReason: "memory_shed" }],
+      ["stopped", { stopReason: "runtime_lost" }],
+      ["stopped", { stopReason: undefined }],
+    ] as const)("keeps closeout on a holding %s owner (%j)", async (status, extra) => {
+      const sessions = seedWorkspace({ status });
+      const owner = { ...sessions.get("api-1")! };
+      if ("stopReason" in extra) {
+        if (extra.stopReason === undefined) delete owner.stopReason;
+        else owner.stopReason = extra.stopReason;
+      }
+      sessions.set("api-1", owner);
+      reserveNextSessionIdMock.mockResolvedValue("api-3");
+      const service = await newService();
+
+      await reuseSpawn(service, "spawn");
+
+      expect(sessions.get("api-3")?.closeoutOwner).toBe(false);
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(true);
+      expect(takenEvents()).toHaveLength(0);
+    });
+
+    it("does not take closeout for restrictWrites or worktree:false reuse spawns", async () => {
+      const sessions = seedWorkspace();
+      reserveNextSessionIdMock.mockResolvedValueOnce("api-3");
+      const service = await newService();
+
+      await reuseSpawn(service, "spawn", { restrictWrites: true });
+
+      expect(sessions.get("api-3")?.closeoutOwner).toBe(false);
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(true);
+
+      sessions.set("api-1", { ...sessions.get("api-1")!, worktree: false });
+      reserveNextSessionIdMock.mockResolvedValueOnce("api-4");
+
+      await reuseSpawn(service, "spawn", { overrides: { worktree: false } });
+
+      expect(sessions.get("api-4")?.closeoutOwner).toBe(false);
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(true);
+      expect(takenEvents()).toHaveLength(0);
+    });
+
+    it("two concurrent reuse spawns over a released closeout owner yield exactly one owner", async () => {
+      const sessions = seedWorkspace();
+      reserveNextSessionIdMock.mockResolvedValueOnce("api-3").mockResolvedValueOnce("api-4");
+      const service = await newService();
+
+      await Promise.all([reuseSpawn(service, "spawn"), reuseSpawn(service, "spawn")]);
+
+      expect(ownerIds(sessions)).toHaveLength(1);
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+      expect(takenEvents()).toHaveLength(1);
+    });
+
+    describe("spawn failure", () => {
+      function failAfterTmuxCreate(sessions: Map<string, SessionRecord>, killed: boolean): void {
+        waitForTmuxReadyMock.mockImplementation(async () => {
+          if (killed) sessions.set("api-3", { ...sessions.get("api-3")!, status: "killed" });
+          throw new Error("ready boom");
+        });
+      }
+
+      it("spawn returns taken closeout to the released owner", async () => {
+        const sessions = seedWorkspace();
+        reserveNextSessionIdMock.mockResolvedValue("api-3");
+        createTmuxSessionMock.mockRejectedValue(new Error("tmux boom"));
+        const service = await newService();
+
+        await expect(reuseSpawn(service, "spawn")).rejects.toThrow("tmux boom");
+
+        expect(sessions.get("api-1")?.closeoutOwner).toBe(true);
+        expect(sessions.get("api-3")?.closeoutOwner).not.toBe(true);
+      });
+
+      it("spawnInBackground returns taken closeout after the final failed attempt", async () => {
+        const sessions = seedWorkspace();
+        reserveNextSessionIdMock.mockResolvedValue("api-3");
+        createTmuxSessionMock.mockRejectedValue(new Error("tmux boom"));
+        const service = await newService();
+
+        await reuseSpawn(service, "spawnInBackground");
+
+        expect(sessions.get("api-3")?.status).toBe("errored");
+        expect(sessions.get("api-3")?.closeoutOwner).not.toBe(true);
+        expect(sessions.get("api-1")?.closeoutOwner).toBe(true);
+      });
+
+      it("spawnInBackground persists the taken owners in the durable intent for restart give-back", async () => {
+        seedWorkspace();
+        reserveNextSessionIdMock.mockResolvedValue("api-3");
+        createTmuxSessionMock.mockRejectedValue(new Error("tmux boom"));
+        const service = await newService();
+
+        await reuseSpawn(service, "spawnInBackground");
+
+        const queued = writeSessionMock.mock.calls
+          .map(([, record]) => record)
+          .find((record) => record.id === "api-3" && record.spawnIntent?.phase === "queued");
+        expect(queued?.closeoutOwner).toBe(true);
+        expect(queued?.spawnIntent?.closeoutTakenFrom).toEqual(["api-1"]);
+      });
+
+      it("spawnInBackground takes nothing when attachment preparation fails before the placeholder write", async () => {
+        const sessions = seedWorkspace();
+        reserveNextSessionIdMock.mockResolvedValue("api-3");
+        const service = await newService();
+
+        await expect(
+          service.spawnInBackground({
+            project: "api",
+            prompt: "continue the task",
+            reuseWorkspaceSessionId: "api-1",
+            attachments: [{ name: "not/a/valid/name", data: "AAAA" }],
+          }),
+        ).rejects.toThrow();
+
+        expect(sessions.has("api-3")).toBe(false);
+        expect(sessions.get("api-1")?.closeoutOwner).toBe(true);
+        expect(takenEvents()).toHaveLength(0);
+      });
+
+      it.each(["spawn", "spawnInBackground"] as const)(
+        "%s returns taken closeout when the launch is already killed",
+        async (path) => {
+          const sessions = seedWorkspace();
+          reserveNextSessionIdMock.mockResolvedValue("api-3");
+          failAfterTmuxCreate(sessions, true);
+          const service = await newService();
+
+          await reuseSpawn(service, path).catch(() => undefined);
+
+          expect(sessions.get("api-1")?.closeoutOwner).toBe(true);
+          expect(sessions.get("api-3")?.closeoutOwner).not.toBe(true);
+        },
+      );
+
+      it("spawn keeps closeout on the new session when a live launch is retained", async () => {
+        const sessions = seedWorkspace();
+        reserveNextSessionIdMock.mockResolvedValue("api-3");
+        failAfterTmuxCreate(sessions, false);
+        const service = await newService();
+        vi.spyOn(sessionServiceInternals(service), "retainLaunchedError").mockImplementation(
+          async (record) => {
+            const retained = { ...sessions.get(record.id)!, status: "running" as const };
+            sessions.set(record.id, retained);
+            return retained;
+          },
+        );
+
+        await expect(reuseSpawn(service, "spawn")).rejects.toThrow("ready boom");
+
+        expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+        expect(sessions.get("api-3")?.closeoutOwner).toBe(true);
+      });
+
+      it("returns no closeout when another member already owns it", async () => {
+        const sessions = seedWorkspace();
+        reserveNextSessionIdMock.mockResolvedValue("api-3");
+        let rejectTmux: (error: Error) => void = () => {};
+        createTmuxSessionMock.mockReturnValue(
+          new Promise<void>((_, reject) => {
+            rejectTmux = reject;
+          }),
+        );
+        const service = await newService();
+
+        const spawning = service
+          .spawn({
+            project: "api",
+            prompt: "continue the task",
+            reuseWorkspaceSessionId: "api-1",
+          })
+          .catch((error: unknown) => error);
+        await vi.waitFor(() => expect(sessions.get("api-3")?.closeoutOwner).toBe(true));
+        sessions.set(
+          "api-5",
+          sessionRecord({
+            id: "api-5",
+            workspaceId: "api-1",
+            closeoutOwner: true,
+            status: "running",
+            worktree: true,
+            worktreePath,
+          }),
+        );
+        rejectTmux(new Error("tmux boom"));
+        await spawning;
+
+        expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+        expect(sessions.get("api-5")?.closeoutOwner).toBe(true);
+        expect(sessions.get("api-3")?.closeoutOwner).not.toBe(true);
+      });
+    });
+
+    it("restore of a former closeout owner launches with SPUR_CLOSEOUT_OWNER=0", async () => {
+      const sessions = seedWorkspace();
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      reserveNextSessionIdMock.mockResolvedValue("api-3");
+      const service = await newService();
+      await reuseSpawn(service, "spawn");
+      mockExitedThenRestoredProcess();
+
+      await service.restore("api-1");
+
+      expect(lastLaunchEnv()?.SPUR_CLOSEOUT_OWNER).toBe("0");
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+      expect(sessions.get("api-3")?.closeoutOwner).toBe(true);
+    });
+
+    it("spawnInBackground settles the take when response enrichment rejects", async () => {
+      const sessions = seedWorkspace();
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      reserveNextSessionIdMock.mockResolvedValue("api-3");
+      const service = await newService();
+      vi.spyOn(
+        service as unknown as { enrich(record: SessionRecord): Promise<SessionView> },
+        "enrich",
+      ).mockRejectedValueOnce(new Error("response projection unavailable"));
+
+      await expect(reuseSpawn(service, "spawnInBackground")).rejects.toThrow(
+        "response projection unavailable",
+      );
+      await service.settleBackgroundSpawns();
+      mockExitedThenRestoredProcess();
+      await service.restore("api-1");
+
+      expect(lastLaunchEnv()?.SPUR_CLOSEOUT_OWNER).toBe("0");
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+      expect(sessions.get("api-3")?.closeoutOwner).toBe(true);
+    });
+
+    it("takes no closeout while the released owner is restoring", async () => {
+      const sessions = seedWorkspace();
+      findAgentSessionIdMock.mockResolvedValue("session-uuid");
+      reserveNextSessionIdMock.mockResolvedValue("api-3");
+      const service = await createDisposedSessionService();
+      let restoredTmuxCreated = false;
+      let releaseLaunch: () => void = () => {};
+      const launchGate = new Promise<void>((resolve) => {
+        releaseLaunch = resolve;
+      });
+      createTmuxSessionMock.mockImplementationOnce(async () => {
+        await launchGate;
+        restoredTmuxCreated = true;
+      });
+      isProcessRunningInTmuxMock.mockImplementation(
+        async (name: string) => name !== "api-1" || restoredTmuxCreated,
+      );
+
+      const restoring = service.restore("api-1");
+      await vi.waitFor(() => expect(createTmuxSessionMock).toHaveBeenCalledTimes(1));
+      await reuseSpawn(service, "spawn");
+
+      expect(sessions.get("api-3")?.closeoutOwner).toBe(false);
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(true);
+      expect(takenEvents()).toHaveLength(0);
+      releaseLaunch();
+      await restoring;
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(true);
+    });
+
+    it.each(["launching", "pending lifecycle operation"] as const)(
+      "takes no closeout while the released owner is %s",
+      async (busy) => {
+        const sessions = seedWorkspace();
+        reserveNextSessionIdMock.mockResolvedValue("api-3");
+        const service = await newService();
+        const internals = service as unknown as {
+          launchesInFlight: Set<string>;
+          lifecycle: SessionLifecycleRegister;
+        };
+        if (busy === "launching") internals.launchesInFlight.add("api-1");
+        else internals.lifecycle.begin("complete", ["api-1"]);
+
+        await reuseSpawn(service, "spawn");
+
+        expect(sessions.get("api-3")?.closeoutOwner).toBe(false);
+        expect(sessions.get("api-1")?.closeoutOwner).toBe(true);
+        expect(takenEvents()).toHaveLength(0);
+      },
+    );
+
+    it("handoff of a cleared former closeout owner does not create a second owner", async () => {
+      const sessions = seedWorkspace();
+      reserveNextSessionIdMock.mockResolvedValueOnce("api-3").mockResolvedValueOnce("api-4");
+      const service = await newService();
+      await reuseSpawn(service, "spawn");
+
+      await service.handoff("api-1", { agent: "cursor" });
+
+      expect(sessions.get("api-4")?.closeoutOwner).toBe(false);
+      expect(sessions.get("api-3")?.closeoutOwner).toBe(true);
+      expect(ownerIds(sessions)).toEqual(["api-3"]);
+    });
+
+    it("handoff and reuse spawn over one released closeout owner yield exactly one owner", async () => {
+      const sessions = seedWorkspace();
+      let resolveSuccessorId: (id: string) => void = () => {};
+      reserveNextSessionIdMock
+        .mockReturnValueOnce(
+          new Promise<string>((resolve) => {
+            resolveSuccessorId = resolve;
+          }),
+        )
+        .mockResolvedValueOnce("api-3");
+      const service = await newService();
+
+      const handingOff = service.handoff("api-1", { agent: "cursor" });
+      await vi.waitFor(() => expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1));
+      await reuseSpawn(service, "spawn");
+
+      expect(sessions.get("api-3")?.closeoutOwner).toBe(false);
+      resolveSuccessorId("api-4");
+      await handingOff;
+
+      expect(sessions.get("api-4")?.closeoutOwner).toBe(true);
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+      expect(ownerIds(sessions)).toEqual(["api-4"]);
+    });
+
+    it("relaunch after a take launches the former closeout owner with SPUR_CLOSEOUT_OWNER=0", async () => {
+      const sessions = seedWorkspace();
+      reserveNextSessionIdMock.mockResolvedValue("api-3");
+      const service = await newService();
+      const captured = clone(sessions.get("api-1")!);
+      await reuseSpawn(service, "spawn");
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+      mockExitedThenRestoredProcess();
+      const internals = service as unknown as {
+        ensureSessionReadyForSend(record: SessionRecord): Promise<unknown>;
+      };
+
+      await internals.ensureSessionReadyForSend(captured);
+
+      expect(lastLaunchEnv()?.SPUR_CLOSEOUT_OWNER).toBe("0");
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+    });
+
+    it("takes closeout while a member operation holds the anchor lifecycle lock", async () => {
+      const sessions = seedWorkspace();
+      reserveNextSessionIdMock.mockResolvedValue("api-3");
+      const service = await newService();
+      let release: () => void = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let locked: () => void = () => {};
+      const lockTaken = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      const internals = sessionServiceInternals(service) as unknown as {
+        withWorkspaceLifecycleLocks(id: string, fn: () => Promise<void>): Promise<void>;
+      };
+      const holding = internals.withWorkspaceLifecycleLocks("api-2", async () => {
+        locked();
+        await held;
+      });
+      await lockTaken;
+      const spawning = reuseSpawn(service, "spawn");
+      try {
+        await vi.waitFor(() => {
+          expect(sessions.get("api-3")?.closeoutOwner).toBe(true);
+          expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+        });
+      } finally {
+        release();
+        await holding;
+        await spawning;
+      }
+    });
+
+    function deferredTakingLaunch(sessions: Map<string, SessionRecord>) {
+      let settleGate: (outcome: "reject" | "resolve") => void = () => {};
+      const gate = new Promise<void>((resolve, reject) => {
+        settleGate = (outcome) =>
+          outcome === "reject" ? reject(new Error("tmux boom")) : resolve();
+      });
+      const api1Tmux = sessions.get("api-1")!.tmuxSession;
+      let api1Created = false;
+      createTmuxSessionMock.mockImplementation(async ({ sessionName }: { sessionName: string }) => {
+        if (sessionName === api1Tmux) {
+          api1Created = true;
+          return;
+        }
+        if (sessionName === "api-3") await gate;
+      });
+      isProcessRunningInTmuxMock.mockImplementation(
+        async (name: string) => name !== api1Tmux || api1Created,
+      );
+      return {
+        settleGate,
+        api1Launches: () =>
+          createTmuxSessionMock.mock.calls.filter(([args]) => args.sessionName === api1Tmux),
+        api1LaunchEnv: () =>
+          createTmuxSessionMock.mock.calls.find(([args]) => args.sessionName === api1Tmux)?.[0]
+            ?.env,
+      };
+    }
+
+    function startTakingSpawn(service: Awaited<ReturnType<typeof newService>>, path: SpawnPath) {
+      const request = {
+        project: "api",
+        prompt: "continue the task",
+        reuseWorkspaceSessionId: "api-1",
+      };
+      if (path === "spawn") return service.spawn(request).catch((error: unknown) => error);
+      return (async () => {
+        await service.spawnInBackground(request);
+        await service.settleBackgroundSpawns();
+      })().catch((error: unknown) => error);
+    }
+
+    it.each([
+      ["spawn", "reject"],
+      ["spawn", "resolve"],
+      ["spawnInBackground", "reject"],
+      ["spawnInBackground", "resolve"],
+    ] as const)(
+      "%s restore of a former closeout owner during a %s taking launch keeps exactly one owner",
+      async (path, outcome) => {
+        const sessions = seedWorkspace();
+        reserveNextSessionIdMock.mockResolvedValue("api-3");
+        findAgentSessionIdMock.mockResolvedValue("session-uuid");
+        const { settleGate, api1Launches, api1LaunchEnv } = deferredTakingLaunch(sessions);
+        const service = await newService();
+
+        const spawning = startTakingSpawn(service, path);
+        await vi.waitFor(() => {
+          expect(sessions.get("api-3")?.closeoutOwner).toBe(true);
+          expect(
+            createTmuxSessionMock.mock.calls.some(([args]) => args.sessionName === "api-3"),
+          ).toBe(true);
+        });
+        const restoring = service.restore("api-1");
+        if (path === "spawnInBackground") {
+          // Persisted background take: refuse now instead of waiting on the run.
+          await expect(restoring).rejects.toThrow(/closeout is moving to api-3/);
+          expect(api1Launches()).toHaveLength(0);
+        } else {
+          await expect(
+            vi.waitFor(() => expect(api1Launches()).toHaveLength(1), { timeout: 1000 }),
+          ).rejects.toThrow();
+        }
+
+        settleGate(outcome);
+        await spawning;
+        if (path === "spawnInBackground") await service.restore("api-1");
+        else await restoring;
+
+        if (outcome === "reject") {
+          expect(ownerIds(sessions)).toEqual(["api-1"]);
+          expect(api1LaunchEnv()?.SPUR_CLOSEOUT_OWNER).toBe("1");
+          expect(sessions.get("api-3")?.closeoutOwner).not.toBe(true);
+        } else {
+          expect(ownerIds(sessions)).toEqual(["api-3"]);
+          expect(api1LaunchEnv()?.SPUR_CLOSEOUT_OWNER).toBe("0");
+          expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+        }
+        expect(sessions.get("api-2")?.closeoutOwner).toBe(false);
+      },
+    );
+
+    it("restore of a former owner refuses promptly while a queued background taker's run is still live", async () => {
+      const sessions = seedWorkspace();
+      reserveNextSessionIdMock.mockResolvedValue("api-3");
+      const { settleGate, api1Launches } = deferredTakingLaunch(sessions);
+      const { SessionService, SessionStartingError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawning = startTakingSpawn(service, "spawnInBackground");
+      await vi.waitFor(() => expect(sessions.get("api-3")?.closeoutOwner).toBe(true));
+      expect(
+        (service as unknown as { closeoutTakesInFlight: Map<string, unknown> })
+          .closeoutTakesInFlight.size,
+      ).toBe(1);
+      const outcomes: unknown[] = [];
+      for (const attempt of [
+        () => service.restore("api-1"),
+        () => service.reopen("api-1"),
+        () => service.handoff("api-1", { agent: "cursor" }),
+      ]) {
+        let timer: NodeJS.Timeout | undefined;
+        const outcome = await Promise.race([
+          attempt().then(
+            () => "resolved",
+            (error: unknown) => error,
+          ),
+          new Promise((resolve) => {
+            timer = setTimeout(() => resolve("waited"), 500);
+          }),
+        ]);
+        clearTimeout(timer);
+        outcomes.push(outcome);
+      }
+
+      for (const outcome of outcomes) expect(outcome).toBeInstanceOf(SessionStartingError);
+      expect(api1Launches()).toHaveLength(0);
+      settleGate("reject");
+      await spawning;
+    });
+
+    it("send relaunch of a former closeout owner refuses while the take is in flight", async () => {
+      const sessions = seedWorkspace();
+      reserveNextSessionIdMock.mockResolvedValue("api-3");
+      const { settleGate, api1Launches } = deferredTakingLaunch(sessions);
+      const { SessionService, SessionStartingError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const captured = clone(sessions.get("api-1")!);
+      const internals = service as unknown as {
+        ensureSessionReadyForSend(record: SessionRecord): Promise<unknown>;
+      };
+
+      const spawning = startTakingSpawn(service, "spawn");
+      await vi.waitFor(() => expect(sessions.get("api-3")?.closeoutOwner).toBe(true));
+      const relaunch = internals.ensureSessionReadyForSend(captured);
+      await expect(relaunch).rejects.toBeInstanceOf(SessionStartingError);
+      await expect(relaunch).rejects.toThrow(/closeout is moving to api-3/);
+      expect(api1Launches()).toHaveLength(0);
+
+      settleGate("reject");
+      await spawning;
+
+      expect(ownerIds(sessions)).toEqual(["api-1"]);
+    });
+
+    it.each(["spawn", "spawnInBackground"] as const)(
+      "%s gives closeout back when the todo ledger write fails after the take",
+      async (path) => {
+        const sessions = seedWorkspace();
+        reserveNextSessionIdMock.mockResolvedValue("api-3");
+        findAgentSessionIdMock.mockResolvedValue("session-uuid");
+        mockExitedThenRestoredProcess();
+        const todo = await import("../../src/todo.js");
+        vi.mocked(todo.ensureTodoLedger).mockImplementationOnce(() => {
+          throw new Error("ledger boom");
+        });
+        const service = await newService();
+        const request = {
+          project: "api",
+          prompt: "continue the task",
+          reuseWorkspaceSessionId: "api-1",
+        };
+
+        await expect(
+          path === "spawn" ? service.spawn(request) : service.spawnInBackground(request),
+        ).rejects.toThrow("ledger boom");
+        await expect(service.restore("api-1")).resolves.toBeDefined();
+
+        expect(lastLaunchEnv()?.SPUR_CLOSEOUT_OWNER).toBe("1");
+        expect(ownerIds(sessions)).toEqual(["api-1"]);
+        expect(sessions.get("api-3")?.closeoutOwner).not.toBe(true);
+      },
+    );
+
+    it("handoff of a former closeout owner waits for a failing taking launch", async () => {
+      const sessions = seedWorkspace();
+      reserveNextSessionIdMock.mockResolvedValueOnce("api-3").mockResolvedValueOnce("api-4");
+      const { settleGate } = deferredTakingLaunch(sessions);
+      const service = await newService();
+
+      const spawning = startTakingSpawn(service, "spawn");
+      await vi.waitFor(() => expect(sessions.get("api-3")?.closeoutOwner).toBe(true));
+      const handingOff = service.handoff("api-1", { agent: "cursor" });
+      settleGate("reject");
+      await spawning;
+      await handingOff;
+
+      expect(sessions.get("api-4")?.closeoutOwner).toBe(true);
+      expect(ownerIds(sessions)).toEqual(["api-4"]);
+    });
+
+    describe("held taker", () => {
+      async function holdTakingSpawn(
+        sessions: Map<string, SessionRecord>,
+        takeOverride?: (service: Awaited<ReturnType<typeof newService>>) => Promise<void>,
+      ) {
+        const { TmuxProbeUnknownError } = await import("../../src/runtime-tmux.js");
+        reserveNextSessionIdMock.mockResolvedValue("api-3");
+        waitForTmuxReadyMock.mockRejectedValue(new TmuxProbeUnknownError("probe unknown"));
+        probeTmuxProcessMatchMock.mockResolvedValue({
+          alive: true,
+          matchedByName: true,
+          unresponsive: false,
+        });
+        // Inconclusive runtime evidence holds the launch instead of failing it.
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "unavailable" } as never);
+        const { SessionService, SessionStartingError } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        if (takeOverride) await takeOverride(service);
+        else await reuseSpawn(service, "spawnInBackground");
+        expect(sessions.get("api-3")).toMatchObject({
+          status: "spawning",
+          closeoutOwner: true,
+          spawnIntent: { closeoutTakenFrom: ["api-1"] },
+        });
+        return { service, SessionService, SessionStartingError };
+      }
+
+      it("handoff of the former owner refuses when a take lands while it waits on the workspace lock", async () => {
+        const sessions = seedWorkspace();
+        const realTimers =
+          await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+        let release: () => void = () => {};
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let holding: Promise<void> = Promise.resolve();
+        let refused: Promise<unknown> = Promise.resolve();
+        let internals:
+          | { admissionReservations: Map<symbol, string>; spawnAdmissionWaiters: Set<unknown> }
+          | undefined;
+        const { service, SessionStartingError } = await holdTakingSpawn(sessions, async (svc) => {
+          const locks = svc as unknown as {
+            withWorkspaceLifecycleLocks(id: string, fn: () => Promise<void>): Promise<void>;
+            admissionReservations: Map<symbol, string>;
+            spawnAdmissionWaiters: Set<unknown>;
+            config: { admission: { maxLiveSessions: number } };
+          };
+          internals = locks;
+          // Full cap: an admitted handoff would queue instead of failing fast; the
+          // taker's launch queues too, so it is not settled here.
+          locks.config.admission = { ...locks.config.admission, maxLiveSessions: 1 };
+          holding = locks.withWorkspaceLifecycleLocks("api-2", async () => {
+            await held;
+          });
+          refused = svc.handoff("api-1", { agent: "cursor" });
+          refused.catch(() => undefined);
+          const taking = svc.spawnInBackground({
+            project: "api",
+            prompt: "continue the task",
+            reuseWorkspaceSessionId: "api-1",
+          });
+          try {
+            await vi.waitFor(() => {
+              expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+            });
+          } finally {
+            release();
+            await holding;
+            await taking;
+          }
+        });
+
+        const abort = new AbortController();
+        const outcome = await Promise.race([
+          refused.then(
+            () => "resolved" as const,
+            (error: unknown) => error,
+          ),
+          realTimers.setTimeout(500, "timeout", { signal: abort.signal }),
+        ]);
+        abort.abort();
+
+        expect(outcome).toBeInstanceOf(SessionStartingError);
+        expect(internals?.admissionReservations.size).toBe(0);
+        expect(
+          [...(internals?.spawnAdmissionWaiters ?? [])].filter(
+            (waiter) => (waiter as { replacingSessionId?: string }).replacingSessionId === "api-1",
+          ),
+        ).toHaveLength(0);
+        service.dispose();
+      });
+
+      it("restore, reopen and handoff of the former owner refuse while the held taker keeps the intent", async () => {
+        const sessions = seedWorkspace();
+        const { service, SessionStartingError } = await holdTakingSpawn(sessions);
+        const launchesBefore = createTmuxSessionMock.mock.calls.length;
+
+        for (const attempt of [
+          () => service.restore("api-1"),
+          () => service.reopen("api-1"),
+          () => service.handoff("api-1", { agent: "cursor" }),
+        ]) {
+          const refused = attempt();
+          await expect(refused).rejects.toBeInstanceOf(SessionStartingError);
+          await expect(refused).rejects.toThrow(/closeout is moving to api-3/);
+        }
+
+        expect(createTmuxSessionMock.mock.calls).toHaveLength(launchesBefore);
+        expect(ownerIds(sessions)).toEqual(["api-3"]);
+      });
+
+      it("handoff of the former owner refuses promptly under a saturated admission cap", async () => {
+        const sessions = seedWorkspace();
+        const { service, SessionStartingError } = await holdTakingSpawn(sessions);
+        const internals = service as unknown as {
+          admissionReservations: Map<symbol, string>;
+          config: { admission: { maxLiveSessions: number } };
+        };
+        // api-2 and api-3 are live: the cap is full for the replacement.
+        internals.config.admission = { ...internals.config.admission, maxLiveSessions: 1 };
+
+        const realTimers =
+          await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+        const refused = service.handoff("api-1", { agent: "cursor" });
+        const abort = new AbortController();
+        const outcome = await Promise.race([
+          refused.then(
+            () => "resolved" as const,
+            (error: unknown) => error,
+          ),
+          realTimers.setTimeout(500, "timeout", { signal: abort.signal }),
+        ]);
+        abort.abort();
+
+        expect(outcome).toBeInstanceOf(SessionStartingError);
+        expect(internals.admissionReservations.size).toBe(0);
+        service.dispose();
+      });
+
+      it("send to the former owner refuses while the held taker keeps the intent, then relaunches it after the final failure", async () => {
+        const sessions = seedWorkspace();
+        const { service, SessionStartingError } = await holdTakingSpawn(sessions);
+        const launchesBefore = createTmuxSessionMock.mock.calls.length;
+
+        const refused = service.send("api-1", { message: "resume", queue: false });
+        await expect(refused).rejects.toBeInstanceOf(SessionStartingError);
+        await expect(refused).rejects.toThrow(/closeout is moving to api-3/);
+        expect(createTmuxSessionMock.mock.calls).toHaveLength(launchesBefore);
+        expect(ownerIds(sessions)).toEqual(["api-3"]);
+
+        const internals = service as unknown as {
+          returnTakenCloseout(failedId: string, takenFrom: string[]): void;
+        };
+        const { spawnIntent: _intent, ...failed } = sessions.get("api-3")!;
+        sessions.set("api-3", { ...failed, status: "errored" });
+        internals.returnTakenCloseout("api-3", ["api-1"]);
+        findAgentSessionIdMock.mockResolvedValue("session-uuid");
+        waitForTmuxReadyMock.mockReset();
+        waitForTmuxReadyMock.mockResolvedValue(undefined);
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+        mockExitedThenRestoredProcess();
+        await service.send("api-1", { message: "resume", queue: false });
+
+        expect(createTmuxSessionMock.mock.calls.length).toBeGreaterThan(launchesBefore);
+        expect(ownerIds(sessions)).toEqual(["api-1"]);
+      });
+
+      it("a running taker still holding an unconfirmed submission intent blocks the former owner", async () => {
+        const sessions = seedWorkspace();
+        const { service, SessionStartingError } = await holdTakingSpawn(sessions);
+        sessions.set("api-3", { ...clone(sessions.get("api-3")!), status: "running" });
+        const launchesBefore = createTmuxSessionMock.mock.calls.length;
+
+        await expect(service.restore("api-1")).rejects.toBeInstanceOf(SessionStartingError);
+        await expect(service.send("api-1", { message: "resume", queue: false })).rejects.toThrow(
+          /closeout is moving to api-3/,
+        );
+        expect(createTmuxSessionMock.mock.calls).toHaveLength(launchesBefore);
+      });
+
+      it("gives closeout back after the held taker fails, then restore launches the owner", async () => {
+        const sessions = seedWorkspace();
+        const { service } = await holdTakingSpawn(sessions);
+        await expect(service.restore("api-1")).rejects.toThrow(/closeout is moving to api-3/);
+        const internals = service as unknown as {
+          returnTakenCloseout(failedId: string, takenFrom: string[]): void;
+        };
+
+        // Final failure retires the intent with the failed-record write.
+        const { spawnIntent: _intent, ...failed } = sessions.get("api-3")!;
+        sessions.set("api-3", { ...failed, status: "errored" });
+        internals.returnTakenCloseout("api-3", ["api-1"]);
+        findAgentSessionIdMock.mockResolvedValue("session-uuid");
+        waitForTmuxReadyMock.mockReset();
+        waitForTmuxReadyMock.mockResolvedValue(undefined);
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+        mockExitedThenRestoredProcess();
+        await service.restore("api-1");
+
+        expect(ownerIds(sessions)).toEqual(["api-1"]);
+        expect(lastLaunchEnv()?.SPUR_CLOSEOUT_OWNER).toBe("1");
+      });
+
+      it("a recovered queued taker gives closeout back on final failure", async () => {
+        const sessions = seedWorkspace();
+        const { service, SessionService } = await holdTakingSpawn(sessions);
+        const held = clone(sessions.get("api-3")!);
+        sessions.set("api-3", {
+          ...held,
+          spawnIntent: { ...held.spawnIntent!, phase: "queued" },
+        });
+        const restarted = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        const internals = restarted as unknown as {
+          prepareRecoveredSpawn(record: SessionRecord): Promise<unknown>;
+          startBackgroundSpawn(prepared: unknown): Promise<void>;
+        };
+        createTmuxSessionMock.mockReset();
+        createTmuxSessionMock.mockRejectedValue(new Error("tmux boom"));
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+
+        await expect(restarted.restore("api-1")).rejects.toThrow(/closeout is moving to api-3/);
+        await expect(
+          internals.startBackgroundSpawn(
+            await internals.prepareRecoveredSpawn(sessions.get("api-3")!),
+          ),
+        ).rejects.toThrow("tmux boom");
+        await restarted.settleBackgroundSpawns();
+
+        expect(sessions.get("api-3")?.closeoutOwner).not.toBe(true);
+        expect(ownerIds(sessions)).toEqual(["api-1"]);
+        service.dispose();
+      });
+    });
+  });
+
+  describe("closeout notice", () => {
+    function seedOwner(overrides: Partial<SessionRecord> = {}, withTarget = true) {
+      const config = baseConfig();
+      config.projects.api.sources = {
+        agentChat: {
+          type: "telegram" as const,
+          runOnStart: false,
+          token: "token-123",
+          allowedUsers: [123],
+          chatId: -1001,
+        },
+      };
+      loadConfigMock.mockReturnValue(config);
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          closeoutOwner: true,
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          ...overrides,
+        }),
+      );
+      if (withTarget) {
+        readTelegramReplyTargetMock.mockReturnValue({
+          sessionId: "api-1",
+          projectId: "api",
+          sourceId: "agentChat",
+          chatId: -1001,
+          messageThreadId: 22,
+          updatedAt: "2026-03-18T10:02:00.000Z",
+        });
+      }
+      mockClaudeJsonlState("waiting");
+      return sessions;
+    }
+
+    async function newService() {
+      const { SessionService } = await loadSessionServiceModule();
+      return new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    }
+
+    function noticeEvents(): { details: { triggerId: string; telegram: boolean } }[] {
+      return logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "trigger.send.blocked_notice");
+    }
+
+    it("notices a blocked trigger once per closeout owner and trigger", async () => {
+      const sessions = seedOwner();
+      const service = await newService();
+
+      service.noticeBlockedTrigger("api-1", "gh-ci-failed");
+      service.noticeBlockedTrigger("api-1", "gh-ci-failed");
+      await vi.waitFor(() => expect(sendTelegramReplyMock).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(sendTelegramReplyMock).toHaveBeenCalledTimes(1);
+      expect(sendTelegramReplyMock.mock.calls[0]?.[2]).toContain("gh-ci-failed");
+      expect(sessions.get("api-1")?.blockedTriggerNotices).toEqual(["gh-ci-failed"]);
+      expect(sessions.get("api-1")?.updatedAt).toBe("2026-03-18T10:01:00.000Z");
+      expect(noticeEvents()).toEqual([
+        expect.objectContaining({ details: { triggerId: "gh-ci-failed", telegram: true } }),
+      ]);
+    });
+
+    it("posts no closeout notice after restart for an already noticed trigger", async () => {
+      seedOwner({ blockedTriggerNotices: ["gh-ci-failed"] });
+      const service = await newService();
+
+      service.noticeBlockedTrigger("api-1", "gh-ci-failed");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+      expect(noticeEvents()).toHaveLength(0);
+    });
+
+    it("notices a second trigger once", async () => {
+      const sessions = seedOwner({ blockedTriggerNotices: ["gh-ci-failed"] });
+      const service = await newService();
+
+      service.noticeBlockedTrigger("api-1", "gh-merge-conflict");
+      service.noticeBlockedTrigger("api-1", "gh-merge-conflict");
+      await vi.waitFor(() => expect(sendTelegramReplyMock).toHaveBeenCalledTimes(1));
+
+      expect(sessions.get("api-1")?.blockedTriggerNotices).toEqual([
+        "gh-ci-failed",
+        "gh-merge-conflict",
+      ]);
+      expect(noticeEvents()).toHaveLength(1);
+    });
+
+    it("sends no closeout notice for non-owners", async () => {
+      const sessions = seedOwner({ closeoutOwner: false });
+      const service = await newService();
+
+      service.noticeBlockedTrigger("api-1", "gh-ci-failed");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.blockedTriggerNotices).toBeUndefined();
+      expect(noticeEvents()).toHaveLength(0);
+    });
+
+    it("logs the closeout notice event without a Telegram topic", async () => {
+      seedOwner({}, false);
+      readTelegramReplyTargetMock.mockReturnValue(null);
+      const service = await newService();
+
+      service.noticeBlockedTrigger("api-1", "gh-ci-failed");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(noticeEvents()).toEqual([
+        expect.objectContaining({ details: { triggerId: "gh-ci-failed", telegram: false } }),
+      ]);
+      expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+      expect(createTelegramTopicMock).not.toHaveBeenCalled();
+    });
   });
 
   describe("codex model validation", () => {

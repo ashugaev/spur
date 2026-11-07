@@ -1257,8 +1257,13 @@ function validateDurableSpawnFields(session: SessionRecord): void {
       "submission",
       "pane",
       "telegramOrigin",
+      "closeoutTakenFrom",
     ],
     "intent",
+  );
+  durableCheck(
+    intent["closeoutTakenFrom"] === undefined || durableStrings(intent["closeoutTakenFrom"]),
+    "intent closeoutTakenFrom",
   );
   durableCheck(
     intent["version"] === 1 &&
@@ -1541,6 +1546,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     closeoutOwner,
     ...(normalizedSession.allowedTriggers !== undefined
       ? { allowedTriggers: normalizedSession.allowedTriggers }
+      : {}),
+    ...(Array.isArray(normalizedSession.blockedTriggerNotices) &&
+    normalizedSession.blockedTriggerNotices.every((id) => typeof id === "string")
+      ? { blockedTriggerNotices: normalizedSession.blockedTriggerNotices }
       : {}),
     ...(normalizedSession.selfDestruct ? { selfDestruct: normalizedSession.selfDestruct } : {}),
     ...(normalizedSession.agentSessionId
