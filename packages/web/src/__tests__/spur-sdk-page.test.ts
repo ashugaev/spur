@@ -22,6 +22,9 @@ describe("page transport", () => {
     expect(root.style.getPropertyValue("--spur-text-primary")).toBe("CanvasText");
     expect(root.style.getPropertyValue("--spur-accent")).toBe("AccentColor");
     expect(root.style.getPropertyValue("--spur-status-error")).toBe("light-dark(#cf222e, #ff4d4d)");
+    expect(root.style.getPropertyValue("--spur-text-tertiary")).toBe(
+      "light-dark(#5c6370, #9da5b4)",
+    );
   });
 
   it("reruns onSnapshot after a change event for its collection only", async () => {

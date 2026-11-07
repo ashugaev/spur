@@ -82,14 +82,14 @@
     depth: "nested too deep",
   };
   // Page defaults: CSS system colors and light-dark() pairs, so a page follows the OS light/dark scheme.
-  // Status tones are fixed pairs; system colors like Mark are unreadable text colors.
+  // Status tones and text-tertiary are fixed pairs (>=4.5:1 on #fff and #121212); system colors like Mark or GrayText are unreadable text colors.
   const PAGE_THEME = {
     "bg-base": "Canvas",
     "bg-surface": "Canvas",
     "bg-elevated": "Canvas",
     "text-primary": "CanvasText",
     "text-secondary": "CanvasText",
-    "text-tertiary": "GrayText",
+    "text-tertiary": "light-dark(#5c6370, #9da5b4)",
     "border-default": "GrayText",
     "border-subtle": "ButtonFace",
     accent: "AccentColor",
