@@ -24,7 +24,7 @@ const reviewedFingerprints = {
   "server.ts": "a3ab73fb2755982bd6b7d0782a9d26564cc800f20d6b9d5621c166179006c5dd",
   "types.ts": "e968f8c8f5660ab51eed062a2769383f6a88d4d9e453216b47e57c62b30f6db8",
   "cron-job-editor.ts": "33fc7b2993819693ef511d9312f9eb8f4260feb2f263421aec2d4e5ac613ec06",
-  "session-service.ts": "005b9fc54ed10b71fa46c020f5c206e6c7757fbd1decf1b3adaf6aeec8d44fc0",
+  "session-service.ts": "d713e7a00a271d8c5aad202be342de1c34118c01d0b067591c9ec0d7d91184ad",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "1d06c2d904fa46b95ef8bed971c5767fad76663482f22822f9a541b345f161ff",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -229,6 +229,16 @@ describe("daemon MCP operation contracts", () => {
     expect(save?.responses.find(({ status }) => status === 200)?.description).toContain(
       'activation:"pending"',
     );
+  });
+
+  it("states allowedTriggers omit and empty-array semantics in the spawn contracts", () => {
+    for (const operationId of ["spawn_session", "spawn_background_session"]) {
+      const description = getDaemonOperation(operationId)?.body?.fields.find(
+        ({ name }) => name === "allowedTriggers",
+      )?.description;
+      expect(description, operationId).toContain("Omit to allow all");
+      expect(description, operationId).toContain("[] blocks every send trigger");
+    }
   });
 
   it("provides examples, path/query/body metadata, errors and source references for every operation", () => {

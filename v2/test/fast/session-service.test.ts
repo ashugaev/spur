@@ -60,6 +60,7 @@ import {
   deleteTelegramSourceStateForSessionMock,
   deleteTelegramReplyTargetMock,
   hasPendingTelegramSendMock,
+  pendingTriggerSendWorkIdsMock,
   listServiceInstancesForSessionMock,
   readServiceInstanceMock,
   writeServiceInstanceMock,
@@ -13648,6 +13649,193 @@ describe("SessionService", () => {
     } finally {
       service.dispose();
     }
+  });
+
+  describe("trigger batch hold", () => {
+    const seedQueue = (messages: string[]) => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "ship the task",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        queuedMessages: { messages, awaitingPrompt: false },
+      });
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+      getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:59.900Z"));
+      createAgentSubmitAckBindingMock.mockImplementation(async () => ({
+        scan: vi.fn().mockResolvedValue({ found: true, lastScannedFile: null }),
+      }));
+      mockTimerPromisesSleepWithFakeTimers();
+      const sentAt: number[] = [];
+      sendMessageToTmuxMock.mockImplementation(async () => {
+        sentAt.push(Date.now());
+      });
+      return { sessions, sentAt };
+    };
+
+    it("holds a queued message while a trigger batch is pending, then types it once the batch clears", async () => {
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:04:59.900Z") });
+      const { sessions, sentAt } = seedQueue(["queued follow up"]);
+      const t0 = Date.now();
+      pendingTriggerSendWorkIdsMock.mockImplementation(() =>
+        Date.now() < t0 + 10_000 ? ["w1"] : [],
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      try {
+        await sessionServiceInternals(service).deliveryRuns.get("api-1");
+        expect(sentAt).toHaveLength(1);
+        expect(sentAt[0]! - t0).toBeGreaterThanOrEqual(10_000);
+        expect(sentAt[0]! - t0).toBeLessThanOrEqual(13_000);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "queued follow up", {
+          agent: "claude",
+        });
+        expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("stops holding one trigger batch after twice the send window", async () => {
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:04:59.900Z") });
+      const { sessions, sentAt } = seedQueue(["m1", "m2"]);
+      const t0 = Date.now();
+      pendingTriggerSendWorkIdsMock.mockImplementation(() =>
+        sentAt.length === 0 ? ["w1"] : ["w1", "w2"],
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      try {
+        await sessionServiceInternals(service).deliveryRuns.get("api-1");
+        expect(sentAt).toHaveLength(2);
+        expect(sentAt[0]! - t0).toBeGreaterThanOrEqual(60_000);
+        expect(sentAt[0]! - t0).toBeLessThanOrEqual(63_000);
+        // w2 is a new batch: its own cap holds m2 again.
+        expect(sentAt[1]! - sentAt[0]!).toBeGreaterThanOrEqual(60_000);
+        expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toEqual(["m1", "m2"]);
+        expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("does not hold a queued message when the send window is 0", async () => {
+      vi.stubEnv("SPUR_IDLE_WAIT_BEFORE_FLUSH_MS", "0");
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:04:59.900Z") });
+      const { sentAt } = seedQueue(["queued follow up"]);
+      const t0 = Date.now();
+      pendingTriggerSendWorkIdsMock.mockReturnValue(["w1"]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      try {
+        await sessionServiceInternals(service).deliveryRuns.get("api-1");
+        expect(sentAt).toHaveLength(1);
+        expect(sentAt[0]! - t0).toBeLessThan(3_000);
+      } finally {
+        service.dispose();
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("starts the trigger batch hold only once the agent is waiting", async () => {
+      const { sentAt } = seedQueue(["queued follow up"]);
+      const t0 = Date.now();
+      const switchAt = t0 + 90_000;
+      pendingTriggerSendWorkIdsMock.mockReturnValue(["w1"]);
+      readClaudeJsonlStateMock.mockImplementation(async () => ({
+        state: Date.now() < switchAt ? "working" : "waiting",
+        reader: {
+          filePath: "test.jsonl",
+          lastOffset: 0,
+          lastMtimeMs: Date.now() < switchAt ? 0 : switchAt,
+          tailRecords: [],
+        },
+      }));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      try {
+        await sessionServiceInternals(service).deliveryRuns.get("api-1");
+        expect(sentAt).toHaveLength(1);
+        expect(sentAt[0]! - switchAt).toBeGreaterThanOrEqual(60_000);
+        expect(sentAt[0]! - switchAt).toBeLessThanOrEqual(65_000);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("re-arms the trigger batch hold once in a new service, then types once", async () => {
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:04:59.900Z") });
+      const { sessions, sentAt } = seedQueue(["m1"]);
+      const t0 = Date.now();
+      pendingTriggerSendWorkIdsMock.mockReturnValue(["w1"]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const serviceA = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      try {
+        await sessionServiceInternals(serviceA).deliveryRuns.get("api-1");
+      } finally {
+        serviceA.dispose();
+      }
+      expect(sentAt).toHaveLength(1);
+      expect(sentAt[0]! - t0).toBeGreaterThanOrEqual(60_000);
+      expect(sentAt[0]! - t0).toBeLessThanOrEqual(63_000);
+
+      const record = sessions.get("api-1");
+      if (!record) throw new Error("missing session");
+      sessions.set("api-1", {
+        ...record,
+        queuedMessages: { messages: ["m2"], awaitingPrompt: false },
+      });
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+      const tB = Date.now();
+      const serviceB = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      try {
+        await sessionServiceInternals(serviceB).deliveryRuns.get("api-1");
+        expect(sentAt).toHaveLength(2);
+        expect(sentAt[1]! - tB).toBeGreaterThanOrEqual(60_000);
+        expect(sentAt[1]! - tB).toBeLessThanOrEqual(63_000);
+        expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      } finally {
+        serviceB.dispose();
+      }
+    });
+
+    it("does not hold a trigger batch for a server-error wedge", async () => {
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "error",
+        reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+        serverError: true,
+      });
+      const { sessions } = seedQueue(["queued follow up"]);
+      getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+      pendingTriggerSendWorkIdsMock.mockReturnValue(["w1"]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      try {
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "queued follow up", {
+          agent: "claude",
+        });
+        expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      } finally {
+        service.dispose();
+      }
+    });
   });
 
   it("keeps a queued message queued when the agent turns busy during the settle wait", async () => {
@@ -28653,6 +28841,40 @@ describe("SessionService", () => {
       const delivered = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
       expect(delivered).toBe(true);
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+    });
+
+    it("does not hold a trigger batch while the memory hold is engaged", async () => {
+      mockClaudeJsonlState("waiting");
+      const service = await createDisposedSessionService();
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "ship the task",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        queuedMessages: { messages: ["queued follow up"], awaitingPrompt: false },
+      });
+      pendingTriggerSendWorkIdsMock.mockReturnValue(["w1"]);
+
+      const holdState = service as unknown as { memoryHold: { engaged: boolean } };
+      holdState.memoryHold.engaged = true;
+
+      const delivered = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+      expect(delivered).toBe(true);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "queued follow up", {
+        agent: "claude",
+      });
+      expect(pendingTriggerSendWorkIdsMock).not.toHaveBeenCalled();
       expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
     });
 
