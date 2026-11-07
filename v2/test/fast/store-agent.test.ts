@@ -480,6 +480,23 @@ describe("chat view", () => {
     pageRecord.entries = [{ kind: "message", role: "user", text: "budget" }];
     expect((await agent.messages("page:films", { limit: 50 })).messages).toEqual([]);
   });
+
+  it("untags a chat send that fails after it was recorded, keeping an earlier identical record", async () => {
+    const { agent, sessions } = await setup();
+    const record = sessions.add({ id: "demo-1", project: "demo" });
+    await agent.deliverChat("session:demo-1", "kept", true);
+    const original = sessions.send.bind(sessions);
+    sessions.send = async () => {
+      throw new Error("send failed");
+    };
+    await expect(agent.deliverChat("session:demo-1", "lost", true)).rejects.toThrow("send failed");
+    await expect(agent.deliverChat("session:demo-1", "kept", true)).rejects.toThrow("send failed");
+    sessions.send = original;
+    const user = (text: string): TranscriptEntry => ({ kind: "message", role: "user", text });
+    record.entries = [user("kept"), user("lost")];
+    const page = await agent.messages("session:demo-1", { limit: 50 });
+    expect(page.messages).toEqual([{ index: 0, role: "user", kind: "chat", text: "kept" }]);
+  });
 });
 
 describe("agent status", () => {

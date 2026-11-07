@@ -131,15 +131,34 @@ export class StoreAgent {
     // Recorded after the delivery checks and before the send: a rejected send is not
     // chat, and a poll must never consume the message before it is known.
     const hash = chatHash(message);
-    return this.ensureAndDeliver(storeId, message, userGesture, () =>
-      this.host.stores.transactMeta(storeId, (meta) => {
-        const stored = meta.get(META_CHAT);
-        const sent = (Array.isArray(stored) ? stored : []).filter(
-          (value): value is string => typeof value === "string" && value !== hash,
-        );
-        meta.set(META_CHAT, [...sent, hash].slice(-CHAT_SENT_CAP));
-      }),
-    );
+    let added = false;
+    try {
+      return await this.ensureAndDeliver(storeId, message, userGesture, () =>
+        this.host.stores.transactMeta(storeId, (meta) => {
+          const stored = meta.get(META_CHAT);
+          const known = (Array.isArray(stored) ? stored : []).filter(
+            (value): value is string => typeof value === "string",
+          );
+          added = !known.includes(hash);
+          meta.set(
+            META_CHAT,
+            [...known.filter((value) => value !== hash), hash].slice(-CHAT_SENT_CAP),
+          );
+        }),
+      );
+    } catch (error) {
+      // A send that failed after recording is not chat. A hash recorded earlier stays.
+      if (added) {
+        await this.host.stores.transactMeta(storeId, (meta) => {
+          const stored = meta.get(META_CHAT);
+          meta.set(
+            META_CHAT,
+            (Array.isArray(stored) ? stored : []).filter((value) => value !== hash),
+          );
+        });
+      }
+      throw error;
+    }
   }
 
   /** Delivers one message to the store's owner, spawning or recovering a page agent. */
