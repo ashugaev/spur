@@ -50,10 +50,12 @@ it("registers strict record schemas and forwards typed path/query values through
     properties: { attachments: { items: { additionalProperties: false } } },
   });
   expect(
-    (await call("daemon_request", {
-      operationId: "get_session",
-      pathParams: { sessionId: session.id },
-    })).structuredContent,
+    (
+      await call("daemon_request", {
+        operationId: "get_session",
+        pathParams: { sessionId: session.id },
+      })
+    ).structuredContent,
   ).toMatchObject({ ok: true, status: 200, body: { id: session.id } });
   const query = { view: "dashboard", limit: 2, includeCompleted: false };
   expect(
