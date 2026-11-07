@@ -1523,6 +1523,24 @@ describe("SessionService", () => {
   });
 
   it.each([
+    { label: "id", record: { project: "api", triggerBirthKey: "missing" } },
+    { label: "project", record: { id: "api-partial", triggerBirthKey: "missing" } },
+  ])("refuses a trigger birth inventory row without $label", async ({ record }) => {
+    createSessionStore();
+    const service = await createDisposedSessionService();
+    const request = { project: "api", prompt: "partial inventory" };
+    const archive = join(TEST_DATA_DIR, "sessions-archive", "api");
+    mkdirSync(archive, { recursive: true });
+    writeFileSync(join(archive, "partial.json"), JSON.stringify(record));
+    expect(() => service.getTriggerBirth("api", "missing", request)).toThrow("incomplete");
+    await expect(service.spawn(request, { triggerBirthKey: "missing" })).rejects.toThrow(
+      "incomplete",
+    );
+    expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
     { reason: "boot", tmux: false },
     { reason: "runtime_check", tmux: false },
     { reason: "boot", tmux: true },
