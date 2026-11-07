@@ -20788,6 +20788,7 @@ export class SessionService {
         `Session ${session.id} closeout is moving to ${closeoutTake.takerId}; retry after it launches`,
       );
     }
+    this.assertNoHeldCloseoutTake(session.id);
 
     const project = this.getProject(session.project);
     // Same restore-warmup protection as restore() above: relaunchSessionInPlace
@@ -22933,7 +22934,7 @@ export class SessionService {
     const taker = this.listWorkspaceRuntimeMembers(session, listSessions(this.config.dataDir)).find(
       (member) =>
         member.id !== sessionId &&
-        member.status === "spawning" &&
+        !isTerminalSessionStatus(member.status) &&
         member.spawnIntent?.closeoutTakenFrom?.includes(sessionId) === true,
     );
     if (taker) {

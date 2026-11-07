@@ -4932,6 +4932,47 @@ describe("SessionService", () => {
         expect(ownerIds(sessions)).toEqual(["api-3"]);
       });
 
+      it("send to the former owner refuses while the held taker keeps the intent, then relaunches it after the final failure", async () => {
+        const sessions = seedWorkspace();
+        const { service, SessionStartingError } = await holdTakingSpawn(sessions);
+        const launchesBefore = createTmuxSessionMock.mock.calls.length;
+
+        const refused = service.send("api-1", { message: "resume", queue: false });
+        await expect(refused).rejects.toBeInstanceOf(SessionStartingError);
+        await expect(refused).rejects.toThrow(/closeout is moving to api-3/);
+        expect(createTmuxSessionMock.mock.calls).toHaveLength(launchesBefore);
+        expect(ownerIds(sessions)).toEqual(["api-3"]);
+
+        const internals = service as unknown as {
+          returnTakenCloseout(failedId: string, takenFrom: string[]): void;
+        };
+        const { spawnIntent: _intent, ...failed } = sessions.get("api-3")!;
+        sessions.set("api-3", { ...failed, status: "errored" });
+        internals.returnTakenCloseout("api-3", ["api-1"]);
+        findAgentSessionIdMock.mockResolvedValue("session-uuid");
+        waitForTmuxReadyMock.mockReset();
+        waitForTmuxReadyMock.mockResolvedValue(undefined);
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+        mockExitedThenRestoredProcess();
+        await service.send("api-1", { message: "resume", queue: false });
+
+        expect(createTmuxSessionMock.mock.calls.length).toBeGreaterThan(launchesBefore);
+        expect(ownerIds(sessions)).toEqual(["api-1"]);
+      });
+
+      it("a running taker still holding an unconfirmed submission intent blocks the former owner", async () => {
+        const sessions = seedWorkspace();
+        const { service, SessionStartingError } = await holdTakingSpawn(sessions);
+        sessions.set("api-3", { ...clone(sessions.get("api-3")!), status: "running" });
+        const launchesBefore = createTmuxSessionMock.mock.calls.length;
+
+        await expect(service.restore("api-1")).rejects.toBeInstanceOf(SessionStartingError);
+        await expect(service.send("api-1", { message: "resume", queue: false })).rejects.toThrow(
+          /closeout is moving to api-3/,
+        );
+        expect(createTmuxSessionMock.mock.calls).toHaveLength(launchesBefore);
+      });
+
       it("gives closeout back after the held taker fails, then restore launches the owner", async () => {
         const sessions = seedWorkspace();
         const { service } = await holdTakingSpawn(sessions);
