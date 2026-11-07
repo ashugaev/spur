@@ -124,6 +124,79 @@ export interface CronJobsResponse {
   eventsSince: string | null;
 }
 
+export type QuotaProvider = "claude" | "codex";
+
+export interface QuotaWindow {
+  label: string;
+  usedPercent: number;
+  remainingPercent: number;
+  resetsAt: string | null;
+}
+
+export type QuotaErrorKind =
+  | "no_credentials"
+  | "expired"
+  | "unauthorized"
+  | "rate_limited"
+  | "http_error"
+  | "network_error"
+  | "unparsable";
+
+interface QuotaSourceBase {
+  provider: QuotaProvider;
+  source: string;
+  label: string;
+  fetchedAt: string;
+}
+
+export type QuotaSourceResult =
+  | (QuotaSourceBase & { status: "ok"; plan: string | null; windows: QuotaWindow[] })
+  | (QuotaSourceBase & {
+      status: "error";
+      error: QuotaErrorKind;
+      message: string;
+      httpStatus: number | null;
+    });
+
+export interface TokenUsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheReadInputTokens?: number;
+  cacheWriteInputTokens?: number;
+  reasoningOutputTokens?: number;
+  cacheWrite5mInputTokens?: number;
+  cacheWrite1hInputTokens?: number;
+}
+
+export type TokenUsageWindow = "today" | "7d" | "30d";
+
+export interface TokenUsageBucket {
+  sessionCount: number;
+  totals: TokenUsageTotals;
+}
+
+export interface ModelTokenUsage extends TokenUsageBucket {
+  model: string | null;
+}
+
+export interface ProviderTokenUsage extends TokenUsageBucket {
+  provider: "claude" | "codex" | "cursor" | "opencode";
+  byModel: ModelTokenUsage[];
+}
+
+export interface TokenUsageWindowSummary {
+  window: TokenUsageWindow;
+  since: string;
+  byProvider: ProviderTokenUsage[];
+}
+
+export interface UsageReport {
+  generatedAt: string;
+  quotas: QuotaSourceResult[];
+  tokens: TokenUsageWindowSummary[];
+}
+
 export interface CronJobEditBlock {
   prompt: string;
   agent: AgentName | null;
