@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { transpileModule, ModuleKind, ScriptTarget } from "typescript";
+import { Command } from "commander";
 import { afterEach, expect, test, vi } from "vitest";
 import {
   parseConfig,
@@ -14,10 +15,11 @@ import {
   blockReview,
   publishReview,
   recoverReview,
+  registerReviewApp,
 } from "../../src/review-app.js";
-import { publishLaneState } from "../../src/review-state.js";
+import { publishLaneState, stateBody } from "../../src/review-state.js";
 import { execFileAsync } from "../helpers/common.js";
-import { readJson } from "../../src/github-app.js";
+import { object, readJson } from "../../src/github-app.js";
 import { plan, capability, defect } from "./review-feedback.fixture.js";
 
 const dirs: string[] = [];
@@ -423,6 +425,37 @@ test.each([
   );
 });
 
+test.each([true, false])(
+  "announcement includes feedback only when prepared feedback exists: %s",
+  async (hasFeedback) => {
+    const f = await lifecycleFixture();
+    if (!hasFeedback) {
+      const prior = object(await readJson(f.request.receipt));
+      delete prior.preparedFeedback;
+      await writeFile(f.request.receipt, JSON.stringify(prior));
+    }
+    vi.mocked(publishLaneState)
+      .mockClear()
+      .mockImplementationOnce(async (_app, state) => {
+        stateBody(state);
+      });
+    const result = await publishReview(f.config, f.request, draft.session, f.transport);
+    const announced = vi.mocked(publishLaneState).mock.calls[0]?.[1];
+    if (!announced) throw new Error("missing announcement");
+    expect(announced.status).toBe("PENDING");
+    expect(Object.hasOwn(announced, "feedback")).toBe(hasFeedback);
+    expect(JSON.stringify(announced).includes('"feedback":')).toBe(hasFeedback);
+    if (hasFeedback) expect(announced.feedback).toEqual(plan);
+    expect(result.status).toBe(hasFeedback ? "APPROVED" : "BLOCKED");
+    expect(f.posts()).toBe(hasFeedback ? 1 : 0);
+    const completed = vi.mocked(publishLaneState).mock.calls.at(-1)?.[1];
+    if (!completed) throw new Error("missing final announcement");
+    expect(completed.status).toBe(result.status);
+    expect(Object.hasOwn(completed, "feedback")).toBe(!hasFeedback);
+    expect(JSON.stringify(completed).includes('"feedback":')).toBe(!hasFeedback);
+  },
+);
+
 test("superseded attempt cannot overwrite newer BLOCKED; new reviewed attempt can recover", async () => {
   const f = await lifecycleFixture();
   expect((await publishReview(f.config, f.request, draft.session, f.transport)).status).toBe(
@@ -516,6 +549,59 @@ test("prepare invalidates old approval before QA and block ends current attempt 
     status: "BLOCKED",
   });
 });
+
+test.each([null, undefined])(
+  "idempotent prepare CLI exits nonzero with prior feedback publication %s",
+  async (feedbackPublication) => {
+    const f = await lifecycleFixture();
+    const prior = object(await readJson(f.request.receipt));
+    const saved = JSON.stringify({
+      ...prior,
+      inputDigest: "d".repeat(64),
+      feedbackPublication,
+    });
+    await writeFile(f.request.receipt, saved);
+    const config = join(f.dir, "config.json"),
+      request = join(f.dir, "request.json");
+    await writeFile(config, JSON.stringify(f.config));
+    await writeFile(request, JSON.stringify(f.request));
+    const previousSession = process.env["SPUR_SESSION"],
+      previousExit = process.exitCode;
+    const output = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const network = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("unexpected network"));
+    vi.mocked(publishLaneState).mockClear();
+    try {
+      process.env["SPUR_SESSION"] = draft.session;
+      process.exitCode = undefined;
+      const program = new Command();
+      registerReviewApp(program);
+      await program.parseAsync([
+        "node",
+        "spur",
+        "review-app",
+        "prepare",
+        "--app-config",
+        config,
+        "--request",
+        request,
+        "--json",
+      ]);
+      expect(process.exitCode).toBe(1);
+      expect(output.mock.calls.at(-1)?.[0]).toContain('"status":"PENDING"');
+      expect(await readFile(f.request.receipt, "utf8")).toBe(saved);
+      expect(publishLaneState).not.toHaveBeenCalled();
+      expect(network).not.toHaveBeenCalled();
+    } finally {
+      output.mockRestore();
+      network.mockRestore();
+      process.exitCode = previousExit;
+      if (previousSession === undefined) delete process.env["SPUR_SESSION"];
+      else process.env["SPUR_SESSION"] = previousSession;
+    }
+  },
+);
 
 test("same-attempt payload conflict preserves state and issues no second POST", async () => {
   const f = await lifecycleFixture();
