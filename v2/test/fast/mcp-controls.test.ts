@@ -163,6 +163,53 @@ it("keeps serialized daemon log output bounded with pagination and rejects paths
   ).toBe(true);
 });
 
+it.each([
+  "00000000-0000-0000-0000-000000000000",
+  "ffffffff-ffff-ffff-ffff-ffffffffffff",
+  "ABCDEFAB-CDEF-9ABC-0DEF-ABCDEFABCDEF",
+  randomUUID(),
+])("preserves SDK admission and receipt lookup for UUID-shaped ID %s", async (operationId) => {
+  const { client } = await setup();
+  vi.mocked(restartDaemonIfRunning).mockResolvedValue({
+    restarted: true,
+    baseUrl: "http://localhost",
+  });
+  const tools = (await client.listTools()).tools;
+  for (const name of ["restart_daemon", "get_daemon_restart"]) {
+    expect(tools.find((tool) => tool.name === name)?.inputSchema).toMatchObject({
+      properties: { operationId: { type: "string", format: "uuid" } },
+      additionalProperties: false,
+    });
+  }
+  expect(
+    (await client.callTool({ name: "restart_daemon", arguments: { operationId } }))
+      .structuredContent,
+  ).toMatchObject({ receipt: { operationId, status: "accepted" } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(
+    (await client.callTool({ name: "get_daemon_restart", arguments: { operationId } }))
+      .structuredContent,
+  ).toMatchObject({ receipt: { operationId } });
+  expect(restartDaemonIfRunning).toHaveBeenCalledOnce();
+});
+
+it("rejects malformed restart IDs through the SDK before daemon or restart access", async () => {
+  const { fixture, client } = await setup();
+  for (const operationId of [
+    "",
+    "../escape",
+    "not-a-uuid",
+    "gggggggg-0000-0000-0000-000000000000",
+  ]) {
+    for (const name of ["restart_daemon", "get_daemon_restart"]) {
+      const before = fixture.calls.length;
+      expect((await client.callTool({ name, arguments: { operationId } })).isError).toBe(true);
+      expect(fixture.calls).toHaveLength(before);
+    }
+  }
+  expect(restartDaemonIfRunning).not.toHaveBeenCalled();
+});
+
 it("returns original durable admission during a stalled daemon probe without repeating restart", async () => {
   const { fixture, client } = await setup();
   vi.mocked(restartDaemonIfRunning).mockResolvedValue({
