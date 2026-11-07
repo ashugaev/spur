@@ -1744,8 +1744,9 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   readBranchDestinationMock
     .mockReset()
     .mockImplementation(async (_path: string, branch: string) => ({
-      url: "git@github.com:acme/api.git",
-      branch,
+      status: "known",
+      push: { url: "git@github.com:acme/api.git", branch },
+      upstream: null,
     }));
   readRemoteUrlsMock
     .mockReset()

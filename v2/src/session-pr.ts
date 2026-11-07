@@ -5,9 +5,8 @@ import {
   resolvePrLookupRepo,
   resolvePrLookups,
 } from "./pr-lookup.js";
-import type { PrRepoSlug } from "./pr-lookup-cache.js";
 import type { SessionLink, SessionPrBinding, SessionRecord, SessionSlots } from "./types.js";
-import { readBranchDestination, readCurrentBranch } from "./workspace.js";
+import { type BranchDestination, readBranchDestination, readCurrentBranch } from "./workspace.js";
 
 const GITHUB_PR_PATH_RE = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/;
 const LEGACY_PR_LABELS = new Set(["pr", "github-pr", "github_pr"]);
@@ -428,10 +427,9 @@ export async function resolveRepoSlug(cwd: string): Promise<string> {
 async function ownsSessionPr(
   worktreePath: string,
   pr: SessionPrBinding,
-  expectedRepo: PrRepoSlug | null,
-  expectedBranch: string | undefined,
+  destinations: readonly BranchDestination[],
+  localBranch: string,
 ): Promise<boolean> {
-  if (!expectedRepo || !expectedBranch) throw new Error("PR ownership destination is unavailable");
   const raw = await gh(
     worktreePath,
     "pr",
@@ -482,12 +480,19 @@ async function ownsSessionPr(
   ) {
     throw new Error("gh pr view returned inconsistent head repository metadata");
   }
-  return (
-    headRef === expectedBranch &&
-    headRepo.host.toLowerCase() === expectedRepo.host.toLowerCase() &&
-    headRepo.owner.toLowerCase() === expectedRepo.owner.toLowerCase() &&
-    headRepo.name.toLowerCase() === expectedRepo.name.toLowerCase()
-  );
+  let plausibleLocalHead = destinations.length === 0 && headRef === localBranch;
+  for (const destination of destinations) {
+    const expectedRepo = parseRepoSlugFromRemoteUrl(destination.url);
+    if (!expectedRepo) throw new Error("PR ownership repository is unavailable");
+    const sameRepo =
+      headRepo.host.toLowerCase() === expectedRepo.host.toLowerCase() &&
+      headRepo.owner.toLowerCase() === expectedRepo.owner.toLowerCase() &&
+      headRepo.name.toLowerCase() === expectedRepo.name.toLowerCase();
+    if (sameRepo && headRef === destination.branch) return true;
+    if (sameRepo && headRef === localBranch) plausibleLocalHead = true;
+  }
+  if (plausibleLocalHead) throw new Error("PR ownership destination is unavailable");
+  return false;
 }
 
 export async function resolveSessionPrBinding(session: SessionRecord): Promise<{
@@ -496,11 +501,19 @@ export async function resolveSessionPrBinding(session: SessionRecord): Promise<{
 }> {
   const normalizedSession = normalizeSessionPrBinding(session);
   const localBranch = await resolvePrDiscoveryBranch(session.worktreePath, session.branch);
-  const destination = await readBranchDestination(session.worktreePath, localBranch);
-  const expectedRepo = destination ? parseRepoSlugFromRemoteUrl(destination.url) : null;
+  const context = await readBranchDestination(session.worktreePath, localBranch);
+  if (context.status !== "known") throw new Error("PR ownership context is unavailable");
+  const locations = new Map<string, BranchDestination>();
+  for (const destination of [context.push, context.upstream]) {
+    if (!destination) continue;
+    const repo = parseRepoSlugFromRemoteUrl(destination.url);
+    const identity = repo ? `${repo.host}/${repo.owner}/${repo.name}`.toLowerCase() : destination.url;
+    locations.set(`${identity}#${destination.branch}`, destination);
+  }
+  const destinations = [...locations.values()];
   if (normalizedSession.pr) {
     if (
-      await ownsSessionPr(session.worktreePath, normalizedSession.pr, expectedRepo, destination?.branch)
+      await ownsSessionPr(session.worktreePath, normalizedSession.pr, destinations, localBranch)
     ) {
       return {
         binding: normalizedSession.pr,
@@ -508,21 +521,15 @@ export async function resolveSessionPrBinding(session: SessionRecord): Promise<{
       };
     }
   }
-  const binding = await discoverPrBindingForBranch(
-    normalizedSession.worktreePath,
-    destination?.branch ?? localBranch,
-  );
-  if (!binding) {
-    return { binding: null };
+  const branches =
+    destinations.length > 0 ? destinations.map((destination) => destination.branch) : [localBranch];
+  for (const branch of branches) {
+    const binding = await discoverPrBindingForBranch(normalizedSession.worktreePath, branch);
+    if (!binding) continue;
+    if (!(await ownsSessionPr(session.worktreePath, binding, destinations, localBranch))) {
+      throw new Error("PR discovery returned a foreign head repository or branch");
+    }
+    return { binding, updatedSession: { ...normalizedSession, pr: binding } };
   }
-  if (!(await ownsSessionPr(session.worktreePath, binding, expectedRepo, destination?.branch))) {
-    throw new Error("PR discovery returned a foreign head repository or branch");
-  }
-  return {
-    binding,
-    updatedSession: {
-      ...normalizedSession,
-      pr: binding,
-    },
-  };
+  return { binding: null };
 }

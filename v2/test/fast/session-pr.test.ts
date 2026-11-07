@@ -76,8 +76,9 @@ describe("session-pr", () => {
     readBranchDestinationMock
       .mockReset()
       .mockImplementation(async (_path: string, branch: string) => ({
-        url: "git@github.com:acme/api.git",
-        branch,
+        status: "known",
+        push: { url: "git@github.com:acme/api.git", branch },
+        upstream: null,
       }));
     readRemoteUrlsMock
       .mockReset()
@@ -224,8 +225,9 @@ describe("session-pr", () => {
     readRemoteUrlsMock.mockResolvedValue(new Map());
     if (case_.fork) {
       readBranchDestinationMock.mockResolvedValue({
-        url: "git@github.com:contributor/api.git",
-        branch: "feature/native-pr-binding",
+        status: "known",
+        push: { url: "git@github.com:contributor/api.git", branch: "feature/native-pr-binding" },
+        upstream: null,
       });
     }
     const binding = { number: 42, repo: "base/api", url: `https://${case_.host}/base/api/pull/42` };
@@ -236,11 +238,63 @@ describe("session-pr", () => {
     expect(result.binding).toEqual(case_.own ? binding : null);
   });
 
+  it("checks a known unpushed branch's foreign reference before requiring ownership", async () => {
+    readBranchDestinationMock.mockResolvedValue({ status: "known", push: null, upstream: null });
+    readRemoteUrlsMock.mockResolvedValue(new Map());
+    ghMock.mockResolvedValueOnce(headMetadata("foreign")).mockResolvedValueOnce("[]");
+    const result = await resolveSessionPrBinding(makeSession({
+      pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+    }));
+    expect(result.binding).toBeNull();
+    expect(ghMock.mock.calls[0]).toContain("view");
+  });
+
+  it("retains old upstream ownership while current mode pushes new", async () => {
+    readCurrentBranchMock.mockResolvedValue("new");
+    readBranchDestinationMock.mockResolvedValue({ status: "known", push: { url: "git@github.com:acme/api.git", branch: "new" }, upstream: { url: "git@github.com:acme/api.git", branch: "old" } });
+    readRemoteUrlsMock.mockResolvedValue(new Map());
+    ghMock.mockResolvedValueOnce(headMetadata("old")).mockResolvedValueOnce("[]");
+    const result = await resolveSessionPrBinding(makeSession({
+      pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+    }));
+    expect(result.binding?.number).toBe(42);
+  });
+
+  it("discovers retained old ownership after the new push ref has no PR", async () => {
+    readCurrentBranchMock.mockResolvedValue("new");
+    readBranchDestinationMock.mockResolvedValue({ status: "known", push: { url: "git@github.com:acme/api.git", branch: "new" }, upstream: { url: "git@github.com:acme/api.git", branch: "old" } });
+    readRemoteUrlsMock.mockResolvedValue(new Map());
+    ghMock.mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(JSON.stringify([{ number: 88, url: "https://github.com/acme/api/pull/88" }]))
+      .mockResolvedValueOnce(headMetadata("old", "acme/api", "https://github.com/acme/api/pull/88"));
+    expect((await resolveSessionPrBinding(makeSession())).binding?.number).toBe(88);
+    expect(ghMock.mock.calls[0]).toContain("new");
+    expect(ghMock.mock.calls[1]).toContain("old");
+    expect(readCurrentBranchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("deduplicates complete ownership locations rather than branch names", async () => {
+    readBranchDestinationMock.mockResolvedValue({ status: "known", push: { url: "git@github.com:contributor/api.git", branch: "shared" }, upstream: { url: "https://github.com/acme/api.git", branch: "shared" } });
+    readRemoteUrlsMock.mockResolvedValue(new Map());
+    ghMock.mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(JSON.stringify([{ number: 88, url: "https://github.com/acme/api/pull/88" }]))
+      .mockResolvedValueOnce(headMetadata("shared", "acme/api", "https://github.com/acme/api/pull/88"));
+    expect((await resolveSessionPrBinding(makeSession())).binding?.number).toBe(88);
+    expect(ghMock.mock.calls.slice(0, 2).every((call) => call.includes("shared"))).toBe(true);
+  });
+
+  it("fails closed on unknown Git context before querying a reference", async () => {
+    readBranchDestinationMock.mockResolvedValue({ status: "unknown" });
+    await expect(resolveSessionPrBinding(makeSession())).rejects.toThrow("context is unavailable");
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
   it.each(["old", "custom"])("protects renamed remote ref (%s)", async (remoteBranch) => {
     readCurrentBranchMock.mockResolvedValue("new");
     readBranchDestinationMock.mockResolvedValue({
-      url: "git@github.com:acme/api.git",
-      branch: remoteBranch,
+      status: "known",
+      push: { url: "git@github.com:acme/api.git", branch: remoteBranch },
+      upstream: null,
     });
     const binding = { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" };
     ghMock.mockResolvedValue(headMetadata(remoteBranch));
@@ -253,7 +307,7 @@ describe("session-pr", () => {
   it.each([true, false])("checks discovered PR head ownership (%s)", async (owned) => {
     readRemoteUrlsMock.mockResolvedValue(new Map());
     readCurrentBranchMock.mockResolvedValue("new");
-    readBranchDestinationMock.mockResolvedValue({ url: "git@github.com:acme/api.git", branch: "old" });
+    readBranchDestinationMock.mockResolvedValue({ status: "known", push: { url: "git@github.com:acme/api.git", branch: "old" }, upstream: null });
     ghMock
       .mockResolvedValueOnce(JSON.stringify([{ number: 88, url: "https://github.com/base/api/pull/88" }]))
       .mockResolvedValueOnce(
@@ -268,7 +322,7 @@ describe("session-pr", () => {
 
   it.each([false, true])("keeps empty lookups distinct (%s)", async (candidate) => {
     readRemoteUrlsMock.mockResolvedValue(new Map());
-    readBranchDestinationMock.mockResolvedValue(null);
+    readBranchDestinationMock.mockResolvedValue({ status: "known", push: null, upstream: null });
     ghMock.mockResolvedValue(
       JSON.stringify(candidate ? [{ number: 88, url: "https://github.com/acme/api/pull/88" }] : []),
     );
@@ -308,8 +362,9 @@ describe("session-pr", () => {
           : { slots: { links: [{ label: "pr", url: binding.url }] } }),
       });
       readBranchDestinationMock.mockResolvedValue({
-        url: "git@ghe.example.com:acme/api.git",
-        branch: "feature/native-pr-binding",
+        status: "known",
+        push: { url: "git@ghe.example.com:acme/api.git", branch: "feature/native-pr-binding" },
+        upstream: null,
       });
       ghMock.mockResolvedValue(headMetadata("feature/native-pr-binding", "acme/api", binding.url));
 
