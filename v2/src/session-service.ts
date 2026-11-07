@@ -23081,6 +23081,8 @@ export class SessionService {
     this.assertNoHeldCloseoutTake(sessionId);
     const waiting = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const session = this.validateHandoffSource(sessionId, options);
+      // A take may have landed while this call waited on the lock.
+      this.assertNoHeldCloseoutTake(sessionId);
       if (this.handoffsInFlight.has(sessionId)) {
         throw new Error(`Handoff already in flight for ${sessionId}`);
       }

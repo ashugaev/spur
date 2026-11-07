@@ -4935,7 +4935,10 @@ describe("SessionService", () => {
     });
 
     describe("held taker", () => {
-      async function holdTakingSpawn(sessions: Map<string, SessionRecord>) {
+      async function holdTakingSpawn(
+        sessions: Map<string, SessionRecord>,
+        takeOverride?: (service: Awaited<ReturnType<typeof newService>>) => Promise<void>,
+      ) {
         const { TmuxProbeUnknownError } = await import("../../src/runtime-tmux.js");
         reserveNextSessionIdMock.mockResolvedValue("api-3");
         waitForTmuxReadyMock.mockRejectedValue(new TmuxProbeUnknownError("probe unknown"));
@@ -4950,7 +4953,8 @@ describe("SessionService", () => {
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
           deferBackgroundLoops: true,
         });
-        await reuseSpawn(service, "spawnInBackground");
+        if (takeOverride) await takeOverride(service);
+        else await reuseSpawn(service, "spawnInBackground");
         expect(sessions.get("api-3")).toMatchObject({
           status: "spawning",
           closeoutOwner: true,
@@ -4958,6 +4962,71 @@ describe("SessionService", () => {
         });
         return { service, SessionService, SessionStartingError };
       }
+
+      it("handoff of the former owner refuses when a take lands while it waits on the workspace lock", async () => {
+        const sessions = seedWorkspace();
+        const realTimers =
+          await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+        let release: () => void = () => {};
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let holding: Promise<void> = Promise.resolve();
+        let refused: Promise<unknown> = Promise.resolve();
+        let internals:
+          | { admissionReservations: Map<symbol, string>; spawnAdmissionWaiters: Set<unknown> }
+          | undefined;
+        const { service, SessionStartingError } = await holdTakingSpawn(sessions, async (svc) => {
+          const locks = svc as unknown as {
+            withWorkspaceLifecycleLocks(id: string, fn: () => Promise<void>): Promise<void>;
+            admissionReservations: Map<symbol, string>;
+            spawnAdmissionWaiters: Set<unknown>;
+            config: { admission: { maxLiveSessions: number } };
+          };
+          internals = locks;
+          // Full cap: an admitted handoff would queue instead of failing fast; the
+          // taker's launch queues too, so it is not settled here.
+          locks.config.admission = { ...locks.config.admission, maxLiveSessions: 1 };
+          holding = locks.withWorkspaceLifecycleLocks("api-2", async () => {
+            await held;
+          });
+          refused = svc.handoff("api-1", { agent: "cursor" });
+          refused.catch(() => undefined);
+          const taking = svc.spawnInBackground({
+            project: "api",
+            prompt: "continue the task",
+            reuseWorkspaceSessionId: "api-1",
+          });
+          try {
+            await vi.waitFor(() => {
+              expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+            });
+          } finally {
+            release();
+            await holding;
+            await taking;
+          }
+        });
+
+        const abort = new AbortController();
+        const outcome = await Promise.race([
+          refused.then(
+            () => "resolved" as const,
+            (error: unknown) => error,
+          ),
+          realTimers.setTimeout(500, "timeout", { signal: abort.signal }),
+        ]);
+        abort.abort();
+
+        expect(outcome).toBeInstanceOf(SessionStartingError);
+        expect(internals?.admissionReservations.size).toBe(0);
+        expect(
+          [...(internals?.spawnAdmissionWaiters ?? [])].filter(
+            (waiter) => (waiter as { replacingSessionId?: string }).replacingSessionId === "api-1",
+          ),
+        ).toHaveLength(0);
+        service.dispose();
+      });
 
       it("restore, reopen and handoff of the former owner refuse while the held taker keeps the intent", async () => {
         const sessions = seedWorkspace();
