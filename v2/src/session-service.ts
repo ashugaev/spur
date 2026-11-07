@@ -2717,6 +2717,10 @@ export function isForeignAgentProcessMessage(message: string): boolean {
   return message.includes(FOREIGN_AGENT_PROCESS_MARKER);
 }
 
+// Per-launch trust: Claude Code skips its workspace trust dialog when this is
+// set and records no trust entry in the account config (Claude Code 2.1.291).
+const CLAUDE_PAGE_TRUST_ENV = "CLAUDE_CODE_SANDBOXED";
+
 function buildSessionEnv(args: {
   agent: SessionRecord["agent"];
   projectId: string;
@@ -2778,6 +2782,10 @@ function buildSessionEnv(args: {
       existsSync(join(args.repoPath, "pnpm-workspace.yaml")))
   ) {
     env["npm_config_virtual_store_dir"] = join(args.repoPath, "node_modules/.pnpm");
+  }
+  // Page dirs are Spur-created: skip Claude's per-folder trust dialog.
+  if (args.agent === "claude" && isPageProjectId(args.projectId)) {
+    env[CLAUDE_PAGE_TRUST_ENV] = "1";
   }
   return {
     ...env,

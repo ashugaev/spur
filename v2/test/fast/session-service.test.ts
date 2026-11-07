@@ -45349,6 +45349,29 @@ describe("SessionService", () => {
     expect(buildAgentRestorePlanMock).toHaveBeenCalledWith("claude", page.path, "", {});
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
     expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
+    expect(createTmuxSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        env: expect.objectContaining({ CLAUDE_CODE_SANDBOXED: "1" }),
+      }),
+    );
+  });
+
+  it("trusts the workspace per launch only for claude page agents", async () => {
+    const { _buildSessionEnvForTests } = await import("../../src/session-service.js");
+    const envFor = (agent: "claude" | "codex", projectId: string) =>
+      _buildSessionEnvForTests({
+        agent,
+        projectId,
+        sessionId: "s-1",
+        artifactsSessionId: "s-1",
+        sessionToolDir: "/tmp/spur-session-tools/s-1",
+        dataDir: TEST_DATA_DIR,
+        repoPath: "/tmp/repo",
+        symlinks: [],
+      });
+    expect(envFor("claude", "spur-page-films")["CLAUDE_CODE_SANDBOXED"]).toBe("1");
+    expect(envFor("claude", "api")).not.toHaveProperty("CLAUDE_CODE_SANDBOXED");
+    expect(envFor("codex", "spur-page-films")).not.toHaveProperty("CLAUDE_CODE_SANDBOXED");
   });
 
   it("fresh-launch restore of a page agent sends its spawn prompt without the restore prefix", async () => {
