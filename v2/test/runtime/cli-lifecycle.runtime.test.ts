@@ -1,12 +1,13 @@
+import { Buffer } from "node:buffer";
 import { createServer } from "node:http";
-import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import { chmod, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { platform } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { toCursorProjectPath } from "../../src/cursor-jsonl-state.js";
 import { cursorDeliveryInput, isCursorDeliveryId } from "../../src/agents/cursor-submit-ack.js";
-import { readEventLog, type SpurLogEntry } from "../../src/event-log.js";
+import { readEventLog, sessionEventLogPath, type SpurLogEntry } from "../../src/event-log.js";
 import { readSession, writeSession } from "../../src/metadata.js";
 import { listProcesses, readProcessEnvValue } from "../../src/process-tree.js";
 import type {
@@ -6125,10 +6126,227 @@ projects:
 
     const devSessionName = `${first.id}--dev`;
 
-    await pollUntil(() => tmuxSessionExists(devSessionName), {
-      timeoutMs: 15_000,
-      accept: (v) => v === true,
-    });
+    try {
+      await pollUntil(() => tmuxSessionExists(devSessionName), {
+        timeoutMs: 15_000,
+        accept: (v) => v === true,
+      });
+    } catch (error) {
+      try {
+        const deadline = Date.now() + 1_000;
+        const signal = AbortSignal.timeout(Math.max(0, deadline - Date.now()));
+        const readEvents = async () => {
+          if (signal.aborted || Date.now() >= deadline) return { status: "deadline-expired" };
+          try {
+            const file = await open(
+              sessionEventLogPath(context.dataDir, first.id),
+              constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
+            );
+            try {
+              if (!(await file.stat()).isFile()) return { status: "nonregular" };
+              if (signal.aborted || Date.now() >= deadline) return { status: "deadline-expired" };
+              const chunks: Buffer[] = [];
+              const stream = file.createReadStream({
+                start: 0,
+                end: 65_536,
+                autoClose: false,
+                signal,
+              });
+              const closed = new Promise<void>((resolve) => stream.once("close", () => resolve()));
+              try {
+                for await (const chunk of stream) {
+                  if (!Buffer.isBuffer(chunk)) return { status: "invalid" };
+                  chunks.push(chunk);
+                }
+              } finally {
+                try {
+                  stream.destroy();
+                } finally {
+                  await closed;
+                }
+              }
+              const raw = Buffer.concat(chunks);
+              const text = raw.subarray(0, 65_536).toString("utf8");
+              const lines = text
+                .slice(0, text.lastIndexOf("\n") + 1)
+                .split("\n")
+                .slice(0, -1);
+              let invalidLines = 0;
+              const events: Array<{
+                ordinal: number;
+                event: string;
+                sidecar?: string;
+                reason: "port_conflict" | "redacted";
+                expectedTmuxMatch?: boolean;
+              }> = [];
+              for (const [index, line] of lines.entries()) {
+                let entry: unknown;
+                try {
+                  entry = JSON.parse(line);
+                } catch {
+                  invalidLines += 1;
+                  continue;
+                }
+                if (
+                  typeof entry !== "object" ||
+                  entry === null ||
+                  !("sessionId" in entry) ||
+                  entry.sessionId !== first.id ||
+                  !("event" in entry) ||
+                  typeof entry.event !== "string" ||
+                  ![
+                    "session.sidecar.start_rejected",
+                    "session.sidecar.autostart.failed",
+                    "session.sidecar.started",
+                    "session.spawn.completed",
+                  ].includes(entry.event)
+                ) {
+                  continue;
+                }
+                const details =
+                  "details" in entry && typeof entry.details === "object" && entry.details !== null
+                    ? entry.details
+                    : undefined;
+                if (entry.event === "session.sidecar.autostart.failed") {
+                  if (
+                    !("message" in entry) ||
+                    typeof entry.message !== "string" ||
+                    !entry.message.startsWith(`Auto-start sidecar dev failed for ${first.id}: `)
+                  ) {
+                    continue;
+                  }
+                } else if (
+                  entry.event !== "session.spawn.completed" &&
+                  (!details || !("sidecarName" in details) || details.sidecarName !== "dev")
+                ) {
+                  continue;
+                }
+                events.push({
+                  ordinal: index + 1,
+                  event: entry.event,
+                  ...(entry.event === "session.spawn.completed" ? {} : { sidecar: "dev" }),
+                  reason:
+                    details && "reason" in details && details.reason === "port_conflict"
+                      ? "port_conflict"
+                      : "redacted",
+                  ...(entry.event === "session.sidecar.started" &&
+                  details &&
+                  "tmuxSession" in details &&
+                  typeof details.tmuxSession === "string"
+                    ? { expectedTmuxMatch: details.tmuxSession === devSessionName }
+                    : {}),
+                });
+                if (events.length > 16) events.shift();
+              }
+              return {
+                status: "ok",
+                bytesRead: raw.length,
+                truncated: raw.length > 65_536,
+                incomplete: text.length > 0 && !text.endsWith("\n"),
+                invalidLines,
+                events,
+              };
+            } finally {
+              await file.close();
+            }
+          } catch (readError) {
+            return {
+              status: signal.aborted
+                ? "timeout"
+                : typeof readError === "object" && readError !== null && "code" in readError
+                  ? readError.code === "ENOENT"
+                    ? "missing"
+                    : readError.code === "ELOOP"
+                      ? "symlink"
+                      : "unavailable"
+                  : "unavailable",
+            };
+          }
+        };
+        const probeTmux = async () => {
+          const remaining = deadline - Date.now();
+          if (signal.aborted || remaining <= 0) return { status: "deadline-expired" };
+          const command = execFileAsync(
+            "tmux",
+            ["-L", context.tmuxSocketName, "has-session", "-t", devSessionName],
+            { signal, timeout: remaining, killSignal: "SIGKILL", maxBuffer: 1_024 },
+          );
+          const closed = new Promise<void>((resolve) =>
+            command.child.once("close", () => resolve()),
+          );
+          let status: number | "unavailable" = 0;
+          let code = "other";
+          let killed = false;
+          let stderr = "";
+          let overflow = false;
+          try {
+            stderr = (await command).stderr;
+          } catch (probeError) {
+            status = "unavailable";
+            if (typeof probeError === "object" && probeError !== null) {
+              if ("code" in probeError) {
+                if (
+                  typeof probeError.code === "number" &&
+                  Number.isInteger(probeError.code) &&
+                  probeError.code >= 0 &&
+                  probeError.code <= 255
+                ) {
+                  status = probeError.code;
+                }
+                if (
+                  probeError.code === "ETIMEDOUT" ||
+                  probeError.code === "ABORT_ERR" ||
+                  probeError.code === "ENOENT"
+                ) {
+                  code = probeError.code;
+                }
+                overflow = probeError.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
+              }
+              killed = "killed" in probeError && probeError.killed === true;
+              if ("stderr" in probeError && typeof probeError.stderr === "string") {
+                stderr = probeError.stderr;
+              }
+            }
+          } finally {
+            await closed;
+          }
+          const bytes = Buffer.byteLength(stderr);
+          return {
+            target: "first--dev",
+            status,
+            code,
+            killed,
+            stderr:
+              stderr.length === 0
+                ? "empty"
+                : stderr.startsWith("can't find session:")
+                  ? "missing-session"
+                  : stderr.startsWith("no server running on ")
+                    ? "missing-server"
+                    : stderr.startsWith("error connecting to ")
+                      ? "connect-failed"
+                      : "other-redacted",
+            stderrByteLength: Math.min(bytes, 1_024),
+            overflow: overflow || bytes > 1_024,
+          };
+        };
+        const [events, probe] = await Promise.allSettled([readEvents(), probeTmux()]);
+        const output = `[runtime-sidecar-startup] ${JSON.stringify({
+          session: "first",
+          events: events.status === "fulfilled" ? events.value : { status: "unavailable" },
+          probe: probe.status === "fulfilled" ? probe.value : { status: "unavailable" },
+        })}`;
+        console.error(
+          Buffer.byteLength(output) <= 8_192
+            ? output
+            : "[runtime-sidecar-startup] diagnostic-output-too-large",
+        );
+      } catch {
+        console.error("[runtime-sidecar-startup] unavailable");
+      } finally {
+        throw error;
+      }
+    }
 
     const paused = JSON.parse(
       (await context.execCli(["--config", configPath, "pause", first.id, "--json"])).stdout,
