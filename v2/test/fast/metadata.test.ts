@@ -416,7 +416,6 @@ describe("work-item lifecycle registry", () => {
         sessionId: "api-a1b2",
         claimedAt: "2026-05-11T10:00:00.000Z",
         attempts: 1,
-        deferrals: 0,
       },
     ]);
 
@@ -432,7 +431,6 @@ describe("work-item lifecycle registry", () => {
           sessionId: "api-a1b2",
           claimedAt: "2026-05-11T10:00:00.000Z",
           attempts: 1,
-          deferrals: 0,
         },
       ],
     });
@@ -448,7 +446,6 @@ describe("work-item lifecycle registry", () => {
         state: "spawning",
         claimedAt: "2026-05-11T10:00:00.000Z",
         attempts: 1,
-        deferrals: 0,
       },
     ]);
 
@@ -553,7 +550,6 @@ describe("work-item lifecycle registry", () => {
       sessionId,
       claimedAt: "2026-05-11T10:00:00.000Z",
       attempts: 1,
-      deferrals: 0,
     });
     const record = updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, () => [
       member(1, "api-2"),
@@ -571,7 +567,6 @@ describe("work-item lifecycle registry", () => {
       state: "spawning" as const,
       claimedAt: "2026-05-11T10:00:00.000Z",
       attempts: 1,
-      deferrals: 0,
     });
     updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, () => [spawning(0), spawning(1)]);
     updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, (members) =>
@@ -598,7 +593,6 @@ describe("work-item lifecycle registry", () => {
       sessionId: "api-1",
       claimedAt: itemBase.createdAt,
       attempts: 1,
-      deferrals: 0,
     };
     updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, () => [running]);
     const laterBase = { ...itemBase, createdAt: "2026-06-01T00:00:00.000Z" };
@@ -641,7 +635,7 @@ describe("work-item lifecycle registry", () => {
     ]);
 
     const records = readWorkItemLifecycles(dataDir, "api", "pr-watch");
-    const legacy = { blockIndex: 0, claimedAt: itemBase.createdAt, attempts: 0, deferrals: 0 };
+    const legacy = { blockIndex: 0, claimedAt: itemBase.createdAt, attempts: 0 };
     expect(records.get("acme/api#7")).toMatchObject({
       state: "failed",
       error: "boom",
@@ -670,7 +664,6 @@ describe("work-item lifecycle registry", () => {
           state: "failed",
           claimedAt: itemBase.createdAt,
           attempts: 1,
-          deferrals: 0,
           error: "boom",
         },
       ]);
@@ -699,7 +692,6 @@ describe("work-item lifecycle registry", () => {
         sessionId: "api-a1b2",
         claimedAt: itemBase.createdAt,
         attempts: 1,
-        deferrals: 0,
       },
     ]);
 

@@ -242,7 +242,6 @@ export interface WorkItemMember {
   sessionId?: string;
   claimedAt: string;
   attempts: number;
-  deferrals: number;
   nextRetryAt?: string;
   error?: string;
   /** Running owner a claimed member would replace; restored when the owner is still live. */

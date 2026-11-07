@@ -174,7 +174,6 @@ describe("discardFailedSpawn", () => {
         claimedAt: "2026-05-11T10:00:00.000Z",
         nextRetryAt: "2026-05-11T10:45:00.000Z",
         attempts: 2,
-        deferrals: 0,
       },
     ]);
     for (const [id, triggerId, launchCommand] of [
@@ -280,7 +279,6 @@ describe("discardFailedSpawn", () => {
         claimedAt: "2026-05-11T10:00:00.000Z",
         nextRetryAt: "2026-05-11T10:45:00.000Z",
         attempts: 1,
-        deferrals: 0,
       },
     ]);
     await git(f.repoPath, "branch", "api-1");
@@ -369,7 +367,6 @@ describe("discardFailedSpawn", () => {
         claimedAt: "2026-05-11T10:00:00.000Z",
         nextRetryAt: "2026-05-11T10:45:00.000Z",
         attempts: 1,
-        deferrals: 0,
       },
     ]);
     await git(f.repoPath, "branch", "api-1");
@@ -448,7 +445,6 @@ describe("discardFailedSpawn", () => {
         claimedAt: "2026-05-11T10:00:00.000Z",
         nextRetryAt: "2026-05-11T10:45:00.000Z",
         attempts: 1,
-        deferrals: 0,
       },
     ]);
     await git(f.repoPath, "branch", "api-1");
@@ -526,7 +522,6 @@ describe("discardFailedSpawn", () => {
         claimedAt: "2026-05-11T10:00:00.000Z",
         nextRetryAt: "2026-05-11T10:45:00.000Z",
         attempts: 1,
-        deferrals: 0,
       },
     ]);
     await git(f.repoPath, "branch", "api-1");
@@ -616,7 +611,6 @@ describe("discardFailedSpawn", () => {
       claimedAt: "2026-05-11T10:00:00.000Z",
       nextRetryAt: "2026-05-11T10:45:00.000Z",
       attempts: 1,
-      deferrals: 0,
     };
     updateWorkItemMembers(f.dataDir, "api", "pr-watch", item, () => [failed]);
     await git(f.repoPath, "branch", "api-1");

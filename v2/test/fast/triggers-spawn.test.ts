@@ -184,7 +184,7 @@ describe("durable spawn admission", () => {
       expect(f.spawn).toHaveBeenCalledTimes(1);
       expect(readWorkItemLifecycles(f.dataDir, "test", "tick").get(data.externalId)).toMatchObject({
         state: "failed",
-        members: [expect.objectContaining({ attempts: 1, deferrals: 0 })],
+        members: [expect.objectContaining({ attempts: 1 })],
       });
       f.spawn.mockResolvedValue({ id: "test-owner", status: "running" });
       await vi.advanceTimersByTimeAsync(15_000);
@@ -382,7 +382,6 @@ describe("durable spawn admission", () => {
             sessionId: "test-1",
             claimedAt: createdAt,
             attempts: 0,
-            deferrals: 0,
           }),
         ],
       });

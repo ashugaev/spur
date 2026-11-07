@@ -19,7 +19,6 @@ function member(overrides: Partial<WorkItemMember>): WorkItemMember {
     state: "failed",
     claimedAt: iso(-3 * WORK_ITEM_RETRY_INTERVAL_MS),
     attempts: 1,
-    deferrals: 0,
     ...overrides,
   };
 }
@@ -44,8 +43,8 @@ describe("isWorkItemMemberDue", () => {
     expect(isWorkItemMemberDue(member({}), NOW)).toBe(true);
   });
 
-  it("has no attempt or deferral cap", () => {
-    expect(isWorkItemMemberDue(member({ attempts: 1000, deferrals: 1000 }), NOW)).toBe(true);
+  it("has no attempt cap", () => {
+    expect(isWorkItemMemberDue(member({ attempts: 1000 }), NOW)).toBe(true);
     expect(
       isWorkItemMemberDue(member({ state: "spawning", attempts: 1000, claimedAt: iso(-1e9) }), NOW),
     ).toBe(true);

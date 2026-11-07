@@ -769,7 +769,6 @@ function workItemMember(overrides?: {
     sessionId: "api-9",
     claimedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
     attempts: 1,
-    deferrals: 0,
     ...overrides,
   };
   return Object.fromEntries(
@@ -6297,7 +6296,7 @@ describe("startConfiguredTriggers", () => {
         );
       });
       const failed = records.get("acme/api#42")?.members[0];
-      expect(failed).toMatchObject({ state: "failed", attempts: 1, deferrals: 0 });
+      expect(failed).toMatchObject({ state: "failed", attempts: 1 });
       const retryAt = Date.parse(failed?.nextRetryAt ?? "");
       expect(retryAt - Date.now()).toBeLessThanOrEqual(WORK_ITEM_RETRY_INTERVAL_MS);
       expect(retryAt - Date.now()).toBeGreaterThan(WORK_ITEM_RETRY_INTERVAL_MS - 5_000);
@@ -7113,7 +7112,6 @@ describe("startConfiguredTriggers", () => {
                   sessionId: accepted.id,
                   claimedAt: f.createdAt,
                   attempts: 0,
-                  deferrals: 0,
                   startedAt: undefined,
                 }),
               ]
@@ -7123,7 +7121,6 @@ describe("startConfiguredTriggers", () => {
                   sessionId: undefined,
                   claimedAt: f.createdAt,
                   attempts: 0,
-                  deferrals: 0,
                   startedAt: undefined,
                 }),
               ],
@@ -7178,7 +7175,6 @@ describe("startConfiguredTriggers", () => {
               sessionId: accepted.id,
               claimedAt: f.createdAt,
               attempts: 0,
-              deferrals: 0,
             });
             expect(f.members()[0]).not.toHaveProperty("startedAt");
             expect(f.actual.readSession(f.dataDir, accepted.id)).not.toHaveProperty("spawnReceipt");
@@ -7264,7 +7260,6 @@ describe("startConfiguredTriggers", () => {
           state: "spawning",
           claimedAt: f.createdAt,
           attempts: 0,
-          deferrals: 0,
         });
         expect(f.actual.readPendingSpawnWork(f.dataDir).has(f.workId)).toBe(true);
         f.birth.mockReturnValue(undefined);
@@ -7294,7 +7289,7 @@ describe("startConfiguredTriggers", () => {
         await vi.waitFor(() => expect(f.spawn).toHaveBeenCalledTimes(2));
         expect(f.actual.readPendingSpawnWork(f.dataDir).size).toBe(0);
         for (const member of f.members().filter((row) => row.blockIndex > 0)) {
-          expect(member).toMatchObject({ state: "failed", attempts: 1, deferrals: 0 });
+          expect(member).toMatchObject({ state: "failed", attempts: 1 });
           expect(member).not.toHaveProperty("startedAt");
           expect(member).not.toHaveProperty("sessionId");
         }
@@ -7397,7 +7392,7 @@ describe("startConfiguredTriggers", () => {
       try {
         bus.emit(workItemEvent());
         await vi.waitFor(() => expect(memberOf(records)?.sessionId).toBe(accepted.id));
-        expect(memberOf(records)).toMatchObject({ state: "spawning", attempts: 1, deferrals: 0 });
+        expect(memberOf(records)).toMatchObject({ state: "spawning", attempts: 1 });
         expect(memberOf(records)?.startedAt).toBeUndefined();
         expect(memberOf(records, 1)).toBeUndefined();
         expect(records.get("acme/api#42")?.state).toBe("pending");
@@ -8282,7 +8277,6 @@ describe("startConfiguredTriggers", () => {
               state: settledState,
               sessionId: nativeOwner.id,
               attempts: 3,
-              deferrals: 0,
             });
             expect(member()).not.toHaveProperty("previousTriggerIds");
             expect(spawn).not.toHaveBeenCalled();
@@ -8411,7 +8405,6 @@ describe("startConfiguredTriggers", () => {
               state: "running",
               sessionId: "api-native",
               attempts: 2,
-              deferrals: previous.deferrals,
             });
             expect(members()?.[0]).not.toHaveProperty("previousTriggerIds");
             expect(members()?.[1]).toMatchObject({ ...sibling, triggerId: "pick-up" });
@@ -8434,7 +8427,6 @@ describe("startConfiguredTriggers", () => {
             sessionId: "api-native",
             startedAt: new Date(Date.now() - 46 * MINUTE).toISOString(),
             attempts: 3,
-            deferrals: 2,
           });
           const records = useWorkItemLifecycleStore([
             workItemLifecycle([owner], { autoComplete: false }),
@@ -8631,7 +8623,6 @@ describe("startConfiguredTriggers", () => {
           state: "running",
           sessionId: "api-9",
           attempts: 1,
-          deferrals: 0,
         });
         expect(memberOf(records)).not.toHaveProperty("replacesSessionId");
       } finally {
@@ -8692,7 +8683,6 @@ describe("startConfiguredTriggers", () => {
               error: "pre-upgrade spawn failed",
               claimedAt: createdAt,
               attempts: 0,
-              deferrals: 0,
             },
           ],
         );
@@ -8944,7 +8934,6 @@ describe("startConfiguredTriggers", () => {
             error: "boom",
             claimedAt: new Date(Date.now() - 60 * MINUTE).toISOString(),
             attempts: 0,
-            deferrals: 0,
           },
         ]),
       ]);
@@ -8986,7 +8975,6 @@ describe("startConfiguredTriggers", () => {
             error: "boom",
             claimedAt: new Date(Date.now() - 60 * MINUTE).toISOString(),
             attempts: 0,
-            deferrals: 0,
           },
         ]),
       ]);

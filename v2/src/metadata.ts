@@ -776,7 +776,6 @@ function parseWorkItemMember(raw: unknown): WorkItemMember | null {
     ...(typeof sessionId === "string" ? { sessionId } : {}),
     claimedAt,
     attempts,
-    deferrals: typeof raw.deferrals === "number" ? raw.deferrals : 0,
     ...(nextRetryAt !== undefined ? { nextRetryAt } : {}),
     ...(error !== undefined ? { error } : {}),
     ...(replacesSessionId !== undefined ? { replacesSessionId } : {}),
@@ -794,7 +793,7 @@ function legacyWorkItemMember(
 ): WorkItemMember | null {
   const state = isWorkItemLifecycleState(raw.state) ? raw.state : "running";
   const sessionId = optionalString(raw.sessionId);
-  const common = { blockIndex: 0, claimedAt: createdAt, attempts: 0, deferrals: 0 };
+  const common = { blockIndex: 0, claimedAt: createdAt, attempts: 0 };
   if (state === "pending") return { ...common, state: "spawning" };
   if (state === "failed") {
     const error = optionalString(raw.error);

@@ -278,7 +278,6 @@ interface PlannedSpawnBlock {
   // Exact pre-claim members this block's claim replaced, restored on release.
   previous: WorkItemMember[];
   attemptsBefore: number;
-  deferralsBefore: number;
   replacesSessionId?: string;
   claimedAt?: string;
 }
@@ -422,7 +421,7 @@ function claimWorkItemBlocks(
       ? legacy
       : own.find((member) => member.blockIndex === blockIndex);
     if (existing === undefined) {
-      planned.push({ block, blockIndex, previous: [], attemptsBefore: 0, deferralsBefore: 0 });
+      planned.push({ block, blockIndex, previous: [], attemptsBefore: 0 });
       continue;
     }
     if (existing.state === "completed") {
@@ -451,7 +450,6 @@ function claimWorkItemBlocks(
       blockIndex,
       previous: [existing],
       attemptsBefore: existing.attempts,
-      deferralsBefore: existing.deferrals,
       ...(replacesSessionId !== undefined ? { replacesSessionId } : {}),
     });
   }
@@ -490,7 +488,6 @@ function claimWorkItemBlocks(
           state: "spawning",
           claimedAt,
           attempts: entry.attemptsBefore + 1,
-          deferrals: entry.deferralsBefore,
           ...(entry.previous[0]?.sessionId !== undefined
             ? { sessionId: entry.previous[0].sessionId }
             : {}),
@@ -1079,7 +1076,6 @@ function recordWorkItemSpawnFailure(
       externalId: ctx.workItem.externalId,
       blockIndex: entry.blockIndex,
       attempts: member.attempts,
-      deferrals: member.deferrals,
       nextRetryAt,
     },
   });
@@ -1171,7 +1167,6 @@ async function reconcileLegacyWorkItemJournal(
         previous.state === "completed" ||
         previous.claimedAt !== snapshot.createdAt ||
         previous.attempts !== 0 ||
-        previous.deferrals !== 0 ||
         previous.startedAt !== undefined)
     )
       continue;
@@ -1181,7 +1176,6 @@ async function reconcileLegacyWorkItemJournal(
       state: "spawning",
       claimedAt: snapshot.createdAt,
       attempts: 0,
-      deferrals: 0,
     };
     let next: WorkItemMember;
     if (block.state === "pending" && index > work.nextBlockIndex && !revalidateBoundPending) {
@@ -1386,7 +1380,6 @@ async function runSpawnTrigger(
       blockIndex,
       previous: [],
       attemptsBefore: 0,
-      deferralsBefore: 0,
     }));
     let claimedAt = "";
     if (ctx) {
