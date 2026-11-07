@@ -5817,6 +5817,123 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it.each([
+    {
+      name: "retains the original spawn failure when a queued trigger birth was killed",
+      mode: "rejected",
+      error: new Error("original spawn failure"),
+      expectedError: "original spawn failure",
+    },
+    {
+      name: "retains the original spawn failure when a queued trigger birth was killed: undefined",
+      mode: "rejected",
+      error: undefined,
+      expectedError: "undefined",
+    },
+    {
+      name: "retains the original spawn failure when a queued trigger birth was killed: zero",
+      mode: "rejected",
+      error: 0,
+      expectedError: "0",
+    },
+    {
+      name: "rejects a killed trigger birth returned by same-key spawn",
+      mode: "resolved",
+      error: undefined,
+      expectedError: "Spawn cancelled for api-9",
+    },
+    {
+      name: "rejects a trigger birth killed while response enrichment is pending",
+      mode: "race",
+      error: new Error("original spawn failure"),
+      expectedError: "original spawn failure",
+    },
+    {
+      name: "recovers a running trigger birth after spawn rejects",
+      mode: "running",
+      error: new Error("response lost after acceptance"),
+      expectedError: undefined,
+    },
+  ])("trigger birth result: $name", async ({ mode, error, expectedError }) => {
+    const birth = {
+      id: "api-9",
+      status: mode === "running" ? "running" : mode === "race" ? "spawning" : "killed",
+      spawnReceipt: { version: 1, acceptedAt: "2026-11-04T00:00:00.000Z" },
+    };
+    const spawnMock = vi.fn();
+    if (mode === "resolved") spawnMock.mockResolvedValue({ ...birth });
+    else spawnMock.mockRejectedValue(error);
+    let releaseGet: ((view: { id: string; status: string }) => void) | undefined;
+    const getMock = vi.fn().mockResolvedValue({ ...birth });
+    if (mode === "race")
+      getMock.mockImplementationOnce(
+        () =>
+          new Promise<{ id: string; status: string }>((resolve) => {
+            releaseGet = resolve;
+          }),
+      );
+    const getTriggerBirthMock = vi.fn(() => birth);
+    const records = useWorkItemLifecycleStore();
+    const savedWork = vi.spyOn(pendingSpawnWork, "set");
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+        get: getMock,
+        getTriggerBirth: getTriggerBirthMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      if (mode === "race") {
+        await vi.waitFor(() => expect(getMock).toHaveBeenCalledWith(birth.id));
+        birth.status = "killed";
+        releaseGet?.({ id: birth.id, status: "spawning" });
+      }
+      const retained = structuredClone(birth);
+      await vi.waitFor(() =>
+        expect(records.get("acme/api#42")?.state).toBe(
+          expectedError === undefined ? "running" : "failed",
+        ),
+      );
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(getTriggerBirthMock).toHaveBeenCalledWith(
+        "api",
+        expect.any(String),
+        spawnMock.mock.calls[0]?.[0],
+      );
+      expect(birth).toEqual(retained);
+      if (expectedError === undefined) {
+        expect(records.get("acme/api#42")).toMatchObject({ state: "running", sessionId: birth.id });
+      } else {
+        expect(records.get("acme/api#42")).toMatchObject({ state: "failed", error: expectedError });
+        expect(
+          recordWorkItemLifecycleMock.mock.calls.some(
+            ([, , , record]) => record.state === "running",
+          ),
+        ).toBe(false);
+        expect(
+          savedWork.mock.calls.some(([, work]) =>
+            work.blocks.some((block) => block.state === "succeeded"),
+          ),
+        ).toBe(false);
+        expect(
+          logSpurEventMock.mock.calls.some(
+            ([, event]) => event.event === "trigger.spawn.completed",
+          ),
+        ).toBe(false);
+      }
+    } finally {
+      await controller.stop();
+      savedWork.mockRestore();
+    }
+  });
+
   it("leaves a failed work-item claim and retries on the next event", async () => {
     const spawnMock = vi
       .fn()

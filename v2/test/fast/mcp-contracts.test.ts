@@ -21,10 +21,10 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "ed2328f25766145324b1939124c0465b054d0379804cae6cb1f88a70ae0d6b16",
-  "types.ts": "7c3cdcb3204b310b59cdc8cc65da56353a6ee32aef5ac5ebd64699d87f610e48",
+  "server.ts": "8e1544954533e645dcf206ceee92779fb547f5406c75bc9a4f95eb8377014f6a",
+  "types.ts": "d70f784edfd22b871770077026aabc48fcfc61188c10b7881027d3d44c24f06d",
   "cron-job-editor.ts": "33fc7b2993819693ef511d9312f9eb8f4260feb2f263421aec2d4e5ac613ec06",
-  "session-service.ts": "08b6042dd2d4d846c4d8ba05c35a0b5f2dd772d4356d9aa5228fe5c2b8ab7b9a",
+  "session-service.ts": "26af9a33a10d13d2d7c0d6203e6809ae4283d025c1ff4feea47247ca5048f7f0",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "1d06c2d904fa46b95ef8bed971c5767fad76663482f22822f9a541b345f161ff",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -87,6 +87,17 @@ describe("daemon MCP operation contracts", () => {
     expect(parserMutation).not.toBe(server);
     expect(contractFingerprint(parserMutation)).not.toBe(contractFingerprint(server));
     expect(contractFingerprint(`// comment\n${server}`)).toBe(contractFingerprint(server));
+  });
+
+  it("describes accepted spawn identities without changing the 201 response contract", () => {
+    const foreground = getDaemonOperation("spawn_session");
+    const background = getDaemonOperation("spawn_background_session");
+    expect(foreground?.responses[0]).toMatchObject({ status: 201 });
+    expect(foreground?.responses[0]?.description).toContain("spawning identity before launch");
+    expect(foreground?.responses[0]?.description).toContain("Healthy foreground");
+    expect(background?.responses[0]).toMatchObject({ status: 201 });
+    expect(background?.responses[0]?.description).toContain("across daemon restart");
+    expect(background?.responses[0]?.description).toContain("ownership remains held");
   });
 
   it("fails closed on unfamiliar dispatch/matcher syntax", async () => {
