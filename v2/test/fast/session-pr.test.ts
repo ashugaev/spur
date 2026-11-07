@@ -28,6 +28,7 @@ const {
   normalizeSessionPrBinding,
   parseSessionPrBinding,
   resolveRepoSlug,
+  resolveSessionPrBinding,
   viewSessionPrState,
 } = await import("../../src/session-pr.js");
 const { _resetPrLookupsForTests } = await import("../../src/pr-lookup.js");
@@ -189,6 +190,90 @@ describe("session-pr", () => {
       links: [],
     });
     expect(deriveSessionSlots(normalized)).toEqual(normalized.slots);
+  });
+
+  it.each(["native", "legacy"])(
+    "validates a matched %s binding against the actual branch",
+    async (kind) => {
+      const binding = {
+        number: 42,
+        repo: "acme/api",
+        url: "https://ghe.example.com/acme/api/pull/42",
+      };
+      const session = makeSession({
+        branch: "stale-metadata",
+        ...(kind === "native"
+          ? { pr: binding }
+          : { slots: { links: [{ label: "pr", url: binding.url }] } }),
+      });
+      ghMock.mockResolvedValue(JSON.stringify({ headRefName: "feature/native-pr-binding" }));
+
+      const result = await resolveSessionPrBinding(session);
+
+      expect(result.binding).toEqual(binding);
+      expect(result.updatedSession?.pr ?? session.pr).toEqual(binding);
+      expect(ghMock).toHaveBeenCalledWith(
+        session.worktreePath,
+        "pr",
+        "view",
+        "42",
+        "--repo",
+        "ghe.example.com/acme/api",
+        "--json",
+        "headRefName",
+      );
+    },
+  );
+
+  it.each([false, true])("discovers an owned PR after a foreign binding: %s", async (hasOwnPr) => {
+    readRemoteUrlsMock.mockResolvedValue(new Map());
+    const session = makeSession({
+      pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+    });
+    ghMock
+      .mockResolvedValueOnce(JSON.stringify({ headRefName: "someone-elses-branch" }))
+      .mockResolvedValueOnce(
+        JSON.stringify(
+          hasOwnPr ? [{ number: 88, url: "https://github.com/acme/api/pull/88" }] : [],
+        ),
+      );
+
+    const result = await resolveSessionPrBinding(session);
+
+    expect(result.binding?.number ?? null).toBe(hasOwnPr ? 88 : null);
+    expect(result.updatedSession?.pr?.number ?? null).toBe(hasOwnPr ? 88 : null);
+    expect(ghMock).toHaveBeenLastCalledWith(
+      session.worktreePath,
+      "pr",
+      "list",
+      "--head",
+      session.branch,
+      "--json",
+      "number,title,url",
+      "--limit",
+      "1",
+    );
+    expect(session.pr?.number).toBe(42);
+  });
+
+  it.each(["not-json", "null", "{}", '{"headRefName":""}', '{"headRefName":42}'])(
+    "fails closed on unavailable bound PR ownership: %s",
+    async (raw) => {
+      const session = makeSession({
+        pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+      });
+      ghMock.mockResolvedValue(raw);
+      await expect(resolveSessionPrBinding(session)).rejects.toThrow();
+      expect(ghMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("propagates a bound ownership lookup failure instead of authorizing teardown", async () => {
+    ghMock.mockRejectedValue(new Error("GitHub unavailable"));
+    const session = makeSession({
+      pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+    });
+    await expect(resolveSessionPrBinding(session)).rejects.toThrow("GitHub unavailable");
   });
 
   it("discovers a binding with exactly one batched graphql call, not pr list", async () => {

@@ -417,10 +417,38 @@ export async function resolveSessionPrBinding(session: SessionRecord): Promise<{
 }> {
   const normalizedSession = normalizeSessionPrBinding(session);
   if (normalizedSession.pr) {
-    return {
-      binding: normalizedSession.pr,
-      ...(normalizedSession.pr !== session.pr ? { updatedSession: normalizedSession } : {}),
-    };
+    const branch = await resolvePrDiscoveryBranch(session.worktreePath, session.branch);
+    const raw = await gh(
+      session.worktreePath,
+      "pr",
+      "view",
+      String(normalizedSession.pr.number),
+      "--repo",
+      prRepoArg(normalizedSession.pr),
+      "--json",
+      "headRefName",
+    );
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw) as unknown;
+    } catch (error) {
+      throw new Error("gh pr view returned unreadable ownership metadata", { cause: error });
+    }
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      !("headRefName" in parsed) ||
+      typeof parsed.headRefName !== "string" ||
+      !parsed.headRefName.trim()
+    ) {
+      throw new Error("gh pr view returned no PR head branch");
+    }
+    if (parsed.headRefName === branch) {
+      return {
+        binding: normalizedSession.pr,
+        ...(normalizedSession.pr !== session.pr ? { updatedSession: normalizedSession } : {}),
+      };
+    }
   }
   const binding = await discoverSessionPrBinding(
     normalizedSession.worktreePath,
