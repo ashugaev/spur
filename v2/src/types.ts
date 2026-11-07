@@ -2175,6 +2175,8 @@ export interface ConversationPage {
   messages: {
     index: number;
     role: "user" | "assistant";
+    /** Store-agent chat view only: chat send, `[spur-action v1]` summary, or agent reply. */
+    kind?: "chat" | "action" | "reply";
     text: string;
     timestampMs?: number;
     textTruncated?: boolean;

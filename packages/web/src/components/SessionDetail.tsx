@@ -47,7 +47,7 @@ import { ArtifactDownloadIcon } from "@/components/icons/ArtifactDownloadIcon";
 import { ArtifactOpenExternalIcon } from "@/components/icons/ArtifactOpenExternalIcon";
 import { ArtifactPreviewIcon } from "@/components/icons/ArtifactPreviewIcon";
 import { ConversationView } from "@/components/ConversationView";
-import { SnippetActionSummary } from "@/components/snippets/SnippetActionSummary";
+import { SpurActionSummary } from "@/components/snippets/SpurActionSummary";
 import { browserSnippetStorage } from "@/components/snippets/SnippetPanel";
 import { SnippetsSection } from "@/components/snippets/SnippetsSection";
 import { pruneSnippetRecords } from "@/lib/snippets/snippet-store";
@@ -124,7 +124,6 @@ import {
   isTokenBudgetBlocked,
   isTerminalSession,
   toDashboardSession,
-  type ConversationMessage,
   type ConversationResponse,
   type DashboardSession,
   type GithubPrCheckUnavailablePayload,
@@ -386,8 +385,6 @@ function ArtifactZoomResetIcon() {
 }
 
 const POLL_INTERVAL_MS = 4_000;
-// Stable identity so the snippet panels' session effect does not re-run on an empty conversation.
-const EMPTY_CONVERSATION_MESSAGES: ConversationMessage[] = [];
 
 // Daemon answers 503 while starting; the Next route answers 502 when it can't reach it.
 const TRANSIENT_LOAD_STATUSES: ReadonlySet<number> = new Set([502, 503]);
@@ -1979,7 +1976,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setShowAllDeskMembers(false);
   }, [sessionId]);
 
-  // Drop snippet records untouched for 7 days (budget keys are never pruned).
+  // Drop v1 snippet records and v2 records untouched for 7 days (budget keys are never pruned).
   useEffect(() => {
     pruneSnippetRecords(browserSnippetStorage(), Date.now());
   }, []);
@@ -1991,16 +1988,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [session?.artifacts, session?.id],
   );
   const genericArtifacts = snippetPartition.generic;
+  const snippetCanSend = session ? canSendMessage(session) : false;
+  const snippetState = session?.state;
+  const snippetStatus = session?.status;
   const snippetSessionView = useMemo(
     () =>
-      session
-        ? {
-            canSend: canSendMessage(session),
-            state: session.state,
-            queuedMessages: session.queuedMessages.messages,
-          }
+      snippetState && snippetStatus
+        ? { canSend: snippetCanSend, state: snippetState, status: snippetStatus }
         : null,
-    [session],
+    [snippetCanSend, snippetState, snippetStatus],
   );
 
   useEffect(() => {
@@ -3121,7 +3117,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {snippetSessionView && snippetPartition.owned.length > 0 ? (
                 <SnippetsSection
                   files={snippetPartition.owned}
-                  messages={conversation?.messages ?? EMPTY_CONVERSATION_MESSAGES}
                   session={snippetSessionView}
                   sessionId={session.id}
                 />
@@ -3185,7 +3180,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             <div
                               className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
                             >
-                              <SnippetActionSummary text={queuedMessage} fallback={queuedMessage} />
+                              <SpurActionSummary text={queuedMessage} fallback={queuedMessage} />
                             </div>
                           </li>
                         );

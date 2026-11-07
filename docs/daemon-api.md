@@ -92,3 +92,29 @@
 - `GET /sessions/:id/shared-memory/:scope/:key`
 - `POST /sessions/:id/shared-memory/:scope/:key`
 - `DELETE /sessions/:id/shared-memory/:scope/:key`
+
+## Store routes
+
+`:store` = `page:<id>` or `session:<sid>`, `:` accepted as `%3A`; [stores.md](stores.md); `v2/src/stores.ts`, `v2/src/store-agent.ts`, `v2/src/store-actions.ts`.
+
+- `GET /stores/:store/docs/:collection`
+- `POST /stores/:store/docs/:collection`
+- `GET /stores/:store/docs/:collection/:docId`
+- `POST /stores/:store/docs/:collection/:docId`
+- `PATCH /stores/:store/docs/:collection/:docId`
+- `DELETE /stores/:store/docs/:collection/:docId`
+- `POST /stores/:store/query/:collection`
+- `GET /stores/:store/changes`
+- `POST /stores/:store/agent/send`
+- `GET /stores/:store/agent/messages`
+- `GET /stores/:store/agent/status`
+- `POST /stores/:store/actions`
+- `POST /stores/:store/actions/:actionId/complete` — CLI and agents only; the web proxy refuses it.
+
+## Page routes
+
+- `GET /pages` — [pages.md](pages.md); `v2/src/pages.ts`.
+- `POST /pages`
+- `DELETE /pages/:id`
+- `GET /pages/:id/files/:path`
+- `GET /pages/:id/events` — `v2/src/sse.ts`.

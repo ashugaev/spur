@@ -4,14 +4,28 @@ import { SnippetsSection } from "@/components/snippets/SnippetsSection";
 import { SNIPPET_FETCH_TIMEOUT_MS } from "@/lib/snippets/snippet-protocol";
 
 vi.mock("@/components/snippets/SnippetPanel", () => ({
-  SnippetErrorCard: ({ chip }: { chip: string }) => <div>{chip}</div>,
+  SnippetErrorCard: ({
+    chip,
+    detail,
+    message,
+  }: {
+    chip: string;
+    detail?: string;
+    message: string;
+  }) => (
+    <div>
+      <span>{chip}</span>
+      {detail ? <span>{detail}</span> : null}
+      <span>{message}</span>
+    </div>
+  ),
   SnippetPanel: ({ manifest }: { manifest: { revision: number } }) => (
     <div>loaded revision {manifest.revision}</div>
   ),
 }));
 
 const SID = "sp-ab12";
-const SESSION = { canSend: true, state: "working" as const, queuedMessages: [] };
+const SESSION = { canSend: true, state: "working" as const, status: "running" as const };
 
 function files(revision: number) {
   return [
@@ -30,9 +44,9 @@ function files(revision: number) {
   ];
 }
 
-function html(revision: number): string {
+function html(revision: number, protocolVersion = 2): string {
   const manifest = {
-    protocolVersion: 1,
+    protocolVersion,
     snippetId: "probe",
     ownerSessionId: SID,
     instanceId: "probe-instance",
@@ -50,10 +64,26 @@ function html(revision: number): string {
 }
 
 function renderSection(revision: number) {
-  return (
-    <SnippetsSection sessionId={SID} files={files(revision)} session={SESSION} messages={[]} />
-  );
+  return <SnippetsSection sessionId={SID} files={files(revision)} session={SESSION} />;
 }
+
+describe("SnippetsSection protocol 1 files", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("renders a v1 snippet as the manifest error card with the rewrite message", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(html(1, 1))),
+    );
+    render(renderSection(1));
+    await waitFor(() => expect(screen.getByText("Manifest invalid")).toBeInTheDocument());
+    expect(screen.getByText("/protocolVersion")).toBeInTheDocument();
+    expect(
+      screen.getByText("Snippet protocol 1 is no longer supported; rewrite with protocolVersion 2"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/loaded revision/)).not.toBeInTheDocument();
+  });
+});
 
 describe("SnippetsSection stale loads", () => {
   const restores: Array<() => void> = [];
