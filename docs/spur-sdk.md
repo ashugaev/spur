@@ -24,7 +24,7 @@ One SDK file, two transports. Page: `<script src="./_spur/sdk.js"></script>`, fe
 - `action`: current `{id, action, payload, status, error?, result?}` or `null`. Status: `awaiting_confirm`, `submitting`, `queued`, `processing`, `completed`, `error`, `timeout`.
 - `requestFullscreen(): Promise<boolean>` (snippet: false until it had focus), `exitFullscreen()`.
 - `selection(sourceId?)`: current selection in a `spur-selectable-text`.
-- Theme: `--spur-<token>` custom properties on `:root`, font `--spur-font`. Snippet: host tokens, `theme` event on change. Page: CSS system colors.
+- Theme: `--spur-<token>` custom properties on `:root`, font `--spur-font`. Snippet: host tokens, `theme` event on change. Page: `./_spur/theme.css` supplies `light-dark()` pairs for `--spur-text-tertiary` and `--spur-status-{error,ready,working,attention}`; page CSS overrides them.
 
 ## Invoke
 
