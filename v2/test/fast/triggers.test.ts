@@ -7222,6 +7222,51 @@ describe("startConfiguredTriggers", () => {
       }
     });
 
+    it("fences a legacy accepted birth tagged for another trigger", async () => {
+      const f = await legacyJournalFixture();
+      const current = f.actual
+        .readWorkItemLifecycles(f.dataDir, "api", "pr-watch")
+        .get(WORK_ITEM_BASE.externalId);
+      const accepted = f.actual.readSession(f.dataDir, "api-9");
+      if (!current || !accepted) throw new Error("Missing legacy fixture");
+      const foreignOrigin = {
+        triggerId: "other",
+        sourceId: "pr-watch",
+        externalId: WORK_ITEM_BASE.externalId,
+        blockIndex: 0,
+      };
+      f.actual.writeSession(f.dataDir, { ...accepted, triggerOrigin: foreignOrigin });
+      const unbound: WorkItemMember = {
+        triggerId: "pick-up",
+        blockIndex: 0,
+        state: "spawning",
+        claimedAt: f.createdAt,
+        attempts: 0,
+      };
+      f.actual.updateWorkItemMembers(f.dataDir, "api", "pr-watch", current, () => [unbound]);
+      f.birth.mockImplementation((_project: string, key: string) =>
+        key === `${f.workId}:0` ? f.actual.readSession(f.dataDir, "api-9") : undefined,
+      );
+      const { bus, controller } = await startTriggers(f.config, f.service);
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() =>
+          expect(f.members().find((member) => member.blockIndex === 0)).toBeDefined(),
+        );
+        await vi.advanceTimersByTimeAsync(10);
+        await controller.stop();
+        expect(f.members().find((member) => member.blockIndex === 0)).toEqual(unbound);
+        expect(f.actual.readPendingSpawnWork(f.dataDir).has(f.workId)).toBe(true);
+        expect(f.actual.readSession(f.dataDir, "api-9")?.triggerOrigin).toEqual(foreignOrigin);
+        expect(
+          f.spawn.mock.calls.some(([, options]) => options.triggerOrigin.blockIndex === 0),
+        ).toBe(false);
+      } finally {
+        await controller.stop();
+        rmSync(f.dataDir, { recursive: true, force: true });
+      }
+    });
+
     it("fences only the unknown legacy frontier while the never-entered tail progresses", async () => {
       const f = await legacyJournalFixture();
       f.birth.mockImplementation(() => {
