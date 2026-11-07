@@ -600,10 +600,10 @@ async function transitionReview(
         ? request.feedback
         : undefined,
     preparedFeedback: action === "prepare" || action === "recover" ? request.feedback : undefined,
-    feedbackPublication: { status: "unconfirmed" } as {
-      status: "unconfirmed" | "confirmed" | "failed";
-      error?: string;
-    },
+    feedbackPublication: { status: "unconfirmed" } as
+      | { status: "unconfirmed" | "confirmed" | "failed"; error?: string }
+      | null
+      | undefined,
   };
   let ownsAttempt = false;
   let recoverySnapshot: Buffer | undefined;
@@ -640,6 +640,7 @@ async function transitionReview(
   };
   const announce = async (persist = true) => {
     receipt.feedbackPublication = { status: "unconfirmed" };
+    const feedback = receipt.status === "APPROVED" ? undefined : receipt.feedback;
     try {
       await publishLaneState(app, {
         version: 1,
@@ -659,9 +660,7 @@ async function transitionReview(
         reviewId: receipt.reviewId,
         assessment:
           receipt.status !== "PENDING" && "assessment" in request ? request.assessment : null,
-        ...(receipt.status !== "APPROVED" && receipt.feedback !== undefined
-          ? { feedback: receipt.feedback }
-          : {}),
+        ...(feedback === undefined ? {} : { feedback }),
       });
       receipt.feedbackPublication = { status: "confirmed" };
     } catch (error) {
@@ -1063,7 +1062,7 @@ export function registerReviewApp(program: Command): void {
         if (
           (action === "prepare" && result.status !== "PENDING") ||
           (action === "block" && result.reason !== "review-blocked") ||
-          result.feedbackPublication.status !== "confirmed"
+          result.feedbackPublication?.status !== "confirmed"
         )
           process.exitCode = 1;
       });
@@ -1083,7 +1082,7 @@ export function registerReviewApp(program: Command): void {
         options.legacySha256,
       );
       process.stdout.write(`${JSON.stringify(result)}\n`);
-      if (result.status !== "PENDING" || result.feedbackPublication.status !== "confirmed")
+      if (result.status !== "PENDING" || result.feedbackPublication?.status !== "confirmed")
         process.exitCode = 1;
     });
   command

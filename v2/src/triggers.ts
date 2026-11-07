@@ -411,14 +411,21 @@ async function runSpawnTrigger(
         if (!queue.current()) return;
         const birthKey = `${work.workId}:${blockIndex}`;
         let session: SessionView;
+        let spawnFailure: { error: unknown } | undefined;
         try {
           session = await service.spawn(spawnRequest, { triggerBirthKey: birthKey });
         } catch (error) {
           const birth = service.getTriggerBirth(projectId, birthKey, spawnRequest);
           if (!birth) throw error;
+          spawnFailure = { error };
           session = await service.get(birth.id);
         }
         if (!queue.current()) return;
+        const birth = service.getTriggerBirth(projectId, birthKey, spawnRequest);
+        if (session.status === "killed" || birth?.status === "killed") {
+          if (spawnFailure) throw spawnFailure.error;
+          throw new Error(`Spawn cancelled for ${session.id}`);
+        }
         work.blocks[blockIndex] = { birthKey, state: "succeeded", sessionId: session.id };
         work.nextBlockIndex = blockIndex + 1;
         work.lastSessionId = session.id;
