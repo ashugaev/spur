@@ -390,7 +390,7 @@ export async function readBranchDestination(
     });
     const trackedRemote = last(`branch.${branch}.remote`);
     const merges = config.get(`branch.${branch}.merge`) ?? [];
-    if (merges.length > 1 || !!trackedRemote !== (merges.length === 1)) {
+    if (merges.length > 1 || (merges.length === 1 && !trackedRemote)) {
       return { status: "unknown" };
     }
     const trackedRef = merges[0];

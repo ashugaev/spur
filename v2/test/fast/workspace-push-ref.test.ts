@@ -86,6 +86,27 @@ describe("branch push destination", () => {
     });
   });
 
+  it.each(["simple", "current", "matching"])("accepts a remote-only %s selector without upstream", async (mode) => {
+    const { repo, git } = await createContextRepo("new");
+    await git("config", "branch.new.remote", "origin");
+    await git("config", "push.default", mode);
+    const push = mode === "simple" ? null : { url: "https://github.com/acme/api.git", branch: "new" };
+    await expect(readBranchDestination(repo, "new")).resolves.toEqual({
+      status: "known", push, upstream: null,
+    });
+    await expect(readBranchPushUrl(repo, "new")).resolves.toBe(push?.url ?? null);
+  });
+
+  it.each([false, true])("rejects an incomplete or ambiguous upstream (%s)", async (multiple) => {
+    const { repo, git } = await createContextRepo("new");
+    await git("config", "branch.new.merge", "refs/heads/old");
+    if (multiple) {
+      await git("config", "branch.new.remote", "origin");
+      await git("config", "--add", "branch.new.merge", "refs/heads/new");
+    }
+    await expect(readBranchDestination(repo, "new")).resolves.toEqual({ status: "unknown" });
+  });
+
   it.each(["current", "matching"])("proves unpushed %s without a remote atom", async (mode) => {
     const { repo, git } = await createContextRepo("new");
     await git("config", "push.default", mode);
