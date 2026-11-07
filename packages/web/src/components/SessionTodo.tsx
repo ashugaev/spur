@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { usePoll } from "@/hooks/usePoll";
+import type { PollOutcome } from "@/lib/poller";
 import { isSpurTodoProjection, type SpurTodoActor, type SpurTodoProjection } from "@/lib/types";
 import { HARD_WRAP_TEXT_CLASS } from "@/design/classes";
 
@@ -31,7 +32,7 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
   }, [sessionId]);
 
   const load = useCallback(
-    async (signal: AbortSignal) => {
+    async (signal: AbortSignal): Promise<PollOutcome> => {
       try {
         const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/todo`, {
           cache: "no-store",
@@ -50,9 +51,11 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
           setProjection(payload);
           setError(null);
         }
+        return "ok";
       } catch (loadError) {
-        if (!signal.aborted)
-          setError(loadError instanceof Error ? loadError.message : "Failed to read Spur ToDo");
+        if (signal.aborted) return "ok";
+        setError(loadError instanceof Error ? loadError.message : "Failed to read Spur ToDo");
+        return "failed";
       }
     },
     [sessionId],
