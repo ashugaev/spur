@@ -445,6 +445,12 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
   ),
   operation("get_headroom", "GET", "/headroom", "Host/session admission capacity."),
   operation(
+    "get_usage",
+    "GET",
+    "/usage",
+    "Provider quota windows and session token totals; tokens excluded.",
+  ),
+  operation(
     "list_deploy_versions",
     "GET",
     "/deploy/versions",
@@ -912,19 +918,21 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
         },
       ],
       status: 201,
-      response: "SessionView",
+      response:
+        "SessionView; under resource admission pressure, accepts a spawning identity before launch. Healthy foreground requests wait for launch.",
     },
   ),
   operation(
     "spawn_background_session",
     "POST",
     "/sessions/background",
-    "Spawn session in background; same complete spawn contract.",
+    "Spawn session in background; accepts identity before resource recovery and launch.",
     {
       body: spawn,
       examples: [{ body: { project: "example-project", prompt: "Inspect code", agent: "codex" } }],
       status: 201,
-      response: "SessionView",
+      response:
+        "SessionView with accepted spawning identity; durable launch intent retains that identity across daemon restart. Uncertain runtime ownership remains held.",
     },
   ),
   operation("spawn_shepherd", "POST", "/shepherd/spawn", "Spawn or reuse shepherd session.", {

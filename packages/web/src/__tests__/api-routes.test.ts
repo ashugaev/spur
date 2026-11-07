@@ -105,6 +105,7 @@ import { POST as switchAuth } from "@/app/api/sessions/[id]/switch-auth/route";
 import { GET as listClaudeAccounts } from "@/app/api/claude-accounts/route";
 import { GET as getSpawnDefaults } from "@/app/api/projects/[id]/spawn-defaults/route";
 import { GET as getCronJobs } from "@/app/api/cron/route";
+import { GET as getUsage } from "@/app/api/usage/route";
 import { GET as getCronDraft, PATCH as patchCronDraft } from "@/app/api/cron/edit/route";
 import { POST as postAutoUpdate } from "@/app/api/runtime/auto-update/route";
 
@@ -4089,6 +4090,37 @@ describe("Spur web API routes", () => {
 
       expect(response.status).toBe(404);
       expect(payload.error).toBe("Unknown project: api");
+    });
+
+    it("GET /api/usage forwards to the daemon with a 15s timeout", async () => {
+      const report = { generatedAt: "2026-11-06T00:00:00.000Z", quotas: [], tokens: [] };
+      mockedSpurRequestJson.mockResolvedValue(report);
+
+      const response = await getUsage();
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(report);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith("/usage", { timeoutMs: 15_000 });
+    });
+
+    it("GET /api/usage preserves the daemon error status", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("usage failed", 503));
+
+      const response = await getUsage();
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(503);
+      expect(payload.error).toBe("usage failed");
+    });
+
+    it("GET /api/usage returns 502 with the message for a plain error", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new Error("daemon down"));
+
+      const response = await getUsage();
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(502);
+      expect(payload.error).toBe("daemon down");
     });
 
     it("GET/PATCH /api/cron/edit preserves encoded identity and scoped body", async () => {

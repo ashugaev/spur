@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { platform } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -21,6 +21,7 @@ import type {
 import { execFileAsync, findFreePort, pollUntil, processExists, sleep } from "../helpers/common.js";
 import {
   CLI_PATH,
+  FAKE_CODEX_PREFLIGHT_LOG,
   captureTmuxPane,
   createGitRepo,
   createRuntimeTestContext,
@@ -2080,18 +2081,43 @@ projects:
       const daemon = await context.startDaemon(configPath);
       currentActiveContext().daemonPid = daemon.info.pid;
 
-      await expect(
-        context.execCli([
-          "--config",
-          configPath,
-          "spawn",
-          "api",
-          `runtime empty preflight prompt for ${agent}`,
-          "--agent",
-          agent,
-          "--json",
-        ]),
-      ).rejects.toThrow("Spawn preflight failed after 3 attempts");
+      try {
+        await expect(
+          context.execCli([
+            "--config",
+            configPath,
+            "spawn",
+            "api",
+            `runtime empty preflight prompt for ${agent}`,
+            "--agent",
+            agent,
+            "--json",
+          ]),
+        ).rejects.toThrow("Spawn preflight failed after 3 attempts");
+      } catch (cause) {
+        if (agent !== "codex") throw cause;
+        let diagnostic: string;
+        try {
+          const file = await open(join(context.agentLogDir, FAKE_CODEX_PREFLIGHT_LOG), "r");
+          try {
+            const buffer = Buffer.alloc(4096);
+            const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+            diagnostic = buffer.subarray(0, bytesRead).toString("utf8") || "empty";
+            if (bytesRead === buffer.length) diagnostic += "\n[limited to 4096 bytes]";
+          } finally {
+            await file.close();
+          }
+        } catch (error) {
+          diagnostic =
+            error !== null &&
+            typeof error === "object" &&
+            "code" in error &&
+            error.code === "ENOENT"
+              ? "absent"
+              : "unreadable";
+        }
+        throw new Error(`Fake Codex preflight dispatch diagnostics: ${diagnostic}`, { cause });
+      }
     },
   );
 
