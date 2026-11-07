@@ -263,7 +263,6 @@ import {
   type SessionListItemView,
   type ScheduleSessionWakeRequest,
   type SendMessageRequest,
-  type SpawnSessionRequest,
   type SessionMemoryRecord,
   type SessionRecord,
   type SessionLifecycleSnapshot,
