@@ -4978,6 +4978,34 @@ describe("SessionService", () => {
         expect(ownerIds(sessions)).toEqual(["api-3"]);
       });
 
+      it("handoff of the former owner refuses promptly under a saturated admission cap", async () => {
+        const sessions = seedWorkspace();
+        const { service, SessionStartingError } = await holdTakingSpawn(sessions);
+        const internals = service as unknown as {
+          admissionReservations: Map<symbol, string>;
+          config: { admission: { maxLiveSessions: number } };
+        };
+        // api-2 and api-3 are live: the cap is full for the replacement.
+        internals.config.admission = { ...internals.config.admission, maxLiveSessions: 1 };
+
+        const realTimers =
+          await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+        const refused = service.handoff("api-1", { agent: "cursor" });
+        const abort = new AbortController();
+        const outcome = await Promise.race([
+          refused.then(
+            () => "resolved" as const,
+            (error: unknown) => error,
+          ),
+          realTimers.setTimeout(500, "timeout", { signal: abort.signal }),
+        ]);
+        abort.abort();
+
+        expect(outcome).toBeInstanceOf(SessionStartingError);
+        expect(internals.admissionReservations.size).toBe(0);
+        service.dispose();
+      });
+
       it("send to the former owner refuses while the held taker keeps the intent, then relaunches it after the final failure", async () => {
         const sessions = seedWorkspace();
         const { service, SessionStartingError } = await holdTakingSpawn(sessions);

@@ -23077,6 +23077,8 @@ export class SessionService {
     request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
   ): Promise<SessionView> {
+    // Refuse before queueing for admission; handoffTransaction rechecks after the wait.
+    this.assertNoHeldCloseoutTake(sessionId);
     const waiting = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const session = this.validateHandoffSource(sessionId, options);
       if (this.handoffsInFlight.has(sessionId)) {
