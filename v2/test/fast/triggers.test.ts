@@ -9317,6 +9317,44 @@ describe("startConfiguredTriggers", () => {
       }
     });
 
+    it.each([
+      { mode: "resolved", expectedError: "Spawn api-9 did not launch" },
+      { mode: "rejected", expectedError: "original spawn failure" },
+    ] as const)(
+      "fails a work-item member whose spawn $mode with a killed birth",
+      async ({ mode, expectedError }) => {
+        const records = useWorkItemLifecycleStore();
+        const killed = { id: "api-9", status: "killed", state: "killed" };
+        listSessionsMock.mockReturnValue(mode === "rejected" ? [taggedSession("api-9")] : []);
+        const spawnMock = vi.fn();
+        if (mode === "resolved") spawnMock.mockResolvedValue(killed);
+        else spawnMock.mockRejectedValue(new Error(expectedError));
+        const getMock = vi.fn().mockResolvedValue(killed);
+        const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
+          spawn: spawnMock,
+          get: getMock,
+        });
+
+        try {
+          bus.emit(workItemEvent());
+          await vi.waitFor(() => expect(memberOf(records)?.state).toBe("failed"));
+          expect(memberOf(records)).toMatchObject({ state: "failed", error: expectedError });
+          expect(memberOf(records)).not.toHaveProperty("sessionId");
+          expect(spawnMock).toHaveBeenCalledTimes(1);
+          expect(
+            updateWorkItemMembersMock.mock.results.some(({ value }) =>
+              (value as WorkItemLifecycleRecord | undefined)?.members.some(
+                (member) => member.state === "running",
+              ),
+            ),
+          ).toBe(false);
+          expect(eventsOf("trigger.spawn.completed")).toHaveLength(0);
+        } finally {
+          await controller.stop();
+        }
+      },
+    );
+
     it.each(["failure", "adoption"] as const)(
       "keeps the original createdAt through a %s write",
       async (kind) => {
