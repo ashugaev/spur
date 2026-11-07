@@ -1,12 +1,13 @@
 import { Command } from "commander";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { expect, test, vi } from "vitest";
-import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import type * as FileSystem from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerReviewApp } from "../../src/review-app.js";
 import { createProgram } from "../../src/cli.js";
+import { createReviewAppProgram, run as runReviewApp } from "../../src/review-app-cli.js";
 import { plan, capability } from "./review-feedback.fixture.js";
 import { object, readJson } from "../../src/github-app.js";
 
@@ -16,7 +17,11 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   return {
     ...actual,
     writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
-      if (faults.pattern && typeof args[1] === "string" && args[1].includes(faults.pattern)) {
+      if (
+        faults.pattern &&
+        (typeof args[1] === "string" || Buffer.isBuffer(args[1])) &&
+        args[1].toString().includes(faults.pattern)
+      ) {
         faults.pattern = "";
         throw new Error("fixture first save failed");
       }
@@ -144,66 +149,84 @@ test.each(["--app-config", "--request", "--legacy-sha256"])(
   },
 );
 
-test("recover rejects invalid digest or session before network and leaves receipt untouched", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "spur-recover-cli-"));
-  const previousSession = process.env["SPUR_SESSION"];
-  const network = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
-  try {
-    const config = join(dir, "config.json"),
-      request = join(dir, "request.json");
-    await writeFile(
-      config,
-      JSON.stringify({
-        repositories: ["fixture/repo"],
-        receiptRoot: dir,
-        code: { appId: 1, keyPath: "/missing" },
-        browser: { appId: 2, keyPath: "/missing" },
-      }),
-    );
-    await writeFile(
-      request,
-      JSON.stringify({
-        repo: "fixture/repo",
-        pr: 1,
-        lane: "code",
-        session: "fixture-session",
-        attempt: "fresh-attempt",
-        H: "a".repeat(40),
-        B: "b".repeat(40),
-        contractDigest: "c".repeat(64),
-        receipt: join(dir, "fixture", "repo", "1", "code.json"),
-      }),
-    );
-    for (const session of ["fixture-session", "other-session"]) {
-      process.env["SPUR_SESSION"] = session;
-      await expect(
-        createProgram("/tmp/dist/cli.js").parseAsync([
-          "node",
-          "spur",
-          "review-app",
-          "recover",
-          "--app-config",
-          config,
-          "--request",
-          request,
-          "--legacy-sha256",
-          session === "fixture-session" ? "invalid" : "a".repeat(64),
-          "--json",
-        ]),
-      ).rejects.toThrow(session === "fixture-session" ? "invalid-hash" : "session-mismatch");
+test.each(["full", "dedicated"])(
+  "%s recover rejects invalid digest or session before network and leaves receipt untouched",
+  async (entry) => {
+    const dir = await mkdtemp(join(tmpdir(), "spur-recover-cli-"));
+    const previousSession = process.env["SPUR_SESSION"];
+    const network = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("unexpected network"));
+    try {
+      const config = join(dir, "config.json"),
+        request = join(dir, "request.json");
+      await writeFile(
+        config,
+        JSON.stringify({
+          repositories: ["fixture/repo"],
+          receiptRoot: dir,
+          code: { appId: 1, keyPath: "/missing" },
+          browser: { appId: 2, keyPath: "/missing" },
+        }),
+      );
+      await writeFile(
+        request,
+        JSON.stringify({
+          repo: "fixture/repo",
+          pr: 1,
+          lane: "code",
+          session: "fixture-session",
+          attempt: "fresh-attempt",
+          H: "a".repeat(40),
+          B: "b".repeat(40),
+          contractDigest: "c".repeat(64),
+          receipt: join(dir, "fixture", "repo", "1", "code.json"),
+        }),
+      );
+      for (const session of ["fixture-session", "other-session"]) {
+        process.env["SPUR_SESSION"] = session;
+        const program =
+          entry === "dedicated" ? createReviewAppProgram() : createProgram("/tmp/dist/cli.js");
+        await expect(
+          program.parseAsync([
+            "node",
+            "spur",
+            "review-app",
+            "recover",
+            "--app-config",
+            config,
+            "--request",
+            request,
+            "--legacy-sha256",
+            session === "fixture-session" ? "invalid" : "a".repeat(64),
+            "--json",
+          ]),
+        ).rejects.toThrow(session === "fixture-session" ? "invalid-hash" : "session-mismatch");
+      }
+      expect(network).not.toHaveBeenCalled();
+    } finally {
+      network.mockRestore();
+      if (previousSession === undefined) delete process.env["SPUR_SESSION"];
+      else process.env["SPUR_SESSION"] = previousSession;
+      await rm(dir, { recursive: true, force: true });
     }
-    expect(network).not.toHaveBeenCalled();
-  } finally {
-    network.mockRestore();
-    if (previousSession === undefined) delete process.env["SPUR_SESSION"];
-    else process.env["SPUR_SESSION"] = previousSession;
-    await rm(dir, { recursive: true, force: true });
-  }
-});
+  },
+);
 
-test.each(["verified-pending", "announcement-failure", "write-failure"])(
-  "daemon-free recover CLI %s obeys verified PENDING exit contract",
-  async (mode) => {
+test.each(
+  ["full", "dedicated"].flatMap((entry) =>
+    [
+      "verified-pending",
+      "announcement-failure",
+      "write-failure",
+      "missing-plan",
+      "capability-plan",
+      "malformed-plan",
+    ].map((mode) => ({ entry, mode })),
+  ),
+)(
+  "daemon-free $entry recover CLI $mode obeys verified PENDING exit contract",
+  async ({ entry, mode }) => {
     const dir = await mkdtemp(join(tmpdir(), "spur-recover-cli-result-"));
     const previousSession = process.env["SPUR_SESSION"],
       previousExit = process.exitCode;
@@ -296,13 +319,22 @@ test.each(["verified-pending", "announcement-failure", "write-failure"])(
           B: "b".repeat(40),
           contractDigest: "c".repeat(64),
           receipt,
-          feedback: plan,
+          feedback:
+            mode === "missing-plan"
+              ? undefined
+              : mode === "capability-plan"
+                ? capability
+                : mode === "malformed-plan"
+                  ? {}
+                  : plan,
         }),
       );
       process.env["SPUR_SESSION"] = "fixture-session";
       process.exitCode = undefined;
       if (mode === "write-failure") faults.pattern = '"status": "PENDING"';
-      const run = createProgram("/tmp/dist/cli.js").parseAsync([
+      const program =
+        entry === "dedicated" ? createReviewAppProgram() : createProgram("/tmp/dist/cli.js");
+      const run = program.parseAsync([
         "node",
         "spur",
         "review-app",
@@ -315,13 +347,22 @@ test.each(["verified-pending", "announcement-failure", "write-failure"])(
         createHash("sha256").update(raw).digest("hex"),
         "--json",
       ]);
-      if (mode === "write-failure") await expect(run).rejects.toThrow("receipt-write");
+      if (mode.endsWith("-plan")) {
+        await expect(run).rejects.toThrow(
+          mode === "missing-plan" ? "invalid-response" : "invalid-review-feedback",
+        );
+        expect(network).not.toHaveBeenCalled();
+        expect(await readFile(receipt)).toEqual(raw);
+      } else if (mode === "write-failure") await expect(run).rejects.toThrow("receipt-write");
       else {
         await run;
         expect(output.mock.calls.at(-1)?.[0]).toContain(
           `"status":"${mode === "verified-pending" ? "PENDING" : "BLOCKED"}"`,
         );
         expect(process.exitCode).toBe(mode === "verified-pending" ? undefined : 1);
+        expect(output.mock.calls.at(-1)?.[0]).toContain(
+          `"feedbackPublication":{"status":"${mode === "verified-pending" ? "confirmed" : "failed"}"`,
+        );
       }
       expect(network.mock.calls.some(([url]) => String(url).includes("/reviews"))).toBe(false);
     } finally {
@@ -335,3 +376,90 @@ test.each(["verified-pending", "announcement-failure", "write-failure"])(
     }
   },
 );
+
+test("dedicated import/program construction registers only inert review handlers", () => {
+  const network = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
+  try {
+    const program = createReviewAppProgram();
+    expect(program.commands.map((command) => command.name())).toEqual(["review-app"]);
+    expect(program.commands[0]?.commands.map((command) => command.name())).toEqual([
+      "prepare",
+      "block",
+      "recover",
+      "status",
+      "publish",
+    ]);
+    const inspect = (command: Command) => {
+      expect((command as Command & { _executableHandler?: boolean })._executableHandler).not.toBe(
+        true,
+      );
+      command.commands.forEach(inspect);
+    };
+    inspect(program);
+    expect(network).not.toHaveBeenCalled();
+  } finally {
+    network.mockRestore();
+  }
+});
+
+test.each(
+  [
+    ["daemon", "--help"],
+    ["--help", "daemon"],
+    ["review-gate", "--help"],
+    ["review-app", "daemon", "--help"],
+    ["--config", "fixture", "--help"],
+    ["--version"],
+    ["spawn", "--json"],
+  ].map((args) => ({ args })),
+)("dedicated run refuses unrelated argv $args before help or actions", async ({ args }) => {
+  const previous = process.exitCode;
+  const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  const network = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
+  try {
+    process.exitCode = undefined;
+    await runReviewApp(["node", "review-app-cli.js", ...args]);
+    expect(process.exitCode).toBe(1);
+    expect(stdout).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalled();
+    expect(network).not.toHaveBeenCalled();
+  } finally {
+    process.exitCode = previous;
+    stdout.mockRestore();
+    stderr.mockRestore();
+    network.mockRestore();
+  }
+});
+
+test("dedicated help preserves required-option discovery and generic error exits", async () => {
+  const previous = process.exitCode;
+  const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  const network = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
+  try {
+    process.exitCode = undefined;
+    await runReviewApp(["node", "review-app-cli.js", "review-app", "recover", "--help"]);
+    expect(process.exitCode).toBe(0);
+    expect(stdout.mock.calls.map(([text]) => String(text)).join("")).toContain("--legacy-sha256");
+    process.exitCode = undefined;
+    await runReviewApp([
+      "node",
+      "review-app-cli.js",
+      "review-app",
+      "status",
+      "--app-config",
+      "/nonexistent-fixture-config",
+      "--repo",
+      "fixture/repo",
+    ]);
+    expect(process.exitCode).toBe(1);
+    expect(stderr.mock.calls.map(([text]) => String(text)).join("")).toContain("invalid-json-file");
+    expect(network).not.toHaveBeenCalled();
+  } finally {
+    process.exitCode = previous;
+    stdout.mockRestore();
+    stderr.mockRestore();
+    network.mockRestore();
+  }
+});

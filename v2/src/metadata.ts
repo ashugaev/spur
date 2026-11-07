@@ -1804,6 +1804,19 @@ export function readSession(dataDir: string, sessionId: string): SessionRecord |
   return path ? readSessionFileCached(path) : null;
 }
 
+// Archived record lookup for the Telegram topic GC. Throws on an unreadable
+// or invalid file (unknown, never "missing").
+export function readArchivedSession(dataDir: string, sessionId: string): SessionRecord | null {
+  const root = join(dataDir, "sessions-archive");
+  if (!existsSync(root)) return null;
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const path = join(root, entry.name, `${sessionId}.json`);
+    if (existsSync(path)) return readSessionFile(path);
+  }
+  return null;
+}
+
 // Group-atomic archival for session GC: moves every member's record (and its
 // per-session log shard dir, if any) out of dataDir/sessions/ into the
 // sibling dataDir/sessions-archive/ tree, then rewrites the index once. Files
@@ -3093,6 +3106,88 @@ export function readTelegramReplyTarget(
   } catch {
     return null;
   }
+}
+
+// Session ids that hold Telegram topic state: bindings of the given projects
+// plus every reply-target file.
+export function listTelegramTopicSessionIds(
+  dataDir: string,
+  projectIds: readonly string[],
+): Set<string> {
+  const ids = new Set<string>();
+  for (const projectId of projectIds) {
+    const dir = join(dataDir, "source-state", "telegram", projectId);
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const sourceId = entry.name.slice(0, -".json".length);
+      for (const binding of readTelegramBindings(dataDir, projectId, sourceId).values()) {
+        ids.add(binding.sessionId);
+      }
+    }
+  }
+  const targetDir = join(dataDir, "source-state", "telegram", "reply-targets");
+  if (existsSync(targetDir)) {
+    for (const entry of readdirSync(targetDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      try {
+        ids.add(decodeURIComponent(entry.name.slice(0, -".json".length)));
+      } catch {
+        continue;
+      }
+    }
+  }
+  return ids;
+}
+
+function telegramTopicGcClockPath(dataDir: string): string {
+  return join(dataDir, "source-state", "telegram-topic-gc.json");
+}
+
+export function readTelegramTopicGcClock(dataDir: string): number | null {
+  const path = telegramTopicGcClockPath(dataDir);
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as { lastSweepAt?: unknown } | null;
+    return typeof parsed?.lastSweepAt === "number" && Number.isFinite(parsed.lastSweepAt)
+      ? parsed.lastSweepAt
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeTelegramTopicGcClock(dataDir: string, lastSweepAt: number): void {
+  writePrivateJsonFile(telegramTopicGcClockPath(dataDir), { lastSweepAt });
+}
+
+function telegramTopicGcFailuresPath(dataDir: string): string {
+  return join(dataDir, "source-state", "telegram-topic-gc-failures.json");
+}
+
+// Failed GC sweeps per session id; restart-safe retry budget.
+export function readTelegramTopicGcFailures(dataDir: string): Record<string, number> {
+  const path = telegramTopicGcFailuresPath(dataDir);
+  if (!existsSync(path)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, number] =>
+          typeof entry[1] === "number" && Number.isInteger(entry[1]) && entry[1] > 0,
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+export function writeTelegramTopicGcFailures(
+  dataDir: string,
+  failures: Record<string, number>,
+): void {
+  writePrivateJsonFile(telegramTopicGcFailuresPath(dataDir), failures);
 }
 
 export function writeTelegramReplyTarget(

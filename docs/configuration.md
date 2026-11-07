@@ -55,6 +55,7 @@ A mode is a prompt suffix naming a skill, set via `projects.<id>.modes.<name>.{s
 
 `chatId<0` selects canonical agent forum; missing/positive `chatId` disables agent communication; `allowedUsers`/`allowedChats` gates manual access — `v2/src/session-service.ts`, `v2/src/event-sources/telegram.ts`.
 Task launch, attention cards, topic lifecycle: [`/new`, `/work`, `/complete`, `/kill`](commands.md#source-reply); complete/kill topic deletion requires bot administrator `can_delete_messages`.
+A daily daemon sweep deletes topics still bound to completed/killed/archived/missing sessions (20 sessions per sweep, first sweep 24h after first boot) and posts a `removed by daily cleanup` notice in the group main topic — `v2/src/session-service.ts`.
 [`source reply`](commands.md#source-reply), questions, attention and typing use assigned topic; Telegram spawn assigns before launch; legacy destinations migrate on input/output — `v2/src/session-service.ts`.
 DMs support commands/spawn tasks; existing-agent text, buttons and voice outside assigned topic redirect without delivery — `v2/src/event-sources/telegram.ts`.
 Telegram attachments (photo/document/audio/video/animation/voice/video_note/sticker): spawn/followup artifact references, optional captions, 10 files × 5 MiB; grouped albums reject late members — `v2/src/event-sources/telegram.ts`, `v2/src/types.ts`.
