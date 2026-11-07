@@ -21,6 +21,7 @@ describe("page transport", () => {
     expect(root.style.getPropertyValue("--spur-bg-base")).toBe("Canvas");
     expect(root.style.getPropertyValue("--spur-text-primary")).toBe("CanvasText");
     expect(root.style.getPropertyValue("--spur-accent")).toBe("AccentColor");
+    expect(root.style.getPropertyValue("--spur-status-error")).toBe("light-dark(#cf222e, #ff4d4d)");
   });
 
   it("reruns onSnapshot after a change event for its collection only", async () => {
@@ -169,6 +170,7 @@ describe("page transport", () => {
     form.dispatchEvent(new r.win.Event("submit", { bubbles: true, cancelable: true }));
     await flush();
     expect(input.disabled).toBe(true);
+    expect(status.textContent).toBe("Sending…");
     release();
     await flush();
     expect(input.disabled).toBe(false);

@@ -81,7 +81,8 @@
     selection_mismatch: "selection mismatch",
     depth: "nested too deep",
   };
-  // Page defaults: CSS system colors, so a page follows the OS light/dark scheme.
+  // Page defaults: CSS system colors and light-dark() pairs, so a page follows the OS light/dark scheme.
+  // Status tones are fixed pairs; system colors like Mark are unreadable text colors.
   const PAGE_THEME = {
     "bg-base": "Canvas",
     "bg-surface": "Canvas",
@@ -92,13 +93,13 @@
     "border-default": "GrayText",
     "border-subtle": "ButtonFace",
     accent: "AccentColor",
-    "status-error": "Mark",
-    "status-ready": "AccentColor",
+    "status-error": "light-dark(#cf222e, #ff4d4d)",
+    "status-ready": "light-dark(#1a7f37, #3fb950)",
     "input-bg": "Field",
     "input-border": "GrayText",
     "text-inverse": "AccentColorText",
-    "status-working": "Highlight",
-    "status-attention": "Mark",
+    "status-working": "light-dark(#0969da, #58a6ff)",
+    "status-attention": "light-dark(#8a5a00, #ffd700)",
   };
   const FIELD_TAGS = "spur-choice-list, spur-text-input, spur-textarea";
   const BOUND_SELECTOR =
@@ -1670,6 +1671,8 @@
             if (!text) return;
             send.disabled = true;
             input.disabled = true;
+            status.removeAttribute("data-tone");
+            status.textContent = "Sending…";
             sendMessage(text, submitEvent.isTrusted).then(function (result) {
               send.disabled = false;
               input.disabled = false;
@@ -1677,6 +1680,7 @@
               if (result.ok) {
                 input.value = "";
                 input.removeAttribute("aria-invalid");
+                status.textContent = AGENT_LABELS[agentStatus.state] || agentStatus.state;
               } else {
                 input.setAttribute("aria-invalid", "true");
                 status.setAttribute("data-tone", "error");
