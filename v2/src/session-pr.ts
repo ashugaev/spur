@@ -1,7 +1,13 @@
 import { gh } from "./gh.js";
-import { type PrLookupPr, resolvePrLookupRepo, resolvePrLookups } from "./pr-lookup.js";
+import {
+  type PrLookupPr,
+  parseRepoSlugFromRemoteUrl,
+  resolvePrLookupRepo,
+  resolvePrLookups,
+} from "./pr-lookup.js";
+import type { PrRepoSlug } from "./pr-lookup-cache.js";
 import type { SessionLink, SessionPrBinding, SessionRecord, SessionSlots } from "./types.js";
-import { readCurrentBranch } from "./workspace.js";
+import { readBranchDestination, readCurrentBranch } from "./workspace.js";
 
 const GITHUB_PR_PATH_RE = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/;
 const LEGACY_PR_LABELS = new Set(["pr", "github-pr", "github_pr"]);
@@ -192,12 +198,20 @@ export async function resolvePrDiscoveryBranch(
  * caller's fail-safe (the open-PR teardown prompt) reads null as "safe to
  * remove the branch". Collapsing the two would delete a worktree and branch out
  * from under an open PR every time GitHub was briefly unreachable.
+ * Found bindings are candidates; lifecycle resolution verifies head ownership.
  */
 export async function discoverSessionPrBinding(
   worktreePath: string,
   sessionBranch: string,
 ): Promise<SessionPrBinding | null> {
   const branch = await resolvePrDiscoveryBranch(worktreePath, sessionBranch);
+  return discoverPrBindingForBranch(worktreePath, branch);
+}
+
+async function discoverPrBindingForBranch(
+  worktreePath: string,
+  branch: string,
+): Promise<SessionPrBinding | null> {
   const slug = await resolvePrLookupRepo(worktreePath, { bypassMissMemo: true });
   if (!slug) {
     // No slug from the remotes: a GitHub Enterprise host Spur cannot recognize
@@ -411,51 +425,98 @@ export async function resolveRepoSlug(cwd: string): Promise<string> {
   return nameWithOwner;
 }
 
+async function ownsSessionPr(
+  worktreePath: string,
+  pr: SessionPrBinding,
+  expectedRepo: PrRepoSlug | null,
+  expectedBranch: string | undefined,
+): Promise<boolean> {
+  if (!expectedRepo || !expectedBranch) throw new Error("PR ownership destination is unavailable");
+  const raw = await gh(
+    worktreePath,
+    "pr",
+    "view",
+    String(pr.number),
+    "--repo",
+    prRepoArg(pr),
+    "--json",
+    "headRefName,headRepository,headRepositoryOwner,url",
+  );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    throw new Error("gh pr view returned unreadable ownership metadata", { cause: error });
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("gh pr view returned invalid ownership metadata");
+  }
+  const record = parsed as Record<string, unknown>;
+  const repository = record["headRepository"];
+  const owner = record["headRepositoryOwner"];
+  const headRef = record["headRefName"];
+  const url = record["url"];
+  const name =
+    typeof repository === "object" && repository !== null && "nameWithOwner" in repository
+      ? repository.nameWithOwner
+      : undefined;
+  const login =
+    typeof owner === "object" && owner !== null && "login" in owner ? owner.login : undefined;
+  if (
+    typeof name !== "string" ||
+    typeof login !== "string" ||
+    !login ||
+    typeof headRef !== "string" ||
+    !headRef.trim() ||
+    typeof url !== "string"
+  ) {
+    throw new Error("gh pr view returned incomplete ownership metadata");
+  }
+  const parsedUrl = new URL(url);
+  const headRepo = parseRepoSlugFromRemoteUrl(`${parsedUrl.origin}/${name}`);
+  if (
+    !headRepo ||
+    name.toLowerCase() !== `${headRepo.owner}/${headRepo.name}`.toLowerCase() ||
+    headRepo.owner.toLowerCase() !== login.toLowerCase() ||
+    parsedUrl.hostname.toLowerCase() !== new URL(pr.url).hostname.toLowerCase()
+  ) {
+    throw new Error("gh pr view returned inconsistent head repository metadata");
+  }
+  return (
+    headRef === expectedBranch &&
+    headRepo.host.toLowerCase() === expectedRepo.host.toLowerCase() &&
+    headRepo.owner.toLowerCase() === expectedRepo.owner.toLowerCase() &&
+    headRepo.name.toLowerCase() === expectedRepo.name.toLowerCase()
+  );
+}
+
 export async function resolveSessionPrBinding(session: SessionRecord): Promise<{
   binding: SessionPrBinding | null;
   updatedSession?: SessionRecord;
 }> {
   const normalizedSession = normalizeSessionPrBinding(session);
+  const localBranch = await resolvePrDiscoveryBranch(session.worktreePath, session.branch);
+  const destination = await readBranchDestination(session.worktreePath, localBranch);
+  const expectedRepo = destination ? parseRepoSlugFromRemoteUrl(destination.url) : null;
   if (normalizedSession.pr) {
-    const branch = await resolvePrDiscoveryBranch(session.worktreePath, session.branch);
-    const raw = await gh(
-      session.worktreePath,
-      "pr",
-      "view",
-      String(normalizedSession.pr.number),
-      "--repo",
-      prRepoArg(normalizedSession.pr),
-      "--json",
-      "headRefName",
-    );
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw) as unknown;
-    } catch (error) {
-      throw new Error("gh pr view returned unreadable ownership metadata", { cause: error });
-    }
     if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      !("headRefName" in parsed) ||
-      typeof parsed.headRefName !== "string" ||
-      !parsed.headRefName.trim()
+      await ownsSessionPr(session.worktreePath, normalizedSession.pr, expectedRepo, destination?.branch)
     ) {
-      throw new Error("gh pr view returned no PR head branch");
-    }
-    if (parsed.headRefName === branch) {
       return {
         binding: normalizedSession.pr,
         ...(normalizedSession.pr !== session.pr ? { updatedSession: normalizedSession } : {}),
       };
     }
   }
-  const binding = await discoverSessionPrBinding(
+  const binding = await discoverPrBindingForBranch(
     normalizedSession.worktreePath,
-    normalizedSession.branch,
+    destination?.branch ?? localBranch,
   );
   if (!binding) {
     return { binding: null };
+  }
+  if (!(await ownsSessionPr(session.worktreePath, binding, expectedRepo, destination?.branch))) {
+    throw new Error("PR discovery returned a foreign head repository or branch");
   }
   return {
     binding,

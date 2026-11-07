@@ -331,7 +331,16 @@ export async function readRemoteUrls(repoPath: string): Promise<Map<string, stri
   return urls;
 }
 
-export async function readBranchPushUrl(repoPath: string, branch: string): Promise<string | null> {
+export interface BranchDestination {
+  url: string;
+  branch: string;
+}
+
+export async function readBranchDestination(
+  repoPath: string,
+  branch: string,
+  allowUpstream = true,
+): Promise<BranchDestination | null> {
   const ref = `refs/heads/${branch}`;
   try {
     const refs = await runGit(
@@ -341,8 +350,30 @@ export async function readBranchPushUrl(repoPath: string, branch: string): Promi
     );
     const rows = refs.split("\n");
     if (rows.length !== 1) return null;
-    const [name, remote, push] = rows[0]?.split("\t") ?? [];
-    if (name !== ref || !remote || push !== `refs/remotes/${remote}/${branch}`) return null;
+    const [name, pushRemote, push] = rows[0]?.split("\t") ?? [];
+    if (name !== ref) return null;
+    let remote = pushRemote;
+    let target = push;
+    let pushing = true;
+    if (!target) {
+      if (!allowUpstream) return null;
+      const upstream = await runGit(
+        repoPath,
+        ["for-each-ref", "--format=%(refname)\t%(upstream:remotename)\t%(upstream)", ref],
+        GIT_READ_TIMEOUT_MS,
+      );
+      const upstreamRows = upstream.split("\n");
+      if (upstreamRows.length !== 1) return null;
+      const [upstreamName, upstreamRemote, upstreamRef] = upstreamRows[0]?.split("\t") ?? [];
+      if (upstreamName !== ref || (remote && remote !== upstreamRemote)) return null;
+      remote = upstreamRemote;
+      target = upstreamRef;
+      pushing = false;
+    }
+    const prefix = `refs/remotes/${remote}/`;
+    if (!remote || !target?.startsWith(prefix)) return null;
+    const remoteBranch = target.slice(prefix.length);
+    if (!remoteBranch || (!allowUpstream && remoteBranch !== branch)) return null;
     const fetch = await runGit(
       repoPath,
       ["config", "--get-all", `remote.${remote}.fetch`],
@@ -352,14 +383,19 @@ export async function readBranchPushUrl(repoPath: string, branch: string): Promi
     if (fetch !== canonicalFetch && fetch !== `+${canonicalFetch}`) return null;
     const urls = await runGit(
       repoPath,
-      ["remote", "get-url", "--push", "--all", remote],
+      ["remote", "get-url", ...(pushing ? ["--push"] : []), "--all", remote],
       GIT_READ_TIMEOUT_MS,
     );
     const candidates = urls.split("\n").filter(Boolean);
-    return candidates.length === 1 ? (candidates[0] ?? null) : null;
+    const url = candidates.length === 1 ? candidates[0] : undefined;
+    return url ? { url, branch: remoteBranch } : null;
   } catch {
     return null;
   }
+}
+
+export async function readBranchPushUrl(repoPath: string, branch: string): Promise<string | null> {
+  return (await readBranchDestination(repoPath, branch, false))?.url ?? null;
 }
 
 function normalizeBranchHint(value: string | undefined): string | undefined {

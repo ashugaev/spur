@@ -100,6 +100,7 @@ import {
   hasUnpushedCommits,
   pruneRepoWorktrees,
   readBranchPushUrl,
+  readBranchDestination,
   readCurrentBranch,
   readDoctorBranchHint,
   readRemoteUrls,
@@ -1227,6 +1228,7 @@ describe("git read probes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockExecFileAsync.mockReset();
     fsMockState.files.clear();
     timerMockState.sleeps = [];
   });
@@ -1265,6 +1267,46 @@ describe("git read probes", () => {
     mockGitFailure("not a git repository", 128);
 
     await expect(readRemoteUrls("/wt")).resolves.toEqual(new Map());
+  });
+
+  it.each([
+    ["", "origin\trefs/remotes/origin/old", false],
+    ["refs/remotes/origin/old", "", true],
+    ["refs/remotes/origin/custom", "", true],
+  ])("preserves the mapped remote branch destination (%s)", async (push, upstream, pushing) => {
+    mockGitSuccess(`refs/heads/new\torigin\t${push}`);
+    if (!pushing) mockGitSuccess(`refs/heads/new\t${upstream}`);
+    mockGitSuccess("+refs/heads/*:refs/remotes/origin/*");
+    mockGitSuccess("git@github.com:acme/api.git");
+
+    await expect(readBranchDestination("/wt", "new")).resolves.toEqual({
+      url: "git@github.com:acme/api.git",
+      branch: push.endsWith("custom") ? "custom" : "old",
+    });
+    expect(mockExecFileAsync).toHaveBeenLastCalledWith(
+      "git",
+      pushing
+        ? ["remote", "get-url", "--push", "--all", "origin"]
+        : ["remote", "get-url", "--all", "origin"],
+      readOpts,
+    );
+  });
+
+  it.each([
+    ["refs/heads/new\torigin\trefs/remotes/other/old", ""],
+    ["refs/heads/new\torigin\t", "refs/heads/new\tother\trefs/remotes/other/old"],
+    ["refs/heads/new\torigin\t", "refs/heads/new/sub\torigin\trefs/remotes/origin/old"],
+    ["refs/heads/new\torigin\t", "refs/heads/new\torigin\t"],
+  ])("rejects unknown or contradictory tracked destinations (%s)", async (push, upstream) => {
+    mockGitSuccess(push);
+    if (upstream) mockGitSuccess(upstream);
+    await expect(readBranchDestination("/wt", "new")).resolves.toBeNull();
+  });
+
+  it("keeps the push URL wrapper from falling back to renamed upstream", async () => {
+    mockGitSuccess("refs/heads/new\torigin\t");
+    await expect(readBranchPushUrl("/wt", "new")).resolves.toBeNull();
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
   });
 
   it("reads the exact branch's configured push URL", async () => {

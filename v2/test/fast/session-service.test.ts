@@ -119,6 +119,7 @@ import {
   isGitWorktreeMock,
   hasUnpushedCommitsMock,
   readCurrentBranchMock,
+  readBranchDestinationMock,
   removeWorktreeMock,
   pruneRepoWorktreesMock,
   resolveRepoPathFromWorktreeMock,
@@ -38110,6 +38111,8 @@ describe("SessionService", () => {
       JSON.stringify({
         number: 42,
         headRefName: "main",
+        headRepository: { nameWithOwner: "acme/api" },
+        headRepositoryOwner: { login: "acme" },
         state: "OPEN",
         title: "Fix checkout",
         url: "https://github.com/acme/api/pull/42",
@@ -38172,7 +38175,9 @@ describe("SessionService", () => {
     readCurrentBranchMock.mockResolvedValue("api-1");
     const pr = JSON.stringify({
       number: 42,
-      headRefName: owned ? "api-1" : "someone-elses-branch",
+      headRefName: "api-1",
+      headRepository: { nameWithOwner: owned ? "acme/api" : "other/api" },
+      headRepositoryOwner: { login: owned ? "acme" : "other" },
       state: "OPEN",
       title: "Fix checkout",
       url: "https://github.com/acme/api/pull/42",
@@ -38189,6 +38194,39 @@ describe("SessionService", () => {
 
     expect(ghMock.mock.calls.some((call) => call[1] === "pr" && call[2] === "close")).toBe(owned);
     expect(result.status).toBe("completed");
+  });
+
+  it("retains the open PR guard after the local branch is renamed", async () => {
+    createSessionStore({
+      ...runningSession(),
+      id: "api-1",
+      branch: "renamed",
+      pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+    });
+    readCurrentBranchMock.mockResolvedValue("renamed");
+    readBranchDestinationMock.mockResolvedValue({
+      url: "git@github.com:acme/api.git",
+      branch: "api-1",
+    });
+    const pr = JSON.stringify({
+      number: 42,
+      headRefName: "api-1",
+      headRepository: { nameWithOwner: "acme/api" },
+      headRepositoryOwner: { login: "acme" },
+      state: "OPEN",
+      title: "Fix checkout",
+      url: "https://github.com/acme/api/pull/42",
+    });
+    const defaultGh = ghMock.getMockImplementation();
+    if (!defaultGh) throw new Error("missing GitHub test harness");
+    ghMock.mockImplementation((cwd: string, ...args: string[]) =>
+      args[0] === "pr" ? Promise.resolve(pr) : defaultGh(cwd, ...args),
+    );
+    const { OpenPrActionRequiredError, SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await expect(service.complete("api-1")).rejects.toBeInstanceOf(OpenPrActionRequiredError);
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(ghMock.mock.calls.some((call) => call[1] === "pr" && call[2] === "close")).toBe(false);
   });
 
   it("completes without a pull request action when the worktree is no longer a git repo", async () => {
@@ -38284,7 +38322,14 @@ describe("SessionService", () => {
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
     ghMock
-      .mockResolvedValueOnce(JSON.stringify({ headRefName: "main" }))
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          headRefName: "main",
+          headRepository: { nameWithOwner: "acme/api" },
+          headRepositoryOwner: { login: "acme" },
+          url: "https://github.com/acme/api/pull/42",
+        }),
+      )
       .mockResolvedValueOnce(
         JSON.stringify({
           number: 42,
@@ -38333,14 +38378,23 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    ghMock.mockResolvedValueOnce(JSON.stringify({ headRefName: "main" })).mockResolvedValueOnce(
-      JSON.stringify({
-        number: 42,
-        state: "OPEN",
-        title: "Fix checkout",
-        url: "https://github.com/acme/api/pull/42",
-      }),
-    );
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          headRefName: "main",
+          headRepository: { nameWithOwner: "acme/api" },
+          headRepositoryOwner: { login: "acme" },
+          url: "https://github.com/acme/api/pull/42",
+        }),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          number: 42,
+          state: "OPEN",
+          title: "Fix checkout",
+          url: "https://github.com/acme/api/pull/42",
+        }),
+      );
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -38385,6 +38439,8 @@ describe("SessionService", () => {
       JSON.stringify({
         number: 42,
         headRefName: "main",
+        headRepository: { nameWithOwner: "acme/api" },
+        headRepositoryOwner: { login: "acme" },
         state: "CLOSED",
         title: "Fix checkout",
         url: "https://github.com/acme/api/pull/42",
@@ -44261,14 +44317,23 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    ghMock.mockResolvedValueOnce(JSON.stringify({ headRefName: "main" })).mockResolvedValueOnce(
-      JSON.stringify({
-        number: 42,
-        state: "OPEN",
-        title: "Fix checkout",
-        url: "https://github.com/acme/api/pull/42",
-      }),
-    );
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          headRefName: "main",
+          headRepository: { nameWithOwner: "acme/api" },
+          headRepositoryOwner: { login: "acme" },
+          url: "https://github.com/acme/api/pull/42",
+        }),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          number: 42,
+          state: "OPEN",
+          title: "Fix checkout",
+          url: "https://github.com/acme/api/pull/42",
+        }),
+      );
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
