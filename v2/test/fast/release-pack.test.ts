@@ -38,6 +38,7 @@ describe("release pack shell boundary", () => {
   let destination: string;
   let archive: string;
   let calls: string;
+  let checkerCalls: string;
   let payload: string;
 
   beforeEach(() => {
@@ -47,13 +48,25 @@ describe("release pack shell boundary", () => {
     destination = join(directory, "pack destination");
     archive = join(directory, "fixture.tgz");
     calls = join(directory, "tar-calls");
+    checkerCalls = join(directory, "checker-calls");
     payload = join(directory, "payload", "package");
     for (const path of [bin, destination, join(workspace, "scripts"), join(workspace, "v2")]) {
       mkdirSync(path, { recursive: true });
     }
-    for (const name of ["pack-release.sh", "verify-package-tarball.sh"]) {
-      copyFileSync(join(root, "scripts", name), join(workspace, "scripts", name));
-    }
+    copyFileSync(join(root, "scripts/pack-release.sh"), join(workspace, "scripts/pack-release.sh"));
+    // Shell orchestration double only; real archive/closure checks live in distribution tests.
+    writeFileSync(
+      join(workspace, "scripts/verify-package-tarball.sh"),
+      `#!/usr/bin/env bash
+set -eu
+[[ "$#" == 1 && "$1" == "$RUNNER_TEMP/$PACK_TEST_NAME" ]]
+printf '%s\n' "$1" >> "$PACK_TEST_CHECKER_CALLS"
+if [[ "$PACK_TEST_MODE" == refuse ]]; then
+  printf 'review-app-package: verification failed\n' >&2
+  exit 1
+fi
+`,
+    );
     const manifest = readFileSync(join(root, "v2/required-package-files.txt"), "utf8");
     writeFileSync(join(workspace, "v2/required-package-files.txt"), manifest);
     for (const entry of [
@@ -75,7 +88,7 @@ if [[ "$PACK_TEST_MODE" == fail ]]; then
   printf 'fixture npm stderr\n' >&2
   exit 2
 fi
-if [[ "$PACK_TEST_MODE" == success ]]; then
+if [[ "$PACK_TEST_MODE" == success || "$PACK_TEST_MODE" == refuse ]]; then
   cp "$PACK_TEST_ARCHIVE" "$3/$PACK_TEST_NAME"
 fi
 printf 'fixture prepack output\n%s\n' "$PACK_TEST_NAME"
@@ -110,6 +123,7 @@ exec "$PACK_TEST_REAL_TAR" "$@"
         PACK_TEST_MODE: mode,
         PACK_TEST_NAME: name,
         PACK_TEST_CALLS: calls,
+        PACK_TEST_CHECKER_CALLS: checkerCalls,
         PACK_TEST_REAL_TAR: realTar,
       },
     });
@@ -123,6 +137,7 @@ exec "$PACK_TEST_REAL_TAR" "$@"
     expect(result.stderr).toContain("ELIFECYCLE Command failed with exit code 2.");
     expect(result.stderr).toContain("fixture npm stderr");
     expect(existsSync(calls)).toBe(false);
+    expect(existsSync(checkerCalls)).toBe(false);
   });
 
   it("verifies the produced archive with paths containing spaces", () => {
@@ -131,7 +146,10 @@ exec "$PACK_TEST_REAL_TAR" "$@"
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe(join(destination, "shugaev-spur-fixture.tgz"));
-    expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(3);
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(2);
+    expect(readFileSync(checkerCalls, "utf8")).toBe(
+      `${join(destination, "shugaev-spur-fixture.tgz")}\n`,
+    );
   });
 
   it.each([
@@ -146,6 +164,7 @@ exec "$PACK_TEST_REAL_TAR" "$@"
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("npm pack did not produce a valid archive");
     expect(existsSync(calls)).toBe(false);
+    expect(existsSync(checkerCalls)).toBe(false);
   });
 
   it("rejects a valid filename when npm did not produce the file", () => {
@@ -153,13 +172,17 @@ exec "$PACK_TEST_REAL_TAR" "$@"
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("npm pack did not produce a valid archive");
     expect(existsSync(calls)).toBe(false);
+    expect(existsSync(checkerCalls)).toBe(false);
   });
 
-  it("retains required-file verification", () => {
-    unlinkSync(join(payload, "dist/cli.js"));
-    const result = run(step);
+  it("propagates checker refusal before native and skill checks", () => {
+    const result = run(step, "refuse");
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("tarball missing: package/dist/cli.js");
+    expect(result.stderr).toBe("review-app-package: verification failed\n");
+    expect(readFileSync(checkerCalls, "utf8")).toBe(
+      `${join(destination, "shugaev-spur-fixture.tgz")}\n`,
+    );
+    expect(existsSync(calls)).toBe(false);
   });
 
   it("retains the native binary check", () => {
@@ -167,6 +190,9 @@ exec "$PACK_TEST_REAL_TAR" "$@"
     const result = run(step);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`missing node-pty/prebuilds/linux-${process.arch}/pty.node`);
+    expect(readFileSync(checkerCalls, "utf8")).toBe(
+      `${join(destination, "shugaev-spur-fixture.tgz")}\n`,
+    );
   });
 
   it("rejects a skill stored as a symlink", () => {
@@ -177,5 +203,8 @@ exec "$PACK_TEST_REAL_TAR" "$@"
     const result = run(step);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("SKILL.md as a non-regular file");
+    expect(readFileSync(checkerCalls, "utf8")).toBe(
+      `${join(destination, "shugaev-spur-fixture.tgz")}\n`,
+    );
   });
 });

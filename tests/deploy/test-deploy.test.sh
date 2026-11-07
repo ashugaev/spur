@@ -2,7 +2,8 @@
 # Hermetic tests for scripts/verify-package-tarball.sh and the production-prefix
 # refusal in scripts/test-deploy.sh and tests/integration/onboarding-test.sh.
 #
-# a1/a1b/a2/a-large  invoke verify-package-tarball.sh directly — no build, no install.
+# a                  verifies exact Node-helper dispatch and failure propagation.
+# Archive/required-entry phase fixtures live in review-app-distribution.test.ts.
 # b                  drives test-deploy.sh's prefix-refusal with stub npm/pnpm on PATH.
 # c                  drives onboarding-test.sh's prefix-refusal with stub npm on PATH.
 #
@@ -27,129 +28,48 @@ bad() {
 
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
-RUNTIME_ENTRIES=()
-while IFS= read -r entry || [[ -n "$entry" ]]; do
-  case "$entry" in dist/*) RUNTIME_ENTRIES+=("$entry") ;; esac
-done <"$repo_root/v2/required-package-files.txt"
+VERIFY_BIN="$WORK_DIR/verify-bin"
+mkdir -p "$VERIFY_BIN"
+cat >"$VERIFY_BIN/node" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\0' "$@" > "$VERIFY_ARGV_LOG"
+exit "$VERIFY_STUB_EXIT"
+EOF
+chmod +x "$VERIFY_BIN/node"
 
-make_tarball() {
-  local name="$1"
-  shift
-  local pkg_dir="$WORK_DIR/$name/package"
-  mkdir -p "$pkg_dir"
-  for entry in "$@"; do
-    mkdir -p "$pkg_dir/$(dirname "$entry")"
-    touch "$pkg_dir/$entry"
-  done
-  local tgz="$WORK_DIR/$name.tgz"
-  tar -czf "$tgz" -C "$WORK_DIR/$name" package
-  echo "$tgz"
+run_dispatch() {
+  local label="$1" expected="$2"
+  shift 2
+  local argv_log="$WORK_DIR/argv" expected_log="$WORK_DIR/expected-argv"
+  rm -f "$argv_log"
+  set +e
+  PATH="$VERIFY_BIN:$PATH" VERIFY_ARGV_LOG="$argv_log" VERIFY_STUB_EXIT="$expected" \
+    bash "$verify_script" "$@" >/dev/null 2>&1
+  local result=$?
+  set -e
+  printf '%s\0' "$repo_root/scripts/verify-review-app-package.mjs" --tarball "$1" > "$expected_log"
+  if [[ "$result" -eq "$expected" ]] && cmp -s "$argv_log" "$expected_log"; then
+    ok "$label: exact helper argv and exit propagation"
+  else
+    bad "$label: helper dispatch mismatch"
+  fi
 }
 
-# a-large: all required entries present at the START, followed by enough
-# filler entries to exceed the 64 KiB pipe buffer (grep exits on the first
-# match, SIGPIPEs tar, pipefail makes the broken pipe appear as a failure).
-# The verifier MUST accept this tarball.
-make_large_tarball() {
-  local name="$1"
-  local dir="$WORK_DIR/$name"
-  local pkg_dir="$dir/package"
-  mkdir -p "$pkg_dir/deploy" "$pkg_dir/dist" "$pkg_dir/web/dist-server" "$pkg_dir/filler" "$pkg_dir/skills/spur"
-  touch "$pkg_dir/deploy/spur-daemon.npm.service"
-  touch "$pkg_dir/deploy/spur-web.npm.service"
-  touch "$pkg_dir/deploy/spur-mcp.npm.service"
-  touch "$pkg_dir/deploy/spur-mcp-tunnel.npm.service"
-  for entry in "${RUNTIME_ENTRIES[@]}"; do touch "$pkg_dir/$entry"; done
-  touch "$pkg_dir/web/dist-server/web-server.js"
-  touch "$pkg_dir/spur.yaml.reference"
-  touch "$pkg_dir/skills/spur/SKILL.md"
-  local i=0
-  while [ "$i" -lt 5000 ]; do
-    printf '%0.s_%.0s' {1..100} >"$pkg_dir/filler/$i.txt"
-    i=$((i + 1))
-  done
-  local tgz="$WORK_DIR/$name.tgz"
-  tar -czf "$tgz" -C "$dir" package
-  echo "$tgz"
-}
-
-tgz_large="$(make_large_tarball large)"
-
-set +e
-out_large="$(bash "$verify_script" "$tgz_large" 2>&1)"
-rc_large=$?
-set -e
-
-if [[ "$rc_large" -eq 0 ]]; then
-  ok "a-large: verify-package-tarball.sh accepts large tarball (no SIGPIPE false rejection)"
-else
-  bad "a-large: verify-package-tarball.sh rejected large tarball (got: $out_large)"
-fi
-
-# a1: missing web/dist-server/web-server.js -> non-zero, names the file
-tgz_a1="$(make_tarball a1 \
-  deploy/spur-daemon.npm.service \
-  deploy/spur-web.npm.service \
-  deploy/spur-mcp.npm.service \
-  deploy/spur-mcp-tunnel.npm.service \
-  "${RUNTIME_ENTRIES[@]}")"
-
-set +e
-out_a1="$(bash "$verify_script" "$tgz_a1" 2>&1)"
-rc_a1=$?
-set -e
-
-if [[ "$rc_a1" -eq 0 ]]; then
-  bad "a1: verify-package-tarball.sh should exit non-zero for incomplete tarball"
-elif echo "$out_a1" | grep -qF "web/dist-server/web-server.js"; then
-  ok "a1: verify-package-tarball.sh rejects incomplete tarball, names missing file"
-else
-  bad "a1: output did not name web/dist-server/web-server.js (got: $out_a1)"
-fi
-
-# a1b: tarball with web-server.js.map but no web-server.js -> rejected (unanchored-match hole)
-tgz_a1b="$(make_tarball a1b \
-  deploy/spur-daemon.npm.service \
-  deploy/spur-web.npm.service \
-  deploy/spur-mcp.npm.service \
-  deploy/spur-mcp-tunnel.npm.service \
-  "${RUNTIME_ENTRIES[@]}" \
-  "web/dist-server/web-server.js.map")"
-
-set +e
-out_a1b="$(bash "$verify_script" "$tgz_a1b" 2>&1)"
-rc_a1b=$?
-set -e
-
-if [[ "$rc_a1b" -eq 0 ]]; then
-  bad "a1b: tarball with only web-server.js.map should be rejected"
-elif echo "$out_a1b" | grep -qF "web/dist-server/web-server.js"; then
-  ok "a1b: verify-package-tarball.sh rejects .map-only tarball, names missing file"
-else
-  bad "a1b: output did not name web/dist-server/web-server.js (got: $out_a1b)"
-fi
-
-# a2: all required entries present -> exit 0
-tgz_a2="$(make_tarball a2 \
-  deploy/spur-daemon.npm.service \
-  deploy/spur-web.npm.service \
-  deploy/spur-mcp.npm.service \
-  deploy/spur-mcp-tunnel.npm.service \
-  "${RUNTIME_ENTRIES[@]}" \
-  web/dist-server/web-server.js \
-  spur.yaml.reference \
-  skills/spur/SKILL.md)"
-
-set +e
-bash "$verify_script" "$tgz_a2" 2>&1
-rc_a2=$?
-set -e
-
-if [[ "$rc_a2" -eq 0 ]]; then
-  ok "a2: verify-package-tarball.sh accepts complete tarball"
-else
-  bad "a2: verify-package-tarball.sh exited $rc_a2 on complete tarball"
-fi
+run_dispatch "a-success" 0 "$WORK_DIR/input with spaces.tgz"
+run_dispatch "a-failure" 17 "$WORK_DIR/input with spaces.tgz"
+for mode in missing extra; do
+  rm -f "$WORK_DIR/argv"
+  args=()
+  [[ "$mode" = extra ]] && args=(first.tgz second.tgz)
+  if PATH="$VERIFY_BIN:$PATH" VERIFY_ARGV_LOG="$WORK_DIR/argv" VERIFY_STUB_EXIT=0 \
+    bash "$verify_script" "${args[@]}" >/dev/null 2>&1; then
+    bad "a-$mode: invalid grammar accepted"
+  elif [[ -e "$WORK_DIR/argv" ]]; then
+    bad "a-$mode: helper invoked before argument rejection"
+  else
+    ok "a-$mode: invalid grammar rejected before helper"
+  fi
+done
 
 # b: SPUR_TEST_DEPLOY_PREFIX == HOME/.local -> refusal before any build/install
 # Covers: exact, trailing slash, path traversal, dot suffix, symlink, leading space, trailing space.
@@ -225,7 +145,7 @@ chmod +x "$C_BIN/npm"
 
 rm -f "$C_MARKER"
 set +e
-c_out="$(HOME="$C_HOME" PATH="$C_BIN:$PATH" timeout 10 bash "$ONBOARDING_SCRIPT" 2>&1)"
+c_out="$(HOME="$C_HOME" PATH="$C_BIN:$PATH" timeout --foreground 10 bash "$ONBOARDING_SCRIPT" 2>&1)"
 c_rc=$?
 set -e
 
@@ -237,17 +157,6 @@ elif echo "$c_out" | grep -q "onboarding-test: refusing production npm prefix"; 
   ok "c-slash: onboarding-test.sh refuses trailing-slash production prefix"
 else
   bad "c-slash: refusal marker line not found (got: $c_out)"
-fi
-
-cp -R "$WORK_DIR/a2" "$WORK_DIR/a-mcp"
-rm "$WORK_DIR/a-mcp/package/dist/mcp-http.js"
-tar -czf "$WORK_DIR/a-mcp.tgz" -C "$WORK_DIR/a-mcp" package
-if out_mcp="$(bash "$verify_script" "$WORK_DIR/a-mcp.tgz" 2>&1)"; then
-  bad "a-mcp: incomplete MCP runtime accepted"
-elif [[ "$out_mcp" == *"dist/mcp-http.js"* ]]; then
-  ok "a-mcp: shared package manifest rejects missing MCP HTTP module"
-else
-  bad "a-mcp: missing MCP module not identified"
 fi
 
 echo ""

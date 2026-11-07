@@ -122,6 +122,7 @@ import {
   isGitWorktreeMock,
   hasUnpushedCommitsMock,
   readCurrentBranchMock,
+  readBranchDestinationMock,
   removeWorktreeMock,
   pruneRepoWorktreesMock,
   resolveRepoPathFromWorktreeMock,
@@ -181,6 +182,12 @@ import {
   consentRepositoryMock,
   readTelegramBindingsMock,
   readTelegramReplyTargetMock,
+  readArchivedSessionMock,
+  listTelegramTopicSessionIdsMock,
+  readTelegramTopicGcClockMock,
+  writeTelegramTopicGcClockMock,
+  readTelegramTopicGcFailuresMock,
+  writeTelegramTopicGcFailuresMock,
   sendTelegramReplyMock,
   sendTelegramChatActionMock,
   editTelegramTopicMock,
@@ -25954,6 +25961,9 @@ describe("SessionService", () => {
           ghMock.mockResolvedValue(
             JSON.stringify({
               number: 42,
+              headRefName: "main",
+              headRepository: { nameWithOwner: "acme/api" },
+              headRepositoryOwner: { login: "acme" },
               state: "OPEN",
               title: "Queued task",
               url: "https://github.com/acme/api/pull/42",
@@ -38333,6 +38343,9 @@ describe("SessionService", () => {
     ghMock.mockResolvedValue(
       JSON.stringify({
         number: 42,
+        headRefName: "main",
+        headRepository: { nameWithOwner: "acme/api" },
+        headRepositoryOwner: { login: "acme" },
         state: "OPEN",
         title: "Fix checkout",
         url: "https://github.com/acme/api/pull/42",
@@ -38374,6 +38387,109 @@ describe("SessionService", () => {
       ([, entry]) => entry.event === "session.complete.failed",
     ) as [string, { details?: unknown }];
     expect(nonTodoFailureEntry.details).toBeUndefined();
+  });
+
+  it.each([false, true])("closes only an owned pull request (%s)", async (owned) => {
+    createSessionStore({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readCurrentBranchMock.mockResolvedValue("api-1");
+    const pr = JSON.stringify({
+      number: 42,
+      headRefName: "api-1",
+      headRepository: { nameWithOwner: owned ? "acme/api" : "other/api" },
+      headRepositoryOwner: { login: owned ? "acme" : "other" },
+      state: "OPEN",
+      title: "Fix checkout",
+      url: "https://github.com/acme/api/pull/42",
+    });
+    const defaultGh = ghMock.getMockImplementation();
+    if (!defaultGh) throw new Error("missing GitHub test harness");
+    ghMock.mockImplementation((cwd: string, ...args: string[]) =>
+      args[0] === "pr" ? Promise.resolve(pr) : defaultGh(cwd, ...args),
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.complete("api-1", { prAction: "close" });
+
+    expect(ghMock.mock.calls.some((call) => call[1] === "pr" && call[2] === "close")).toBe(owned);
+    expect(result.status).toBe("completed");
+  });
+
+  it.each(["current", "matching"])(
+    "retains the open PR guard after the local branch is renamed (%s)",
+    async () => {
+      createSessionStore({
+        ...runningSession(),
+        id: "api-1",
+        branch: "renamed",
+        pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+      });
+      readCurrentBranchMock.mockResolvedValue("renamed");
+      readBranchDestinationMock.mockResolvedValue({
+        status: "known",
+        push: { url: "git@github.com:acme/api.git", branch: "renamed" },
+        upstream: { url: "git@github.com:acme/api.git", branch: "api-1" },
+      });
+      const pr = JSON.stringify({
+        number: 42,
+        headRefName: "api-1",
+        headRepository: { nameWithOwner: "acme/api" },
+        headRepositoryOwner: { login: "acme" },
+        state: "OPEN",
+        title: "Fix checkout",
+        url: "https://github.com/acme/api/pull/42",
+      });
+      const defaultGh = ghMock.getMockImplementation();
+      if (!defaultGh) throw new Error("missing GitHub test harness");
+      ghMock.mockImplementation((cwd: string, ...args: string[]) =>
+        args[0] === "pr" ? Promise.resolve(pr) : defaultGh(cwd, ...args),
+      );
+      const { OpenPrActionRequiredError, SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await expect(service.complete("api-1")).rejects.toBeInstanceOf(OpenPrActionRequiredError);
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(ghMock.mock.calls.some((call) => call[1] === "pr" && call[2] === "close")).toBe(false);
+    },
+  );
+
+  it("completes an unpushed simple session after rejecting a foreign reference", async () => {
+    createSessionStore({
+      ...runningSession(),
+      pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+    });
+    readBranchDestinationMock.mockResolvedValue({ status: "known", push: null, upstream: null });
+    const defaultGh = ghMock.getMockImplementation();
+    if (!defaultGh) throw new Error("missing GitHub test harness");
+    ghMock.mockImplementation((cwd: string, ...args: string[]) =>
+      args[0] === "pr"
+        ? Promise.resolve(
+            JSON.stringify({
+              headRefName: "foreign",
+              headRepository: { nameWithOwner: "acme/api" },
+              headRepositoryOwner: { login: "acme" },
+              url: "https://github.com/acme/api/pull/42",
+            }),
+          )
+        : defaultGh(cwd, ...args),
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    expect((await service.complete("api-1")).status).toBe("completed");
+    expect(ghMock.mock.calls.some((call) => call[1] === "pr" && call[2] === "close")).toBe(false);
   });
 
   it("completes without a pull request action when the worktree is no longer a git repo", async () => {
@@ -38471,6 +38587,14 @@ describe("SessionService", () => {
     ghMock
       .mockResolvedValueOnce(
         JSON.stringify({
+          headRefName: "main",
+          headRepository: { nameWithOwner: "acme/api" },
+          headRepositoryOwner: { login: "acme" },
+          url: "https://github.com/acme/api/pull/42",
+        }),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({
           number: 42,
           state: "OPEN",
           title: "Fix checkout",
@@ -38517,14 +38641,23 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    ghMock.mockResolvedValueOnce(
-      JSON.stringify({
-        number: 42,
-        state: "OPEN",
-        title: "Fix checkout",
-        url: "https://github.com/acme/api/pull/42",
-      }),
-    );
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          headRefName: "main",
+          headRepository: { nameWithOwner: "acme/api" },
+          headRepositoryOwner: { login: "acme" },
+          url: "https://github.com/acme/api/pull/42",
+        }),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          number: 42,
+          state: "OPEN",
+          title: "Fix checkout",
+          url: "https://github.com/acme/api/pull/42",
+        }),
+      );
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -38539,7 +38672,7 @@ describe("SessionService", () => {
       "--repo",
       "acme/api",
     );
-    expect(ghMock.mock.invocationCallOrder[1]).toBeLessThan(
+    expect(ghMock.mock.invocationCallOrder[2]).toBeLessThan(
       killTmuxSessionMock.mock.invocationCallOrder[0] ?? 0,
     );
     expect(result.status).toBe("completed");
@@ -38568,6 +38701,9 @@ describe("SessionService", () => {
     ghMock.mockResolvedValue(
       JSON.stringify({
         number: 42,
+        headRefName: "main",
+        headRepository: { nameWithOwner: "acme/api" },
+        headRepositoryOwner: { login: "acme" },
         state: "CLOSED",
         title: "Fix checkout",
         url: "https://github.com/acme/api/pull/42",
@@ -44491,14 +44627,23 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    ghMock.mockResolvedValueOnce(
-      JSON.stringify({
-        number: 42,
-        state: "OPEN",
-        title: "Fix checkout",
-        url: "https://github.com/acme/api/pull/42",
-      }),
-    );
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          headRefName: "main",
+          headRepository: { nameWithOwner: "acme/api" },
+          headRepositoryOwner: { login: "acme" },
+          url: "https://github.com/acme/api/pull/42",
+        }),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          number: 42,
+          state: "OPEN",
+          title: "Fix checkout",
+          url: "https://github.com/acme/api/pull/42",
+        }),
+      );
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -44513,7 +44658,7 @@ describe("SessionService", () => {
       "--repo",
       "acme/api",
     );
-    expect(ghMock.mock.invocationCallOrder[1]).toBeLessThan(
+    expect(ghMock.mock.invocationCallOrder[2]).toBeLessThan(
       killTmuxSessionMock.mock.invocationCallOrder[0] ?? 0,
     );
     expect(result.status).toBe("killed");
@@ -77035,6 +77180,665 @@ describe("SessionService", () => {
 
       expect(retry.id).toBe("api-2");
       expect([...sessions.keys()]).toEqual(["api-2"]);
+    });
+  });
+
+  describe("telegram topic gc sweep", () => {
+    const DAY_MS = 24 * 60 * 60_000;
+    const TICK_MS = 5 * 60_000;
+
+    interface GcEntry {
+      id: string;
+      thread: number;
+      binding: boolean;
+      target: boolean;
+    }
+
+    function gcRecord(id: string, status: SessionRecord["status"]): SessionRecord {
+      return {
+        id,
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: id,
+        worktree: true,
+        worktreePath: `/tmp/spur-worktrees/api/${id}`,
+        tmuxSession: id,
+        launchCommand: "claude --dangerously-skip-permissions",
+        status,
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      };
+    }
+
+    // In-memory Telegram state behind the mocked metadata: one binding and one
+    // reply target per session, deleted the way the real helper deletes them.
+    function seedGc(
+      entries: GcEntry[],
+      options: {
+        live?: SessionRecord[];
+        archived?: SessionRecord[];
+        clockAgeMs?: number | null;
+        foreignOwner?: { chatId: number; thread: number; sessionId: string };
+      } = {},
+    ) {
+      const { config, telegramSource } = (() => {
+        const cfg = baseConfig();
+        const source = {
+          type: "telegram" as const,
+          runOnStart: false,
+          token: "token-123",
+          chatId: -1001,
+          allowedUsers: [123],
+        };
+        cfg.projects.api.sources = { agentChat: source };
+        return { config: cfg, telegramSource: source };
+      })();
+      loadConfigMock.mockReturnValue(config);
+      const state = new Map(entries.map((entry) => [entry.id, { ...entry }]));
+      const clock = {
+        value:
+          options.clockAgeMs === null || options.clockAgeMs === undefined
+            ? null
+            : Date.now() - options.clockAgeMs,
+      } as { value: number | null };
+      const targetOf = (entry: GcEntry) => ({
+        sessionId: entry.id,
+        projectId: "api",
+        sourceId: "agentChat",
+        chatId: -1001,
+        messageThreadId: entry.thread,
+        updatedAt: "2026-03-18T10:02:00.000Z",
+      });
+      readTelegramReplyTargetMock.mockImplementation((_dir: string, id: string) => {
+        const entry = state.get(id);
+        return entry?.target ? targetOf(entry) : null;
+      });
+      readTelegramBindingsMock.mockImplementation(() => {
+        const bindings = new Map<
+          string,
+          { chatId: number; messageThreadId: number; sessionId: string }
+        >();
+        for (const entry of state.values()) {
+          if (!entry.binding) continue;
+          bindings.set(`-1001:${entry.thread}`, {
+            chatId: -1001,
+            messageThreadId: entry.thread,
+            sessionId: entry.id,
+          });
+        }
+        if (options.foreignOwner) {
+          bindings.set(`${options.foreignOwner.chatId}:${options.foreignOwner.thread}`, {
+            chatId: options.foreignOwner.chatId,
+            messageThreadId: options.foreignOwner.thread,
+            sessionId: options.foreignOwner.sessionId,
+          });
+        }
+        return bindings;
+      });
+      deleteTelegramSourceStateForSessionMock.mockImplementation(
+        (_dir: string, projectId: string, id: string) => {
+          const entry = state.get(id);
+          const removedBindings =
+            entry?.binding && projectId === "api"
+              ? [
+                  {
+                    sourceId: "agentChat",
+                    binding: { chatId: -1001, messageThreadId: entry.thread, sessionId: id },
+                  },
+                ]
+              : [];
+          if (entry && projectId === "api") entry.binding = false;
+          if (entry) entry.target = false;
+          return { removedBindings };
+        },
+      );
+      writeTelegramBindingsMock.mockImplementation(
+        (_dir: string, _project: string, _source: string, _bindings: unknown, opts) => {
+          for (const key of (opts as { removeKeys?: string[] }).removeKeys ?? []) {
+            for (const entry of state.values()) {
+              if (`-1001:${entry.thread}` === key) entry.binding = false;
+            }
+          }
+        },
+      );
+      deleteTelegramReplyTargetMock.mockImplementation((_dir: string, id: string) => {
+        const entry = state.get(id);
+        if (entry) entry.target = false;
+      });
+      listTelegramTopicSessionIdsMock.mockImplementation(
+        () => new Set([...state.values()].filter((e) => e.binding || e.target).map((e) => e.id)),
+      );
+      readTelegramTopicGcClockMock.mockImplementation(() => clock.value);
+      writeTelegramTopicGcClockMock.mockImplementation((_dir: string, at: number) => {
+        clock.value = at;
+      });
+      const failures = { value: {} as Record<string, number> };
+      readTelegramTopicGcFailuresMock.mockImplementation(() => ({ ...failures.value }));
+      writeTelegramTopicGcFailuresMock.mockImplementation(
+        (_dir: string, next: Record<string, number>) => {
+          failures.value = { ...next };
+        },
+      );
+      createSessionStore(...(options.live ?? []));
+      const archived = new Map((options.archived ?? []).map((record) => [record.id, record]));
+      readArchivedSessionMock.mockImplementation(
+        (_dir: string, id: string) => archived.get(id) ?? null,
+      );
+      return { state, clock, failures, telegramSource };
+    }
+
+    const gcNotices = () =>
+      sendTelegramReplyMock.mock.calls.filter(([, , text]) =>
+        String(text).includes("removed by daily cleanup"),
+      );
+
+    async function tick(): Promise<void> {
+      await vi.advanceTimersByTimeAsync(TICK_MS);
+    }
+
+    async function startService() {
+      const { SessionService } = await loadSessionServiceModule();
+      return new SessionService("/tmp/spur.yaml", new Date().toISOString());
+    }
+
+    it("T1 retires the topic of a killed session on a due sweep with one notice", async () => {
+      const { state, clock, telegramSource } = seedGc(
+        [{ id: "api-1", thread: 22, binding: true, target: true }],
+        {
+          live: [gcRecord("api-1", "killed")],
+          clockAgeMs: 25 * 60 * 60_000,
+        },
+      );
+      const service = await startService();
+      await tick();
+
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(1);
+      expect(deleteTelegramTopicMock).toHaveBeenCalledWith(telegramSource, -1001, 22);
+      expect(state.get("api-1")).toMatchObject({ binding: false, target: false });
+      expect(clock.value).toBe(Date.now());
+      expect(gcNotices()).toHaveLength(1);
+      expect(gcNotices()[0]).toEqual([
+        telegramSource,
+        { chatId: -1001 },
+        "Session api-1 topic 22 removed by daily cleanup (status: killed).",
+        { lifecycle: true },
+      ]);
+      service.dispose();
+    });
+
+    it("T2 retires the topic of a session with no record", async () => {
+      const { state } = seedGc([{ id: "api-9", thread: 30, binding: true, target: true }], {
+        clockAgeMs: 25 * 60 * 60_000,
+      });
+      const service = await startService();
+      await tick();
+
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(1);
+      expect(state.get("api-9")).toMatchObject({ binding: false, target: false });
+      expect(gcNotices()).toHaveLength(1);
+      expect(gcNotices()[0]?.[2]).toBe(
+        "Session api-9 topic 30 removed by daily cleanup (status: missing).",
+      );
+      service.dispose();
+    });
+
+    it("T3 never touches live or restorable sessions", async () => {
+      const statuses = [
+        "stopped",
+        "paused",
+        "errored",
+        "budget_limited",
+        "running",
+        "spawning",
+      ] as const;
+      const { state } = seedGc(
+        statuses.map((_, i) => ({
+          id: `api-${i + 1}`,
+          thread: 20 + i,
+          binding: true,
+          target: true,
+        })),
+        {
+          live: statuses.map((status, i) => gcRecord(`api-${i + 1}`, status)),
+          clockAgeMs: 25 * 60 * 60_000,
+        },
+      );
+      const service = await startService();
+      await tick();
+
+      expect(deleteTelegramTopicMock).not.toHaveBeenCalled();
+      expect(gcNotices()).toHaveLength(0);
+      for (const entry of state.values())
+        expect(entry).toMatchObject({ binding: true, target: true });
+      service.dispose();
+    });
+
+    it("T4 first boot writes the clock and waits 24h", async () => {
+      const { state, clock } = seedGc([{ id: "api-1", thread: 22, binding: true, target: true }], {
+        live: [gcRecord("api-1", "killed")],
+        clockAgeMs: null,
+      });
+      const service = await startService();
+      await tick();
+
+      expect(writeTelegramTopicGcClockMock).toHaveBeenCalledTimes(1);
+      expect(clock.value).toBe(Date.now());
+      expect(deleteTelegramTopicMock).not.toHaveBeenCalled();
+      expect(state.get("api-1")?.binding).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(DAY_MS);
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(1);
+      expect(state.get("api-1")).toMatchObject({ binding: false, target: false });
+      service.dispose();
+    });
+
+    it("T5 a restart within 24h of the last sweep does not sweep", async () => {
+      const { state } = seedGc([{ id: "api-1", thread: 22, binding: true, target: true }], {
+        live: [gcRecord("api-1", "killed")],
+        clockAgeMs: 60 * 60_000,
+      });
+      const first = await startService();
+      first.dispose();
+      const service = await startService();
+      await tick();
+
+      expect(deleteTelegramTopicMock).not.toHaveBeenCalled();
+      expect(writeTelegramTopicGcClockMock).not.toHaveBeenCalled();
+      expect(state.get("api-1")?.binding).toBe(true);
+      service.dispose();
+    });
+
+    it("T6 retires at most 20 sessions per sweep and the rest the next day", async () => {
+      const ids = Array.from({ length: 25 }, (_, i) => `api-${String(i + 1).padStart(2, "0")}`);
+      const { state } = seedGc(
+        ids.map((id, i) => ({ id, thread: 100 + i, binding: true, target: true })),
+        { live: ids.map((id) => gcRecord(id, "killed")), clockAgeMs: 25 * 60 * 60_000 },
+      );
+      const service = await startService();
+      await tick();
+
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(20);
+      expect([...state.values()].filter((e) => e.binding)).toHaveLength(5);
+
+      // Next day: jump the system clock instead of simulating 288 ticks.
+      vi.setSystemTime(Date.now() + 25 * 60 * 60_000);
+      await tick();
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(25);
+      expect([...state.values()].filter((e) => e.binding)).toHaveLength(0);
+      service.dispose();
+    });
+
+    it("T7 a second tick the same day makes no Telegram calls", async () => {
+      seedGc([{ id: "api-1", thread: 22, binding: true, target: true }], {
+        live: [gcRecord("api-1", "killed")],
+        clockAgeMs: 25 * 60 * 60_000,
+      });
+      const service = await startService();
+      await tick();
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(1);
+      deleteTelegramTopicMock.mockClear();
+      sendTelegramReplyMock.mockClear();
+      writeTelegramTopicGcClockMock.mockClear();
+
+      await tick();
+      await tick();
+
+      expect(deleteTelegramTopicMock).not.toHaveBeenCalled();
+      expect(gcNotices()).toHaveLength(0);
+      expect(writeTelegramTopicGcClockMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("T8 one failed delete does not stop the others", async () => {
+      const { state } = seedGc(
+        [
+          { id: "api-1", thread: 21, binding: true, target: true },
+          { id: "api-2", thread: 22, binding: true, target: true },
+        ],
+        {
+          live: [gcRecord("api-1", "killed"), gcRecord("api-2", "completed")],
+          clockAgeMs: 25 * 60 * 60_000,
+        },
+      );
+      deleteTelegramTopicMock.mockImplementation(async (_source, _chat, topic: number) => {
+        if (topic === 21) throw new Error("Telegram 500");
+        return "deleted";
+      });
+      const service = await startService();
+      await tick();
+
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(2);
+      expect(state.get("api-2")).toMatchObject({ binding: false, target: false });
+      expect(gcNotices()).toHaveLength(1);
+      expect(gcNotices()[0]?.[2]).toContain("topic 22");
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => (entry as { event?: string }).event === "source.telegram.notify_failed",
+        ),
+      ).toBe(true);
+      service.dispose();
+    });
+
+    it("T9 retires a reply-target-only topic of a completed session", async () => {
+      const { state } = seedGc([{ id: "api-1", thread: 22, binding: false, target: true }], {
+        live: [gcRecord("api-1", "completed")],
+        clockAgeMs: 25 * 60 * 60_000,
+      });
+      const service = await startService();
+      await tick();
+
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(1);
+      expect(state.get("api-1")?.target).toBe(false);
+      expect(gcNotices()).toHaveLength(1);
+      expect(gcNotices()[0]?.[2]).toBe(
+        "Session api-1 topic 22 removed by daily cleanup (status: completed).",
+      );
+      service.dispose();
+    });
+
+    it("T10 drops a reply target without deleting a topic another session owns", async () => {
+      const { state } = seedGc([{ id: "api-1", thread: 22, binding: false, target: true }], {
+        live: [gcRecord("api-1", "completed"), gcRecord("api-2", "running")],
+        clockAgeMs: 25 * 60 * 60_000,
+        foreignOwner: { chatId: -1001, thread: 22, sessionId: "api-2" },
+      });
+      const service = await startService();
+      await tick();
+
+      expect(deleteTelegramTopicMock).not.toHaveBeenCalled();
+      expect(state.get("api-1")?.target).toBe(false);
+      expect(gcNotices()).toHaveLength(0);
+      service.dispose();
+    });
+
+    it("T11 keeps the topic of an archived stopped session", async () => {
+      const { state } = seedGc([{ id: "api-1", thread: 22, binding: true, target: true }], {
+        archived: [gcRecord("api-1", "stopped")],
+        clockAgeMs: 25 * 60 * 60_000,
+      });
+      const service = await startService();
+      await tick();
+
+      expect(deleteTelegramTopicMock).not.toHaveBeenCalled();
+      expect(gcNotices()).toHaveLength(0);
+      expect(state.get("api-1")).toMatchObject({ binding: true, target: true });
+      service.dispose();
+    });
+
+    it("T12 retires the topic of an archived completed session", async () => {
+      const { state } = seedGc([{ id: "api-1", thread: 22, binding: true, target: true }], {
+        archived: [gcRecord("api-1", "completed")],
+        clockAgeMs: 25 * 60 * 60_000,
+      });
+      const service = await startService();
+      await tick();
+
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(1);
+      expect(state.get("api-1")).toMatchObject({ binding: false, target: false });
+      expect(gcNotices()).toHaveLength(1);
+      expect(gcNotices()[0]?.[2]).toContain("(status: completed)");
+      service.dispose();
+    });
+
+    it("T13 skips a session whose record is unreadable", async () => {
+      const { state } = seedGc([{ id: "api-1", thread: 22, binding: true, target: true }], {
+        clockAgeMs: 25 * 60 * 60_000,
+      });
+      readSessionMock.mockImplementation(() => {
+        throw new Error("Invalid session metadata JSON");
+      });
+      const service = await startService();
+      await tick();
+
+      expect(deleteTelegramTopicMock).not.toHaveBeenCalled();
+      expect(gcNotices()).toHaveLength(0);
+      expect(state.get("api-1")).toMatchObject({ binding: true, target: true });
+      service.dispose();
+    });
+
+    it("T14 a failed notice leaves the topic deleted and is never retried", async () => {
+      const { state } = seedGc([{ id: "api-1", thread: 22, binding: true, target: true }], {
+        live: [gcRecord("api-1", "killed")],
+        clockAgeMs: 25 * 60 * 60_000,
+      });
+      sendTelegramReplyMock.mockRejectedValue(new Error("Telegram 500"));
+      const service = await startService();
+      await tick();
+
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(1);
+      expect(state.get("api-1")).toMatchObject({ binding: false, target: false });
+      expect(gcNotices()).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(DAY_MS);
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(1);
+      expect(gcNotices()).toHaveLength(1);
+      service.dispose();
+    });
+
+    it("holds the claim in memory when the clock write throws", async () => {
+      seedGc([{ id: "api-1", thread: 22, binding: true, target: true }], {
+        live: [gcRecord("api-1", "killed")],
+        clockAgeMs: 25 * 60 * 60_000,
+      });
+      writeTelegramTopicGcClockMock.mockImplementation(() => {
+        throw new Error("EACCES");
+      });
+      const service = await startService();
+      await tick();
+      await tick();
+      await tick();
+
+      expect(writeTelegramTopicGcClockMock).toHaveBeenCalledTimes(1);
+      expect(deleteTelegramTopicMock).not.toHaveBeenCalled();
+      const failed = logSpurEventMock.mock.calls.filter(
+        ([, entry]) => (entry as { event?: string }).event === "source.telegram.topic_gc.failed",
+      );
+      expect(failed).toHaveLength(1);
+      service.dispose();
+    });
+
+    async function nextDaySweep(): Promise<void> {
+      vi.setSystemTime(Date.now() + 25 * 60 * 60_000);
+      await tick();
+    }
+
+    it("T16 a failed delete keeps the retry locator and retries on the next due sweep", async () => {
+      const { state, failures } = seedGc(
+        [{ id: "api-missing", thread: 22, binding: true, target: true }],
+        {
+          clockAgeMs: 25 * 60 * 60_000,
+        },
+      );
+      deleteTelegramTopicMock.mockRejectedValue(new Error("Telegram 500"));
+      const service = await startService();
+      await tick();
+
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(1);
+      expect(state.get("api-missing")).toMatchObject({ binding: true, target: true });
+      expect(failures.value).toEqual({ "api-missing": 1 });
+      expect(gcNotices()).toHaveLength(0);
+
+      await nextDaySweep();
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(2);
+      service.dispose();
+    });
+
+    it("T17 gives up after 3 failed sweeps, drops state and logs once", async () => {
+      const { state, failures } = seedGc(
+        [{ id: "api-missing", thread: 22, binding: true, target: true }],
+        {
+          clockAgeMs: 25 * 60 * 60_000,
+        },
+      );
+      deleteTelegramTopicMock.mockRejectedValue(new Error("Telegram 500"));
+      const service = await startService();
+      await tick();
+      await nextDaySweep();
+      expect(state.get("api-missing")?.binding).toBe(true);
+      await nextDaySweep();
+
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(3);
+      expect(state.get("api-missing")).toMatchObject({ binding: false, target: false });
+      expect(failures.value).toEqual({});
+      expect(gcNotices()).toHaveLength(0);
+      const gaveUp = () =>
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => (entry as { event?: string }).event === "source.telegram.topic_gc.gave_up",
+        );
+      expect(gaveUp()).toHaveLength(1);
+
+      await nextDaySweep();
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(3);
+      expect(gaveUp()).toHaveLength(1);
+      service.dispose();
+    });
+
+    it("T18 posts the notice only after the delete succeeds", async () => {
+      const { state, failures } = seedGc(
+        [{ id: "api-missing", thread: 22, binding: true, target: true }],
+        {
+          clockAgeMs: 25 * 60 * 60_000,
+        },
+      );
+      deleteTelegramTopicMock.mockRejectedValueOnce(new Error("Telegram 500"));
+      const service = await startService();
+      await tick();
+      expect(gcNotices()).toHaveLength(0);
+
+      await nextDaySweep();
+      expect(deleteTelegramTopicMock).toHaveBeenCalledTimes(2);
+      expect(state.get("api-missing")).toMatchObject({ binding: false, target: false });
+      expect(failures.value).toEqual({});
+      expect(gcNotices()).toHaveLength(1);
+      expect(gcNotices()[0]?.[2]).toBe(
+        "Session api-missing topic 22 removed by daily cleanup (status: missing).",
+      );
+      service.dispose();
+    });
+
+    it("T19 prunes failure counts of reopened sessions and ids with no Telegram state", async () => {
+      const { failures, state } = seedGc(
+        [{ id: "api-1", thread: 22, binding: true, target: true }],
+        {
+          live: [gcRecord("api-1", "running")],
+          clockAgeMs: 25 * 60 * 60_000,
+        },
+      );
+      failures.value = { "api-1": 2, "api-gone": 1 };
+      const service = await startService();
+      await tick();
+
+      expect(failures.value).toEqual({});
+      expect(writeTelegramTopicGcFailuresMock).toHaveBeenCalledTimes(1);
+      expect(deleteTelegramTopicMock).not.toHaveBeenCalled();
+      expect(state.get("api-1")).toMatchObject({ binding: true, target: true });
+      service.dispose();
+    });
+
+    it("T20 leaves the failure file alone when nothing is stale", async () => {
+      const { failures } = seedGc([{ id: "api-1", thread: 22, binding: true, target: true }], {
+        live: [gcRecord("api-1", "killed")],
+        clockAgeMs: 25 * 60 * 60_000,
+      });
+      failures.value = { "api-1": 1 };
+      deleteTelegramTopicMock.mockRejectedValue(new Error("Telegram 500"));
+      const service = await startService();
+      await tick();
+
+      expect(failures.value).toEqual({ "api-1": 2 });
+      expect(writeTelegramTopicGcFailuresMock).toHaveBeenCalledTimes(1);
+      service.dispose();
+    });
+
+    it("T21 retires each topic independently when another topic keeps failing", async () => {
+      seedGc([], { clockAgeMs: 25 * 60 * 60_000 });
+      const bindings = new Map([
+        [22, true],
+        [23, true],
+      ]);
+      readTelegramBindingsMock.mockImplementation(
+        () =>
+          new Map(
+            [...bindings]
+              .filter(([, held]) => held)
+              .map(([thread]) => [
+                `-1001:${thread}`,
+                { chatId: -1001, messageThreadId: thread, sessionId: "api-missing" },
+              ]),
+          ),
+      );
+      readTelegramReplyTargetMock.mockReturnValue(null);
+      listTelegramTopicSessionIdsMock.mockImplementation(
+        () => new Set([...bindings.values()].some(Boolean) ? ["api-missing"] : []),
+      );
+      writeTelegramBindingsMock.mockImplementation(
+        (_dir: string, _project: string, _source: string, _bindings: unknown, opts) => {
+          for (const key of (opts as { removeKeys?: string[] }).removeKeys ?? []) {
+            bindings.set(Number(key.split(":")[1]), false);
+          }
+        },
+      );
+      deleteTelegramSourceStateForSessionMock.mockImplementation(() => {
+        for (const thread of bindings.keys()) bindings.set(thread, false);
+        return { removedBindings: [] };
+      });
+      deleteTelegramTopicMock.mockImplementation(async (_source, _chat, topic: number) => {
+        if (topic === 23) throw new Error("Telegram 500");
+        return "deleted";
+      });
+      const service = await startService();
+      await tick();
+
+      expect(bindings.get(22)).toBe(false);
+      expect(bindings.get(23)).toBe(true);
+      expect(gcNotices()).toHaveLength(1);
+      expect(gcNotices()[0]?.[2]).toContain("topic 22");
+
+      await nextDaySweep();
+      expect(bindings.get(23)).toBe(true);
+      expect(gcNotices()).toHaveLength(1);
+      expect(deleteTelegramTopicMock.mock.calls.filter(([, , topic]) => topic === 22)).toHaveLength(
+        1,
+      );
+
+      await nextDaySweep();
+      expect(bindings.get(23)).toBe(false);
+      expect(gcNotices()).toHaveLength(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => (entry as { event?: string }).event === "source.telegram.topic_gc.gave_up",
+        ),
+      ).toHaveLength(1);
+      service.dispose();
+    });
+
+    it("T15 a session reopened after the scan keeps its topic", async () => {
+      const { state } = seedGc([{ id: "api-1", thread: 22, binding: true, target: true }], {
+        clockAgeMs: 25 * 60 * 60_000,
+      });
+      let scanned = false;
+      let reads = 0;
+      const scan = listTelegramTopicSessionIdsMock.getMockImplementation();
+      listTelegramTopicSessionIdsMock.mockImplementation((...args: unknown[]) => {
+        scanned = true;
+        return scan?.(...args);
+      });
+      // First read after the scan is the candidate classification; the reopen
+      // lands before the in-lock reads.
+      readSessionMock.mockImplementation(() => {
+        if (!scanned) return gcRecord("api-1", "completed");
+        reads += 1;
+        return gcRecord("api-1", reads === 1 ? "completed" : "running");
+      });
+      const service = await startService();
+      await tick();
+
+      expect(reads).toBeGreaterThanOrEqual(2);
+      expect(deleteTelegramTopicMock).not.toHaveBeenCalled();
+      expect(gcNotices()).toHaveLength(0);
+      expect(state.get("api-1")).toMatchObject({ binding: true, target: true });
+      service.dispose();
     });
   });
 });
