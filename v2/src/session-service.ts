@@ -21431,6 +21431,7 @@ export class SessionService {
     // No lock held here. A failed taking spawn gives closeout back before it
     // settles, so the launch below reads the final flag.
     await this.waitForCloseoutTakeFrom(sessionId, operation);
+    this.assertNoHeldCloseoutTake(sessionId);
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     return this.withPaneWriteLock(
@@ -22311,6 +22312,9 @@ export class SessionService {
     sessionId: string,
     request: RestoreSessionRequest,
   ): Promise<SessionView> {
+    // Before the claim: awaiting between the has-check and the set would race.
+    await this.waitForCloseoutTakeFrom(sessionId);
+    this.assertNoHeldCloseoutTake(sessionId);
     // Refuse a second concurrent reopen outright instead of narrowing the
     // read-check-then-write window: two overlapping calls that both pass the
     // `status !== "completed"` guard would otherwise race into restore() for
@@ -22918,6 +22922,27 @@ export class SessionService {
     }
   }
 
+  // The in-memory wait covers a take that is running. A held or restart-queued
+  // taker keeps its persisted intent but has no in-flight entry, and may still
+  // fail and give closeout back to this session. Restoring or handing it off
+  // now would launch a helper that the later give-back skips. Persisted record
+  // only, read-only, no lock.
+  private assertNoHeldCloseoutTake(sessionId: string): void {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) return;
+    const taker = this.listWorkspaceRuntimeMembers(session, listSessions(this.config.dataDir)).find(
+      (member) =>
+        member.id !== sessionId &&
+        member.status === "spawning" &&
+        member.spawnIntent?.closeoutTakenFrom?.includes(sessionId) === true,
+    );
+    if (taker) {
+      throw new SessionStartingError(
+        `Session ${sessionId} closeout is moving to ${taker.id}; retry after it launches`,
+      );
+    }
+  }
+
   // Sync with the failed-record write. A live launch retained by the failure
   // path never reaches here.
   private returnTakenCloseout(failedSessionId: string, takenFrom: readonly string[]): void {
@@ -23125,6 +23150,7 @@ export class SessionService {
     waiting: HandoffAdmission,
   ): Promise<SessionView> {
     await this.waitForCloseoutTakeFrom(sessionId);
+    this.assertNoHeldCloseoutTake(sessionId);
     // A failed take gives ownership back during the wait; admit against that.
     const { closeoutOwner: _stale, ...unowned } = waiting.session;
     const settledOwner = readSession(this.config.dataDir, sessionId)?.closeoutOwner;

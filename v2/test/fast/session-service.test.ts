@@ -4887,6 +4887,106 @@ describe("SessionService", () => {
       expect(sessions.get("api-4")?.closeoutOwner).toBe(true);
       expect(ownerIds(sessions)).toEqual(["api-4"]);
     });
+
+    describe("held taker", () => {
+      async function holdTakingSpawn(sessions: Map<string, SessionRecord>) {
+        const { TmuxProbeUnknownError } = await import("../../src/runtime-tmux.js");
+        reserveNextSessionIdMock.mockResolvedValue("api-3");
+        waitForTmuxReadyMock.mockRejectedValue(new TmuxProbeUnknownError("probe unknown"));
+        probeTmuxProcessMatchMock.mockResolvedValue({
+          alive: true,
+          matchedByName: true,
+          unresponsive: false,
+        });
+        // Inconclusive runtime evidence holds the launch instead of failing it.
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "unavailable" } as never);
+        const { SessionService, SessionStartingError } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        await reuseSpawn(service, "spawnInBackground");
+        expect(sessions.get("api-3")).toMatchObject({
+          status: "spawning",
+          closeoutOwner: true,
+          spawnIntent: { closeoutTakenFrom: ["api-1"] },
+        });
+        return { service, SessionService, SessionStartingError };
+      }
+
+      it("restore, reopen and handoff of the former owner refuse while the held taker keeps the intent", async () => {
+        const sessions = seedWorkspace();
+        const { service, SessionStartingError } = await holdTakingSpawn(sessions);
+        const launchesBefore = createTmuxSessionMock.mock.calls.length;
+
+        for (const attempt of [
+          () => service.restore("api-1"),
+          () => service.reopen("api-1"),
+          () => service.handoff("api-1", { agent: "cursor" }),
+        ]) {
+          const refused = attempt();
+          await expect(refused).rejects.toBeInstanceOf(SessionStartingError);
+          await expect(refused).rejects.toThrow(/closeout is moving to api-3/);
+        }
+
+        expect(createTmuxSessionMock.mock.calls).toHaveLength(launchesBefore);
+        expect(ownerIds(sessions)).toEqual(["api-3"]);
+      });
+
+      it("gives closeout back after the held taker fails, then restore launches the owner", async () => {
+        const sessions = seedWorkspace();
+        const { service } = await holdTakingSpawn(sessions);
+        await expect(service.restore("api-1")).rejects.toThrow(/closeout is moving to api-3/);
+        const internals = service as unknown as {
+          returnTakenCloseout(failedId: string, takenFrom: string[]): void;
+        };
+
+        // Final failure retires the intent with the failed-record write.
+        const { spawnIntent: _intent, ...failed } = sessions.get("api-3")!;
+        sessions.set("api-3", { ...failed, status: "errored" });
+        internals.returnTakenCloseout("api-3", ["api-1"]);
+        findAgentSessionIdMock.mockResolvedValue("session-uuid");
+        waitForTmuxReadyMock.mockReset();
+        waitForTmuxReadyMock.mockResolvedValue(undefined);
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+        mockExitedThenRestoredProcess();
+        await service.restore("api-1");
+
+        expect(ownerIds(sessions)).toEqual(["api-1"]);
+        expect(lastLaunchEnv()?.SPUR_CLOSEOUT_OWNER).toBe("1");
+      });
+
+      it("a recovered queued taker gives closeout back on final failure", async () => {
+        const sessions = seedWorkspace();
+        const { service, SessionService } = await holdTakingSpawn(sessions);
+        const held = clone(sessions.get("api-3")!);
+        sessions.set("api-3", {
+          ...held,
+          spawnIntent: { ...held.spawnIntent!, phase: "queued" },
+        });
+        const restarted = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        const internals = restarted as unknown as {
+          prepareRecoveredSpawn(record: SessionRecord): Promise<unknown>;
+          startBackgroundSpawn(prepared: unknown): Promise<void>;
+        };
+        createTmuxSessionMock.mockReset();
+        createTmuxSessionMock.mockRejectedValue(new Error("tmux boom"));
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+
+        await expect(restarted.restore("api-1")).rejects.toThrow(/closeout is moving to api-3/);
+        await expect(
+          internals.startBackgroundSpawn(
+            await internals.prepareRecoveredSpawn(sessions.get("api-3")!),
+          ),
+        ).rejects.toThrow("tmux boom");
+        await restarted.settleBackgroundSpawns();
+
+        expect(sessions.get("api-3")?.closeoutOwner).not.toBe(true);
+        expect(ownerIds(sessions)).toEqual(["api-1"]);
+        service.dispose();
+      });
+    });
   });
 
   describe("closeout notice", () => {
