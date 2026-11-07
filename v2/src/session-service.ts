@@ -21431,6 +21431,8 @@ export class SessionService {
   ): Promise<SessionView> {
     // No lock held here. A failed taking spawn gives closeout back before it
     // settles, so the launch below reads the final flag.
+    // Persisted background takes refuse now; only foreground takes wait.
+    this.assertNoHeldCloseoutTake(sessionId);
     await this.waitForCloseoutTakeFrom(sessionId, operation);
     this.assertNoHeldCloseoutTake(sessionId);
     const hint = readSession(this.config.dataDir, sessionId);
@@ -22314,6 +22316,8 @@ export class SessionService {
     request: RestoreSessionRequest,
   ): Promise<SessionView> {
     // Before the claim: awaiting between the has-check and the set would race.
+    // Persisted background takes refuse now; only foreground takes wait.
+    this.assertNoHeldCloseoutTake(sessionId);
     await this.waitForCloseoutTakeFrom(sessionId);
     this.assertNoHeldCloseoutTake(sessionId);
     // Refuse a second concurrent reopen outright instead of narrowing the
@@ -23150,6 +23154,8 @@ export class SessionService {
     options: { todoActor?: TodoActor } | undefined,
     waiting: HandoffAdmission,
   ): Promise<SessionView> {
+    // Persisted background takes refuse now; only foreground takes wait.
+    this.assertNoHeldCloseoutTake(sessionId);
     await this.waitForCloseoutTakeFrom(sessionId);
     this.assertNoHeldCloseoutTake(sessionId);
     // A failed take gives ownership back during the wait; admit against that.

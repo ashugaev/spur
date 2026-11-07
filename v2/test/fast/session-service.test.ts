@@ -4797,13 +4797,20 @@ describe("SessionService", () => {
           ).toBe(true);
         });
         const restoring = service.restore("api-1");
-        await expect(
-          vi.waitFor(() => expect(api1Launches()).toHaveLength(1), { timeout: 1000 }),
-        ).rejects.toThrow();
+        if (path === "spawnInBackground") {
+          // Persisted background take: refuse now instead of waiting on the run.
+          await expect(restoring).rejects.toThrow(/closeout is moving to api-3/);
+          expect(api1Launches()).toHaveLength(0);
+        } else {
+          await expect(
+            vi.waitFor(() => expect(api1Launches()).toHaveLength(1), { timeout: 1000 }),
+          ).rejects.toThrow();
+        }
 
         settleGate(outcome);
         await spawning;
-        await restoring;
+        if (path === "spawnInBackground") await service.restore("api-1");
+        else await restoring;
 
         if (outcome === "reject") {
           expect(ownerIds(sessions)).toEqual(["api-1"]);
@@ -4817,6 +4824,33 @@ describe("SessionService", () => {
         expect(sessions.get("api-2")?.closeoutOwner).toBe(false);
       },
     );
+
+    it("restore of a former owner refuses promptly while a queued background taker's run is still live", async () => {
+      const sessions = seedWorkspace();
+      reserveNextSessionIdMock.mockResolvedValue("api-3");
+      const { settleGate, api1Launches } = deferredTakingLaunch(sessions);
+      const { SessionService, SessionStartingError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawning = startTakingSpawn(service, "spawnInBackground");
+      await vi.waitFor(() => expect(sessions.get("api-3")?.closeoutOwner).toBe(true));
+      expect(
+        (service as unknown as { closeoutTakesInFlight: Map<string, unknown> })
+          .closeoutTakesInFlight.size,
+      ).toBe(1);
+      const outcome = await Promise.race([
+        service.restore("api-1").then(
+          () => "resolved",
+          (error: unknown) => error,
+        ),
+        new Promise((resolve) => setTimeout(() => resolve("waited"), 500)),
+      ]);
+
+      expect(outcome).toBeInstanceOf(SessionStartingError);
+      expect(api1Launches()).toHaveLength(0);
+      settleGate("reject");
+      await spawning;
+    });
 
     it("send relaunch of a former closeout owner refuses while the take is in flight", async () => {
       const sessions = seedWorkspace();
