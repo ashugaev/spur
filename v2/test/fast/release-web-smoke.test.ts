@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,18 +20,24 @@ const {
   runBundledWebSmoke: (entry: string, options?: SmokeOptions) => Promise<void>;
 } = await import(new URL("../../../scripts/verify-bundled-web.mjs", import.meta.url).href);
 const directories: string[] = [];
-const options = { startupTimeoutMs: 2_000, upgradeTimeoutMs: 1_000 };
+// Event-driven phases settle on the child's own signal, so their budget only caps
+// a stalled child; a loaded runner can take seconds to boot the fixture.
+// Every budget stays below the fixture's 25s self-exit, so a stall reports its phase timeout.
+const options = { startupTimeoutMs: 20_000, upgradeTimeoutMs: 10_000 };
+// A case that expects one phase to time out gets a short budget for that phase only.
+const readinessTimeout = { ...options, startupTimeoutMs: 2_000 };
+// Startup budget covers readiness and the HTTP check, so readiness under load must fit too.
+const httpTimeout = { ...options, startupTimeoutMs: 15_000 };
+const upgradeTimeout = { ...options, upgradeTimeoutMs: 1_000 };
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-async function untilFile(path: string) {
+// The fixture writes each checkpoint non-atomically; an existing empty file is not yet reported.
+async function untilFile(path: string): Promise<number> {
   const deadline = performance.now() + 2_000;
   while (performance.now() < deadline) {
-    try {
-      await access(path);
-      return;
-    } catch {
-      await wait(5);
-    }
+    const value = Number(await readFile(path, "utf8").catch(() => ""));
+    if (value > 0) return value;
+    await wait(5);
   }
   throw new Error("Fixture did not report its checkpoint");
 }
@@ -51,7 +57,7 @@ import { existsSync, writeFileSync } from "node:fs";
 const cfg = ${JSON.stringify({ mode, pid, port, release })};
 writeFileSync(cfg.pid, String(process.pid));
 writeFileSync(cfg.port, process.env.PORT);
-setTimeout(() => process.exit(99), 10_000).unref();
+setTimeout(() => process.exit(99), 25_000).unref();
 if (cfg.mode === "exit-before") process.exit(7);
 if (cfg.mode === "ignore-term") process.on("SIGTERM", () => {});
 const server = createServer((request, response) => {
@@ -90,8 +96,7 @@ if (cfg.mode === "collision") {
     port,
     release,
     async assertStopped() {
-      await untilFile(pid);
-      const value = Number(await readFile(pid, "utf8"));
+      const value = await untilFile(pid);
       expect(() => process.kill(value, 0)).toThrow();
     },
   };
@@ -108,34 +113,36 @@ test("own split readiness gates HTTP 200 and valid WebSocket 101; child is stopp
   await child.assertStopped();
 });
 
-const failureCases: [string, string | RegExp][] = [
-  ["exit-before", "exited"],
-  ["exit-http", /exited|closed before headers/],
-  ["exit-ws", /exited|closed before headers/],
-  ["wrong-port", "readiness timed out"],
-  ["wrong-host", "readiness timed out"],
-  ["silent", "readiness timed out"],
-  ["http401", "did not return 200"],
-  ["ws401", "did not return 101"],
-  ["bad-accept", "handshake is invalid"],
-  ["bad-connection", "handshake is invalid"],
-  ["huge-headers", "headers exceeded limit"],
-  ["hang-http", "HTTP check timed out"],
-  ["hang-ws", "WebSocket check timed out"],
+const failureCases: [string, string | RegExp, SmokeOptions][] = [
+  ["exit-before", "exited", options],
+  ["exit-http", /exited|closed before headers/, options],
+  ["exit-ws", /exited|closed before headers/, options],
+  ["wrong-port", "readiness timed out", readinessTimeout],
+  ["wrong-host", "readiness timed out", readinessTimeout],
+  ["silent", "readiness timed out", readinessTimeout],
+  ["http401", "did not return 200", options],
+  ["ws401", "did not return 101", options],
+  ["bad-accept", "handshake is invalid", options],
+  ["bad-connection", "handshake is invalid", options],
+  ["huge-headers", "headers exceeded limit", options],
+  ["hang-http", "HTTP check timed out", httpTimeout],
+  ["hang-ws", "WebSocket check timed out", upgradeTimeout],
 ];
-test.each(failureCases)("%s fails closed and stops only the owned child", async (mode, reason) => {
-  const child = await fixture(mode);
-  await expect(runBundledWebSmoke(child.entry, options)).rejects.toThrow(reason);
-  await child.assertStopped();
-});
+test.each(failureCases)(
+  "%s fails closed and stops only the owned child",
+  async (mode, reason, caseOptions) => {
+    const child = await fixture(mode);
+    await expect(runBundledWebSmoke(child.entry, caseOptions)).rejects.toThrow(reason);
+    await child.assertStopped();
+  },
+);
 
 test("port handoff collision never probes or kills the foreign successful endpoint", async () => {
   const child = await fixture("collision");
   const result = runBundledWebSmoke(child.entry, options);
   // Attach the assertion before the deliberate failing child can reject.
   const failed = expect(result).rejects.toThrow("exited");
-  await untilFile(child.port);
-  const port = Number(await readFile(child.port, "utf8"));
+  const port = await untilFile(child.port);
   let connections = 0;
   const sockets = new Set<Socket>();
   const foreign = createServer((socket) => {
