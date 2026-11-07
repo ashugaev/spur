@@ -46,6 +46,9 @@ it("registers strict record schemas and forwards typed path/query values through
     },
   });
   expect(request?.outputSchema).toBeUndefined();
+  expect(tools.find((tool) => tool.name === "send_message")?.inputSchema).toMatchObject({
+    properties: { attachments: { items: { additionalProperties: false } } },
+  });
   expect(
     (await call("daemon_request", {
       operationId: "get_session",
@@ -135,7 +138,7 @@ it("exposes all projects, raw conversation and complete operator requests withou
     message: "followup",
     queue: true,
     interrupt: false,
-    attachments: [{ name: "x", data: "eA==" }],
+    attachments: [{ name: "x", data: "eA==", extra: true }],
   });
   expect(fixture.calls.at(-1)?.body).toEqual({
     message: "followup",

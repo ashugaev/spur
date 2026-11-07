@@ -302,7 +302,11 @@ export function createMcpWrapper(gateway: McpGateway): McpServer {
     {
       sessionId: id,
       message: z.string(),
-      attachments: z.array(z.object({ name: z.string(), data: z.string() })).optional(),
+      attachments: z
+        .array(
+          z.object({ name: z.string(), data: z.string() }).meta({ additionalProperties: false }),
+        )
+        .optional(),
       queue: z.boolean().optional(),
       interrupt: z.boolean().optional(),
     },
