@@ -61,6 +61,7 @@ import { readClaudeSessionStatus } from "../claude-session-status.js";
 import { readCursorTranscriptEntries } from "../cursor-jsonl-state.js";
 import type {
   AgentName,
+  OpenCodeLogLevel,
   ProviderReasoningEffort,
   TranscriptEntry,
   SidecarMcpBinding,
@@ -217,6 +218,9 @@ interface AgentAdapter {
     cursorConfigDir?: string;
     claudeConfigDir?: string;
     modelsCacheHome?: string;
+    // Resolved by the caller from `opencodeGc.logLevel`. Never read AppConfig
+    // from inside agents/.
+    opencodeLogLevel?: OpenCodeLogLevel;
     model?: string;
     reasoningEffort?: ProviderReasoningEffort;
     reasoningVariantNames?: string[];
@@ -738,6 +742,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       model,
       reasoningEffort,
       reasoningVariantNames,
+      opencodeLogLevel,
     }) => {
       await assertOpenCodeCompatibility();
       const configContent = buildOpenCodeConfig(
@@ -746,6 +751,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         model && reasoningEffort && reasoningVariantNames
           ? { model, reasoningEffort, variantNames: reasoningVariantNames }
           : undefined,
+        opencodeLogLevel,
       );
       return configContent ? { opencodeConfigContent: configContent } : {};
     },
@@ -955,6 +961,7 @@ export async function setupAgentHooks(args: {
   cursorConfigDir?: string;
   claudeConfigDir?: string;
   modelsCacheHome?: string;
+  opencodeLogLevel?: OpenCodeLogLevel;
   model?: string;
   reasoningEffort?: ProviderReasoningEffort;
   reasoningVariantNames?: string[];

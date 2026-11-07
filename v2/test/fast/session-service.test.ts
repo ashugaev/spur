@@ -79,6 +79,8 @@ import {
   readDiskBudgetReportMock,
   measureDiskBudgetMock,
   realDuMock,
+  collectOpenCodeGcPlanMock,
+  executeOpenCodeGcMock,
   hasEstablishedConnectionsMock,
   findListenerPidsMock,
   snapshotListenersMock,
@@ -43408,6 +43410,53 @@ describe("SessionService", () => {
     // Archived sessions lose their log shard dir, so the event must not carry a
     // sessionId (that would recreate the dir appendEventLog writes into).
     expect(completed?.[1].sessionId).toBeUndefined();
+    service.dispose();
+  });
+
+  it("never runs the opencode GC sweep while opencodeGc.enabled is false", async () => {
+    createSessionStore();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runOpenCodeGcSweep(): Promise<void>;
+      lastOpenCodeGcSweepAt: number;
+      dispose(): void;
+    };
+    service.lastOpenCodeGcSweepAt = 0;
+
+    await service.runOpenCodeGcSweep();
+
+    expect(collectOpenCodeGcPlanMock).not.toHaveBeenCalled();
+    expect(executeOpenCodeGcMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("I5 the daemon sweep executes with vacuum disabled", async () => {
+    createSessionStore();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      opencodeGc: { ...baseConfig().opencodeGc, enabled: true },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runOpenCodeGcSweep(): Promise<void>;
+      lastOpenCodeGcSweepAt: number;
+      dispose(): void;
+    };
+    service.lastOpenCodeGcSweepAt = 0;
+
+    await service.runOpenCodeGcSweep();
+
+    expect(executeOpenCodeGcMock).toHaveBeenCalledTimes(1);
+    expect(executeOpenCodeGcMock.mock.calls[0]?.[2]).toEqual({
+      dryRun: false,
+      sizes: true,
+      vacuum: false,
+    });
+    const completed = logSpurEventMock.mock.calls.find(
+      ([, entry]) => entry.event === "opencode.gc.completed",
+    );
+    expect(completed?.[1].message).toContain("0 store session(s) deleted");
+    expect(completed?.[1].message).toContain("spur opencode-gc --execute");
     service.dispose();
   });
 

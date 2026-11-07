@@ -146,6 +146,20 @@ const resolvePlaywrightSidecarCommandMock = vi.fn<() => string | undefined>();
 const isHostPortFreeMock = vi.fn<IsHostPortFree>().mockResolvedValue(true);
 const clearPortListenerMock = vi.fn<ClearPortListener>().mockResolvedValue(undefined);
 const readFreeKbMock = vi.fn<(path: string, timeoutMs?: number) => Promise<number | undefined>>();
+const createOpenCodeGcDepsMock = vi.fn(() => ({}) as never);
+const collectOpenCodeGcPlanMock = vi.fn(async () => ({ reason: null, sessions: [] }) as never);
+const executeOpenCodeGcMock = vi.fn(
+  async (_plan: unknown, _deps: unknown, _options: unknown) =>
+    ({
+      reason: null,
+      sessions: [],
+      totals: {
+        sessionsDeleted: 0,
+        snapshotLeavesRemoved: 0,
+        freedBytes: 0,
+      },
+    }) as never,
+);
 const readDiskBudgetReportMock: Mock = vi.fn();
 const measureDiskBudgetMock: Mock = vi.fn();
 const realDuMock: Mock = vi.fn();
@@ -810,6 +824,15 @@ vi.mock("../../src/disk-space.js", () => ({
   DISK_PROBE_TIMEOUT_MS: 2_000,
 }));
 
+// The real deps spawn the opencode CLI; the fast tier never forks a vendor
+// binary. The executor options object is what the daemon-boundary assertion
+// reads (vacuum must always be false there).
+vi.mock("../../src/opencode-gc.js", () => ({
+  createOpenCodeGcDeps: createOpenCodeGcDepsMock,
+  collectOpenCodeGcPlan: collectOpenCodeGcPlanMock,
+  executeOpenCodeGc: executeOpenCodeGcMock,
+}));
+
 // The daemon never runs `du` (see cache-retention.ts's call-site comment) —
 // runDiskBudgetSweep only reads the CLI-written disk-budget.json, so only
 // that read is mocked here.
@@ -1021,6 +1044,16 @@ function baseConfig() {
       intervalMinutes: 360,
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
+    },
+    opencodeGc: {
+      enabled: false,
+      olderThanDays: 14,
+      intervalMinutes: 360,
+      maxSessionsPerSweep: 20,
+      statuses: ["completed", "killed"],
+      logLevel: "WARN",
+      logMaxBytes: 134_217_728,
+      logTailBytes: 16_777_216,
     },
     artifactRetention: {
       enabled: false,
@@ -1787,6 +1820,9 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   // Same "no test-visible signal unless a test opts in" default as
   // readFreeKb above — absent measurement emits nothing.
   readDiskBudgetReportMock.mockReset().mockResolvedValue(undefined);
+  createOpenCodeGcDepsMock.mockClear();
+  collectOpenCodeGcPlanMock.mockClear();
+  executeOpenCodeGcMock.mockClear();
   measureDiskBudgetMock.mockReset();
   realDuMock.mockReset();
   flushEventLogCollapseMock.mockReset();
@@ -2051,6 +2087,9 @@ export {
   readDiskBudgetReportMock,
   measureDiskBudgetMock,
   realDuMock,
+  createOpenCodeGcDepsMock,
+  collectOpenCodeGcPlanMock,
+  executeOpenCodeGcMock,
   hasEstablishedConnectionsMock,
   findListenerPidsMock,
   snapshotListenersMock,

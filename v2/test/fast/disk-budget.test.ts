@@ -83,7 +83,7 @@ describe("measureDiskBudget", () => {
     const cacache = report.roots.find((r) => r.id === "npm-cacache");
     expect(cacache?.reclaimedBy).toBe("spur cache");
     const opencode = report.roots.find((r) => r.id === "opencode-store");
-    expect(opencode?.reclaimedBy).toBe("none");
+    expect(opencode?.reclaimedBy).toBe("opencode-gc");
     expect(opencode?.reclaimedByDiskGc).toBe(false);
     const profiles = report.roots.find((r) => r.id === "playwright-mcp-profiles");
     expect(profiles?.reclaimedBy).toBe("disk-gc");
