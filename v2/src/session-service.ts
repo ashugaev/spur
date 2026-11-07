@@ -2718,7 +2718,8 @@ export function isForeignAgentProcessMessage(message: string): boolean {
 }
 
 // Per-launch trust: Claude Code skips its workspace trust dialog when this is
-// set and records no trust entry in the account config (Claude Code 2.1.291).
+// set. Trust is not persisted: Claude still writes a project entry with
+// hasTrustDialogAccepted false for each launched dir (Claude Code 2.1.291).
 const CLAUDE_PAGE_TRUST_ENV = "CLAUDE_CODE_SANDBOXED";
 
 function buildSessionEnv(args: {

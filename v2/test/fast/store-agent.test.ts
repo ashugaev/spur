@@ -455,6 +455,31 @@ describe("chat view", () => {
     expect(page).toMatchObject({ nextFrom: 10, totalEntries: 10 });
     expect(sessions.sends.map((send) => send.message)).toEqual(["hello from chat", long]);
   });
+
+  it("does not tag a message as chat when its send was rejected", async () => {
+    const { agent, sessions, advance } = await setup();
+    const record = sessions.add({ id: "demo-1", project: "demo" });
+    record.status = "completed";
+    expect(await outcome(agent.deliverChat("session:demo-1", "closed", true))).toBe(409);
+    record.status = "running";
+    for (let n = 0; n < 30; n += 1) await agent.ensureAndDeliver("session:demo-1", `m${n}`, true);
+    expect(await outcome(agent.deliverChat("session:demo-1", "flooded", true))).toBe(429);
+    for (let n = 0; n < AUTO_DELIVERY_BUDGET; n += 1) {
+      await agent.ensureAndDeliver("page:films", `a${n}`, false);
+    }
+    expect(await outcome(agent.deliverChat("page:films", "budget", false))).toBe(429);
+    advance(0);
+    record.entries = ["closed", "flooded"].map((text) => ({
+      kind: "message",
+      role: "user",
+      text,
+    }));
+    const page = await agent.messages("session:demo-1", { limit: 50 });
+    expect(page.messages).toEqual([]);
+    const pageRecord = sessions.records.get("pg-x-0001") as FakeRecord;
+    pageRecord.entries = [{ kind: "message", role: "user", text: "budget" }];
+    expect((await agent.messages("page:films", { limit: 50 })).messages).toEqual([]);
+  });
 });
 
 describe("agent status", () => {

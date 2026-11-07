@@ -128,16 +128,18 @@ export class StoreAgent {
     message: string,
     userGesture: boolean,
   ): Promise<{ sessionId: string }> {
-    // Recorded before delivery: a poll must never consume the message before it is known.
+    // Recorded after the delivery checks and before the send: a rejected send is not
+    // chat, and a poll must never consume the message before it is known.
     const hash = chatHash(message);
-    await this.host.stores.transactMeta(storeId, (meta) => {
-      const stored = meta.get(META_CHAT);
-      const sent = (Array.isArray(stored) ? stored : []).filter(
-        (value): value is string => typeof value === "string" && value !== hash,
-      );
-      meta.set(META_CHAT, [...sent, hash].slice(-CHAT_SENT_CAP));
-    });
-    return this.ensureAndDeliver(storeId, message, userGesture);
+    return this.ensureAndDeliver(storeId, message, userGesture, () =>
+      this.host.stores.transactMeta(storeId, (meta) => {
+        const stored = meta.get(META_CHAT);
+        const sent = (Array.isArray(stored) ? stored : []).filter(
+          (value): value is string => typeof value === "string" && value !== hash,
+        );
+        meta.set(META_CHAT, [...sent, hash].slice(-CHAT_SENT_CAP));
+      }),
+    );
   }
 
   /** Delivers one message to the store's owner, spawning or recovering a page agent. */
@@ -145,6 +147,7 @@ export class StoreAgent {
     storeId: string,
     message: string,
     userGesture: boolean,
+    onAccepted?: () => Promise<unknown>,
   ): Promise<{ sessionId: string }> {
     const ref = parseStoreId(storeId);
     return this.serialize(storeId, async () => {
@@ -153,10 +156,11 @@ export class StoreAgent {
         if (!record) throw new StoreError(404, `Session not found: ${ref.sessionId}`);
         if (TERMINAL.has(record.status)) throw new StoreClosedError(storeId);
         await this.chargeDelivery(storeId, userGesture);
+        await onAccepted?.();
         await this.host.sessions.send(record.id, { message, queue: true });
         return { sessionId: record.id };
       }
-      return this.deliverToPage(ref.pageId, storeId, message, userGesture);
+      return this.deliverToPage(ref.pageId, storeId, message, userGesture, onAccepted);
     });
   }
 
@@ -226,9 +230,11 @@ export class StoreAgent {
     storeId: string,
     message: string,
     userGesture: boolean,
+    onAccepted?: () => Promise<unknown>,
   ): Promise<{ sessionId: string }> {
     const page = readPageConfig(this.host.dataDir(), pageId);
     await this.chargeDelivery(storeId, userGesture);
+    await onAccepted?.();
     const { stores, sessions } = this.host;
     let record = this.boundRecord(storeId, pageId, await stores.readMeta(storeId, META_BINDING));
     if (record) await this.resetOnAgentProgress(storeId, record.id);
