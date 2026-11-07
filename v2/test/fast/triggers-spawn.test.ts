@@ -4,18 +4,22 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventBus } from "../../src/event-bus.js";
 import { AutoPingService } from "../../src/auto-ping.js";
+import { resetEventLogCollapse } from "../../src/event-log.js";
 import {
   readPendingSpawnWork,
   writePendingSpawnWork,
   recordWorkItemLifecycle,
   readWorkItemLifecycles,
   readPendingSendBatches,
+  readSession,
+  writeSession,
 } from "../../src/metadata.js";
 import { SessionAdmissionDeniedError } from "../../src/session-service.js";
 import { startConfiguredTriggers } from "../../src/triggers.js";
 
 const dirs: string[] = [];
 afterEach(() => {
+  resetEventLogCollapse();
   vi.useRealTimers();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -54,6 +58,58 @@ function fixture(blocks = [{ prompt: "review" }]) {
     });
   return { dataDir, config, spawn, get, birth, deps, emit };
 }
+
+function workItemFixture(blocks = [{ prompt: "anchor" }, { prompt: "sibling" }]) {
+  const f = fixture(blocks);
+  f.config.projects.test.triggers.review.event = "github:work_item.new";
+  const data = {
+    externalId: "repo#queued",
+    url: "https://example.com/pr/2",
+    number: 2,
+    title: "queued",
+    repo: "repo",
+  };
+  const emit = () =>
+    f.deps.bus.emit({
+      projectId: "test",
+      sourceId: "tick",
+      name: "github:work_item.new",
+      occurrenceId: "queued-work-item",
+      data,
+    });
+  const members = () =>
+    readWorkItemLifecycles(f.dataDir, "test", "tick").get(data.externalId)?.members ?? [];
+  return { ...f, emit, members };
+}
+
+describe("work-item foreground spawn", () => {
+  it("keeps admitted foreground completion semantics", async () => {
+    const f = workItemFixture([{ prompt: "foreground" }]);
+    let complete!: () => void;
+    f.spawn.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          complete = () => resolve({ id: "test-foreground", status: "running", state: "working" });
+        }),
+    );
+    const controller = startConfiguredTriggers(f.deps);
+    try {
+      f.emit();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.members()[0]).not.toHaveProperty("sessionId");
+      complete();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.members()[0]).toMatchObject({
+        state: "running",
+        sessionId: "test-foreground",
+        attempts: 1,
+      });
+    } finally {
+      complete();
+      await controller.stop();
+    }
+  });
+});
 
 describe("durable spawn admission", () => {
   it("keeps equal-payload occurrences and routes distinct across disk reload", async () => {
@@ -110,7 +166,7 @@ describe("durable spawn admission", () => {
       title: "task",
       repo: "repo",
     };
-    f.spawn.mockRejectedValue(new SessionAdmissionDeniedError("cap", "cap"));
+    f.spawn.mockRejectedValue(new Error("spawn failed"));
     const controller = startConfiguredTriggers(f.deps);
     const emit = (occurrenceId: string) =>
       f.deps.bus.emit({
@@ -124,15 +180,19 @@ describe("durable spawn admission", () => {
       emit("first");
       emit("second");
       await vi.advanceTimersByTimeAsync(0);
-      const pending = [...readPendingSpawnWork(f.dataDir).values()];
-      expect(pending).toHaveLength(1);
+      expect(readPendingSpawnWork(f.dataDir).size).toBe(0);
       expect(f.spawn).toHaveBeenCalledTimes(1);
       expect(readWorkItemLifecycles(f.dataDir, "test", "tick").get(data.externalId)).toMatchObject({
-        state: "pending",
-        spawnWorkId: pending[0]?.workId,
+        state: "failed",
+        members: [expect.objectContaining({ attempts: 1 })],
       });
       f.spawn.mockResolvedValue({ id: "test-owner", status: "running" });
       await vi.advanceTimersByTimeAsync(15_000);
+      expect(f.spawn).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(45 * 60_000 - 15_000);
+      expect(f.spawn).toHaveBeenCalledTimes(1);
+      emit("eligible-current-return");
+      await vi.advanceTimersByTimeAsync(0);
       expect(f.spawn).toHaveBeenCalledTimes(2);
       expect(readWorkItemLifecycles(f.dataDir, "test", "tick").get(data.externalId)).toMatchObject({
         state: "running",
@@ -225,10 +285,10 @@ describe("durable spawn admission", () => {
       await controller.stop();
     }
   });
-  it("repairs an owned work-item claim after final birth checkpoint survives a crash", async () => {
+  it("retains an unresolved receiptless accepted work-item journal across controller restarts", async () => {
     const f = fixture();
     f.config.projects.test.triggers.review.event = "github:work_item.new";
-    const workId = "completed-work";
+    const workId = JSON.stringify(["test", "tick", "review", "event"]);
     const data = {
       externalId: "repo#1",
       url: "https://example.com/pr/1",
@@ -268,15 +328,106 @@ describe("durable spawn admission", () => {
       notBeforeAt: 0,
       blocks: [{ birthKey: `${workId}:0`, state: "succeeded", sessionId: "test-1" }],
     });
-    const controller = startConfiguredTriggers(f.deps);
+    const request = {
+      project: "test",
+      prompt: "review",
+      slots: { links: [{ label: "pr", url: data.url }] },
+    };
+    writeSession(f.dataDir, {
+      id: "test-1",
+      project: "test",
+      agent: "claude",
+      prompt: "review",
+      branch: "main",
+      worktree: false,
+      worktreePath: f.dataDir,
+      tmuxSession: "test-1",
+      launchCommand: "",
+      status: "spawning",
+      createdAt,
+      updatedAt: createdAt,
+      triggerBirthKey: `${workId}:0`,
+      triggerBirthRequest: request,
+    });
+    f.birth.mockImplementation(() => readSession(f.dataDir, "test-1") ?? undefined);
+    f.get.mockResolvedValue({
+      id: "test-1",
+      status: "spawning",
+      state: "error",
+      workspaceExists: true,
+    });
+    const initialJournal = readPendingSpawnWork(f.dataDir).get(workId);
+    if (!initialJournal) throw new Error("Missing original accepted journal");
+    const { revision: originalRevision, ...originalJournal } = initialJournal;
+    expect(readSession(f.dataDir, "test-1")).toMatchObject({
+      status: "spawning",
+      launchCommand: "",
+      triggerBirthKey: `${workId}:0`,
+      triggerBirthRequest: request,
+    });
+    const expectRetainedBirth = () => {
+      const journal = readPendingSpawnWork(f.dataDir).get(workId);
+      if (!journal) throw new Error("Unresolved accepted journal was retired");
+      const { revision, ...retained } = journal;
+      expect(retained).toEqual(originalJournal);
+      expect(revision).toBeGreaterThanOrEqual(originalRevision);
+      expect(readPendingSpawnWork(f.dataDir).size).toBe(1);
+      const lifecycle = readWorkItemLifecycles(f.dataDir, "test", "tick").get(data.externalId);
+      expect(lifecycle).toMatchObject({
+        state: "pending",
+        spawnWorkId: workId,
+        members: [
+          expect.objectContaining({
+            state: "spawning",
+            sessionId: "test-1",
+            claimedAt: createdAt,
+            attempts: 0,
+          }),
+        ],
+      });
+      expect(lifecycle?.members[0]).not.toHaveProperty("startedAt");
+      const accepted = readSession(f.dataDir, "test-1");
+      expect(accepted).toMatchObject({
+        id: "test-1",
+        status: "spawning",
+        launchCommand: "",
+        triggerBirthKey: `${workId}:0`,
+        triggerBirthRequest: request,
+        triggerOrigin: {
+          triggerId: "review",
+          sourceId: "tick",
+          externalId: data.externalId,
+          blockIndex: 0,
+        },
+      });
+      for (const field of ["spawnIntent", "spawnReceipt", "agentSessionId", "agentLaunchId"])
+        expect(accepted).not.toHaveProperty(field);
+      expect(f.spawn).not.toHaveBeenCalled();
+      return { accepted, members: lifecycle?.members };
+    };
+    const emit = () =>
+      f.deps.bus.emit({
+        projectId: "test",
+        sourceId: "tick",
+        name: "github:work_item.new",
+        occurrenceId: "current-return",
+        data,
+      });
+    let controller = startConfiguredTriggers(f.deps);
     try {
       await vi.advanceTimersByTimeAsync(0);
       expect(f.spawn).not.toHaveBeenCalled();
-      expect(readWorkItemLifecycles(f.dataDir, "test", "tick").get(data.externalId)).toMatchObject({
-        state: "running",
-        sessionId: "test-1",
-      });
-      expect(readPendingSpawnWork(f.dataDir).size).toBe(0);
+      expect(readPendingSpawnWork(f.dataDir).size).toBe(1);
+      await vi.advanceTimersByTimeAsync(45 * 60_000);
+      emit();
+      await vi.advanceTimersByTimeAsync(0);
+      const retained = expectRetainedBirth();
+      await controller.stop();
+      controller = startConfiguredTriggers(f.deps);
+      await vi.advanceTimersByTimeAsync(45 * 60_000);
+      emit();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(expectRetainedBirth()).toEqual(retained);
     } finally {
       await controller.stop();
     }

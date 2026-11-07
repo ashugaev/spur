@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   archiveSessions,
   deletePendingSendBatch,
@@ -51,6 +51,8 @@ import {
   recordPendingSendBatch,
   recordWorkItem,
   recordWorkItemLifecycle,
+  markWorkItemRetriesEmitted,
+  updateWorkItemMembers,
   findTelegramChoice,
   findTelegramMessageSession,
   recordTelegramMessages,
@@ -389,85 +391,310 @@ describe("github poll-disabled registry", () => {
 });
 
 describe("work-item lifecycle registry", () => {
-  it("round-trips lifecycle records", async () => {
+  const itemBase = {
+    externalId: "acme/api#7",
+    url: "https://github.com/acme/api/pull/7",
+    number: 7,
+    title: "Review me",
+    repo: "acme/api",
+    createdAt: "2026-05-11T10:00:00.000Z",
+    autoComplete: true,
+  };
+
+  async function writeLifecycleFile(dataDir: string, records: unknown[]): Promise<void> {
+    const dir = join(dataDir, "source-state", "work-item-lifecycle", "api");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "pr-watch.json"), JSON.stringify({ records }, null, 2), "utf8");
+  }
+
+  it("round-trips members and derives the record state", async () => {
     const dataDir = await newDataDir();
-    recordWorkItemLifecycle(dataDir, "api", "pr-watch", {
-      externalId: "acme/api#7",
-      state: "running",
-      sessionId: "api-a1b2",
-      url: "https://github.com/acme/api/pull/7",
-      number: 7,
-      title: "Review me",
-      repo: "acme/api",
-      createdAt: "2026-05-11T10:00:00.000Z",
-      autoComplete: true,
-    });
+    updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, () => [
+      {
+        triggerId: "review",
+        blockIndex: 0,
+        state: "running",
+        sessionId: "api-a1b2",
+        claimedAt: "2026-05-11T10:00:00.000Z",
+        attempts: 1,
+      },
+    ]);
 
     expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").get("acme/api#7")).toEqual({
-      externalId: "acme/api#7",
+      ...itemBase,
       state: "running",
       sessionId: "api-a1b2",
-      url: "https://github.com/acme/api/pull/7",
-      number: 7,
-      title: "Review me",
-      repo: "acme/api",
-      createdAt: "2026-05-11T10:00:00.000Z",
-      autoComplete: true,
+      members: [
+        {
+          triggerId: "review",
+          blockIndex: 0,
+          state: "running",
+          sessionId: "api-a1b2",
+          claimedAt: "2026-05-11T10:00:00.000Z",
+          attempts: 1,
+        },
+      ],
     });
   });
 
-  it("reads legacy lifecycle records as running auto-complete claims", async () => {
+  it("round-trips retained trigger namespaces of a spawning member", async () => {
     const dataDir = await newDataDir();
-    const dir = join(dataDir, "source-state", "work-item-lifecycle", "api");
-    await mkdir(dir, { recursive: true });
-    await writeFile(
-      join(dir, "pr-watch.json"),
-      JSON.stringify(
+    updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, () => [
+      {
+        triggerId: "new-name",
+        previousTriggerIds: ["old-name", "middle-name"],
+        blockIndex: 0,
+        state: "spawning",
+        claimedAt: "2026-05-11T10:00:00.000Z",
+        attempts: 1,
+      },
+    ]);
+
+    expect(
+      readWorkItemLifecycles(dataDir, "api", "pr-watch").get("acme/api#7")?.members[0],
+    ).toMatchObject({ triggerId: "new-name", previousTriggerIds: ["old-name", "middle-name"] });
+  });
+
+  it("migrates a legacy trigger scalar into the canonical namespace list", async () => {
+    const dataDir = await newDataDir();
+    await writeLifecycleFile(dataDir, [
+      {
+        ...itemBase,
+        members: [
+          {
+            triggerId: "new-name",
+            previousTriggerId: "old-name",
+            blockIndex: 0,
+            state: "spawning",
+            claimedAt: itemBase.createdAt,
+            attempts: 1,
+          },
+        ],
+      },
+    ]);
+    const member = readWorkItemLifecycles(dataDir, "api", "pr-watch").get(itemBase.externalId)
+      ?.members[0];
+    expect(member).toMatchObject({ previousTriggerIds: ["old-name"] });
+    expect(member).not.toHaveProperty("previousTriggerId");
+    updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, (members) => members);
+    const saved = readFileSync(
+      join(dataDir, "source-state", "work-item-lifecycle", "api", "pr-watch.json"),
+      "utf8",
+    );
+    expect(saved).not.toContain('"previousTriggerId"');
+    expect(
+      readWorkItemLifecycles(dataDir, "api", "pr-watch").get(itemBase.externalId)?.members[0],
+    ).toEqual(member);
+  });
+
+  it.each([null, "old-name", ["old-name", 7]])(
+    "rejects malformed retained trigger namespaces %j",
+    async (previousTriggerIds) => {
+      const dataDir = await newDataDir();
+      await writeLifecycleFile(dataDir, [
         {
-          records: [
+          ...itemBase,
+          members: [
             {
-              externalId: "acme/api#7",
-              sessionId: "api-a1b2",
-              url: "https://github.com/acme/api/pull/7",
-              number: 7,
-              title: "Review me",
-              repo: "acme/api",
-              createdAt: "2026-05-11T10:00:00.000Z",
+              triggerId: "new-name",
+              previousTriggerIds,
+              blockIndex: 0,
+              state: "spawning",
+              claimedAt: itemBase.createdAt,
+              attempts: 1,
             },
           ],
         },
-        null,
-        2,
-      ),
-      "utf8",
+      ]);
+      expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").size).toBe(0);
+    },
+  );
+
+  it("deduplicates retained namespaces and omits empty/current-only history", async () => {
+    const dataDir = await newDataDir();
+    const member = {
+      triggerId: "new-name",
+      blockIndex: 0,
+      state: "spawning",
+      claimedAt: itemBase.createdAt,
+      attempts: 1,
+    };
+    await writeLifecycleFile(dataDir, [
+      {
+        ...itemBase,
+        members: [
+          {
+            ...member,
+            previousTriggerIds: ["old-name", "middle-name", "old-name", "new-name"],
+            previousTriggerId: "ignored-legacy",
+          },
+        ],
+      },
+    ]);
+    expect(
+      readWorkItemLifecycles(dataDir, "api", "pr-watch").get(itemBase.externalId)?.members[0],
+    ).toMatchObject({ previousTriggerIds: ["old-name", "middle-name"] });
+    await writeLifecycleFile(dataDir, [
+      { ...itemBase, members: [{ ...member, previousTriggerIds: ["new-name"] }] },
+    ]);
+    expect(
+      readWorkItemLifecycles(dataDir, "api", "pr-watch").get(itemBase.externalId)?.members[0],
+    ).not.toHaveProperty("previousTriggerIds");
+  });
+
+  it("derives the anchor session from the lowest running block", async () => {
+    const dataDir = await newDataDir();
+    const member = (blockIndex: number, sessionId: string) => ({
+      triggerId: "review",
+      blockIndex,
+      state: "running" as const,
+      sessionId,
+      claimedAt: "2026-05-11T10:00:00.000Z",
+      attempts: 1,
+    });
+    const record = updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, () => [
+      member(1, "api-2"),
+      member(0, "api-1"),
+    ]);
+
+    expect(record).toMatchObject({ state: "running", sessionId: "api-1" });
+  });
+
+  it("member updates do not clobber sibling members", async () => {
+    const dataDir = await newDataDir();
+    const spawning = (blockIndex: number) => ({
+      triggerId: "review",
+      blockIndex,
+      state: "spawning" as const,
+      claimedAt: "2026-05-11T10:00:00.000Z",
+      attempts: 1,
+    });
+    updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, () => [spawning(0), spawning(1)]);
+    updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, (members) =>
+      members.map((m) => (m.blockIndex === 0 ? { ...m, state: "running", sessionId: "api-1" } : m)),
+    );
+    updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, (members) =>
+      members.map((m) => (m.blockIndex === 1 ? { ...m, state: "failed", error: "boom" } : m)),
     );
 
-    expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").get("acme/api#7")).toEqual({
-      externalId: "acme/api#7",
-      state: "running",
-      sessionId: "api-a1b2",
-      url: "https://github.com/acme/api/pull/7",
-      number: 7,
-      title: "Review me",
-      repo: "acme/api",
-      createdAt: "2026-05-11T10:00:00.000Z",
-      autoComplete: true,
+    const record = readWorkItemLifecycles(dataDir, "api", "pr-watch").get("acme/api#7");
+    expect(record?.members.map((m) => [m.blockIndex, m.state])).toEqual([
+      [0, "running"],
+      [1, "failed"],
+    ]);
+    expect(record).toMatchObject({ state: "running", sessionId: "api-1" });
+  });
+
+  it("keeps createdAt and completedAt across later member writes", async () => {
+    const dataDir = await newDataDir();
+    const running = {
+      triggerId: "review",
+      blockIndex: 0,
+      state: "running" as const,
+      sessionId: "api-1",
+      claimedAt: itemBase.createdAt,
+      attempts: 1,
+    };
+    updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, () => [running]);
+    const laterBase = { ...itemBase, createdAt: "2026-06-01T00:00:00.000Z" };
+    const failed = updateWorkItemMembers(dataDir, "api", "pr-watch", laterBase, (members) => [
+      ...members,
+      { ...running, blockIndex: 1, state: "failed" as const, error: "boom" },
+    ]);
+    expect(failed.createdAt).toBe(itemBase.createdAt);
+
+    const completed = updateWorkItemMembers(dataDir, "api", "pr-watch", laterBase, (members) =>
+      members.map((m) => ({ ...m, state: "completed" as const })),
+    );
+    expect(completed).toMatchObject({ state: "completed", createdAt: itemBase.createdAt });
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse("2027-01-01T00:00:00.000Z"));
+    try {
+      const again = updateWorkItemMembers(
+        dataDir,
+        "api",
+        "pr-watch",
+        laterBase,
+        (members) => members,
+      );
+      expect(again).toMatchObject({
+        state: "completed",
+        completedAt: (completed as { completedAt: string }).completedAt,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("migrates a legacy lifecycle record into one untriggered member", async () => {
+    const dataDir = await newDataDir();
+    await writeLifecycleFile(dataDir, [
+      { ...itemBase, externalId: "acme/api#7", state: "failed", error: "boom" },
+      { ...itemBase, externalId: "acme/api#8", state: "pending" },
+      { ...itemBase, externalId: "acme/api#9", state: "running", sessionId: "api-9" },
+      { ...itemBase, externalId: "acme/api#10", sessionId: "api-10" },
+    ]);
+
+    const records = readWorkItemLifecycles(dataDir, "api", "pr-watch");
+    const legacy = { blockIndex: 0, claimedAt: itemBase.createdAt, attempts: 0 };
+    expect(records.get("acme/api#7")).toMatchObject({
+      state: "failed",
+      error: "boom",
+      members: [{ ...legacy, state: "failed", error: "boom" }],
     });
+    expect(records.get("acme/api#8")).toMatchObject({
+      state: "pending",
+      members: [{ ...legacy, state: "spawning" }],
+    });
+    expect(records.get("acme/api#9")).toMatchObject({
+      state: "running",
+      sessionId: "api-9",
+      members: [{ ...legacy, state: "running", sessionId: "api-9" }],
+    });
+    expect(records.get("acme/api#10")).toMatchObject({ state: "running", sessionId: "api-10" });
+    expect(records.get("acme/api#7")?.members[0]).not.toHaveProperty("triggerId");
+  });
+
+  it("stamps the retry emit time for exactly the given records", async () => {
+    const dataDir = await newDataDir();
+    for (const externalId of ["acme/api#7", "acme/api#8"]) {
+      updateWorkItemMembers(dataDir, "api", "pr-watch", { ...itemBase, externalId }, () => [
+        {
+          triggerId: "review",
+          blockIndex: 0,
+          state: "failed",
+          claimedAt: itemBase.createdAt,
+          attempts: 1,
+          error: "boom",
+        },
+      ]);
+    }
+
+    markWorkItemRetriesEmitted(
+      dataDir,
+      "api",
+      "pr-watch",
+      ["acme/api#7"],
+      "2026-05-11T11:00:00.000Z",
+    );
+
+    const records = readWorkItemLifecycles(dataDir, "api", "pr-watch");
+    expect(records.get("acme/api#7")?.lastRetryEmitAt).toBe("2026-05-11T11:00:00.000Z");
+    expect(records.get("acme/api#8")).not.toHaveProperty("lastRetryEmitAt");
   });
 
   it("deletes lifecycle records", async () => {
     const dataDir = await newDataDir();
-    recordWorkItemLifecycle(dataDir, "api", "pr-watch", {
-      externalId: "acme/api#7",
-      state: "running",
-      sessionId: "api-a1b2",
-      url: "https://github.com/acme/api/pull/7",
-      number: 7,
-      title: "Review me",
-      repo: "acme/api",
-      createdAt: "2026-05-11T10:00:00.000Z",
-      autoComplete: true,
-    });
+    updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, () => [
+      {
+        triggerId: "review",
+        blockIndex: 0,
+        state: "running",
+        sessionId: "api-a1b2",
+        claimedAt: itemBase.createdAt,
+        attempts: 1,
+      },
+    ]);
 
     deleteWorkItemLifecycle(dataDir, "api", "pr-watch", "acme/api#7");
 
@@ -1191,6 +1418,15 @@ describe("durable spawn metadata", () => {
     async (phase) => {
       const dataDir = await newDataDir();
       const session = acceptedSession();
+      session.triggerOrigin = {
+        triggerId: "review",
+        sourceId: "pr-watch",
+        externalId: "acme/api#7",
+        blockIndex: 0,
+      };
+      session.codexRestoreStartedAt = session.createdAt;
+      session.codexRestoreLaunchId = "restore-owner";
+      session.restoredAt = session.createdAt;
       session.spawnIntent.phase = phase;
       if (phase === "launching" || phase === "submitted") {
         session.agentLaunchId = "launch-1";
@@ -1206,6 +1442,15 @@ describe("durable spawn metadata", () => {
       writeSession(dataDir, session);
       expect(readSession(dataDir, session.id)).toMatchObject(session);
       expect(listSessions(dataDir)[0]?.spawnIntent).toEqual(session.spawnIntent);
+      expect(readSession(dataDir, session.id)?.triggerOrigin).toEqual(session.triggerOrigin);
+      expect(readSession(dataDir, session.id)?.codexRestoreLaunchId).toBe("restore-owner");
+      writeSession(dataDir, { ...session, restoredAt: "invalid" });
+      expect(readSession(dataDir, session.id)).toMatchObject({
+        codexRestoreLaunchId: "restore-owner",
+        spawnIntent: session.spawnIntent,
+        spawnReceipt: session.spawnReceipt,
+      });
+      expect(readSession(dataDir, session.id)?.restoredAt).toBeUndefined();
     },
   );
 
@@ -1342,6 +1587,46 @@ describe("session workspaceId normalization", () => {
     createdAt: "2026-03-18T10:00:00.000Z",
     updatedAt: "2026-03-18T10:01:00.000Z",
   };
+
+  it("preserves an explicit Codex launch owner without backfilling legacy ownership", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = {
+      ...legacyBase,
+      agent: "codex",
+      id: "api-1",
+      tmuxSession: "api-1",
+      agentLaunchId: "current-launch",
+      codexRestoreStartedAt: "2026-03-18T10:00:00.000Z",
+      codexRestoreLaunchId: "current-launch",
+    };
+    writeSession(dataDir, record);
+    expect(readSession(dataDir, record.id)).toMatchObject({
+      agentLaunchId: record.agentLaunchId,
+      codexRestoreStartedAt: record.codexRestoreStartedAt,
+      codexRestoreLaunchId: record.codexRestoreLaunchId,
+    });
+
+    writeSession(dataDir, { ...record, codexRestoreLaunchId: "previous-launch" });
+    expect(readSession(dataDir, record.id)?.codexRestoreLaunchId).toBe("previous-launch");
+
+    const { codexRestoreLaunchId: _owner, ...legacy } = record;
+    writeSession(dataDir, legacy);
+    expect(readSession(dataDir, record.id)?.codexRestoreStartedAt).toBe(
+      record.codexRestoreStartedAt,
+    );
+    expect(readSession(dataDir, record.id)?.codexRestoreLaunchId).toBeUndefined();
+
+    for (const owner of [null, 42, "", "   "]) {
+      writeSession(dataDir, { ...record, codexRestoreLaunchId: owner } as unknown as SessionRecord);
+      expect(readSession(dataDir, record.id)?.codexRestoreLaunchId).toBeUndefined();
+      expect(readSession(dataDir, record.id)?.codexRestoreStartedAt).toBe(
+        record.codexRestoreStartedAt,
+      );
+    }
+    writeSession(dataDir, { ...record, codexRestoreStartedAt: "invalid" });
+    expect(readSession(dataDir, record.id)?.codexRestoreLaunchId).toBe(record.codexRestoreLaunchId);
+    expect(readSession(dataDir, record.id)?.codexRestoreStartedAt).toBeUndefined();
+  });
 
   it("survives a write/read round-trip", async () => {
     // Guards the whitelist trap: normalizeSessionRecord drops any field it
@@ -1534,6 +1819,19 @@ describe("staleSidecars", () => {
     writeSession(dataDir, { ...base, id: "api-1", tmuxSession: "api-1" });
 
     expect(readSession(dataDir, "api-1")).not.toHaveProperty("staleSidecars");
+  });
+
+  it("keeps triggerOrigin through a write/read round-trip", async () => {
+    const dataDir = await newDataDir();
+    const triggerOrigin = {
+      triggerId: "review",
+      sourceId: "pr-watch",
+      externalId: "acme/api#7",
+      blockIndex: 1,
+    };
+    writeSession(dataDir, { ...base, id: "api-1", tmuxSession: "api-1", triggerOrigin });
+
+    expect(readSession(dataDir, "api-1")?.triggerOrigin).toEqual(triggerOrigin);
   });
 });
 

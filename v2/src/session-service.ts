@@ -1,6 +1,7 @@
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   statSync,
@@ -268,6 +269,7 @@ import {
   retireTelegramLegacyState,
   readServiceInstance,
   readSession,
+  archiveSessions,
   readInterfaceConsent,
   writeInterfaceConsent,
   recordTelegramMessages,
@@ -527,6 +529,7 @@ import {
   type TelegramReplyTarget,
   type TelegramSourceConfig,
   type TelegramSpawnOrigin,
+  type WorkItemTriggerOrigin,
   TELEGRAM_CHOICE_CALLBACK_PREFIX,
   TELEGRAM_MESSAGE_EVENT,
   type SharedMemoryEntryResponse,
@@ -603,6 +606,7 @@ import {
   branchRefsExist,
   branchStatus,
   createWorktree,
+  deleteLocalBranch,
   findWorktreePathForBranch,
   hasUncommittedChanges,
   hasUnpushedCommits,
@@ -1337,7 +1341,15 @@ type ReadySessionForSend = {
 type PreparedSessionObservation = {
   session: SessionRecord;
   revision: number;
+  codex?: {
+    restoreLaunchId: string | undefined;
+    restoreStartedAt: string | undefined;
+    episode: string | undefined;
+    pane: CodexPaneOverride | undefined;
+  };
 };
+
+class CodexEvidenceInvalidatedError extends Error {}
 
 type SessionPreparationOptions = {
   operation?: RestoreOperationContext;
@@ -1434,6 +1446,7 @@ type MemberRuntimeSample = "live" | "dead" | "dead_looking" | "unknown";
 
 interface SessionStateResult {
   session: SessionRecord;
+  observation?: PreparedSessionObservation;
   runtime: SessionRuntimeSnapshot;
   state: SessionState;
   source: StateSource;
@@ -1729,6 +1742,30 @@ type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
 function nowIso(): string {
   return new Date().toISOString();
 }
+
+function codexLaunchAttempt(
+  agent: AgentName,
+  agentLaunchId: string,
+): Pick<SessionRecord, "codexRestoreStartedAt" | "codexRestoreLaunchId"> {
+  return agent === "codex"
+    ? { codexRestoreStartedAt: nowIso(), codexRestoreLaunchId: agentLaunchId }
+    : {};
+}
+
+function codexLaunchStartedAt(
+  session: Pick<SessionRecord, "agentLaunchId" | "codexRestoreLaunchId" | "codexRestoreStartedAt">,
+): number | null {
+  if (!session.agentLaunchId || session.codexRestoreLaunchId !== session.agentLaunchId) return null;
+  const at = session.codexRestoreStartedAt ? Date.parse(session.codexRestoreStartedAt) : NaN;
+  return Number.isFinite(at) && at <= Date.now() ? at : null;
+}
+
+type CodexPaneOverride = {
+  nativeId: string | undefined;
+  launchId: string | undefined;
+  startedAt: number | null;
+  expiresAt: number;
+};
 
 function canonicalSubscriptionStates(states: SessionState[]): SessionState[] {
   const requested = new Set(states);
@@ -3288,6 +3325,7 @@ interface SessionSpawnOptions {
   acceptQueued?: boolean;
   /** Set by source adapters, never from the HTTP body. */
   telegramOrigin?: TelegramSpawnOrigin;
+  triggerOrigin?: WorkItemTriggerOrigin;
   triggerBirthKey?: string;
 }
 
@@ -3338,6 +3376,7 @@ interface HandoffAdmission {
 interface BackgroundSpawnOptions {
   triggerBirthKey?: string;
   triggerBirthRequest?: SpawnSessionRequest;
+  triggerOrigin?: WorkItemTriggerOrigin;
   modeResolution?: "strict" | "carried";
   telegramOrigin?: TelegramSpawnOrigin;
   promptKind?: UserInputKind;
@@ -3722,10 +3761,11 @@ export class SessionService {
   private readonly attentionStates = new Map<string, AttentionState>();
   private readonly lastObservedRunStates = new Map<string, SessionState>();
   // Last live (scanPane:true) pane-scan confirmation of an active codex MCP
-  // permission dialog, keyed by session id, value = expiry epoch ms. Lets the
-  // scanPane:false dashboard tick apply the same needs_input demotion without
-  // forking a capture-pane (the tick's whole reason for existing).
-  private readonly codexMcpDialogOverrides = new Map<string, number>();
+  // permission dialog, keyed by session id, value = expiry epoch ms bound to
+  // the native/launch identity it was observed on. Lets the scanPane:false
+  // dashboard tick apply the same needs_input demotion without forking a
+  // capture-pane (the tick's whole reason for existing).
+  private readonly codexMcpDialogOverrides = new Map<string, CodexPaneOverride>();
   private readonly codexPaneLimitObservedAt = new Map<string, number>();
   private readonly codexRateLimitPoller = new CodexRateLimitPoller();
   // Same pattern for an active claude compaction spinner. Compaction never
@@ -6650,11 +6690,15 @@ export class SessionService {
       source: SessionRecord | null;
       receipt: SessionLifecycleSnapshot;
       identity?: boolean;
+      observation?: PreparedSessionObservation;
     }[],
     rebuild: (
       record: SessionRecord,
       listing: SessionRecord[] | undefined,
-    ) => Promise<{ view: T; source: SessionRecord | null } | undefined>,
+    ) => Promise<
+      | { view: T; source: SessionRecord | null; observation?: PreparedSessionObservation }
+      | undefined
+    >,
     // "refuse" throws 503 once the rebuild budget is spent; "lastBuild" returns
     // each still-moving row as last built with the receipt captured at that
     // build, and omits a pending session first seen on the final pass.
@@ -6664,6 +6708,17 @@ export class SessionService {
       signal?: AbortSignal | undefined;
     },
   ): Promise<(T & { lifecycle: SessionLifecycleSnapshot })[]> {
+    const publishable = (row: (typeof rows)[number]): boolean => {
+      try {
+        this.assertCodexObservation(row.observation);
+        return true;
+      } catch (error) {
+        if (options.onExhausted === "refuse" || !(error instanceof CodexEvidenceInvalidatedError))
+          throw error;
+        this.logListEnrichFailed(row.view.id, error);
+        return false;
+      }
+    };
     const rebuildExisting = async (record: SessionRecord, listing: SessionRecord[] | undefined) => {
       try {
         const rebuilt = await rebuild(record, listing);
@@ -6723,7 +6778,7 @@ export class SessionService {
           if (record) current.set(record.id, record);
         }
       }
-      live = live.filter((row) => current.has(row.view.id));
+      live = live.filter((row) => current.has(row.view.id) && publishable(row));
       const liveIds = new Set(live.map((row) => row.view.id));
       const pickup = listing
         ? [...current.values()].filter((record) => {
@@ -6772,6 +6827,8 @@ export class SessionService {
             }
             row.view = rebuilt.view;
             row.source = rebuilt.source;
+            if (rebuilt.observation) row.observation = rebuilt.observation;
+            else delete row.observation;
             row.receipt = receipts.get(id) as SessionLifecycleSnapshot;
             row.identity = false;
           }),
@@ -7730,8 +7787,13 @@ export class SessionService {
       const sessionId = key.split("\0")[0] ?? key;
       if (!liveIds.has(sessionId)) this.sidecarStartNoopIdentity.delete(key);
     }
-    for (const sessionId of this.codexMcpDialogOverrides.keys()) {
-      if (!liveIds.has(sessionId)) {
+    for (const [sessionId, entry] of this.codexMcpDialogOverrides) {
+      const current = readSession(this.config.dataDir, sessionId);
+      if (
+        !liveIds.has(sessionId) &&
+        (!current || isTerminalSessionStatus(current.status)) &&
+        this.codexMcpDialogOverrides.get(sessionId) === entry
+      ) {
         this.codexMcpDialogOverrides.delete(sessionId);
       }
     }
@@ -7938,10 +8000,11 @@ export class SessionService {
         nextDashboardIdleCursor = (this.dashboardIdleCursor + quota) % idle.length;
       }
 
+      const observations = due.map((session) => this.prepareSessionObservation(session));
       const enriched = await Promise.all(
-        due.map(async (session) => {
+        due.map(async (session, index) => {
           try {
-            return await this.enrichDashboard(session);
+            return await this.enrichDashboard(session, observations[index]);
           } catch (error) {
             if (
               error instanceof SessionResourceNotFoundError &&
@@ -7966,6 +8029,13 @@ export class SessionService {
         if (refreshedDuringTick(session.id)) continue;
         const view = enriched[index];
         if (view === "failed") continue;
+        try {
+          this.assertCodexObservation(observations[index]);
+        } catch (error) {
+          if (!(error instanceof CodexEvidenceInvalidatedError)) throw error;
+          this.logListEnrichFailed(session.id, error);
+          continue;
+        }
         if (!view) {
           this.dashboardCache.delete(session.id);
           this.dashboardEnrichedRecords.delete(session.id);
@@ -8483,7 +8553,9 @@ export class SessionService {
         this.dashboardCache.delete(record.id);
         return;
       }
-      const enriched = await this.enrichDashboard(record);
+      const observation = this.prepareSessionObservation(record);
+      const enriched = await this.enrichDashboard(record, observation);
+      this.assertCodexObservation(observation);
       if (this.dashboardRefreshVersions.get(record.id) !== version) return;
       if (!enriched) {
         this.dashboardCache.delete(record.id);
@@ -10979,6 +11051,7 @@ export class SessionService {
   private async sidecarViews(
     session: SessionRecord,
     project: ProjectConfig | undefined,
+    preparedObservation?: PreparedSessionObservation,
   ): Promise<SessionSidecarView[]> {
     const names = sessionSidecarNames(session, project);
     if (names.length === 0) return [];
@@ -11025,7 +11098,12 @@ export class SessionService {
       const ageSeconds = identity
         ? observation.processes.byPid.get(identity.pid)?.etimes
         : undefined;
-      const { exists, paneDead } = await this.sidecarPaneState(owner.id, name, session);
+      const { exists, paneDead } = await this.sidecarPaneState(
+        owner.id,
+        name,
+        session,
+        preparedObservation,
+      );
       const view: SessionSidecarView = {
         name,
         alive: exists && !paneDead,
@@ -11428,12 +11506,17 @@ export class SessionService {
       sessions.map(async (session) => {
         const receipt = this.lifecycle.snapshot(session.id);
         try {
-          const { view, source } = await this.enrichWithClassified(
+          const { view, source, classified } = await this.enrichWithClassified(
             session,
             claudeAccounts,
             allSessions,
           );
-          return { view, source, receipt };
+          return {
+            view,
+            source,
+            receipt,
+            ...(classified.observation ? { observation: classified.observation } : {}),
+          };
         } catch (error) {
           if (
             error instanceof SessionResourceNotFoundError &&
@@ -11883,6 +11966,52 @@ export class SessionService {
     const project = this.getProject(projectId);
     const agent = resolveSpawnAgent(requestedAgent, project, this.config);
     return loadProjectSuggestions(agent, project.path);
+  }
+
+  // Cleans up what a hard spawn failure of a work-item trigger block left
+  // behind before a replacement spawns: the session's own local branch (named
+  // after its id, never reused) and the errored record. Untagged or non-errored
+  // records are not touched ("skipped"). The record is archived whatever the
+  // delete does, unless a restore or relaunch took it over meanwhile
+  // ("declined"): its owner then still stands for the block.
+  async discardFailedSpawn(sessionId: string): Promise<"archived" | "skipped" | "declined"> {
+    // launchCommand stays empty until the agent launches: a launched session
+    // is not a never-started spawn leftover.
+    const discardable = (current: SessionRecord | null): current is SessionRecord =>
+      current !== null &&
+      current.status === "errored" &&
+      current.triggerOrigin !== undefined &&
+      !current.spawnIntent &&
+      current.launchCommand === "";
+    const record = readSession(this.config.dataDir, sessionId);
+    if (!discardable(record)) return "skipped";
+    if (record.branch === record.id) {
+      try {
+        await deleteLocalBranch(this.getProject(record.project).path, record.branch);
+      } catch (error) {
+        this.logEvent("trigger.spawn.discard_failed", {
+          level: "warn",
+          sessionId,
+          projectId: record.project,
+          message: `Could not delete branch ${record.branch}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        });
+      }
+    }
+    // Branch cleanup awaits: revalidate under the lock restore takes before
+    // the destructive archive.
+    return this.withSessionLifecycleLocks(this.lifecycleIdsFor(record), async () => {
+      const current = readSession(this.config.dataDir, sessionId);
+      if (
+        !discardable(current) ||
+        current.agentLaunchId !== record.agentLaunchId ||
+        this.lifecycle.snapshot(sessionId).operation?.phase === "pending"
+      )
+        return "declined";
+      archiveSessions(this.config.dataDir, [current]);
+      return "archived";
+    });
   }
 
   async branchStatus(projectId: string, name: string): Promise<BranchExistsResponse> {
@@ -12964,10 +13093,6 @@ export class SessionService {
   async spawn(request: SpawnSessionRequest, options?: SessionSpawnOptions): Promise<SessionView> {
     if (options?.triggerBirthKey) {
       const key = options.triggerBirthKey;
-      const existing = this.getTriggerBirth(request.project, key, request);
-      if (existing) {
-        return this.get(existing.id);
-      }
       const pending = this.triggerBirthsInFlight.get(key);
       if (pending) {
         if (!isDeepStrictEqual(pending.request, request)) {
@@ -12975,6 +13100,8 @@ export class SessionService {
         }
         return pending.result;
       }
+      const existing = this.findPersistedTriggerBirth(request.project, key, request);
+      if (existing) return this.get(existing.id);
       const original = structuredClone(request);
       // Defer execution until the identity is registered, before the first await.
       const result = Promise.resolve().then(() =>
@@ -12997,14 +13124,49 @@ export class SessionService {
     key: string,
     request?: SpawnSessionRequest,
   ): SessionRecord | undefined {
-    const existing = listSessions(this.config.dataDir).find(
+    const existing = this.findPersistedTriggerBirth(projectId, key, request);
+    if (!existing && this.triggerBirthsInFlight.has(key))
+      throw new Error("Trigger birth acceptance remains in flight");
+    return existing;
+  }
+
+  private findPersistedTriggerBirth(
+    projectId: string,
+    key: string,
+    request?: SpawnSessionRequest,
+  ): SessionRecord | undefined {
+    const candidates = listSessions(this.config.dataDir).filter(
       (session) => session.triggerBirthKey === key,
     );
+    if (candidates.length > 1) throw new Error("Trigger birth identity is ambiguous");
+    const existing = candidates[0];
     if (existing && existing.project !== projectId) {
       throw new Error("Trigger birth key already belongs to a different project");
     }
     if (existing && request && !isDeepStrictEqual(existing.triggerBirthRequest, request)) {
       throw new Error("Trigger birth key already belongs to a different spawn request");
+    }
+    for (const store of ["sessions", "sessions-archive"]) {
+      const root = join(this.config.dataDir, store);
+      if (!existsSync(root)) continue;
+      for (const project of readdirSync(root, { withFileTypes: true })) {
+        if (!project.isDirectory()) continue;
+        const directory = join(root, project.name);
+        for (const file of readdirSync(directory, { withFileTypes: true })) {
+          if (!file.isFile() || !file.name.endsWith(".json") || file.name.startsWith(".")) continue;
+          let raw: unknown;
+          try {
+            raw = JSON.parse(readFileSync(join(directory, file.name), "utf8")) as unknown;
+          } catch (error) {
+            throw new Error("Trigger birth inventory is unreadable", { cause: error });
+          }
+          if (!isRecord(raw) || typeof raw.id !== "string" || typeof raw.project !== "string")
+            throw new Error("Trigger birth inventory is incomplete");
+          if (raw.triggerBirthKey !== key) continue;
+          if (store === "sessions-archive" || raw.id !== existing?.id)
+            throw new Error("Trigger birth persisted binding remains uncertain");
+        }
+      }
     }
     return existing;
   }
@@ -13277,6 +13439,7 @@ export class SessionService {
         ...(request.slots?.links?.length
           ? { slots: { links: normalizeSlotLinks(request.slots.links) } }
           : {}),
+        ...(options?.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
@@ -13510,9 +13673,16 @@ export class SessionService {
             : undefined;
 
         stage = "tmux.create";
-        await this.withWorkspaceLifecycleLocks(launchSessionId, async () =>
-          this.assertSpawnNotKilled(launchSessionId),
-        );
+        await this.withWorkspaceLifecycleLocks(launchSessionId, async () => {
+          this.assertSpawnNotKilled(launchSessionId);
+          runningRecord = { ...runningRecord, ...codexLaunchAttempt(launchAgent, agentLaunchId) };
+          if (launchAgent === "codex") {
+            const latest = readSession(this.config.dataDir, launchSessionId);
+            if (latest)
+              runningRecord = withQueuedMessages(runningRecord, queuedMessages(latest), true);
+            writeSession(this.config.dataDir, { ...runningRecord, status: "spawning" });
+          }
+        });
         launchCandidate = runningRecord;
         await createTmuxSession({
           sessionName: tmuxSession,
@@ -13785,12 +13955,20 @@ export class SessionService {
             worktreePath: workspacePath,
             tmuxSession: sessionId,
             launchCommand: "",
+            ...(launchCandidate?.agent === "codex"
+              ? {
+                  agentLaunchId: launchCandidate.agentLaunchId,
+                  codexRestoreLaunchId: launchCandidate.codexRestoreLaunchId,
+                  codexRestoreStartedAt: launchCandidate.codexRestoreStartedAt,
+                }
+              : {}),
             status: "errored",
             preflightTokenUsage,
             createdAt: createdAt ?? nowIso(),
             updatedAt: nowIso(),
             error: message,
             errorSource: "other",
+            ...(options?.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
           };
           const killed = this.spawnWasKilled(sessionId);
           const persistedFailure = killed ? null : this.carrySpawnQueue(erroredRecord);
@@ -14049,6 +14227,7 @@ export class SessionService {
         continue;
       }
       const classified = await this.classifySessionRecord(member, { scanPane: false });
+      this.assertCodexObservation(classified.observation);
       members.push({
         id: classified.session.id,
         agent: classified.session.agent,
@@ -14341,6 +14520,7 @@ export class SessionService {
         ...(options.triggerBirthKey && triggerBirthRequest
           ? { triggerBirthKey: options.triggerBirthKey, triggerBirthRequest }
           : {}),
+        ...(options.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
         ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
@@ -14497,6 +14677,7 @@ export class SessionService {
         writeSession(this.config.dataDir, {
           id: sessionId,
           project: request.project,
+          ...(options.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
           workspaceId: erroredWorkspaceId,
           agent: agent ?? resolveSpawnAgent(request.agent, project, this.config),
           prompt,
@@ -14901,7 +15082,7 @@ export class SessionService {
             })
           : null;
       runningRecord = this.checkpointSpawn(
-        { ...runningRecord, status: "spawning" },
+        { ...runningRecord, ...codexLaunchAttempt(launchAgent, agentLaunchId), status: "spawning" },
         agent === "opencode" ? "workspace_ready" : "launching",
         {
           state: promptDeliveredOnLaunch && agent !== "opencode" ? "uncertain" : "pending",
@@ -20066,7 +20247,7 @@ export class SessionService {
       this.stateCache.delete(sessionId);
       if (options?.skipEnrichment) return;
       await this.refreshDashboardCacheEntry(migrated);
-      return this.enrich(migrated);
+      return this.enrich(this.manualResponseRecord(migrated));
     }
     if (session.status === targetStatus) {
       if (targetStatus === "stopped" && hasSessionErrorEvidence(session)) {
@@ -20086,7 +20267,7 @@ export class SessionService {
         this.stateCache.delete(sessionId);
         if (options?.skipEnrichment) return;
         await this.refreshDashboardCacheEntry(record);
-        return this.enrich(record);
+        return this.enrich(this.manualResponseRecord(record));
       }
       return options?.skipEnrichment ? undefined : this.enrich(session);
     }
@@ -20186,7 +20367,21 @@ export class SessionService {
         worktree: session.worktree,
       },
     });
-    return options?.skipEnrichment ? undefined : this.enrich(record);
+    return options?.skipEnrichment ? undefined : this.enrich(this.manualResponseRecord(record));
+  }
+
+  private manualResponseRecord(written: SessionRecord): SessionRecord {
+    const current = readSession(this.config.dataDir, written.id);
+    if (
+      !current ||
+      !sameSessionRuntimeOwner(current, written) ||
+      current.agentLaunchId !== written.agentLaunchId ||
+      current.codexRestoreLaunchId !== written.codexRestoreLaunchId ||
+      current.codexRestoreStartedAt !== written.codexRestoreStartedAt ||
+      !this.lifecycleStateMatches(current, this.lifecycleStamp(written))
+    )
+      throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(written.id));
+    return current;
   }
 
   private async ensureKillDirtyWorktreeAllowed(
@@ -20582,9 +20777,74 @@ export class SessionService {
       current.agentLaunchId === preceding.agentLaunchId &&
       current.error === preceding.error &&
       current.errorSource === preceding.errorSource &&
+      (!observation.codex ||
+        (current.codexRestoreLaunchId === observation.codex.restoreLaunchId &&
+          current.codexRestoreStartedAt === observation.codex.restoreStartedAt &&
+          current.rateLimitedAt === observation.codex.episode &&
+          isDeepStrictEqual(
+            this.codexMcpDialogOverrides.get(current.id),
+            observation.codex.pane,
+          ))) &&
       this.lifecycleStateMatches(current, this.lifecycleStamp(preceding)) &&
       this.lifecycle.snapshot(current.id).revision === observation.revision,
     );
+  }
+
+  private prepareSessionObservation(session: SessionRecord): PreparedSessionObservation {
+    // An unlaunched placeholder carries no Codex evidence to fence.
+    const unlaunched = session.status === "spawning" && !session.agentLaunchId;
+    return {
+      session: session.agent === "codex" ? structuredClone(session) : session,
+      revision: this.lifecycle.snapshot(session.id).revision,
+      ...(session.agent === "codex" && !isTerminalSessionStatus(session.status) && !unlaunched
+        ? {
+            codex: {
+              restoreLaunchId: session.codexRestoreLaunchId,
+              restoreStartedAt: session.codexRestoreStartedAt,
+              episode: session.rateLimitedAt,
+              pane: structuredClone(this.codexMcpDialogOverrides.get(session.id)),
+            },
+          }
+        : {}),
+    };
+  }
+
+  private assertCodexObservation(observation?: PreparedSessionObservation): void {
+    if (observation?.codex && !this.preparedSessionObservationCurrent(observation))
+      throw new CodexEvidenceInvalidatedError("Codex observation changed");
+  }
+
+  private advancePreparedObservation(
+    observation: PreparedSessionObservation,
+    written: SessionRecord,
+  ): void {
+    const next: PreparedSessionObservation = {
+      ...observation,
+      session: written.agent === "codex" ? structuredClone(written) : written,
+      ...(observation.codex
+        ? {
+            codex: {
+              ...observation.codex,
+              restoreLaunchId: written.codexRestoreLaunchId,
+              restoreStartedAt: written.codexRestoreStartedAt,
+              episode: written.rateLimitedAt,
+            },
+          }
+        : {}),
+    };
+    this.assertCodexObservation(next);
+    observation.session = next.session;
+    if (next.codex) observation.codex = next.codex;
+  }
+
+  private writeCodexPaneObservation(
+    observation: PreparedSessionObservation,
+    pane?: CodexPaneOverride,
+  ): void {
+    this.assertCodexObservation(observation);
+    if (pane) this.codexMcpDialogOverrides.set(observation.session.id, pane);
+    else this.codexMcpDialogOverrides.delete(observation.session.id);
+    if (observation.codex) observation.codex.pane = structuredClone(pane);
   }
 
   // `paneAlreadyConfirmedGone`: set only by a caller that has JUST killed and
@@ -20932,6 +21192,7 @@ export class SessionService {
       });
     let agentLaunchId = newAgentLaunchId();
     let env = buildLaunchEnv(agentLaunchId);
+    let codexAttempt: Pick<SessionRecord, "codexRestoreStartedAt" | "codexRestoreLaunchId"> = {};
 
     // True whenever this relaunch ends up starting a brand-new agent process
     // with no native resume (no agentSessionId to resume from, or the resume
@@ -21058,6 +21319,20 @@ export class SessionService {
     } else {
       try {
         assertActive();
+        codexAttempt = codexLaunchAttempt(session.agent, agentLaunchId);
+        if (session.agent === "codex") {
+          this.writeRecoverySession(
+            {
+              ...sessionWithAgentId,
+              ...readSession(this.config.dataDir, session.id),
+              agentLaunchId,
+              ...codexAttempt,
+            },
+            options?.wakeClaim,
+            options,
+          );
+        }
+        assertActive();
         await createTmuxSession({
           sessionName: session.tmuxSession,
           cwd: session.worktreePath,
@@ -21076,6 +21351,7 @@ export class SessionService {
               status: "running",
               launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
               agentLaunchId,
+              ...codexAttempt,
             },
             mcpSidecarUpdate,
           ),
@@ -21108,6 +21384,7 @@ export class SessionService {
             ...sessionWithAgentId,
             launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
             agentLaunchId,
+            ...codexAttempt,
           },
           mcpSidecarUpdate,
         );
@@ -21162,6 +21439,20 @@ export class SessionService {
           recoveredAgentSessionId = freshClaudeId;
           persistedLaunchCommand = freshLaunchCommand;
           assertActive();
+          codexAttempt = codexLaunchAttempt(session.agent, agentLaunchId);
+          if (session.agent === "codex") {
+            this.writeRecoverySession(
+              {
+                ...sessionWithAgentId,
+                ...readSession(this.config.dataDir, session.id),
+                agentLaunchId,
+                ...codexAttempt,
+              },
+              options?.wakeClaim,
+              options,
+            );
+          }
+          assertActive();
           await createTmuxSession({
             sessionName: session.tmuxSession,
             cwd: session.worktreePath,
@@ -21179,6 +21470,7 @@ export class SessionService {
                 status: "running",
                 launchCommand: freshLaunchCommand,
                 agentLaunchId,
+                ...codexAttempt,
                 ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
                 updatedAt: nowIso(),
               },
@@ -21291,6 +21583,7 @@ export class SessionService {
             ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
             launchCommand: persistedLaunchCommand,
             agentLaunchId,
+            ...codexAttempt,
             status: "running",
             updatedAt: nowIso(),
           },
@@ -21482,6 +21775,10 @@ export class SessionService {
       }
       if (this.lifecycleStateMatches(latest, claim)) return { claim };
       const reconciledDeadRuntime =
+        sameSessionRuntimeOwner(latest, session) &&
+        latest.agentLaunchId === session.agentLaunchId &&
+        latest.codexRestoreLaunchId === session.codexRestoreLaunchId &&
+        latest.codexRestoreStartedAt === session.codexRestoreStartedAt &&
         (claim.status === "running" || claim.status === "spawning") &&
         (latest.status === "stopped" || latest.status === "errored") &&
         latest.stopReason === undefined;
@@ -21578,7 +21875,7 @@ export class SessionService {
       : null;
     operation?.assertActive();
     if (current.agent === "cursor") this.cursorJsonlReaders.delete(sessionId);
-    const codexRestoreStartedAt = current.agent === "codex" ? nowIso() : null;
+    let codexAttempt: Pick<SessionRecord, "codexRestoreStartedAt" | "codexRestoreLaunchId"> = {};
     // Set before startMcpSidecars below: the on-disk status stays
     // stopped/errored until the restore completes (~50 lines down), so the
     // sidecar reaper's normal running|spawning filter would not protect the
@@ -21780,6 +22077,19 @@ export class SessionService {
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
 
+      codexAttempt = codexLaunchAttempt(current.agent, restoreAgentLaunchId);
+      if (current.agent === "codex") {
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (!latest || reopenInvalidated() || !this.lifecycleStateMatches(latest, claim)) {
+          throw new Error(`Session ${sessionId} changed before restore launch`);
+        }
+        writeSession(this.config.dataDir, {
+          ...latest,
+          launchCommand: restoredLaunchCommand,
+          agentLaunchId: restoreAgentLaunchId,
+          ...codexAttempt,
+        });
+      }
       await createTmuxSession({
         sessionName: current.tmuxSession,
         cwd: current.worktreePath,
@@ -21809,6 +22119,7 @@ export class SessionService {
             status: "running",
             launchCommand: restoredLaunchCommand,
             ...(restoreAgentLaunchId ? { agentLaunchId: restoreAgentLaunchId } : {}),
+            ...codexAttempt,
             updatedAt: nowIso(),
           },
           mcpSidecarUpdate,
@@ -22013,7 +22324,7 @@ export class SessionService {
               status: "running",
               updatedAt: nowIso(),
               ...(cursorRestoreBoundary ? { cursorRestoreBoundary } : {}),
-              ...(codexRestoreStartedAt ? { codexRestoreStartedAt } : {}),
+              ...codexAttempt,
             },
             mcpSidecarUpdate,
           );
@@ -22062,6 +22373,7 @@ export class SessionService {
           ...current,
           launchCommand: restoredLaunchCommand,
           ...(restoreAgentLaunchId ? { agentLaunchId: restoreAgentLaunchId } : {}),
+          ...codexAttempt,
         },
         mcpSidecarUpdate,
       );
@@ -22139,7 +22451,7 @@ export class SessionService {
           status: "running",
           updatedAt: nowIso(),
           ...(cursorRestoreBoundary ? { cursorRestoreBoundary } : {}),
-          ...(codexRestoreStartedAt ? { codexRestoreStartedAt } : {}),
+          ...codexAttempt,
         },
         mcpSidecarUpdate,
       );
@@ -23313,9 +23625,9 @@ export class SessionService {
     // `opencode export`), and remove/flush must not 409 while nothing is
     // being typed.
     let claimed = false;
-    const preparedObservation: PreparedSessionObservation = { session, revision: probeRevision };
+    const preparedObservation = this.prepareSessionObservation(session);
     const observePreparedSession = (prepared: SessionRecord) => {
-      preparedObservation.session = prepared;
+      this.advancePreparedObservation(preparedObservation, prepared);
     };
     try {
       let nextMessage: string | undefined;
@@ -24062,7 +24374,10 @@ export class SessionService {
     });
   }
 
-  private async enrichService(service: ServiceInstanceRecord): Promise<ServiceInstanceView> {
+  private async enrichService(
+    service: ServiceInstanceRecord,
+    preparedObservation?: PreparedSessionObservation,
+  ): Promise<ServiceInstanceView> {
     const {
       exists: runtimeAlive,
       paneDead,
@@ -24070,6 +24385,8 @@ export class SessionService {
     } = await this.readReportingPaneState(
       service.tmuxSession,
       readSession(this.config.dataDir, service.sessionId) ?? undefined,
+      undefined,
+      preparedObservation,
     );
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(service.tmuxSession) : null;
     const updatedAt = new Date(service.updatedAt);
@@ -24110,7 +24427,10 @@ export class SessionService {
   }
 
   private async classifyCodexState(
-    session: Pick<SessionRecord, "id" | "agentSessionId" | "codexRestoreStartedAt">,
+    session: Pick<
+      SessionRecord,
+      "id" | "agentSessionId" | "agentLaunchId" | "codexRestoreLaunchId" | "codexRestoreStartedAt"
+    >,
   ): Promise<{
     state: SessionState;
     source: StateSource;
@@ -24136,20 +24456,23 @@ export class SessionService {
     let state: SessionState = hookState?.state ?? "waiting";
     let source: StateSource = hookState ? "hook" : "status";
 
-    const restoreStartedAtMs = session.codexRestoreStartedAt
-      ? Date.parse(session.codexRestoreStartedAt)
-      : NaN;
+    const restoreStartedAtMs = codexLaunchStartedAt(session);
     const restoreMarkerReady =
       rolloutState?.reason === "thread_settings_applied" &&
-      Number.isFinite(restoreStartedAtMs) &&
+      session.agentSessionId !== undefined &&
+      restoreStartedAtMs !== null &&
       rolloutState.timestampMs >= restoreStartedAtMs &&
-      (rolloutState.precedingState?.timestampMs ?? 0) < restoreStartedAtMs &&
+      rolloutState.precedingState !== undefined &&
+      rolloutState.precedingState.timestampMs < restoreStartedAtMs &&
       (!hookState ||
         hookState.state === "waiting" ||
         new Date(hookState.updatedAt).getTime() < restoreStartedAtMs);
     if (restoreMarkerReady) {
       state = "waiting";
       source = "jsonl";
+    } else if (rolloutState?.reason === "thread_settings_applied") {
+      state = rolloutState.precedingState?.state ?? hookState?.state ?? "working";
+      if (rolloutState.precedingState) source = "jsonl";
     } else if (rolloutState && shouldUseCodexRolloutState(hookState, rolloutState)) {
       state = rolloutState.state;
       source = "jsonl";
@@ -24824,8 +25147,10 @@ export class SessionService {
     historySourcePath: string | null,
     serverError: boolean,
     serverErrorEvidence?: "error" | "recovered",
+    observation?: PreparedSessionObservation,
   ): Promise<SessionStateTransition[]> {
     if (this.isDeliveryStopped()) return [];
+    this.assertCodexObservation(observation);
     // Recovery evidence is independent of the displayed state and restore warmup.
     if (serverError && !session.serverErrorAt) {
       this.writeServerErrorMarker(session.id, nowIso());
@@ -24851,10 +25176,16 @@ export class SessionService {
               rateLimitedAt: transitionAt,
               updatedAt: nowIso(),
             });
+            if (observation)
+              this.advancePreparedObservation(observation, {
+                ...current,
+                rateLimitedAt: transitionAt,
+              });
           }
         } else if (current.rateLimitedAt) {
           const { rateLimitedAt: _rateLimitedAt, ...base } = current;
           writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+          if (observation) this.advancePreparedObservation(observation, base);
         }
       }
       if (lastEntry) {
@@ -24868,6 +25199,7 @@ export class SessionService {
           },
           historySourcePath,
         );
+        this.assertCodexObservation(observation);
         this.scheduleStateSubscriptionDispatch(session, {
           at: transitionAt,
           fromState: lastEntry.state,
@@ -24906,7 +25238,10 @@ export class SessionService {
     }
   }
 
-  private async hasServiceIssues(session: Pick<SessionRecord, "id" | "project">): Promise<boolean> {
+  private async hasServiceIssues(
+    session: Pick<SessionRecord, "id" | "project">,
+    preparedObservation?: PreparedSessionObservation,
+  ): Promise<boolean> {
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
       if (service.status !== "running") {
         return true;
@@ -24914,6 +25249,8 @@ export class SessionService {
       const runtime = await this.readReportingPaneState(
         service.tmuxSession,
         readSession(this.config.dataDir, session.id) ?? undefined,
+        undefined,
+        preparedObservation,
       );
       if (runtime.diagnostic || !runtime.exists) {
         return true;
@@ -24962,7 +25299,10 @@ export class SessionService {
     reason: "boot" | "runtime_check",
     workspaceMissing: boolean,
     probeRevision = this.lifecycle.snapshot(session.id).revision,
+    preparation?: SessionPreparationOptions,
   ): Promise<{ session: SessionRecord; runtime: SessionRuntimeSnapshot }> {
+    const assertObserved = () => this.assertCodexObservation(preparation?.preparedObservation);
+    assertObserved();
     if (this.isDeliveryStopped() || this.staleParksInFlight.has(session.id)) {
       return { session, runtime };
     }
@@ -24984,13 +25324,15 @@ export class SessionService {
       current.updatedAt === session.updatedAt;
     if (protectedRuntime()) return { session, runtime };
     if (runtime.probeUnresponsive) {
+      const retained = this.retainDetectionError(
+        session,
+        runtime.diagnostic ?? "runtime probe (tmux or ps) timed out; runtime state unknown",
+        "runtime_probe",
+        probeRevision,
+      );
+      preparation?.observePreparedSession?.(retained);
       return {
-        session: this.retainDetectionError(
-          session,
-          runtime.diagnostic ?? "runtime probe (tmux or ps) timed out; runtime state unknown",
-          "runtime_probe",
-          probeRevision,
-        ),
+        session: retained,
         runtime,
       };
     }
@@ -25008,6 +25350,7 @@ export class SessionService {
         try {
           confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
         } catch (error) {
+          assertObserved();
           const diagnostic = error instanceof Error ? error.message : String(error);
           const retained = this.retainDetectionError(
             session,
@@ -25015,6 +25358,7 @@ export class SessionService {
             "runtime_probe",
             probeRevision,
           );
+          preparation?.observePreparedSession?.(retained);
           return {
             session: retained,
             runtime: {
@@ -25027,6 +25371,7 @@ export class SessionService {
             },
           };
         }
+        assertObserved();
         if (this.isDeliveryStopped() || this.staleParksInFlight.has(session.id)) {
           return { session, runtime: confirmedRuntime };
         }
@@ -25048,6 +25393,7 @@ export class SessionService {
             session.tmuxSession,
             async (ownedPane) => {
               const assertCurrent = () => {
+                assertObserved();
                 const latest = readSession(this.config.dataDir, session.id);
                 if (!latest || protectedRuntime(ownedPane) || !runtimeOwnerMatches(latest)) {
                   throw superseded;
@@ -25064,6 +25410,7 @@ export class SessionService {
             runtime: confirmedRuntime,
           };
         }
+        assertObserved();
       }
       if (live(confirmedRuntime)) {
         return { session, runtime: confirmedRuntime };
@@ -25081,6 +25428,7 @@ export class SessionService {
           "runtime_probe",
           probeRevision,
         );
+        preparation?.observePreparedSession?.(retained);
         this.logEvent("session.runtime.probe_unresponsive", {
           level: "warn",
           sessionId: session.id,
@@ -25131,7 +25479,9 @@ export class SessionService {
         updatedAt,
       };
     }
+    assertObserved();
     writeSession(this.config.dataDir, updated);
+    preparation?.observePreparedSession?.(updated);
     this.stateCache.delete(session.id);
     this.logEvent(
       reason === "boot" ? "session.reconcile.drift" : `session.runtime.${updated.status}`,
@@ -25169,6 +25519,8 @@ export class SessionService {
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
     workspaceMissing: boolean,
+    probeRevision: number,
+    observePromotion?: (session: SessionRecord) => void,
   ): SessionRecord {
     // Shepherd is not exempt: its own terminal exits are "completed" (self
     // destruct) or "killed", and it is never stale-parked, so a stopped or
@@ -25194,6 +25546,11 @@ export class SessionService {
       return session;
     }
     if (
+      !sameSessionRuntimeOwner(latest, session) ||
+      latest.agentLaunchId !== session.agentLaunchId ||
+      latest.codexRestoreLaunchId !== session.codexRestoreLaunchId ||
+      latest.codexRestoreStartedAt !== session.codexRestoreStartedAt ||
+      this.lifecycle.snapshot(session.id).revision !== probeRevision ||
       latest.status !== "stopped" ||
       latest.stopReason === "manual_pause" ||
       latest.stopReason === "token_budget" ||
@@ -25211,6 +25568,7 @@ export class SessionService {
     };
     delete updated.stopReason;
     writeSession(this.config.dataDir, updated);
+    observePromotion?.(updated);
     this.stateCache.delete(session.id);
     this.logEvent("session.reconcile.running", {
       level: "warn",
@@ -25354,22 +25712,33 @@ export class SessionService {
     session: SessionRecord,
     options?: { scanPane?: boolean; reconcileRuntime?: boolean },
     observePreparation?: (session: SessionRecord) => void,
+    prepared = this.prepareSessionObservation(session),
   ): Promise<SessionStateResult> {
     const probeRevision = this.lifecycle.snapshot(session.id).revision;
     let observation = session;
     try {
-      return await this.classifySessionRecordKnown(session, options, (prepared) => {
-        observation = prepared;
-        observePreparation?.(prepared);
-      });
+      return await this.classifySessionRecordKnown(
+        session,
+        options,
+        (current) => {
+          observation = current;
+          observePreparation?.(current);
+        },
+        prepared,
+      );
     } catch (error) {
+      if (error instanceof CodexEvidenceInvalidatedError || error instanceof SessionLifecycleError)
+        throw error;
       if (
         error instanceof SessionResourceNotFoundError &&
         !readSession(this.config.dataDir, session.id)
       ) {
         throw error;
       }
-      return this.classificationErrorResult(observation, error, "other", probeRevision);
+      this.assertCodexObservation(prepared);
+      const result = this.classificationErrorResult(observation, error, "other", probeRevision);
+      this.advancePreparedObservation(prepared, result.session);
+      return { ...result, observation: prepared };
     }
   }
 
@@ -25476,12 +25845,14 @@ export class SessionService {
     )
       return latest ?? current;
     if (latest && isTerminalSessionStatus(latest.status)) return latest;
+    const retentionCandidate = { ...session, ...latest, launchCommand: session.launchCommand };
+    if (session.agent === "codex" && latest) {
+      if (latest.codexRestoreLaunchId === undefined) delete retentionCandidate.codexRestoreLaunchId;
+      if (latest.codexRestoreStartedAt === undefined)
+        delete retentionCandidate.codexRestoreStartedAt;
+    }
     const retained: SessionRecord = {
-      ...withQueuedMessages(
-        { ...session, ...latest, launchCommand: session.launchCommand },
-        queuedMessages(latest ?? session),
-        true,
-      ),
+      ...withQueuedMessages(retentionCandidate, queuedMessages(latest ?? session), true),
       status:
         runtime && !runtime.probeUnresponsive && !runtime.processAlive ? "errored" : "running",
       error: message,
@@ -25514,13 +25885,32 @@ export class SessionService {
     }
   }
 
+  private codexPaneOverride(session: SessionRecord): CodexPaneOverride | undefined {
+    const entry = this.codexMcpDialogOverrides.get(session.id);
+    if (
+      entry &&
+      (entry.nativeId !== session.agentSessionId ||
+        entry.launchId !== session.agentLaunchId ||
+        entry.startedAt !== codexLaunchStartedAt(session))
+    ) {
+      return undefined;
+    }
+    return entry;
+  }
+
   private async classifySessionRecordKnown(
     session: SessionRecord,
     options?: { scanPane?: boolean; reconcileRuntime?: boolean },
     observePreparation?: (session: SessionRecord) => void,
+    observation = this.prepareSessionObservation(session),
   ): Promise<SessionStateResult> {
     const probeLifecycle = this.lifecycle.snapshot(session.id);
     const probeRevision = probeLifecycle.revision;
+    const observeOwned = (prepared: SessionRecord): void => {
+      this.advancePreparedObservation(observation, prepared);
+      observePreparation?.(prepared);
+    };
+    this.assertCodexObservation(observation);
     const ackEntry = { ...session };
     const entryTyped = structuredClone(session.queuedMessageTyped);
     const matchesAckEntry = (current: SessionRecord | null): boolean => {
@@ -25549,6 +25939,7 @@ export class SessionService {
       this.lastClassifiedLogStates.delete(session.id);
       return {
         session,
+        observation,
         runtime: {
           runtimeAlive: true,
           paneUsable: true,
@@ -25575,14 +25966,18 @@ export class SessionService {
       try {
         runtime = await this.readRuntimeSnapshot(session);
       } catch (error) {
+        if (error instanceof SessionLifecycleError) throw error;
+        this.assertCodexObservation(observation);
         const result = this.classificationErrorResult(
           session,
           error,
           "runtime_probe",
           probeRevision,
         );
+        observeOwned(result.session);
         return {
           ...result,
+          observation,
           session:
             matchesAckEntry(result.session) &&
             matchesAckEntry(readSession(this.config.dataDir, session.id))
@@ -25591,6 +25986,7 @@ export class SessionService {
         };
       }
     }
+    this.assertCodexObservation(observation);
     if (this.isDeliveryStopped())
       return {
         session,
@@ -25648,6 +26044,7 @@ export class SessionService {
           : "other",
         probeRevision,
       );
+      observeOwned(effectiveSession);
     } else if (
       session.status !== "errored" &&
       workspace.exists &&
@@ -25674,7 +26071,7 @@ export class SessionService {
         const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recovered } = latest;
         effectiveSession = { ...recovered, updatedAt: nowIso() };
         writeSession(this.config.dataDir, effectiveSession);
-        observePreparation?.(effectiveSession);
+        observeOwned(effectiveSession);
         this.stateCache.delete(session.id);
         if (this.shouldRunDelivery(effectiveSession)) this.scheduleDeliveryRunner(session.id);
       }
@@ -25712,7 +26109,9 @@ export class SessionService {
         "runtime_check",
         workspace.missing,
         probeRevision,
+        { preparedObservation: observation, observePreparedSession: observeOwned },
       );
+      this.assertCodexObservation(observation);
       effectiveSession = reconciled.session;
       runtime = reconciled.runtime;
     }
@@ -25720,16 +26119,26 @@ export class SessionService {
       effectiveSession,
       runtime,
       workspace.missing,
+      probeRevision,
+      observeOwned,
     );
+    this.assertCodexObservation(observation);
     if (!runtimeOwnerChanged) {
       effectiveSession = this.reconcileStaleErroredSession(
         effectiveSession,
         runtime,
         workspace.exists,
         probeRevision,
-        observePreparation,
+        observeOwned,
       );
     }
+    this.assertCodexObservation(observation);
+    if (
+      observation.codex &&
+      this.codexMcpDialogOverrides.has(session.id) &&
+      !this.codexPaneOverride(effectiveSession)
+    )
+      this.writeCodexPaneObservation(observation);
 
     let rateLimit: RateLimitDetection | null = null;
     let codexLimitObservedAtMs = 0;
@@ -25779,6 +26188,7 @@ export class SessionService {
       effectiveSession.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX)
     ) {
       const native = await this.classifyCodexState(session).catch(() => null);
+      this.assertCodexObservation(observation);
       const observedAt = Date.now();
       const current = readSession(this.config.dataDir, session.id);
       const lifecycle = this.lifecycle.snapshot(session.id);
@@ -25828,6 +26238,7 @@ export class SessionService {
         const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recovered } = current;
         effectiveSession = { ...recovered, updatedAt: nowIso() };
         writeSession(this.config.dataDir, effectiveSession);
+        observeOwned(effectiveSession);
         this.stateCache.delete(session.id);
         codexProbeRecovery = native;
       }
@@ -25953,6 +26364,7 @@ export class SessionService {
         }
       } else if (strategy === "hook") {
         const codexState = await this.classifyCodexState(session);
+        this.assertCodexObservation(observation);
         state = codexState.state;
         stateSource = codexState.source;
         rateLimit = codexState.rateLimit;
@@ -26171,14 +26583,15 @@ export class SessionService {
         // not a soft rate-limit signal is also present) the session is
         // promoted to needs_input.
         const paneText = await captureTmuxPane(session.tmuxSession);
+        this.assertCodexObservation(observation);
         if (paneText === null) {
           // A failed fork never mutates codexMcpDialogOverrides (no hard-hit
           // promotion, no delete) — only reapply the stored entry if
           // unexpired, the same read the scanPane:false branch below does.
           // Reapplying does NOT refresh the expiry: only the live "detected
           // dialog" branch below writes it.
-          const expiresAt = this.codexMcpDialogOverrides.get(session.id);
-          if (expiresAt !== undefined && expiresAt > Date.now()) {
+          const override = this.codexPaneOverride(session);
+          if (override !== undefined && override.expiresAt > Date.now()) {
             state = "needs_input";
             rateLimit = null;
             classifiedDetail = "State: needs_input (codex MCP permission dialog)";
@@ -26192,17 +26605,19 @@ export class SessionService {
           );
           if (hardHit?.limited) {
             rateLimit = hardHit;
-            this.codexMcpDialogOverrides.delete(session.id);
+            this.writeCodexPaneObservation(observation);
           } else if (detectCodexMcpPermissionDialog(paneText)) {
             state = "needs_input";
             rateLimit = null;
-            this.codexMcpDialogOverrides.set(
-              session.id,
-              Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
-            );
+            this.writeCodexPaneObservation(observation, {
+              nativeId: session.agentSessionId,
+              launchId: session.agentLaunchId,
+              startedAt: codexLaunchStartedAt(session),
+              expiresAt: Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
+            });
             classifiedDetail = "State: needs_input (codex MCP permission dialog)";
           } else {
-            this.codexMcpDialogOverrides.delete(session.id);
+            this.writeCodexPaneObservation(observation);
           }
         }
       } else if (!scanPane && strategy === "hook") {
@@ -26217,8 +26632,8 @@ export class SessionService {
         // misses that case on 2s ticks. The override-presence + expiry check
         // below is the real gate; this branch is just a cheap Map.get when
         // there's nothing to reuse.
-        const expiresAt = this.codexMcpDialogOverrides.get(session.id);
-        if (expiresAt !== undefined && expiresAt > Date.now()) {
+        const override = this.codexPaneOverride(session);
+        if (override !== undefined && override.expiresAt > Date.now()) {
           state = "needs_input";
           rateLimit = null;
           classifiedDetail = "State: needs_input (codex MCP permission dialog)";
@@ -26335,6 +26750,7 @@ export class SessionService {
       }
     }
 
+    this.assertCodexObservation(observation);
     if (!readSession(this.config.dataDir, session.id) || classifiedDetail === undefined) {
       this.lastClassifiedLogStates.delete(session.id);
     } else {
@@ -26359,9 +26775,11 @@ export class SessionService {
         agentActivityAt,
         runtime.probeUnresponsive ? "ack-only" : "normal",
       );
+    this.assertCodexObservation(observation);
 
     return {
       session: effectiveSession,
+      observation,
       runtime,
       state,
       source: stateSource,
@@ -26380,20 +26798,33 @@ export class SessionService {
 
   private async enrichDashboard(
     session: SessionRecord,
+    observation?: PreparedSessionObservation,
   ): Promise<Omit<DashboardSessionView, "lifecycle"> | undefined> {
-    return (await this.assembleDashboard(session))?.view;
+    return (await this.assembleDashboard(session, observation))?.view;
   }
 
   private async assembleDashboard(
     session: SessionRecord,
+    observation?: PreparedSessionObservation,
   ): Promise<
-    { view: Omit<DashboardSessionView, "lifecycle">; source: SessionRecord | null } | undefined
+    | {
+        view: Omit<DashboardSessionView, "lifecycle">;
+        source: SessionRecord | null;
+        observation?: PreparedSessionObservation;
+      }
+    | undefined
   > {
     // The 2s dashboard-cache tick skips the per-session capture-pane scan (the
     // last un-batched fork): jsonl/hook-sourced rate limits still show up
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
     // viewed-session enrich still run the tmux-banner/usage-menu scan.
-    const classified = await this.classifySessionRecord(session, { scanPane: false });
+    const classified = await this.classifySessionRecord(
+      session,
+      { scanPane: false },
+      undefined,
+      observation,
+    );
+    this.assertCodexObservation(classified.observation);
     const persisted = this.persistClassifiedTokenUsage(classified.session, classified);
     if (persisted.status === "missing") return undefined;
     session = persisted.session;
@@ -26401,10 +26832,15 @@ export class SessionService {
     const lastActivityAt = buildLastActivityAt(session, classified);
     const workspaceState = resolveWorkspaceState(this.config.dataDir, session);
     const displaySlots = this.projectSidecarSlots(session, deriveSessionSlots(workspaceState));
-    const sidecars = await this.sidecarViews(session, this.resolveProjectForSession(session));
+    const sidecars = await this.sidecarViews(
+      session,
+      this.resolveProjectForSession(session),
+      classified.observation,
+    );
     const runningSidecarNames = sidecars.filter((view) => view.alive).map((view) => view.name);
 
-    const hasServiceIssues = await this.hasServiceIssues(session);
+    const hasServiceIssues = await this.hasServiceIssues(session, classified.observation);
+    this.assertCodexObservation(classified.observation);
     const persistedSession = session;
     session = this.withReportingError(session);
     const source = isDeepStrictEqual(session, persistedSession) ? session : null;
@@ -26417,6 +26853,7 @@ export class SessionService {
       preflightTokenUsage: _preflightTokenUsage,
       cursorRestoreBoundary: _cursorRestoreBoundary,
       codexRestoreStartedAt: _codexRestoreStartedAt,
+      codexRestoreLaunchId: _codexRestoreLaunchId,
       restoredAt: _restoredAt,
       launchCommand: _launchCommand,
       stateSubscriptions: _stateSubscriptions,
@@ -26443,10 +26880,13 @@ export class SessionService {
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
+      classified.observation,
     );
+    this.assertCodexObservation(classified.observation);
     this.guardSidecarViews(session.id, sidecars);
     return {
       source,
+      ...(classified.observation ? { observation: classified.observation } : {}),
       view: {
         ...dashboardSession,
         ...(session.error ? { error: session.error } : {}),
@@ -26573,9 +27013,13 @@ export class SessionService {
     ownerId: string,
     sidecarName: string,
     session: SessionRecord,
+    preparedObservation?: PreparedSessionObservation,
   ): Promise<{ exists: boolean; paneDead: boolean; diagnostic?: string }> {
-    return this.readReportingPaneState(sidecarTmuxSession(ownerId, sidecarName), session, () =>
-      sidecarTmuxAlive(ownerId, sidecarName),
+    return this.readReportingPaneState(
+      sidecarTmuxSession(ownerId, sidecarName),
+      session,
+      () => sidecarTmuxAlive(ownerId, sidecarName),
+      preparedObservation,
     );
   }
 
@@ -26583,25 +27027,32 @@ export class SessionService {
     tmuxSession: string,
     session?: SessionRecord,
     readExists: () => Promise<boolean> = () => tmuxSessionExists(tmuxSession),
+    preparedObservation = session ? this.prepareSessionObservation(session) : undefined,
   ): Promise<{ exists: boolean; paneDead: boolean; diagnostic?: string }> {
     const probeRevision = session && this.lifecycle.snapshot(session.id).revision;
+    this.assertCodexObservation(preparedObservation);
     let exists: boolean;
     let paneDead: boolean;
     try {
       exists = await readExists();
+      this.assertCodexObservation(preparedObservation);
       if (session && !readSession(this.config.dataDir, session.id)) {
         throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
       }
       paneDead = exists && (await tmuxPaneDead(tmuxSession));
+      this.assertCodexObservation(preparedObservation);
     } catch (error) {
       if (!(error instanceof TmuxProbeUnknownError)) throw error;
-      if (session && probeRevision !== undefined)
-        this.retainDetectionError(
+      this.assertCodexObservation(preparedObservation);
+      if (session && probeRevision !== undefined) {
+        const retained = this.retainDetectionError(
           session,
           `Resource readout ${tmuxSession}: ${error.message}`,
           "other",
           probeRevision,
         );
+        if (preparedObservation) this.advancePreparedObservation(preparedObservation, retained);
+      }
       return { exists: false, paneDead: false, diagnostic: error.message };
     }
     if (session && probeRevision !== undefined) {
@@ -26617,6 +27068,7 @@ export class SessionService {
         const { error: _error, errorSource: _errorSource, ...recovered } = latest;
         const cleared = { ...recovered, updatedAt: nowIso() };
         writeSession(this.config.dataDir, cleared);
+        if (preparedObservation) this.advancePreparedObservation(preparedObservation, cleared);
         this.stateCache.delete(session.id);
         if (
           !cleared.serverErrorAt &&
@@ -26696,6 +27148,20 @@ export class SessionService {
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],
   ): Promise<SessionView> {
+    try {
+      return await this.enrichObserved(session, claudeAccounts, sessionBatch);
+    } catch (error) {
+      if (error instanceof CodexEvidenceInvalidatedError)
+        throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(session.id));
+      throw error;
+    }
+  }
+
+  private async enrichObserved(
+    session: SessionRecord,
+    claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
+    sessionBatch?: SessionRecord[],
+  ): Promise<SessionView> {
     const receipt = this.lifecycle.snapshot(session.id);
     const { view, classified, source } = await this.enrichWithClassified(
       session,
@@ -26703,12 +27169,22 @@ export class SessionService {
       sessionBatch,
     );
     const rows = await this.finalizeLifecycleRows(
-      [{ view: this.withSessionDetail(view, classified.session), source, receipt }],
+      [
+        {
+          view: this.withSessionDetail(view, classified.session),
+          source,
+          receipt,
+          ...(classified.observation ? { observation: classified.observation } : {}),
+        },
+      ],
       async (record) => {
         const rebuilt = await this.enrichWithClassified(record);
         return {
           view: this.withSessionDetail(rebuilt.view, rebuilt.classified.session),
           source: rebuilt.source,
+          ...(rebuilt.classified.observation
+            ? { observation: rebuilt.classified.observation }
+            : {}),
         };
       },
       { includePending: false, onExhausted: "refuse" },
@@ -26772,6 +27248,7 @@ export class SessionService {
       Boolean(record.error?.trim() && !record.error.startsWith(STATUS_DETECTION_ERROR_PREFIX));
     const inputHasIndependentError = hasIndependentError(session);
     const classified = await this.classifySessionRecord(session);
+    this.assertCodexObservation(classified.observation);
     const persisted = this.persistClassifiedTokenUsage(classified.session, classified);
     if (persisted.status === "missing") {
       throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
@@ -26787,7 +27264,7 @@ export class SessionService {
 
     const services: ServiceInstanceView[] = [];
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
-      services.push(await this.enrichService(service));
+      services.push(await this.enrichService(service, classified.observation));
     }
 
     const project = this.resolveProjectForSession(session);
@@ -26799,7 +27276,8 @@ export class SessionService {
     // pay for a second read of the same anchor record when there's no
     // workspace file yet.
     const anchorRecord = this.deskAnchorRecord(session);
-    const sidecars = await this.sidecarViews(session, project);
+    const sidecars = await this.sidecarViews(session, project, classified.observation);
+    this.assertCodexObservation(classified.observation);
     const persistedSession = session;
     session = this.withReportingError(session);
     const source = isDeepStrictEqual(session, persistedSession) ? session : null;
@@ -26813,6 +27291,7 @@ export class SessionService {
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
+      classified.observation,
     );
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
@@ -26828,6 +27307,7 @@ export class SessionService {
     );
     const resolvedClaudeAccounts =
       session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
+    this.assertCodexObservation(classified.observation);
     const {
       launchCommand: _launchCommand,
       prompt: _prompt,
@@ -26840,6 +27320,7 @@ export class SessionService {
       preflightTokenUsage: _preflightTokenUsage,
       cursorRestoreBoundary: _cursorRestoreBoundary,
       codexRestoreStartedAt: _codexRestoreStartedAt,
+      codexRestoreLaunchId: _codexRestoreLaunchId,
       restoredAt: _restoredAt,
       // The record's queue state is internal; the view carries queuedMessagesView.
       queuedMessages: _queuedMessages,
@@ -26881,6 +27362,7 @@ export class SessionService {
       !inputHasIndependentError &&
       !preReportHasIndependentError &&
       !hasIndependentError(session);
+    this.assertCodexObservation(classified.observation);
     this.guardSidecarViews(session.id, sidecars);
     return { view, classified, source, detectionOnlyError };
   }

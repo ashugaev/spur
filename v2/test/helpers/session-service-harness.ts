@@ -34,6 +34,7 @@ import type * as registryModule from "../../src/registry.js";
 import type * as sessionPrModule from "../../src/session-pr.js";
 import type * as releasesCacheModule from "../../src/releases-cache.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
+import type * as sessionArtifactsModule from "../../src/session-artifacts.js";
 import type * as sharedMemoryModule from "../../src/shared-memory.js";
 import type * as todoModule from "../../src/todo.js";
 import type * as reapModule from "../../src/sidecars/reap.js";
@@ -908,7 +909,8 @@ vi.mock("../../src/session-slots.js", async (importOriginal) => ({
   normalizeSlotLinks: normalizeSlotLinksMock,
 }));
 
-vi.mock("../../src/session-artifacts.js", () => ({
+vi.mock("../../src/session-artifacts.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof sessionArtifactsModule>()),
   ensureSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
     const dir = artifactDirForSession(sessionId);
     mkdirSync(dir, { recursive: true });
@@ -1274,7 +1276,15 @@ type SessionServiceInternals = {
     options?: { scanPane?: boolean },
   ): Promise<{ state: SessionState; session: SessionRecord }>;
   classifySessionState(session: SessionRecord): Promise<SessionState>;
-  codexMcpDialogOverrides: Map<string, number>;
+  codexMcpDialogOverrides: Map<
+    string,
+    {
+      nativeId: string | undefined;
+      launchId: string | undefined;
+      startedAt: number | null;
+      expiresAt: number;
+    }
+  >;
   claudeCompactingOverrides: Map<string, number>;
   cursorPaneReadyOverrides: Map<string, number>;
   lastClassifiedLogStates: Map<string, SessionState>;
