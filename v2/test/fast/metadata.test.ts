@@ -1424,6 +1424,7 @@ describe("durable spawn metadata", () => {
         externalId: "acme/api#7",
         blockIndex: 0,
       };
+      session.restoredAt = session.createdAt;
       session.spawnIntent.phase = phase;
       if (phase === "launching" || phase === "submitted") {
         session.agentLaunchId = "launch-1";
@@ -1440,6 +1441,12 @@ describe("durable spawn metadata", () => {
       expect(readSession(dataDir, session.id)).toMatchObject(session);
       expect(listSessions(dataDir)[0]?.spawnIntent).toEqual(session.spawnIntent);
       expect(readSession(dataDir, session.id)?.triggerOrigin).toEqual(session.triggerOrigin);
+      writeSession(dataDir, { ...session, restoredAt: "invalid" });
+      expect(readSession(dataDir, session.id)).toMatchObject({
+        spawnIntent: session.spawnIntent,
+        spawnReceipt: session.spawnReceipt,
+      });
+      expect(readSession(dataDir, session.id)?.restoredAt).toBeUndefined();
     },
   );
 
