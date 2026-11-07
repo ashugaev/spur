@@ -49,8 +49,21 @@ describe("page route", () => {
       pageContext("films"),
     );
     expect(response.status).toBe(308);
-    expect(response.headers.get("location")).toBe("http://host:3000/p/films/");
+    expect(response.headers.get("location")).toBe("/p/films/");
     expect(spurRequestMock).not.toHaveBeenCalled();
+  });
+
+  it("redirects with a path-only Location behind a proxy, keeping the query", async () => {
+    const response = await pageGet(
+      new NextRequest("http://localhost:3000/p/films?a=1&b=2", {
+        headers: { host: "spur.example.com", "x-forwarded-proto": "https" },
+      }),
+      pageContext("films"),
+    );
+    expect(response.status).toBe(308);
+    const location = response.headers.get("location");
+    expect(location).toBe("/p/films/?a=1&b=2");
+    expect(location).not.toContain("localhost");
   });
 
   it("serves index.html for /p/<id>/ and a relative asset by path", async () => {

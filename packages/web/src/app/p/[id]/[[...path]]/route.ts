@@ -10,9 +10,11 @@ async function handle(request: NextRequest, context: RouteContext): Promise<Resp
   const { id, path = [] } = await context.params;
   // Relative asset URLs resolve against the page dir only with the trailing slash.
   if (path.length === 0 && !request.nextUrl.pathname.endsWith("/")) {
-    // A plain URL: NextURL drops the trailing slash on serialization.
-    const target = new URL(`${request.nextUrl.pathname}/${request.nextUrl.search}`, request.url);
-    return NextResponse.redirect(target, 308);
+    // Path-only Location: request.url carries the custom server's localhost origin, not the public one.
+    return new Response(null, {
+      status: 308,
+      headers: { Location: `${request.nextUrl.pathname}/${request.nextUrl.search}` },
+    });
   }
   const target = resolvePageProxyTarget(id, path, request.method);
   if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
