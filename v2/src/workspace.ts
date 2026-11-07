@@ -380,7 +380,8 @@ export async function readBranchDestination(
       config.set(key, values);
     }
     const last = (key: string): string | undefined => config.get(key)?.at(-1);
-    const mode = last("push.default") ?? "simple";
+    const configuredMode = last("push.default") ?? "simple";
+    const mode = configuredMode === "tracking" ? "upstream" : configuredMode;
     if (!["simple", "current", "matching", "upstream", "nothing"].includes(mode)) {
       return { status: "unknown" };
     }

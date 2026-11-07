@@ -86,6 +86,36 @@ describe("branch push destination", () => {
     });
   });
 
+  it.each([false, true])("normalizes Git's tracking alias after rename: %s", async (renamed) => {
+    const { repo, git } = await createContextRepo("old");
+    await git("config", "branch.old.remote", "origin");
+    await git("config", "branch.old.merge", "refs/heads/old");
+    await git("update-ref", "refs/remotes/origin/old", "HEAD");
+    if (renamed) await git("branch", "-m", "new");
+    const branch = renamed ? "new" : "old";
+    const args = ["for-each-ref", "--format=%(push)\t%(upstream)", `refs/heads/${branch}`];
+    await git("config", "push.default", "upstream");
+    const upstreamAtoms = await git(...args);
+    const upstreamContext = await readBranchDestination(repo, branch);
+    expect(upstreamContext).toEqual({
+      status: "known",
+      push: { url: "https://github.com/acme/api.git", branch: "old" },
+      upstream: { url: "https://github.com/acme/api.git", branch: "old" },
+    });
+    await git("config", "push.default", "tracking");
+    expect((await git(...args)).stdout).toBe(upstreamAtoms.stdout);
+    await expect(readBranchDestination(repo, branch)).resolves.toEqual(upstreamContext);
+    await expect(readBranchPushUrl(repo, branch)).resolves.toBe(
+      renamed ? null : "https://github.com/acme/api.git",
+    );
+  });
+
+  it("keeps an unsupported push mode unknown", async () => {
+    const { repo, git } = await createContextRepo("new");
+    await git("config", "push.default", "unsupported-mode");
+    await expect(readBranchDestination(repo, "new")).resolves.toEqual({ status: "unknown" });
+  });
+
   it.each(["simple", "current", "matching"])("accepts a remote-only %s selector without upstream", async (mode) => {
     const { repo, git } = await createContextRepo("new");
     await git("config", "branch.new.remote", "origin");
