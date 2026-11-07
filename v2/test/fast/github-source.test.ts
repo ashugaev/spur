@@ -1754,7 +1754,7 @@ describe("github source", () => {
     handle.stop();
   });
 
-  it("does not echo the viewer's review body while delivering another review", async () => {
+  it("suppresses its session review while delivering another session on the same login", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
     mockLifecyclePoll(
@@ -1763,14 +1763,14 @@ describe("github source", () => {
         {
           id: 610,
           state: "CHANGES_REQUESTED",
-          body: "my own review",
-          user: { login: "review-bot" },
+          body: "my own review\n[AI-generated, session: api-a1b2]",
+          user: { login: "different-login" },
         },
         {
           id: 611,
           state: "CHANGES_REQUESTED",
-          body: "fix this",
-          user: { login: "other-reviewer" },
+          body: "fix this\n[AI-generated, session: other-session]",
+          user: { login: "review-bot" },
         },
       ]),
     );
@@ -1785,7 +1785,7 @@ describe("github source", () => {
     handle.stop();
   });
 
-  it("does not echo the viewer's inline or issue comments", async () => {
+  it("suppresses its session inline and issue comments while delivering the shared account", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
     ghMock
@@ -1793,14 +1793,26 @@ describe("github source", () => {
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce(
         JSON.stringify([
-          { id: 620, body: "my reply", user: { login: "REVIEW-BOT" } },
-          { id: 621, body: "please fix", user: { login: "other-reviewer" } },
+          {
+            id: 620,
+            body: "my reply\nWritten by Spur · api-a1b2",
+            user: { login: "different-login" },
+          },
+          {
+            id: 621,
+            body: "please fix\nWritten by Spur · other-session",
+            user: { login: "review-bot" },
+          },
         ]),
       )
       .mockResolvedValueOnce(
         JSON.stringify([
-          { id: 622, body: "my note", user: { login: "review-bot" } },
-          { id: 623, body: "please check", user: { login: "other-reviewer" } },
+          {
+            id: 622,
+            body: "my note\n[AI-generated, session: api-a1b2]",
+            user: { login: "different-login" },
+          },
+          { id: 623, body: "please check", user: { login: "review-bot" } },
         ]),
       )
       .mockResolvedValueOnce("[]");
@@ -1816,9 +1828,49 @@ describe("github source", () => {
   });
 
   it.each([
+    { body: "feedback\n[AI-generated, session: api-a1b2]\r\n\r\n", own: true },
+    { body: "feedback\nWritten by Spur · api-a1b2\n", own: true },
+    { body: "feedback\n[AI-generated, session: other-session]", own: false },
+    { body: "feedback\n> [AI-generated, session: api-a1b2]", own: false },
+    { body: "[AI-generated, session: api-a1b2]\nmore feedback", own: false },
+    { body: "feedback\n[AI-generated, session: api-a1b2-extra]", own: false },
+    { body: "unsigned human feedback", own: false },
+  ])(
+    "matches only terminal session attribution across feedback classes ($body)",
+    async ({ body, own }) => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghMock
+        .mockResolvedValueOnce(prView())
+        .mockResolvedValueOnce("[]")
+        .mockResolvedValueOnce(JSON.stringify([{ id: 670, body, user: { login: "review-bot" } }]))
+        .mockResolvedValueOnce(JSON.stringify([{ id: 671, body, user: { login: "review-bot" } }]))
+        .mockResolvedValueOnce(
+          JSON.stringify([
+            { id: 672, state: "COMMENTED", body, user: { login: "review-bot" } },
+            { id: 673, state: "APPROVED", body, user: { login: "review-bot" } },
+          ]),
+        );
+
+      const handle = await startLifecycle(vi.fn());
+
+      const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+      for (const key of [
+        "review-comment:670",
+        "comment:671",
+        "review:672",
+        "approved:review-bot",
+      ]) {
+        expect(snapshot.signals.has(key), key).toBe(!own);
+      }
+      handle.stop();
+    },
+  );
+
+  it.each([
     { headRefName: "someone-elses-branch", author: "someone-else", ownsPr: false },
     { headRefName: "feature/native-pr-binding", author: "someone-else", ownsPr: true },
-    { headRefName: "someone-elses-branch", author: "review-bot", ownsPr: true },
+    { headRefName: "someone-elses-branch", author: "review-bot", ownsPr: false },
   ])(
     "scopes fix instructions to an owned PR ($headRefName, $author)",
     async ({ headRefName, author, ownsPr }) => {
@@ -1829,6 +1881,8 @@ describe("github source", () => {
           headRefName,
           author: { login: author },
           reviewDecision: "CHANGES_REQUESTED",
+          mergeable: "CONFLICTING",
+          statusCheckRollup: [{ name: "build", status: "COMPLETED", conclusion: "FAILURE" }],
         }),
       );
       const emit = vi.fn();
@@ -1837,21 +1891,24 @@ describe("github source", () => {
 
       const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
       expect(snapshot.signals.has("changes_requested")).toBe(ownsPr);
+      expect(snapshot.signals.has("ci_failed")).toBe(ownsPr);
+      expect(snapshot.signals.has("merge_conflict")).toBe(ownsPr);
       handle.stop();
     },
   );
 
   it.each([
-    { reviewer: "review-bot", actionable: false },
-    { reviewer: "other-reviewer", actionable: true },
+    { reviewer: "different-login", body: "[AI-generated, session: api-a1b2]", actionable: false },
+    { reviewer: "review-bot", body: "Written by Spur · other-session", actionable: true },
+    { reviewer: "review-bot", body: "unsigned human feedback", actionable: true },
   ])(
-    "does not turn the viewer's change request into a fix alert ($reviewer)",
-    async ({ reviewer, actionable }) => {
+    "attributes a current change request by session marker ($reviewer, $body)",
+    async ({ reviewer, body, actionable }) => {
       readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
       listSessionsMock.mockReturnValue([makeSession()]);
       mockLifecyclePoll(
         prView({ reviewDecision: "CHANGES_REQUESTED" }),
-        JSON.stringify([{ id: 630, state: "CHANGES_REQUESTED", user: { login: reviewer } }]),
+        JSON.stringify([{ id: 630, state: "CHANGES_REQUESTED", body, user: { login: reviewer } }]),
       );
       const emit = vi.fn();
 
@@ -1859,6 +1916,10 @@ describe("github source", () => {
 
       const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
       expect(snapshot.signals.has("changes_requested")).toBe(actionable);
+      const query = ghTransportMock.mock.calls
+        .flatMap((call) => call.filter((value): value is string => typeof value === "string"))
+        .find((value) => value.includes("latestOpinionatedReviews"));
+      expect(query).toMatch(/latestOpinionatedReviews[^{}]*\{nodes\{[^}]*\bbody\b/);
       handle.stop();
     },
   );
@@ -1891,7 +1952,11 @@ describe("github source", () => {
         latestOpinionatedReviews: {
           nodes: [
             { state: "APPROVED", author: { login: "other-reviewer" } },
-            { state: "CHANGES_REQUESTED", author: { login: "review-bot" } },
+            {
+              state: "CHANGES_REQUESTED",
+              body: "Written by Spur · api-a1b2",
+              author: { login: "review-bot" },
+            },
           ],
           pageInfo: { hasPreviousPage: false },
         },
@@ -1939,7 +2004,13 @@ describe("github source", () => {
       prView({
         reviewDecision: "CHANGES_REQUESTED",
         latestOpinionatedReviews: {
-          nodes: [{ state: "CHANGES_REQUESTED", author: { login: "review-bot" } }],
+          nodes: [
+            {
+              state: "CHANGES_REQUESTED",
+              body: "Written by Spur · api-a1b2",
+              author: { login: "review-bot" },
+            },
+          ],
           pageInfo: { hasPreviousPage: true },
         },
       }),

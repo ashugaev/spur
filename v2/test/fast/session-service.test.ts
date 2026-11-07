@@ -29192,6 +29192,7 @@ describe("SessionService", () => {
     ghMock.mockResolvedValue(
       JSON.stringify({
         number: 42,
+        headRefName: "main",
         state: "OPEN",
         title: "Fix checkout",
         url: "https://github.com/acme/api/pull/42",
@@ -29233,6 +29234,42 @@ describe("SessionService", () => {
       ([, entry]) => entry.event === "session.complete.failed",
     ) as [string, { details?: unknown }];
     expect(nonTodoFailureEntry.details).toBeUndefined();
+  });
+
+  it.each([false, true])("closes only an owned pull request (%s)", async (owned) => {
+    createSessionStore({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readCurrentBranchMock.mockResolvedValue("api-1");
+    ghMock.mockImplementation(async (_cwd: string, ...args: string[]) => {
+      if (args[0] !== "pr") return emptyPrLookupEnvelope();
+      return JSON.stringify({
+        number: 42,
+        headRefName: owned ? "api-1" : "someone-elses-branch",
+        state: "OPEN",
+        title: "Fix checkout",
+        url: "https://github.com/acme/api/pull/42",
+      });
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.complete("api-1", { prAction: "close" });
+
+    expect(ghMock.mock.calls.some((call) => call[1] === "pr" && call[2] === "close")).toBe(owned);
+    expect(result.status).toBe("completed");
   });
 
   it("completes without a pull request action when the worktree is no longer a git repo", async () => {
@@ -29328,6 +29365,7 @@ describe("SessionService", () => {
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
     ghMock
+      .mockResolvedValueOnce(JSON.stringify({ headRefName: "main" }))
       .mockResolvedValueOnce(
         JSON.stringify({
           number: 42,
@@ -29376,7 +29414,7 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    ghMock.mockResolvedValueOnce(
+    ghMock.mockResolvedValueOnce(JSON.stringify({ headRefName: "main" })).mockResolvedValueOnce(
       JSON.stringify({
         number: 42,
         state: "OPEN",
@@ -29398,7 +29436,7 @@ describe("SessionService", () => {
       "--repo",
       "acme/api",
     );
-    expect(ghMock.mock.invocationCallOrder[1]).toBeLessThan(
+    expect(ghMock.mock.invocationCallOrder[2]).toBeLessThan(
       killTmuxSessionMock.mock.invocationCallOrder[0] ?? 0,
     );
     expect(result.status).toBe("completed");
@@ -29427,6 +29465,7 @@ describe("SessionService", () => {
     ghMock.mockResolvedValue(
       JSON.stringify({
         number: 42,
+        headRefName: "main",
         state: "CLOSED",
         title: "Fix checkout",
         url: "https://github.com/acme/api/pull/42",
@@ -34079,7 +34118,7 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    ghMock.mockResolvedValueOnce(
+    ghMock.mockResolvedValueOnce(JSON.stringify({ headRefName: "main" })).mockResolvedValueOnce(
       JSON.stringify({
         number: 42,
         state: "OPEN",
@@ -34101,7 +34140,7 @@ describe("SessionService", () => {
       "--repo",
       "acme/api",
     );
-    expect(ghMock.mock.invocationCallOrder[1]).toBeLessThan(
+    expect(ghMock.mock.invocationCallOrder[2]).toBeLessThan(
       killTmuxSessionMock.mock.invocationCallOrder[0] ?? 0,
     );
     expect(result.status).toBe("killed");
