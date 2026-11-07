@@ -6342,10 +6342,13 @@ projects:
             : "[runtime-sidecar-startup] diagnostic-output-too-large",
         );
       } catch {
-        console.error("[runtime-sidecar-startup] unavailable");
-      } finally {
-        throw error;
+        try {
+          console.error("[runtime-sidecar-startup] unavailable");
+        } catch {
+          // Preserve the original poll error if fallback emission also fails.
+        }
       }
+      throw error;
     }
 
     const paused = JSON.parse(
