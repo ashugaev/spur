@@ -125,7 +125,11 @@ const spawn = body("SpawnSessionRequest", [
     "boolean",
     "Agent write restriction setting; does not restrict MCP rights.",
   ),
-  field("allowedTriggers", "string[]", "Allowed configured trigger IDs."),
+  field(
+    "allowedTriggers",
+    "string[]",
+    "Allowed send trigger IDs. Omit to allow all; [] blocks every send trigger, including CI failure alerts. Carried by respawn and handoff.",
+  ),
   field("branch", "string", "Workspace branch; project naming constraints apply."),
   overrides,
   field("reuseWorkspaceSessionId", "string", "Reuse the named session workspace."),

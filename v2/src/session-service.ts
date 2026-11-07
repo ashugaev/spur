@@ -260,6 +260,7 @@ import {
   deleteTelegramReplyTarget,
   deleteTelegramSourceStateForSession,
   hasPendingTelegramSend,
+  pendingTriggerSendWorkIds,
   listActiveServiceProblems,
   readAvailableBacklogItems,
   listServiceInstances,
@@ -3700,6 +3701,9 @@ export class SessionService {
   // Epoch ms at which the last queued delivery's submit ack was confirmed;
   // lets waitForQueuedMessage release the prompt hold without its grace.
   private readonly queuedDeliveryAckedAt = new Map<string, number>();
+  // Epoch ms of the first drain-ready poll that yielded to each pending
+  // send-trigger batch (session -> workId); bounds yieldsToTriggerBatch.
+  private readonly triggerBatchYieldSince = new Map<string, Map<string, number>>();
   // Epoch ms at which the latest pane write to the session started
   // (recordPaneWrite); queuedDeliveryState's fence.
   private readonly paneWriteFenceAt = new Map<string, number>();
@@ -4203,6 +4207,7 @@ export class SessionService {
     this.codexRateLimitPoller.dispose();
     this.scheduledWakeClaims.clear();
     this.scheduledWakeLastFailure.clear();
+    this.triggerBatchYieldSince.clear();
     this.sidecarEndpoints.clear();
     this.sidecarObservation = undefined;
     this.sidecarObservationRevision += 1;
@@ -23294,6 +23299,29 @@ export class SessionService {
     return run;
   }
 
+  /**
+   * Whether a drain-ready queued message should wait for a pending send-trigger
+   * batch, which only delivers into a waiting agent after the idle window and
+   * would otherwise lose every window to the drain. Each batch workId holds the
+   * drain for at most twice the send window from its first drain-ready poll;
+   * Telegram batches never hold. A memory hold blocks trigger delivery, so it
+   * releases the drain.
+   */
+  private yieldsToTriggerBatch(sessionId: string): boolean {
+    const capMs = 2 * getIdleWaitBeforeFlushMs();
+    if (capMs === 0 || this.memoryHold.engaged) return false;
+    const workIds = pendingTriggerSendWorkIds(this.config.dataDir, sessionId);
+    const previous = this.triggerBatchYieldSince.get(sessionId);
+    if (workIds.length === 0) {
+      this.triggerBatchYieldSince.delete(sessionId);
+      return false;
+    }
+    const now = Date.now();
+    const current = new Map(workIds.map((workId) => [workId, previous?.get(workId) ?? now]));
+    this.triggerBatchYieldSince.set(sessionId, current);
+    return [...current.values()].some((firstSeenMs) => now - firstSeenMs < capMs);
+  }
+
   private async tryDeliverQueuedMessage(sessionId: string): Promise<boolean> {
     // Synchronous, before any await: a flush already registered for this
     // session owns the next attempt. Stand down instead of queuing behind
@@ -23339,6 +23367,8 @@ export class SessionService {
         const readySession = readSession(this.config.dataDir, sessionId);
         if (!readySession) return false;
         let settleObservation = readySession;
+        // Set by every settle pass: true only for plain waiting, not a wedge.
+        const settle = { holdable: false };
         // A live claude server-error wedge behaves like "waiting" for delivery
         // purposes: typing the queued message is exactly what un-wedges Claude
         // (the same mechanism as the reactivation nudge in processScheduledWakes),
@@ -23360,7 +23390,9 @@ export class SessionService {
               observePreparedSession(prepared);
             },
           );
-          if (this.queuedDeliveryState(classified) !== "waiting" && !classified.serverError) {
+          const state = this.queuedDeliveryState(classified);
+          settle.holdable = state === "waiting" && !classified.serverError;
+          if (state !== "waiting" && !classified.serverError) {
             return null;
           }
           const activityAt = resolveAgentActivityAt(classified);
@@ -23379,6 +23411,11 @@ export class SessionService {
           if (this.deliveryStopped || (await settleRemainingMs()) !== 0) {
             return false;
           }
+        }
+
+        // Before the claim: nothing is typed and remove/flush never 409 here.
+        if (settle.holdable && this.yieldsToTriggerBatch(sessionId)) {
+          return false;
         }
 
         const latest = readSession(this.config.dataDir, sessionId);
