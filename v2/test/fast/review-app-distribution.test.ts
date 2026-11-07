@@ -509,7 +509,7 @@ test("drains the observed 143MB unselected size without a 16MiB capture ceiling"
   expect(index.captured.size).toBe(1);
 });
 
-test.each(["a1", "a1b", "a-mcp", "a2", "a-large"])(
+test.each(["a1", "a1b", "a-mcp", "a-cli", "a2", "a-large"])(
   "migrated %s fixture proves reader/required-list PHASE only",
   async (mode) => {
     const required = (await readFile(join(root, "v2/required-package-files.txt"), "utf8"))
@@ -520,13 +520,14 @@ test.each(["a1", "a1b", "a-mcp", "a2", "a-large"])(
       names = names.filter((name) => name !== "web/dist-server/web-server.js");
     if (mode === "a1b") names.push("web/dist-server/web-server.js.map");
     if (mode === "a-mcp") names = names.filter((name) => name !== "dist/mcp-http.js");
+    if (mode === "a-cli") names = names.filter((name) => name !== "dist/cli.js");
     if (mode === "a-large")
       names.push(
         ...Array.from({ length: 5000 }, (_, index) => `filler/${index}-${"x".repeat(100)}`),
       );
     const input = archive(names.map((name) => ({ path: `package/${name}` })));
     const index = await verifier.readArchive(input);
-    if (["a1", "a1b", "a-mcp"].includes(mode))
+    if (["a1", "a1b", "a-mcp", "a-cli"].includes(mode))
       expect(() => verifier.assertRequiredEntries(index, required)).toThrow(
         "missing required member",
       );
@@ -856,11 +857,27 @@ test.each(["external-fs", "prefixed-external"])(
 test("existing PR/release hooks retain actual-tarball verification before install", async () => {
   const deploy = await readFile(join(root, "scripts/test-deploy.sh"), "utf8");
   const release = await readFile(join(root, ".github/workflows/release.yml"), "utf8");
+  const pack = await readFile(join(root, "scripts/pack-release.sh"), "utf8");
   const hook = await readFile(join(root, "scripts/verify-package-tarball.sh"), "utf8");
+  expect(deploy).toContain('scripts/verify-package-tarball.sh" "$TGZ"');
+  expect(deploy).toContain("npm install -g");
   expect(deploy.indexOf('scripts/verify-package-tarball.sh" "$TGZ"')).toBeLessThan(
     deploy.indexOf("npm install -g"),
   );
-  expect(release).toContain('scripts/verify-package-tarball.sh" "$tgz"');
+  expect(release).toContain('run: bash scripts/pack-release.sh "$RUNNER_TEMP"');
+  expect(pack).toContain("npm pack did not produce a valid archive");
+  expect(pack).toContain('TARBALL="$DESTINATION/$NAME"');
+  expect(pack).toContain('scripts/verify-package-tarball.sh" "$TARBALL"');
+  expect(pack).toContain("printf '%s\\n' \"$TARBALL\"");
+  expect(pack.indexOf("npm pack did not produce a valid archive")).toBeLessThan(
+    pack.indexOf('scripts/verify-package-tarball.sh" "$TARBALL"'),
+  );
+  expect(pack.indexOf('TARBALL="$DESTINATION/$NAME"')).toBeLessThan(
+    pack.indexOf('scripts/verify-package-tarball.sh" "$TARBALL"'),
+  );
+  expect(pack.indexOf('scripts/verify-package-tarball.sh" "$TARBALL"')).toBeLessThan(
+    pack.indexOf("printf '%s\\n' \"$TARBALL\""),
+  );
   expect(hook).toContain('verify-review-app-package.mjs" --tarball "$TARBALL"');
   expect(hook).not.toMatch(/tar -t|grep|skip|presence-only|postpack/);
 });

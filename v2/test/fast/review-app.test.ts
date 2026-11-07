@@ -221,6 +221,31 @@ test("publishes and reconciles completed approval without a challenger", async (
   );
   expect(f.posts()).toBe(1);
 });
+test.each(["legacy", "current"])(
+  "%s prepared receipt announces only available feedback and omits it from approval",
+  async (mode) => {
+    const f = await lifecycleFixture();
+    if (mode === "legacy") {
+      const receipt = (await readJson(f.request.receipt)) as {
+        feedback?: unknown;
+        preparedFeedback?: unknown;
+      };
+      delete receipt.feedback;
+      delete receipt.preparedFeedback;
+      await writeFile(f.request.receipt, JSON.stringify(receipt));
+    }
+    vi.mocked(publishLaneState).mockClear();
+    expect((await publishReview(f.config, f.request, draft.session, f.transport)).status).toBe(
+      "APPROVED",
+    );
+    const announcements = vi.mocked(publishLaneState).mock.calls.map(([, state]) => state);
+    expect(announcements.map((state) => state.status)).toEqual(["PENDING", "APPROVED"]);
+    if (mode === "legacy") expect(announcements[0]).not.toHaveProperty("feedback");
+    else expect(announcements[0]?.feedback).toEqual(plan);
+    expect(announcements[1]).not.toHaveProperty("feedback");
+    expect(f.posts()).toBe(1);
+  },
+);
 test.each(["clean", "race", "denial", "ambiguous", "wrong-actor"])(
   "pinned publication %s",
   async (mode) => {
