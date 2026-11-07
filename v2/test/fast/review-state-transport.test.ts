@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -257,6 +258,7 @@ test.each(["clean", "all-final-denied"] as const)(
       rows: [{ status: "failed", evidence: "attributable named assertion" }],
     });
     const result = await publishReview(f.config, request, request.session, f.transport);
+    assert.ok("inputDigest" in result);
     expect(result).toMatchObject({
       status: mode === "clean" ? "CHANGES_REQUESTED" : "BLOCKED",
       localVerdict: "CHANGES_REQUESTED",

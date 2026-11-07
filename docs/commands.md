@@ -3,8 +3,9 @@
 > Scope: CLI usage index, names and syntax only. Full behavior: `v2/src/cli.ts`, the command's own source file, or `spur <cmd> --help`. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md). CI scheduling: [ci-admission.md](ci-admission.md).
 
 Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance; fallback: [configuration.md](configuration.md).
-`review-app prepare|block|recover|status|publish`, `recover --legacy-sha256 <digest>`: daemon-free review lifecycle, non-APPROVED public feedback and publication outcomes; request/receipt contracts: `v2/src/review-app.ts`.
+`review-app prepare|block|recover|status|publish`, `node <package>/dist/review-app-cli.js`: review feedback and registered recovery; `v2/src/review-app.ts`, `v2/src/review-app-cli.ts`.
 `review-gate evaluate`: approval aggregation with `GITHUB_TOKEN` and `--policy`; `v2/src/review-gate.ts`.
+`scripts/verify-package-tarball.sh`: candidate closure check; `scripts/verify-review-app-package.mjs`.
 `mcp [--http]`, `mcp-tunnel`: daemon MCP, durable backend restart receipts, bounded daemon logs, cache-only attached PR status; `v2/src/mcp.ts`, `v2/src/mcp-tunnel.ts`; [contracts/setup](mcp.md).
 
 ## Session tools and environment
