@@ -18,6 +18,7 @@ import {
   deleteTelegramSourceStateForSession,
   deleteWorkItemLifecycle,
   hasPendingTelegramSend,
+  pendingTriggerSendWorkIds,
   listSessions,
   clearGitHubPollDisabledSession,
   listGitHubPollDisabledEntries,
@@ -3484,5 +3485,44 @@ describe("hasPendingTelegramSend", () => {
     expect(hasPendingTelegramSend(dataDir, "api-1", { unclaimedOnly: true })).toBe(false);
     recordPendingSendBatch(dataDir, telegramRecord("api:chat:api-1", "api-1"));
     expect(hasPendingTelegramSend(dataDir, "api-1", { unclaimedOnly: true })).toBe(true);
+  });
+});
+
+describe("pendingTriggerSendWorkIds", () => {
+  const claim = {
+    controllerId: "c",
+    routeLeaseId: "l",
+    claimId: "id",
+    claimedAt: "2026-01-01T00:00:00.000Z",
+  };
+
+  it("lists this session's non-telegram batches, claimed or not, keyed by workId or queueKey", async () => {
+    const dataDir = await newDataDir();
+    expect(pendingTriggerSendWorkIds(dataDir, "api-1")).toEqual([]);
+
+    recordPendingSendBatch(dataDir, reviewPendingBatch({ queueKey: "api:ci:api-1", workId: "w1" }));
+    recordPendingSendBatch(
+      dataDir,
+      servicePendingBatch({ queueKey: "api:notify:api-1", workId: "w2", claim }),
+    );
+    recordPendingSendBatch(dataDir, reviewPendingBatch({ queueKey: "api:legacy:api-1" }));
+    recordPendingSendBatch(
+      dataDir,
+      telegramPendingBatch({ queueKey: "api:chat:api-1", workId: "tg" }),
+    );
+    recordPendingSendBatch(
+      dataDir,
+      servicePendingBatch({
+        queueKey: "api:notify:api-2",
+        workId: "other",
+        batch: { kind: "service", sessionId: "api-2", serviceId: "web", ruleIds: ["crash"] },
+      }),
+    );
+
+    expect(pendingTriggerSendWorkIds(dataDir, "api-1").sort()).toEqual([
+      "api:legacy:api-1",
+      "w1",
+      "w2",
+    ]);
   });
 });

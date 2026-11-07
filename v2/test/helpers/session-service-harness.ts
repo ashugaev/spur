@@ -129,6 +129,7 @@ const deleteServiceSourceStatesForSessionMock: Mock = vi.fn();
 const deleteTelegramSourceStateForSessionMock: Mock = vi.fn();
 const deleteTelegramReplyTargetMock: Mock = vi.fn();
 const hasPendingTelegramSendMock: Mock = vi.fn();
+const pendingTriggerSendWorkIdsMock: Mock = vi.fn();
 const listActiveServiceProblemsMock: Mock = vi.fn();
 const listServiceInstancesMock: Mock = vi.fn();
 const listServiceInstancesForSessionMock: Mock = vi.fn();
@@ -694,6 +695,7 @@ vi.mock("../../src/metadata.js", () => ({
   deleteTelegramSourceStateForSession: deleteTelegramSourceStateForSessionMock,
   deleteTelegramReplyTarget: deleteTelegramReplyTargetMock,
   hasPendingTelegramSend: hasPendingTelegramSendMock,
+  pendingTriggerSendWorkIds: pendingTriggerSendWorkIdsMock,
   listActiveServiceProblems: listActiveServiceProblemsMock,
   listServiceInstances: listServiceInstancesMock,
   listServiceInstancesForSession: listServiceInstancesForSessionMock,
@@ -1577,6 +1579,7 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   sendTelegramChatActionMock.mockReset().mockResolvedValue({});
   deleteTelegramReplyTargetMock.mockReset();
   hasPendingTelegramSendMock.mockReset().mockReturnValue(false);
+  pendingTriggerSendWorkIdsMock.mockReset().mockReturnValue([]);
   editTelegramTopicMock.mockReset().mockResolvedValue(true);
   closeTelegramTopicMock.mockReset().mockResolvedValue(undefined);
   writeTelegramBindingsMock.mockReset();
@@ -2012,6 +2015,7 @@ export {
   deleteTelegramSourceStateForSessionMock,
   deleteTelegramReplyTargetMock,
   hasPendingTelegramSendMock,
+  pendingTriggerSendWorkIdsMock,
   listServiceInstancesForSessionMock,
   readServiceInstanceMock,
   writeServiceInstanceMock,

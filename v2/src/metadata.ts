@@ -2830,6 +2830,19 @@ export function hasPendingTelegramSend(
   return false;
 }
 
+/**
+ * Work ids of this session's persisted non-Telegram send batches, claimed or
+ * not. A legacy record without a workId is identified by its queue key.
+ */
+export function pendingTriggerSendWorkIds(dataDir: string, sessionId: string): string[] {
+  const workIds: string[] = [];
+  for (const record of readPendingSendBatches(dataDir).values()) {
+    if (record.batch.kind === "telegram" || record.batch.sessionId !== sessionId) continue;
+    workIds.push(record.workId ?? record.queueKey);
+  }
+  return workIds;
+}
+
 export function recordPendingSendBatch(dataDir: string, record: PersistedPendingBatch): void {
   const records = readPendingSendBatches(dataDir);
   records.set(record.queueKey, record);
