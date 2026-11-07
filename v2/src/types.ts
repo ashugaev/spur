@@ -1248,10 +1248,8 @@ export interface SessionRecord {
   agentSessionId?: string;
   /** Cursor transcript position before the latest restore; excludes earlier activity from state. */
   cursorRestoreBoundary?: CursorRestoreBoundary;
-  /** Start of the Codex launch attempt owned by codexRestoreLaunchId. */
+  /** Start of the latest Codex restore generation for rollout state classification. */
   codexRestoreStartedAt?: string;
-  /** Internal owner of codexRestoreStartedAt; legacy timestamps have no inferred owner. */
-  codexRestoreLaunchId?: string;
   prompt: string;
   originalTaskPrompt?: string;
   startupAttachmentIds?: string[];
@@ -1449,7 +1447,6 @@ export interface SessionView extends Omit<
   | "preflightTokenUsage"
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
-  | "codexRestoreLaunchId"
   | "restoredAt"
   | "errorSource"
 > {
@@ -1491,7 +1488,6 @@ export type DashboardOmittedField =
   | "queuedMessages"
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
-  | "codexRestoreLaunchId"
   | "restoredAt"
   | "pipeline"
   | "sidecarNames"
