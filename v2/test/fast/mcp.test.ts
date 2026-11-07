@@ -28,6 +28,82 @@ async function setup() {
       client.callTool({ name, arguments: args }),
   };
 }
+it("registers strict record schemas and forwards typed path/query values through the SDK", async () => {
+  const { fixture, client, call } = await setup();
+  const tools = (await client.listTools()).tools;
+  expect(tools).toHaveLength(17);
+  const request = tools.find((tool) => tool.name === "daemon_request");
+  expect(request?.inputSchema).toMatchObject({
+    type: "object",
+    required: ["operationId"],
+    additionalProperties: false,
+    properties: {
+      pathParams: { type: "object", additionalProperties: { type: "string" } },
+      query: {
+        type: "object",
+        additionalProperties: { type: ["string", "number", "boolean"] },
+      },
+    },
+  });
+  expect(request?.outputSchema).toBeUndefined();
+  expect(
+    (await call("daemon_request", {
+      operationId: "get_session",
+      pathParams: { sessionId: session.id },
+    })).structuredContent,
+  ).toMatchObject({ ok: true, status: 200, body: { id: session.id } });
+  const query = { view: "dashboard", limit: 2, includeCompleted: false };
+  expect(
+    (await call("daemon_request", { operationId: "list_sessions", query })).isError,
+  ).toBeUndefined();
+  const expectedQuery = new URLSearchParams({
+    view: "dashboard",
+    limit: "2",
+    includeCompleted: "false",
+  });
+  expect(fixture.calls.at(-1)?.path).toBe(`/sessions?${expectedQuery}`);
+  for (const optional of [{}, { pathParams: {}, query: {} }]) {
+    expect(
+      (await call("daemon_request", { operationId: "list_projects", ...optional })).isError,
+    ).toBeUndefined();
+    expect(fixture.calls.at(-1)?.path).toBe("/projects");
+  }
+});
+it("rejects invalid SDK arguments before daemon access and retains gateway error messages", async () => {
+  const { fixture, call } = await setup();
+  for (const args of [
+    {},
+    { operationId: 1 },
+    { operationId: "get_session", pathParams: { sessionId: 1 } },
+    { operationId: "list_sessions", query: { view: {} } },
+    { operationId: "list_sessions", query: { view: null } },
+    { operationId: "list_sessions", query: { limit: Infinity } },
+    { operationId: "list_projects", extra: true },
+  ]) {
+    const before = fixture.calls.length;
+    const result = await call("daemon_request", args);
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([
+      expect.objectContaining({ type: "text", text: expect.stringContaining("Invalid arguments") }),
+    ]);
+    expect(fixture.calls).toHaveLength(before);
+  }
+  for (const [args, message] of [
+    [{ operationId: "unknown" }, "Unknown daemon operation; use describe_operations"],
+    [{ operationId: "get_session", pathParams: { sessionId: ".." } }, "Invalid path segment"],
+    [
+      { operationId: "list_projects", body: null, bodyHandle: "upload" },
+      "Use body or bodyHandle, not both",
+    ],
+  ] as const) {
+    const before = fixture.calls.length;
+    expect((await call("daemon_request", args)).structuredContent).toMatchObject({
+      ok: false,
+      message,
+    });
+    expect(fixture.calls).toHaveLength(before);
+  }
+});
 it("exposes all projects, raw conversation and complete operator requests without inherited identity", async () => {
   const { fixture, call, client } = await setup();
   expect((await client.listTools()).tools).toHaveLength(17);
