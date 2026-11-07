@@ -25765,6 +25765,9 @@ describe("SessionService", () => {
           ghMock.mockResolvedValue(
             JSON.stringify({
               number: 42,
+              headRefName: "main",
+              headRepository: { nameWithOwner: "acme/api" },
+              headRepositoryOwner: { login: "acme" },
               state: "OPEN",
               title: "Queued task",
               url: "https://github.com/acme/api/pull/42",
