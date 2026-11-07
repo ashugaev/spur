@@ -16859,6 +16859,68 @@ describe("SessionService", () => {
     expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first queued"]);
   });
 
+  it("keeps a Codex queued message when its observation changes during the wait check", async () => {
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      runningSession({
+        agent: "codex",
+        agentSessionId: "codex-thread",
+        agentLaunchId: "launch-1",
+        queuedMessages: { messages: ["first queued"], awaitingPrompt: false },
+      }),
+    );
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    const internals = service as unknown as {
+      tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
+      ensureReadyForQueuedSend(...args: unknown[]): Promise<unknown>;
+      classifySessionRecordKnown(...args: unknown[]): Promise<unknown>;
+      codexMcpDialogOverrides: Map<string, unknown>;
+    };
+    let waitCheck = false;
+    let changes = 0;
+    const ensureReady = internals.ensureReadyForQueuedSend.bind(service);
+    vi.spyOn(internals, "ensureReadyForQueuedSend").mockImplementation(async (...args) => {
+      waitCheck = false;
+      const ready = await ensureReady(...args);
+      waitCheck = true;
+      return ready;
+    });
+    const classifyKnown = internals.classifySessionRecordKnown.bind(service);
+    vi.spyOn(internals, "classifySessionRecordKnown").mockImplementation(async (...args) => {
+      if (waitCheck) {
+        changes += 1;
+        internals.codexMcpDialogOverrides.set("api-1", {
+          nativeId: "codex-thread",
+          launchId: "launch-1",
+          startedAt: null,
+          expiresAt: Date.now() + changes * 60_000,
+        });
+      }
+      return classifyKnown(...args);
+    });
+    const observationFailures = () =>
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) =>
+          entry.event === "session.message.delivery_failed" &&
+          String(entry.message).includes("Codex observation changed"),
+      );
+
+    for (let poll = 1; poll <= 2; poll += 1) {
+      await expect(internals.tryDeliverQueuedMessage("api-1")).resolves.toBe(true);
+      expect(changes).toBe(poll);
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first queued"]);
+    }
+
+    expect(observationFailures()).toHaveLength(1);
+    expect(observationFailures()[0]?.[1]).toMatchObject({ level: "error", sessionId: "api-1" });
+    expect(pendingTriggerSendWorkIdsMock).not.toHaveBeenCalled();
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
   // MUST FIX (reviewer, round 2): ensureSessionReadyForSend is a third
   // ungated consumer of a timeout-killed tmux probe reading as absence — a
   // false "not ready" here falls into relaunchSessionInPlace, which KILLS
