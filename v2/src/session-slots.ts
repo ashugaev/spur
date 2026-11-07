@@ -1,5 +1,13 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentStateStrategy } from "./agents/index.js";
@@ -640,6 +648,20 @@ exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${
   return toolDir;
 }
 
-export function removeSessionSlotTool(dataDir: string, sessionId: string): void {
-  rmSync(slotToolDir(dataDir, sessionId), { recursive: true, force: true });
+export function removeSessionSlotTool(
+  dataDir: string,
+  sessionId: string,
+  keep: readonly string[],
+): void {
+  const toolDir = slotToolDir(dataDir, sessionId);
+  const entries = existsSync(toolDir) ? readdirSync(toolDir) : [];
+  if (!entries.some((name) => keep.includes(name))) {
+    rmSync(toolDir, { recursive: true, force: true });
+    return;
+  }
+  for (const name of entries) {
+    if (!keep.includes(name)) {
+      rmSync(join(toolDir, name), { recursive: true, force: true });
+    }
+  }
 }
