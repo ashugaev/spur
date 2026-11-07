@@ -46,7 +46,7 @@ describe("store change poller", () => {
       { store: "page:a", since: 0 },
       { store: "session:s", since: 0 },
     ]);
-    expect(seenA).toEqual([]);
+    expect(seenA).toEqual([{ type: "reset" }]);
     await vi.advanceTimersByTimeAsync(STORE_POLL_INTERVAL_MS - 1);
     expect(calls).toHaveLength(2);
     await vi.advanceTimersByTimeAsync(1);
@@ -54,7 +54,7 @@ describe("store change poller", () => {
       { store: "page:a", since: 7 },
       { store: "session:s", since: 3 },
     ]);
-    expect(seenA).toEqual([{ type: "changes", changes: [row(8), row(9)] }]);
+    expect(seenA).toEqual([{ type: "reset" }, { type: "changes", changes: [row(8), row(9)] }]);
     await vi.advanceTimersByTimeAsync(STORE_POLL_INTERVAL_MS);
     expect(calls.slice(4)).toEqual([
       { store: "page:a", since: 9 },
@@ -72,7 +72,7 @@ describe("store change poller", () => {
     await vi.advanceTimersByTimeAsync(STORE_POLL_INTERVAL_MS);
     expect(calls).toHaveLength(2);
     expect(one).toEqual(two);
-    expect(one).toHaveLength(1);
+    expect(one).toEqual([{ type: "reset" }, { type: "changes", changes: [row(2)] }]);
   });
 
   it("emits reset and moves the cursor to lastSeq", async () => {
@@ -81,8 +81,22 @@ describe("store change poller", () => {
     const seen: StoreChangeEvent[] = [];
     poller.subscribe("page:a", (event) => seen.push(event));
     await vi.advanceTimersByTimeAsync(2 * STORE_POLL_INTERVAL_MS);
-    expect(seen).toEqual([{ type: "reset" }]);
+    expect(seen).toEqual([{ type: "reset" }, { type: "reset" }]);
     expect(calls[2]).toEqual({ store: "page:a", since: 4 });
+  });
+
+  it("resets subscribers once the first poll fixes the cursor, so reads made before it are redone", async () => {
+    const { poller, queue } = rig();
+    queue("page:a", { changes: [], lastSeq: 7 });
+    const seen: StoreChangeEvent[] = [];
+    poller.subscribe("page:a", (event) => seen.push(event));
+    expect(seen).toEqual([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen).toEqual([{ type: "reset" }]);
+    const late: StoreChangeEvent[] = [];
+    poller.subscribe("page:a", (event) => late.push(event));
+    await vi.advanceTimersByTimeAsync(STORE_POLL_INTERVAL_MS);
+    expect(late).toEqual([]);
   });
 
   it("stops a store's timer when its last subscriber leaves", async () => {

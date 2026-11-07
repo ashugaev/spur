@@ -34,7 +34,7 @@ export interface StoreChangePollerDeps {
 
 interface StoreEntry {
   listeners: Set<StoreChangeListener>;
-  // null until the first poll fixes the cursor at the store's current lastSeq
+  // null until the first poll fixes the cursor at the store's current lastSeq and resets subscribers
   cursor: number | null;
   timer: ReturnType<typeof setTimeout> | undefined;
   inflight: boolean;
@@ -65,8 +65,10 @@ export function createStoreChangePoller(deps: StoreChangePollerDeps): StoreChang
       const page = await deps.fetchChanges(store, entry.cursor ?? 0);
       if (entries.get(store) !== entry || !isChangesResponse(page)) return;
       if (entry.cursor === null) {
-        // First poll only fixes the cursor; subscribers read current docs themselves.
+        // Writes between a subscriber's first read and this cursor are in neither: the
+        // reset makes subscribers read again from the fixed cursor.
         entry.cursor = page.lastSeq;
+        emit(entry, { type: "reset" });
       } else if (page.reset) {
         entry.cursor = page.lastSeq;
         emit(entry, { type: "reset" });
@@ -108,10 +110,10 @@ export function createStoreChangePoller(deps: StoreChangePollerDeps): StoreChang
 }
 
 async function fetchStoreChanges(store: string, since: number): Promise<StoreChangesResponse> {
-  const response = await fetch(
-    `/api/stores/${encodeURIComponent(store)}/changes?since=${since}`,
-    { cache: "no-store", headers: { accept: "application/json" } },
-  );
+  const response = await fetch(`/api/stores/${encodeURIComponent(store)}/changes?since=${since}`, {
+    cache: "no-store",
+    headers: { accept: "application/json" },
+  });
   if (!response.ok) throw new Error(`changes ${response.status}`);
   return (await response.json()) as StoreChangesResponse;
 }
