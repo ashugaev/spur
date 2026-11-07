@@ -3886,6 +3886,34 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("keeps triggerOrigin on the errored record of a resource-queued preparation failure", async () => {
+      const config = baseConfig();
+      loadConfigMock.mockReturnValue({
+        ...config,
+        admission: { ...config.admission, maxLiveSessions: 1 },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-live", sessionRecord({ id: "api-live", status: "running" }));
+      logSpurEventMock.mockImplementation((_dataDir: string, entry: { event: string }) => {
+        if (entry.event === "session.input.received") throw new Error("input log failed");
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.spawn({ project: "api", prompt: "hello" }, { triggerOrigin }),
+      ).rejects.toThrow("input log failed");
+
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "errored",
+        launchCommand: "",
+        triggerOrigin,
+      });
+      expect(sessions.get("api-1")).not.toHaveProperty("spawnIntent");
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
     it("keeps triggerOrigin on the errored record of a hard spawn failure", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
