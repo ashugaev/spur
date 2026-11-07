@@ -15,9 +15,9 @@ import { z } from "zod";
 import { restartDaemonIfRunning } from "./client.js";
 import { appendUserAction } from "./user-action-log.js";
 
-const operationId = z.string().uuid();
+export const daemonOperationIdSchema = z.guid();
 const receiptSchema = z.object({
-  operationId,
+  operationId: daemonOperationIdSchema,
   action: z.literal("daemon.restart"),
   status: z.enum(["accepted", "completed", "unknown"]),
   acceptedAt: z.string(),
@@ -50,7 +50,7 @@ export class McpDaemonControl {
   }
 
   private read(id: string): DaemonRestartReceipt | undefined {
-    const path = join(this.directory, `${operationId.parse(id)}.json`);
+    const path = join(this.directory, `${daemonOperationIdSchema.parse(id)}.json`);
     let fd: number | undefined;
     try {
       fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -123,7 +123,7 @@ export class McpDaemonControl {
     id: string,
     current: DaemonIdentity,
   ): { receipt: DaemonRestartReceipt; duplicate: boolean } {
-    operationId.parse(id);
+    daemonOperationIdSchema.parse(id);
     const lock = join(this.directory, "admission.lock");
     // A crashed admission holds the lock: fail closed rather than replay effects.
     mkdirSync(lock, { mode: 0o700 });
