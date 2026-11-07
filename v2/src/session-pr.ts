@@ -507,7 +507,9 @@ export async function resolveSessionPrBinding(session: SessionRecord): Promise<{
   for (const destination of [context.push, context.upstream]) {
     if (!destination) continue;
     const repo = parseRepoSlugFromRemoteUrl(destination.url);
-    const identity = repo ? `${repo.host}/${repo.owner}/${repo.name}`.toLowerCase() : destination.url;
+    const identity = repo
+      ? `${repo.host}/${repo.owner}/${repo.name}`.toLowerCase()
+      : destination.url;
     locations.set(`${identity}#${destination.branch}`, destination);
   }
   const destinations = [...locations.values()];

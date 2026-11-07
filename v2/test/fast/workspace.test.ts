@@ -1275,11 +1275,21 @@ describe("git read probes", () => {
     ["refs/remotes/origin/custom", "", true],
   ])("preserves the mapped remote branch destination (%s)", async (push, upstream, pushing) => {
     mockGitSuccess(`refs/heads/new\torigin\t${push}\t${upstream}`);
-    mockGitSuccess("remote.origin.fetch=+refs/heads/*:refs/remotes/origin/*" + (pushing ? "" : "\nbranch.new.remote=origin\nbranch.new.merge=refs/heads/old"));
+    mockGitSuccess(
+      "remote.origin.fetch=+refs/heads/*:refs/remotes/origin/*" +
+        (pushing ? "" : "\nbranch.new.remote=origin\nbranch.new.merge=refs/heads/old"),
+    );
     mockGitSuccess("git@github.com:acme/api.git");
 
-    const destination = { url: "git@github.com:acme/api.git", branch: push.endsWith("custom") ? "custom" : "old" };
-    await expect(readBranchDestination("/wt", "new")).resolves.toEqual({ status: "known", push: pushing ? destination : null, upstream: pushing ? null : destination });
+    const destination = {
+      url: "git@github.com:acme/api.git",
+      branch: push.endsWith("custom") ? "custom" : "old",
+    };
+    await expect(readBranchDestination("/wt", "new")).resolves.toEqual({
+      status: "known",
+      push: pushing ? destination : null,
+      upstream: pushing ? null : destination,
+    });
     expect(mockExecFileAsync).toHaveBeenLastCalledWith(
       "git",
       pushing
@@ -1291,7 +1301,10 @@ describe("git read probes", () => {
 
   it.each([
     ["refs/heads/new\torigin\trefs/remotes/other/old", ""],
-    ["refs/heads/new\torigin\t\tother\trefs/remotes/other/old", "branch.new.remote=origin\nbranch.new.merge=refs/heads/old"],
+    [
+      "refs/heads/new\torigin\t\tother\trefs/remotes/other/old",
+      "branch.new.remote=origin\nbranch.new.merge=refs/heads/old",
+    ],
     ["refs/heads/new/sub\torigin\t\torigin\trefs/remotes/origin/old", ""],
     ["refs/heads/new\torigin\t\torigin\t", "branch.new.remote=origin"],
   ])("rejects unknown or contradictory tracked destinations (%s)", async (push, upstream) => {
@@ -1324,12 +1337,7 @@ describe("git read probes", () => {
       ],
       readOpts,
     );
-    expect(mockExecFileAsync).toHaveBeenNthCalledWith(
-      2,
-      "git",
-      ["config", "--list"],
-      readOpts,
-    );
+    expect(mockExecFileAsync).toHaveBeenNthCalledWith(2, "git", ["config", "--list"], readOpts);
     expect(mockExecFileAsync).toHaveBeenNthCalledWith(
       3,
       "git",
@@ -1354,7 +1362,9 @@ describe("git read probes", () => {
   ])("rejects %s (%s)", async (refs) => {
     mockGitSuccess(refs);
     await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBeNull();
-    expect(mockExecFileAsync.mock.calls.some((call) => (call[1] as string[]).includes("get-url"))).toBe(false);
+    expect(
+      mockExecFileAsync.mock.calls.some((call) => (call[1] as string[]).includes("get-url")),
+    ).toBe(false);
   });
 
   it.each([

@@ -38,8 +38,14 @@ describe("branch push destination", () => {
     const git = (...args: string[]) => execFileAsync("/usr/bin/git", args, { cwd: repo });
     await git("init", "-b", branch);
     await git(
-      "-c", "user.name=Spur Test", "-c", "user.email=test@example.invalid",
-      "commit", "--allow-empty", "-m", "fixture",
+      "-c",
+      "user.name=Spur Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "fixture",
     );
     await git("remote", "add", "origin", "https://github.com/acme/api.git");
     return { repo, git };
@@ -71,7 +77,9 @@ describe("branch push destination", () => {
           push:
             mode === "current" || mode === "matching"
               ? location("new")
-              : mode === "upstream" ? location("old") : null,
+              : mode === "upstream"
+                ? location("old")
+                : null,
           upstream: location("old"),
         });
       }
@@ -82,7 +90,9 @@ describe("branch push destination", () => {
     const { repo, git } = await createContextRepo("new");
     await git("config", "push.default", "simple");
     await expect(readBranchDestination(repo, "new")).resolves.toEqual({
-      status: "known", push: null, upstream: null,
+      status: "known",
+      push: null,
+      upstream: null,
     });
   });
 
@@ -116,16 +126,22 @@ describe("branch push destination", () => {
     await expect(readBranchDestination(repo, "new")).resolves.toEqual({ status: "unknown" });
   });
 
-  it.each(["simple", "current", "matching"])("accepts a remote-only %s selector without upstream", async (mode) => {
-    const { repo, git } = await createContextRepo("new");
-    await git("config", "branch.new.remote", "origin");
-    await git("config", "push.default", mode);
-    const push = mode === "simple" ? null : { url: "https://github.com/acme/api.git", branch: "new" };
-    await expect(readBranchDestination(repo, "new")).resolves.toEqual({
-      status: "known", push, upstream: null,
-    });
-    await expect(readBranchPushUrl(repo, "new")).resolves.toBe(push?.url ?? null);
-  });
+  it.each(["simple", "current", "matching"])(
+    "accepts a remote-only %s selector without upstream",
+    async (mode) => {
+      const { repo, git } = await createContextRepo("new");
+      await git("config", "branch.new.remote", "origin");
+      await git("config", "push.default", mode);
+      const push =
+        mode === "simple" ? null : { url: "https://github.com/acme/api.git", branch: "new" };
+      await expect(readBranchDestination(repo, "new")).resolves.toEqual({
+        status: "known",
+        push,
+        upstream: null,
+      });
+      await expect(readBranchPushUrl(repo, "new")).resolves.toBe(push?.url ?? null);
+    },
+  );
 
   it.each([false, true])("rejects an incomplete or ambiguous upstream (%s)", async (multiple) => {
     const { repo, git } = await createContextRepo("new");
@@ -141,7 +157,9 @@ describe("branch push destination", () => {
     const { repo, git } = await createContextRepo("new");
     await git("config", "push.default", mode);
     await expect(readBranchDestination(repo, "new")).resolves.toEqual({
-      status: "known", push: { url: "https://github.com/acme/api.git", branch: "new" }, upstream: null,
+      status: "known",
+      push: { url: "https://github.com/acme/api.git", branch: "new" },
+      upstream: null,
     });
     await expect(readBranchPushUrl(repo, "new")).resolves.toBe("https://github.com/acme/api.git");
   });
@@ -152,7 +170,11 @@ describe("branch push destination", () => {
     await git("config", "branch.new.remote", "origin");
     await git("config", "branch.new.merge", "refs/heads/new");
     await git("config", "push.default", "current");
-    await expect(readBranchDestination(repo, "new")).resolves.toEqual({ status: "known", push: { url: "https://github.com/contributor/api.git", branch: "new" }, upstream: { url: "https://github.com/acme/api.git", branch: "new" } });
+    await expect(readBranchDestination(repo, "new")).resolves.toEqual({
+      status: "known",
+      push: { url: "https://github.com/contributor/api.git", branch: "new" },
+      upstream: { url: "https://github.com/acme/api.git", branch: "new" },
+    });
   });
 
   it.each([
@@ -199,7 +221,11 @@ describe("branch push destination", () => {
 
     await expect(readBranchDestination(repo, branch)).resolves.toEqual(
       case_.expected
-        ? { status: "known", push: { url: remote, branch: case_.expected }, upstream: { url: remote, branch: "first" } }
+        ? {
+            status: "known",
+            push: { url: remote, branch: case_.expected },
+            upstream: { url: remote, branch: "first" },
+          }
         : { status: "unknown" },
     );
     await expect(readBranchPushUrl(repo, branch)).resolves.toBe(

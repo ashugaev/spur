@@ -38196,48 +38196,63 @@ describe("SessionService", () => {
     expect(result.status).toBe("completed");
   });
 
-  it.each(["current", "matching"])("retains the open PR guard after the local branch is renamed (%s)", async () => {
-    createSessionStore({
-      ...runningSession(),
-      id: "api-1",
-      branch: "renamed",
-      pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
-    });
-    readCurrentBranchMock.mockResolvedValue("renamed");
-    readBranchDestinationMock.mockResolvedValue({
-      status: "known",
-      push: { url: "git@github.com:acme/api.git", branch: "renamed" },
-      upstream: { url: "git@github.com:acme/api.git", branch: "api-1" },
-    });
-    const pr = JSON.stringify({
-      number: 42,
-      headRefName: "api-1",
-      headRepository: { nameWithOwner: "acme/api" },
-      headRepositoryOwner: { login: "acme" },
-      state: "OPEN",
-      title: "Fix checkout",
-      url: "https://github.com/acme/api/pull/42",
-    });
-    const defaultGh = ghMock.getMockImplementation();
-    if (!defaultGh) throw new Error("missing GitHub test harness");
-    ghMock.mockImplementation((cwd: string, ...args: string[]) =>
-      args[0] === "pr" ? Promise.resolve(pr) : defaultGh(cwd, ...args),
-    );
-    const { OpenPrActionRequiredError, SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    await expect(service.complete("api-1")).rejects.toBeInstanceOf(OpenPrActionRequiredError);
-    expect(killTmuxSessionMock).not.toHaveBeenCalled();
-    expect(ghMock.mock.calls.some((call) => call[1] === "pr" && call[2] === "close")).toBe(false);
-  });
+  it.each(["current", "matching"])(
+    "retains the open PR guard after the local branch is renamed (%s)",
+    async () => {
+      createSessionStore({
+        ...runningSession(),
+        id: "api-1",
+        branch: "renamed",
+        pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+      });
+      readCurrentBranchMock.mockResolvedValue("renamed");
+      readBranchDestinationMock.mockResolvedValue({
+        status: "known",
+        push: { url: "git@github.com:acme/api.git", branch: "renamed" },
+        upstream: { url: "git@github.com:acme/api.git", branch: "api-1" },
+      });
+      const pr = JSON.stringify({
+        number: 42,
+        headRefName: "api-1",
+        headRepository: { nameWithOwner: "acme/api" },
+        headRepositoryOwner: { login: "acme" },
+        state: "OPEN",
+        title: "Fix checkout",
+        url: "https://github.com/acme/api/pull/42",
+      });
+      const defaultGh = ghMock.getMockImplementation();
+      if (!defaultGh) throw new Error("missing GitHub test harness");
+      ghMock.mockImplementation((cwd: string, ...args: string[]) =>
+        args[0] === "pr" ? Promise.resolve(pr) : defaultGh(cwd, ...args),
+      );
+      const { OpenPrActionRequiredError, SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await expect(service.complete("api-1")).rejects.toBeInstanceOf(OpenPrActionRequiredError);
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(ghMock.mock.calls.some((call) => call[1] === "pr" && call[2] === "close")).toBe(false);
+    },
+  );
 
   it("completes an unpushed simple session after rejecting a foreign reference", async () => {
-    createSessionStore({ ...runningSession(), pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" } });
+    createSessionStore({
+      ...runningSession(),
+      pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+    });
     readBranchDestinationMock.mockResolvedValue({ status: "known", push: null, upstream: null });
     const defaultGh = ghMock.getMockImplementation();
     if (!defaultGh) throw new Error("missing GitHub test harness");
-    ghMock.mockImplementation((cwd: string, ...args: string[]) => args[0] === "pr" ? Promise.resolve(JSON.stringify({
-      headRefName: "foreign", headRepository: { nameWithOwner: "acme/api" }, headRepositoryOwner: { login: "acme" }, url: "https://github.com/acme/api/pull/42",
-    })) : defaultGh(cwd, ...args));
+    ghMock.mockImplementation((cwd: string, ...args: string[]) =>
+      args[0] === "pr"
+        ? Promise.resolve(
+            JSON.stringify({
+              headRefName: "foreign",
+              headRepository: { nameWithOwner: "acme/api" },
+              headRepositoryOwner: { login: "acme" },
+              url: "https://github.com/acme/api/pull/42",
+            }),
+          )
+        : defaultGh(cwd, ...args),
+    );
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
     expect((await service.complete("api-1")).status).toBe("completed");
