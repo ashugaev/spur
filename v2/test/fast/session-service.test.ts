@@ -4838,15 +4838,27 @@ describe("SessionService", () => {
         (service as unknown as { closeoutTakesInFlight: Map<string, unknown> })
           .closeoutTakesInFlight.size,
       ).toBe(1);
-      const outcome = await Promise.race([
-        service.restore("api-1").then(
-          () => "resolved",
-          (error: unknown) => error,
-        ),
-        new Promise((resolve) => setTimeout(() => resolve("waited"), 500)),
-      ]);
+      const outcomes: unknown[] = [];
+      for (const attempt of [
+        () => service.restore("api-1"),
+        () => service.reopen("api-1"),
+        () => service.handoff("api-1", { agent: "cursor" }),
+      ]) {
+        let timer: NodeJS.Timeout | undefined;
+        const outcome = await Promise.race([
+          attempt().then(
+            () => "resolved",
+            (error: unknown) => error,
+          ),
+          new Promise((resolve) => {
+            timer = setTimeout(() => resolve("waited"), 500);
+          }),
+        ]);
+        clearTimeout(timer);
+        outcomes.push(outcome);
+      }
 
-      expect(outcome).toBeInstanceOf(SessionStartingError);
+      for (const outcome of outcomes) expect(outcome).toBeInstanceOf(SessionStartingError);
       expect(api1Launches()).toHaveLength(0);
       settleGate("reject");
       await spawning;
