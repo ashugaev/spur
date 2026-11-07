@@ -20785,7 +20785,7 @@ export class SessionService {
     const closeoutTake = this.closeoutTakeFrom(session.id);
     if (closeoutTake) {
       throw new SessionStartingError(
-        `Session ${session.id} closeout is moving to ${closeoutTake.takerId}; retry after it launches`,
+        `Session ${session.id} closeout is moving to ${closeoutTake.takerId}; retry after it launches or kill ${closeoutTake.takerId}`,
       );
     }
     this.assertNoHeldCloseoutTake(session.id);
@@ -22939,7 +22939,7 @@ export class SessionService {
     );
     if (taker) {
       throw new SessionStartingError(
-        `Session ${sessionId} closeout is moving to ${taker.id}; retry after it launches`,
+        `Session ${sessionId} closeout is moving to ${taker.id}; retry after it launches or kill ${taker.id}`,
       );
     }
   }
