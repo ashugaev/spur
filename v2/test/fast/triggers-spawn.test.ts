@@ -166,7 +166,7 @@ describe("durable spawn admission", () => {
       title: "task",
       repo: "repo",
     };
-    f.spawn.mockRejectedValue(new SessionAdmissionDeniedError("cap", "cap"));
+    f.spawn.mockRejectedValue(new Error("spawn failed"));
     const controller = startConfiguredTriggers(f.deps);
     const emit = (occurrenceId: string) =>
       f.deps.bus.emit({
@@ -184,7 +184,7 @@ describe("durable spawn admission", () => {
       expect(f.spawn).toHaveBeenCalledTimes(1);
       expect(readWorkItemLifecycles(f.dataDir, "test", "tick").get(data.externalId)).toMatchObject({
         state: "failed",
-        members: [expect.objectContaining({ attempts: 0, deferrals: 1 })],
+        members: [expect.objectContaining({ attempts: 1, deferrals: 0 })],
       });
       f.spawn.mockResolvedValue({ id: "test-owner", status: "running" });
       await vi.advanceTimersByTimeAsync(15_000);

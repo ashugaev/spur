@@ -1328,6 +1328,7 @@ function validateDurableSpawnFields(session: SessionRecord): void {
       "launchSelection",
       "submission",
       "pane",
+      "telegramOrigin",
     ],
     "intent",
   );
@@ -1493,7 +1494,8 @@ function validateDurableSpawnFields(session: SessionRecord): void {
     const validOffset = (value: number): boolean => Number.isSafeInteger(value) && value >= 0;
     if (normalized.agent === "claude" || normalized.agent === "cursor") {
       durableCheck(
-        durableString(normalized.file) && validOffset(normalized.size),
+        (normalized.file === null || durableString(normalized.file)) &&
+          validOffset(normalized.size),
         "submission transcript offset",
       );
       if (normalized.agent === "cursor" && normalized.rotated) {
@@ -1528,6 +1530,24 @@ function validateDurableSpawnFields(session: SessionRecord): void {
         Number.isSafeInteger(pane["starttime"]) &&
         pane["starttime"] >= 0,
       "pane identity",
+    );
+  }
+  if (intent["telegramOrigin"] !== undefined) {
+    const origin = durableObject(
+      intent["telegramOrigin"],
+      ["projectId", "sourceId", "chatId", "messageThreadId"],
+      "Telegram origin",
+    );
+    durableCheck(
+      durableString(origin["projectId"]) &&
+        durableString(origin["sourceId"]) &&
+        typeof origin["chatId"] === "number" &&
+        Number.isSafeInteger(origin["chatId"]) &&
+        (origin["messageThreadId"] === undefined ||
+          (typeof origin["messageThreadId"] === "number" &&
+            Number.isSafeInteger(origin["messageThreadId"]) &&
+            origin["messageThreadId"] > 0)),
+      "Telegram origin values",
     );
   }
 }

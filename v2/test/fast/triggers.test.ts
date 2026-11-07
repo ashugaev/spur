@@ -6160,6 +6160,117 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it.each([
+    {
+      name: "retains the original spawn failure when a queued trigger birth was killed",
+      mode: "rejected",
+      error: new Error("original spawn failure"),
+      expectedError: "original spawn failure",
+    },
+    {
+      name: "retains the original spawn failure when a queued trigger birth was killed: undefined",
+      mode: "rejected",
+      error: undefined,
+      expectedError: "undefined",
+    },
+    {
+      name: "retains the original spawn failure when a queued trigger birth was killed: zero",
+      mode: "rejected",
+      error: 0,
+      expectedError: "0",
+    },
+    {
+      name: "rejects a killed trigger birth returned by same-key spawn",
+      mode: "resolved",
+      error: undefined,
+      expectedError: "Spawn cancelled for api-9",
+    },
+    {
+      name: "rejects a trigger birth killed while response enrichment is pending",
+      mode: "race",
+      error: new Error("original spawn failure"),
+      expectedError: "original spawn failure",
+    },
+    {
+      name: "recovers a running trigger birth after spawn rejects",
+      mode: "running",
+      error: new Error("response lost after acceptance"),
+      expectedError: undefined,
+    },
+  ])("trigger birth result: $name", async ({ mode, error, expectedError }) => {
+    const birth = {
+      id: "api-9",
+      status: mode === "running" ? "running" : mode === "race" ? "spawning" : "killed",
+      spawnReceipt: { version: 1, acceptedAt: "2026-11-04T00:00:00.000Z" },
+    };
+    const spawnMock = vi.fn();
+    if (mode === "resolved") spawnMock.mockResolvedValue({ ...birth });
+    else spawnMock.mockRejectedValue(error);
+    let releaseGet: ((view: { id: string; status: string }) => void) | undefined;
+    const getMock = vi.fn().mockResolvedValue({ ...birth });
+    if (mode === "race")
+      getMock.mockImplementationOnce(
+        () =>
+          new Promise<{ id: string; status: string }>((resolve) => {
+            releaseGet = resolve;
+          }),
+      );
+    const getTriggerBirthMock = vi.fn(() => birth);
+    const savedWork = vi.spyOn(pendingSpawnWork, "set");
+    const savedBlock = () => savedWork.mock.calls.at(-1)?.[1].blocks[0];
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    // Work items take the claim path; the durable journal path owns trigger births.
+    const controller = startConfiguredTriggers({
+      config: spawnConfig() as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+        get: getMock,
+        getTriggerBirth: getTriggerBirthMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(cronEvent());
+      if (mode === "race") {
+        await vi.waitFor(() => expect(getMock).toHaveBeenCalledWith(birth.id));
+        birth.status = "killed";
+        releaseGet?.({ id: birth.id, status: "spawning" });
+      }
+      const retained = structuredClone(birth);
+      await vi.waitFor(() =>
+        expect(savedBlock()?.state).toBe(expectedError === undefined ? "succeeded" : "failed"),
+      );
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(getTriggerBirthMock).toHaveBeenCalledWith(
+        "api",
+        expect.any(String),
+        spawnMock.mock.calls[0]?.[0],
+      );
+      expect(birth).toEqual(retained);
+      if (expectedError === undefined) {
+        expect(savedBlock()).toMatchObject({ state: "succeeded", sessionId: birth.id });
+      } else {
+        expect(savedBlock()).toMatchObject({ state: "failed", error: expectedError });
+        expect(
+          savedWork.mock.calls.some(([, work]) =>
+            work.blocks.some((block) => block.state === "succeeded"),
+          ),
+        ).toBe(false);
+        expect(
+          logSpurEventMock.mock.calls.some(
+            ([, event]) => event.event === "trigger.spawn.completed",
+          ),
+        ).toBe(false);
+      }
+    } finally {
+      await controller.stop();
+      savedWork.mockRestore();
+    }
+  });
+
   it("retries a failed work-item spawn only after 45 minutes", async () => {
     const spawnMock = vi
       .fn()
@@ -7177,14 +7288,13 @@ describe("startConfiguredTriggers", () => {
     it("migrates failed outer tails without assigning aggregate denials or native attempts", async () => {
       const f = await legacyJournalFixture("failed");
       const { bus, controller } = await startTriggers(f.config, f.service);
-      const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
-      f.spawn.mockRejectedValue(new SessionAdmissionDeniedError("capacity", "memory_guard"));
+      f.spawn.mockRejectedValue(new Error("capacity"));
       try {
         bus.emit(workItemEvent());
         await vi.waitFor(() => expect(f.spawn).toHaveBeenCalledTimes(2));
         expect(f.actual.readPendingSpawnWork(f.dataDir).size).toBe(0);
         for (const member of f.members().filter((row) => row.blockIndex > 0)) {
-          expect(member).toMatchObject({ state: "failed", attempts: 0, deferrals: 1 });
+          expect(member).toMatchObject({ state: "failed", attempts: 1, deferrals: 0 });
           expect(member).not.toHaveProperty("startedAt");
           expect(member).not.toHaveProperty("sessionId");
         }
@@ -7433,54 +7543,6 @@ describe("startConfiguredTriggers", () => {
       },
     );
 
-    it.each(["memory_guard", "cap"] as const)(
-      "admission denial defers without spending an attempt (%s)",
-      async (reason) => {
-        const records = useWorkItemLifecycleStore();
-        const spawnMock = vi.fn();
-        const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
-          spawn: spawnMock,
-        });
-        const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
-        spawnMock
-          .mockRejectedValueOnce(new SessionAdmissionDeniedError("held", reason))
-          .mockResolvedValueOnce({ id: "api-10" });
-
-        try {
-          bus.emit(workItemEvent());
-          await vi.waitFor(() => {
-            expect(memberOf(records)?.state).toBe("failed");
-          });
-          const failed = memberOf(records);
-          expect(failed).toMatchObject({ attempts: 0, deferrals: 1 });
-          expect(records.get("acme/api#42")?.state).toBe("failed");
-          const retryAt = Date.parse(failed?.nextRetryAt ?? "");
-          expect(retryAt - Date.now()).toBeLessThanOrEqual(WORK_ITEM_RETRY_INTERVAL_MS);
-          expect(retryAt - Date.now()).toBeGreaterThan(WORK_ITEM_RETRY_INTERVAL_MS - 5_000);
-          expect(eventsOf("trigger.spawn.retry_deferred")).toHaveLength(1);
-          expect(eventsOf("trigger.spawn.retry_deferred")[0]?.details).toMatchObject({
-            reason,
-            deferrals: 1,
-          });
-          expect(eventsOf("trigger.spawn.retry_scheduled")).toHaveLength(0);
-
-          vi.setSystemTime(retryAt);
-          bus.emit(workItemEvent());
-          await vi.waitFor(() => {
-            expect(spawnMock).toHaveBeenCalledTimes(2);
-          });
-          expect(memberOf(records)).toMatchObject({
-            state: "running",
-            sessionId: "api-10",
-            attempts: 1,
-            deferrals: 1,
-          });
-        } finally {
-          await controller.stop();
-        }
-      },
-    );
-
     it("keeps retrying past 24 failed attempts every 45 minutes", async () => {
       const records = useWorkItemLifecycleStore([
         workItemLifecycle([failedMember({ attempts: 30 })]),
@@ -7507,33 +7569,6 @@ describe("startConfiguredTriggers", () => {
           expect(spawnMock).toHaveBeenCalledTimes(2);
         });
         expect(memberOf(records)).toMatchObject({ attempts: 32 });
-        expect(eventsOf("trigger.spawn.retry_exhausted")).toHaveLength(0);
-      } finally {
-        await controller.stop();
-      }
-    });
-
-    it("keeps deferring past 96 admission denials", async () => {
-      const records = useWorkItemLifecycleStore([
-        workItemLifecycle([failedMember({ attempts: 0, deferrals: 100 })]),
-      ]);
-      const spawnMock = vi.fn();
-      const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
-        spawn: spawnMock,
-      });
-      const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
-      spawnMock.mockRejectedValue(new SessionAdmissionDeniedError("held", "memory_guard"));
-
-      try {
-        bus.emit(workItemEvent());
-        await vi.waitFor(() => {
-          expect(eventsOf("trigger.spawn.retry_deferred")).toHaveLength(1);
-        });
-        const deferred = memberOf(records);
-        expect(deferred).toMatchObject({ attempts: 0, deferrals: 101 });
-        expect(Date.parse(deferred?.nextRetryAt ?? "") - Date.now()).toBeGreaterThan(
-          WORK_ITEM_RETRY_INTERVAL_MS - 5_000,
-        );
         expect(eventsOf("trigger.spawn.retry_exhausted")).toHaveLength(0);
       } finally {
         await controller.stop();

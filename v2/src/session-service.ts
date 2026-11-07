@@ -3320,6 +3320,8 @@ interface SessionSpawnOptions {
   validatedLaunchSelection?: AgentLaunchSelection;
   closeoutOwnerTransfer?: boolean;
   receiptToken?: symbol;
+  /** HTTP accepts a spawning identity when admission must wait. */
+  acceptQueued?: boolean;
   /** Set by source adapters, never from the HTTP body. */
   telegramOrigin?: TelegramSpawnOrigin;
   triggerOrigin?: WorkItemTriggerOrigin;
@@ -3349,7 +3351,7 @@ interface PreparedSpawn {
 }
 
 class SpawnAdmissionCancelledError extends Error {
-  constructor(readonly reason: "disposed" | "killed") {
+  constructor(readonly reason: "disposed" | "killed" | "handoff") {
     super(`Spawn admission cancelled: ${reason}`);
   }
 }
@@ -3361,6 +3363,24 @@ interface SpawnAdmissionWaiter {
   reservation?: symbol;
   resolve: (reservation: symbol) => void;
   reject: (error: SpawnAdmissionCancelledError) => void;
+}
+
+interface HandoffAdmission {
+  token: symbol;
+  session: SessionRecord;
+  launchSelection: AgentLaunchSelection;
+  admissionReservation: symbol;
+}
+
+interface BackgroundSpawnOptions {
+  triggerBirthKey?: string;
+  triggerBirthRequest?: SpawnSessionRequest;
+  triggerOrigin?: WorkItemTriggerOrigin;
+  modeResolution?: "strict" | "carried";
+  telegramOrigin?: TelegramSpawnOrigin;
+  promptKind?: UserInputKind;
+  validatedLaunchSelection?: AgentLaunchSelection;
+  closeoutOwnerTransfer?: boolean;
 }
 
 function resolveCarriedSpawnModel(
@@ -3932,7 +3952,10 @@ export class SessionService {
   private readonly foregroundSpawnReceipts = new Map<symbol, ForegroundSpawnReceipt>();
   private readonly handoffsInFlight = new Map<
     string,
-    { token: symbol; lifecycleIds: string[]; sourceStamp: HandoffSourceStamp }
+    {
+      token: symbol;
+      phase: "waiting" | "activating";
+    }
   >();
   // Session ids this process is actively reopening. Guards against two
   // overlapping reopen() calls both passing the completed-status check and
@@ -6583,6 +6606,9 @@ export class SessionService {
     operationId: string | undefined,
     work: () => Promise<SessionView | { completedIds: string[] }>,
   ): Promise<SessionView | CompleteDeskResponse> {
+    if (action === "complete") {
+      for (const id of targetIds) this.cancelWaitingHandoff(id);
+    }
     for (const id of targetIds) {
       if (!readSession(this.config.dataDir, id)) {
         throw new SessionResourceNotFoundError(`Session not found: ${id}`);
@@ -13146,11 +13172,8 @@ export class SessionService {
   ): Promise<SessionView> {
     const triggerBirthRequest = options?.triggerBirthKey ? structuredClone(request) : undefined;
     request = normalizeShepherdSpawnRequest(request);
-    if (options?.admissionReservation === undefined) this.drainSpawnAdmissions();
-    const admissionReservation =
-      options?.admissionReservation ??
-      this.reserveSpawnAdmission(request.project, options?.replacingSessionId, false);
-    let admissionReserved = true;
+    let admissionReservation = options?.admissionReservation;
+    let admissionReserved = admissionReservation !== undefined;
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -13219,6 +13242,22 @@ export class SessionService {
           fallbackBranch: "",
           project,
         });
+      }
+      if (admissionReservation === undefined) {
+        this.drainSpawnAdmissions();
+        admissionReservation =
+          this.tryReserveSpawnAdmission(request.project, options?.replacingSessionId, false) ??
+          undefined;
+        if (admissionReservation === undefined) {
+          const accepted = await this.acceptBackgroundSpawn(request, {
+            ...options,
+            ...(triggerBirthRequest ? { triggerBirthRequest } : {}),
+            validatedLaunchSelection: launchSelection,
+          });
+          if (options?.acceptQueued) return accepted.session;
+          return await accepted.completion;
+        }
+        admissionReserved = true;
       }
       this.consumeSpawnAdmission(admissionReservation);
       if (
@@ -13997,7 +14036,7 @@ export class SessionService {
       });
       throw error;
     } finally {
-      if (admissionReserved) {
+      if (admissionReserved && admissionReservation !== undefined) {
         this.admissionReservations.delete(admissionReservation);
       }
       if (sessionId) {
@@ -14357,17 +14396,21 @@ export class SessionService {
     );
   }
 
-  private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
+  private async prepareBackgroundSpawn(
+    request: SpawnSessionRequest,
+    options: BackgroundSpawnOptions = {},
+  ): Promise<PreparedSpawn> {
+    const triggerBirthRequest = options.triggerBirthRequest;
     request = normalizeShepherdSpawnRequest(request);
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
     let agent: SessionRecord["agent"] | undefined;
-    let worktree: boolean;
+    let worktree = false;
     let createdAt: string | undefined;
     let placeholderWritten = false;
     let ownedClaimBatchId: string | undefined;
-    let prompt: string;
+    let prompt = "";
     let steps: string[] | undefined;
     let mode: ResolvedSessionMode | undefined;
     let planMode: boolean;
@@ -14385,7 +14428,7 @@ export class SessionService {
     } | null = null;
     try {
       ({ project, prompt, steps, mode, planMode, restrictWrites, allowedTriggers, selfDestruct } =
-        this.resolveSpawnTarget(request));
+        this.resolveSpawnTarget(request, options.modeResolution ?? "strict"));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -14399,12 +14442,14 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = resolveSpawnAgent(request.agent, project, this.config);
-      launchSelection = await resolveSpawnRequestLaunchSelection(
-        request,
-        project,
-        agent,
-        this.config.models.codexHome,
-      );
+      launchSelection =
+        options.validatedLaunchSelection ??
+        (await resolveSpawnRequestLaunchSelection(
+          request,
+          project,
+          agent,
+          this.config.models.codexHome,
+        ));
       resolvedModel = launchSelection.model;
       this.assertSpawnAccountReady(request.claudeAccountId);
       if (worktree && request.branch && !reuseCtx) {
@@ -14454,6 +14499,9 @@ export class SessionService {
         restrictWrites,
         worktree,
         reusesWorkspace: reuseCtx !== null,
+        ...(options.closeoutOwnerTransfer !== undefined
+          ? { transferredOwner: options.closeoutOwnerTransfer }
+          : {}),
       });
       const preflightTokenUsage = await this.claimSpawnPreflightBatch(
         preflightBatchId,
@@ -14464,6 +14512,10 @@ export class SessionService {
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
+        ...(options.triggerBirthKey && triggerBirthRequest
+          ? { triggerBirthKey: options.triggerBirthKey, triggerBirthRequest }
+          : {}),
+        ...(options.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
         ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
@@ -14496,6 +14548,7 @@ export class SessionService {
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
+      this.assertReuseAnchorPresent(reuseCtx);
       const startupAttachments = this.storeAttachments(
         workspaceIdOf(placeholder),
         request.attachments,
@@ -14522,19 +14575,26 @@ export class SessionService {
         startupAttachments: startupAttachments.map(({ id, name }) => ({ id, name })),
         launchSelection,
         submission: { state: "pending" },
+        ...(options.telegramOrigin ? { telegramOrigin: options.telegramOrigin } : {}),
       };
       if (startupAttachments.length > 0) {
         placeholder.startupAttachmentIds = startupAttachments.map(({ id }) => id);
       }
-      this.assertReuseAnchorPresent(reuseCtx);
-      placeholder.todoLedgerVersion = 1;
       ensureTodoLedger(this.config.dataDir, placeholder);
+      placeholder.todoLedgerVersion = 1;
       if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
       this.pendingSpawnIds.add(sessionId);
       this.spawnsInFlight.add(sessionId);
       writeSession(this.config.dataDir, placeholder);
-      ownedClaimBatchId = undefined;
       placeholderWritten = true;
+      ownedClaimBatchId = undefined;
+      if (options.telegramOrigin) {
+        writeTelegramReplyTarget(this.config.dataDir, {
+          sessionId,
+          ...options.telegramOrigin,
+          lastInboundAt: nowIso(),
+        });
+      }
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -14553,7 +14613,7 @@ export class SessionService {
       });
 
       this.logUserInput(sessionId, request.project, {
-        kind: "spawn_prompt",
+        kind: options.promptKind ?? "spawn_prompt",
         text: prompt,
         source: "spawn_background",
         attachments: startupAttachments,
@@ -14582,49 +14642,58 @@ export class SessionService {
       };
     } catch (error) {
       if (sessionId) {
-        let current: SessionRecord | null;
-        try {
-          current = readSession(this.config.dataDir, sessionId);
-        } catch {
-          // Unknown durability must retain the record, dependencies and batch claim.
-          throw error;
-        }
-        if (current !== null) {
-          this.pendingSpawnIds.delete(sessionId);
-          this.spawnsInFlight.delete(sessionId);
-          if (
-            current.id === sessionId &&
-            current.project === request.project &&
-            !this.admissionStopped
-          ) {
-            this.registerDurableSpawn(current);
-          }
-          throw error;
-        }
-        if (placeholderWritten) throw error;
         this.pendingSpawnIds.delete(sessionId);
         this.spawnsInFlight.delete(sessionId);
-        if (project) {
-          try {
-            this.removeSessionArtifacts({
-              id: sessionId,
-              project: request.project,
-              workspaceId: reuseCtx?.workspaceId ?? sessionId,
-            });
-          } catch {
-            // Preserve the preparation error even if uncommitted cleanup fails.
-          }
-        }
-        if (ownedClaimBatchId !== undefined) {
-          try {
+      }
+      if (ownedClaimBatchId !== undefined && sessionId) {
+        try {
+          if (readSession(this.config.dataDir, sessionId) === null) {
             await this.preflightUsageStore.release(ownedClaimBatchId, request.project, sessionId);
-          } catch {
-            // Cleanup must not mask the original spawn failure.
           }
+        } catch {
+          // Cleanup must not mask the spawn failure; an unreadable record keeps the claim.
         }
       }
       if (error instanceof SpawnAdmissionCancelledError) throw error;
       const message = error instanceof Error ? error.message : String(error);
+      if (sessionId && project && placeholderWritten) {
+        const erroredWorkspaceId = reuseCtx?.workspaceId ?? sessionId;
+        const claimedPreflightUsage = readSession(
+          this.config.dataDir,
+          sessionId,
+        )?.preflightTokenUsage;
+        this.removeSessionArtifacts({
+          id: sessionId,
+          project: request.project,
+          workspaceId: erroredWorkspaceId,
+        });
+        const erroredBranchSource =
+          resolvedBranch?.branchSource ?? (worktree && explicitBranch ? "explicit" : undefined);
+        writeSession(this.config.dataDir, {
+          id: sessionId,
+          project: request.project,
+          ...(options.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
+          workspaceId: erroredWorkspaceId,
+          agent: agent ?? resolveSpawnAgent(request.agent, project, this.config),
+          prompt,
+          branch: resolvedBranch?.branch ?? explicitBranch ?? sessionId,
+          ...(erroredBranchSource ? { branchSource: erroredBranchSource } : {}),
+          worktree,
+          worktreePath: reuseCtx
+            ? reuseCtx.workspacePath
+            : worktree
+              ? join(this.config.worktreeDir, request.project, sessionId)
+              : project.path,
+          tmuxSession: sessionId,
+          launchCommand: "",
+          status: "errored",
+          ...(claimedPreflightUsage ? { preflightTokenUsage: claimedPreflightUsage } : {}),
+          createdAt: createdAt ?? nowIso(),
+          updatedAt: nowIso(),
+          error: message,
+          errorSource: "other",
+        });
+      }
       this.logEvent("session.spawn.failed", {
         level: "error",
         ...(sessionId ? { sessionId } : {}),
@@ -14664,8 +14733,6 @@ export class SessionService {
     let initialPromptSent = false;
     let launchedRecord: SessionRecord | undefined;
     let launchCandidate: SessionRecord | undefined;
-    const checkpoint = this.checkpointSpawn.bind(this);
-    const write = this.writeSpawnRecord.bind(this);
     try {
       this.assertSpawnNotKilled(sessionId);
       const current = readSession(this.config.dataDir, sessionId);
@@ -14676,6 +14743,13 @@ export class SessionService {
           delete prepared.placeholder.errorSource;
           writeSession(this.config.dataDir, prepared.placeholder);
         }
+      }
+      const telegramOrigin = prepared.placeholder.spawnIntent?.telegramOrigin;
+      if (telegramOrigin) {
+        await this.ensureTelegramTopic(sessionId, telegramOrigin);
+        await this.withWorkspaceLifecycleLocks(sessionId, async () =>
+          this.assertSpawnNotKilled(sessionId),
+        );
       }
       const sessionToolDir = this.prepareSessionTools(sessionId, agent, request.project);
       let resolvedBranch = prepared.resolvedBranch;
@@ -14806,7 +14880,7 @@ export class SessionService {
         ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
         updatedAt: nowIso(),
       };
-      write(spawnPlaceholder);
+      this.writeSpawnRecord(spawnPlaceholder);
       ensureTodoLedger(this.config.dataDir, spawnPlaceholder);
       prepared.placeholder = spawnPlaceholder;
 
@@ -14860,7 +14934,7 @@ export class SessionService {
         });
       }
 
-      prepared.placeholder = checkpoint(
+      prepared.placeholder = this.checkpointSpawn(
         { ...prepared.placeholder, worktreePath: workspacePath },
         "workspace_ready",
       );
@@ -14888,7 +14962,11 @@ export class SessionService {
             this.config.tags,
             project.branchNaming?.regex,
             selfDestruct,
-            telegramAgentInstructions(project, false),
+            telegramAgentInstructions(
+              telegramOrigin ? this.config.projects[telegramOrigin.projectId] : project,
+              telegramOrigin !== undefined,
+              telegramOrigin?.sourceId,
+            ),
             githubPostInstructions(project, sessionId),
           );
       const budgetLimited = this.holdBudgetLimitedLaunch({
@@ -14918,13 +14996,21 @@ export class SessionService {
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
         ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
       });
-      // Pin a native session id at launch for claude (fresh per attempt so a
-      // retry never reuses a possibly-existing transcript id).
+      const sessionAgentConfig = this.sessionAgentConfig({
+        agent,
+        id: sessionId,
+        restrictWrites,
+      });
+      // Fresh native identity per attempt avoids reusing an existing transcript.
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
       this.assertSpawnAccountReady(request.claudeAccountId);
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...withAgentModeOptions(
-          withProjectAgentOptions(project, { ...hookSetup, ...prepared.launchSelection }),
+          withProjectAgentOptions(project, {
+            ...hookSetup,
+            ...prepared.launchSelection,
+            ...(sessionAgentConfig.planOptions ?? {}),
+          }),
           { planMode, restrictWrites },
         ),
         ...this.resolveClaudeAuthPlanOptions(prepared.placeholder),
@@ -14976,6 +15062,7 @@ export class SessionService {
         symlinks: project.symlinks,
         closeoutOwner: runningRecord.closeoutOwner === true,
         agentLaunchId,
+        ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
       const launchAgent = agent;
       const launchSessionId = sessionId;
@@ -14983,42 +15070,38 @@ export class SessionService {
         ? launchPlan.initialMessage
         : spawnInitialMessage;
       const startupBinding =
-        startupMessage.trim() && agent !== "opencode"
+        startupMessage.trim() && agent !== "opencode" && agent !== "cursor"
           ? await createAgentSubmitAckBinding(agent, {
               ...this.submitAckContext(runningRecord),
               freshLaunch: true,
             })
           : null;
-      const launchSubmission = {
-        state: promptDeliveredOnLaunch && agent !== "opencode" ? "uncertain" : "pending",
-        ...(promptDeliveredOnLaunch && agent !== "opencode" ? { uncertainAt: nowIso() } : {}),
-        message: startupMessage,
-        ...(startupBinding ? { ackBaseline: startupBinding.baseline } : {}),
-      } satisfies DurableSpawnIntent["submission"];
+      runningRecord = this.checkpointSpawn(
+        { ...runningRecord, ...codexLaunchAttempt(launchAgent, agentLaunchId), status: "spawning" },
+        agent === "opencode" ? "workspace_ready" : "launching",
+        {
+          state: promptDeliveredOnLaunch && agent !== "opencode" ? "uncertain" : "pending",
+          ...(promptDeliveredOnLaunch && agent !== "opencode" ? { uncertainAt: nowIso() } : {}),
+          message: startupMessage,
+          ...(startupBinding ? { ackBaseline: startupBinding.baseline } : {}),
+        },
+      );
+      prepared.placeholder = runningRecord;
       const launchAndBind = async (): Promise<void> => {
         const openCodeSessionBaseline =
           launchAgent === "opencode"
             ? await captureOpenCodeSessionBaseline(workspacePath)
             : undefined;
+        if (openCodeSessionBaseline) {
+          runningRecord = this.checkpointSpawn(runningRecord, "launching", {
+            ...runningRecord.spawnIntent?.submission,
+            state: promptDeliveredOnLaunch ? "uncertain" : "pending",
+            ...(promptDeliveredOnLaunch ? { uncertainAt: nowIso() } : {}),
+          });
+        }
+
         stage = attempt > 1 ? `retry.${attempt}.tmux.create` : "tmux.create";
-        await this.withWorkspaceLifecycleLocks(sessionId, async () => {
-          this.assertSpawnNotKilled(sessionId);
-          const latest = readSession(this.config.dataDir, launchSessionId);
-          if (latest)
-            runningRecord = withQueuedMessages(runningRecord, queuedMessages(latest), true);
-          runningRecord = checkpoint(
-            {
-              ...runningRecord,
-              ...codexLaunchAttempt(launchAgent, agentLaunchId),
-              status: "spawning",
-            },
-            openCodeSessionBaseline || agent !== "opencode" ? "launching" : "workspace_ready",
-            openCodeSessionBaseline
-              ? { ...launchSubmission, state: promptDeliveredOnLaunch ? "uncertain" : "pending" }
-              : launchSubmission,
-          );
-          prepared.placeholder = runningRecord;
-        });
+        this.assertSpawnNotKilled(sessionId);
         launchCandidate = runningRecord;
         await createTmuxSession({
           sessionName: launchSessionId,
@@ -15026,22 +15109,20 @@ export class SessionService {
           launchCommand: launchPlan.launchCommand,
           launchScriptDir: sessionToolDir,
           env: sessionEnv,
-          beforeLaunch: () => this.assertSpawnNotKilled(sessionId),
+          beforeLaunch: () => this.assertSpawnNotKilled(launchSessionId),
         });
-        await this.withWorkspaceLifecycleLocks(sessionId, async () => {
-          this.assertSpawnNotKilled(sessionId);
-        });
+        this.assertSpawnNotKilled(launchSessionId);
         const current = readSession(this.config.dataDir, runningRecord.id);
         if (current && hasQueuedMessages(current)) {
           runningRecord = withQueuedMessages(runningRecord, queuedMessages(current), true);
         }
         launchedRecord = runningRecord;
-        write(runningRecord);
+        this.writeSpawnRecord(runningRecord);
         const pane = await this.lookupPanePidQuietly(launchSessionId, { fresh: true });
         if (pane.status === "ok" && pane.panePid !== null) {
           const starttime = await readProcessStarttime(pane.panePid);
           if (starttime !== null) {
-            runningRecord = checkpoint(runningRecord, "launching", undefined, {
+            runningRecord = this.checkpointSpawn(runningRecord, "launching", undefined, {
               pid: pane.panePid,
               starttime,
             });
@@ -15076,7 +15157,7 @@ export class SessionService {
         if (openCodeSessionBaseline) {
           const agentSessionId = await waitForNewOpenCodeSessionId(openCodeSessionBaseline);
           runningRecord = { ...runningRecord, agentSessionId, updatedAt: nowIso() };
-          write(runningRecord);
+          this.writeSpawnRecord(runningRecord);
         }
       };
       if (launchAgent === "opencode") {
@@ -15091,7 +15172,7 @@ export class SessionService {
       if (launchPlan.initialMessage.trim()) {
         stage = attempt > 1 ? `retry.${attempt}.prompt.send` : "prompt.send";
         const launchSentAt = Date.now();
-        runningRecord = checkpoint(runningRecord, "launching", {
+        runningRecord = this.checkpointSpawn(runningRecord, "launching", {
           ...runningRecord.spawnIntent?.submission,
           state: "uncertain",
           uncertainAt: new Date(launchSentAt).toISOString(),
@@ -15100,7 +15181,7 @@ export class SessionService {
         const sendOutcome = await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
           freshLaunch: true,
           onPaneWritten: (ackBaseline, pastedAt) => {
-            runningRecord = checkpoint(runningRecord, "launching", {
+            runningRecord = this.checkpointSpawn(runningRecord, "launching", {
               state: "uncertain",
               uncertainAt: new Date(pastedAt).toISOString(),
               message: launchPlan.initialMessage,
@@ -15154,7 +15235,7 @@ export class SessionService {
           : openCodeLaunchConfirmed ||
             (startupBinding !== null && (await startupBinding.scan(startupMessage)).found));
       if (deliveryConfirmed) {
-        runningRecord = checkpoint(runningRecord, "submitted", {
+        runningRecord = this.checkpointSpawn(runningRecord, "submitted", {
           ...runningRecord.spawnIntent?.submission,
           state: "confirmed",
         });
@@ -15179,7 +15260,7 @@ export class SessionService {
       if (latestAttempt && hasQueuedMessages(latestAttempt)) {
         updatedRecord = withQueuedMessages(updatedRecord, queuedMessages(latestAttempt), true);
       }
-      updatedRecord = write(updatedRecord);
+      updatedRecord = this.writeSpawnRecord(updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       if (updatedRecord.spawnIntent?.submission.state === "confirmed") {
         updatedRecord = this.retireDurableSpawn(updatedRecord);
@@ -15291,6 +15372,7 @@ export class SessionService {
           spawnIntent: { ...intent, phase: "queued", submission: { state: "pending" } },
         };
         writeSession(this.config.dataDir, prepared.placeholder);
+        this.pendingSpawnIds.add(sessionId);
         this.logEvent("session.spawn.retrying", {
           level: "warn",
           sessionId,
@@ -15339,30 +15421,22 @@ export class SessionService {
   }
 
   async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
-    this.drainSpawnAdmissions();
-    const reservation = this.reserveSpawnAdmission(request.project, undefined, false);
-    let prepared: PreparedSpawn;
-    try {
-      prepared = await this.prepareBackgroundSpawn(request);
-    } catch (error) {
-      this.admissionReservations.delete(reservation);
-      throw error;
-    }
-    this.registerDurableSpawn(prepared.placeholder);
-    const acceptedView = Promise.resolve().then(() => this.enrich(prepared.placeholder));
-    void this.startBackgroundSpawn(prepared, reservation);
-    return acceptedView;
+    return (await this.acceptBackgroundSpawn(request)).session;
   }
 
-  // `heldReservation`: admission a new request already reserved at accept
-  // time; the first attempt consumes it instead of waiting. Recovered intents
-  // pass none and wait for admission. Retry attempts never re-check admission.
-  private startBackgroundSpawn(
-    prepared: PreparedSpawn,
-    heldReservation?: symbol,
-  ): Promise<SessionView> {
+  private async acceptBackgroundSpawn(
+    request: SpawnSessionRequest,
+    options?: BackgroundSpawnOptions,
+  ): Promise<{ session: SessionView; completion: Promise<SessionView> }> {
+    const prepared = await this.prepareBackgroundSpawn(request, options);
+    this.registerDurableSpawn(prepared.placeholder);
+    const completion = this.startBackgroundSpawn(prepared);
+    const session = await this.enrich(prepared.placeholder);
+    return { session, completion };
+  }
+
+  private startBackgroundSpawn(prepared: PreparedSpawn): Promise<SessionView> {
     if (this.admissionStopped) {
-      if (heldReservation) this.admissionReservations.delete(heldReservation);
       const cancelled = Promise.reject<SessionView>(new SpawnAdmissionCancelledError("disposed"));
       void cancelled.catch(() => {});
       return cancelled;
@@ -15383,25 +15457,17 @@ export class SessionService {
       void promise.catch(() => {});
       this.spawnCompletions.set(prepared.sessionId, { promise, resolve, reject });
     }
-    const completion = this.spawnCompletions.get(prepared.sessionId);
-    if (!completion) throw new Error(`Missing spawn completion for ${prepared.sessionId}`);
     const run = new Promise<void>((resolve) => {
       queueMicrotask(() => {
         void (async () => {
           try {
             for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
-              const reservation =
-                attempt > 1
-                  ? undefined
-                  : (heldReservation ??
-                    (await this.waitForSpawnAdmission(prepared.request.project, {
-                      sessionId: prepared.sessionId,
-                    })));
+              const reservation = await this.waitForSpawnAdmission(prepared.request.project, {
+                sessionId: prepared.sessionId,
+              });
               try {
                 await this.withWorkspaceLifecycleLocks(prepared.sessionId, async () => {
-                  if (reservation) this.consumeSpawnAdmission(reservation);
-                  else if (this.admissionStopped)
-                    throw new SpawnAdmissionCancelledError("disposed");
+                  this.consumeSpawnAdmission(reservation);
                   const current = readSession(this.config.dataDir, prepared.sessionId);
                   if (!current || current.status !== "spawning") {
                     throw new SpawnAdmissionCancelledError("killed");
@@ -15409,7 +15475,7 @@ export class SessionService {
                   this.pendingSpawnIds.delete(prepared.sessionId);
                 });
               } finally {
-                if (reservation) this.admissionReservations.delete(reservation);
+                this.admissionReservations.delete(reservation);
               }
               const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
               if (result === "completed") {
@@ -15424,7 +15490,6 @@ export class SessionService {
               );
             }
           } finally {
-            if (heldReservation) this.admissionReservations.delete(heldReservation);
             this.durableSpawnRuns.delete(prepared.sessionId);
             const current = readSession(this.config.dataDir, prepared.sessionId);
             if (!current?.spawnIntent) {
@@ -15455,6 +15520,8 @@ export class SessionService {
     });
     this.backgroundSpawnRuns.add(run);
     void run.finally(() => this.backgroundSpawnRuns.delete(run));
+    const completion = this.spawnCompletions.get(prepared.sessionId);
+    if (!completion) throw new Error(`Missing spawn completion for ${prepared.sessionId}`);
     return completion.promise;
   }
 
@@ -15608,6 +15675,7 @@ export class SessionService {
     }
     if (
       pane.panePid === null ||
+      pane.paneDead ||
       capture.processes.length === 0 ||
       capture.processes.some((process) => process.identity === null)
     ) {
@@ -15729,11 +15797,14 @@ export class SessionService {
         : null;
       const message = intent.submission.message;
       if (intent.submission.state === "pending" && message?.trim()) {
-        const freshBinding = await createAgentSubmitAckBinding(record.agent, {
-          ...this.submitAckContext(record),
-          freshLaunch: true,
-        });
-        if (!freshBinding)
+        const freshBinding =
+          record.agent === "cursor"
+            ? null
+            : await createAgentSubmitAckBinding(record.agent, {
+                ...this.submitAckContext(record),
+                freshLaunch: true,
+              });
+        if (!freshBinding && record.agent !== "cursor")
           throw new Error(`Startup provider identity unavailable for ${record.id}`);
         const generation = {
           tmuxSession: record.tmuxSession,
@@ -15754,13 +15825,35 @@ export class SessionService {
             state: "uncertain",
             uncertainAt: nowIso(),
             message,
-            ackBaseline: freshBinding.baseline,
+            ...(freshBinding ? { ackBaseline: freshBinding.baseline } : {}),
           });
         });
         const sent = await this.sendAgentMessageWithGeneration(
           uncertain,
           message,
-          { freshLaunch: true },
+          {
+            freshLaunch: true,
+            ...(record.agent === "cursor"
+              ? {
+                  onPaneWritten: (ackBaseline: SubmitAckBaseline | null, pastedAt: number) => {
+                    const latest = readSession(this.config.dataDir, record.id);
+                    if (
+                      this.admissionStopped ||
+                      !latest?.spawnIntent ||
+                      isTerminalSessionStatus(latest.status) ||
+                      latest.agentLaunchId !== record.agentLaunchId
+                    )
+                      throw new SpawnAdmissionCancelledError("killed");
+                    this.checkpointSpawn(latest, "launching", {
+                      state: "uncertain",
+                      uncertainAt: new Date(pastedAt).toISOString(),
+                      message,
+                      ...(ackBaseline ? { ackBaseline } : {}),
+                    });
+                  },
+                }
+              : {}),
+          },
           (actual) => {
             const latest = readSession(this.config.dataDir, record.id);
             if (
@@ -15802,9 +15895,12 @@ export class SessionService {
       delete launched.submitUnconfirmedAt;
       delete launched.error;
       delete launched.errorSource;
+      this.assertSpawnNotKilled(launched.id);
+      launched = this.carrySpawnQueue(launched);
+      writeSession(this.config.dataDir, launched);
       launched = await this.startAutoStartSidecars(launched, project);
       launched = this.applyRequestedStateSubscriptions(launched, intent.request.subscriptions);
-      if (launched.spawnIntent) launched = this.retireDurableSpawn(launched);
+      launched = this.retireDurableSpawn(launched);
       const completion = this.spawnCompletions.get(record.id);
       if (completion) completion.resolve(await this.enrich(launched));
       this.spawnCompletions.delete(record.id);
@@ -18468,7 +18564,7 @@ export class SessionService {
       "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
     >,
     message: string,
-    options?: { interrupt?: boolean; freshLaunch?: boolean },
+    options?: Pick<AgentMessageWriteOptions, "interrupt" | "freshLaunch" | "onPaneWritten">,
     onGeneration?: (generation: PaneGeneration) => void,
   ): Promise<{ outcome: AgentSendOutcome; generation: PaneGeneration }> {
     return this.withPaneWriteLock(session.tmuxSession, async () => {
@@ -20334,6 +20430,7 @@ export class SessionService {
           session = await this.applyOpenPrAction(session, request.prAction);
         }
       }
+      this.cancelWaitingHandoff(sessionId);
       if (session.spawnIntent) {
         session = this.retireDurableSpawn(
           withQueuedMessages({ ...session, status: "killed", updatedAt: nowIso() }, [], false),
@@ -23041,18 +23138,85 @@ export class SessionService {
     request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
   ): Promise<SessionView> {
-    return this.runLifecycle("complete", [sessionId], undefined, () =>
-      this.handoffTransaction(sessionId, request, options),
-    );
+    const waiting = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = this.validateHandoffSource(sessionId, options);
+      if (this.handoffsInFlight.has(sessionId)) {
+        throw new Error(`Handoff already in flight for ${sessionId}`);
+      }
+      const agent = parseAgentName(request.agent);
+      const token = Symbol(`handoff:${sessionId}`);
+      this.handoffsInFlight.set(sessionId, {
+        token,
+        phase: "waiting",
+      });
+      try {
+        const launchSelection = await resolveSpawnRequestLaunchSelection(
+          resolveRespawnRequest(session, {
+            agent,
+            ...(request.model !== undefined ? { model: request.model } : {}),
+            ...(request.reasoningEffort !== undefined
+              ? { reasoningEffort: request.reasoningEffort }
+              : {}),
+          }),
+          this.getProject(session.project),
+          agent,
+          this.config.models.codexHome,
+        );
+        if (this.handoffsInFlight.get(sessionId)?.token !== token) {
+          throw new SpawnAdmissionCancelledError("handoff");
+        }
+        return { token, session, launchSelection };
+      } catch (error) {
+        if (this.handoffsInFlight.get(sessionId)?.token === token) {
+          this.handoffsInFlight.delete(sessionId);
+        }
+        throw error;
+      }
+    });
+    let reservation: symbol | undefined;
+    try {
+      if (this.handoffsInFlight.get(sessionId)?.token !== waiting.token) {
+        throw new SpawnAdmissionCancelledError("handoff");
+      }
+      reservation = await this.waitForSpawnAdmission(waiting.session.project, {
+        replacingSessionId: sessionId,
+      });
+      const claim = this.handoffsInFlight.get(sessionId);
+      if (claim?.token !== waiting.token) throw new SpawnAdmissionCancelledError("handoff");
+      this.consumeSpawnAdmission(reservation);
+      claim.phase = "activating";
+      const admissionReservation = reservation;
+      return await this.runLifecycle("complete", [sessionId], undefined, () =>
+        this.handoffTransaction(sessionId, request, options, {
+          ...waiting,
+          admissionReservation,
+        }),
+      );
+    } finally {
+      if (reservation !== undefined) this.admissionReservations.delete(reservation);
+      if (this.handoffsInFlight.get(sessionId)?.token === waiting.token) {
+        this.handoffsInFlight.delete(sessionId);
+      }
+    }
+  }
+
+  private cancelWaitingHandoff(sessionId: string): void {
+    const claim = this.handoffsInFlight.get(sessionId);
+    if (claim?.phase !== "waiting") return;
+    this.handoffsInFlight.delete(sessionId);
+    for (const waiter of this.spawnAdmissionWaiters) {
+      if (waiter.replacingSessionId === sessionId) this.cancelSpawnAdmission(waiter, "handoff");
+    }
   }
 
   private async handoffTransaction(
     sessionId: string,
     request: HandoffSessionRequest,
-    options?: { todoActor?: TodoActor },
+    options: { todoActor?: TodoActor } | undefined,
+    waiting: HandoffAdmission,
   ): Promise<SessionView> {
     const prepared = await this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.prepareHandoffLocked(sessionId, request, options),
+      this.prepareHandoffLocked(sessionId, request, options, waiting),
     );
     try {
       const spawned = await this.spawn(prepared.spawnRequest, prepared.spawnOptions);
@@ -23119,20 +23283,13 @@ export class SessionService {
       return await this.enrich(finalized);
     } finally {
       this.foregroundSpawnReceipts.delete(prepared.receiptToken);
-      await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
-        if (this.handoffsInFlight.get(sessionId)?.token === prepared.token) {
-          this.handoffsInFlight.delete(sessionId);
-        }
-      });
-      this.admissionReservations.delete(prepared.admissionReservation);
     }
   }
 
-  private async prepareHandoffLocked(
+  private validateHandoffSource(
     sessionId: string,
-    request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
-  ): Promise<PreparedHandoff> {
+  ): SessionRecord {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -23160,26 +23317,29 @@ export class SessionService {
       this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
       throw error;
     }
-    const admissionReservation = this.reserveSpawnAdmission(session.project, session.id, false);
+    return session;
+  }
+
+  private async prepareHandoffLocked(
+    sessionId: string,
+    request: HandoffSessionRequest,
+    options: { todoActor?: TodoActor } | undefined,
+    waiting: HandoffAdmission,
+  ): Promise<PreparedHandoff> {
+    const session = this.validateHandoffSource(sessionId, options);
+    const admissionReservation = waiting.admissionReservation;
+    if (
+      this.handoffsInFlight.get(sessionId)?.token !== waiting.token ||
+      workspaceIdOf(session) !== workspaceIdOf(waiting.session) ||
+      session.worktreePath !== waiting.session.worktreePath ||
+      session.closeoutOwner !== waiting.session.closeoutOwner
+    ) {
+      throw new Error(`Handoff source changed before admission for ${sessionId}`);
+    }
 
     try {
-      if (this.handoffsInFlight.has(sessionId)) {
-        throw new Error(`Handoff already in flight for ${sessionId}`);
-      }
       const agent = parseAgentName(request.agent);
-      const carriedRequest = resolveRespawnRequest(session, {
-        agent,
-        ...(request.model !== undefined ? { model: request.model } : {}),
-        ...(request.reasoningEffort !== undefined
-          ? { reasoningEffort: request.reasoningEffort }
-          : {}),
-      });
-      const launchSelection = await resolveSpawnRequestLaunchSelection(
-        carriedRequest,
-        this.getProject(session.project),
-        agent,
-        this.config.models.codexHome,
-      );
+      const launchSelection = waiting.launchSelection;
       const notes = request.notes?.trim();
       const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
       const { attachments: clonedAttachments, missingIds: missingStartupAttachmentIds } =
@@ -23250,7 +23410,7 @@ export class SessionService {
         },
       });
 
-      const token = Symbol(`handoff:${sessionId}`);
+      const token = waiting.token;
       const receiptToken = Symbol(`handoff-receipt:${sessionId}`);
       const lifecycleIds = this.lifecycleIdsFor(sourceForSpawn);
       const sourceStamp: HandoffSourceStamp = {
@@ -23263,7 +23423,6 @@ export class SessionService {
         updatedAt: sourceForSpawn.updatedAt,
         tmuxSession: sourceForSpawn.tmuxSession,
       };
-      this.handoffsInFlight.set(sessionId, { token, lifecycleIds, sourceStamp });
       const knownTags = new Set(this.config.tags.map((tag) => tag.name));
       const carryTags = (session.slots?.tags ?? []).filter((tag) => knownTags.has(tag));
       return {
@@ -24660,24 +24819,16 @@ export class SessionService {
     replacingSessionId?: string,
     quiet = true,
   ): symbol | null {
+    if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
     try {
-      return this.reserveSpawnAdmission(projectId, replacingSessionId, quiet);
+      this.assertAdmissible(projectId, "spawn", {
+        ...(replacingSessionId ? { replacingSessionId } : {}),
+        quiet,
+      });
     } catch (error) {
       if (error instanceof SessionAdmissionDeniedError) return null;
       throw error;
     }
-  }
-
-  private reserveSpawnAdmission(
-    projectId: string,
-    replacingSessionId?: string,
-    quiet = true,
-  ): symbol {
-    if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
-    this.assertAdmissible(projectId, "spawn", {
-      ...(replacingSessionId ? { replacingSessionId } : {}),
-      quiet,
-    });
     const reservation = Symbol(projectId);
     this.admissionReservations.set(reservation, projectId);
     return reservation;
@@ -26666,8 +26817,6 @@ export class SessionService {
       cursorRestoreBoundary: _cursorRestoreBoundary,
       codexRestoreStartedAt: _codexRestoreStartedAt,
       codexRestoreLaunchId: _codexRestoreLaunchId,
-      spawnIntent: _spawnIntent,
-      spawnReceipt: _spawnReceipt,
       restoredAt: _restoredAt,
       launchCommand: _launchCommand,
       stateSubscriptions: _stateSubscriptions,
@@ -27135,8 +27284,6 @@ export class SessionService {
       cursorRestoreBoundary: _cursorRestoreBoundary,
       codexRestoreStartedAt: _codexRestoreStartedAt,
       codexRestoreLaunchId: _codexRestoreLaunchId,
-      spawnIntent: _spawnIntent,
-      spawnReceipt: _spawnReceipt,
       restoredAt: _restoredAt,
       // The record's queue state is internal; the view carries queuedMessagesView.
       queuedMessages: _queuedMessages,

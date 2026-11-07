@@ -1451,8 +1451,6 @@ export interface SessionView extends Omit<
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
   | "codexRestoreLaunchId"
-  | "spawnIntent"
-  | "spawnReceipt"
   | "restoredAt"
   | "errorSource"
 > {
@@ -1495,8 +1493,6 @@ export type DashboardOmittedField =
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
   | "codexRestoreLaunchId"
-  | "spawnIntent"
-  | "spawnReceipt"
   | "restoredAt"
   | "pipeline"
   | "sidecarNames"
@@ -1648,6 +1644,7 @@ export interface DurableSpawnIntent {
     ackBaseline?: SubmitAckBaseline;
   };
   pane?: { pid: number; starttime: number };
+  telegramOrigin?: TelegramSpawnOrigin;
 }
 
 /**

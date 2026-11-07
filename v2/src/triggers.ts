@@ -1052,47 +1052,35 @@ async function endDeskRetryWithoutLiveAnchor(
   return planned.filter((entry) => !retrying.includes(entry));
 }
 
-// Records a failed block and logs how it will be retried. An admission denial
-// is a deferral: the attempt counted at claim is refunded.
+// Records a failed block and logs when it will be retried.
 function recordWorkItemSpawnFailure(
   ctx: WorkItemClaimContext,
   entry: PlannedSpawnBlock,
-  error: unknown,
   message: string,
 ): void {
-  const denied = error instanceof SessionAdmissionDeniedError;
   const nextRetryAt = new Date(Date.now() + WORK_ITEM_RETRY_INTERVAL_MS).toISOString();
   const member = patchWorkItemMember(
     ctx,
     entry.blockIndex,
     (current) => {
       const { replacesSessionId: _replaces, ...rest } = current;
-      return {
-        ...rest,
-        state: "failed",
-        attempts: denied ? entry.attemptsBefore : current.attempts,
-        deferrals: denied ? entry.deferralsBefore + 1 : current.deferrals,
-        nextRetryAt,
-        error: message,
-      };
+      return { ...rest, state: "failed", nextRetryAt, error: message };
     },
     entry.claimedAt,
   );
   if (!member) return;
-  const event = denied ? "trigger.spawn.retry_deferred" : "trigger.spawn.retry_scheduled";
-  logTriggerEvent(ctx.dataDir, event, {
+  logTriggerEvent(ctx.dataDir, "trigger.spawn.retry_scheduled", {
     level: "info",
     projectId: ctx.projectId,
     sourceId: ctx.sourceId,
     triggerId: ctx.triggerId,
-    message: `${event} for work item ${ctx.workItem.externalId} block ${entry.blockIndex}`,
+    message: `trigger.spawn.retry_scheduled for work item ${ctx.workItem.externalId} block ${entry.blockIndex}`,
     details: {
       externalId: ctx.workItem.externalId,
       blockIndex: entry.blockIndex,
       attempts: member.attempts,
       deferrals: member.deferrals,
       nextRetryAt,
-      ...(denied ? { reason: error.reason } : {}),
     },
   });
 }
@@ -1472,6 +1460,7 @@ async function runSpawnTrigger(
         );
         if (!current()) return;
         let spawning: Promise<SessionView>;
+        let spawnFailure: { error: unknown } | undefined;
         if (ctx) {
           // Refresh this block's claim only while it is still this run's: an
           // earlier slow block must not make it look stale, and a member
@@ -1500,6 +1489,7 @@ async function runSpawnTrigger(
               if (!current()) throw error;
               const birth = service.getTriggerBirth(projectId, birthKey, spawnRequest);
               if (!birth) throw error;
+              spawnFailure = { error };
               return service.get(birth.id);
             });
         } else {
@@ -1507,6 +1497,17 @@ async function runSpawnTrigger(
         }
         const session = await spawning;
         if (!current()) return;
+        if (queue && work) {
+          const birth = service.getTriggerBirth(
+            projectId,
+            `${work.workId}:${blockIndex}`,
+            spawnRequest,
+          );
+          if (session.status === "killed" || birth?.status === "killed") {
+            if (spawnFailure) throw spawnFailure.error;
+            throw new Error(`Spawn cancelled for ${session.id}`);
+          }
+        }
         const outcome = ctx
           ? classifyWorkItemOwner(session, readSession(ctx.dataDir, session.id))
           : "adopt";
@@ -1595,10 +1596,9 @@ async function runSpawnTrigger(
         if (ctx) {
           // The spawn can throw after the session exists (a launched agent
           // retained with its error): adopt it instead of scheduling a retry.
-          const survivor =
-            error instanceof SessionAdmissionDeniedError
-              ? undefined
-              : await findTaggedWorkItemSession(ctx, service, blockIndex, [ctx.triggerId]);
+          const survivor = await findTaggedWorkItemSession(ctx, service, blockIndex, [
+            ctx.triggerId,
+          ]);
           if (!current()) return;
           if (survivor) {
             patchWorkItemMember(
@@ -1617,7 +1617,7 @@ async function runSpawnTrigger(
               return;
             }
           } else {
-            recordWorkItemSpawnFailure(ctx, entry, error, message);
+            recordWorkItemSpawnFailure(ctx, entry, message);
           }
         }
         if (queue && work) {

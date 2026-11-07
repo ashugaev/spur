@@ -1415,6 +1415,7 @@ describe("durable spawn metadata", () => {
           reasoningVariantNames: ["high"],
         },
         submission: { state: "pending" },
+        telegramOrigin: { projectId: "api", sourceId: "tg", chatId: -123, messageThreadId: 7 },
       },
     };
   }
@@ -1460,6 +1461,22 @@ describe("durable spawn metadata", () => {
     },
   );
 
+  it("round-trips a durable Cursor correlated baseline before its transcript exists", async () => {
+    const dataDir = await newDataDir();
+    const session = acceptedSession();
+    session.agent = "cursor";
+    session.spawnIntent.request.agent = "cursor";
+    session.spawnIntent.submission.ackBaseline = {
+      agent: "cursor",
+      file: null,
+      size: 0,
+      deliveryId: "12345678-1234-4123-8123-123456789abc",
+    };
+    writeSession(dataDir, session);
+    expect(readSession(dataDir, session.id)?.spawnIntent).toEqual(session.spawnIntent);
+    expect(listSessions(dataDir)[0]?.spawnIntent).toEqual(session.spawnIntent);
+  });
+
   it.each([
     { label: "version", patch: { version: 2 } },
     { label: "phase", patch: { phase: "unknown" } },
@@ -1483,6 +1500,12 @@ describe("durable spawn metadata", () => {
       label: "negative baseline",
       patch: {
         submission: { state: "pending", ackBaseline: { agent: "claude", file: "file", size: -1 } },
+      },
+    },
+    {
+      label: "uncorrelated Cursor baseline",
+      patch: {
+        submission: { state: "pending", ackBaseline: { agent: "cursor", file: null, size: 0 } },
       },
     },
     { label: "pane identity", patch: { pane: { pid: 1234, starttime: "bad" } } },
