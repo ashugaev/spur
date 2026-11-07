@@ -235,6 +235,8 @@ export async function configureOwnedPushRemote(context: RuntimeTestContext): Pro
   });
 }
 
+export const FAKE_CODEX_PREFLIGHT_LOG = "codex-preflight.log";
+
 export function fakeAgentScript(
   agentName: "claude" | "codex" | "cursor",
   options?: { hupResistant?: boolean },
@@ -333,7 +335,19 @@ jsonl_append() {
   if [[ "\${args[\${#args[@]}-1]:-}" == "-" ]]; then
     preflight_input="$(cat)"
   fi
-  if printf '%s' "$preflight_input" | grep -q "empty preflight output"; then
+  empty_marker=false
+  retry_marker=false
+  if [[ "$preflight_input" == *"empty preflight output"* ]]; then
+    empty_marker=true
+  fi
+  if [[ "$preflight_input" == *"Previous attempt feedback:"* ]]; then
+    retry_marker=true
+  fi
+  record_preflight_dispatch() {
+    printf '{"firstCommand":"exec","argumentCount":%s,"inputCharacters":%s,"emptyMarker":%s,"retryMarker":%s,"dispatch":"%s"}\\n' "\${#args[@]}" "\${#preflight_input}" "$empty_marker" "$retry_marker" "$1" >> "$log_dir/${FAKE_CODEX_PREFLIGHT_LOG}"
+  }
+  if [[ "$empty_marker" == true ]]; then
+    record_preflight_dispatch empty
     if [[ -n "$output_file" ]]; then
       : > "$output_file"
     fi
@@ -341,12 +355,15 @@ jsonl_append() {
   fi
   branch_hint="$(printf '%s' "$preflight_input" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
   retry_branch_hint="$(printf '%s' "$preflight_input" | sed -n 's/.*retry branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
-  if printf '%s' "$preflight_input" | grep -q "Previous attempt feedback:" && [[ -n "$retry_branch_hint" ]]; then
+  if [[ "$retry_marker" == true && -n "$retry_branch_hint" ]]; then
     branch_hint="$retry_branch_hint"
   fi
   payload='NO_PROJECT_RULES'
   if [[ -n "$branch_hint" ]]; then
     payload="$branch_hint"
+    record_preflight_dispatch branch_hint
+  else
+    record_preflight_dispatch no_project_rules
   fi
   if [[ -n "$output_file" ]]; then
     printf '%s\n' "$payload" > "$output_file"

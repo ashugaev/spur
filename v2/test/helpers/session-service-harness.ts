@@ -228,7 +228,9 @@ const probeTmuxProcessMatchMock = vi.fn<
 >();
 const killTmuxSessionMock: Mock = vi.fn();
 const captureAgentProcessesForLaunchMock = vi.fn(() =>
-  Promise.resolve<{ status: "ok"; processes: AgentProcessRef[] } | { status: "unavailable" }>({
+  Promise.resolve<
+    { status: "ok"; processes: AgentProcessRef[]; complete?: boolean } | { status: "unavailable" }
+  >({
     status: "ok",
     processes: [],
   }),

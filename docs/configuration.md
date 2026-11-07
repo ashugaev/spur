@@ -126,15 +126,23 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 
 ## Admission control
 
-Cap limits concurrent live sessions at spawn, restore, and the wake of a stale-parked or memory-shed session (including one-shot wakes and relaunching sends). Ordinary stopped/paused interval/daily relaunches: background gated, manual ungated. Over cap: `429` naming stop candidates. Reporting route: [`GET /headroom`](daemon-api.md). CLI: [`spur doctor`](commands.md#doctor). Schema `v2/src/config.ts`, enforcement `v2/src/session-service.ts`.
+Spawn waits automatically for memory-guard or live-session-cap recovery; `v2/src/session-service.ts`.
+Accepted background and resource-queued HTTP spawns retain session id, launch intent, messages, attachments, and selected account across daemon restart; `v2/src/session-service.ts`, `v2/src/metadata.ts`.
+Recovery adopts confirmed existing runtime; uncertain runtime or startup delivery holds and rechecks automatically; `v2/src/session-service.ts`.
+OpenCode recovery without a persisted native session id stays `session.spawn.recovery_held`; history and prompt acknowledgment cannot supply ownership; `v2/src/session-service.ts`.
+
+Restore and stale-parked/memory-shed relaunches (including one-shot wakes and sends) reject memory-guard or cap denial (`429`); `v2/src/session-service.ts`.
+Ordinary stopped/paused interval/daily relaunches: background gated, manual ungated; `v2/src/session-service.ts`.
+Cap denial names stop candidates; `v2/src/session-service.ts`.
+Limits: `v2/src/config.ts`; reports: [`GET /headroom`](daemon-api.md), [`spur doctor`](commands.md#doctor).
 
 `stopReason: "runtime_lost"`: confirmed runtime loss becomes restorable `stopped`, retains error evidence, releases capacity; unknown probes retain capacity (`v2/src/session-service.ts`).
 
 The shed's session stop writes `status: "stopped"`, `stopReason: "memory_shed"`. Queued trigger batches for such a session are held, not dropped, and its wake passes the admission gate.
 
-Memory guard floors (`enforceFloors`) also deny spawn, restore, and wake while the daemon cgroup's `memory.max` headroom is within the shed's emergency threshold, or its release band while the shed is latched. Unreadable cgroup or unlimited `memory.max` adds no denial.
+Memory guard floors (`enforceFloors`) also defer spawn and deny restore or wake while the daemon cgroup's `memory.max` headroom is within the shed's emergency threshold, or its release band while the shed is latched. Unreadable cgroup or unlimited `memory.max` adds no denial.
 
-Events: `daemon.memory.shed`(`.failed`), `session.admission.denied`, `session.admission.memory_guard`, `daemon.memory.unbounded`, `daemon.memory.hold.engaged`(`.cleared`/`.failed`), `trigger.send.suppressed_memory_guard`.
+Events: `daemon.memory.shed`(`.failed`), `session.admission.denied`, `session.admission.memory_guard`, `session.spawn.recovery_held`, `daemon.memory.unbounded`, `daemon.memory.hold.engaged`(`.cleared`/`.failed`), `trigger.send.suppressed_memory_guard`.
 
 ## Artifact retention
 
