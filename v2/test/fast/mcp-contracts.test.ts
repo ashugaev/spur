@@ -24,7 +24,7 @@ const reviewedFingerprints = {
   "server.ts": "f59b352c82dd047bff618e199153d95760ea8e81cc6e0429ba34a376c806c4dd",
   "types.ts": "08e32db98b6ae1b00fe1ba41171cb23ea46693cca9036242b45d0c5ee59b1ded",
   "cron-job-editor.ts": "33fc7b2993819693ef511d9312f9eb8f4260feb2f263421aec2d4e5ac613ec06",
-  "session-service.ts": "0fcdd5e41e838cc0f41681c498815d8ae24af90a49dbfde53a837d94a621db95",
+  "session-service.ts": "88855c82c6351660a8ba95fa1ce0ad45952b6c912b89e69cd9db12282764042d",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "1d06c2d904fa46b95ef8bed971c5767fad76663482f22822f9a541b345f161ff",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -229,6 +229,16 @@ describe("daemon MCP operation contracts", () => {
     expect(save?.responses.find(({ status }) => status === 200)?.description).toContain(
       'activation:"pending"',
     );
+  });
+
+  it("states allowedTriggers omit and empty-array semantics in the spawn contracts", () => {
+    for (const operationId of ["spawn_session", "spawn_background_session"]) {
+      const description = getDaemonOperation(operationId)?.body?.fields.find(
+        ({ name }) => name === "allowedTriggers",
+      )?.description;
+      expect(description, operationId).toContain("Omit to allow all");
+      expect(description, operationId).toContain("[] blocks every send trigger");
+    }
   });
 
   it("provides examples, path/query/body metadata, errors and source references for every operation", () => {
