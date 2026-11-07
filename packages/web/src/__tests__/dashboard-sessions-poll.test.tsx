@@ -2,6 +2,7 @@ import { act, render } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
+import type * as BackendConnectionModule from "@/lib/backend-connection-context";
 
 vi.mock("next/font/google", () => ({
   JetBrains_Mono: () => ({ variable: "--font-jetbrains-mono" }),
@@ -14,7 +15,7 @@ vi.mock("@/components/SessionLinkBadge", () => ({
 
 const backend = vi.hoisted(() => ({ phase: "connected" as "connected" | "disconnected" }));
 vi.mock("@/lib/backend-connection-context", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/backend-connection-context")>()),
+  ...(await importOriginal<typeof BackendConnectionModule>()),
   useBackendConnection: () => ({ phase: backend.phase, attempts: 0, version: null }),
 }));
 
