@@ -603,7 +603,7 @@
     "spur-choice:last-child{border-bottom:0}",
     "spur-choice[aria-selected=true]{background:color-mix(in srgb,var(--spur-accent) 6%,transparent);color:var(--spur-text-primary);box-shadow:inset 2px 0 0 var(--spur-accent)}",
     "spur-choice[disabled]{opacity:.55;cursor:not-allowed}",
-    "spur-choice:focus-visible,.spur-btn:focus-visible,.spur-field input:focus-visible,.spur-field textarea:focus-visible{outline:2px solid var(--spur-accent);outline-offset:-2px}",
+    "spur-choice:focus-visible,.spur-btn:focus-visible,.spur-field input:focus-visible,.spur-field textarea:focus-visible,.spur-chat-form input:focus-visible{outline:2px solid var(--spur-accent);outline-offset:-2px}",
     ".spur-choice-box{width:14px;height:14px;border:1px solid var(--spur-border-default);flex-shrink:0;margin-top:2px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;color:var(--spur-text-inverse)}",
     "spur-choice[aria-selected=true] .spur-choice-box{background:var(--spur-accent);border-color:var(--spur-accent)}",
     "spur-choice[aria-selected=true] .spur-choice-box::after{content:'';width:7px;height:4px;margin-top:-2px;border-left:1.5px solid var(--spur-text-inverse);border-bottom:1.5px solid var(--spur-text-inverse);transform:rotate(-45deg)}",
@@ -644,13 +644,17 @@
     "spur-chat{display:flex;flex-direction:column;border:1px solid var(--spur-border-default);padding:8px}",
     "spur-chat>*+*{margin-top:8px}",
     ".spur-chat-log{display:flex;flex-direction:column;gap:6px;max-height:320px;overflow-y:auto;border-top:1px solid var(--spur-border-subtle);padding-top:8px}",
+    ".spur-chat-log:empty{display:none}",
     ".spur-chat-msg{white-space:pre-wrap;line-height:1.5;padding:4px 8px;border-left:2px solid var(--spur-border-subtle)}",
     ".spur-chat-msg[data-role=assistant]{border-left-color:var(--spur-accent)}",
     ".spur-chat-msg[data-kind=action]{font-size:11px;color:var(--spur-text-secondary)}",
     ".spur-chat-tag{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--spur-text-tertiary);margin-right:8px}",
     ".spur-chat-status{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--spur-text-tertiary)}",
+    ".spur-chat-status[data-tone=error]{color:var(--spur-status-error)}",
     ".spur-chat-form{display:flex;gap:6px}",
     ".spur-chat-form input{flex:1;font:inherit;color:var(--spur-text-primary);background:var(--spur-input-bg);border:1px solid var(--spur-input-border);padding:6px 8px;border-radius:0}",
+    ".spur-chat-form input[aria-invalid=true]{border-color:var(--spur-status-error)}",
+    ".spur-chat-form input:disabled{opacity:.55}",
   ].join("\n");
 
   function installStyles() {
@@ -1655,17 +1659,27 @@
           sdk.agent.onMessage(render);
           sdk.on("agent", function (next) {
             status.textContent = AGENT_LABELS[next.state] || next.state;
+            status.removeAttribute("data-tone");
+          });
+          input.addEventListener("input", function () {
+            input.removeAttribute("aria-invalid");
           });
           form.addEventListener("submit", (submitEvent) => {
             submitEvent.preventDefault();
             const text = input.value.trim();
             if (!text) return;
             send.disabled = true;
+            input.disabled = true;
             sendMessage(text, submitEvent.isTrusted).then(function (result) {
               send.disabled = false;
+              input.disabled = false;
+              input.focus();
               if (result.ok) {
                 input.value = "";
+                input.removeAttribute("aria-invalid");
               } else {
+                input.setAttribute("aria-invalid", "true");
+                status.setAttribute("data-tone", "error");
                 status.textContent = result.error || REJECTION_TEXT[result.reason] || "Not sent";
               }
             });

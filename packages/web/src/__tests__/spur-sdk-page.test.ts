@@ -143,6 +143,45 @@ describe("page transport", () => {
     ).toBe("./_spur/agent/messages?from=2");
   });
 
+  it("chat disables the input while sending and flags a failed send until the next input or status", async () => {
+    const r = await pageRig("<spur-chat></spur-chat>");
+    r.respond((method, url) =>
+      method === "POST" && url === "./_spur/agent/send"
+        ? [503, { error: "Agent is down" }]
+        : undefined,
+    );
+    // Hold the send response so the pending state is observable.
+    const realFetch = r.win.fetch;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    r.win.fetch = (async (url: string, init?: RequestInit) => {
+      if (url === "./_spur/agent/send") await gate;
+      return realFetch(url, init);
+    }) as typeof r.win.fetch;
+    await flush();
+    const input = r.doc.querySelector(".spur-chat-form input") as HTMLInputElement;
+    const status = r.doc.querySelector(".spur-chat-status") as Element;
+    const form = r.doc.querySelector(".spur-chat-form") as HTMLFormElement;
+    expect(r.doc.querySelector(".spur-chat-log")?.childNodes).toHaveLength(0);
+    input.value = "hello";
+    form.dispatchEvent(new r.win.Event("submit", { bubbles: true, cancelable: true }));
+    await flush();
+    expect(input.disabled).toBe(true);
+    release();
+    await flush();
+    expect(input.disabled).toBe(false);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(status.getAttribute("data-tone")).toBe("error");
+    expect(status.textContent).toBe("Agent is down");
+    input.dispatchEvent(new r.win.Event("input", { bubbles: true }));
+    expect(input.hasAttribute("aria-invalid")).toBe(false);
+    r.sources[0]?.emit("agent", { state: "working", sessionId: "pg-films-ab12" });
+    expect(status.hasAttribute("data-tone")).toBe(false);
+    expect(status.textContent).toBe("Agent working");
+  });
+
   it("renders an action message as a tagged label line and spaces the status off the log", async () => {
     const r = await pageRig("<style>spur-chat{display:block}</style><spur-chat></spur-chat>");
     r.respond((method, url) =>
