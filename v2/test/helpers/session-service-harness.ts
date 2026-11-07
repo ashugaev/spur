@@ -312,6 +312,7 @@ const hasUncommittedChangesMock: Mock = vi.fn();
 const isGitWorktreeMock: Mock = vi.fn();
 const hasUnpushedCommitsMock: Mock = vi.fn();
 const readCurrentBranchMock: Mock = vi.fn();
+const readBranchDestinationMock: Mock = vi.fn();
 const readRemoteUrlsMock: Mock = vi.fn();
 const removeWorktreeMock: Mock = vi.fn();
 const pruneRepoWorktreesMock: Mock = vi.fn();
@@ -978,6 +979,7 @@ vi.mock("../../src/workspace.js", () => ({
   isGitWorktree: isGitWorktreeMock,
   pruneRepoWorktrees: pruneRepoWorktreesMock,
   readCurrentBranch: readCurrentBranchMock,
+  readBranchDestination: readBranchDestinationMock,
   readRemoteUrls: readRemoteUrlsMock,
   removeWorktree: removeWorktreeMock,
   resolveRepoPathFromWorktree: resolveRepoPathFromWorktreeMock,
@@ -1763,6 +1765,13 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   hasUnpushedCommitsMock.mockReset().mockResolvedValue(false);
   isGitWorktreeMock.mockReset().mockResolvedValue(true);
   readCurrentBranchMock.mockReset().mockResolvedValue("main");
+  readBranchDestinationMock
+    .mockReset()
+    .mockImplementation(async (_path: string, branch: string) => ({
+      status: "known",
+      push: { url: "git@github.com:acme/api.git", branch },
+      upstream: null,
+    }));
   readRemoteUrlsMock
     .mockReset()
     .mockResolvedValue(new Map([["origin", "git@github.com:acme/api.git"]]));
@@ -2087,6 +2096,7 @@ export {
   isGitWorktreeMock,
   hasUnpushedCommitsMock,
   readCurrentBranchMock,
+  readBranchDestinationMock,
   removeWorktreeMock,
   pruneRepoWorktreesMock,
   resolveRepoPathFromWorktreeMock,
