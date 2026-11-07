@@ -29,7 +29,10 @@ const nextConfig = {
   // so relative asset URLs in a page resolve against its dir.
   skipTrailingSlashRedirect: true,
   async rewrites() {
-    return [{ source: "/p/:id/_spur/sdk.js", destination: "/spur/spur-sdk.v2.js" }];
+    return [
+      { source: "/p/:id/_spur/sdk.js", destination: "/spur/spur-sdk.v2.js" },
+      { source: "/p/:id/_spur/theme.css", destination: "/spur/spur-page-theme.v2.css" },
+    ];
   },
   ...(sidecarDistDir ? { distDir: sidecarDistDir } : {}),
   ...(configuredAllowedDevOrigins.length > 0

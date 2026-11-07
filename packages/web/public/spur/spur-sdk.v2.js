@@ -81,26 +81,22 @@
     selection_mismatch: "selection mismatch",
     depth: "nested too deep",
   };
-  // Page defaults: CSS system colors and light-dark() pairs, so a page follows the OS light/dark scheme.
-  // Status tones and text-tertiary are fixed pairs (>=4.5:1 on #fff and #121212); system colors like Mark or GrayText are unreadable text colors.
+  // Page defaults: CSS system colors, so a page follows the OS light/dark scheme.
+  // Status tones and text-tertiary come from the page palette stylesheet (system colors like Mark or GrayText are unreadable as text).
   const PAGE_THEME = {
     "bg-base": "Canvas",
     "bg-surface": "Canvas",
     "bg-elevated": "Canvas",
     "text-primary": "CanvasText",
     "text-secondary": "CanvasText",
-    "text-tertiary": "light-dark(#5c6370, #9da5b4)",
     "border-default": "GrayText",
     "border-subtle": "ButtonFace",
     accent: "AccentColor",
-    "status-error": "light-dark(#cf222e, #ff4d4d)",
-    "status-ready": "light-dark(#1a7f37, #3fb950)",
     "input-bg": "Field",
     "input-border": "GrayText",
     "text-inverse": "AccentColorText",
-    "status-working": "light-dark(#0969da, #58a6ff)",
-    "status-attention": "light-dark(#8a5a00, #ffd700)",
   };
+  const PAGE_PALETTE_HREF = "./_spur/theme.css";
   const FIELD_TAGS = "spur-choice-list, spur-text-input, spur-textarea";
   const BOUND_SELECTOR =
     "[data-spur-action], spur-button, spur-choice-list, spur-choice, spur-text-input, spur-textarea";
@@ -473,6 +469,11 @@
           if (status) onTransportEvent({ type: "agent", status: status });
         });
         applyTheme({ mode: null, tokens: PAGE_THEME });
+        const palette = document.createElement("link");
+        palette.rel = "stylesheet";
+        palette.href = PAGE_PALETTE_HREF;
+        palette.setAttribute("data-spur-sdk-palette", "");
+        (document.head || document.documentElement).appendChild(palette);
         return call("GET", "db/docs/_state/page").then(function (response) {
           const stored = response.ok ? response.body.data : null;
           return {
@@ -512,6 +513,8 @@
           waiters.set(id, resolve);
           call("POST", "actions", body).then(function (response) {
             if (response.ok) {
+              // The stream may have settled this action before the POST returned; that response is stale.
+              if (!waiters.has(id)) return;
               setAction(actionEventFromDoc(response.body));
               settleIfClosed(id);
               return;

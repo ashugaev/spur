@@ -1,0 +1,8 @@
+/* Page palette for fixed tones: each pair is at least 4.5:1 on white and on near-black. */
+:root {
+  --spur-text-tertiary: light-dark(#5c6370, #9da5b4);
+  --spur-status-error: light-dark(#cf222e, #ff4d4d);
+  --spur-status-ready: light-dark(#1a7f37, #3fb950);
+  --spur-status-working: light-dark(#0969da, #58a6ff);
+  --spur-status-attention: light-dark(#8a5a00, #ffd700);
+}

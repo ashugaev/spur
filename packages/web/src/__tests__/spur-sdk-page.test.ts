@@ -1,4 +1,6 @@
 // @vitest-environment node
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { flush, pageRig } from "./fixtures/spur-sdk-rig";
 
@@ -21,10 +23,27 @@ describe("page transport", () => {
     expect(root.style.getPropertyValue("--spur-bg-base")).toBe("Canvas");
     expect(root.style.getPropertyValue("--spur-text-primary")).toBe("CanvasText");
     expect(root.style.getPropertyValue("--spur-accent")).toBe("AccentColor");
-    expect(root.style.getPropertyValue("--spur-status-error")).toBe("light-dark(#cf222e, #ff4d4d)");
-    expect(root.style.getPropertyValue("--spur-text-tertiary")).toBe(
-      "light-dark(#5c6370, #9da5b4)",
+    expect(root.style.getPropertyValue("--spur-status-error")).toBe("");
+    const link = r.doc.querySelector("link[data-spur-sdk-palette]");
+    expect(link?.getAttribute("href")).toBe("./_spur/theme.css");
+  });
+
+  it("palette stylesheet defines the fixed tones as light-dark pairs", () => {
+    const css = readFileSync(
+      resolve(__dirname, "../../public/spur/spur-page-theme.v2.css"),
+      "utf8",
     );
+    for (const token of [
+      "text-tertiary",
+      "status-error",
+      "status-ready",
+      "status-working",
+      "status-attention",
+    ]) {
+      expect(css).toMatch(
+        new RegExp(`--spur-${token}: light-dark\\(#[0-9a-f]{6}, #[0-9a-f]{6}\\)`),
+      );
+    }
   });
 
   it("reruns onSnapshot after a change event for its collection only", async () => {
@@ -98,6 +117,52 @@ describe("page transport", () => {
     r.sources[0]?.emit("change", { seq: 3, collection: "_actions", id, op: "set", rev: 2 }, "3");
     await expect(pending).resolves.toEqual({ ok: true, id, result: { ok: 1 } });
     expect(r.win.spur.action).toMatchObject({ id, status: "completed" });
+  });
+
+  it("keeps a completed action completed when the invoke POST response arrives late", async () => {
+    const r = await pageRig("<spur-button action='pick'>Pick</spur-button>");
+    r.respond((method, url) =>
+      method === "GET" && url.startsWith("./_spur/db/docs/_actions/")
+        ? [
+            200,
+            {
+              id: decodeURIComponent(url.split("/").at(-1) ?? ""),
+              rev: 2,
+              data: { action: "pick", status: "done", result: { ok: 1 } },
+            },
+          ]
+        : undefined,
+    );
+    const realFetch = r.win.fetch;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    r.win.fetch = (async (url: string, init?: { method?: string }) => {
+      const response = await realFetch(url, init as never);
+      if (init?.method === "POST" && url === "./_spur/actions") {
+        await gate;
+        const id = (JSON.parse((init as { body: string }).body) as { id: string }).id;
+        return new Response(
+          JSON.stringify({ id, rev: 1, data: { action: "pick", status: "pending" } }),
+          { status: 200 },
+        );
+      }
+      return response;
+    }) as unknown as typeof r.win.fetch;
+    const first = r.win.spur.agent.invoke("pick", {});
+    await flush();
+    const post = r.requests.find((request) => request.url === "./_spur/actions");
+    const id = (post?.body as { id: string }).id;
+    r.sources[0]?.emit("change", { seq: 3, collection: "_actions", id, op: "set", rev: 2 }, "3");
+    await expect(first).resolves.toEqual({ ok: true, id, result: { ok: 1 } });
+    release();
+    await flush();
+    expect(r.win.spur.action).toMatchObject({ id, status: "completed" });
+    expect(r.doc.querySelector("spur-button")?.hasAttribute("aria-busy")).toBe(false);
+    await expect(r.win.spur.agent.invoke("pick", {})).resolves.not.toMatchObject({
+      reason: "busy",
+    });
   });
 
   it("chat sends, polls messages and renders text inertly", async () => {
