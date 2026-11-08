@@ -10,6 +10,7 @@ import {
   readGitHubSourceSnapshot,
   requestGitHubMergeConflictRestoreReplay,
   recordCommentSeen,
+  recordIgnoredGitHubFeedback,
   readIgnoredGitHubFeedback,
   writeGitHubSourceSnapshot,
   writeGitHubReviewPagination,
@@ -1135,6 +1136,158 @@ describe("GitHub review batching", () => {
   }
 
   it.each([
+    { body: "feedback\n[AI-generated, session: a]\r\n\r\n", own: true },
+    { body: "feedback\nWritten by Spur · a\n", own: true },
+    { body: "feedback\n[AI-generated, session: a]", own: true, login: "other" },
+    { body: "feedback\n[AI-generated, session: b]", own: false },
+    { body: "feedback\n> [AI-generated, session: a]", own: false },
+    { body: "[AI-generated, session: a]\nmore feedback", own: false },
+    { body: "feedback\n[AI-generated, session: a-extra]", own: false },
+    { body: "unsigned human feedback", own: false },
+    { body: "feedback\n[AI-generated, session: a]", marker: "custom:{session}", own: false },
+    { body: "custom:a\nmore feedback", marker: "custom:{session}", own: true },
+  ])("attributes all feedback classes by receiving session ($body, $marker)", async (case_) => {
+    const dataDir = await makeDataDir();
+    const login = case_.login ?? "AndreIntelas";
+    const item = { databaseId: 101, body: case_.body, author: { login } };
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          viewer: { login: "AndreIntelas" },
+          r: {
+            a0: fullPrNode(42, {
+              comments: { nodes: [item] },
+              reviewThreads: { nodes: [{ comments: { nodes: [item] } }] },
+              reviews: {
+                nodes: [
+                  { ...item, state: "COMMENTED" },
+                  { ...item, databaseId: 102, state: "APPROVED" },
+                ],
+              },
+            }),
+          },
+        },
+      }),
+    );
+    const result = await collectGitHubSignalsBatch(
+      [boundSession("a", 42)],
+      dataDir,
+      "api",
+      "watch",
+      undefined,
+      case_.marker,
+    );
+    const entry = result.get("a");
+    if (entry?.status !== "ok" || !entry.collected) throw new Error("missing feedback result");
+    for (const key of ["comment:101", "review-comment:101", "review:101", `approved:${login}`]) {
+      expect(entry.collected.snapshot.has(key), key).toBe(!case_.own);
+    }
+  });
+
+  it.each([undefined, "custom:{session}"])(
+    "persists current-only own review attribution (%s)",
+    async (marker) => {
+      const dataDir = await makeDataDir();
+      const session = boundSession("a", 42);
+      const envelope = (body: string) =>
+        JSON.stringify({
+          data: {
+            viewer: { login: "AndreIntelas" },
+            r: {
+              a0: fullPrNode(42, {
+                headRefName: session.branch,
+                headRepository: { nameWithOwner: "acme/api" },
+                reviewDecision: "CHANGES_REQUESTED",
+                latestOpinionatedReviews: {
+                  nodes: [
+                    {
+                      databaseId: 900,
+                      state: "CHANGES_REQUESTED",
+                      body,
+                      author: { login: "other" },
+                    },
+                  ],
+                  pageInfo: { hasPreviousPage: false },
+                },
+              }),
+            },
+          },
+        });
+      ghMock.mockResolvedValueOnce(envelope(marker ? "custom:a" : "Written by Spur · a"));
+      const first = await collectGitHubSignalsBatch(
+        [session],
+        dataDir,
+        "api",
+        "watch",
+        undefined,
+        marker,
+      );
+      const firstEntry = first.get("a");
+      if (firstEntry?.status !== "ok" || !firstEntry.collected)
+        throw new Error("missing current result");
+      expect(firstEntry.collected.snapshot.has("changes_requested")).toBe(false);
+      expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42)]).toEqual([
+        "review:900",
+      ]);
+      const query = ghMock.mock.calls[0]?.join(" ");
+      expect(query).toMatch(/latestOpinionatedReviews[^{}]*\{nodes\{[^}]*\bdatabaseId\b/);
+      expect(query).toMatch(/latestOpinionatedReviews[^{}]*\{nodes\{[^}]*\bbody\b/);
+      ghMock.mockResolvedValueOnce(envelope("operator edited body"));
+      const second = await collectGitHubSignalsBatch(
+        [session],
+        dataDir,
+        "api",
+        "watch",
+        undefined,
+        "changed:{session}",
+      );
+      const secondEntry = second.get("a");
+      if (secondEntry?.status !== "ok" || !secondEntry.collected)
+        throw new Error("missing changed result");
+      expect(secondEntry.collected.snapshot.has("changes_requested")).toBe(false);
+    },
+  );
+
+  it("does not persist a missing review ID or suppress another missing-ID review", async () => {
+    const dataDir = await makeDataDir();
+    const session = boundSession("a", 42);
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          viewer: { login: "AndreIntelas" },
+          r: {
+            a0: fullPrNode(42, {
+              headRefName: session.branch,
+              headRepository: { nameWithOwner: "acme/api" },
+              reviewDecision: "CHANGES_REQUESTED",
+              latestOpinionatedReviews: {
+                nodes: [
+                  {
+                    state: "CHANGES_REQUESTED",
+                    body: "Written by Spur · a",
+                    author: { login: "other" },
+                  },
+                  {
+                    state: "CHANGES_REQUESTED",
+                    body: "external",
+                    author: { login: "AndreIntelas" },
+                  },
+                ],
+                pageInfo: { hasPreviousPage: false },
+              },
+            }),
+          },
+        },
+      }),
+    );
+    const result = await collectGitHubSignalsBatch([session], dataDir, "api", "watch");
+    const entry = result.get("a");
+    if (entry?.status !== "ok" || !entry.collected) throw new Error("missing review result");
+    expect(entry.collected.snapshot.has("changes_requested")).toBe(true);
+    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42)]).toEqual([]);
+  });
+
+  it.each([
     { kind: "inline", key: "review-comment:101" },
     { kind: "issue", key: "comment:101" },
     { kind: "review", key: "review:101" },
@@ -1407,7 +1560,17 @@ describe("GitHub review batching", () => {
           key.startsWith("review:") ||
           key.startsWith("review-comment:"),
       ),
-    ).toEqual([]);
+    ).toEqual(
+      expect.arrayContaining([
+        "review-comment:1",
+        "review-comment:2",
+        "review-comment:3",
+        "comment:4",
+        "comment:5",
+        "review:6",
+        "review:7",
+      ]),
+    );
   });
 
   it("keeps filtered keys ignored after a body edit and config toggle", async () => {
@@ -1473,6 +1636,7 @@ describe("GitHub review batching", () => {
   it("keeps legacy-filtered feedback ignored after enabling the marker", async () => {
     const dataDir = await makeDataDir();
     const session = boundSession("a", 42);
+    recordIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42, ["comment:81"]);
     const envelope = (body: string) =>
       JSON.stringify({
         data: {
@@ -1611,7 +1775,7 @@ describe("GitHub review batching", () => {
       owns: false,
       branch: "feature/other",
     },
-    { name: "viewer author", head: null, pushUrl: null, owns: true, author: "review-bot" },
+    { name: "viewer author", head: null, pushUrl: null, owns: false, author: "review-bot" },
   ])("scopes bound fix signals by independent PR head identity: $name", async (case_) => {
     const dataDir = await makeDataDir();
     readBranchPushUrlMock.mockResolvedValue(case_.pushUrl);
