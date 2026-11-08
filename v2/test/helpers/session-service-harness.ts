@@ -89,6 +89,7 @@ const waitForOpenCodeLaunchMessageMock: Mock = vi.fn();
 const withOpenCodeLaunchIdentityLockMock: Mock = vi.fn();
 const readOpenCodeStateMock: Mock = vi.fn();
 const readOpenCodeStructuredStateMock: Mock = vi.fn();
+const openCodeHeartbeatExpiredMock: Mock = vi.fn();
 const resolveCursorLaunchModelMock = vi.fn(
   async (model: string | undefined): Promise<string | undefined> => model,
 );
@@ -543,6 +544,7 @@ vi.mock("../../src/agents/opencode.js", async (importOriginal) => {
     withOpenCodeLaunchIdentityLock: withOpenCodeLaunchIdentityLockMock,
     readOpenCodeState: readOpenCodeStateMock,
     readOpenCodeStructuredState: readOpenCodeStructuredStateMock,
+    openCodeHeartbeatExpired: openCodeHeartbeatExpiredMock,
   };
 });
 
@@ -1458,6 +1460,7 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   readOpenCodeStructuredStateMock.mockReset().mockImplementation(async (...args: unknown[]) => ({
     state: await readOpenCodeStateMock(...args),
   }));
+  openCodeHeartbeatExpiredMock.mockReset().mockResolvedValue(false);
   agentProcessMatchersMock
     .mockReset()
     .mockImplementation((agent: string, launchCommand: string) => {
@@ -2005,6 +2008,7 @@ export {
   withOpenCodeLaunchIdentityLockMock,
   readOpenCodeStateMock,
   readOpenCodeStructuredStateMock,
+  openCodeHeartbeatExpiredMock,
   resolveCursorLaunchModelMock,
   validateOpenCodeModelMock,
   resolveAgentReasoningEffortMock,
