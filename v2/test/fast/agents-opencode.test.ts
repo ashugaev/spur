@@ -215,13 +215,18 @@ describe("OpenCode adapter", () => {
 
   it("emits the log level and still returns undefined on an empty config", () => {
     expect(
-      JSON.parse(buildOpenCodeConfig(undefined, undefined, undefined, "WARN") ?? "{}"),
+      JSON.parse(buildOpenCodeConfig(undefined, undefined, undefined, undefined, "WARN") ?? "{}"),
     ).toEqual({
       logLevel: "WARN",
     });
     expect(
-      JSON.parse(buildOpenCodeConfig(undefined, true, undefined, "ERROR") ?? "{}")["logLevel"],
+      JSON.parse(buildOpenCodeConfig(undefined, true, undefined, undefined, "ERROR") ?? "{}")[
+        "logLevel"
+      ],
     ).toBe("ERROR");
+    expect(
+      JSON.parse(buildOpenCodeConfig(undefined, false, undefined, "/x/plugin.js", "WARN") ?? "{}"),
+    ).toEqual({ plugin: ["file:///x/plugin.js"], logLevel: "WARN" });
     expect(buildOpenCodeConfig(undefined, undefined, undefined)).toBeUndefined();
     expect(buildOpenCodeConfig([], false)).toBeUndefined();
   });

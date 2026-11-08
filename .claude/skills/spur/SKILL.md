@@ -53,7 +53,7 @@ DOCS
   Cursor send correlation and retained acknowledgement baselines: docs/commands.md, docs/daemon-api.md.
   Review feedback, recovery, package checks: docs/commands.md
   Routes, bounded conversation pages, pre-flight batches, lifecycle receipts, restore cancellation: docs/daemon-api.md
-  Config, admission, trigger-spawn retry, reviewer App/consent, pane-child fallback: docs/configuration.md; events: docs/configuration.md#events
+  Config, admission, trigger-spawn retry, reviewer App/consent, pane-child fallback, OpenCode heartbeat: docs/configuration.md; events: docs/configuration.md#events
   GitHub PR feedback attribution, ownership and custom markers: docs/configuration.md#field-reference
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
