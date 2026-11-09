@@ -163,9 +163,13 @@ The same pass also runs a detect-only step over one shared process-table snapsho
 
 `staleAfterMinutes` (default `720`) parks an idle session: `status: "stopped"`, `stopReason: "stale_timeout"`, state `stale`; `0` disables. Wake: any system message, through the [admission gate](#admission-control). Mechanics: `v2/src/session-service.ts`.
 
+## PR alert ownership
+
+- Native spawn `prAlertOwner` (default `false`): exclusive workspace CI/conflict recipient; eligibility, lifecycle and permissions: `v2/src/pr-alert-owner.ts`, `v2/src/session-service.ts`; [spawn API](daemon-api.md#session-routes).
+
 ## Automatic reminders
 
-Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 attempts for unchanged open work/blockers/empty ledger — see [todo](commands.md#todo). Pending automatic GitHub/Jira sends: 8 attempts per unchanged item. `ci_failed` pings once per head commit and failing check name, a re-run of the same check on that commit does not ping again, a new head commit does; no reminder loop. `merge_conflict` pings at most once per head+base pair. Failing CI or a conflict present at a PR's first observation pings once; a persisted or legacy snapshot does not replay it.
+Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 attempts for unchanged open work/blockers/empty ledger — see [todo](commands.md#todo). Pending automatic GitHub/Jira sends: 8 attempts per unchanged item. `ci_failed` pings once per head commit and failing check name, a re-run of the same check on that commit does not ping again, a new head commit does; no reminder loop. `merge_conflict` pings at most once per head+base pair. Failing CI or a conflict present at a PR's first observation pings once; legacy/unclaimed persisted snapshots do not replay it. Explicit owner-return recheck: `v2/src/event-sources/github.ts`.
 
 A session bound to a PR GitHub reports as nonexistent stops signal polling after one attempt, logs `source.poll.disabled` once (`warn`), and persists the disable per source under `<dataDir>/source-state/github-poll-disabled/<projectId>/<sourceId>.json` across source reload and daemon restart. Clear via rebind away from that PR, [`spur source poll-enable`](commands.md#source), or `spur restore`/`spur reopen`. Bounded recheck every `pollDisabledRecheckMs` (default 24h); a still-missing PR does not re-emit `source.poll.disabled`. A resolved recheck logs `source.poll.enabled` once.
 
