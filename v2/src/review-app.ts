@@ -185,6 +185,18 @@ const registeredDenials = [
     pr: 1061,
     lane: "browser",
   },
+  {
+    digest: "03a9b9355907b9282224c696bd8468482878cf6b58cb5934af57f4c5585ed1c7",
+    repository: "ashugaev/spur",
+    pr: 887,
+    lane: "code",
+  },
+  {
+    digest: "8984c3e9554dc00f2aaa418cb35868c323eb7ae8e4f18717174456885ee4597f",
+    repository: "ashugaev/spur",
+    pr: 887,
+    lane: "browser",
+  },
 ] as const;
 
 function recognizeLegacy(
@@ -201,6 +213,110 @@ function recognizeLegacy(
   const rawDigest = createHash("sha256").update(raw).digest("hex");
   const registered = registeredDenials.find((entry) => entry.digest === rawDigest);
   if (registered) {
+    const text = (value: unknown) => typeof value === "string" && value.length > 0;
+    const time = (value: unknown) => text(value) && Number.isFinite(Date.parse(String(value)));
+    if (registered.pr === 887) {
+      const exact = (value: Record<string, unknown>, keys: string[]) =>
+        Object.keys(value).length === keys.length &&
+        Object.keys(value).every((key) => keys.includes(key));
+      const common = [
+        "repository",
+        "pr",
+        "lane",
+        "session",
+        "attempt",
+        "H",
+        "B",
+        "contractDigest",
+        "status",
+        "localVerdict",
+        "evidence",
+        "reviewId",
+      ];
+      const code = registered.lane === "code";
+      const profile = code
+        ? ["prior", "requestNote", "publication", "notification", "head", "base", "delta"]
+        : ["reason", "updatedAt"];
+      if (
+        !exact(legacy, [...common, ...profile]) ||
+        legacy.repository !== registered.repository ||
+        request.repo !== registered.repository ||
+        legacy.pr !== registered.pr ||
+        request.pr !== registered.pr ||
+        legacy.lane !== registered.lane ||
+        request.lane !== registered.lane ||
+        legacy.H !==
+          (code
+            ? "f0257be2e9ac82ff87bf29a6200ed76a1c155249"
+            : "db67b3855a3a36e00ea20976be3d547676b1ecb2") ||
+        legacy.B !==
+          (code
+            ? "31bf904dbfa8f08180baa0a1ebc7829f76b44b3a"
+            : "a4a71c6bae94859e25e6c26dbf5f9f74142f7b77") ||
+        legacy.contractDigest !==
+          "379384c38ef273c111a2576abc5c090b3fe08a3bd68af35de0580b45897f030a" ||
+        legacy.status !== "BLOCKED" ||
+        legacy.localVerdict !== "APPROVED" ||
+        legacy.reviewId !== null ||
+        !Array.isArray(legacy.evidence) ||
+        !legacy.evidence.length
+      )
+        throw new ReviewAppError("legacy-receipt-invalid");
+      const attempts = [identifier(legacy.attempt)];
+      if (code) {
+        const prior = object(legacy.prior);
+        const publication = object(legacy.publication);
+        const delta = object(legacy.delta);
+        if (
+          !exact(prior, ["attempt", "H", "B", "localVerdict", "status"]) ||
+          prior.localVerdict !== "APPROVED" ||
+          prior.status !== "BLOCKED" ||
+          !exact(publication, ["attempted", "result", "appStatus", "prerequisite"]) ||
+          publication.attempted !== null ||
+          ![publication.result, publication.appStatus, publication.prerequisite].every(text) ||
+          !exact(delta, ["from", "commits", "kind", "conflicts", "checks"]) ||
+          ![delta.from, delta.kind, delta.conflicts, delta.checks].every(text) ||
+          !Array.isArray(delta.commits) ||
+          !delta.commits.length ||
+          !delta.commits.every(text) ||
+          !text(legacy.requestNote) ||
+          !text(legacy.notification) ||
+          !legacy.evidence.every((value) => {
+            const row = object(value);
+            return (
+              exact(row, ["id", "requirement", "action", "result", "status"]) &&
+              Object.values(row).every(text) &&
+              ["PASS", "NOTE", "RETAINED"].includes(String(row.status))
+            );
+          })
+        )
+          throw new ReviewAppError("legacy-receipt-invalid");
+        hash(legacy.head, 40);
+        hash(legacy.base, 40);
+        hash(prior.H, 40);
+        hash(prior.B, 40);
+        attempts.push(identifier(prior.attempt));
+      } else if (
+        !text(legacy.reason) ||
+        !time(legacy.updatedAt) ||
+        !legacy.evidence.every((value) => {
+          const row = object(value);
+          const common = ["id", "requirement", "variant", "action", "result"];
+          return (
+            Object.values(row).every(text) &&
+            (exact(row, [...common, "artifact", "retainedFrom", "rationale"]) ||
+              exact(row, [...common, "artifact"]) ||
+              (exact(row, [...common, "status"]) && row.status === "PASS"))
+          );
+        })
+      )
+        throw new ReviewAppError("legacy-receipt-invalid");
+      return {
+        session: identifier(legacy.session),
+        attempts: [...new Set(attempts)],
+        kind: "registered-denial",
+      };
+    }
     const common = [
       "repository",
       "pr",
@@ -220,8 +336,6 @@ function recognizeLegacy(
         ? ["localVerdict", "publication", "notification", "lastDeltaCheck", "deltaNote"]
         : ["localConclusion", "publicationBlockReason", "ownerNotification"];
     const keys = [...common, ...profile];
-    const text = (value: unknown) => typeof value === "string" && value.length > 0;
-    const time = (value: unknown) => text(value) && Number.isFinite(Date.parse(String(value)));
     if (
       Object.keys(legacy).length !== keys.length ||
       Object.keys(legacy).some((key) => !keys.includes(key)) ||

@@ -1521,58 +1521,134 @@ const registeredDigests = {
   browser: "f74d0a206c31a3d5069a2895f4d951288a8d80749dcfdc2924c9a3270601badc",
 };
 
-async function registeredFixture(lane: "code" | "browser" = "code") {
+const observed887Digests = {
+  code: "03a9b9355907b9282224c696bd8468482878cf6b58cb5934af57f4c5585ed1c7",
+  browser: "8984c3e9554dc00f2aaa418cb35868c323eb7ae8e4f18717174456885ee4597f",
+};
+
+// Sanitized snapshots retain every observed key and row variant, not original bytes.
+function observed887(lane: "code" | "browser") {
+  const common = {
+    repository: "ashugaev/spur",
+    pr: 887,
+    lane,
+    session: "historical-review",
+    attempt: "historical-attempt",
+    contractDigest: "379384c38ef273c111a2576abc5c090b3fe08a3bd68af35de0580b45897f030a",
+    localVerdict: "APPROVED",
+    status: "BLOCKED",
+    reviewId: null,
+  };
+  if (lane === "code")
+    return {
+      ...common,
+      H: "f0257be2e9ac82ff87bf29a6200ed76a1c155249",
+      B: "31bf904dbfa8f08180baa0a1ebc7829f76b44b3a",
+      evidence: ["PASS", "PASS", "NOTE", "PASS", "PASS", "RETAINED"].map((status, i) => ({
+        id: `code-${i}`,
+        requirement: "Historical requirement",
+        action: "Historical check",
+        result: "Historical result",
+        status,
+      })),
+      prior: {
+        attempt: "historical-prior",
+        H: "8618c6c147da7c13fe4d0567fa357f4c18d539bf",
+        B: "d89def94df9331605d90196570785951643fc196",
+        localVerdict: "APPROVED",
+        status: "BLOCKED",
+      },
+      requestNote: "Historical request",
+      publication: {
+        attempted: null,
+        result: "Historical denial",
+        appStatus: "Historical capability",
+        prerequisite: "Historical prerequisite",
+      },
+      notification: "Historical notification",
+      head: "26e11a6700f27dfa54ec0d17dfc0ae8df2b9eb23",
+      base: "de90f1e2ffd2c74c887e404b86a3b01f2067614d",
+      delta: {
+        from: "Historical baseline",
+        commits: ["Historical commit"],
+        kind: "Historical delta",
+        conflicts: "Historical conflicts",
+        checks: "Historical checks",
+      },
+    };
+  return {
+    ...common,
+    H: "db67b3855a3a36e00ea20976be3d547676b1ecb2",
+    B: "a4a71c6bae94859e25e6c26dbf5f9f74142f7b77",
+    reason: "Historical blocker",
+    evidence: Array.from({ length: 7 }, (_, i) => ({
+      id: `browser-${i}`,
+      requirement: "Historical requirement",
+      variant: "Historical variant",
+      action: "Historical check",
+      result: "Historical result",
+      ...(i < 6 ? { artifact: "historical.png" } : { status: "PASS" }),
+      ...(i < 4 ? { retainedFrom: "Historical baseline", rationale: "Historical rationale" } : {}),
+    })),
+    updatedAt: "2026-10-09T05:12:52Z",
+  };
+}
+
+async function registeredFixture(lane: "code" | "browser" = "code", pr: 1061 | 887 = 1061) {
   const f = await lifecycleFixture();
   const request = parseAttempt({
     ...draft,
     repo: "ashugaev/spur",
-    pr: 1061,
+    pr,
     lane,
-    receipt: join(f.dir, "ashugaev", "spur", "1061", `${lane}.json`),
+    receipt: join(f.dir, "ashugaev", "spur", String(pr), `${lane}.json`),
   });
   const config = { ...f.config, repositories: [request.repo] };
-  const legacy: Record<string, unknown> = {
-    repository: request.repo,
-    pr: request.pr,
-    lane,
-    session: "historical-review",
-    attempt: "historical-attempt",
-    H: "f61a0b6f9eb437cdc84037ca4d8d9b54c6b400a9",
-    B: "85c9d9e7487a6918fe6da0be1323107d0734e96d",
-    contractDigest: "379384c38ef273c111a2576abc5c090b3fe08a3bd68af35de0580b45897f030a",
-    status: "BLOCKED",
-    reviewId: null,
-    updatedAt: "2026-10-04T05:33:00Z",
-    ...(lane === "code"
-      ? {
-          localVerdict: "APPROVED",
-          publication: "DENIED: self-author 422 on pinned APPROVE; needs non-author credential",
-          evidence: ["sanitized historical diagnostic"],
-          notification: "SENT task",
-          lastDeltaCheck: "2026-11-04T05:23:08Z",
-          deltaNote: "historical delta",
-        }
+  const legacy: Record<string, unknown> =
+    pr === 887
+      ? observed887(lane)
       : {
-          localConclusion: "APPROVED",
-          publicationBlockReason:
-            "self-author restriction: active GitHub account example is PR author; non-author credential required for publication",
-          evidence: [
-            {
-              id: "SC-01",
-              boundary: "Dashboard",
-              action: "Open dashboard",
-              expected: "Loads",
-              status: "PASS",
-              artifact: "dashboard.png",
-            },
-          ],
-          ownerNotification: "SENT task",
-        }),
-  };
+          repository: request.repo,
+          pr: request.pr,
+          lane,
+          session: "historical-review",
+          attempt: "historical-attempt",
+          H: "f61a0b6f9eb437cdc84037ca4d8d9b54c6b400a9",
+          B: "85c9d9e7487a6918fe6da0be1323107d0734e96d",
+          contractDigest: "379384c38ef273c111a2576abc5c090b3fe08a3bd68af35de0580b45897f030a",
+          status: "BLOCKED",
+          reviewId: null,
+          updatedAt: "2026-10-04T05:33:00Z",
+          ...(lane === "code"
+            ? {
+                localVerdict: "APPROVED",
+                publication: "DENIED: self-author 422 on pinned APPROVE; needs non-author credential",
+                evidence: ["sanitized historical diagnostic"],
+                notification: "SENT task",
+                lastDeltaCheck: "2026-11-04T05:23:08Z",
+                deltaNote: "historical delta",
+              }
+            : {
+                localConclusion: "APPROVED",
+                publicationBlockReason:
+                  "self-author restriction: active GitHub account example is PR author; non-author credential required for publication",
+                evidence: [
+                  {
+                    id: "SC-01",
+                    boundary: "Dashboard",
+                    action: "Open dashboard",
+                    expected: "Loads",
+                    status: "PASS",
+                    artifact: "dashboard.png",
+                  },
+                ],
+                ownerNotification: "SENT task",
+              }),
+        };
   const raw = Buffer.from(JSON.stringify(legacy));
-  await mkdir(join(f.dir, "ashugaev", "spur", "1061"), { recursive: true });
+  await mkdir(join(f.dir, "ashugaev", "spur", String(pr)), { recursive: true });
   await writeFile(request.receipt, raw);
-  const sha256 = registeredDigests[lane];
+  const sha256 = (pr === 887 ? observed887Digests : registeredDigests)[lane];
   admittedBytes.set(raw.toString("base64"), sha256);
   const archive = `${request.receipt}.legacy-${sha256}`;
   const calls: string[] = [];
@@ -1608,7 +1684,7 @@ async function registeredFixture(lane: "code" | "browser" = "code") {
         id: 4,
         full_name: mode === "repository" ? "other/repo" : request.repo,
       });
-    if (method === "GET" && path === `/repos/${request.repo}/pulls/1061`) {
+    if (method === "GET" && path === `/repos/${request.repo}/pulls/${pr}`) {
       freshReads++;
       return Response.json({
         state: mode === "closed" ? "closed" : "open",
@@ -1622,7 +1698,7 @@ async function registeredFixture(lane: "code" | "browser" = "code") {
         user: { login: mode === "author" ? `${lane}[bot]` : "author" },
       });
     }
-    if (method === "GET" && path === `/repos/${request.repo}/pulls/1061/reviews`) {
+    if (method === "GET" && path === `/repos/${request.repo}/pulls/${pr}/reviews`) {
       if (mode === "malformed-history") return Response.json({ reviews: [] });
       if (mode === "history") return Response.json([{ state: "PENDING" }]);
       if (["later-page", "failed-page"].includes(mode)) {
@@ -1634,7 +1710,7 @@ async function registeredFixture(lane: "code" | "browser" = "code") {
       }
       return Response.json([]);
     }
-    if (path === `/repos/${request.repo}/issues/1061/comments`) {
+    if (path === `/repos/${request.repo}/issues/${pr}/comments`) {
       if (method === "GET") return Response.json(comments);
       if (method === "POST") {
         let payload: { body: string };
@@ -1679,6 +1755,228 @@ async function registeredFixture(lane: "code" | "browser" = "code") {
     transport,
   };
 }
+
+test.each(["code", "browser"] as const)(
+  "mocked-admission observed887 %s resets authority and replays exact archives",
+  async (lane) => {
+    const f = await registeredFixture(lane, 887);
+    const attempts =
+      lane === "code" ? ["historical-attempt", "historical-prior"] : ["historical-attempt"];
+    expect(await f.recover()).toMatchObject({
+      status: "PENDING",
+      H: f.request.H,
+      B: f.request.B,
+      session: f.request.session,
+      attempt: f.request.attempt,
+      localVerdict: null,
+      evidence: [],
+      coverage: null,
+      reviewId: null,
+      inputDigest: null,
+      mutationStarted: false,
+      supersededAttempts: attempts,
+      legacyRecovery: { digest: f.sha256, publication: "unknown", attempts },
+      feedbackPublication: { status: "confirmed" },
+    });
+    expect(await readFile(f.archive)).toEqual(f.raw);
+    const pending = await readFile(f.request.receipt);
+    const writes = faults.writes;
+    expect(await f.recover()).toMatchObject({ status: "PENDING" });
+    expect(await readFile(f.request.receipt)).toEqual(pending);
+    expect(faults.writes).toBe(writes);
+    expect(f.comments).toHaveLength(1);
+    expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+  },
+);
+
+test.each(["code", "browser"] as const)(
+  "real-hash observed887 %s sanitized bytes cannot borrow registered authority",
+  async (lane) => {
+    const f = await registeredFixture(lane, 887);
+    admittedBytes.clear();
+    const actualDigest = createHash("sha256").update(f.raw).digest("hex");
+    expect(actualDigest).not.toBe(f.sha256);
+    for (const sha256 of [actualDigest, f.sha256]) {
+      await expect(
+        recoverReview(f.config, f.request, f.request.session, sha256, f.transport),
+      ).rejects.toThrow();
+      expect(await readFile(f.request.receipt)).toEqual(f.raw);
+      await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    const changed = Buffer.concat([f.raw, Buffer.from("\n")]);
+    await writeFile(f.request.receipt, changed);
+    await expect(
+      recoverReview(f.config, f.request, f.request.session, actualDigest, f.transport),
+    ).rejects.toThrow();
+    expect(await readFile(f.request.receipt)).toEqual(changed);
+    await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(f.calls).toEqual([]);
+  },
+);
+
+test.each(["code", "browser"] as const)(
+  "mocked-admission observed887 %s rejects unknown missing and malformed profile data",
+  async (lane) => {
+    const f = await registeredFixture(lane, 887);
+    const changes: Record<string, unknown>[] = [
+      { extra: true },
+      { repository: "other/repo" },
+      { pr: 1061 },
+      { lane: lane === "code" ? "browser" : "code" },
+      { session: "invalid session" },
+      { attempt: "invalid attempt" },
+      { H: draft.H },
+      { B: draft.B },
+      { contractDigest: draft.contractDigest },
+      { status: "PENDING" },
+      { localVerdict: "FAIL" },
+      { reviewId: 8 },
+      { publicationVerdict: "BLOCKED" },
+      { mutationStarted: true },
+      { inputDigest: "a".repeat(64) },
+      { evidence: [] },
+      { evidence: [{}] },
+    ];
+    if (lane === "code") {
+      changes.push(
+        { reason: "Mixed browser profile" },
+        { head: "bad" },
+        { base: false },
+        { requestNote: "" },
+        { notification: false },
+      );
+      for (const key of ["prior", "publication", "delta"] as const) {
+        const nested = object(f.legacy[key]);
+        changes.push({ [key]: { ...nested, extra: true } });
+        for (const field of Object.keys(nested)) {
+          const missing = { ...nested };
+          delete missing[field];
+          changes.push({ [key]: missing });
+        }
+      }
+      const prior = object(f.legacy.prior);
+      const publication = object(f.legacy.publication);
+      const delta = object(f.legacy.delta);
+      changes.push(
+        { prior: { ...prior, attempt: "invalid prior" } },
+        { prior: { ...prior, H: "bad" } },
+        { prior: { ...prior, B: false } },
+        { prior: { ...prior, status: "APPROVED" } },
+        { prior: { ...prior, localVerdict: "FAIL" } },
+        { publication: { ...publication, attempted: true } },
+        { publication: { ...publication, result: "" } },
+        { publication: { ...publication, appStatus: false } },
+        { publication: { ...publication, prerequisite: "" } },
+        { delta: { ...delta, commits: [] } },
+        { delta: { ...delta, commits: [false] } },
+        { delta: { ...delta, from: "" } },
+        { delta: { ...delta, kind: false } },
+        { delta: { ...delta, conflicts: "" } },
+        { delta: { ...delta, checks: false } },
+      );
+    } else {
+      changes.push(
+        { publication: { attempted: null } },
+        { updatedAt: "bad time" },
+        { updatedAt: false },
+        { reason: "" },
+      );
+    }
+    assert(Array.isArray(f.legacy.evidence));
+    for (const value of f.legacy.evidence) {
+      const row = object(value);
+      const rows: Record<string, unknown>[] = [{ ...row, extra: true }];
+      for (const key of Object.keys(row)) {
+        const missing = { ...row };
+        delete missing[key];
+        rows.push(missing, { ...row, [key]: false });
+      }
+      rows.push({ ...row, status: "FAIL" }, { ...row, result: "" });
+      if (lane === "browser") rows.push({ ...row, status: "PASS", artifact: "mixed.png" });
+      changes.push(...rows.map((row) => ({ evidence: [row] })));
+    }
+    const variants = changes.map((change) => ({ ...f.legacy, ...change }));
+    for (const key of Object.keys(f.legacy)) {
+      const missing = { ...f.legacy };
+      delete missing[key];
+      variants.push(missing);
+    }
+    for (const variant of variants) {
+      const raw = Buffer.from(JSON.stringify(variant));
+      admittedBytes.set(raw.toString("base64"), f.sha256);
+      await writeFile(f.request.receipt, raw);
+      const writes = faults.writes;
+      await expect(f.recover()).rejects.toThrow();
+      expect(faults.writes).toBe(writes);
+      expect(await readFile(f.request.receipt)).toEqual(raw);
+      await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    expect(f.calls).toEqual([]);
+  },
+);
+
+test.each(["code", "browser"] as const)(
+  "mocked-admission observed887 %s preserves request identity and retires lineage",
+  async (lane) => {
+    const f = await registeredFixture(lane, 887);
+    const retired =
+      lane === "code" ? ["historical-attempt", "historical-prior"] : ["historical-attempt"];
+    const otherLane = lane === "code" ? ("browser" as const) : ("code" as const);
+    const requests = [
+      { ...f.request, repo: "other/repo" },
+      { ...f.request, pr: 1061 },
+      { ...f.request, lane: otherLane },
+      { ...f.request, session: "other-session" },
+      ...retired.map((attempt) => ({ ...f.request, attempt })),
+    ];
+    for (const request of requests) {
+      await expect(
+        recoverReview(f.config, request, f.request.session, f.sha256, f.transport),
+      ).rejects.toThrow();
+      expect(await readFile(f.request.receipt)).toEqual(f.raw);
+      await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    expect(f.calls).toEqual([]);
+    await f.recover();
+    const pending = await readFile(f.request.receipt);
+    f.calls.splice(0);
+    for (const attempt of retired) {
+      await expect(
+        prepareReview(f.config, { ...f.request, attempt }, f.request.session, f.transport),
+      ).rejects.toThrow("attempt-superseded");
+      expect(await readFile(f.request.receipt)).toEqual(pending);
+    }
+    expect(f.calls).toEqual([]);
+  },
+);
+
+test.each(["code", "browser"] as const)(
+  "mocked-admission observed887 %s retains registered preflight and readback checks",
+  async (lane) => {
+    const f = await registeredFixture(lane, 887);
+    for (const mode of ["history", "H"]) {
+      f.controls.mode = mode;
+      await expect(f.recover()).rejects.toThrow();
+      expect(await readFile(f.request.receipt)).toEqual(f.raw);
+      await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    f.controls.mode = "readback";
+    expect(await f.recover()).toMatchObject({ status: "BLOCKED", reviewBlocked: true });
+    expect(await readJson(f.request.receipt)).toMatchObject({
+      status: "BLOCKED",
+      localVerdict: null,
+      reviewId: null,
+      feedbackPublication: { status: "failed" },
+    });
+    expect(await readFile(f.archive)).toEqual(f.raw);
+    const blocked = await readFile(f.request.receipt);
+    f.controls.mode = "";
+    await expect(f.recover()).rejects.toThrow();
+    expect(await readFile(f.request.receipt)).toEqual(blocked);
+    expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
+  },
+);
 
 test.each(["code", "browser"] as const)(
   "mocked-admission %s denial resets authority and replays exact archives",
