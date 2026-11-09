@@ -3016,6 +3016,422 @@ describe("Spur web API routes", () => {
       expect(payload.reviewDecision).toBe("approved");
     });
 
+    function review(state: string, second: number, login = "alice") {
+      return {
+        state,
+        submittedAt: new Date(Date.UTC(2026, 10, 7, 0, 0, second)).toISOString(),
+        author: { login },
+      };
+    }
+
+    function nativePolicy(parameters: Record<string, unknown> = {}) {
+      return {
+        headRefOid: "a".repeat(40),
+        baseRefOid: "b".repeat(40),
+        baseRefName: "main",
+        baseRef: {
+          target: { oid: "b".repeat(40) },
+          branchProtectionRule: null,
+          rules: {
+            pageInfo: { hasNextPage: false },
+            nodes: [
+              {
+                type: "PULL_REQUEST",
+                parameters: {
+                  requiredApprovingReviewCount: 0,
+                  requireCodeOwnerReview: false,
+                  requireLastPushApproval: false,
+                  requiredReviewers: [],
+                  ...parameters,
+                },
+              },
+            ],
+          },
+        },
+        reviewRequests: { nodes: [], pageInfo: { hasNextPage: false } },
+        reviews: { nodes: [], pageInfo: { hasPreviousPage: false } },
+      };
+    }
+
+    it.each([
+      [{}, "none"],
+      [{ requiredApprovingReviewCount: 2 }, "required"],
+      [{ requireLastPushApproval: true }, "required"],
+      [{ requiredReviewers: [{ minimumApprovals: 1, filePatterns: [] }] }, "required"],
+      [{ requiredReviewers: [{ minimumApprovals: 0, filePatterns: ["src/**"] }] }, "none"],
+      [{ requiredReviewers: [{ minimumApprovals: 1, filePatterns: ["src/**"] }] }, "unavailable"],
+    ])("classifies complete native rules %j as %s", async (parameters, reviewRequirement) => {
+      fetchMock.mockResolvedValueOnce(ghOk(makePrGql(nativePolicy(parameters))));
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      expect(await response.json()).toMatchObject({ reviewRequirement });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("reads owner absence at the exact PR base through the existing GitHub channel", async () => {
+      fetchMock.mockResolvedValueOnce(
+        ghOk(makePrGql(nativePolicy({ requireCodeOwnerReview: true }))),
+      );
+      fetchMock.mockResolvedValueOnce(
+        ghOk({ data: { repository: { github: null, root: null, docs: null } } }),
+      );
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      expect(await response.json()).toMatchObject({ reviewRequirement: "none" });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+      expect(url).toBe("https://api.github.com/graphql");
+      expect(JSON.parse(init.body as string)).toMatchObject({
+        variables: {
+          github: `${"b".repeat(40)}:.github/CODEOWNERS`,
+          root: `${"b".repeat(40)}:CODEOWNERS`,
+          docs: `${"b".repeat(40)}:docs/CODEOWNERS`,
+        },
+      });
+    });
+
+    it.each([
+      { data: { repository: { github: { __typename: "Blob" }, root: null, docs: null } } },
+      {
+        data: { repository: { github: null, root: null, docs: null } },
+        errors: [{ message: "permission denied" }],
+      },
+      { data: { repository: { github: null } } },
+    ])("keeps unresolved owner applicability unavailable (%j)", async (owners) => {
+      fetchMock.mockResolvedValueOnce(
+        ghOk(makePrGql(nativePolicy({ requireCodeOwnerReview: true }))),
+      );
+      fetchMock.mockResolvedValueOnce(ghOk(owners));
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      expect(await response.json()).toMatchObject({ reviewRequirement: "unavailable" });
+    });
+
+    it("uses positive code-owner requests without pretending empty requests prove absence", async () => {
+      const policy = nativePolicy({ requireCodeOwnerReview: true });
+      fetchMock.mockResolvedValueOnce(
+        ghOk(
+          makePrGql({
+            ...policy,
+            reviewRequests: { nodes: [{ asCodeOwner: true }], pageInfo: { hasNextPage: false } },
+          }),
+        ),
+      );
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      expect(await response.json()).toMatchObject({ reviewRequirement: "required" });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([true, false, null])(
+      "distinguishes current blocking CR eligibility (%j)",
+      async (authorCanPushToRepository) => {
+        const policy = nativePolicy();
+        fetchMock.mockResolvedValueOnce(
+          ghOk(
+            makePrGql({
+              ...policy,
+              reviews: {
+                nodes: [{ ...review("CHANGES_REQUESTED", 1), authorCanPushToRepository }],
+                pageInfo: { hasPreviousPage: false },
+              },
+            }),
+          ),
+        );
+        const response = await getPrStatus(
+          new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+        );
+        expect(await response.json()).toMatchObject({
+          reviewRequirement:
+            authorCanPushToRepository === true
+              ? "required"
+              : authorCanPushToRepository === false
+                ? "none"
+                : "unavailable",
+          reviewers: { approved: [], changesRequested: ["alice"] },
+        });
+      },
+    );
+
+    it("does not turn voluntary write-eligible changes requests into a native requirement without a rule", async () => {
+      const policy = nativePolicy();
+      policy.baseRef.rules.nodes = [];
+      fetchMock.mockResolvedValueOnce(
+        ghOk(
+          makePrGql({
+            ...policy,
+            reviews: {
+              nodes: [{ ...review("CHANGES_REQUESTED", 1), authorCanPushToRepository: true }],
+              pageInfo: { hasPreviousPage: false },
+            },
+          }),
+        ),
+      );
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      expect(await response.json()).toMatchObject({ reviewRequirement: "none" });
+    });
+
+    it("uses only the current account opinion when deciding whether CR blocks a native PR rule", async () => {
+      fetchMock.mockResolvedValueOnce(
+        ghOk(
+          makePrGql({
+            ...nativePolicy(),
+            reviews: {
+              nodes: [
+                { ...review("CHANGES_REQUESTED", 1), authorCanPushToRepository: true },
+                { ...review("APPROVED", 2), authorCanPushToRepository: true },
+              ],
+              pageInfo: { hasPreviousPage: false },
+            },
+          }),
+        ),
+      );
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      expect(await response.json()).toMatchObject({
+        reviewRequirement: "none",
+        reviewers: { approved: ["alice"], changesRequested: [] },
+      });
+    });
+
+    it("retains GitHub's positive required-review decision even when visible rules contain no PR rule", async () => {
+      const policy = nativePolicy();
+      const baseRef = {
+        ...policy.baseRef,
+        rules: {
+          nodes: [{ type: "COPILOT_CODE_REVIEW", parameters: {} }],
+          pageInfo: { hasNextPage: false },
+        },
+      };
+      fetchMock.mockResolvedValueOnce(
+        ghOk(makePrGql({ ...policy, baseRef, reviewDecision: "REVIEW_REQUIRED" })),
+      );
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      expect(await response.json()).toMatchObject({
+        reviewRequirement: "required",
+        reviewDecision: "review_required",
+      });
+    });
+
+    it("keeps a positive native decision despite denied policy subfields", async () => {
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          ...makePrGql({ reviewDecision: "REVIEW_REQUIRED", baseRef: null }),
+          errors: [
+            { message: "policy permission denied", path: ["repository", "pullRequest", "baseRef"] },
+          ],
+        }),
+      );
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      expect(await response.json()).toMatchObject({
+        reviewRequirement: "required",
+        reviewDecision: "review_required",
+        error: "policy permission denied",
+      });
+    });
+
+    it("includes classic protection in the same native classifier", async () => {
+      const policy = nativePolicy();
+      fetchMock.mockResolvedValueOnce(
+        ghOk(
+          makePrGql({
+            ...policy,
+            baseRef: {
+              ...policy.baseRef,
+              branchProtectionRule: {
+                requiresApprovingReviews: true,
+                requiredApprovingReviewCount: 1,
+                requiresCodeOwnerReviews: false,
+                requireLastPushApproval: false,
+              },
+            },
+          }),
+        ),
+      );
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      expect(await response.json()).toMatchObject({ reviewRequirement: "required" });
+    });
+
+    it.each([
+      { baseRef: null },
+      { baseRefOid: null },
+      {
+        baseRef: {
+          ...nativePolicy().baseRef,
+          rules: { nodes: [], pageInfo: { hasNextPage: true } },
+        },
+      },
+      { baseRef: { ...nativePolicy().baseRef, target: { oid: "c".repeat(40) } } },
+      { reviews: { nodes: [], pageInfo: { hasPreviousPage: true } } },
+    ])("never proves no native requirement from incomplete data (%j)", async (change) => {
+      fetchMock.mockResolvedValueOnce(ghOk(makePrGql({ ...nativePolicy(), ...change })));
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      expect(await response.json()).toMatchObject({ reviewRequirement: "unavailable" });
+    });
+
+    it("reduces the live five-review history to two current approvals with null aggregate decision", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk(
+          makePrGql({
+            reviewDecision: null,
+            reviews: {
+              pageInfo: { hasPreviousPage: false },
+              nodes: [
+                review("CHANGES_REQUESTED", 1, "alice"),
+                review("CHANGES_REQUESTED", 2, "bob"),
+                review("APPROVED", 3, "bob"),
+                review("APPROVED", 4, "alice"),
+                review("APPROVED", 5, "alice"),
+              ],
+            },
+          }),
+        ),
+      );
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      expect(await response.json()).toMatchObject({
+        reviewDecision: null,
+        reviewers: { approved: ["alice", "bob"], changesRequested: [] },
+      });
+      const query = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string) as { query: string };
+      expect(query.query).toContain("reviews(last:100)");
+      expect(query.query).toContain("submittedAt");
+      expect(query.query).toContain("reviewDecision");
+      expect(query.query).not.toContain("latestOpinionatedReviews");
+      expect(query.query).toContain("pageInfo { hasPreviousPage }");
+    });
+
+    it.each([
+      [
+        "comments and pending keep approval",
+        [
+          review("APPROVED", 1),
+          { state: "COMMENTED", author: { login: "alice" } },
+          { state: "PENDING", submittedAt: null, author: { login: "alice" } },
+        ],
+        ["alice"],
+        [],
+      ],
+      [
+        "changes replace approval",
+        [review("APPROVED", 1), review("CHANGES_REQUESTED", 2)],
+        [],
+        ["alice"],
+      ],
+      [
+        "approval replaces changes",
+        [review("CHANGES_REQUESTED", 1), review("APPROVED", 2)],
+        ["alice"],
+        [],
+      ],
+      ["dismissal clears approval", [review("APPROVED", 1), review("DISMISSED", 2)], [], []],
+      [
+        "approval restores after dismissal",
+        [review("APPROVED", 1), review("DISMISSED", 2), review("APPROVED", 3)],
+        ["alice"],
+        [],
+      ],
+      [
+        "latest account spelling survives case folding",
+        [review("CHANGES_REQUESTED", 1, "ALICE"), review("APPROVED", 2, "alice")],
+        ["alice"],
+        [],
+      ],
+      [
+        "publication time beats connection order",
+        [review("APPROVED", 3), review("CHANGES_REQUESTED", 1), review("DISMISSED", 2)],
+        ["alice"],
+        [],
+      ],
+      [
+        "equal publication times preserve connection order",
+        [review("APPROVED", 1), review("CHANGES_REQUESTED", 1)],
+        [],
+        ["alice"],
+      ],
+      [
+        "deleted authors do not affect current opinions",
+        [review("APPROVED", 1), { state: "CHANGES_REQUESTED", author: null }],
+        ["alice"],
+        [],
+      ],
+    ])("reduces review history: %s", async (_name, nodes, approved, changesRequested) => {
+      fetchMock.mockResolvedValue(
+        ghOk(makePrGql({ reviews: { nodes, pageInfo: { hasPreviousPage: false } } })),
+      );
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      expect(await response.json()).toMatchObject({ reviewers: { approved, changesRequested } });
+    });
+
+    it.each([
+      undefined,
+      null,
+      { nodes: [], pageInfo: { hasPreviousPage: true } },
+      { nodes: [], pageInfo: {} },
+      { nodes: "invalid", pageInfo: { hasPreviousPage: false } },
+      { nodes: [null], pageInfo: { hasPreviousPage: false } },
+      {
+        nodes: [{ state: "APPROVED", author: { login: 3 } }],
+        pageInfo: { hasPreviousPage: false },
+      },
+      {
+        nodes: [{ ...review("APPROVED", 1), submittedAt: null }],
+        pageInfo: { hasPreviousPage: false },
+      },
+      {
+        nodes: [{ ...review("CHANGES_REQUESTED", 1), submittedAt: "invalid" }],
+        pageInfo: { hasPreviousPage: false },
+      },
+      {
+        nodes: [{ ...review("DISMISSED", 1), submittedAt: "123" }],
+        pageInfo: { hasPreviousPage: false },
+      },
+      { nodes: [review("UNKNOWN", 1)], pageInfo: { hasPreviousPage: false } },
+    ])(
+      "hides unavailable or incomplete reviewer metadata without losing PR status (%j)",
+      async (reviews) => {
+        fetchMock.mockResolvedValue(ghOk(makePrGql({ reviewDecision: "APPROVED", reviews })));
+        const response = await getPrStatus(
+          new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+        );
+        expect(await response.json()).toMatchObject({
+          state: "open",
+          reviewDecision: "approved",
+          reviewers: null,
+        });
+      },
+    );
+
+    it("distinguishes a complete empty reviewer list from unknown", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk(makePrGql({ reviews: { nodes: [], pageInfo: { hasPreviousPage: false } } })),
+      );
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      expect(await response.json()).toMatchObject({
+        reviewers: { approved: [], changesRequested: [] },
+      });
+    });
+
     it("does not infer approval from resolved review threads", async () => {
       fetchMock.mockResolvedValue(
         ghOk(
@@ -3674,6 +4090,87 @@ describe("Spur web API routes", () => {
       const response = await postBatch("not-an-array");
       expect(response.status).toBe(400);
       expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("returns reviewer metadata through the shared batch selection", async () => {
+      const url = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(
+        ghOk(
+          aliasedGql({
+            pr0: makePrNode({
+              reviews: {
+                nodes: [
+                  {
+                    state: "CHANGES_REQUESTED",
+                    submittedAt: "2026-11-07T06:42:56Z",
+                    author: { login: "alice" },
+                  },
+                ],
+                pageInfo: { hasPreviousPage: false },
+              },
+            }),
+          }),
+        ),
+      );
+      const response = await postBatch([url]);
+      expect(await response.json()).toMatchObject({
+        results: { [url]: { reviewers: { approved: [], changesRequested: ["alice"] } } },
+      });
+      const query = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string) as { query: string };
+      expect(query.query).toContain("reviews(last:100)");
+      expect(query.query).toContain("submittedAt");
+      expect(query.query).toContain("reviewDecision");
+      expect(query.query).not.toContain("latestOpinionatedReviews");
+    });
+
+    it("shares the authoritative positive REVIEW_REQUIRED decision in batch responses", async () => {
+      const url = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(
+        ghOk(
+          aliasedGql({
+            pr0: makePrNode({
+              reviewDecision: "REVIEW_REQUIRED",
+              headRefOid: "a".repeat(40),
+              baseRefOid: "b".repeat(40),
+              baseRefName: "main",
+              baseRef: {
+                target: { oid: "b".repeat(40) },
+                branchProtectionRule: null,
+                rules: {
+                  nodes: [{ type: "COPILOT_CODE_REVIEW", parameters: {} }],
+                  pageInfo: { hasNextPage: false },
+                },
+              },
+            }),
+          }),
+        ),
+      );
+      const response = await postBatch([url]);
+      expect(await response.json()).toMatchObject({
+        results: { [url]: { reviewRequirement: "required", reviewDecision: "review_required" } },
+      });
+    });
+
+    it("preserves positive native decision and alias error for denied policy fields in batch", async () => {
+      const url = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          ...aliasedGql({ pr0: makePrNode({ reviewDecision: "REVIEW_REQUIRED", baseRef: null }) }),
+          errors: [
+            { message: "policy permission denied", path: ["pr0", "pullRequest", "baseRef"] },
+          ],
+        }),
+      );
+      const response = await postBatch([url]);
+      expect(await response.json()).toMatchObject({
+        results: {
+          [url]: {
+            reviewRequirement: "required",
+            reviewDecision: "review_required",
+            error: "policy permission denied",
+          },
+        },
+      });
     });
 
     it("returns 400 for more than 100 urls", async () => {
