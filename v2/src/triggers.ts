@@ -163,7 +163,10 @@ function isWorkItemEventData(data: unknown): data is WorkItemEventData {
   );
 }
 
-function isSendTriggerAllowed(session: SessionView, triggerId: string): boolean {
+function isSendTriggerAllowed(
+  session: Pick<SessionView, "allowedTriggers">,
+  triggerId: string,
+): boolean {
   if (session.allowedTriggers === undefined) {
     return true;
   }
