@@ -5,7 +5,7 @@ import { readSnippetBudget } from "@/lib/snippets/snippet-store";
 import { createStoreChangePoller, STORE_POLL_INTERVAL_MS } from "@/lib/store-change-poller";
 import {
   FakeDaemon,
-  FakePoller,
+  type FakePoller,
   flush,
   harness,
   manifest,

@@ -185,7 +185,7 @@
 
   function randomId() {
     const bytes = new Uint8Array(10);
-    crypto.getRandomValues(bytes);
+    window.crypto.getRandomValues(bytes);
     return (
       "act-" +
       Array.from(bytes)
@@ -399,7 +399,7 @@
         init.headers["content-type"] = "application/json";
         init.body = JSON.stringify(body);
       }
-      return fetch(base + path, init).then(
+      return window.fetch(base + path, init).then(
         function (response) {
           return response
             .json()
@@ -455,7 +455,7 @@
     return {
       kind: "page",
       connect: function () {
-        source = new EventSource(base + "events");
+        source = new window.EventSource(base + "events");
         source.addEventListener("open", reconcile);
         source.addEventListener("change", function (event) {
           const change = parseEventData(event);
@@ -1550,6 +1550,7 @@
         }
         const id = this.getAttribute("action") || (form && form.getAttribute("action"));
         if (!id) return;
+        // eslint-disable-next-line @typescript-eslint/no-this-alias -- retain the invoking element identity for its spinner
         invokingEl = this;
         invokeAction(id, payload, trusted === true, false);
       }

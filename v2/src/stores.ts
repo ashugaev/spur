@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type * as sqlite from "node:sqlite";
 import { sessionArtifactsDir, SESSION_WORK_DIR } from "./session-artifacts.js";
 import { workspaceIdOf } from "./session-desk.js";
 import type { SessionRecord } from "./types.js";
@@ -163,7 +163,7 @@ function encodeDocData(data: unknown): string {
   return text;
 }
 
-function bindScalar(value: unknown): SQLInputValue {
+function bindScalar(value: unknown): sqlite.SQLInputValue {
   if (value === null) return null;
   if (typeof value === "boolean") return value ? 1 : 0;
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -197,8 +197,8 @@ function rowToDoc(row: DocRow): StoreDoc {
   };
 }
 
-let sqliteModule: Promise<typeof import("node:sqlite")> | undefined;
-function loadSqlite(): Promise<typeof import("node:sqlite")> {
+let sqliteModule: Promise<typeof sqlite> | undefined;
+function loadSqlite(): Promise<typeof sqlite> {
   sqliteModule ??= import("node:sqlite");
   return sqliteModule;
 }
@@ -271,7 +271,10 @@ export class StoreService {
     };
   }
 
-  private async open({ ref, path }: Resolved, create: boolean): Promise<DatabaseSync | null> {
+  private async open(
+    { ref, path }: Resolved,
+    create: boolean,
+  ): Promise<sqlite.DatabaseSync | null> {
     if (!create && !existsSync(path)) return null;
     const { DatabaseSync } = await loadSqlite();
     if (create) {
@@ -293,7 +296,11 @@ export class StoreService {
     return db;
   }
 
-  private async withRead<T>(storeId: string, empty: T, fn: (db: DatabaseSync) => T): Promise<T> {
+  private async withRead<T>(
+    storeId: string,
+    empty: T,
+    fn: (db: sqlite.DatabaseSync) => T,
+  ): Promise<T> {
     const db = await this.open(this.resolve(storeId, "read"), false);
     if (!db) return empty;
     try {
@@ -306,7 +313,7 @@ export class StoreService {
   private async withWrite<T>(
     storeId: string,
     options: WriteOptions,
-    fn: (db: DatabaseSync, changes: StoreChangeEvent[]) => T,
+    fn: (db: sqlite.DatabaseSync, changes: StoreChangeEvent[]) => T,
     capSize = !options.internal,
   ): Promise<T> {
     const resolved = this.resolve(storeId, options.internal ? "internal" : "write");
@@ -562,7 +569,7 @@ function assertStoreSize(path: string): void {
   }
 }
 
-function readDoc(db: DatabaseSync, collection: string, docId: string): StoreDoc | null {
+function readDoc(db: sqlite.DatabaseSync, collection: string, docId: string): StoreDoc | null {
   const row = db
     .prepare(
       "SELECT id, data, rev, created_at, updated_at FROM docs WHERE collection = ? AND id = ?",
@@ -572,7 +579,7 @@ function readDoc(db: DatabaseSync, collection: string, docId: string): StoreDoc 
 }
 
 function writeDoc(
-  db: DatabaseSync,
+  db: sqlite.DatabaseSync,
   changes: StoreChangeEvent[],
   collection: string,
   docId: string,
@@ -600,7 +607,7 @@ function writeDoc(
   return doc;
 }
 
-function readChanges(db: DatabaseSync, since: number, limit: number): StoreChangesPage {
+function readChanges(db: sqlite.DatabaseSync, since: number, limit: number): StoreChangesPage {
   const seqRow = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'changes'").get() as
     | { seq: number }
     | undefined;
@@ -622,10 +629,10 @@ function readChanges(db: DatabaseSync, since: number, limit: number): StoreChang
 }
 
 function runQuery(
-  db: DatabaseSync,
+  db: sqlite.DatabaseSync,
   collection: string,
   query: StoreQuery,
-  built: { sql: string; params: SQLInputValue[] },
+  built: { sql: string; params: sqlite.SQLInputValue[] },
 ): StoreDoc[] {
   const params = [...built.params];
   let sql = built.sql;
@@ -639,17 +646,17 @@ function runQuery(
 function buildQuery(
   collection: string,
   query: StoreQuery,
-): { sql: string; params: SQLInputValue[] } {
+): { sql: string; params: sqlite.SQLInputValue[] } {
   const where = query.where ?? [];
   if (!Array.isArray(where) || where.length > MAX_WHERE_CLAUSES) {
     throw new StoreError(400, `where accepts at most ${MAX_WHERE_CLAUSES} clauses`);
   }
   const clauses = ["collection = ?"];
-  const params: SQLInputValue[] = [collection];
+  const params: sqlite.SQLInputValue[] = [collection];
   for (const clause of where) {
     if (!isJsonObject(clause)) throw new StoreError(400, "where clause must be an object");
     const path = assertFieldPath(clause.field);
-    const op = clause.op as WhereOp;
+    const op = clause.op;
     if (!WHERE_OPS.has(op)) throw new StoreError(400, `Invalid where op: ${String(clause.op)}`);
     if (op === "in") {
       const values = clause.value;
@@ -678,7 +685,7 @@ function buildQuery(
   if (query.orderBy !== undefined) {
     const path = assertFieldPath(query.orderBy.field);
     const direction = query.orderBy.direction ?? "asc";
-    if (direction !== "asc" && direction !== "desc") {
+    if (!["asc", "desc"].includes(direction)) {
       throw new StoreError(400, `Invalid orderBy direction: ${String(direction)}`);
     }
     order = `json_extract(data, ?) ${direction.toUpperCase()}, id ${direction.toUpperCase()}`;
@@ -696,10 +703,10 @@ function buildQuery(
 // Keyset cursor after `startAfter`, ties broken by id. Inserts its params before the
 // trailing orderBy param.
 function cursorClause(
-  db: DatabaseSync,
+  db: sqlite.DatabaseSync,
   collection: string,
   query: StoreQuery,
-  params: SQLInputValue[],
+  params: sqlite.SQLInputValue[],
 ): string {
   const startAfter = query.startAfter as string;
   const anchor = readDoc(db, collection, startAfter);
@@ -714,11 +721,11 @@ function cursorClause(
   const valueRow = db
     .prepare("SELECT json_extract(?, ?) AS v")
     .get(JSON.stringify(anchor.data), path) as {
-    v: SQLInputValue;
+    v: sqlite.SQLInputValue;
   };
   const value = valueRow.v;
   let clause: string;
-  let clauseParams: SQLInputValue[];
+  let clauseParams: sqlite.SQLInputValue[];
   // NULLs sort first ascending, last descending.
   if (value === null && descending) {
     clause = "(json_extract(data, ?) IS NULL AND id < ?)";

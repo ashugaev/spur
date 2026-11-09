@@ -131,7 +131,7 @@ export class StoreAgent {
     // Recorded after the delivery checks and before the send: a rejected send is not
     // chat, and a poll must never consume the message before it is known.
     const hash = chatHash(message);
-    let added = false;
+    const chat = { added: false };
     try {
       return await this.ensureAndDeliver(storeId, message, userGesture, () =>
         this.host.stores.transactMeta(storeId, (meta) => {
@@ -139,7 +139,7 @@ export class StoreAgent {
           const known = (Array.isArray(stored) ? stored : []).filter(
             (value): value is string => typeof value === "string",
           );
-          added = !known.includes(hash);
+          chat.added = !known.includes(hash);
           meta.set(
             META_CHAT,
             [...known.filter((value) => value !== hash), hash].slice(-CHAT_SENT_CAP),
@@ -148,7 +148,7 @@ export class StoreAgent {
       );
     } catch (error) {
       // A send that failed after recording is not chat. A hash recorded earlier stays.
-      if (added) {
+      if (chat.added) {
         await this.host.stores.transactMeta(storeId, (meta) => {
           const stored = meta.get(META_CHAT);
           meta.set(
@@ -214,7 +214,7 @@ export class StoreAgent {
   private boundRecord(storeId: string, pageId: string, binding: unknown) {
     const sessionId =
       typeof binding === "object" && binding !== null && "sessionId" in binding
-        ? (binding as { sessionId: unknown }).sessionId
+        ? binding.sessionId
         : undefined;
     if (typeof sessionId !== "string") return null;
     const record = this.host.readSession(sessionId);

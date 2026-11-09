@@ -254,6 +254,12 @@ describe("store queries", () => {
     await expectStatus(service.query("page:films", "items", { orderBy: { field: "x;drop" } }), 400);
     await expectStatus(
       service.query("page:films", "items", {
+        orderBy: { field: "rating", direction: "sideways" as never },
+      }),
+      400,
+    );
+    await expectStatus(
+      service.query("page:films", "items", {
         where: [{ field: "a", op: "LIKE" as never, value: 1 }],
       }),
       400,

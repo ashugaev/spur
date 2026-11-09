@@ -189,7 +189,7 @@ export function parseActionEnvelope(
     }
     const label = JSON.parse(quoted) as string;
     const source = parseSource(body["source"]);
-    const payload = body["payload"] as JsonObject;
+    const payload = body["payload"];
     if (buildActionEnvelope({ id, store, action, label, source, payload }) !== text) return null;
     return { id, store, action, label, source };
   } catch {

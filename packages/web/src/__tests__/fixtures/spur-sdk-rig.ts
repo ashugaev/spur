@@ -264,16 +264,15 @@ export async function pageRig(body = ""): Promise<PageRig> {
       Array<(event: { data: string; lastEventId: string }) => void>
     >();
     constructor(public url: string) {
-      const self = this;
       sources.push({
         url,
-        emit(type, data, id) {
-          for (const fn of self.handlers.get(type) ?? []) {
+        emit: (type, data, id) => {
+          for (const fn of this.handlers.get(type) ?? []) {
             fn({ data: JSON.stringify(data), lastEventId: id ?? "" });
           }
         },
-        emitRaw(type, data) {
-          for (const fn of self.handlers.get(type) ?? []) fn({ data, lastEventId: "" });
+        emitRaw: (type, data) => {
+          for (const fn of this.handlers.get(type) ?? []) fn({ data, lastEventId: "" });
         },
       });
     }
