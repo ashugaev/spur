@@ -156,6 +156,13 @@ const send = body("SendMessageRequest", [
 const restore = body("RestoreSessionRequest", [
   field("operationId", "string", "Optional lifecycle operation ID for receipt reconciliation."),
   field(
+    "restart",
+    "boolean",
+    "Restart a running terminal session; restore endpoint only.",
+    false,
+    false,
+  ),
+  field(
     "force",
     "boolean",
     "Bypass duplicate-launch guard; never bypass surviving pane process guard.",

@@ -35788,7 +35788,7 @@ describe("SessionService", () => {
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
     expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
     expect(deleteAgentHookStateMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", ["codex-home"]);
     expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       "api",
@@ -36566,9 +36566,9 @@ describe("SessionService", () => {
     await service.complete("api-2");
 
     expect(existsSync(artifactDirForSession("api-1"))).toBe(true);
-    expect(removeSessionSlotToolMock).not.toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
-    // The closing sibling's own tool dir is per-session and must not leak.
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-2");
+    expect(removeSessionSlotToolMock.mock.calls.filter(([, id]) => id === "api-1")).toEqual([]);
+    // The closing sibling's own tool dir is per-session; its codex-home survives completion.
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-2", ["codex-home"]);
   });
 
   it("keeps the workspace state file while completing a desk member with a live sibling", async () => {
@@ -36639,7 +36639,7 @@ describe("SessionService", () => {
     await service.complete("api-2");
 
     expect(existsSync(artifactDirForSession("api-1"))).toBe(true);
-    expect(removeSessionSlotToolMock).not.toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock.mock.calls.filter(([, id]) => id === "api-1")).toEqual([]);
     expect(removeWorktreeMock).not.toHaveBeenCalled();
   });
 
@@ -36723,7 +36723,7 @@ describe("SessionService", () => {
     await service.complete("api-2");
 
     expect(existsSync(artifactDirForSession("api-1"))).toBe(false);
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", ["codex-home"]);
   });
 
   it("deletes the workspace state file only on the last member's teardown", async () => {
@@ -36788,7 +36788,7 @@ describe("SessionService", () => {
     await service.complete("api-2");
 
     expect(existsSync(artifactDirForSession("api-1"))).toBe(true);
-    expect(removeSessionSlotToolMock).not.toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock.mock.calls.filter(([, id]) => id === "api-1")).toEqual([]);
   });
 
   describe("M2: desk-shared project sidecars", () => {
@@ -36912,6 +36912,40 @@ describe("SessionService", () => {
       );
       expect(result.id).toBe("api-2");
       expect(sessions.get("api-2")?.sidecarNames).toBeUndefined();
+    });
+
+    it("rebuilds the owner's tool wrappers when its session-tools dir already exists", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { daemon: { command: "pnpm daemon", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        }),
+      );
+      // A completed Codex anchor leaves only codex-home behind.
+      mkdirSync(join(TEST_DATA_DIR, "session-tools", "api-1", "codex-home"), { recursive: true });
+      sidecarTmuxAliveMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.startSidecar("api-1", "daemon");
+
+      expect(ensureSessionSlotToolMock).toHaveBeenCalledWith(
+        expect.objectContaining({ dataDir: TEST_DATA_DIR, sessionId: "api-1" }),
+      );
     });
 
     it("stops a project sidecar requested from a desk sibling and preserves the anchor's slot", async () => {
@@ -40476,7 +40510,7 @@ describe("SessionService", () => {
 
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
     expect(deleteAgentHookStateMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", []);
     expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
       id: "api-1",
@@ -43843,7 +43877,7 @@ describe("SessionService", () => {
 
     expect(writeSessionMock).not.toHaveBeenCalled();
     expect(deleteAgentHookStateMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", []);
     expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       "api",
@@ -43942,7 +43976,7 @@ describe("SessionService", () => {
 
     expect(removeWorktreeMock).not.toHaveBeenCalled();
     expect(deleteAgentHookStateMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", []);
     expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       "api",
@@ -44291,7 +44325,7 @@ describe("SessionService", () => {
     await service.kill("api-2");
 
     expect(existsSync(artifactDirForSession("api-1"))).toBe(true);
-    expect(removeSessionSlotToolMock).not.toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock.mock.calls.filter(([, id]) => id === "api-1")).toEqual([]);
   });
 
   it("removes the shared artifacts dir and anchor tool dir when killing the last non-terminal desk member", async () => {
@@ -44324,7 +44358,35 @@ describe("SessionService", () => {
     await service.kill("api-2");
 
     expect(existsSync(artifactDirForSession("api-1"))).toBe(false);
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    // Completed anchor can be reopened: its codex-home outlives the sibling's kill.
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", ["codex-home"]);
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-2", []);
+  });
+
+  it("removes the whole anchor tool dir when killing the last desk member and the anchor was killed", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    store.set("api-1", { ...base, id: "api-1", tmuxSession: "api-1", status: "killed" as const });
+    store.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2", status: "running" as const });
+    mkdirSync(artifactDirForSession("api-1"), { recursive: true });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.kill("api-2");
+
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", []);
   });
 
   it("preserves startup attachments under the desk anchor id when killing the last desk member", async () => {
@@ -45442,6 +45504,130 @@ describe("SessionService", () => {
       expect.any(String),
       expect.objectContaining({ model: "sonnet" }),
     );
+  });
+
+  it("restarts at the live-session cap and retains native identity and settings", async () => {
+    mockClaudeJsonlState("waiting");
+    const config = baseConfig();
+    loadConfigMock.mockReturnValue({
+      ...config,
+      admission: { ...config.admission, maxLiveSessions: 1 },
+      projects: { api: { ...config.projects.api, modes: { manager: { skill: "manager" } } } },
+    });
+    const record = runningSession({
+      agentSessionId: "session-uuid",
+      model: "sonnet",
+      mode: "manager",
+    });
+    const sessions = createSessionStore(record);
+    const service = await createDisposedSessionService();
+
+    const restored = await service.restore(record.id, { restart: true });
+
+    expect(restored.status).toBe("running");
+    expect(sessions.get(record.id)).toMatchObject({
+      id: record.id,
+      agentSessionId: record.agentSessionId,
+      worktreePath: record.worktreePath,
+      prompt: record.prompt,
+      model: record.model,
+      mode: record.mode,
+    });
+    expect(killTmuxSessionMock.mock.invocationCallOrder[0]).toBeLessThan(
+      createTmuxSessionMock.mock.invocationCallOrder[0]!,
+    );
+    expect(buildAgentRestorePlanMock).toHaveBeenCalledWith(
+      "claude",
+      record.worktreePath,
+      "",
+      expect.objectContaining({ model: "sonnet" }),
+    );
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["admission", "budget", "status", "survivor", "cancelled", "pre-launch"] as const)(
+    "guards restart at the %s boundary",
+    async (boundary) => {
+      const record = runningSession(boundary === "status" ? { status: "stopped" } : {});
+      const sessions = createSessionStore(record);
+      const service = await createDisposedSessionService();
+      const seam = service as unknown as {
+        assertAdmissible(): void;
+        assertTokenBudgetAllowsActivation(): void;
+        killAgentPaneAndConfirmExit(
+          record: SessionRecord,
+          options: { failOnSurvivors: boolean; operation: { assertActive(): void } },
+        ): Promise<void>;
+        restoreLocked(): Promise<SessionView>;
+      };
+      const launch = vi.spyOn(seam, "restoreLocked").mockRejectedValue(new Error("pre-launch"));
+      const controller = new AbortController();
+      if (boundary === "admission")
+        vi.spyOn(seam, "assertAdmissible").mockImplementation(() => {
+          throw new Error("admission");
+        });
+      if (boundary === "budget")
+        vi.spyOn(seam, "assertTokenBudgetAllowsActivation").mockImplementation(() => {
+          throw new Error("budget");
+        });
+      if (boundary === "survivor")
+        vi.spyOn(seam, "killAgentPaneAndConfirmExit").mockImplementation(
+          async (_record, options) => {
+            expect(options.failOnSurvivors).toBe(true);
+            options.operation.assertActive();
+            throw new Error("survivor");
+          },
+        );
+      if (boundary === "cancelled") controller.abort();
+      await expect(
+        service.restore(record.id, { restart: true }, { signal: controller.signal }),
+      ).rejects.toThrow();
+      if (boundary === "pre-launch") {
+        expect(sessions.get(record.id)).toMatchObject({
+          status: "stopped",
+          stopReason: "manual_pause",
+        });
+        expect(launch).toHaveBeenCalledOnce();
+      } else {
+        expect(launch).not.toHaveBeenCalled();
+        expect(sessions.get(record.id)?.status).toBe(record.status);
+      }
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects restart on reopen before mutating a completed session", async () => {
+    const record = runningSession({ status: "completed" });
+    const sessions = createSessionStore(record);
+    const service = await createDisposedSessionService();
+    await expect(service.reopen(record.id, { restart: true })).rejects.toThrow(
+      "only supported by restore",
+    );
+    expect(sessions.get(record.id)).toEqual(record);
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(createWorktreeMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a second restart while the first owns the lifecycle", async () => {
+    const record = runningSession();
+    createSessionStore(record);
+    const service = await createDisposedSessionService();
+    const seam = service as unknown as { restoreLocked(): Promise<SessionView> };
+    let finish!: (result: SessionView) => void;
+    const launch = vi.spyOn(seam, "restoreLocked").mockImplementation(
+      () =>
+        new Promise<SessionView>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const first = service.restore(record.id, { restart: true });
+    await vi.waitFor(() => expect(launch).toHaveBeenCalledOnce());
+    await expect(service.restore(record.id, { restart: true })).rejects.toThrow();
+    finish({ ...record, status: "running" } as SessionView);
+    await first;
+    expect(launch).toHaveBeenCalledOnce();
+    expect(killTmuxSessionMock).toHaveBeenCalledOnce();
   });
 
   it("restores through the agent-specific resume plan and keeps the same session id", async () => {
@@ -76912,14 +77098,21 @@ describe("SessionService", () => {
       expect(sessions.get(record.id)?.slots).toEqual(record.slots);
     });
 
-    it.each(["alive", "unknown", "dead"])(
-      "retains an uncertain restore readiness result with subsequent %s liveness",
-      async (liveness) => {
+    it.each([
+      { liveness: "alive", restart: false },
+      { liveness: "unknown", restart: false },
+      { liveness: "dead", restart: false },
+      { liveness: "alive", restart: true },
+      { liveness: "unknown", restart: true },
+      { liveness: "dead", restart: true },
+    ])(
+      "retains uncertain restore readiness with $liveness liveness and restart=$restart",
+      async ({ liveness, restart }) => {
         const service = await createDisposedSessionService();
         const sessions = createSessionStore();
         const record = sessionRecord({
           id: "api-1",
-          status: "stopped",
+          status: restart ? "running" : "stopped",
           stopReason: "manual_pause",
           agentSessionId: "native-session",
           queuedMessages: { messages: ["pending work"], awaitingPrompt: true },
@@ -76939,7 +77132,7 @@ describe("SessionService", () => {
             ...(liveness === "unknown" ? { diagnostic: "ps failed" } : {}),
           });
         });
-        await expect(service.restore(record.id)).rejects.toThrow(
+        await expect(service.restore(record.id, { restart })).rejects.toThrow(
           "capture-pane failed during restore",
         );
         expect(killTmuxSessionMock).toHaveBeenCalledTimes(killsBeforeLaunch);
