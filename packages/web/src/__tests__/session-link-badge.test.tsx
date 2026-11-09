@@ -16,48 +16,103 @@ vi.mock("@/lib/link-icons.js", async () => {
 
 describe("SessionLinkBadge", () => {
   const info: PrInfo = {
-    state: "open", reviewDecision: "approved", ciStatus: "success", canMerge: true,
-    mergeConflict: false, totalThreads: 0, unresolvedThreads: 0,
+    state: "open",
+    reviewDecision: "approved",
+    ciStatus: "success",
+    canMerge: true,
+    mergeConflict: false,
+    totalThreads: 0,
+    unresolvedThreads: 0,
     reviewers: { approved: ["alice", "bob"], changesRequested: ["carol"] },
   };
 
   it("shows separate person counts and names while preserving the approved composite", () => {
-    const { container } = render(<SessionLinkBadge link={{ label: "pr", url: "https://github.com/org/repo/pull/101" }} prInfo={info} />);
+    const { container } = render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/101" }}
+        prInfo={info}
+      />,
+    );
     expect(screen.getByTitle(/Approved · 2/)).toHaveTextContent("2");
-    expect(screen.getByTitle(/Approved · 2/)).toHaveAttribute("title", "Approved · 2\n@alice\n@bob");
+    expect(screen.getByTitle(/Approved · 2/)).toHaveAttribute(
+      "title",
+      "Approved · 2\n@alice\n@bob",
+    );
     expect(screen.getByTitle(/Changes requested · 1/)).toHaveTextContent("1");
     expect(screen.getByLabelText("Approved")).toBeInTheDocument();
-    expect(container.querySelector("[data-pr-review-decision='approved'] svg")?.querySelectorAll("path")).toHaveLength(4);
+    expect(
+      container.querySelector("[data-pr-review-decision='approved'] svg")?.querySelectorAll("path"),
+    ).toHaveLength(4);
     expect(screen.getByTitle(/CI passing/)).toHaveAttribute("title", "CI passing\nReview approved");
   });
 
   it("explains required review without inventing a deficit or changing the CI mark", () => {
-    render(<SessionLinkBadge link={{ label: "pr", url: "https://github.com/org/repo/pull/102" }} prInfo={{ ...info, reviewDecision: "review_required", reviewers: { approved: ["alice"], changesRequested: [] } }} />);
-    expect(screen.getByTitle(/GitHub requires review/)).toHaveAttribute("title", "CI passing\nGitHub requires review\nRemaining required approvals: unknown");
+    render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/102" }}
+        prInfo={{
+          ...info,
+          reviewDecision: "review_required",
+          reviewers: { approved: ["alice"], changesRequested: [] },
+        }}
+      />,
+    );
+    expect(screen.getByTitle(/GitHub requires review/)).toHaveAttribute(
+      "title",
+      "CI passing\nGitHub requires review\nRemaining required approvals: unknown",
+    );
     expect(screen.getByLabelText("CI passing")).toBeInTheDocument();
     expect(screen.getByTitle(/Approved · 1/)).toHaveAttribute("title", "Approved · 1\n@alice");
     expect(screen.queryByLabelText(/Changes requested ·/)).not.toBeInTheDocument();
   });
 
-  it.each([null, undefined, { approved: [], changesRequested: [] }])("hides zero or unknown reviewer groups (%j)", (reviewers) => {
-    render(<SessionLinkBadge link={{ label: "pr", url: "https://github.com/org/repo/pull/103" }} prInfo={{ ...info, reviewers }} />);
-    expect(screen.queryByTitle(/Approved ·/)).not.toBeInTheDocument();
-    expect(screen.queryByTitle(/Changes requested ·/)).not.toBeInTheDocument();
-  });
+  it.each([null, undefined, { approved: [], changesRequested: [] }])(
+    "hides zero or unknown reviewer groups (%j)",
+    (reviewers) => {
+      render(
+        <SessionLinkBadge
+          link={{ label: "pr", url: "https://github.com/org/repo/pull/103" }}
+          prInfo={{ ...info, reviewers }}
+        />,
+      );
+      expect(screen.queryByTitle(/Approved ·/)).not.toBeInTheDocument();
+      expect(screen.queryByTitle(/Changes requested ·/)).not.toBeInTheDocument();
+    },
+  );
 
   it("keeps people metadata independent from failing CI and explains the conflict", () => {
-    render(<SessionLinkBadge link={{ label: "pr", url: "https://github.com/org/repo/pull/104" }} prInfo={{ ...info, ciStatus: "failure", reviewDecision: "changes_requested", mergeConflict: true }} />);
+    render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/104" }}
+        prInfo={{
+          ...info,
+          ciStatus: "failure",
+          reviewDecision: "changes_requested",
+          mergeConflict: true,
+        }}
+      />,
+    );
     expect(screen.getByLabelText("CI failing")).toBeInTheDocument();
-    expect(screen.getByTitle(/CI failing/)).toHaveAttribute("title", "CI failing\nChanges requested\nMerge conflict");
+    expect(screen.getByTitle(/CI failing/)).toHaveAttribute(
+      "title",
+      "CI failing\nChanges requested\nMerge conflict",
+    );
     expect(screen.getByTitle(/Approved · 2/)).toBeInTheDocument();
     expect(screen.getByTitle(/Changes requested · 1/)).toBeInTheDocument();
   });
 
   it("uses fetched reviewer data and omits GitHub metadata on GitLab links", () => {
     usePrInfoMock.mockReturnValue(info);
-    const { rerender } = render(<SessionLinkBadge link={{ label: "pr", url: "https://github.com/org/repo/pull/105" }} />);
+    const { rerender } = render(
+      <SessionLinkBadge link={{ label: "pr", url: "https://github.com/org/repo/pull/105" }} />,
+    );
     expect(screen.getByTitle(/Approved · 2/)).toBeInTheDocument();
-    rerender(<SessionLinkBadge link={{ label: "gitlab-pr", url: "https://gitlab.example/org/repo/-/merge_requests/105" }} prInfo={info} />);
+    rerender(
+      <SessionLinkBadge
+        link={{ label: "gitlab-pr", url: "https://gitlab.example/org/repo/-/merge_requests/105" }}
+        prInfo={info}
+      />,
+    );
     expect(screen.queryByTitle(/Approved ·/)).not.toBeInTheDocument();
     expect(screen.getByLabelText("Approved")).toBeInTheDocument();
   });

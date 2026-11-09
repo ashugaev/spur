@@ -115,7 +115,9 @@ it("forwards cached reviewer names without fetching or changing readiness", asyn
   recordGitHubPrNode("acme/repo/1", {
     ...node,
     reviews: {
-      nodes: [{ state: "APPROVED", submittedAt: "2026-11-07T07:56:01Z", author: { login: "alice" } }],
+      nodes: [
+        { state: "APPROVED", submittedAt: "2026-11-07T07:56:01Z", author: { login: "alice" } },
+      ],
       pageInfo: { hasPreviousPage: false },
     },
   });

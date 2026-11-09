@@ -59,7 +59,16 @@ describe("pr-status cache", () => {
   it("retains reviewer names in stale and merged snapshots", () => {
     const key = "a/b/1";
     const reviewers = { approved: ["alice"], changesRequested: ["bob"] };
-    recordSuccessfulPrStatus(key, { state: "open", reviewDecision: "approved", ciStatus: "success", canMerge: true, mergeConflict: false, totalThreads: 0, unresolvedThreads: 0, reviewers });
+    recordSuccessfulPrStatus(key, {
+      state: "open",
+      reviewDecision: "approved",
+      ciStatus: "success",
+      canMerge: true,
+      mergeConflict: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      reviewers,
+    });
     expect(errorResponse(key, "offline")).toMatchObject({ reviewers, stale: true });
     markPrStatusMerged("https://github.com/a/b/pull/1");
     expect(readCachedPrStatus(key)).toMatchObject({ state: "merged", reviewers });

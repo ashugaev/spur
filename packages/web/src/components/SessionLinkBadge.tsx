@@ -60,7 +60,8 @@ export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBa
   const fetchedPrInfo = useSessionLinkPrInfo(providedPrInfo ? undefined : link);
   const prInfo = providedPrInfo ?? fetchedPrInfo;
   const indicator = prStatusIndicator(prInfo);
-  const hasStatus = indicator.kind === "review" || indicator.status !== null || prInfo.mergeConflict;
+  const hasStatus =
+    indicator.kind === "review" || indicator.status !== null || prInfo.mergeConflict;
   const labelStyle: CSSProperties | undefined = isPr
     ? (() => {
         const color = prStateColor(prInfo.state);

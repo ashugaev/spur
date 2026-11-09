@@ -1,4 +1,5 @@
 # Daemon HTTP API
+
 > Scope: route names only, one method + full path per line, every line `git grep`-able verbatim. Payload/status-code contracts: `v2/src/server.ts`. CLI usage: [commands.md](commands.md). Default `127.0.0.1:4310`.
 
 - `GET /info` — `lifecycleInstanceId`, runtime `buildId`: process/build identity; `v2/src/session-lifecycle.ts`, `v2/src/build-identity.ts`.
@@ -17,8 +18,6 @@
 - `POST /claude-accounts/remove`
 - `POST /claude-accounts/:id/finish-login`
 - `GET /claude-accounts/:id/login-status`
-
-## Project routes
 - `GET /projects`
 - `GET /projects/cron?project=<id>` — cron sources, bound triggers, owner-file drift, last tick/action from the live event log; `project` optional; `404` unknown project; `v2/src/cron-jobs.ts`.
 - `GET /projects/cron/edit` — disk draft for a Cron spawn trigger; MCP `get_cron_job_draft`; `v2/src/cron-job-editor.ts`.

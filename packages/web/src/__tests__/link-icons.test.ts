@@ -50,21 +50,38 @@ describe("fetchPrInfo", () => {
   it("preserves reviewer metadata through fetch, batch cache, storage, and last-good reads", async () => {
     const url = "https://github.com/org/repo/pull/reviewers-cache";
     const reviewers = { approved: ["alice", "bob"], changesRequested: ["carol"] };
-    const snapshot = { state: "open", reviewDecision: "approved", ciStatus: "success", canMerge: true, mergeConflict: false, totalThreads: 0, unresolvedThreads: 0, reviewers };
+    const snapshot = {
+      state: "open",
+      reviewDecision: "approved",
+      ciStatus: "success",
+      canMerge: true,
+      mergeConflict: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      reviewers,
+    };
     mockFetch.mockResolvedValueOnce(jsonResponse(snapshot));
     expect((await fetchPrInfo(url)).reviewers).toEqual(reviewers);
     mockFetch.mockResolvedValueOnce(jsonResponse({ results: { [url]: snapshot } }));
     await fetchPrInfoBatch([url]);
     const { result } = renderHook(() => usePrInfo(url));
     expect(result.current.reviewers).toEqual(reviewers);
-    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
     expect(window.localStorage.getItem("spur:pr-status-cache:v1")).toContain("alice");
     mockFetch.mockResolvedValueOnce(jsonResponse({}, false));
     expect((await fetchPrInfo(url)).reviewers).toEqual(reviewers);
   });
 
   it("treats malformed reviewer metadata as unknown without losing aggregate data", async () => {
-    mockFetch.mockResolvedValueOnce(jsonResponse({ state: "open", reviewDecision: "approved", reviewers: { approved: [42], changesRequested: [] } }));
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        state: "open",
+        reviewDecision: "approved",
+        reviewers: { approved: [42], changesRequested: [] },
+      }),
+    );
     const result = await fetchPrInfo("https://github.com/org/repo/pull/malformed-reviewers");
     expect(result.state).toBe("open");
     expect(result.reviewDecision).toBe("approved");

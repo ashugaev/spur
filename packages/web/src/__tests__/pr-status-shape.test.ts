@@ -25,20 +25,34 @@ describe("pr-status-shape", () => {
   it("accepts legacy or unavailable reviewers and rejects malformed lists", () => {
     expect(isPrInfoShape(makePrInfo())).toBe(true);
     expect(isPrInfoShape(makePrInfo({ reviewers: null }))).toBe(true);
-    expect(isPrInfoShape(makePrInfo({ reviewers: { approved: ["alice"], changesRequested: [] } }))).toBe(true);
-    for (const reviewers of [{ approved: [1], changesRequested: [] }, { approved: [] }, { approved: [""], changesRequested: [] }]) {
+    expect(
+      isPrInfoShape(makePrInfo({ reviewers: { approved: ["alice"], changesRequested: [] } })),
+    ).toBe(true);
+    for (const reviewers of [
+      { approved: [1], changesRequested: [] },
+      { approved: [] },
+      { approved: [""], changesRequested: [] },
+    ]) {
       expect(isPrInfoShape({ ...makePrInfo(), reviewers })).toBe(false);
     }
   });
 
   it("notifies consumers when reviewer names or decisions change without changing readiness", () => {
     const first = makePrInfo({ reviewers: { approved: ["alice"], changesRequested: [] } });
-    expect(prInfosEqual(first, { ...first, reviewers: { approved: ["alice"], changesRequested: [] } })).toBe(true);
-    expect(prInfosEqual(first, { ...first, reviewers: { approved: ["bob"], changesRequested: [] } })).toBe(false);
-    expect(prInfosEqual(first, { ...first, reviewers: { approved: [], changesRequested: ["alice"] } })).toBe(false);
+    expect(
+      prInfosEqual(first, { ...first, reviewers: { approved: ["alice"], changesRequested: [] } }),
+    ).toBe(true);
+    expect(
+      prInfosEqual(first, { ...first, reviewers: { approved: ["bob"], changesRequested: [] } }),
+    ).toBe(false);
+    expect(
+      prInfosEqual(first, { ...first, reviewers: { approved: [], changesRequested: ["alice"] } }),
+    ).toBe(false);
     expect(prInfosEqual(first, { ...first, reviewers: null })).toBe(false);
     expect(isPrReady(first)).toBe(true);
-    expect(isPrReady({ ...first, reviewers: { approved: [], changesRequested: ["bob"] } })).toBe(true);
+    expect(isPrReady({ ...first, reviewers: { approved: [], changesRequested: ["bob"] } })).toBe(
+      true,
+    );
   });
 
   it.each([

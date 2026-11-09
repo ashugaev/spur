@@ -3017,25 +3017,38 @@ describe("Spur web API routes", () => {
     });
 
     function review(state: string, second: number, login = "alice") {
-      return { state, submittedAt: new Date(Date.UTC(2026, 10, 7, 0, 0, second)).toISOString(), author: { login } };
+      return {
+        state,
+        submittedAt: new Date(Date.UTC(2026, 10, 7, 0, 0, second)).toISOString(),
+        author: { login },
+      };
     }
 
     it("reduces the live five-review history to two current approvals with null aggregate decision", async () => {
-      fetchMock.mockResolvedValue(ghOk(makePrGql({
+      fetchMock.mockResolvedValue(
+        ghOk(
+          makePrGql({
+            reviewDecision: null,
+            reviews: {
+              pageInfo: { hasPreviousPage: false },
+              nodes: [
+                review("CHANGES_REQUESTED", 1, "alice"),
+                review("CHANGES_REQUESTED", 2, "bob"),
+                review("APPROVED", 3, "bob"),
+                review("APPROVED", 4, "alice"),
+                review("APPROVED", 5, "alice"),
+              ],
+            },
+          }),
+        ),
+      );
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      expect(await response.json()).toMatchObject({
         reviewDecision: null,
-        reviews: {
-          pageInfo: { hasPreviousPage: false },
-          nodes: [
-            review("CHANGES_REQUESTED", 1, "alice"),
-            review("CHANGES_REQUESTED", 2, "bob"),
-            review("APPROVED", 3, "bob"),
-            review("APPROVED", 4, "alice"),
-            review("APPROVED", 5, "alice"),
-          ],
-        },
-      })));
-      const response = await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`));
-      expect(await response.json()).toMatchObject({ reviewDecision: null, reviewers: { approved: ["alice", "bob"], changesRequested: [] } });
+        reviewers: { approved: ["alice", "bob"], changesRequested: [] },
+      });
       const query = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string) as { query: string };
       expect(query.query).toContain("reviews(last:100)");
       expect(query.query).toContain("submittedAt");
@@ -3045,18 +3058,66 @@ describe("Spur web API routes", () => {
     });
 
     it.each([
-      ["comments and pending keep approval", [review("APPROVED", 1), { state: "COMMENTED", author: { login: "alice" } }, { state: "PENDING", submittedAt: null, author: { login: "alice" } }], ["alice"], []],
-      ["changes replace approval", [review("APPROVED", 1), review("CHANGES_REQUESTED", 2)], [], ["alice"]],
-      ["approval replaces changes", [review("CHANGES_REQUESTED", 1), review("APPROVED", 2)], ["alice"], []],
+      [
+        "comments and pending keep approval",
+        [
+          review("APPROVED", 1),
+          { state: "COMMENTED", author: { login: "alice" } },
+          { state: "PENDING", submittedAt: null, author: { login: "alice" } },
+        ],
+        ["alice"],
+        [],
+      ],
+      [
+        "changes replace approval",
+        [review("APPROVED", 1), review("CHANGES_REQUESTED", 2)],
+        [],
+        ["alice"],
+      ],
+      [
+        "approval replaces changes",
+        [review("CHANGES_REQUESTED", 1), review("APPROVED", 2)],
+        ["alice"],
+        [],
+      ],
       ["dismissal clears approval", [review("APPROVED", 1), review("DISMISSED", 2)], [], []],
-      ["approval restores after dismissal", [review("APPROVED", 1), review("DISMISSED", 2), review("APPROVED", 3)], ["alice"], []],
-      ["latest account spelling survives case folding", [review("CHANGES_REQUESTED", 1, "ALICE"), review("APPROVED", 2, "alice")], ["alice"], []],
-      ["publication time beats connection order", [review("APPROVED", 3), review("CHANGES_REQUESTED", 1), review("DISMISSED", 2)], ["alice"], []],
-      ["equal publication times preserve connection order", [review("APPROVED", 1), review("CHANGES_REQUESTED", 1)], [], ["alice"]],
-      ["deleted authors do not affect current opinions", [review("APPROVED", 1), { state: "CHANGES_REQUESTED", author: null }], ["alice"], []],
+      [
+        "approval restores after dismissal",
+        [review("APPROVED", 1), review("DISMISSED", 2), review("APPROVED", 3)],
+        ["alice"],
+        [],
+      ],
+      [
+        "latest account spelling survives case folding",
+        [review("CHANGES_REQUESTED", 1, "ALICE"), review("APPROVED", 2, "alice")],
+        ["alice"],
+        [],
+      ],
+      [
+        "publication time beats connection order",
+        [review("APPROVED", 3), review("CHANGES_REQUESTED", 1), review("DISMISSED", 2)],
+        ["alice"],
+        [],
+      ],
+      [
+        "equal publication times preserve connection order",
+        [review("APPROVED", 1), review("CHANGES_REQUESTED", 1)],
+        [],
+        ["alice"],
+      ],
+      [
+        "deleted authors do not affect current opinions",
+        [review("APPROVED", 1), { state: "CHANGES_REQUESTED", author: null }],
+        ["alice"],
+        [],
+      ],
     ])("reduces review history: %s", async (_name, nodes, approved, changesRequested) => {
-      fetchMock.mockResolvedValue(ghOk(makePrGql({ reviews: { nodes, pageInfo: { hasPreviousPage: false } } })));
-      const response = await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`));
+      fetchMock.mockResolvedValue(
+        ghOk(makePrGql({ reviews: { nodes, pageInfo: { hasPreviousPage: false } } })),
+      );
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
       expect(await response.json()).toMatchObject({ reviewers: { approved, changesRequested } });
     });
 
@@ -3067,21 +3128,48 @@ describe("Spur web API routes", () => {
       { nodes: [], pageInfo: {} },
       { nodes: "invalid", pageInfo: { hasPreviousPage: false } },
       { nodes: [null], pageInfo: { hasPreviousPage: false } },
-      { nodes: [{ state: "APPROVED", author: { login: 3 } }], pageInfo: { hasPreviousPage: false } },
-      { nodes: [{ ...review("APPROVED", 1), submittedAt: null }], pageInfo: { hasPreviousPage: false } },
-      { nodes: [{ ...review("CHANGES_REQUESTED", 1), submittedAt: "invalid" }], pageInfo: { hasPreviousPage: false } },
-      { nodes: [{ ...review("DISMISSED", 1), submittedAt: "123" }], pageInfo: { hasPreviousPage: false } },
+      {
+        nodes: [{ state: "APPROVED", author: { login: 3 } }],
+        pageInfo: { hasPreviousPage: false },
+      },
+      {
+        nodes: [{ ...review("APPROVED", 1), submittedAt: null }],
+        pageInfo: { hasPreviousPage: false },
+      },
+      {
+        nodes: [{ ...review("CHANGES_REQUESTED", 1), submittedAt: "invalid" }],
+        pageInfo: { hasPreviousPage: false },
+      },
+      {
+        nodes: [{ ...review("DISMISSED", 1), submittedAt: "123" }],
+        pageInfo: { hasPreviousPage: false },
+      },
       { nodes: [review("UNKNOWN", 1)], pageInfo: { hasPreviousPage: false } },
-    ])("hides unavailable or incomplete reviewer metadata without losing PR status (%j)", async (reviews) => {
-      fetchMock.mockResolvedValue(ghOk(makePrGql({ reviewDecision: "APPROVED", reviews })));
-      const response = await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`));
-      expect(await response.json()).toMatchObject({ state: "open", reviewDecision: "approved", reviewers: null });
-    });
+    ])(
+      "hides unavailable or incomplete reviewer metadata without losing PR status (%j)",
+      async (reviews) => {
+        fetchMock.mockResolvedValue(ghOk(makePrGql({ reviewDecision: "APPROVED", reviews })));
+        const response = await getPrStatus(
+          new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+        );
+        expect(await response.json()).toMatchObject({
+          state: "open",
+          reviewDecision: "approved",
+          reviewers: null,
+        });
+      },
+    );
 
     it("distinguishes a complete empty reviewer list from unknown", async () => {
-      fetchMock.mockResolvedValue(ghOk(makePrGql({ reviews: { nodes: [], pageInfo: { hasPreviousPage: false } } })));
-      const response = await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`));
-      expect(await response.json()).toMatchObject({ reviewers: { approved: [], changesRequested: [] } });
+      fetchMock.mockResolvedValue(
+        ghOk(makePrGql({ reviews: { nodes: [], pageInfo: { hasPreviousPage: false } } })),
+      );
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      expect(await response.json()).toMatchObject({
+        reviewers: { approved: [], changesRequested: [] },
+      });
     });
 
     it("does not infer approval from resolved review threads", async () => {
@@ -3746,11 +3834,28 @@ describe("Spur web API routes", () => {
 
     it("returns reviewer metadata through the shared batch selection", async () => {
       const url = nextPrUrl();
-      fetchMock.mockResolvedValueOnce(ghOk(aliasedGql({ pr0: makePrNode({
-        reviews: { nodes: [{ state: "CHANGES_REQUESTED", submittedAt: "2026-11-07T06:42:56Z", author: { login: "alice" } }], pageInfo: { hasPreviousPage: false } },
-      }) })));
+      fetchMock.mockResolvedValueOnce(
+        ghOk(
+          aliasedGql({
+            pr0: makePrNode({
+              reviews: {
+                nodes: [
+                  {
+                    state: "CHANGES_REQUESTED",
+                    submittedAt: "2026-11-07T06:42:56Z",
+                    author: { login: "alice" },
+                  },
+                ],
+                pageInfo: { hasPreviousPage: false },
+              },
+            }),
+          }),
+        ),
+      );
       const response = await postBatch([url]);
-      expect(await response.json()).toMatchObject({ results: { [url]: { reviewers: { approved: [], changesRequested: ["alice"] } } } });
+      expect(await response.json()).toMatchObject({
+        results: { [url]: { reviewers: { approved: [], changesRequested: ["alice"] } } },
+      });
       const query = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string) as { query: string };
       expect(query.query).toContain("reviews(last:100)");
       expect(query.query).toContain("submittedAt");
