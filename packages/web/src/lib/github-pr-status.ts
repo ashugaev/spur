@@ -19,7 +19,7 @@ import {
 // there is exactly one definition of "what we ask GitHub for".
 export const GITHUB_PR_STATUS_FIELDS =
   "state isDraft merged mergeable mergeStateStatus reviewDecision " +
-  "latestOpinionatedReviews(last:100) { nodes { state author { login } } pageInfo { hasPreviousPage } } " +
+  "reviews(last:100) { nodes { state submittedAt author { login } } pageInfo { hasPreviousPage } } " +
   "reviewThreads(first:100) { nodes { isResolved } } " +
   "commits(last:1) { nodes { commit { statusCheckRollup { state } } } }";
 
@@ -30,7 +30,7 @@ export interface GitHubPrNode {
   mergeable: string | null;
   mergeStateStatus: string | null;
   reviewDecision: string | null;
-  latestOpinionatedReviews?: unknown;
+  reviews?: unknown;
   reviewThreads: { nodes: { isResolved: boolean }[] };
   commits: { nodes: { commit: { statusCheckRollup?: { state: string } } }[] };
 }
@@ -80,20 +80,48 @@ function parseGitHubReviewers(value: unknown): PrReviewers | null {
     return null;
   }
 
-  const accounts = new Map<string, { login: string; state: string }>();
+  const events: Array<{
+    login: string;
+    state: "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED";
+    submittedAt: number;
+  }> = [];
   for (const node of connection["nodes"]) {
     if (typeof node !== "object" || node === null) return null;
     const review = node as Record<string, unknown>;
-    if (typeof review["state"] !== "string") return null;
+    const state = review["state"];
+    if (
+      state !== "APPROVED" &&
+      state !== "CHANGES_REQUESTED" &&
+      state !== "DISMISSED" &&
+      state !== "COMMENTED" &&
+      state !== "PENDING"
+    ) {
+      return null;
+    }
     const author = review["author"];
     if (author === null) continue;
     if (typeof author !== "object" || author === null) return null;
     const login = (author as Record<string, unknown>)["login"];
     if (typeof login !== "string" || login.length === 0) return null;
+    if (state === "COMMENTED" || state === "PENDING") continue;
+    const submittedAt = review["submittedAt"];
+    if (
+      typeof submittedAt !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(submittedAt)
+    ) {
+      return null;
+    }
+    const timestamp = Date.parse(submittedAt);
+    if (!Number.isFinite(timestamp)) return null;
+    events.push({ login, state, submittedAt: timestamp });
+  }
+  const accounts = new Map<string, { login: string; state: "APPROVED" | "CHANGES_REQUESTED" }>();
+  // Stable ordering retains connection order when publication times are equal.
+  events.sort((a, b) => a.submittedAt - b.submittedAt);
+  for (const { login, state } of events) {
     const key = login.toLowerCase();
-    const previous = accounts.get(key);
-    if (previous && previous.state !== review["state"]) return null;
-    if (!previous) accounts.set(key, { login, state: review["state"] });
+    if (state === "DISMISSED") accounts.delete(key);
+    else accounts.set(key, { login, state });
   }
   const reviewers: PrReviewers = { approved: [], changesRequested: [] };
   for (const { login, state } of accounts.values()) {
@@ -135,7 +163,7 @@ export function recordGitHubPrNode(
   const response = recordSuccessfulPrStatus(cacheKey, {
     state,
     reviewDecision: parseReviewDecision(node.reviewDecision),
-    reviewers: parseGitHubReviewers(node.latestOpinionatedReviews),
+    reviewers: parseGitHubReviewers(node.reviews),
     ciStatus: normalizeGitHubCiStatus(node.commits.nodes[0]?.commit.statusCheckRollup?.state),
     canMerge,
     mergeConflict,

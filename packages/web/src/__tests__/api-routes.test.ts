@@ -3016,27 +3016,48 @@ describe("Spur web API routes", () => {
       expect(payload.reviewDecision).toBe("approved");
     });
 
-    it("returns current unique reviewer opinions without treating other states as votes", async () => {
+    function review(state: string, second: number, login = "alice") {
+      return { state, submittedAt: new Date(Date.UTC(2026, 10, 7, 0, 0, second)).toISOString(), author: { login } };
+    }
+
+    it("reduces the live five-review history to two current approvals with null aggregate decision", async () => {
       fetchMock.mockResolvedValue(ghOk(makePrGql({
-        latestOpinionatedReviews: {
+        reviewDecision: null,
+        reviews: {
           pageInfo: { hasPreviousPage: false },
           nodes: [
-            { state: "APPROVED", author: { login: "bob" } },
-            { state: "APPROVED", author: { login: "alice" } },
-            { state: "APPROVED", author: { login: "ALICE" } },
-            { state: "CHANGES_REQUESTED", author: { login: "carol" } },
-            { state: "DISMISSED", author: { login: "dismissed" } },
-            { state: "COMMENTED", author: { login: "commenter" } },
-            { state: "PENDING", author: { login: "draft" } },
-            { state: "APPROVED", author: null },
+            review("CHANGES_REQUESTED", 1, "alice"),
+            review("CHANGES_REQUESTED", 2, "bob"),
+            review("APPROVED", 3, "bob"),
+            review("APPROVED", 4, "alice"),
+            review("APPROVED", 5, "alice"),
           ],
         },
       })));
       const response = await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`));
-      expect(await response.json()).toMatchObject({ reviewers: { approved: ["alice", "bob"], changesRequested: ["carol"] } });
+      expect(await response.json()).toMatchObject({ reviewDecision: null, reviewers: { approved: ["alice", "bob"], changesRequested: [] } });
       const query = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string) as { query: string };
-      expect(query.query).toContain("latestOpinionatedReviews(last:100)");
+      expect(query.query).toContain("reviews(last:100)");
+      expect(query.query).toContain("submittedAt");
+      expect(query.query).toContain("reviewDecision");
+      expect(query.query).not.toContain("latestOpinionatedReviews");
       expect(query.query).toContain("pageInfo { hasPreviousPage }");
+    });
+
+    it.each([
+      ["comments and pending keep approval", [review("APPROVED", 1), { state: "COMMENTED", author: { login: "alice" } }, { state: "PENDING", submittedAt: null, author: { login: "alice" } }], ["alice"], []],
+      ["changes replace approval", [review("APPROVED", 1), review("CHANGES_REQUESTED", 2)], [], ["alice"]],
+      ["approval replaces changes", [review("CHANGES_REQUESTED", 1), review("APPROVED", 2)], ["alice"], []],
+      ["dismissal clears approval", [review("APPROVED", 1), review("DISMISSED", 2)], [], []],
+      ["approval restores after dismissal", [review("APPROVED", 1), review("DISMISSED", 2), review("APPROVED", 3)], ["alice"], []],
+      ["latest account spelling survives case folding", [review("CHANGES_REQUESTED", 1, "ALICE"), review("APPROVED", 2, "alice")], ["alice"], []],
+      ["publication time beats connection order", [review("APPROVED", 3), review("CHANGES_REQUESTED", 1), review("DISMISSED", 2)], ["alice"], []],
+      ["equal publication times preserve connection order", [review("APPROVED", 1), review("CHANGES_REQUESTED", 1)], [], ["alice"]],
+      ["deleted authors do not affect current opinions", [review("APPROVED", 1), { state: "CHANGES_REQUESTED", author: null }], ["alice"], []],
+    ])("reduces review history: %s", async (_name, nodes, approved, changesRequested) => {
+      fetchMock.mockResolvedValue(ghOk(makePrGql({ reviews: { nodes, pageInfo: { hasPreviousPage: false } } })));
+      const response = await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`));
+      expect(await response.json()).toMatchObject({ reviewers: { approved, changesRequested } });
     });
 
     it.each([
@@ -3047,15 +3068,18 @@ describe("Spur web API routes", () => {
       { nodes: "invalid", pageInfo: { hasPreviousPage: false } },
       { nodes: [null], pageInfo: { hasPreviousPage: false } },
       { nodes: [{ state: "APPROVED", author: { login: 3 } }], pageInfo: { hasPreviousPage: false } },
-      { nodes: [{ state: "APPROVED", author: { login: "alice" } }, { state: "CHANGES_REQUESTED", author: { login: "ALICE" } }], pageInfo: { hasPreviousPage: false } },
-    ])("hides unavailable or incomplete reviewer metadata without losing PR status (%j)", async (latestOpinionatedReviews) => {
-      fetchMock.mockResolvedValue(ghOk(makePrGql({ reviewDecision: "APPROVED", latestOpinionatedReviews })));
+      { nodes: [{ ...review("APPROVED", 1), submittedAt: null }], pageInfo: { hasPreviousPage: false } },
+      { nodes: [{ ...review("CHANGES_REQUESTED", 1), submittedAt: "invalid" }], pageInfo: { hasPreviousPage: false } },
+      { nodes: [{ ...review("DISMISSED", 1), submittedAt: "123" }], pageInfo: { hasPreviousPage: false } },
+      { nodes: [review("UNKNOWN", 1)], pageInfo: { hasPreviousPage: false } },
+    ])("hides unavailable or incomplete reviewer metadata without losing PR status (%j)", async (reviews) => {
+      fetchMock.mockResolvedValue(ghOk(makePrGql({ reviewDecision: "APPROVED", reviews })));
       const response = await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`));
       expect(await response.json()).toMatchObject({ state: "open", reviewDecision: "approved", reviewers: null });
     });
 
     it("distinguishes a complete empty reviewer list from unknown", async () => {
-      fetchMock.mockResolvedValue(ghOk(makePrGql({ latestOpinionatedReviews: { nodes: [], pageInfo: { hasPreviousPage: false } } })));
+      fetchMock.mockResolvedValue(ghOk(makePrGql({ reviews: { nodes: [], pageInfo: { hasPreviousPage: false } } })));
       const response = await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`));
       expect(await response.json()).toMatchObject({ reviewers: { approved: [], changesRequested: [] } });
     });
@@ -3723,12 +3747,15 @@ describe("Spur web API routes", () => {
     it("returns reviewer metadata through the shared batch selection", async () => {
       const url = nextPrUrl();
       fetchMock.mockResolvedValueOnce(ghOk(aliasedGql({ pr0: makePrNode({
-        latestOpinionatedReviews: { nodes: [{ state: "CHANGES_REQUESTED", author: { login: "alice" } }], pageInfo: { hasPreviousPage: false } },
+        reviews: { nodes: [{ state: "CHANGES_REQUESTED", submittedAt: "2026-11-07T06:42:56Z", author: { login: "alice" } }], pageInfo: { hasPreviousPage: false } },
       }) })));
       const response = await postBatch([url]);
       expect(await response.json()).toMatchObject({ results: { [url]: { reviewers: { approved: [], changesRequested: ["alice"] } } } });
       const query = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string) as { query: string };
-      expect(query.query).toContain("latestOpinionatedReviews(last:100)");
+      expect(query.query).toContain("reviews(last:100)");
+      expect(query.query).toContain("submittedAt");
+      expect(query.query).toContain("reviewDecision");
+      expect(query.query).not.toContain("latestOpinionatedReviews");
     });
 
     it("returns 400 for more than 100 urls", async () => {

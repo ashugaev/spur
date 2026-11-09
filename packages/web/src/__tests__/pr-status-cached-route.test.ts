@@ -114,8 +114,8 @@ it("forwards cached reviewer names without fetching or changing readiness", asyn
   vi.stubGlobal("fetch", fetch);
   recordGitHubPrNode("acme/repo/1", {
     ...node,
-    latestOpinionatedReviews: {
-      nodes: [{ state: "APPROVED", author: { login: "alice" } }],
+    reviews: {
+      nodes: [{ state: "APPROVED", submittedAt: "2026-11-07T07:56:01Z", author: { login: "alice" } }],
       pageInfo: { hasPreviousPage: false },
     },
   });
