@@ -12,6 +12,7 @@ import { writeSession } from "../../src/metadata.js";
 import { sessionArtifactsDir } from "../../src/session-artifacts.js";
 import { startServer, type StartedServer } from "../../src/server.js";
 import { AgentModelError, AgentReasoningEffortError } from "../../src/agents/models.js";
+import { PrAlertOwnerRequestError } from "../../src/pr-alert-owner.js";
 import { TodoEmptyLedgerError, TodoOpenWorkError } from "../../src/todo.js";
 import {
   buildForeignAgentProcessMessage,
@@ -39,6 +40,52 @@ import {
 import { findFreePort, startOnFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
+  it.each([
+    { method: "spawn", path: "/sessions", kind: "invalid", status: 400 },
+    { method: "spawnInBackground", path: "/sessions/background", kind: "conflict", status: 409 },
+  ] as const)(
+    "PR alert ownership HTTP $status at $path preserves native intent and error payload",
+    async ({ method, path, kind, status }) => {
+      const root = await mkdtemp(join(tmpdir(), "spur-pr-alert-http-"));
+      const port = await findFreePort();
+      const configPath = join(root, "spur.yaml");
+      await mkdir(join(root, "repo"));
+      await writeFile(
+        configPath,
+        [
+          "server:",
+          "  host: 127.0.0.1",
+          `  port: ${port}`,
+          `dataDir: ${join(root, "data")}`,
+          `worktreeDir: ${join(root, "worktrees")}`,
+          "projects:",
+          "  demo:",
+          `    path: ${join(root, "repo")}`,
+        ].join("\n"),
+      );
+      const error = new PrAlertOwnerRequestError(kind, "owner admission rejected");
+      const spawn = vi.spyOn(SessionService.prototype, method).mockRejectedValue(error);
+      let server: StartedServer | undefined;
+      try {
+        server = await startServer(configPath);
+        const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ project: "demo", prompt: "owner", prAlertOwner: true }),
+        });
+        expect(response.status).toBe(status);
+        expect(await response.json()).toEqual({
+          code: `pr_alert_owner_${kind}`,
+          error: error.message,
+        });
+        expect(spawn.mock.calls[0]?.[0]).toMatchObject({ prAlertOwner: true });
+      } finally {
+        spawn.mockRestore();
+        await server?.stop();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
   it("wires source attachment preparation to the requested session", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-source-preparation-"));
     const port = await findFreePort();
