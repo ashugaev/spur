@@ -2,9 +2,54 @@ import {
   test,
   expect,
   makeStoppedSession,
+  makeWorkingSession,
   mockSessions,
   type SpurSessionView,
 } from "./fixtures.js";
+
+test("restarts from the row menu and retains pending ownership across reload", async ({ page }) => {
+  const source = makeWorkingSession({ id: "restart-row" });
+  let rows = [source];
+  let calls = 0;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await mockSessions(page, () => rows);
+  await page.route(`**/api/sessions/${source.id}/restore`, async (route) => {
+    calls += 1;
+    const body = route.request().postDataJSON() as { restart: boolean; operationId: string };
+    expect(body).toEqual({ restart: true, operationId: expect.any(String) });
+    rows = [
+      {
+        ...source,
+        lifecycle: {
+          instanceId: "test-instance",
+          revision: 1,
+          operation: {
+            operationId: body.operationId,
+            action: "restore",
+            phase: "pending",
+            targetIds: [source.id],
+            outcomes: [],
+          },
+        },
+      },
+    ];
+    await held;
+    await route.fulfill({ json: rows[0] });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: `Actions for ${source.id}` }).click();
+  await page.getByRole("menuitem", { name: "Restart session" }).click();
+  await expect.poll(() => calls).toBe(1);
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: `Actions for ${source.id}` })).toBeDisabled();
+  await page.reload();
+  await expect(page.getByRole("button", { name: `Actions for ${source.id}` })).toBeDisabled();
+  expect(calls).toBe(1);
+  release();
+});
 
 test("restores an exited agent from its row while the pane remains alive", async ({ page }) => {
   const source = makeStoppedSession({
