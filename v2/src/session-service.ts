@@ -20367,7 +20367,7 @@ export class SessionService {
       if (!request.skipRuntimeTeardown) {
         await this.killAgentPaneAndConfirmExit(session, {
           failOnSurvivors: options?.restoreOperation !== undefined,
-          operation: options?.restoreOperation,
+          ...(options?.restoreOperation ? { operation: options.restoreOperation } : {}),
         });
         await this.cleanupSessionServices(session);
       }
@@ -21601,7 +21601,7 @@ export class SessionService {
                 sessionId,
                 "stopped",
                 {},
-                { skipEnrichment: true, restoreOperation: operation },
+                { skipEnrichment: true, ...(operation ? { restoreOperation: operation } : {}) },
               );
               operation?.assertActive();
               const stopped = readSession(this.config.dataDir, sessionId);
