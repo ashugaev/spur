@@ -674,10 +674,7 @@ export function SnippetPanel({
             onSend={(trusted) => host.confirmSend(trusted)}
           />
         ) : null}
-        <StatusLine
-          action={state.action}
-          onRetry={(trusted) => host.retry(trusted)}
-        />
+        <StatusLine action={state.action} onRetry={(trusted) => host.retry(trusted)} />
       </dialog>
     </section>
   );

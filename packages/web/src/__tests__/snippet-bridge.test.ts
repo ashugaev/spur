@@ -407,7 +407,9 @@ describe("state", () => {
       {
         method: "POST",
         url: `${PAGE}/docs/_state/${docId}`,
-        body: { data: { instanceId: "inst-00000001", app: { k: 1 }, controls: [{ id: "c", value: "v" }] } },
+        body: {
+          data: { instanceId: "inst-00000001", app: { k: 1 }, controls: [{ id: "c", value: "v" }] },
+        },
       },
     ]);
     h.host.applyFile(manifest({ store: "page:films", revision: 2 }), "<html>2</html>");
