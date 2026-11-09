@@ -2,7 +2,13 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname, join } from "node:path";
 import { readSession } from "./metadata.js";
 import { workspaceIdOf } from "./session-desk.js";
-import type { SessionLink, SessionPrBinding, SessionRecord, SessionSlots } from "./types.js";
+import type {
+  PrAlertOwner,
+  SessionLink,
+  SessionPrBinding,
+  SessionRecord,
+  SessionSlots,
+} from "./types.js";
 
 // Workspace-owned state: the subset of a shared-desk-workspace's data that
 // used to live inside the owning (anchor) session's own record — slots
@@ -15,7 +21,14 @@ import type { SessionLink, SessionPrBinding, SessionRecord, SessionSlots } from 
 export interface WorkspaceState {
   slots?: SessionSlots;
   pr?: SessionPrBinding;
+  prAlertOwner?: PrAlertOwner;
 }
+
+export type PrAlertOwnership = PrAlertOwner | { state: "unclaimed" | "invalid" };
+
+type WorkspaceDocument =
+  | { state: "absent" | "invalid" }
+  | { state: "valid"; value: Record<string, unknown> };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -59,16 +72,74 @@ function workspaceStateFilePath(dataDir: string, workspaceId: string): string {
   return join(dataDir, "workspaces", `${workspaceId}.json`);
 }
 
-function readWorkspaceStateFile(path: string): WorkspaceState | null {
-  let parsed: unknown;
+function readWorkspaceDocument(path: string): WorkspaceDocument {
   try {
-    parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
-  } catch {
-    return null;
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+    return isRecord(parsed) ? { state: "valid", value: parsed } : { state: "invalid" };
+  } catch (error) {
+    return { state: isRecord(error) && error["code"] === "ENOENT" ? "absent" : "invalid" };
   }
-  if (!isRecord(parsed)) return null;
+}
+
+function parsePrAlertOwner(value: unknown): PrAlertOwner | null {
+  if (!isRecord(value)) return null;
+  if (
+    value["state"] === "owned" &&
+    typeof value["sessionId"] === "string" &&
+    value["sessionId"].trim()
+  ) {
+    const ownerRollbackId = value["ownerRollbackId"];
+    if (
+      ownerRollbackId !== undefined &&
+      (typeof ownerRollbackId !== "string" || !ownerRollbackId.trim())
+    )
+      return null;
+    return {
+      state: "owned",
+      sessionId: value["sessionId"],
+      ...(ownerRollbackId !== undefined ? { ownerRollbackId } : {}),
+    };
+  }
+  if (
+    value["state"] === "retired" &&
+    typeof value["successorWorkspaceId"] === "string" &&
+    value["successorWorkspaceId"].trim() &&
+    typeof value["successorSessionId"] === "string" &&
+    value["successorSessionId"].trim()
+  )
+    return {
+      state: "retired",
+      successorWorkspaceId: value["successorWorkspaceId"],
+      successorSessionId: value["successorSessionId"],
+    };
+  return null;
+}
+
+export function readPrAlertOwnership(dataDir: string, workspaceId: string): PrAlertOwnership {
+  const document = readWorkspaceDocument(workspaceStateFilePath(dataDir, workspaceId));
+  if (document.state === "absent") return { state: "unclaimed" };
+  if (document.state !== "valid") return { state: "invalid" };
+  if (!("prAlertOwner" in document.value)) return { state: "unclaimed" };
+  const owner = parsePrAlertOwner(document.value["prAlertOwner"]);
+  if (!owner) return { state: "invalid" };
+  if (owner.state === "owned") {
+    try {
+      const session = readSession(dataDir, owner.sessionId);
+      if (!session || workspaceIdOf(session) !== workspaceId) return { state: "invalid" };
+    } catch {
+      return { state: "invalid" };
+    }
+  }
+  return owner;
+}
+
+function readWorkspaceStateFile(path: string): WorkspaceState | null {
+  const document = readWorkspaceDocument(path);
+  if (document.state !== "valid") return null;
+  const parsed = document.value;
   let slots = parseSlots(parsed["slots"]);
   const pr = parsePrBinding(parsed["pr"]);
+  const prAlertOwner = parsePrAlertOwner(parsed["prAlertOwner"]);
   // Read-path upgrade for records written before `ac484aa0f` (the standalone
   // `manualTitleOverride` marker) was folded into `slots.titleSource`. A live
   // workspace file may still carry the legacy marker with no `titleSource`.
@@ -83,6 +154,7 @@ function readWorkspaceStateFile(path: string): WorkspaceState | null {
   return {
     ...(slots ? { slots } : {}),
     ...(pr ? { pr } : {}),
+    ...(prAlertOwner ? { prAlertOwner } : {}),
   };
 }
 
@@ -100,12 +172,17 @@ export function writeWorkspaceState(
   workspaceId: string,
   state: WorkspaceState,
 ): void {
+  const current = readPrAlertOwnership(dataDir, workspaceId);
+  if (current.state === "invalid") throw new Error("Cannot overwrite invalid PR alert ownership");
+  if (current.state !== "unclaimed" && state.prAlertOwner === undefined)
+    throw new Error("Workspace writes must retain PR alert ownership");
   const path = workspaceStateFilePath(dataDir, workspaceId);
   mkdirSync(dirname(path), { recursive: true });
   const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}`;
   const payload: WorkspaceState = {
     ...(state.slots ? { slots: state.slots } : {}),
     ...(state.pr ? { pr: state.pr } : {}),
+    ...(state.prAlertOwner ? { prAlertOwner: state.prAlertOwner } : {}),
   };
   writeFileSync(tmpPath, JSON.stringify(payload, null, 2) + "\n", "utf-8");
   renameSync(tmpPath, path);
