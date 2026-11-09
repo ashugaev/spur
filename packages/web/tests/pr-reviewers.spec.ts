@@ -109,7 +109,9 @@ for (const { name, info } of cases) {
     await mockSessions(page, [session]);
     await mockPrStatusBatch(page, { [prUrl]: { ...info } });
     await page.route(/\/api\/pr-status\?/, (route) => route.fulfill({ json: info }));
-    await page.route(`**/api/sessions/${session.id}`, (route) => route.fulfill({ json: session }));
+    await page.route(`**/api/sessions/${encodeURIComponent(session.id)}`, (route) =>
+      route.fulfill({ json: session }),
+    );
 
     for (const path of ["/", `/sessions/${session.id}`]) {
       await page.goto(path);
