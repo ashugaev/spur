@@ -1851,6 +1851,7 @@ export interface KillSessionRequest {
 // (pane-rooted) survivor check; a pid that survives SIGKILL always refuses.
 export interface RestoreSessionRequest {
   operationId?: string;
+  restart?: boolean;
   force?: boolean;
   overrideTokenBudget?: boolean;
 }

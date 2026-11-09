@@ -20645,6 +20645,7 @@ export class SessionService {
       skipEnrichment: true;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
+      restoreOperation?: RestoreOperationContext;
     },
   ): Promise<void>;
   private async applyManualStatusLocked(
@@ -20657,6 +20658,7 @@ export class SessionService {
       todoActor?: TodoActor;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
+      restoreOperation?: RestoreOperationContext;
     },
   ): Promise<SessionView>;
   private async applyManualStatusLocked(
@@ -20669,6 +20671,7 @@ export class SessionService {
       todoActor?: TodoActor;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
+      restoreOperation?: RestoreOperationContext;
     },
   ): Promise<SessionView | void> {
     const reopenClaim = this.reopensInFlight.get(sessionId);
@@ -20766,7 +20769,10 @@ export class SessionService {
         }
       }
       if (!request.skipRuntimeTeardown) {
-        await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
+        await this.killAgentPaneAndConfirmExit(session, {
+          failOnSurvivors: options?.restoreOperation !== undefined,
+          ...(options?.restoreOperation ? { operation: options.restoreOperation } : {}),
+        });
         await this.cleanupSessionServices(session);
       }
       if (targetStatus === "completed") {
@@ -21988,6 +21994,29 @@ export class SessionService {
             if (!current || current.tmuxSession !== hint.tmuxSession) {
               throw new Error(`Session ${sessionId} changed before restore`);
             }
+            if (request.restart === true) {
+              operation?.assertActive();
+              if (current.status !== "running") {
+                throw new SessionNotRestorableError(
+                  sessionId,
+                  `Session ${sessionId} is not running`,
+                  restoreRecoveryActions(current.status),
+                );
+              }
+              this.assertTokenBudgetAllowsActivation(current);
+              this.assertAdmissible(current.project, "restore", { replacingSessionId: current.id });
+              await this.applyManualStatusLocked(
+                sessionId,
+                "stopped",
+                {},
+                { skipEnrichment: true, ...(operation ? { restoreOperation: operation } : {}) },
+              );
+              operation?.assertActive();
+              const stopped = readSession(this.config.dataDir, sessionId);
+              if (!stopped)
+                throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+              return this.lifecycleStamp(stopped);
+            }
             return this.lifecycleStamp(current);
           },
           operation,
@@ -22847,6 +22876,9 @@ export class SessionService {
   // whole launch transaction to restore(). Nothing completion destroyed
   // (Telegram binding, sidecarPorts, artifacts, work item) is recreated.
   async reopen(sessionId: string, request: RestoreSessionRequest = {}): Promise<SessionView> {
+    if (request.restart === true) {
+      throw new SessionNotReopenableError("restart is only supported by restore");
+    }
     return this.runLifecycle("reopen", [sessionId], request.operationId, () =>
       this.reopenTransaction(sessionId, request),
     );

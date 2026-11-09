@@ -675,6 +675,7 @@ export function parseRestoreSessionRequest(raw: unknown): RestoreSessionRequest 
   const operationId = parseLifecycleOperationId(raw["operationId"]);
   return {
     ...(operationId ? { operationId } : {}),
+    ...(raw["restart"] === true ? { restart: true } : {}),
     ...(raw["force"] === true ? { force: true } : {}),
     ...(raw["overrideTokenBudget"] === true ? { overrideTokenBudget: true } : {}),
   };
