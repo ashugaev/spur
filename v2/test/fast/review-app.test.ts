@@ -2538,31 +2538,48 @@ test("legacy holds canonical alias lock during preflight and refuses stale owner
   expect(f.calls).toEqual([]);
 });
 
-test.each(["evidence", "verdict", "mutation", "review-id", "lineage", "unknown", "raw-current"])(
-  "legacy refuses touched PENDING %s before network",
-  async (mode) => {
-    const f = await structuralFixture();
-    await f.recover();
-    const current = (await readJson(f.request.receipt)) as Record<string, unknown>;
-    if (mode === "evidence")
-      current.evidence = [{ status: "passed", evidence: "already assessed" }];
-    if (mode === "verdict") current.localVerdict = "APPROVED";
-    if (mode === "mutation" || mode === "review-id") {
-      current.mutationStarted = true;
-      current.inputDigest = "d".repeat(64);
-    }
-    if (mode === "review-id") current.reviewId = 1;
-    if (mode === "lineage") current.supersededAttempts = [];
-    if (mode === "unknown") current.status = "UNKNOWN";
-    const raw = Buffer.from(JSON.stringify(current));
-    await writeFile(f.request.receipt, raw);
-    f.calls.splice(0);
-    const hash = mode === "raw-current" ? createHash("sha256").update(raw).digest("hex") : f.sha256;
+test.each([
+  "evidence",
+  "verdict",
+  "mutation",
+  "review-id",
+  "blocked-mutation",
+  "lineage",
+  "unknown",
+  "raw-current",
+])("legacy refuses touched modern %s before network", async (mode) => {
+  const f = await structuralFixture();
+  await f.recover();
+  const current = (await readJson(f.request.receipt)) as Record<string, unknown>;
+  if (mode === "evidence") current.evidence = [{ status: "passed", evidence: "already assessed" }];
+  if (mode === "verdict") current.localVerdict = "APPROVED";
+  if (["mutation", "review-id", "blocked-mutation", "unknown"].includes(mode)) {
+    current.mutationStarted = true;
+    current.inputDigest = "d".repeat(64);
+  }
+  if (mode === "review-id") current.reviewId = 1;
+  if (mode === "blocked-mutation") {
+    current.status = "BLOCKED";
+    current.reviewBlocked = true;
+  }
+  if (mode === "lineage") current.supersededAttempts = [];
+  if (mode === "unknown") current.status = "UNKNOWN";
+  const raw = Buffer.from(JSON.stringify(current));
+  await writeFile(f.request.receipt, raw);
+  f.calls.splice(0);
+  const currentSha256 = createHash("sha256").update(raw).digest("hex");
+  const digests = mode === "raw-current" ? [currentSha256] : [f.sha256, currentSha256];
+  for (const sha256 of digests) {
+    const writes = faults.writes;
     await expect(
-      recoverReview(f.config, f.request, f.request.session, hash, f.transport),
+      recoverReview(f.config, f.request, f.request.session, sha256, f.transport),
     ).rejects.toThrow();
     expect(await readFile(f.request.receipt)).toEqual(raw);
     expect(await readFile(f.archive)).toEqual(f.raw);
-    expect(f.calls).toEqual([]);
-  },
-);
+    await expect(stat(`${f.request.receipt}.legacy-${currentSha256}`)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(faults.writes).toBe(writes);
+  }
+  expect(f.calls).toEqual([]);
+});
