@@ -67,6 +67,57 @@ describe("page transport", () => {
     expect(seen).toHaveLength(3);
   });
 
+  it.each([false, true])(
+    "reconciles snapshots on stream open after a missed write (reconnect: %s)",
+    async (reconnect) => {
+      const r = await pageRig("");
+      let docs = [{ id: "a" }];
+      r.respond((method, url) =>
+        method === "POST" && url === "./_spur/db/query/items" ? [200, { docs }] : undefined,
+      );
+      const seen: unknown[] = [];
+      r.win.spur.db.collection("items").onSnapshot((next) => seen.push(next));
+      await flush();
+      if (reconnect) {
+        r.sources[0]?.emit("open", {});
+        await flush();
+        r.sources[0]?.emit("error", {});
+      }
+      docs = [{ id: "a" }, { id: "b" }];
+      r.sources[0]?.emit("open", {});
+      await flush();
+      expect(seen.at(-1)).toEqual([{ id: "a" }, { id: "b" }]);
+      expect(r.sources).toHaveLength(1);
+    },
+  );
+
+  it("settles an action completed before the stream first opens", async () => {
+    const r = await pageRig("");
+    let completed = false;
+    r.respond((method, url, body) => {
+      if (method === "POST" && url === "./_spur/actions") {
+        return [200, { id: (body as { id: string }).id, data: { status: "pending" } }];
+      }
+      if (method === "GET" && url.startsWith("./_spur/db/docs/_actions/")) {
+        return [
+          200,
+          {
+            id: decodeURIComponent(url.split("/").at(-1) ?? ""),
+            data: completed ? { status: "done", result: { saved: true } } : { status: "pending" },
+          },
+        ];
+      }
+      return undefined;
+    });
+    const pending = r.win.spur.agent.invoke("pick", {});
+    await flush();
+    expect(r.win.spur.action?.status).toBe("queued");
+    completed = true;
+    r.sources[0]?.emit("open", {});
+    await expect(pending).resolves.toMatchObject({ ok: true, result: { saved: true } });
+    expect(r.win.spur.action?.status).toBe("completed");
+  });
+
   it("reloads the page on a reload event", async () => {
     const r = await pageRig("");
     r.sources[0]?.emit("reload", { path: "index.html" });

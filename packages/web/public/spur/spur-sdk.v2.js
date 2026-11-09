@@ -445,22 +445,25 @@
       });
     }
 
+    function reconcile() {
+      waiters.forEach(function (_waiter, id) {
+        settleIfClosed(id);
+      });
+      onTransportEvent({ type: "reset" });
+    }
+
     return {
       kind: "page",
       connect: function () {
         source = new EventSource(base + "events");
+        source.addEventListener("open", reconcile);
         source.addEventListener("change", function (event) {
           const change = parseEventData(event);
           if (!change) return;
           if (change.collection === "_actions") settleIfClosed(change.id);
           onTransportEvent({ type: "change", change: change });
         });
-        source.addEventListener("reset", function () {
-          waiters.forEach(function (_waiter, id) {
-            settleIfClosed(id);
-          });
-          onTransportEvent({ type: "reset" });
-        });
+        source.addEventListener("reset", reconcile);
         source.addEventListener("reload", function () {
           onTransportEvent({ type: "reload" });
         });

@@ -287,17 +287,24 @@ export class StoreActions {
       await this.host.deliver(storeId, envelope, request.userGesture);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await stores.update(
-        storeId,
-        ACTIONS_COLLECTION,
-        request.id,
-        {
-          status: "failed",
-          error: message.slice(0, ACTION_ERROR_MAX_CHARS),
-          completedAt: new Date(this.now()).toISOString(),
-        },
-        { internal: true },
-      );
+      await stores
+        .update(
+          storeId,
+          ACTIONS_COLLECTION,
+          request.id,
+          {
+            status: "failed",
+            error: message.slice(0, ACTION_ERROR_MAX_CHARS),
+            completedAt: new Date(this.now()).toISOString(),
+          },
+          { internal: true, expectedRev: doc.rev },
+        )
+        .catch((updateError: unknown) => {
+          // Completion or expiry can win before delivery reports its failure.
+          if (!(updateError instanceof StoreError && updateError.statusCode === 409)) {
+            throw updateError;
+          }
+        });
       throw error;
     }
     return doc;

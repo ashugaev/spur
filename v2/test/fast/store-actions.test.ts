@@ -185,6 +185,30 @@ describe("action delivery", () => {
     expect(delivered).toHaveLength(1);
   });
 
+  it.each([
+    { status: "done", result: { saved: true } },
+    { status: "failed", error: "Agent rejected the action" },
+  ] as const)(
+    "preserves concurrent $status completion when delivery rejects",
+    async (completion) => {
+      const fixture = await setup({
+        deliver: async (): Promise<void> => {
+          await fixture.actions.complete("page:films", "act-00000001", completion);
+          throw new StoreError(503, "Delivery acknowledgement lost");
+        },
+      });
+      expect(await status(fixture.actions.invoke("page:films", invokeBody("act-00000001")))).toBe(
+        503,
+      );
+      const doc = await fixture.stores.get("page:films", "_actions", "act-00000001");
+      expect(doc.rev).toBe(2);
+      expect(doc.data).toMatchObject(completion);
+      if (completion.status === "done") expect(doc.data).not.toHaveProperty("error");
+      else expect(doc.data).not.toHaveProperty("result");
+      expect(fixture.delivered).toHaveLength(1);
+    },
+  );
+
   it("caps pending actions at 20 and expires stale ones on the next invoke", async () => {
     const { actions, stores, advance } = await setup();
     for (let n = 0; n < ACTION_PENDING_CAP; n++) {
