@@ -11,6 +11,8 @@ import {
   workspaceExistsMock,
 } from "../helpers/session-service-harness.js";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type * as metadataModule from "../../src/metadata.js";
+import type * as workspaceModule from "../../src/workspace.js";
 import type { ReviewEventData, SessionRecord } from "../../src/types.js";
 
 beforeEach(() => resetSessionServiceHarness(() => []));
@@ -73,12 +75,12 @@ it("rechecks both native PR alerts after denied stale-owner handoff rolls back b
 
   // Keep native lifecycle mocks; let the source use real durable snapshot storage.
   vi.doMock("../../src/metadata.js", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("../../src/metadata.js")>()),
+    ...(await importOriginal<typeof metadataModule>()),
     readSession: readSessionMock,
     listSessions: () => [sessions.get(owner.id)!],
   }));
   vi.doMock("../../src/workspace.js", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("../../src/workspace.js")>()),
+    ...(await importOriginal<typeof workspaceModule>()),
     isGitWorktree: async () => true,
     readBranchPushUrl: async () => "git@github.com:acme/api.git",
     readRemoteUrls: async () => new Map([["origin", "git@github.com:acme/api.git"]]),

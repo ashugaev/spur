@@ -21,10 +21,10 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "ff44434f283c5ccc17ae75ca60d0ea93e6a1bc73f17d4c2d344ce5c0faac392c",
-  "types.ts": "1f6c8a711d93e221a8f9c9d29c560a2e3394580a23a6952a5b5705834b993b17",
+  "server.ts": "45cc22ae06975f29debb04865b0eeac53f493604e8ffc0ef55a87783b58ade86",
+  "types.ts": "d8944934b4aa496306b491529e4efb83cf8739a36cd2ea46006eeebcfb448ca1",
   "cron-job-editor.ts": "33fc7b2993819693ef511d9312f9eb8f4260feb2f263421aec2d4e5ac613ec06",
-  "session-service.ts": "0c48f49ecac9f2222bd4b2225ed2d67e87f7649a0c5b865008fec240904b0549",
+  "session-service.ts": "bc6eda60100f34013a2d17d8cec773c8b4a113e65317c58f35005094b6a2f6a3",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "1d06c2d904fa46b95ef8bed971c5767fad76663482f22822f9a541b345f161ff",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",

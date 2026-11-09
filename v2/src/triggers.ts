@@ -1291,7 +1291,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
               if (!isPrAlertEvent(batch.eventName) || !denied) throw error;
             }
             if (isPrAlertEvent(batch.eventName) && !accepted && (!allowDelivery() || denied)) {
-              return autoPing.withRouteLock(batch.routeFingerprint, async () => {
+              return await autoPing.withRouteLock(batch.routeFingerprint, async () => {
                 const latest = readPendingSendBatch(deps.config.dataDir, batch.workId);
                 if (latest?.claim?.claimId !== claimId) return { status: "suppressed" };
                 if (conflictClaims.length > 0) autoPing.refundMergeConflict(batch.routeFingerprint);

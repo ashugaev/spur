@@ -1260,6 +1260,20 @@ describe("durable spawn metadata", () => {
     expect(() => writeSession(dataDir, session)).toThrow("Invalid PR alert transfer");
   });
 
+  it.each([null, "invalid", { kind: "helper" }])(
+    "rejects raw malformed PR alert provenance without rewriting it: %j",
+    async (prAlertTransfer) => {
+      const dataDir = await newDataDir();
+      const session = acceptedSession();
+      writeSession(dataDir, session);
+      const path = join(dataDir, "sessions", "api", "api-1.json");
+      const bytes = JSON.stringify({ ...session, prAlertTransfer });
+      writeFileSync(path, bytes);
+      expect(() => readSession(dataDir, session.id)).toThrow("Invalid PR alert transfer");
+      expect(readFileSync(path, "utf8")).toBe(bytes);
+    },
+  );
+
   it("round-trips a durable Cursor correlated baseline before its transcript exists", async () => {
     const dataDir = await newDataDir();
     const session = acceptedSession();

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AutoPingService, autoPingRouteFingerprint } from "../../src/auto-ping.js";
 import type * as eventLogModule from "../../src/event-log.js";
+import type * as metadataModule from "../../src/metadata.js";
 import type * as githubProviderModule from "../../src/review-providers/github.js";
 import type {
   RefreshReviewSignalsInput,
@@ -64,7 +65,7 @@ vi.mock("../../src/event-log.js", async (importOriginal) => {
 });
 
 vi.mock("../../src/metadata.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../src/metadata.js")>()),
+  ...(await importOriginal<typeof metadataModule>()),
   readPendingSpawnWork: () =>
     new Map([...pendingSpawnWork].map(([id, work]) => [id, structuredClone(work)])),
   writePendingSpawnWork: (_dataDir: string, work: PersistedSpawnWork, revision?: number) => {
@@ -890,9 +891,18 @@ describe("startConfiguredTriggers", () => {
     { accepted: true, reject: true, merge: false, kind: "ci_failed" as const },
     { accepted: false, reject: false, merge: true, kind: "ci_failed" as const },
     { accepted: false, reject: false, merge: true, kind: "merge_conflict" as const },
+    {
+      accepted: false,
+      reject: false,
+      merge: false,
+      kind: "ci_failed" as const,
+      settlementReject: true,
+    },
   ])(
-    "explicit PR alert owner preserves $kind accepted=$accepted/reject=$reject/merge=$merge across deny then reallow",
-    async ({ accepted, reject, merge, kind }) => {
+    "explicit PR alert owner preserves $kind accepted=$accepted/reject=$reject/merge=$merge/settlementReject=$settlementReject across deny then reallow",
+    async (scenario) => {
+      const { accepted, reject, merge, kind } = scenario;
+      const settlementReject = "settlementReject" in scenario && scenario.settlementReject === true;
       const { startConfiguredTriggers } = await loadTriggersModule();
       const { writeSession } = await import("../../src/metadata.js");
       const { writeWorkspaceState } = await import("../../src/workspace-store.js");
@@ -945,6 +955,11 @@ describe("startConfiguredTriggers", () => {
           });
           expect(options?.allowDelivery?.()).toBe(false);
           writeWorkspaceState(dataDir, owner.id, { pr, prAlertOwner: claim });
+          if (settlementReject) {
+            vi.spyOn(autoPing, "withRouteLock").mockImplementationOnce(async () => {
+              throw new Error("denial settlement persistence failed");
+            });
+          }
           if (merge) {
             const revision = [...readPendingSendBatchesMock().values()][0]?.revision ?? 0;
             bus.emit(replayEvent);
@@ -993,6 +1008,22 @@ describe("startConfiguredTriggers", () => {
           expect(fresh?.claim).toBeUndefined();
           expect(fresh?.retryAccounting?.every((entry) => entry.deliveryAttempts === 0)).toBe(true);
           await advanceSendWindow();
+        }
+        if (settlementReject) {
+          expect(deliver).toHaveBeenCalledTimes(1);
+          expect(markCi).not.toHaveBeenCalled();
+          const pending = [...readPendingSendBatchesMock().values()][0];
+          expect(pending?.claim).toBeUndefined();
+          expect(pending?.retryAccounting?.[0]?.deliveryAttempts).toBe(1);
+          expect(
+            logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "trigger.send.failed"),
+          ).toBe(true);
+          expect(
+            logSpurEventMock.mock.calls.some(
+              ([, entry]) => entry.event === "trigger.send.delivered",
+            ),
+          ).toBe(false);
+          return;
         }
         expect(deliver).toHaveBeenCalledTimes(merge ? 2 : 1);
         expect(kind === "ci_failed" ? markCi : markConflict).toHaveBeenCalledTimes(

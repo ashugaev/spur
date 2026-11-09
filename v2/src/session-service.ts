@@ -13275,7 +13275,7 @@ export class SessionService {
     let workspacePath = "";
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let createdAt: string | undefined;
-    let placeholderWritten = false;
+    const placeholderState = { written: false };
     let prAlertReservation: string | undefined;
     let prAlertLaunchStarted = false;
     let prAlertBirthConfirmed = false;
@@ -13539,7 +13539,7 @@ export class SessionService {
       };
       this.assertReuseAnchorPresent(reuseCtx);
       await this.persistSpawnPlaceholder(placeholder, request.prAlertOwner === true, () => {
-        placeholderWritten = true;
+        placeholderState.written = true;
       });
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
@@ -13965,7 +13965,7 @@ export class SessionService {
         const retained = await this.retainLaunchedError(launchedRecord, error);
         if (!isTerminalSessionStatus(retained.status)) throw error;
       }
-      if (sessionId && project && placeholderWritten && agent) {
+      if (sessionId && project && placeholderState.written && agent) {
         const failedSessionId = sessionId;
         const failedProject = project;
         const failedAgent = agent;
@@ -14597,7 +14597,7 @@ export class SessionService {
       )
     )
       throw new PrAlertOwnerRequestError("conflict", "PR alert owner changed before claim");
-    if (transfer && !sameWorkspace) {
+    if (!sameWorkspace) {
       const predecessor = readSession(this.config.dataDir, transfer.predecessorSessionId);
       if (!predecessor || workspaceIdOf(predecessor) !== transfer.predecessorWorkspaceId)
         throw new PrAlertOwnerRequestError("conflict", "PR alert predecessor is unavailable");
@@ -14777,7 +14777,7 @@ export class SessionService {
     let agent: SessionRecord["agent"] | undefined;
     let worktree = false;
     let createdAt: string | undefined;
-    let placeholderWritten = false;
+    const placeholderState = { written: false };
     let ownedClaimBatchId: string | undefined;
     let prAlertReservation: string | undefined;
     let prompt = "";
@@ -14957,7 +14957,7 @@ export class SessionService {
       this.pendingSpawnIds.add(sessionId);
       this.spawnsInFlight.add(sessionId);
       await this.persistSpawnPlaceholder(placeholder, request.prAlertOwner === true, () => {
-        placeholderWritten = true;
+        placeholderState.written = true;
       });
       ownedClaimBatchId = undefined;
       if (options.telegramOrigin) {
@@ -15028,7 +15028,7 @@ export class SessionService {
       }
       if (error instanceof SpawnAdmissionCancelledError) throw error;
       const message = error instanceof Error ? error.message : String(error);
-      if (sessionId && project && placeholderWritten) {
+      if (sessionId && project && placeholderState.written) {
         const erroredWorkspaceId = reuseCtx?.workspaceId ?? sessionId;
         const claimedPreflightUsage = readSession(
           this.config.dataDir,

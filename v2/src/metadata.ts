@@ -1528,18 +1528,24 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     normalizedSession.submitUnconfirmedAt ??
     (typeof legacyUnconfirmed === "string" ? legacyUnconfirmed : undefined);
   const workspaceId = workspaceIdOf(normalizedSession);
-  const prAlertTransfer = normalizedSession.prAlertTransfer;
-  if (
-    prAlertTransfer !== undefined &&
-    (!prAlertTransfer ||
-      typeof prAlertTransfer !== "object" ||
-      (prAlertTransfer.kind !== "owner" && prAlertTransfer.kind !== "suppressed") ||
-      typeof prAlertTransfer.predecessorWorkspaceId !== "string" ||
-      !prAlertTransfer.predecessorWorkspaceId.trim() ||
-      typeof prAlertTransfer.predecessorSessionId !== "string" ||
-      !prAlertTransfer.predecessorSessionId.trim())
-  )
-    throw new Error("Invalid PR alert transfer metadata");
+  const rawPrAlertTransfer: unknown = normalizedSession.prAlertTransfer;
+  let prAlertTransfer: SessionRecord["prAlertTransfer"];
+  if (rawPrAlertTransfer !== undefined) {
+    if (
+      !isRecord(rawPrAlertTransfer) ||
+      (rawPrAlertTransfer["kind"] !== "owner" && rawPrAlertTransfer["kind"] !== "suppressed") ||
+      typeof rawPrAlertTransfer["predecessorWorkspaceId"] !== "string" ||
+      !rawPrAlertTransfer["predecessorWorkspaceId"].trim() ||
+      typeof rawPrAlertTransfer["predecessorSessionId"] !== "string" ||
+      !rawPrAlertTransfer["predecessorSessionId"].trim()
+    )
+      throw new Error("Invalid PR alert transfer metadata");
+    prAlertTransfer = {
+      kind: rawPrAlertTransfer["kind"],
+      predecessorWorkspaceId: rawPrAlertTransfer["predecessorWorkspaceId"],
+      predecessorSessionId: rawPrAlertTransfer["predecessorSessionId"],
+    };
+  }
   const closeoutOwner =
     typeof normalizedSession.closeoutOwner === "boolean"
       ? normalizedSession.closeoutOwner
