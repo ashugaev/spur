@@ -1026,6 +1026,101 @@ describe("runSpawnPreflight", () => {
     ).rejects.toThrow(/codex preflight failed \(exit code 2\): codex auth error/);
   });
 
+  it("keeps Codex terminal failures visible beside warnings without copying transcript rows", async () => {
+    mockExecFileAsync.mockRejectedValueOnce(
+      Object.assign(new Error("Command failed"), {
+        code: 1,
+        stderr: "WARNING: helper unavailable; proceeding anyway\n",
+        stdout: [
+          "not json",
+          JSON.stringify({ type: "item.completed", item: { text: "TOOL_TRANSCRIPT_SENTINEL" } }),
+          JSON.stringify({ type: "error", message: "earlier transient failure" }),
+          JSON.stringify({ type: "turn.failed", error: { message: "Earlier terminal" } }),
+          JSON.stringify({
+            type: "turn.failed",
+            error: { code: "quota_exhausted", message: "Plan quota exhausted" },
+          }),
+          JSON.stringify({ type: "error", message: "incidental shutdown error" }),
+        ].join("\n"),
+      }),
+    );
+    const result = await runSpawnPreflight({
+      agent: "codex",
+      projectId: "api",
+      project: PROJECT,
+      baseBranch: "main",
+      worktree: true,
+      prompt: "Choose a branch",
+    }).catch((error: unknown) => error);
+    expect(result).toBeInstanceOf(Error);
+    const message = (result as Error).message;
+    expect(message).toContain("exit code 1");
+    expect(message).toContain("quota_exhausted: Plan quota exhausted");
+    expect(message).toContain("helper unavailable; proceeding anyway");
+    expect(message).not.toMatch(/TOOL_TRANSCRIPT_SENTINEL|Earlier terminal|incidental shutdown/);
+    expect(message).not.toContain("\n");
+  });
+
+  it("extracts standalone Codex error records and ignores malformed or unrelated JSONL", async () => {
+    mockExecFileAsync.mockRejectedValueOnce(
+      Object.assign(new Error("Command failed"), {
+        code: 2,
+        stderr: "helper warning",
+        stdout: [
+          "{malformed",
+          JSON.stringify({ type: "turn.failed", error: { message: 42 } }),
+          JSON.stringify({ type: "item.completed", message: "ASSISTANT_SENTINEL" }),
+          JSON.stringify({ type: "error", code: "unauthorized", message: "Login required" }),
+        ].join("\n"),
+      }),
+    );
+    await expect(
+      runSpawnPreflight({
+        agent: "codex",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Choose a branch",
+      }),
+    ).rejects.toThrow(/exit code 2.*unauthorized: Login required.*helper warning/);
+  });
+
+  it("redacts Codex terminal and warning secrets before bounding each diagnostic", async () => {
+    const secret = "boundary-secret-value";
+    vi.stubEnv("PREFLIGHT_DIAGNOSTIC_TOKEN", secret);
+    mockExecFileAsync.mockRejectedValueOnce(
+      Object.assign(new Error("Command failed"), {
+        code: 1,
+        stderr:
+          "Bearer bearer-demo-value sk-proj-demo_secretkey12345 " +
+          "https://example.test/?token=query-secret-value " +
+          "warning ".repeat(200),
+        stdout: JSON.stringify({
+          type: "turn.failed",
+          error: { message: "x".repeat(310) + secret },
+        }),
+      }),
+    );
+    try {
+      const result = await runSpawnPreflight({
+        agent: "codex",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Choose a branch",
+      }).catch((error: unknown) => error);
+      const message = (result as Error).message;
+      expect(message).not.toMatch(/boundary-secret|bearer-demo|demo_secretkey|query-secret/);
+      expect(message).toContain("[REDACTED]");
+      expect(message).not.toContain("\n");
+      expect(message.length).toBeLessThanOrEqual(700);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("surfaces a cursor timeout as a timed-out failure", async () => {
     mockExecFileAsync.mockRejectedValueOnce(
       Object.assign(new Error("Command failed"), {
