@@ -68,10 +68,19 @@ describe("pr-status cache", () => {
       totalThreads: 0,
       unresolvedThreads: 0,
       reviewers,
+      reviewRequirement: "required",
     });
-    expect(errorResponse(key, "offline")).toMatchObject({ reviewers, stale: true });
+    expect(errorResponse(key, "offline")).toMatchObject({
+      reviewers,
+      reviewRequirement: "required",
+      stale: true,
+    });
     markPrStatusMerged("https://github.com/a/b/pull/1");
-    expect(readCachedPrStatus(key)).toMatchObject({ state: "merged", reviewers });
+    expect(readCachedPrStatus(key)).toMatchObject({
+      state: "merged",
+      reviewers,
+      reviewRequirement: "required",
+    });
   });
 
   it("returns null for an unknown key", () => {

@@ -13,6 +13,7 @@ const cases: Array<{ name: string; info: PrInfo }> = [
       totalThreads: 0,
       unresolvedThreads: 0,
       reviewers: { approved: ["alice", "bob"], changesRequested: [] },
+      reviewRequirement: "required",
     },
   },
   {
@@ -25,7 +26,8 @@ const cases: Array<{ name: string; info: PrInfo }> = [
       mergeConflict: false,
       totalThreads: 0,
       unresolvedThreads: 0,
-      reviewers: { approved: ["alice"], changesRequested: ["carol"] },
+      reviewers: { approved: ["alice", "bob"], changesRequested: ["carol"] },
+      reviewRequirement: "required",
     },
   },
   {
@@ -39,6 +41,7 @@ const cases: Array<{ name: string; info: PrInfo }> = [
       totalThreads: 0,
       unresolvedThreads: 0,
       reviewers: { approved: ["alice"], changesRequested: [] },
+      reviewRequirement: "required",
     },
   },
   {
@@ -51,20 +54,22 @@ const cases: Array<{ name: string; info: PrInfo }> = [
       mergeConflict: false,
       totalThreads: 0,
       unresolvedThreads: 0,
-      reviewers: { approved: ["alice"], changesRequested: [] },
+      reviewers: { approved: ["alice"], changesRequested: ["carol"] },
+      reviewRequirement: "none",
     },
   },
   {
     name: "empty",
     info: {
       state: "open",
-      reviewDecision: null,
+      reviewDecision: "review_required",
       ciStatus: "pending",
       canMerge: false,
       mergeConflict: false,
       totalThreads: 0,
       unresolvedThreads: 0,
       reviewers: { approved: [], changesRequested: [] },
+      reviewRequirement: "required",
     },
   },
   {
@@ -78,6 +83,21 @@ const cases: Array<{ name: string; info: PrInfo }> = [
       totalThreads: 0,
       unresolvedThreads: 0,
       reviewers: null,
+      reviewRequirement: "required",
+    },
+  },
+  {
+    name: "policy unavailable",
+    info: {
+      state: "open",
+      reviewDecision: "changes_requested",
+      ciStatus: "success",
+      canMerge: false,
+      mergeConflict: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      reviewers: { approved: ["alice"], changesRequested: ["carol"] },
+      reviewRequirement: "unavailable",
     },
   },
 ];
@@ -95,22 +115,30 @@ for (const { name, info } of cases) {
       await page.goto(path);
       const badge = page.locator(`a[href='${prUrl}']`).first();
       await expect(badge).toBeVisible();
-      for (const [key, label] of [
-        ["approved", "Approved"],
-        ["changesRequested", "Changes requested"],
-      ] as const) {
-        const logins = info.reviewers?.[key] ?? [];
-        const group = badge.locator(`[title^='${label} ·']`);
-        if (logins.length === 0) {
-          await expect(group).toHaveCount(0);
+      const person = badge.locator("[data-pr-reviewers]");
+      if (info.reviewRequirement !== "required") {
+        await expect(person).toHaveCount(0);
+      } else {
+        await expect(person).toHaveCount(1);
+        await expect(person).toHaveText(
+          info.reviewers ? String(info.reviewers.approved.length) : "",
+        );
+        await person.hover();
+        if (info.reviewers) {
+          for (const login of [...info.reviewers.approved, ...info.reviewers.changesRequested]) {
+            await expect(person).toHaveAttribute("title", new RegExp(`@${login}`));
+          }
         } else {
-          await expect(group).toHaveText(String(logins.length));
-          await group.hover();
-          await expect(group).toHaveAttribute(
-            "title",
-            `${label} · ${logins.length}\n${logins.map((login) => `@${login}`).join("\n")}`,
-          );
+          await expect(person).toHaveAttribute("title", /Review history unavailable/);
         }
+        const color =
+          info.reviewDecision === "changes_requested" ||
+          (info.reviewers?.changesRequested.length ?? 0) > 0
+            ? "error"
+            : info.reviewDecision === "approved"
+              ? "ready"
+              : "attention";
+        await expect(person).toHaveAttribute("class", new RegExp(`--color-status-${color}`));
       }
       if (name === "approved") {
         await expect(badge.locator("[data-pr-review-decision='approved']")).toBeVisible();
@@ -124,10 +152,7 @@ for (const { name, info } of cases) {
         await expect(badge.getByLabel("CI passing")).toBeVisible();
         const status = badge.locator("[title*='GitHub requires review']");
         await status.hover();
-        await expect(status).toHaveAttribute(
-          "title",
-          "CI passing\nGitHub requires review\nRemaining required approvals: unknown",
-        );
+        await expect(status).toHaveAttribute("title", "CI passing\nGitHub requires review");
       }
     }
   });

@@ -41,11 +41,10 @@ function statusTitle(info: PrInfo, github: boolean): string | undefined {
   if (info.reviewDecision === "approved") facts.push("Review approved");
   if (info.reviewDecision === "changes_requested") facts.push("Changes requested");
   if (info.reviewDecision === "review_required") {
-    facts.push(
-      github ? "GitHub requires review" : "Review required",
-      "Remaining required approvals: unknown",
-    );
+    facts.push(github ? "GitHub requires review" : "Review required");
   }
+  if (github && (info.reviewRequirement ?? "unavailable") === "unavailable")
+    facts.push("Native review policy unavailable");
   if (info.mergeConflict) facts.push("Merge conflict");
   return facts.length > 0 ? facts.join("\n") : undefined;
 }
@@ -102,15 +101,7 @@ export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBa
               {prInfo.mergeConflict ? <MergeConflictBadge /> : null}
             </span>
           ) : null}
-          {reviewProvider === "github" && prInfo.reviewers ? (
-            <>
-              <ReviewersBadge logins={prInfo.reviewers.approved} decision="approved" />
-              <ReviewersBadge
-                logins={prInfo.reviewers.changesRequested}
-                decision="changes_requested"
-              />
-            </>
-          ) : null}
+          {reviewProvider === "github" ? <ReviewersBadge info={prInfo} /> : null}
           <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
         </>
       ) : null}

@@ -22,6 +22,20 @@ function makePrInfo(overrides: Partial<PrInfo> = {}): PrInfo {
 }
 
 describe("pr-status-shape", () => {
+  it("validates optional native requirement without equating unavailable to none", () => {
+    expect(isPrInfoShape(makePrInfo())).toBe(true);
+    for (const reviewRequirement of ["required", "none", "unavailable"] as const) {
+      expect(isPrInfoShape(makePrInfo({ reviewRequirement }))).toBe(true);
+    }
+    for (const reviewRequirement of [null, false, "optional"]) {
+      expect(isPrInfoShape({ ...makePrInfo(), reviewRequirement })).toBe(false);
+    }
+    const unknown = makePrInfo({ reviewRequirement: "unavailable" });
+    expect(prInfosEqual(unknown, makePrInfo())).toBe(true);
+    expect(prInfosEqual(unknown, makePrInfo({ reviewRequirement: "none" }))).toBe(false);
+    expect(isPrReady(unknown)).toBe(isPrReady(makePrInfo({ reviewRequirement: "required" })));
+  });
+
   it("accepts legacy or unavailable reviewers and rejects malformed lists", () => {
     expect(isPrInfoShape(makePrInfo())).toBe(true);
     expect(isPrInfoShape(makePrInfo({ reviewers: null }))).toBe(true);

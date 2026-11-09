@@ -12,6 +12,7 @@ import {
   isPrReady,
   isPrState,
   isPrReviewers,
+  isReviewRequirement,
   parseReviewDecision,
   prInfosEqual,
 } from "@/lib/pr-status-shape";
@@ -153,6 +154,9 @@ function parsePrInfoPayload(obj: Record<string, unknown>): PrInfo {
     state: isPrState(obj["state"]) ? obj["state"] : null,
     reviewDecision: parseReviewDecision(obj["reviewDecision"]),
     reviewers: isPrReviewers(obj["reviewers"]) ? obj["reviewers"] : null,
+    reviewRequirement: isReviewRequirement(obj["reviewRequirement"])
+      ? obj["reviewRequirement"]
+      : "unavailable",
     ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
     canMerge: typeof obj["canMerge"] === "boolean" ? obj["canMerge"] : false,
     mergeConflict: typeof obj["mergeConflict"] === "boolean" ? obj["mergeConflict"] : false,
@@ -541,21 +545,35 @@ export function ReviewDecisionDot({
   );
 }
 
-export function ReviewersBadge({
-  logins,
-  decision,
-}: {
-  logins: readonly string[];
-  decision: "approved" | "changes_requested";
-}) {
-  if (logins.length === 0) return null;
-  const approved = decision === "approved";
-  const title = `${approved ? "Approved" : "Changes requested"} · ${logins.length}\n${logins.map((login) => `@${login}`).join("\n")}`;
+export function ReviewersBadge({ info }: { info: PrInfo }) {
+  if (info.reviewRequirement !== "required") return null;
+  const changesRequested =
+    info.reviewDecision === "changes_requested" ||
+    (info.reviewers?.changesRequested.length ?? 0) > 0;
+  const approved = !changesRequested && info.reviewDecision === "approved";
+  const status = changesRequested
+    ? "Changes requested"
+    : approved
+      ? "Review approved"
+      : "Review required";
+  const color = changesRequested
+    ? "text-[var(--color-status-error)]"
+    : approved
+      ? "text-[var(--color-status-ready)]"
+      : "text-[var(--color-status-attention)]";
+  const title = info.reviewers
+    ? [
+        status,
+        `Approvals: ${info.reviewers.approved.length}${info.reviewers.approved.length ? ` · ${info.reviewers.approved.map((login) => `@${login}`).join(", ")}` : ""}`,
+        `Changes requested: ${info.reviewers.changesRequested.length}${info.reviewers.changesRequested.length ? ` · ${info.reviewers.changesRequested.map((login) => `@${login}`).join(", ")}` : ""}`,
+      ].join("\n")
+    : `${status}\nReview history unavailable`;
   return (
     <span
+      data-pr-reviewers
       aria-label={title}
       title={title}
-      className={`inline-flex items-center gap-0.5 text-[10px] font-bold ${approved ? "text-[var(--color-status-ready)]" : "text-[var(--color-status-error)]"}`}
+      className={`inline-flex items-center gap-0.5 text-[10px] font-bold ${color}`}
     >
       <svg
         aria-hidden="true"
@@ -570,7 +588,7 @@ export function ReviewersBadge({
         <circle cx="12" cy="7" r="4" />
         <path d="M5 21v-3a7 7 0 0 1 14 0v3" />
       </svg>
-      {logins.length}
+      {info.reviewers ? info.reviewers.approved.length : null}
     </span>
   );
 }

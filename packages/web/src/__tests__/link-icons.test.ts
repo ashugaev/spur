@@ -59,19 +59,21 @@ describe("fetchPrInfo", () => {
       totalThreads: 0,
       unresolvedThreads: 0,
       reviewers,
+      reviewRequirement: "required",
     };
     mockFetch.mockResolvedValueOnce(jsonResponse(snapshot));
-    expect((await fetchPrInfo(url)).reviewers).toEqual(reviewers);
+    expect(await fetchPrInfo(url)).toMatchObject({ reviewers, reviewRequirement: "required" });
     mockFetch.mockResolvedValueOnce(jsonResponse({ results: { [url]: snapshot } }));
     await fetchPrInfoBatch([url]);
     const { result } = renderHook(() => usePrInfo(url));
     expect(result.current.reviewers).toEqual(reviewers);
+    expect(result.current.reviewRequirement).toBe("required");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(250);
     });
     expect(window.localStorage.getItem("spur:pr-status-cache:v1")).toContain("alice");
     mockFetch.mockResolvedValueOnce(jsonResponse({}, false));
-    expect((await fetchPrInfo(url)).reviewers).toEqual(reviewers);
+    expect(await fetchPrInfo(url)).toMatchObject({ reviewers, reviewRequirement: "required" });
   });
 
   it("treats malformed reviewer metadata as unknown without losing aggregate data", async () => {
@@ -80,12 +82,14 @@ describe("fetchPrInfo", () => {
         state: "open",
         reviewDecision: "approved",
         reviewers: { approved: [42], changesRequested: [] },
+        reviewRequirement: "optional",
       }),
     );
     const result = await fetchPrInfo("https://github.com/org/repo/pull/malformed-reviewers");
     expect(result.state).toBe("open");
     expect(result.reviewDecision).toBe("approved");
     expect(result.reviewers).toBeNull();
+    expect(result.reviewRequirement).toBe("unavailable");
   });
 
   it("maps state, ciStatus, totalThreads, unresolvedThreads from JSON", async () => {

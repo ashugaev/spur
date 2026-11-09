@@ -6,8 +6,8 @@
 - `GET /headroom`
 - `GET /usage` — quota windows per Claude account and Codex, per-source error entries, token totals today/7d/30d; provider request timeout 5s; MCP `get_usage`; `v2/src/usage-report.ts`.
 - `GET /models` — model and default reasoning capabilities; discovery in `v2/src/agents/models.ts`.
-- `GET /api/pr-status` — web PR status, nullable reviewer names; `packages/web/src/app/api/pr-status/route.ts`, `packages/web/src/lib/pr-status-shape.ts`.
-- `POST /api/pr-status/batch` — web PR statuses, nullable reviewer names; `packages/web/src/app/api/pr-status/batch/route.ts`.
+- `GET /api/pr-status` — web PR status, nullable reviewer names, native review requirement; `packages/web/src/app/api/pr-status/route.ts`, `packages/web/src/lib/pr-status-shape.ts`.
+- `POST /api/pr-status/batch` — web PR statuses, reviewer/native requirement metadata; `packages/web/src/app/api/pr-status/batch/route.ts`.
 - `GET /user-actions`
 - `GET /deploy/versions`
 - `GET /deploy/switch/status`

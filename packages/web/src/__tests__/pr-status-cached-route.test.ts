@@ -72,7 +72,7 @@ it.each([
   async (change, state, reviewDecision, ready, mergeConflict) => {
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);
-    recordGitHubPrNode("acme/repo/1", { ...node, ...change });
+    await recordGitHubPrNode("acme/repo/1", { ...node, ...change });
     const response = await (await GET(request())).json();
     expect(response).toMatchObject({
       status: "available",
@@ -95,7 +95,7 @@ it.each([
 );
 it("exposes last-good staleness and provider errors without refreshing or losing fetchedAt", async () => {
   vi.useFakeTimers();
-  const snapshot = recordGitHubPrNode("acme/repo/1", node);
+  const snapshot = await recordGitHubPrNode("acme/repo/1", node);
   vi.advanceTimersByTime(120001);
   expect(await (await GET(request())).json()).toMatchObject({
     status: "available",
@@ -112,8 +112,9 @@ it("exposes last-good staleness and provider errors without refreshing or losing
 it("forwards cached reviewer names without fetching or changing readiness", async () => {
   const fetch = vi.fn();
   vi.stubGlobal("fetch", fetch);
-  recordGitHubPrNode("acme/repo/1", {
+  await recordGitHubPrNode("acme/repo/1", {
     ...node,
+    reviewDecision: "REVIEW_REQUIRED",
     reviews: {
       nodes: [
         { state: "APPROVED", submittedAt: "2026-11-07T07:56:01Z", author: { login: "alice" } },
@@ -122,7 +123,10 @@ it("forwards cached reviewer names without fetching or changing readiness", asyn
     },
   });
   expect(await (await GET(request())).json()).toMatchObject({
-    info: { reviewers: { approved: ["alice"], changesRequested: [] } },
+    info: {
+      reviewers: { approved: ["alice"], changesRequested: [] },
+      reviewRequirement: "required",
+    },
     ready: true,
     refreshed: false,
   });
@@ -143,7 +147,7 @@ it.each([
   ["PENDING", "pending"],
   ["UNKNOWN", null],
 ] as const)("preserves extracted CI rollup %s", async (state, ciStatus) => {
-  recordGitHubPrNode("acme/repo/1", {
+  await recordGitHubPrNode("acme/repo/1", {
     ...node,
     commits: { nodes: [{ commit: { statusCheckRollup: { state } } }] },
     reviewThreads: { nodes: [{ isResolved: false }] },

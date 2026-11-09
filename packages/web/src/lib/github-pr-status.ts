@@ -12,6 +12,7 @@ import {
   errorResponse,
   recordSuccessfulPrStatus,
 } from "@/lib/pr-status-store";
+import { githubReviewRequirement, type NativeReviewSource } from "@/lib/github-review-requirement";
 
 // Shared GraphQL selection set for a GitHub pull request. Both the
 // single-URL route (one PR per document) and the batch route (one aliased
@@ -19,11 +20,15 @@ import {
 // there is exactly one definition of "what we ask GitHub for".
 export const GITHUB_PR_STATUS_FIELDS =
   "state isDraft merged mergeable mergeStateStatus reviewDecision " +
-  "reviews(last:100) { nodes { state submittedAt author { login } } pageInfo { hasPreviousPage } } " +
+  "headRefOid baseRefOid baseRefName " +
+  "baseRef { target { oid } rules(first:100) { nodes { type parameters { ... on PullRequestParameters { requiredApprovingReviewCount requireCodeOwnerReview requireLastPushApproval requiredReviewers { minimumApprovals filePatterns } } } } pageInfo { hasNextPage } } " +
+  "branchProtectionRule { requiresApprovingReviews requiredApprovingReviewCount requiresCodeOwnerReviews requireLastPushApproval } } " +
+  "reviewRequests(first:100) { nodes { asCodeOwner } pageInfo { hasNextPage } } " +
+  "reviews(last:100) { nodes { state submittedAt authorCanPushToRepository author { login } } pageInfo { hasPreviousPage } } " +
   "reviewThreads(first:100) { nodes { isResolved } } " +
   "commits(last:1) { nodes { commit { statusCheckRollup { state } } } }";
 
-export interface GitHubPrNode {
+export interface GitHubPrNode extends NativeReviewSource {
   state: string;
   isDraft: boolean;
   merged: boolean;
@@ -67,7 +72,9 @@ function normalizeGitHubCiStatus(rollupState: string | undefined): CiStatus {
   return null;
 }
 
-function parseGitHubReviewers(value: unknown): PrReviewers | null {
+function parseGitHubReviews(
+  value: unknown,
+): { reviewers: PrReviewers; blockingChanges: boolean | null } | null {
   if (typeof value !== "object" || value === null) return null;
   const connection = value as Record<string, unknown>;
   const pageInfo = connection["pageInfo"];
@@ -84,6 +91,7 @@ function parseGitHubReviewers(value: unknown): PrReviewers | null {
     login: string;
     state: "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED";
     submittedAt: number;
+    canPush: boolean | null;
   }> = [];
   for (const node of connection["nodes"]) {
     if (typeof node !== "object" || node === null) return null;
@@ -113,24 +121,40 @@ function parseGitHubReviewers(value: unknown): PrReviewers | null {
     }
     const timestamp = Date.parse(submittedAt);
     if (!Number.isFinite(timestamp)) return null;
-    events.push({ login, state, submittedAt: timestamp });
+    events.push({
+      login,
+      state,
+      submittedAt: timestamp,
+      canPush:
+        typeof review["authorCanPushToRepository"] === "boolean"
+          ? review["authorCanPushToRepository"]
+          : null,
+    });
   }
-  const accounts = new Map<string, { login: string; state: "APPROVED" | "CHANGES_REQUESTED" }>();
+  const accounts = new Map<
+    string,
+    { login: string; state: "APPROVED" | "CHANGES_REQUESTED"; canPush: boolean | null }
+  >();
   // Stable ordering retains connection order when publication times are equal.
   events.sort((a, b) => a.submittedAt - b.submittedAt);
-  for (const { login, state } of events) {
+  for (const { login, state, canPush } of events) {
     const key = login.toLowerCase();
     if (state === "DISMISSED") accounts.delete(key);
-    else accounts.set(key, { login, state });
+    else accounts.set(key, { login, state, canPush });
   }
   const reviewers: PrReviewers = { approved: [], changesRequested: [] };
-  for (const { login, state } of accounts.values()) {
+  let blockingChanges: boolean | null = false;
+  for (const { login, state, canPush } of accounts.values()) {
     if (state === "APPROVED") reviewers.approved.push(login);
-    if (state === "CHANGES_REQUESTED") reviewers.changesRequested.push(login);
+    if (state === "CHANGES_REQUESTED") {
+      reviewers.changesRequested.push(login);
+      if (canPush === true) blockingChanges = true;
+      else if (canPush === null && blockingChanges !== true) blockingChanges = null;
+    }
   }
   reviewers.approved.sort();
   reviewers.changesRequested.sort();
-  return reviewers;
+  return { reviewers, blockingChanges };
 }
 
 // Normalizes a resolved PR node into the store's PrInfo shape, writes it
@@ -139,11 +163,11 @@ function parseGitHubReviewers(value: unknown): PrReviewers | null {
 // node can still arrive alongside a partial GraphQL `errors[]` entry (e.g.
 // a rate-limited sub-field); when `error` is set the payload carries it and
 // is cached with the shorter error TTL instead of the normal success TTL.
-export function recordGitHubPrNode(
+export async function recordGitHubPrNode(
   cacheKey: string,
   node: GitHubPrNode,
   error?: string,
-): PrStatusResponse {
+): Promise<PrStatusResponse> {
   let state: PrState;
   if (node.merged) state = "merged";
   else if (node.state === "CLOSED") state = "closed";
@@ -160,10 +184,23 @@ export function recordGitHubPrNode(
     mergeStateStatus === "DIRTY" ||
     mergeStateStatus === "CANNOT_BE_MERGED";
 
+  const reviews = parseGitHubReviews(node.reviews);
+  const [owner, repo] = cacheKey.split("/");
+  const reviewRequirement =
+    !owner || !repo
+      ? "unavailable"
+      : await githubReviewRequirement(
+          node,
+          reviews?.blockingChanges ?? null,
+          owner,
+          repo,
+          Boolean(error),
+        );
   const response = recordSuccessfulPrStatus(cacheKey, {
     state,
     reviewDecision: parseReviewDecision(node.reviewDecision),
-    reviewers: parseGitHubReviewers(node.reviews),
+    reviewers: reviews?.reviewers ?? null,
+    reviewRequirement,
     ciStatus: normalizeGitHubCiStatus(node.commits.nodes[0]?.commit.statusCheckRollup?.state),
     canMerge,
     mergeConflict,
@@ -183,6 +220,7 @@ export function recordGitHubPrAbsent(cacheKey: string): PrStatusResponse {
     state: null,
     reviewDecision: null,
     reviewers: null,
+    reviewRequirement: "unavailable",
     ciStatus: null,
     canMerge: false,
     mergeConflict: false,
