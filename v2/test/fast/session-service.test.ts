@@ -45505,6 +45505,130 @@ describe("SessionService", () => {
     );
   });
 
+  it("restarts at the live-session cap and retains native identity and settings", async () => {
+    mockClaudeJsonlState("waiting");
+    const config = baseConfig();
+    loadConfigMock.mockReturnValue({
+      ...config,
+      admission: { ...config.admission, maxLiveSessions: 1 },
+      projects: { api: { ...config.projects.api, modes: { manager: { skill: "manager" } } } },
+    });
+    const record = runningSession({
+      agentSessionId: "session-uuid",
+      model: "sonnet",
+      mode: "manager",
+    });
+    const sessions = createSessionStore(record);
+    const service = await createDisposedSessionService();
+
+    const restored = await service.restore(record.id, { restart: true });
+
+    expect(restored.status).toBe("running");
+    expect(sessions.get(record.id)).toMatchObject({
+      id: record.id,
+      agentSessionId: record.agentSessionId,
+      worktreePath: record.worktreePath,
+      prompt: record.prompt,
+      model: record.model,
+      mode: record.mode,
+    });
+    expect(killTmuxSessionMock.mock.invocationCallOrder[0]).toBeLessThan(
+      createTmuxSessionMock.mock.invocationCallOrder[0]!,
+    );
+    expect(buildAgentRestorePlanMock).toHaveBeenCalledWith(
+      "claude",
+      record.worktreePath,
+      "",
+      expect.objectContaining({ model: "sonnet" }),
+    );
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["admission", "budget", "status", "survivor", "cancelled", "pre-launch"] as const)(
+    "guards restart at the %s boundary",
+    async (boundary) => {
+      const record = runningSession(boundary === "status" ? { status: "stopped" } : {});
+      const sessions = createSessionStore(record);
+      const service = await createDisposedSessionService();
+      const seam = service as unknown as {
+        assertAdmissible(): void;
+        assertTokenBudgetAllowsActivation(): void;
+        killAgentPaneAndConfirmExit(
+          record: SessionRecord,
+          options: { failOnSurvivors: boolean; operation: { assertActive(): void } },
+        ): Promise<void>;
+        restoreLocked(): Promise<SessionView>;
+      };
+      const launch = vi.spyOn(seam, "restoreLocked").mockRejectedValue(new Error("pre-launch"));
+      const controller = new AbortController();
+      if (boundary === "admission")
+        vi.spyOn(seam, "assertAdmissible").mockImplementation(() => {
+          throw new Error("admission");
+        });
+      if (boundary === "budget")
+        vi.spyOn(seam, "assertTokenBudgetAllowsActivation").mockImplementation(() => {
+          throw new Error("budget");
+        });
+      if (boundary === "survivor")
+        vi.spyOn(seam, "killAgentPaneAndConfirmExit").mockImplementation(
+          async (_record, options) => {
+            expect(options.failOnSurvivors).toBe(true);
+            options.operation.assertActive();
+            throw new Error("survivor");
+          },
+        );
+      if (boundary === "cancelled") controller.abort();
+      await expect(
+        service.restore(record.id, { restart: true }, { signal: controller.signal }),
+      ).rejects.toThrow();
+      if (boundary === "pre-launch") {
+        expect(sessions.get(record.id)).toMatchObject({
+          status: "stopped",
+          stopReason: "manual_pause",
+        });
+        expect(launch).toHaveBeenCalledOnce();
+      } else {
+        expect(launch).not.toHaveBeenCalled();
+        expect(sessions.get(record.id)?.status).toBe(record.status);
+      }
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects restart on reopen before mutating a completed session", async () => {
+    const record = runningSession({ status: "completed" });
+    const sessions = createSessionStore(record);
+    const service = await createDisposedSessionService();
+    await expect(service.reopen(record.id, { restart: true })).rejects.toThrow(
+      "only supported by restore",
+    );
+    expect(sessions.get(record.id)).toEqual(record);
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(createWorktreeMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a second restart while the first owns the lifecycle", async () => {
+    const record = runningSession();
+    createSessionStore(record);
+    const service = await createDisposedSessionService();
+    const seam = service as unknown as { restoreLocked(): Promise<SessionView> };
+    let finish!: (result: SessionView) => void;
+    const launch = vi.spyOn(seam, "restoreLocked").mockImplementation(
+      () =>
+        new Promise<SessionView>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const first = service.restore(record.id, { restart: true });
+    await vi.waitFor(() => expect(launch).toHaveBeenCalledOnce());
+    await expect(service.restore(record.id, { restart: true })).rejects.toThrow();
+    finish({ ...record, status: "running" } as SessionView);
+    await first;
+    expect(launch).toHaveBeenCalledOnce();
+    expect(killTmuxSessionMock).toHaveBeenCalledOnce();
+  });
+
   it("restores through the agent-specific resume plan and keeps the same session id", async () => {
     mockClaudeJsonlState("waiting");
     findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
@@ -76802,14 +76926,21 @@ describe("SessionService", () => {
       expect(sessions.get(record.id)?.slots).toEqual(record.slots);
     });
 
-    it.each(["alive", "unknown", "dead"])(
-      "retains an uncertain restore readiness result with subsequent %s liveness",
-      async (liveness) => {
+    it.each([
+      { liveness: "alive", restart: false },
+      { liveness: "unknown", restart: false },
+      { liveness: "dead", restart: false },
+      { liveness: "alive", restart: true },
+      { liveness: "unknown", restart: true },
+      { liveness: "dead", restart: true },
+    ])(
+      "retains uncertain restore readiness with $liveness liveness and restart=$restart",
+      async ({ liveness, restart }) => {
         const service = await createDisposedSessionService();
         const sessions = createSessionStore();
         const record = sessionRecord({
           id: "api-1",
-          status: "stopped",
+          status: restart ? "running" : "stopped",
           stopReason: "manual_pause",
           agentSessionId: "native-session",
           queuedMessages: { messages: ["pending work"], awaitingPrompt: true },
@@ -76829,7 +76960,7 @@ describe("SessionService", () => {
             ...(liveness === "unknown" ? { diagnostic: "ps failed" } : {}),
           });
         });
-        await expect(service.restore(record.id)).rejects.toThrow(
+        await expect(service.restore(record.id, { restart })).rejects.toThrow(
           "capture-pane failed during restore",
         );
         expect(killTmuxSessionMock).toHaveBeenCalledTimes(killsBeforeLaunch);

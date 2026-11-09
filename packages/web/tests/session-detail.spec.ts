@@ -785,6 +785,45 @@ test.describe("S1: Session detail header", () => {
     );
   });
 
+  test("restarts from overflow and offers Restore after pre-launch failure", async ({ page }) => {
+    let current = makeWorkingSession({ id: "detail-restart" });
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    let calls = 0;
+    await page.route(`**/api/sessions/${current.id}`, (route) => route.fulfill({ json: current }));
+    await page.route(`**/api/sessions/${current.id}/restore`, async (route) => {
+      calls += 1;
+      const body = route.request().postDataJSON() as { restart: boolean; operationId: string };
+      expect(body).toEqual({ restart: true, operationId: expect.any(String) });
+      await held;
+      current = {
+        ...current,
+        status: "stopped",
+        state: "stopped",
+        runtimeAlive: false,
+        lifecycle: lifecycleReceipt(body.operationId, current.id, "restore", "failed", 2),
+      };
+      await route.fulfill({
+        status: 500,
+        json: { error: "Restart failed", lifecycle: current.lifecycle },
+      });
+    });
+    await page.goto(`/sessions/${current.id}`);
+    await page.getByRole("button", { name: "More session actions" }).click();
+    await page.getByRole("menuitem", { name: "Restart session" }).click();
+    await expect.poll(() => calls).toBe(1);
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "More session actions" })).toBeDisabled();
+    finish();
+    await expect(page.getByText("Restart failed")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Restore", exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: "More session actions" }).click();
+    await expect(page.getByRole("menuitem", { name: "Restart session" })).toHaveCount(0);
+    expect(calls).toBe(1);
+  });
+
   test("kebab menu opens Change title on a touch device with no prior hover", async ({
     browser,
   }) => {
