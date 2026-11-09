@@ -192,6 +192,7 @@ import {
 import {
   buildShepherdProject,
   ensureShepherdWorkspace,
+  refreshShepherdPrompt,
   SHEPHERD_PROJECT_ID,
   SHEPHERD_PROJECT_NAME,
 } from "./shepherd.js";
@@ -2702,8 +2703,10 @@ export function buildRestorePrompt(
   planMode = false,
   restrictWrites = false,
   mode?: ResolvedSessionMode,
+  source?: Pick<SessionRecord, "project" | "originalTaskPrompt">,
 ): string {
-  return `${RESTORE_PROMPT_PREFIX}\n\n${buildSessionPrompt(prompt, planMode, restrictWrites, mode)}`;
+  const launchPrompt = source ? refreshShepherdPrompt(prompt, source) : prompt;
+  return `${RESTORE_PROMPT_PREFIX}\n\n${buildSessionPrompt(launchPrompt, planMode, restrictWrites, mode)}`;
 }
 
 function joinReasons(reasons: string[]): string {
@@ -21103,7 +21106,7 @@ export class SessionService {
     );
     const recoverySidecarNames = manualSidecarNames(resolveSessionSidecars(session, project));
     const recoveryContextMessage = buildInitialMessage(
-      buildRestorePrompt(session.prompt, planMode, restrictWrites, mode),
+      buildRestorePrompt(session.prompt, planMode, restrictWrites, mode, session),
       recoverySidecarNames,
       this.config.tags,
       project.branchNaming?.regex,
@@ -21912,7 +21915,7 @@ export class SessionService {
         current.stopReason !== "stale_timeout" &&
         current.stopReason !== "memory_shed";
       const restorePrompt = shouldSendRestoreMessage
-        ? buildRestorePrompt(current.prompt, planMode, restrictWrites, mode)
+        ? buildRestorePrompt(current.prompt, planMode, restrictWrites, mode, current)
         : "";
       const planOptions = {
         ...withAgentModeOptions(

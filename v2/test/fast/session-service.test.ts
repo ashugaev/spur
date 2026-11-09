@@ -260,6 +260,8 @@ import type * as todoModule from "../../src/todo.js";
 import type * as reapModule from "../../src/sidecars/reap.js";
 import type { ListenerSnapshot } from "../../src/port-probe.js";
 import { normalizeSessionPrBinding } from "../../src/session-pr.js";
+import { buildShepherdProject } from "../../src/shepherd.js";
+import { legacyShepherdPrompt } from "../helpers/shepherd.js";
 import {
   hasRetainedSessionError,
   isRespawnableStatus,
@@ -6077,6 +6079,53 @@ describe("SessionService", () => {
 
     expect(buildAgentRestorePlanMock.mock.calls[0]?.[2]).not.toContain("Mode:");
   });
+
+  it.each(["standard restore", "runtime recovery"] as const)(
+    "refreshes generated Shepherd startup in the assembled %s message without changing stored task",
+    async (path) => {
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValue(path === "standard restore" ? "session-uuid" : null);
+      const task = "Follow the bounded INT protocol; keep its current-sprint admission gates.";
+      const legacy = legacyShepherdPrompt(task);
+      const sessions = seedShepherdSession({
+        prompt: legacy,
+        originalTaskPrompt: task,
+        status: "stopped",
+      });
+      mockExitedThenRestoredProcess();
+      const service = await createDisposedSessionService();
+      let message: string | undefined;
+      if (path === "standard restore") {
+        await service.restore("shp-1");
+        message = buildAgentRestorePlanMock.mock.calls.at(-1)?.[2];
+      } else {
+        const record = sessions.get("shp-1");
+        if (!record) throw new Error("Missing Shepherd recovery fixture");
+        const recovery = service as unknown as {
+          killAgentPaneAndConfirmExit(): Promise<void>;
+          capturePreparedAgentSessionId(): Promise<SessionRecord>;
+          relaunchSessionInPlace(
+            record: SessionRecord,
+            project: ProjectConfig,
+            options: { paneAlreadyOwned: true },
+          ): Promise<{ recoveryMessage: { message: string } | null }>;
+        };
+        vi.spyOn(recovery, "killAgentPaneAndConfirmExit").mockResolvedValue(undefined);
+        vi.spyOn(recovery, "capturePreparedAgentSessionId").mockResolvedValue(record);
+        const result = await recovery.relaunchSessionInPlace(
+          record,
+          buildShepherdProject(TEST_DATA_DIR),
+          { paneAlreadyOwned: true },
+        );
+        message = result.recoveryMessage?.message;
+      }
+      expect(message).toContain("complete fresh relevant project registry census");
+      expect(message).not.toContain("1. Run `spur list --json`");
+      expect(message).toContain(task);
+      expect(sessions.get("shp-1")?.prompt).toBe(legacy);
+      expect(sessions.get("shp-1")?.originalTaskPrompt).toBe(task);
+    },
+  );
 
   it("carries a configured mode through restore's resume-plan prompt", async () => {
     mockClaudeJsonlState("waiting");
@@ -54359,7 +54408,10 @@ describe("SessionService", () => {
       mockClaudeJsonlState("waiting");
       const dataDir = resolve(TEST_ARTIFACTS_ROOT, "handoff-shepherd-data");
       loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
-      seedShepherdSession({ prompt: "Watch project health" });
+      seedShepherdSession({
+        prompt: legacyShepherdPrompt("Watch project health"),
+        originalTaskPrompt: "Watch project health",
+      });
       workspaceExistsMock.mockReturnValue(true);
       reserveNextSessionIdMock.mockResolvedValue("shp-2");
 
@@ -54375,10 +54427,45 @@ describe("SessionService", () => {
       expect(launchPrompt).toContain("Watch project health");
       const shepherdHeaderMatches = launchPrompt?.match(/You are Spur Shepherd:/g) ?? [];
       const operatorRequestMatches = launchPrompt?.match(/Operator request:/g) ?? [];
-      expect(shepherdHeaderMatches.length).toBeLessThanOrEqual(1);
-      expect(operatorRequestMatches.length).toBeLessThanOrEqual(1);
+      expect(shepherdHeaderMatches).toHaveLength(0);
+      expect(operatorRequestMatches).toHaveLength(0);
+      expect(launchPrompt).not.toContain("spur list --json");
       expect(withSessionSlotInstructionsMock).not.toHaveBeenCalled();
       expect(launchPrompt).not.toContain("source info --json");
+    });
+
+    it("keeps a canonical int-review task exact through handoff without Shepherd startup policy", async () => {
+      mockClaudeJsonlState("waiting");
+      const config = baseConfig();
+      loadConfigMock.mockReturnValue({
+        ...config,
+        projects: {
+          ...config.projects,
+          "int-review": { ...config.projects.api, sessionPrefix: "intreview" },
+        },
+      });
+      const task =
+        "Code reviewer for https://github.com/acme/api/pull/42. Preserve draft state and stay through closure.";
+      const sessions = createSessionStore(
+        sessionRecord({
+          id: "intreview-one",
+          project: "int-review",
+          agent: "codex",
+          prompt: task,
+          originalTaskPrompt: task,
+          branch: "review-one",
+          slots: { links: [] },
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("intreview-two");
+      const service = await createDisposedSessionService();
+      await service.handoff("intreview-one", { agent: "claude" });
+      const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
+      expect(launchPrompt).toContain(task);
+      expect(launchPrompt).not.toContain("You are Spur Shepherd");
+      expect(launchPrompt).not.toContain("spur list --json");
+      expect(sessions.get("intreview-two")?.originalTaskPrompt).toBe(task);
     });
 
     it("attaches a disposable terminal screenshot when tmux pane capture succeeds", async () => {
