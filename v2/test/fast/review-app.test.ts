@@ -1852,7 +1852,7 @@ test.each(["code", "browser"] as const)(
         changes.push({ [key]: { ...nested, extra: true } });
         for (const field of Object.keys(nested)) {
           const missing = { ...nested };
-          delete missing[field];
+          Reflect.deleteProperty(missing, field);
           changes.push({ [key]: missing });
         }
       }
@@ -1890,7 +1890,7 @@ test.each(["code", "browser"] as const)(
       const rows: Record<string, unknown>[] = [{ ...row, extra: true }];
       for (const key of Object.keys(row)) {
         const missing = { ...row };
-        delete missing[key];
+        Reflect.deleteProperty(missing, key);
         rows.push(missing, { ...row, [key]: false });
       }
       rows.push({ ...row, status: "FAIL" }, { ...row, result: "" });
@@ -1900,7 +1900,7 @@ test.each(["code", "browser"] as const)(
     const variants = changes.map((change) => ({ ...f.legacy, ...change }));
     for (const key of Object.keys(f.legacy)) {
       const missing = { ...f.legacy };
-      delete missing[key];
+      Reflect.deleteProperty(missing, key);
       variants.push(missing);
     }
     for (const variant of variants) {
