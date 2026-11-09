@@ -2924,6 +2924,11 @@ describe("SessionService", () => {
     expect(waitForTmuxReadyMock).toHaveBeenCalledWith("api-1", ["Claude Code", "❯"], undefined, {
       agent: "claude",
     });
+    expect(writeSessionMock.mock.calls.map(([, record]) => record.status)).toEqual([
+      "spawning",
+      "spawning",
+      "running",
+    ]);
     expect(writeSessionMock).toHaveBeenCalledTimes(3);
     expect(writeSessionMock.mock.calls[0]?.[1].status).toBe("spawning");
     expect(writeSessionMock.mock.calls[1]?.[1].status).toBe("spawning");
@@ -5360,6 +5365,9 @@ describe("SessionService", () => {
     const subscriptionWrites = writeSessionMock.mock.calls.filter(
       ([, session]) => session.id === "api-1" && session.stateSubscriptions !== undefined,
     );
+    expect(subscriptionWrites.map(([, record]) => record.stateSubscriptions)).toEqual([
+      result.stateSubscriptions,
+    ]);
     expect(subscriptionWrites).toHaveLength(1);
     expect(subscriptionWrites[0]?.[1].stateSubscriptions).toEqual([
       expect.objectContaining({ id: "state-watched-1" }),

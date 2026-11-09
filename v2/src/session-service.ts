@@ -13923,9 +13923,10 @@ export class SessionService {
 
       updatedRecord = this.writeSpawnRecord(updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
-      if (prAlertBirthConfirmed)
+      if (prAlertBirthConfirmed && updatedRecord.prAlertTransfer) {
         updatedRecord = this.settlePrAlertTransferLocked(updatedRecord, "commit");
-      writeSession(this.config.dataDir, updatedRecord);
+        writeSession(this.config.dataDir, updatedRecord);
+      }
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
