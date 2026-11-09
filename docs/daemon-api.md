@@ -1,11 +1,12 @@
 # Daemon HTTP API
-
 > Scope: route names only, one method + full path per line, every line `git grep`-able verbatim. Payload/status-code contracts: `v2/src/server.ts`. CLI usage: [commands.md](commands.md). Default `127.0.0.1:4310`.
 
 - `GET /info` — `lifecycleInstanceId`, runtime `buildId`: process/build identity; `v2/src/session-lifecycle.ts`, `v2/src/build-identity.ts`.
 - `GET /headroom`
 - `GET /usage` — quota windows per Claude account and Codex, per-source error entries, token totals today/7d/30d; provider request timeout 5s; MCP `get_usage`; `v2/src/usage-report.ts`.
 - `GET /models` — model and default reasoning capabilities; discovery in `v2/src/agents/models.ts`.
+- `GET /api/pr-status` — web PR status, nullable reviewer names; `packages/web/src/app/api/pr-status/route.ts`, `packages/web/src/lib/pr-status-shape.ts`.
+- `POST /api/pr-status/batch` — web PR statuses, nullable reviewer names; `packages/web/src/app/api/pr-status/batch/route.ts`.
 - `GET /user-actions`
 - `GET /deploy/versions`
 - `GET /deploy/switch/status`
@@ -18,7 +19,6 @@
 - `GET /claude-accounts/:id/login-status`
 
 ## Project routes
-
 - `GET /projects`
 - `GET /projects/cron?project=<id>` — cron sources, bound triggers, owner-file drift, last tick/action from the live event log; `project` optional; `404` unknown project; `v2/src/cron-jobs.ts`.
 - `GET /projects/cron/edit` — disk draft for a Cron spawn trigger; MCP `get_cron_job_draft`; `v2/src/cron-job-editor.ts`.

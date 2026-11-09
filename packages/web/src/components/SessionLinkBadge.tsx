@@ -15,6 +15,7 @@ import {
   reviewProviderFromUrl,
   ReviewCommentsBadge,
   ReviewDecisionDot,
+  ReviewersBadge,
   usePrInfo,
 } from "@/lib/link-icons";
 import type { SpurSessionLink } from "@/lib/types";
@@ -32,6 +33,23 @@ function hoverClassForLink(link: SpurSessionLink): string {
   return "hover:text-[var(--color-text-primary)]";
 }
 
+function statusTitle(info: PrInfo, github: boolean): string | undefined {
+  const facts: string[] = [];
+  if (info.ciStatus === "success") facts.push("CI passing");
+  if (info.ciStatus === "failure") facts.push("CI failing");
+  if (info.ciStatus === "pending") facts.push("CI pending");
+  if (info.reviewDecision === "approved") facts.push("Review approved");
+  if (info.reviewDecision === "changes_requested") facts.push("Changes requested");
+  if (info.reviewDecision === "review_required") {
+    facts.push(
+      github ? "GitHub requires review" : "Review required",
+      "Remaining required approvals: unknown",
+    );
+  }
+  if (info.mergeConflict) facts.push("Merge conflict");
+  return facts.length > 0 ? facts.join("\n") : undefined;
+}
+
 export function useSessionLinkPrInfo(link: SpurSessionLink | undefined) {
   return usePrInfo(link && isReviewLinkLabel(link.label) ? link.url : undefined);
 }
@@ -42,6 +60,7 @@ export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBa
   const fetchedPrInfo = useSessionLinkPrInfo(providedPrInfo ? undefined : link);
   const prInfo = providedPrInfo ?? fetchedPrInfo;
   const indicator = prStatusIndicator(prInfo);
+  const hasStatus = indicator.kind === "review" || indicator.status !== null || prInfo.mergeConflict;
   const labelStyle: CSSProperties | undefined = isPr
     ? (() => {
         const color = prStateColor(prInfo.state);
@@ -69,12 +88,28 @@ export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBa
       </span>
       {isPr ? (
         <>
-          {indicator.kind === "review" ? (
-            <ReviewDecisionDot decision={indicator.decision} />
-          ) : (
-            <CiStatusDot status={indicator.status} />
-          )}
-          {prInfo.mergeConflict ? <MergeConflictBadge /> : null}
+          {hasStatus ? (
+            <span
+              className="inline-flex items-center gap-1"
+              title={statusTitle(prInfo, reviewProvider === "github")}
+            >
+              {indicator.kind === "review" ? (
+                <ReviewDecisionDot decision={indicator.decision} showTitle={false} />
+              ) : (
+                <CiStatusDot status={indicator.status} />
+              )}
+              {prInfo.mergeConflict ? <MergeConflictBadge /> : null}
+            </span>
+          ) : null}
+          {reviewProvider === "github" && prInfo.reviewers ? (
+            <>
+              <ReviewersBadge logins={prInfo.reviewers.approved} decision="approved" />
+              <ReviewersBadge
+                logins={prInfo.reviewers.changesRequested}
+                decision="changes_requested"
+              />
+            </>
+          ) : null}
           <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
         </>
       ) : null}

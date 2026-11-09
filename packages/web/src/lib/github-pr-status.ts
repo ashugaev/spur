@@ -1,4 +1,9 @@
-import { type CiStatus, type PrState, parseReviewDecision } from "@/lib/pr-status-shape";
+import {
+  type CiStatus,
+  type PrReviewers,
+  type PrState,
+  parseReviewDecision,
+} from "@/lib/pr-status-shape";
 import {
   type PrStatusResponse,
   cachePrStatusResponse,
@@ -14,6 +19,7 @@ import {
 // there is exactly one definition of "what we ask GitHub for".
 export const GITHUB_PR_STATUS_FIELDS =
   "state isDraft merged mergeable mergeStateStatus reviewDecision " +
+  "latestOpinionatedReviews(last:100) { nodes { state author { login } } pageInfo { hasPreviousPage } } " +
   "reviewThreads(first:100) { nodes { isResolved } } " +
   "commits(last:1) { nodes { commit { statusCheckRollup { state } } } }";
 
@@ -24,6 +30,7 @@ export interface GitHubPrNode {
   mergeable: string | null;
   mergeStateStatus: string | null;
   reviewDecision: string | null;
+  latestOpinionatedReviews?: unknown;
   reviewThreads: { nodes: { isResolved: boolean }[] };
   commits: { nodes: { commit: { statusCheckRollup?: { state: string } } }[] };
 }
@@ -60,6 +67,44 @@ function normalizeGitHubCiStatus(rollupState: string | undefined): CiStatus {
   return null;
 }
 
+function parseGitHubReviewers(value: unknown): PrReviewers | null {
+  if (typeof value !== "object" || value === null) return null;
+  const connection = value as Record<string, unknown>;
+  const pageInfo = connection["pageInfo"];
+  if (
+    typeof pageInfo !== "object" ||
+    pageInfo === null ||
+    (pageInfo as Record<string, unknown>)["hasPreviousPage"] !== false ||
+    !Array.isArray(connection["nodes"])
+  ) {
+    return null;
+  }
+
+  const accounts = new Map<string, { login: string; state: string }>();
+  for (const node of connection["nodes"]) {
+    if (typeof node !== "object" || node === null) return null;
+    const review = node as Record<string, unknown>;
+    if (typeof review["state"] !== "string") return null;
+    const author = review["author"];
+    if (author === null) continue;
+    if (typeof author !== "object" || author === null) return null;
+    const login = (author as Record<string, unknown>)["login"];
+    if (typeof login !== "string" || login.length === 0) return null;
+    const key = login.toLowerCase();
+    const previous = accounts.get(key);
+    if (previous && previous.state !== review["state"]) return null;
+    if (!previous) accounts.set(key, { login, state: review["state"] });
+  }
+  const reviewers: PrReviewers = { approved: [], changesRequested: [] };
+  for (const { login, state } of accounts.values()) {
+    if (state === "APPROVED") reviewers.approved.push(login);
+    if (state === "CHANGES_REQUESTED") reviewers.changesRequested.push(login);
+  }
+  reviewers.approved.sort();
+  reviewers.changesRequested.sort();
+  return reviewers;
+}
+
 // Normalizes a resolved PR node into the store's PrInfo shape, writes it
 // through recordSuccessfulPrStatus (last-good snapshot) and caches the
 // response — the same store path used by both route surfaces. A resolved
@@ -90,6 +135,7 @@ export function recordGitHubPrNode(
   const response = recordSuccessfulPrStatus(cacheKey, {
     state,
     reviewDecision: parseReviewDecision(node.reviewDecision),
+    reviewers: parseGitHubReviewers(node.latestOpinionatedReviews),
     ciStatus: normalizeGitHubCiStatus(node.commits.nodes[0]?.commit.statusCheckRollup?.state),
     canMerge,
     mergeConflict,
@@ -108,6 +154,7 @@ export function recordGitHubPrAbsent(cacheKey: string): PrStatusResponse {
   const response = recordSuccessfulPrStatus(cacheKey, {
     state: null,
     reviewDecision: null,
+    reviewers: null,
     ciStatus: null,
     canMerge: false,
     mergeConflict: false,

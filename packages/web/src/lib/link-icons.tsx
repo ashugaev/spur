@@ -11,6 +11,7 @@ import {
   isPrInfoShape,
   isPrReady,
   isPrState,
+  isPrReviewers,
   parseReviewDecision,
   prInfosEqual,
 } from "@/lib/pr-status-shape";
@@ -151,6 +152,7 @@ function parsePrInfoPayload(obj: Record<string, unknown>): PrInfo {
   return {
     state: isPrState(obj["state"]) ? obj["state"] : null,
     reviewDecision: parseReviewDecision(obj["reviewDecision"]),
+    reviewers: isPrReviewers(obj["reviewers"]) ? obj["reviewers"] : null,
     ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
     canMerge: typeof obj["canMerge"] === "boolean" ? obj["canMerge"] : false,
     mergeConflict: typeof obj["mergeConflict"] === "boolean" ? obj["mergeConflict"] : false,
@@ -470,10 +472,12 @@ function CompositeCiReviewMark({
   className,
   reviewColor,
   title,
+  showTitle = true,
 }: {
   className?: string;
   reviewColor: string;
   title: string;
+  showTitle?: boolean;
 }) {
   const halo = "var(--color-bg-base)";
 
@@ -489,7 +493,7 @@ function CompositeCiReviewMark({
       aria-label={title}
       className={`inline-flex shrink-0 ${className ?? ""}`.trim()}
       role="img"
-      title={title}
+      title={showTitle ? title : undefined}
     >
       <svg
         aria-hidden="true"
@@ -509,20 +513,64 @@ function CompositeCiReviewMark({
 export function ReviewDecisionDot({
   decision,
   className,
+  showTitle = true,
 }: {
   decision: "approved" | "changes_requested";
   className?: string;
+  showTitle?: boolean;
 }) {
   if (decision === "approved")
     return (
       <span className={className} data-pr-review-decision="approved">
-        <CompositeCiReviewMark reviewColor="var(--color-status-ready)" title="Approved" />
+        <CompositeCiReviewMark
+          reviewColor="var(--color-status-ready)"
+          title="Approved"
+          showTitle={showTitle}
+        />
       </span>
     );
 
   return (
     <span className={className} data-pr-review-decision="changes_requested">
-      <CompositeCiReviewMark reviewColor="var(--color-status-error)" title="Changes requested" />
+      <CompositeCiReviewMark
+        reviewColor="var(--color-status-error)"
+        title="Changes requested"
+        showTitle={showTitle}
+      />
+    </span>
+  );
+}
+
+export function ReviewersBadge({
+  logins,
+  decision,
+}: {
+  logins: readonly string[];
+  decision: "approved" | "changes_requested";
+}) {
+  if (logins.length === 0) return null;
+  const approved = decision === "approved";
+  const title = `${approved ? "Approved" : "Changes requested"} · ${logins.length}\n${logins.map((login) => `@${login}`).join("\n")}`;
+  return (
+    <span
+      aria-label={title}
+      title={title}
+      className={`inline-flex items-center gap-0.5 text-[10px] font-bold ${approved ? "text-[var(--color-status-ready)]" : "text-[var(--color-status-error)]"}`}
+    >
+      <svg
+        aria-hidden="true"
+        className="h-3 w-3 shrink-0"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <circle cx="12" cy="7" r="4" />
+        <path d="M5 21v-3a7 7 0 0 1 14 0v3" />
+      </svg>
+      {logins.length}
     </span>
   );
 }

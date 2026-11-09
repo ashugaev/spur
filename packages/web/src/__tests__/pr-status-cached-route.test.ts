@@ -109,6 +109,23 @@ it("exposes last-good staleness and provider errors without refreshing or losing
     info: { error: "provider unavailable", fetchedAt: snapshot.fetchedAt },
   });
 });
+it("forwards cached reviewer names without fetching or changing readiness", async () => {
+  const fetch = vi.fn();
+  vi.stubGlobal("fetch", fetch);
+  recordGitHubPrNode("acme/repo/1", {
+    ...node,
+    latestOpinionatedReviews: {
+      nodes: [{ state: "APPROVED", author: { login: "alice" } }],
+      pageInfo: { hasPreviousPage: false },
+    },
+  });
+  expect(await (await GET(request())).json()).toMatchObject({
+    info: { reviewers: { approved: ["alice"], changesRequested: [] } },
+    ready: true,
+    refreshed: false,
+  });
+  expect(fetch).not.toHaveBeenCalled();
+});
 it("preserves extracted absent PR and unknown fields", async () => {
   recordGitHubPrAbsent("acme/repo/1");
   expect(await (await GET(request())).json()).toMatchObject({

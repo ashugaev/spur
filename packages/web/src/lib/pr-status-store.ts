@@ -23,6 +23,7 @@ const PERSIST_DEBOUNCE_MS = 1_000;
 const EMPTY_PR_STATUS: Omit<PrStatusResponse, "error"> = {
   state: null,
   reviewDecision: null,
+  reviewers: null,
   ciStatus: null,
   canMerge: false,
   mergeConflict: false,
@@ -87,6 +88,7 @@ function freshFromEntry(entry: LastGoodEntry): PrStatusResponse {
   return {
     state: entry.state,
     reviewDecision: entry.reviewDecision,
+    reviewers: entry.reviewers ?? null,
     ciStatus: entry.ciStatus,
     canMerge: entry.canMerge,
     mergeConflict: entry.mergeConflict,
@@ -160,6 +162,7 @@ export function markPrStatusMerged(url: string): void {
   const next = recordLastGood(cacheKey, {
     state: "merged",
     reviewDecision: previous?.reviewDecision ?? null,
+    reviewers: previous?.reviewers ?? null,
     ciStatus: previous?.ciStatus ?? null,
     canMerge: false,
     mergeConflict: false,
