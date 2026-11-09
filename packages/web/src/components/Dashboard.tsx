@@ -2534,6 +2534,8 @@ export function Dashboard() {
         return handleCompleteSession(session);
       case "continue":
         return handleSessionTransition(session, "restore", { overrideTokenBudget: true });
+      case "restart":
+        return handleSessionTransition(session, "restore", { restart: true });
       case "kill":
         if (!window.confirm(killConfirmText(session.id))) return false;
         return handleKillSession(session);
