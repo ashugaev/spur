@@ -1622,7 +1622,8 @@ async function registeredFixture(lane: "code" | "browser" = "code", pr: 1061 | 8
           ...(lane === "code"
             ? {
                 localVerdict: "APPROVED",
-                publication: "DENIED: self-author 422 on pinned APPROVE; needs non-author credential",
+                publication:
+                  "DENIED: self-author 422 on pinned APPROVE; needs non-author credential",
                 evidence: ["sanitized historical diagnostic"],
                 notification: "SENT task",
                 lastDeltaCheck: "2026-11-04T05:23:08Z",
