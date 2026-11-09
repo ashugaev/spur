@@ -1309,6 +1309,52 @@ describe("SessionService", () => {
       "pending hold",
       "wrong retired pointer",
     ] as const;
+
+    it.each(["owned", "retired", "suppressed"] as const)(
+      "retains %s PR alert authority through native terminal restart",
+      async (role) => {
+        const config = configurePrAlerts();
+        mockClaudeJsonlState("waiting");
+        const transfer =
+          role === "owned"
+            ? undefined
+            : {
+                kind: role === "suppressed" ? ("suppressed" as const) : ("owner" as const),
+                predecessorWorkspaceId: "api-old",
+                predecessorSessionId: "api-old",
+              };
+        const record = runningSession({
+          id: "api-1",
+          agentSessionId: "native-session",
+          ...(transfer ? { prAlertTransfer: transfer } : {}),
+        });
+        const sessions = createSessionStore(record, sessionRecord({ id: "api-old" }));
+        const authority =
+          role === "owned"
+            ? { state: "owned" as const, sessionId: record.id }
+            : {
+                state: "retired" as const,
+                successorWorkspaceId: "api-old",
+                successorSessionId: "api-old",
+              };
+        writeWorkspaceState(config.dataDir, record.id, { prAlertOwner: authority });
+        writeWorkspaceState(config.dataDir, "api-old", {
+          prAlertOwner: { state: "owned", sessionId: "api-old" },
+        });
+        const service = await createDisposedSessionService();
+        const restarted = await service.restore(record.id, { restart: true });
+        expect(restarted.status).toBe("running");
+        expect(readPrAlertOwnership(config.dataDir, record.id)).toEqual(authority);
+        expect(readPrAlertOwnership(config.dataDir, "api-old")).toEqual({
+          state: "owned",
+          sessionId: "api-old",
+        });
+        expect(sessions.get(record.id)?.prAlertTransfer).toEqual(transfer);
+        expect(restarted).not.toHaveProperty("prAlertTransfer");
+        service.dispose();
+      },
+    );
+
     it.each(recoveryRaces)(
       "never steals queued transfer authority on restart: %s",
       async (race) => {
