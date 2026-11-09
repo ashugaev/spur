@@ -8844,6 +8844,45 @@ describe("SessionDetail lifecycle operation", () => {
     },
   );
 
+  it("restarts from overflow once and exposes Restore after a pre-launch failure", async () => {
+    const delivery = deferred<Response>();
+    let current = sessionFixture();
+    const bodies: unknown[] = [];
+    let operationId = "";
+    mockLifecycleFetch(
+      () => current,
+      async (body) => {
+        bodies.push(body);
+        operationId = body.operationId;
+        return delivery.promise;
+      },
+    );
+    render(<SessionDetail sessionId="api-a1" />);
+    await advance();
+    fireEvent.click(screen.getByRole("button", { name: "More session actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Restart session" }));
+    await advance();
+    expect(bodies).toEqual([{ restart: true, operationId: expect.any(String) }]);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "More session actions" })).toBeDisabled();
+    current = sessionFixture({
+      status: "stopped",
+      state: "stopped",
+      runtimeAlive: false,
+      lifecycle: receipt(operationId, "failed", 2),
+    });
+    delivery.resolve(
+      new Response(JSON.stringify({ error: "Restart failed", lifecycle: current.lifecycle }), {
+        status: 500,
+      }),
+    );
+    await advance();
+    expect(screen.getByText("Restart failed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "More session actions" }));
+    expect(screen.queryByRole("menuitem", { name: "Restart session" })).not.toBeInTheDocument();
+  });
+
   it("hands a settled receipt to current Waiting before the restore POST resolves", async () => {
     const delivery = deferred<Response>();
     let current = sessionFixture({ status: "stopped", state: "stopped", runtimeAlive: false });
