@@ -241,6 +241,19 @@ describe("daemon MCP operation contracts", () => {
     }
   });
 
+  it("exposes optional explicit PR alert ownership only on native spawn contracts", () => {
+    for (const operationId of ["spawn_session", "spawn_background_session"]) {
+      expect(
+        getDaemonOperation(operationId)?.body?.fields.find(({ name }) => name === "prAlertOwner"),
+      ).toMatchObject({ name: "prAlertOwner", type: "boolean", required: false });
+    }
+    expect(
+      getDaemonOperation("respawn_session")?.body?.fields.some(
+        ({ name }) => name === "prAlertOwner",
+      ),
+    ).toBe(false);
+  });
+
   it("provides examples, path/query/body metadata, errors and source references for every operation", () => {
     for (const entry of DAEMON_OPERATIONS) {
       expect(entry.summary.length, entry.operationId).toBeGreaterThan(12);

@@ -20,6 +20,7 @@ import {
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { AutoPingError, AutoPingService, redactAutoPingHandles } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
+import { PrAlertOwnerRequestError } from "./pr-alert-owner.js";
 import { projectConversationPage } from "./conversation-page.js";
 import { readCronJobs, UnknownCronProjectError } from "./cron-jobs.js";
 import {
@@ -2549,7 +2550,8 @@ export async function startServer(
         error instanceof OpenPrActionRequiredError ||
         error instanceof GithubPrCheckUnavailableError ||
         error instanceof SessionNotRestorableError ||
-        error instanceof SpawnBatchConflictError
+        error instanceof SpawnBatchConflictError ||
+        error instanceof PrAlertOwnerRequestError
       ) {
         failRequest(response, error.statusCode, message, {
           method,
