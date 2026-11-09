@@ -18,6 +18,7 @@ import type {
   PersistedSpawnWork,
   ReviewSignal,
   ReviewSnapshot,
+  SendBatchRetryEntry,
   SessionRecord,
   WorkItemLifecycleRecord,
 } from "../../src/types.js";
@@ -1006,7 +1007,11 @@ describe("startConfiguredTriggers", () => {
           );
           const fresh = [...readPendingSendBatchesMock().values()][0];
           expect(fresh?.claim).toBeUndefined();
-          expect(fresh?.retryAccounting?.every((entry) => entry.deliveryAttempts === 0)).toBe(true);
+          expect(
+            fresh?.retryAccounting?.every(
+              (entry: SendBatchRetryEntry) => entry.deliveryAttempts === 0,
+            ),
+          ).toBe(true);
           await advanceSendWindow();
         }
         if (settlementReject) {

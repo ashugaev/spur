@@ -165,7 +165,7 @@ it("rechecks both native PR alerts after denied stale-owner handoff rolls back b
     workspaceExistsMock.mockReturnValue(true);
     let handoffError: unknown;
     const handoff = service
-      .handoff(owner.id, { agent: "claude" }, { todoActor: { kind: "human" } })
+      .handoff(owner.id, { agent: "claude" }, { todoActor: { kind: "human", origin: "cli" } })
       .catch((error: unknown) => {
         handoffError = error;
       });

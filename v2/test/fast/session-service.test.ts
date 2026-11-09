@@ -757,7 +757,11 @@ describe("SessionService", () => {
       });
       const service = await createDisposedSessionService();
       await expect(
-        service.handoff(source.id, { agent: "claude" }, { todoActor: { kind: "human" } }),
+        service.handoff(
+          source.id,
+          { agent: "claude" },
+          { todoActor: { kind: "human", origin: "cli" } },
+        ),
       ).rejects.toThrow("prelaunch failure");
       expect(readPrAlertOwnership(config.dataDir, source.id)).toEqual({
         state: "owned",
@@ -1041,7 +1045,7 @@ describe("SessionService", () => {
           successor.id,
           { skipPrCheck: true },
           {
-            todoActor: { kind: "human" },
+            todoActor: { kind: "human", origin: "cli" },
           },
         );
         const descendant = await service.respawn(successor.id);
@@ -1109,7 +1113,7 @@ describe("SessionService", () => {
         "api-blocker",
         { skipPrCheck: true },
         {
-          todoActor: { kind: "human" },
+          todoActor: { kind: "human", origin: "cli" },
         },
       );
       await restarted.settleBackgroundSpawns();
@@ -1141,7 +1145,7 @@ describe("SessionService", () => {
         "api-2",
         { skipPrCheck: true },
         {
-          todoActor: { kind: "human" },
+          todoActor: { kind: "human", origin: "cli" },
         },
       );
       expect(result.completedIds).toEqual(["api-2"]);
@@ -1173,7 +1177,11 @@ describe("SessionService", () => {
       workspaceExistsMock.mockReturnValue(true);
       mockClaudeJsonlState("waiting");
       const service = await createDisposedSessionService();
-      await service.complete("api-1", { skipPrCheck: true }, { todoActor: { kind: "human" } });
+      await service.complete(
+        "api-1",
+        { skipPrCheck: true },
+        { todoActor: { kind: "human", origin: "cli" } },
+      );
       expect(removeSessionSlotToolMock).toHaveBeenCalled();
       expect(readPrAlertOwnership(config.dataDir, "api-1")).toEqual(retired);
       await service.reopen("api-1");
@@ -1287,7 +1295,7 @@ describe("SessionService", () => {
           await service.complete(
             successor.id,
             { skipPrCheck: true },
-            { todoActor: { kind: "human" } },
+            { todoActor: { kind: "human", origin: "cli" } },
           );
         expect(readPrAlertOwnership(config.dataDir, "api-1").state).toBe("retired");
         expect(readPrAlertOwnership(config.dataDir, successor.id)).toEqual({
