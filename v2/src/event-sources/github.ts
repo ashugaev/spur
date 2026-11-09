@@ -91,35 +91,102 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isGitHubSearchPrItem(value: unknown): value is GitHubSearchPrItem {
-  if (!isRecord(value) || !isRecord(value.repository)) return false;
-  return (
-    Number.isInteger(value.number) &&
-    typeof value.title === "string" &&
-    typeof value.url === "string" &&
-    typeof value.repository.nameWithOwner === "string"
-  );
-}
-
-function parseGitHubSearchPrItems(raw: string): GitHubSearchPrItem[] {
-  let parsed: unknown;
+function parseGitHubSearchJson(raw: string): unknown {
   try {
-    parsed = JSON.parse(raw) as unknown;
+    return JSON.parse(raw) as unknown;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Invalid GitHub search PR JSON: ${message}`, { cause: error });
+    throw new Error(`Invalid GitHub search JSON: ${message}`, { cause: error });
+  }
+}
+
+async function workItemSearchBackend(): Promise<{ advanced: boolean; optIn: boolean }> {
+  const meta = parseGitHubSearchJson(await gh(process.cwd(), "api", "meta"));
+  if (!isRecord(meta)) throw new Error("Invalid GitHub search host metadata");
+  if (meta.installed_version !== undefined) {
+    const version =
+      typeof meta.installed_version === "string"
+        ? /^(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/.exec(meta.installed_version)
+        : null;
+    if (!version) throw new Error("Invalid GitHub search host version");
+    const major = Number(version[1]);
+    const minor = Number(version[2]);
+    if (major < 3 || (major === 3 && minor < 18)) return { advanced: false, optIn: false };
   }
 
-  if (!Array.isArray(parsed)) {
-    throw new Error("Invalid GitHub search PR JSON: expected an array");
+  const features = parseGitHubSearchJson(
+    await gh(
+      process.cwd(),
+      "api",
+      "graphql",
+      "--raw-field",
+      'query=query { __type(name: "SearchType") { enumValues(includeDeprecated: true) { name } } }',
+    ),
+  );
+  if (
+    !isRecord(features) ||
+    !isRecord(features.data) ||
+    !isRecord(features.data.__type) ||
+    !Array.isArray(features.data.__type.enumValues) ||
+    !features.data.__type.enumValues.every(
+      (value) => isRecord(value) && typeof value.name === "string",
+    )
+  ) {
+    throw new Error("Invalid GitHub search capabilities");
   }
+  return {
+    advanced: true,
+    optIn: features.data.__type.enumValues.some((value) => value.name === "ISSUE_ADVANCED"),
+  };
+}
 
-  return parsed.map((item, index) => {
-    if (!isGitHubSearchPrItem(item)) {
+function parseGitHubSearchPage(raw: string): { total: number; items: GitHubSearchPrItem[] } {
+  const parsed = parseGitHubSearchJson(raw);
+  if (
+    !isRecord(parsed) ||
+    typeof parsed.total_count !== "number" ||
+    !Number.isSafeInteger(parsed.total_count) ||
+    parsed.total_count < 0 ||
+    parsed.incomplete_results !== false ||
+    !Array.isArray(parsed.items)
+  ) {
+    throw new Error("Incomplete GitHub PR discovery: invalid or incomplete search page");
+  }
+  // GitHub search cannot paginate beyond its first 1,000 matches.
+  if (parsed.total_count > 1_000) {
+    throw new Error("Incomplete GitHub PR discovery: search exceeds the 1,000-result ceiling");
+  }
+  const items = parsed.items.map((item: unknown, index: number): GitHubSearchPrItem => {
+    if (
+      !isRecord(item) ||
+      typeof item.number !== "number" ||
+      !Number.isSafeInteger(item.number) ||
+      item.number <= 0 ||
+      typeof item.title !== "string" ||
+      item.title.trim().length === 0 ||
+      typeof item.html_url !== "string" ||
+      typeof item.repository_url !== "string" ||
+      !isRecord(item.pull_request)
+    ) {
       throw new Error(`Invalid GitHub search PR item at index ${index}`);
     }
-    return item;
+    let repository: RegExpMatchArray | null;
+    try {
+      const url = new URL(item.html_url);
+      if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Invalid PR URL");
+      repository = new URL(item.repository_url).pathname.match(/\/repos\/([^/]+)\/([^/]+)\/?$/);
+    } catch (error) {
+      throw new Error(`Invalid GitHub search PR URL at index ${index}`, { cause: error });
+    }
+    if (!repository) throw new Error(`Invalid GitHub search repository at index ${index}`);
+    return {
+      number: item.number,
+      title: item.title,
+      url: item.html_url,
+      repository: { nameWithOwner: `${repository[1]}/${repository[2]}` },
+    };
   });
+  return { total: parsed.total_count, items };
 }
 
 function isGitHubBadCredentialsError(text: string): boolean {
@@ -242,53 +309,49 @@ function emitSignalsByKind(
     });
   }
 }
-export function tokenizeSearchQuery(query: string): string[] {
-  const tokens: string[] = [];
-  let current = "";
-  let inQuotes = false;
-  let hasContent = false;
-  for (const char of query) {
-    if (char === '"') {
-      inQuotes = !inQuotes;
-      hasContent = true;
-      continue;
-    }
-    if (!inQuotes && /\s/.test(char)) {
-      if (hasContent) {
-        tokens.push(current);
-        current = "";
-        hasContent = false;
-      }
-      continue;
-    }
-    current += char;
-    hasContent = true;
-  }
-  if (hasContent) {
-    tokens.push(current);
-  }
-  return tokens;
-}
-
 async function pollWorkItems(
   deps: SourceStartDeps<GitHubSourceConfig>,
   query: string,
   seenWorkItems: Set<string>,
 ) {
-  const raw = await gh(
-    process.cwd(),
-    "search",
-    "prs",
-    ...tokenizeSearchQuery(query),
-    "--state",
-    "open",
-    deps.config.draft === true ? "--draft=true" : "--draft=false",
-    "--json",
-    "number,title,url,repository",
-    "--limit",
-    "100",
-  );
-  const items = parseGitHubSearchPrItems(raw);
+  const backend = await workItemSearchBackend();
+  const keywords = query.trim() ? (backend.advanced ? `( ${query} )` : query) : "";
+  const effectiveQuery = `${keywords ? `${keywords} ` : ""}type:pr state:open draft:${deps.config.draft === true}`;
+  const items: GitHubSearchPrItem[] = [];
+  const identities = new Set<string>();
+  let total: number | undefined;
+  for (let page = 1; ; page++) {
+    if (deps.signal.aborted) throw new Error("GitHub PR discovery cancelled");
+    const raw = await gh(
+      process.cwd(),
+      "api",
+      "--method",
+      "GET",
+      "search/issues",
+      "--raw-field",
+      `q=${effectiveQuery}`,
+      "--field",
+      "per_page=100",
+      "--field",
+      `page=${page}`,
+      ...(backend.optIn ? ["--field", "advanced_search=true"] : []),
+    );
+    const result = parseGitHubSearchPage(raw);
+    total ??= result.total;
+    if (result.total !== total || result.items.length !== Math.min(100, total - items.length)) {
+      throw new Error("Incomplete GitHub PR discovery: result count changed or page was truncated");
+    }
+    for (const item of result.items) {
+      const identity = `${item.repository.nameWithOwner}#${item.number}`;
+      if (identities.has(identity)) {
+        throw new Error("Incomplete GitHub PR discovery: duplicate result across search pages");
+      }
+      identities.add(identity);
+      items.push(item);
+    }
+    if (items.length === total) break;
+  }
+  deps.signal.throwIfAborted();
   const candidates = items.map((item) => {
     const repo = item.repository.nameWithOwner;
     const data: WorkItemEventData = {

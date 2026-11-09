@@ -83,8 +83,7 @@ vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => true),
 }));
 
-const { githubSourceModule, tokenizeSearchQuery } =
-  await import("../../src/event-sources/github.js");
+const { githubSourceModule } = await import("../../src/event-sources/github.js");
 const {
   GH_POLL_MIN_GRAPHQL_REMAINING,
   _resetGhUsageForTests,
@@ -175,6 +174,28 @@ function parseMockJson(raw: unknown, fallback: unknown): unknown {
   }
 }
 
+function legacySearchPage(raw: string): string {
+  const parsed = parseMockJson(raw, null);
+  if (!Array.isArray(parsed)) return raw;
+  return JSON.stringify({
+    total_count: parsed.length,
+    incomplete_results: false,
+    items: parsed.map((value: unknown) => {
+      const item = value as Record<string, unknown>;
+      const repository = item.repository as { nameWithOwner?: string } | undefined;
+      return {
+        number: item.number,
+        title: item.title,
+        html_url: item.url,
+        repository_url: repository?.nameWithOwner
+          ? `https://api.github.com/repos/${repository.nameWithOwner}`
+          : undefined,
+        pull_request: {},
+      };
+    }),
+  });
+}
+
 // REST `user.type` maps onto the GraphQL actor `__typename`.
 function graphqlAuthor(user: unknown): { login: unknown; __typename?: unknown } | null {
   if (typeof user !== "object" || user === null || !("login" in user)) return null;
@@ -186,6 +207,13 @@ function graphqlAuthor(user: unknown): { login: unknown; __typename?: unknown } 
 let viewerLogin: string | null = "review-bot";
 
 async function legacyGhAdapter(cwd: string, ...args: string[]): Promise<string> {
+  if (args[0] === "api" && args.includes("meta")) return "{}";
+  if (args[0] === "api" && args.some((arg) => arg.includes('__type(name: "SearchType")'))) {
+    return JSON.stringify({ data: { __type: { enumValues: [{ name: "ISSUE_ADVANCED" }] } } });
+  }
+  if (args[0] === "api" && args.includes("search/issues")) {
+    return legacySearchPage(await ghMock(cwd, ...args));
+  }
   if (args[0] !== "api" || !args.includes("graphql")) {
     return ghMock(cwd, ...args) as Promise<string>;
   }
@@ -320,9 +348,10 @@ describe("github source", () => {
         resolveQuery = resolve;
         rejectQuery = reject;
       });
-      ghTransportMock.mockImplementation(async () => {
+      ghTransportMock.mockImplementation(async (cwd: string, ...args: string[]) => {
+        if (!args.includes("search/issues")) return legacyGhAdapter(cwd, ...args);
         enter();
-        return query;
+        return legacySearchPage(await query);
       });
       const abort = new AbortController();
       const manual = mode.startsWith("runOnStart");
@@ -348,7 +377,7 @@ describe("github source", () => {
       if (manual) handle.runOnStart?.();
       let stopped = false;
       let effectsAtStop: { accounting: number; errors: number; registry: number } | null = null;
-      abort.abort();
+      if (mode.endsWith("error")) abort.abort();
       const stop = Promise.resolve(handle.stop()).then(() => {
         effectsAtStop = {
           accounting: logSpurEventMock.mock.calls.filter(
@@ -3364,7 +3393,7 @@ describe("github source", () => {
     handle.stop();
   });
 
-  it("queries open PRs with a state flag and no is: qualifiers", async () => {
+  it("queries open non-draft PRs through the complete search API", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map());
     listSessionsMock.mockReturnValue([]);
     ghMock.mockResolvedValueOnce("[]");
@@ -3386,22 +3415,17 @@ describe("github source", () => {
       resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
-    const searchCall = ghMock.mock.calls.find((call) => call[1] === "search" && call[2] === "prs");
+    const searchCall = ghMock.mock.calls.find((call) => call.includes("search/issues"));
     expect(searchCall).toBeDefined();
     const argv = (searchCall ?? []).map(String);
-    const stateIndex = argv.indexOf("--state");
-    expect(stateIndex).toBeGreaterThan(-1);
-    expect(argv[stateIndex + 1]).toBe("open");
-    expect(argv.some((arg) => arg.includes("is:"))).toBe(false);
-    expect(argv).toContain("--draft=false");
-    // A simple query is a single positional token.
-    expect(argv[3]).toBe("repo:acme/api");
-    expect(argv[4]).toBe("--state");
+    expect(argv).toContain("q=( repo:acme/api ) type:pr state:open draft:false");
+    expect(argv).toContain("per_page=100");
+    expect(argv).toContain("page=1");
 
     handle.stop();
   });
 
-  it("passes --draft=true when the source config opts into draft polling", async () => {
+  it("preserves explicit draft polling in the search constraints", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map());
     listSessionsMock.mockReturnValue([]);
     ghMock.mockResolvedValueOnce("[]");
@@ -3424,16 +3448,15 @@ describe("github source", () => {
       resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
-    const searchCall = ghMock.mock.calls.find((call) => call[1] === "search" && call[2] === "prs");
+    const searchCall = ghMock.mock.calls.find((call) => call.includes("search/issues"));
     expect(searchCall).toBeDefined();
     const argv = (searchCall ?? []).map(String);
-    expect(argv).toContain("--draft=true");
-    expect(argv).not.toContain("--draft=false");
+    expect(argv).toContain("q=( repo:acme/api ) type:pr state:open draft:true");
 
     handle.stop();
   });
 
-  it("splits a multi-qualifier query with a quoted label into separate gh args", async () => {
+  it("preserves quoted label qualifiers as one API query value", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map());
     listSessionsMock.mockReturnValue([]);
     ghMock.mockResolvedValueOnce("[]");
@@ -3455,12 +3478,12 @@ describe("github source", () => {
       resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
-    const searchCall = ghMock.mock.calls.find((call) => call[1] === "search" && call[2] === "prs");
+    const searchCall = ghMock.mock.calls.find((call) => call.includes("search/issues"));
     expect(searchCall).toBeDefined();
     const argv = (searchCall ?? []).map(String);
-    expect(argv).toContain("repo:intelas/intelas-web");
-    expect(argv).toContain("label:🌞 Front");
-    expect(argv).toContain("--draft=false");
+    expect(argv).toContain(
+      'q=( repo:intelas/intelas-web label:"🌞 Front" ) type:pr state:open draft:false',
+    );
 
     handle.stop();
   });
@@ -6016,29 +6039,5 @@ describe("github source", () => {
 
       handle.stop();
     });
-  });
-});
-
-describe("tokenizeSearchQuery", () => {
-  it("returns a single token for a simple query", () => {
-    expect(tokenizeSearchQuery("repo:ashugaev/spur")).toEqual(["repo:ashugaev/spur"]);
-  });
-
-  it("splits two bare qualifiers into separate tokens", () => {
-    expect(tokenizeSearchQuery("repo:cli/cli label:bug")).toEqual(["repo:cli/cli", "label:bug"]);
-  });
-
-  it("keeps a quoted value with a space as one token and strips the quotes", () => {
-    expect(tokenizeSearchQuery('repo:intelas/intelas-web label:"🌞 Front"')).toEqual([
-      "repo:intelas/intelas-web",
-      "label:🌞 Front",
-    ]);
-  });
-
-  it("ignores extra, leading, and trailing whitespace", () => {
-    expect(tokenizeSearchQuery("  repo:cli/cli   label:bug  ")).toEqual([
-      "repo:cli/cli",
-      "label:bug",
-    ]);
   });
 });
