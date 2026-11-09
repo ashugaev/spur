@@ -6,6 +6,8 @@
 - `GET /headroom`
 - `GET /usage` — quota windows per Claude account and Codex, per-source error entries, token totals today/7d/30d; provider request timeout 5s; MCP `get_usage`; `v2/src/usage-report.ts`.
 - `GET /models` — model and default reasoning capabilities; discovery in `v2/src/agents/models.ts`.
+- `GET /api/pr-status` — web PR status, nullable reviewer names, native review requirement; `packages/web/src/app/api/pr-status/route.ts`, `packages/web/src/lib/pr-status-shape.ts`.
+- `POST /api/pr-status/batch` — web PR statuses, reviewer/native requirement metadata; `packages/web/src/app/api/pr-status/batch/route.ts`.
 - `GET /user-actions`
 - `GET /deploy/versions`
 - `GET /deploy/switch/status`
@@ -16,9 +18,6 @@
 - `POST /claude-accounts/remove`
 - `POST /claude-accounts/:id/finish-login`
 - `GET /claude-accounts/:id/login-status`
-
-## Project routes
-
 - `GET /projects`
 - `GET /projects/cron?project=<id>` — cron sources, bound triggers, owner-file drift, last tick/action from the live event log; `project` optional; `404` unknown project; `v2/src/cron-jobs.ts`.
 - `GET /projects/cron/edit` — disk draft for a Cron spawn trigger; MCP `get_cron_job_draft`; `v2/src/cron-job-editor.ts`.
@@ -38,8 +37,8 @@
 ## Session routes
 
 - `GET /sessions` — array body, `sidecars[].url` ready endpoint, `sidecars[].ports[].listening` host TCP listener true|false|null; `v2/src/types.ts`; producing `x-spur-lifecycle-instance-id` header, per-row `lifecycle`; `v2/src/session-lifecycle.ts`; never `503` on lifecycle churn, a still-moving row carries its last build and that build's receipt.
-- `POST /sessions` — `201` accepted spawning identity under [admission pressure](configuration.md#admission-control); optional `allowedTriggers` (omitted = all send triggers, `[]` = none incl. CI failure alerts; kept by respawn and handoff); optional `reasoningEffort` overrides project default; provider/model validation in `v2/src/session-service.ts`.
-- `POST /sessions/background` — `201` accepted spawning identity before [resource recovery](configuration.md#admission-control); same `allowedTriggers` semantics as `POST /sessions`; `409 spawn_in_progress|spawn_committed|spawn_failed` body `{ code, sessionId, error }` for claimed `preflightBatchId`; `sessionId` identifies its owner; `v2/src/session-service.ts`.
+- `POST /sessions` — `201` accepted spawning identity under [admission pressure](configuration.md#admission-control); optional `allowedTriggers` (omitted = all sends, `[]` = none; carried by respawn/handoff), `reasoningEffort`, `prAlertOwner` (default `false`, [exclusive PR alerts](configuration.md#pr-alert-ownership)); `400 pr_alert_owner_invalid`, `409 pr_alert_owner_conflict` body `{ code, error }`; `v2/src/session-service.ts`, `v2/src/pr-alert-owner.ts`.
+- `POST /sessions/background` — `201` accepted spawning identity before [resource recovery](configuration.md#admission-control); same `allowedTriggers` and `prAlertOwner` contract as `POST /sessions`; `409 spawn_in_progress|spawn_committed|spawn_failed` body `{ code, sessionId, error }` for claimed `preflightBatchId`; `v2/src/session-service.ts`.
 - `POST /shepherd/spawn`
 - `POST /sidecars/sweep` — body `{ reap?: boolean }`, default `false`. Always `200`. Response `{ supported, leaked, reaped }`: `supported` is `false` when the process table or procfs is unreadable, in which case `leaked` and `reaped` are both `[]`. Each `leaked` row carries `kind: "worktree-tree" | "orphan-daemon"`; a `worktree-tree` row's `reapable` reflects proven Spur provenance and carries `rootPid`, `pgid`, `ageSeconds`, `worktreePath`, `args`, `sidecarName`, `tree` (descendant pids, root first), `treeRssKb`; an `orphan-daemon` row is always `reapable: false` and carries `configPath`/`cliEntryPath` instead of a `sidecarName`, plus `port: number | null` and `liveness: "serving" | "not-serving" | "unknown"`. `reap: true` signals only `reapable` rows — never an `orphan-daemon` row, serving or not — and populates `reaped`, one entry per `reapable` leaked tree it signaled: `{ sessionName, panePid, survivors, blindKill }` — `survivors` is the pids still alive after the SIGKILL confirmation window, and `blindKill` is `true` when tmux was killed with no verified process-tree signal (no pane pid, or an unusable snapshot, and no identity fallback confirmed a reap either) — a `survivors: []` alongside `blindKill: true` is not proof anything died, only that nothing was checked. See [Sidecars](commands.md#sidecars)
 - `GET /sessions/:id` — current row, `sidecars[].url` ready endpoint, `sidecars[].ports[].listening` host TCP listener true|false|null; Cursor `queuedMessageTyped.ackBaseline.deliveryId` optional UUIDv4, correlated `file:null` requires `size:0` and valid ID, malformed IDs drop baseline, legacy string-file floors retained; optional read-only `intervalWake.dispatchClaimId`: opaque correlation, absent on legacy records, ignored on input; `v2/src/types.ts`, `v2/src/metadata.ts`; ephemeral `lifecycle` receipt; `v2/src/session-lifecycle.ts`.

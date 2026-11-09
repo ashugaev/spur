@@ -22,6 +22,53 @@ function makePrInfo(overrides: Partial<PrInfo> = {}): PrInfo {
 }
 
 describe("pr-status-shape", () => {
+  it("validates optional native requirement without equating unavailable to none", () => {
+    expect(isPrInfoShape(makePrInfo())).toBe(true);
+    for (const reviewRequirement of ["required", "none", "unavailable"] as const) {
+      expect(isPrInfoShape(makePrInfo({ reviewRequirement }))).toBe(true);
+    }
+    for (const reviewRequirement of [null, false, "optional"]) {
+      expect(isPrInfoShape({ ...makePrInfo(), reviewRequirement })).toBe(false);
+    }
+    const unknown = makePrInfo({ reviewRequirement: "unavailable" });
+    expect(prInfosEqual(unknown, makePrInfo())).toBe(true);
+    expect(prInfosEqual(unknown, makePrInfo({ reviewRequirement: "none" }))).toBe(false);
+    expect(isPrReady(unknown)).toBe(isPrReady(makePrInfo({ reviewRequirement: "required" })));
+  });
+
+  it("accepts legacy or unavailable reviewers and rejects malformed lists", () => {
+    expect(isPrInfoShape(makePrInfo())).toBe(true);
+    expect(isPrInfoShape(makePrInfo({ reviewers: null }))).toBe(true);
+    expect(
+      isPrInfoShape(makePrInfo({ reviewers: { approved: ["alice"], changesRequested: [] } })),
+    ).toBe(true);
+    for (const reviewers of [
+      { approved: [1], changesRequested: [] },
+      { approved: [] },
+      { approved: [""], changesRequested: [] },
+    ]) {
+      expect(isPrInfoShape({ ...makePrInfo(), reviewers })).toBe(false);
+    }
+  });
+
+  it("notifies consumers when reviewer names or decisions change without changing readiness", () => {
+    const first = makePrInfo({ reviewers: { approved: ["alice"], changesRequested: [] } });
+    expect(
+      prInfosEqual(first, { ...first, reviewers: { approved: ["alice"], changesRequested: [] } }),
+    ).toBe(true);
+    expect(
+      prInfosEqual(first, { ...first, reviewers: { approved: ["bob"], changesRequested: [] } }),
+    ).toBe(false);
+    expect(
+      prInfosEqual(first, { ...first, reviewers: { approved: [], changesRequested: ["alice"] } }),
+    ).toBe(false);
+    expect(prInfosEqual(first, { ...first, reviewers: null })).toBe(false);
+    expect(isPrReady(first)).toBe(true);
+    expect(isPrReady({ ...first, reviewers: { approved: [], changesRequested: ["bob"] } })).toBe(
+      true,
+    );
+  });
+
   it.each([
     ["success", "approved", { kind: "review", decision: "approved" }],
     ["success", "changes_requested", { kind: "review", decision: "changes_requested" }],
