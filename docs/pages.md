@@ -4,6 +4,8 @@
 
 A page is a static web app in `<dataDir>/pages/<id>/` with its own store `page:<id>`. The web UI serves it at `/p/<id>/`.
 
+Open the project menu → Pages for the catalogue. Titles open pages in a new tab; Agents returns to the dashboard with the selected project. The catalogue lists readable, valid page configurations; it does not check the entry document.
+
 ## Create
 
 ```sh
