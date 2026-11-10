@@ -96,6 +96,7 @@ import {
 import { insertTextAtCursor } from "@/lib/textarea";
 import { useToasts } from "@/hooks/useToasts";
 import { usePoll } from "@/hooks/usePoll";
+import type { PollOutcome } from "@/lib/poller";
 import {
   killConfirmText,
   SessionLifecycleConsumer,
@@ -1745,7 +1746,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
 
   const fetchSession = useCallback(
-    async (signal: AbortSignal) => {
+    async (signal: AbortSignal): Promise<PollOutcome> => {
       const requestedSessionId = sessionId;
       const requestId = loadRequestIdRef.current + 1;
       loadRequestIdRef.current = requestId;
@@ -1761,7 +1762,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           requestId !== loadRequestIdRef.current ||
           currentSessionIdRef.current !== requestedSessionId
         ) {
-          return;
+          return "ok";
         }
         if (!response.ok) {
           if (response.status === 404) {
@@ -1771,7 +1772,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               requestId !== loadRequestIdRef.current ||
               currentSessionIdRef.current !== requestedSessionId
             )
-              return;
+              return "ok";
             if (baseline.ok) {
               const info = (await baseline.json()) as { lifecycleInstanceId?: string };
               if (
@@ -1779,7 +1780,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 requestId !== loadRequestIdRef.current ||
                 currentSessionIdRef.current !== requestedSessionId
               )
-                return;
+                return "ok";
               if (info.lifecycleInstanceId && consumer.accept(info.lifecycleInstanceId, [], read)) {
                 rawSessionRef.current = null;
                 sessionRef.current = null;
@@ -1801,11 +1802,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           requestId !== loadRequestIdRef.current ||
           currentSessionIdRef.current !== requestedSessionId
         ) {
-          return;
+          return "ok";
         }
         if (!payload.lifecycle) throw new Error("Invalid session lifecycle snapshot");
         const accepted = consumer.accept(payload.lifecycle.instanceId, [payload], read)?.[0];
-        if (!accepted) return;
+        if (!accepted) return "ok";
         const reconciling = lifecycleReconcileRef.current;
         if (reconciling && accepted === payload) {
           consumer.releaseUnmatched(reconciling);
@@ -1814,13 +1815,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         publishLifecycleSession(accepted);
         setError(null);
         dismissLoadErrorToast();
+        return "ok";
       } catch (loadError) {
         if (
           signal.aborted ||
           requestId !== loadRequestIdRef.current ||
           currentSessionIdRef.current !== requestedSessionId
         ) {
-          return;
+          return "ok";
         }
         const message = errorMessage(loadError, "Failed to load session");
         if (sessionRef.current?.id !== requestedSessionId) {
@@ -1831,12 +1833,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               loadError instanceof SessionLoadHttpError &&
               TRANSIENT_LOAD_STATUSES.has(loadError.status),
           });
-          return;
+          return "failed";
         }
-        if (lastLoadErrorToastRef.current?.message === message) return;
+        if (lastLoadErrorToastRef.current?.message === message) return "failed";
         dismissLoadErrorToast();
         const id = showErrorToast(message);
         lastLoadErrorToastRef.current = { id, message };
+        return "failed";
       }
     },
     [dismissLoadErrorToast, publishLifecycleSession, sessionId, showErrorToast],
@@ -1897,10 +1900,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   ]);
 
   const fetchConversation = useCallback(
-    async (signal: AbortSignal) => {
+    async (signal: AbortSignal): Promise<PollOutcome> => {
       if (!session) {
         setConversation(null);
-        return;
+        return "ok";
       }
       const query = fromIndex !== null ? `?from=${fromIndex}` : "";
       if (fromIndex !== null) olderRequestRef.current = signal;
@@ -1911,12 +1914,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         );
         if (!res.ok) {
           if (!signal.aborted) setConversation(null);
-          return;
+          return signal.aborted ? "ok" : "failed";
         }
         const payload = (await res.json()) as ConversationResponse;
         if (!signal.aborted) setConversation(payload);
+        return "ok";
       } catch {
-        if (!signal.aborted) setConversation(null);
+        if (signal.aborted) return "ok";
+        setConversation(null);
+        return "failed";
       } finally {
         if (olderRequestRef.current === signal) {
           olderRequestRef.current = null;

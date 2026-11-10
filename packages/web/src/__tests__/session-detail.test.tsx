@@ -3285,8 +3285,9 @@ describe("SessionDetail voice input", () => {
               failed.resolve(invalid);
             }
           });
+          // The failed older read backs the next poll off to 2x the 4s base.
           await act(async () => {
-            await vi.advanceTimersByTimeAsync(4_000);
+            await vi.advanceTimersByTimeAsync(8_000);
           });
           expect(screen.getByText("page-100")).toBeInTheDocument();
           expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
@@ -7208,17 +7209,19 @@ describe("SessionDetail load state", () => {
     });
     expect(calls.session).toBe(2);
     expect(screen.getByTestId("session-load-failed")).toBeInTheDocument();
-    // Only the poll may fetch now (4s after the settled retry); the card timer must be gone.
+    // Only the poll may fetch now, backed off to 4x the 4s base after two failed
+    // reads (16s after the settled retry); the card timer must be gone.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(15_999);
     });
     expect(calls.session).toBe(2);
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(1);
     });
     expect(calls.session).toBe(3);
+    // Third failure: 8x cap.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(4_000);
+      await vi.advanceTimersByTimeAsync(32_000);
     });
     expect(calls.session).toBe(4);
   });
@@ -7366,26 +7369,27 @@ describe("SessionDetail load state", () => {
       throw new Error(`Unexpected fetch: ${url}`);
     });
 
+    vi.useFakeTimers();
     render(<SessionDetail sessionId="api-a1" />);
-
-    await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
     });
+    expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
-
-    await waitFor(() => {
-      expect(screen.getAllByText("temporary failure").length).toBeGreaterThan(0);
+    // The next 4s poll fails: the toast shows, the following poll backs off to 8s.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_000);
     });
+    expect(screen.getAllByText("temporary failure").length).toBeGreaterThan(0);
 
-    // Pause holds its optimistic status, so the next poll is the successful reload.
-    await waitFor(
-      () => {
-        expect(screen.queryByText("temporary failure")).not.toBeInTheDocument();
-      },
-      { timeout: 6_000 },
-    );
-  }, 10_000);
+    // Pause's follow-up read lands now, ahead of the backed-off poll and the 8s
+    // toast auto-dismiss, so only the successful reload can clear the toast.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.queryByText("temporary failure")).not.toBeInTheDocument();
+  });
 });
 
 describe("SessionDetail display state", () => {
@@ -8817,10 +8821,36 @@ describe("SessionDetail lifecycle operation", () => {
       expect(screen.queryByRole("heading", { name: "Fix auth" })).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Complete" })).not.toBeInTheDocument();
       current = sessionFixture();
-      await advance(4_000);
+      // The rejected read is a failed poll: the next one backs off to 2x the 4s base.
+      await advance(8_000);
       expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
     },
   );
+
+  it("backs the conversation poll off to 2x after a non-ok read", async () => {
+    let conversationCalls = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") return new Response(JSON.stringify(sessionFixture()));
+      if (url === "/api/sessions/api-a1/conversation") {
+        conversationCalls += 1;
+        return new Response("{}", { status: 500 });
+      }
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "" }));
+      if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    render(<SessionDetail sessionId="api-a1" />);
+    await advance();
+    const afterFirst = conversationCalls;
+    expect(afterFirst).toBeGreaterThan(0);
+
+    await advance(7_999);
+    expect(conversationCalls).toBe(afterFirst);
+    await advance(1);
+    expect(conversationCalls).toBe(afterFirst + 1);
+  });
 
   it.each(["restore", "reopen"] as const)(
     "blocks immediate send during pending %s with an already live runtime",
