@@ -1,41 +1,37 @@
-// Host side of one snippet panel, without DOM. `decideInvoke` is the single
-// send-validation function (D4); `createSnippetHost` wires the handshake, the
-// port, gates, persistence and the action lifecycle behind an injectable
-// bridge so every rule is testable without a real iframe.
+// Host side of one snippet panel, without DOM. `decideInvoke` and `decideSend` are
+// the send-validation functions; `createSnippetHost` wires the handshake, the port,
+// gates and the store bridge behind injectable deps so every rule is testable
+// without a real iframe. The host picks every store: data goes to the manifest
+// `store` (default `session:<owner>`), actions and agent traffic to `session:<owner>`.
 
-import type { ConversationMessage } from "@/lib/types";
 import type { SnippetManifest } from "./snippet-manifest";
 import {
-  buildSnippetActionPrompt,
-  classifySendOutcome,
-  deriveActionStatus,
+  actionStatusFromDoc,
   isRecord,
   isTerminalSnippetStatus,
-  parseSnippetActionPrompt,
+  ownerStoreOf,
   SNIPPET_BUDGET_LIMIT,
+  SNIPPET_FETCH_TIMEOUT_MS,
   SNIPPET_FLOOD_MAX_MESSAGES,
   SNIPPET_FLOOD_WINDOW_MS,
-  SNIPPET_HELLO_TIMEOUT_MS,
   SNIPPET_HEIGHT_MAX,
-  SNIPPET_FETCH_TIMEOUT_MS,
   SNIPPET_HEIGHT_MIN,
-  SNIPPET_SDK_URL,
+  SNIPPET_HELLO_TIMEOUT_MS,
   SNIPPET_MAX_PAYLOAD_BYTES,
   SNIPPET_MAX_PORT_MESSAGE_BYTES,
-  SNIPPET_MAX_PROMPT_BYTES,
   SNIPPET_MAX_STATE_BYTES,
   SNIPPET_PROTOCOL_VERSION,
   SNIPPET_RETRY_STATUSES,
+  SNIPPET_SDK_URL,
   SNIPPET_TO_FRAME,
   SNIPPET_TO_HOST,
   SNIPPET_WINDOW_MSG,
   snippetByteLength,
-  type SnippetActionEvent,
-  type SnippetActionRecord,
+  snippetStateDocId,
+  type SnippetActionStatus,
   type SnippetAvailability,
   type SnippetConfirmReason,
   type SnippetInvokeRejection,
-  type SnippetSendOutcome,
   type SnippetTheme,
 } from "./snippet-protocol";
 import {
@@ -44,13 +40,19 @@ import {
   readSnippetRecord,
   writeSnippetBudget,
   writeSnippetRecord,
+  type SnippetControlValue,
   type SnippetRecord,
   type SnippetStorage,
 } from "./snippet-store";
 import { validateSnippetPayload, type JsonValue, type SnippetSchemaIssue } from "./snippet-schema";
+import { resolveStoreProxyTarget, type ProxyMethod } from "@/lib/store-proxy";
+import type { StoreChangeEvent, StoreChangePoller } from "@/lib/store-change-poller";
+import type { SpurSessionState, SpurSessionStatus } from "@/lib/types";
+
+type JsonObject = { [key: string]: JsonValue };
 
 // ---------------------------------------------------------------------------
-// decideInvoke
+// gates
 
 export type GateStorage =
   | { ok: true; unconfirmedRevision: number | null; unconfirmed: number }
@@ -60,34 +62,25 @@ export interface DecideInput {
   connected: boolean;
   conflict: boolean;
   manifest: SnippetManifest;
-  sessionId: string;
   actionId: string;
   payload: unknown;
   canSend: boolean;
   busy: boolean;
   hasInteraction: boolean;
   gates: GateStorage;
-  requestId: string;
-  retryOf?: string;
-  // Trusted host click (Retry): skips the confirm gates, still passes structure, G1, G5.
+  // Trusted host click (Retry): skips the confirm gates, still passes structure and availability.
   trusted?: boolean;
 }
 
 export type DecideResult =
   | { kind: "reject"; reason: SnippetInvokeRejection; issues?: SnippetSchemaIssue[] }
-  | {
-      kind: "confirm";
-      reason: SnippetConfirmReason;
-      payload: { [key: string]: JsonValue };
-      prompt: string;
-      label: string;
-    }
-  | { kind: "send"; payload: { [key: string]: JsonValue }; prompt: string; label: string };
+  | { kind: "confirm"; reason: SnippetConfirmReason; payload: JsonObject; label: string }
+  | { kind: "send"; payload: JsonObject; label: string };
 
 export function decideInvoke(input: DecideInput): DecideResult {
   const { manifest } = input;
   if (!input.connected) return { kind: "reject", reason: "not_connected" };
-  if (input.conflict) return { kind: "reject", reason: "revision_conflict" };
+  if (input.conflict) return { kind: "reject", reason: "stale" };
   const action = manifest.actions.find((candidate) => candidate.id === input.actionId);
   if (!action) return { kind: "reject", reason: "unknown_action" };
   if (snippetByteLength(input.payload) > SNIPPET_MAX_PAYLOAD_BYTES) {
@@ -95,23 +88,9 @@ export function decideInvoke(input: DecideInput): DecideResult {
   }
   const validated = validateSnippetPayload(action.payload, input.payload);
   if (!validated.ok) return { kind: "reject", reason: "invalid_payload", issues: validated.issues };
-  const prompt = buildSnippetActionPrompt({
-    requestId: input.requestId,
-    ...(input.retryOf ? { retryOf: input.retryOf } : {}),
-    sessionId: input.sessionId,
-    snippetId: manifest.snippetId,
-    instanceId: manifest.instanceId,
-    revision: manifest.revision,
-    actionId: action.id,
-    label: action.label,
-    payload: validated.payload,
-  });
-  if (snippetByteLength(prompt) > SNIPPET_MAX_PROMPT_BYTES) {
-    return { kind: "reject", reason: "payload_too_large" };
-  }
   if (!input.canSend) return { kind: "reject", reason: "session_unavailable" };
   if (input.busy) return { kind: "reject", reason: "busy" };
-  const done = { payload: validated.payload, prompt, label: action.label };
+  const done = { payload: validated.payload, label: action.label };
   if (input.trusted) return { kind: "send", ...done };
   const confirm = (reason: SnippetConfirmReason): DecideResult => ({
     kind: "confirm",
@@ -124,6 +103,41 @@ export function decideInvoke(input: DecideInput): DecideResult {
   if (input.gates.unconfirmedRevision === manifest.revision) return confirm("repeat_in_revision");
   if (input.gates.unconfirmed >= SNIPPET_BUDGET_LIMIT) return confirm("budget");
   return { kind: "send", ...done };
+}
+
+export interface DecideSendInput {
+  connected: boolean;
+  message: unknown;
+  canSend: boolean;
+  confirmPending: boolean;
+  hasInteraction: boolean;
+  gates: GateStorage;
+}
+
+export type DecideSendResult =
+  | { kind: "reject"; reason: SnippetInvokeRejection }
+  | { kind: "confirm"; reason: SnippetConfirmReason; message: string }
+  | { kind: "send"; message: string };
+
+// `spur.agent.send` and `<spur-chat>`: same interaction, storage and budget gates as
+// invoke, no per-revision repeat gate (a chat sends several times per revision).
+export function decideSend(input: DecideSendInput): DecideSendResult {
+  if (!input.connected) return { kind: "reject", reason: "not_connected" };
+  const { message } = input;
+  if (typeof message !== "string" || message.trim().length === 0) {
+    return { kind: "reject", reason: "invalid_payload" };
+  }
+  if (snippetByteLength(message) > SNIPPET_MAX_PAYLOAD_BYTES) {
+    return { kind: "reject", reason: "payload_too_large" };
+  }
+  if (!input.canSend) return { kind: "reject", reason: "session_unavailable" };
+  if (input.confirmPending) return { kind: "reject", reason: "busy" };
+  if (!input.hasInteraction) return { kind: "confirm", reason: "no_focus", message };
+  if (!input.gates.ok) return { kind: "confirm", reason: "storage_unavailable", message };
+  if (input.gates.unconfirmed >= SNIPPET_BUDGET_LIMIT) {
+    return { kind: "confirm", reason: "budget", message };
+  }
+  return { kind: "send", message };
 }
 
 // ---------------------------------------------------------------------------
@@ -146,11 +160,19 @@ export interface SnippetFontBuffer {
   data: ArrayBuffer;
 }
 
+export interface StoreResponse {
+  ok: boolean;
+  status: number;
+  body: unknown;
+}
+
 export interface SnippetHostDeps {
   sessionId: string;
   postToFrame(message: unknown, transfer: unknown[]): void;
   createChannel(): SnippetChannel;
-  send(prompt: string): Promise<SnippetSendOutcome>;
+  // JSON request against the web store proxy; network failure resolves status 0.
+  request(method: ProxyMethod, url: string, body?: unknown): Promise<StoreResponse>;
+  poller: StoreChangePoller;
   loadSdk(refetch: boolean): Promise<string>;
   getFonts(): SnippetFontBuffer[];
   getTheme(): SnippetTheme;
@@ -170,14 +192,33 @@ export const RELOADABLE_ERRORS: readonly PanelRuntimeError[] = [
   "flood",
 ];
 
-export interface PendingConfirm {
-  requestId: string;
+export interface InvokeDraft {
+  id: string;
   actionId: string;
   label: string;
-  reason: SnippetConfirmReason;
-  payload: { [key: string]: JsonValue };
-  prompt: string;
+  payload: JsonObject;
   retryOf?: string;
+}
+
+export type PendingConfirm =
+  | ({ kind: "invoke"; reason: SnippetConfirmReason } & InvokeDraft)
+  | { kind: "send"; reason: SnippetConfirmReason; message: string };
+
+export interface SnippetAction {
+  id: string;
+  actionId: string;
+  label: string;
+  payload: JsonObject;
+  status: SnippetActionStatus;
+  createdAt: number;
+  // `_actions` doc revision last applied; null until the doc was read.
+  rev: number | null;
+  retryOf?: string;
+  confirmReason?: SnippetConfirmReason;
+  error?: string;
+  result?: JsonValue;
+  // POST refused before a doc existed.
+  httpStatus?: number;
 }
 
 export interface SnippetHostState {
@@ -190,7 +231,7 @@ export interface SnippetHostState {
   error: PanelRuntimeError | null;
   conflict: boolean;
   availability: SnippetAvailability;
-  action: SnippetActionRecord | null;
+  action: SnippetAction | null;
   confirm: PendingConfirm | null;
   height: number | null;
   fullscreen: boolean;
@@ -198,10 +239,20 @@ export interface SnippetHostState {
 
 export interface SnippetSessionUpdate {
   canSend: boolean;
-  state: Parameters<typeof deriveActionStatus>[1]["state"];
-  queuedMessages: readonly string[];
-  messages: readonly ConversationMessage[];
-  fileSettled: boolean;
+  state: SpurSessionState;
+  status: SpurSessionStatus;
+}
+
+type SnippetAgentState = "working" | "idle" | "error" | "rate_limited";
+
+/** Same mapping as the daemon's `mapAgentState` (v2/src/store-agent.ts) behind `agent/status`. */
+function agentStateOf(update: SnippetSessionUpdate): SnippetAgentState {
+  const { state, status } = update;
+  if (status === "completed" || status === "killed" || status === "errored") return "error";
+  if (state === "error" || state === "killed") return "error";
+  if (state === "working") return "working";
+  if (state === "rate_limited" || status === "budget_limited") return "rate_limited";
+  return "idle";
 }
 
 export type ApplyFileResult = "mounted" | "ignored" | "conflict" | "lower_revision";
@@ -225,15 +276,71 @@ export interface SnippetHost {
   dispose(): void;
 }
 
-function eventOf(action: SnippetActionRecord): SnippetActionEvent {
+export function storeUrl(store: string, segments: readonly string[], search = ""): string {
+  return `/api/stores/${encodeURIComponent(store)}/${segments.map(encodeURIComponent).join("/")}${search}`;
+}
+
+export function dataStoreOf(manifest: SnippetManifest): string {
+  return manifest.store ?? ownerStoreOf(manifest.ownerSessionId);
+}
+
+function eventOf(action: SnippetAction): Record<string, unknown> {
   return {
-    requestId: action.requestId,
-    actionId: action.actionId,
+    id: action.id,
+    action: action.actionId,
+    payload: action.payload,
     status: action.status,
-    ...(action.confirmReason ? { confirmReason: action.confirmReason } : {}),
-    ...(action.retryOf ? { retryOf: action.retryOf } : {}),
-    ...(action.httpStatus !== undefined ? { httpStatus: action.httpStatus } : {}),
+    ...(action.error !== undefined ? { error: action.error } : {}),
+    ...(action.result !== undefined ? { result: action.result } : {}),
   };
+}
+
+// Final invoke resolution for a terminal action, same shape as the page transport.
+function resultOf(action: SnippetAction): Record<string, unknown> {
+  if (action.status === "completed") return { ok: true, id: action.id, result: action.result };
+  if (action.status === "timeout") return { ok: false, reason: "timeout", id: action.id };
+  if (action.httpStatus !== undefined) {
+    const reason: SnippetInvokeRejection =
+      action.httpStatus === 400
+        ? "invalid_payload"
+        : action.httpStatus === 413
+          ? "payload_too_large"
+          : "session_unavailable";
+    return { ok: false, reason };
+  }
+  return { ok: false, reason: "failed", id: action.id, error: action.error };
+}
+
+interface ActionDoc {
+  id: string;
+  rev: number;
+  createdAt: string;
+  data: Record<string, unknown>;
+}
+
+function parseActionDoc(value: unknown): ActionDoc | null {
+  if (!isRecord(value) || !isRecord(value.data)) return null;
+  const { id, rev, createdAt } = value;
+  if (typeof id !== "string" || typeof rev !== "number" || typeof createdAt !== "string") {
+    return null;
+  }
+  return { id, rev, createdAt, data: value.data };
+}
+
+const DB_HEADS = new Set(["docs", "query", "changes"]);
+const DB_METHODS = new Set<string>(["GET", "POST", "PATCH", "DELETE"]);
+
+// Frame db path -> decoded segments, or null when it leaves the data store's doc routes.
+function parseDbPath(store: string, method: string, path: unknown): string[] | null {
+  if (typeof path !== "string" || !DB_METHODS.has(method)) return null;
+  let segments: string[];
+  try {
+    segments = path.split("/").map(decodeURIComponent);
+  } catch {
+    return null;
+  }
+  if (!DB_HEADS.has(segments[0] ?? "")) return null;
+  return resolveStoreProxyTarget(store, segments, method) === null ? null : segments;
 }
 
 export function createSnippetHost(
@@ -241,21 +348,34 @@ export function createSnippetHost(
   initial: { manifest: SnippetManifest; html: string },
 ): SnippetHost {
   const { sessionId } = deps;
+  const ownerStore = ownerStoreOf(sessionId);
+  const snippetId = initial.manifest.snippetId;
+  const stateDocId = snippetStateDocId(sessionId, snippetId);
+  // Handled at hello (error card); this only keeps an early rejection from going unhandled.
+  stateDocId.catch(() => undefined);
   const listeners = new Set<() => void>();
   let disposed = false;
   let mountCount = 0;
   let port: SnippetPort | null = null;
+  let handshaking = false;
   let helloTimer: ReturnType<typeof setTimeout> | undefined;
   let blurObserved = false;
   let loads = 0;
   let floodTimes: number[] = [];
   let canSend = true;
-  let pendingCallId: string | null = null;
-  let session: SnippetSessionUpdate | null = null;
+  let agentWorking = false;
+  // Last agent state sent to the frame; null until the first session update.
+  let agentState: SnippetAgentState | null = null;
+  // Invoke promise in the frame waiting for its action's final status.
+  let invokeCall: { callId: string; actionId: string } | null = null;
+  // Frame call waiting on the confirm strip (invoke-result or agent reply).
+  let confirmCallId: string | null = null;
   let sdkAttempt = 0;
   let previousRevision: number | null = null;
+  let restoreAttempt = 0;
+  let dataUnsubscribe: (() => void) | null = null;
   // Action shown before a confirm strip opened; restored on Discard.
-  let actionBeforeConfirm: SnippetActionRecord | null = null;
+  let actionBeforeConfirm: SnippetAction | null = null;
 
   let state: SnippetHostState = {
     manifest: initial.manifest,
@@ -288,6 +408,13 @@ export function createSnippetHost(
     if (state.phase === "connected" && port) port.postMessage(message);
   }
 
+  function agentStatusOf(agent: SnippetAgentState): {
+    state: SnippetAgentState;
+    sessionId: string;
+  } {
+    return { state: agent, sessionId };
+  }
+
   function setAvailability(conflict: boolean): void {
     const next = availabilityFor(conflict);
     const changed =
@@ -296,9 +423,9 @@ export function createSnippetHost(
     if (changed) postToSnippet({ type: SNIPPET_TO_FRAME.availability, availability: next });
   }
 
-  // Read-modify-write on the snippet record. Returns false when storage fails.
+  // Read-modify-write on the gate record. Returns false when storage fails.
   function updateRecord(mutate: (record: SnippetRecord) => void): boolean {
-    const read = readSnippetRecord(deps.storage, sessionId, state.manifest.snippetId);
+    const read = readSnippetRecord(deps.storage, sessionId, snippetId);
     if (!read.ok) return false;
     const record: SnippetRecord =
       read.value && read.value.instanceId === state.manifest.instanceId
@@ -307,19 +434,121 @@ export function createSnippetHost(
             instanceId: state.manifest.instanceId,
             lastRevision: state.manifest.revision,
             unconfirmedRevision: null,
-            state: { app: null, controls: [] },
-            action: null,
             updatedAt: deps.now(),
           };
     mutate(record);
     record.updatedAt = deps.now();
-    return writeSnippetRecord(deps.storage, sessionId, state.manifest.snippetId, record).ok;
+    return writeSnippetRecord(deps.storage, sessionId, snippetId, record);
   }
 
-  function publishAction(action: SnippetActionRecord | null, persist: boolean): void {
+  function replyInvoke(callId: string, result: Record<string, unknown>): void {
+    postToSnippet({ type: SNIPPET_TO_FRAME.invokeResult, callId, ...result });
+  }
+
+  function replyAgent(callId: string, response: StoreResponse): void {
+    postToSnippet({ type: SNIPPET_TO_HOST.agent, callId, ...response });
+  }
+
+  function publishAction(action: SnippetAction | null): void {
     set({ action });
-    if (persist) updateRecord((record) => void (record.action = action));
-    if (action) postToSnippet({ type: SNIPPET_TO_FRAME.action, action: eventOf(action) });
+    if (!action) return;
+    postToSnippet({ type: SNIPPET_TO_FRAME.action, action: eventOf(action) });
+    if (invokeCall?.actionId === action.id && isTerminalSnippetStatus(action.status)) {
+      const { callId } = invokeCall;
+      invokeCall = null;
+      replyInvoke(callId, resultOf(action));
+    }
+  }
+
+  function applyDoc(doc: ActionDoc): void {
+    const current = state.action;
+    if (!current || current.id !== doc.id) return;
+    if (current.rev !== null && doc.rev < current.rev) return;
+    const { data } = doc;
+    publishAction({
+      ...current,
+      status: actionStatusFromDoc(data, agentWorking),
+      rev: doc.rev,
+      ...(typeof data.error === "string" ? { error: data.error } : {}),
+      ...(data.result !== undefined ? { result: data.result as JsonValue } : {}),
+    });
+  }
+
+  async function readActionDoc(id: string): Promise<ActionDoc | null> {
+    const response = await deps.request("GET", storeUrl(ownerStore, ["docs", "_actions", id]));
+    return response.ok ? parseActionDoc(response.body) : null;
+  }
+
+  function refreshAction(): void {
+    const current = state.action;
+    if (!current || current.status === "awaiting_confirm") return;
+    void readActionDoc(current.id).then((doc) => {
+      if (!disposed && doc) applyDoc(doc);
+    });
+  }
+
+  function onOwnerChange(event: StoreChangeEvent): void {
+    const current = state.action;
+    if (!current || isTerminalSnippetStatus(current.status)) return;
+    if (
+      event.type === "reset" ||
+      event.changes.some((change) => change.collection === "_actions" && change.id === current.id)
+    ) {
+      refreshAction();
+    }
+  }
+
+  const ownerUnsubscribe = deps.poller.subscribe(ownerStore, onOwnerChange);
+
+  // Changes in the data store reach the frame once per collection per poll; the SDK
+  // reruns every snapshot of that collection.
+  function onDataChange(event: StoreChangeEvent): void {
+    if (event.type === "reset") {
+      postToSnippet({ type: SNIPPET_TO_FRAME.dbReset });
+      return;
+    }
+    const last = new Map<string, unknown>();
+    for (const change of event.changes) last.set(change.collection, change);
+    for (const change of last.values()) postToSnippet({ type: SNIPPET_TO_FRAME.dbChange, change });
+  }
+
+  function dropDataSubscription(): void {
+    dataUnsubscribe?.();
+    dataUnsubscribe = null;
+  }
+
+  // Mount restore: the latest action of this snippet instance, from the owner store.
+  function restoreAction(): void {
+    const attempt = (restoreAttempt += 1);
+    const { instanceId } = state.manifest;
+    void deps
+      .request("POST", storeUrl(ownerStore, ["query", "_actions"]), {
+        where: [
+          { field: "source.snippetId", op: "==", value: snippetId },
+          { field: "source.instanceId", op: "==", value: instanceId },
+        ],
+        orderBy: { field: "createdAt", direction: "desc" },
+        limit: 1,
+      })
+      .then((response) => {
+        if (disposed || attempt !== restoreAttempt || state.action !== null) return;
+        const docs = isRecord(response.body) ? response.body.docs : null;
+        const doc = response.ok && Array.isArray(docs) ? parseActionDoc(docs[0]) : null;
+        if (!doc || typeof doc.data.action !== "string") return;
+        const { data } = doc;
+        publishAction({
+          id: doc.id,
+          actionId: data.action as string,
+          label: typeof data.label === "string" ? data.label : (data.action as string),
+          payload: isRecord(data.payload) ? (data.payload as JsonObject) : {},
+          status: actionStatusFromDoc(data, agentWorking),
+          createdAt: Date.parse(doc.createdAt),
+          rev: doc.rev,
+          ...(typeof data.retryOf === "string" ? { retryOf: data.retryOf } : {}),
+          ...(typeof data.error === "string" ? { error: data.error } : {}),
+          ...(data.result !== undefined ? { result: data.result as JsonValue } : {}),
+        });
+      });
   }
 
   function closePort(): void {
@@ -328,22 +557,39 @@ export function createSnippetHost(
       port.close();
       port = null;
     }
+    handshaking = false;
+    dropDataSubscription();
     clearTimeout(helloTimer);
   }
 
+  function resolveConfirmCall(reason: SnippetInvokeRejection): void {
+    const callId = confirmCallId;
+    confirmCallId = null;
+    if (callId === null || !state.confirm) return;
+    if (state.confirm.kind === "invoke") replyInvoke(callId, { ok: false, reason });
+    else replyAgent(callId, { ok: false, status: 0, body: { error: reason } });
+  }
+
   // A pending confirm belongs to one document in one session state. Any change
-  // that voids it resolves the snippet's invoke as stale and drops the strip.
+  // that voids it resolves the snippet's call as stale and drops the strip.
   function staleConfirm(): void {
     if (!state.confirm) return;
-    resolvePending({ ok: false, reason: "stale" });
+    resolveConfirmCall("stale");
+    const wasInvoke = state.confirm.kind === "invoke";
     set({ confirm: null });
-    if (state.action?.status === "awaiting_confirm") set({ action: actionBeforeConfirm });
+    if (wasInvoke && state.action?.status === "awaiting_confirm")
+      set({ action: actionBeforeConfirm });
+  }
+
+  function failInvokeCall(): void {
+    if (invokeCall) replyInvoke(invokeCall.callId, { ok: false, reason: "not_connected" });
+    invokeCall = null;
   }
 
   function fail(error: PanelRuntimeError): void {
     staleConfirm();
+    failInvokeCall();
     closePort();
-    resolvePending({ ok: false, reason: "not_connected" });
     // Hand the dialog back to the shell (exit path), then drop the flag.
     if (state.fullscreen) deps.onFullscreenRequest(false);
     set({ phase: "error", error, fullscreen: false });
@@ -358,6 +604,7 @@ export function createSnippetHost(
 
   function beginMount(refetchSdk: boolean): void {
     staleConfirm();
+    invokeCall = null;
     closePort();
     mountCount += 1;
     blurObserved = false;
@@ -389,16 +636,25 @@ export function createSnippetHost(
     );
   }
 
-  function resolvePending(result: Record<string, unknown>): void {
-    const callId = pendingCallId;
-    pendingCallId = null;
-    if (callId !== null) postToSnippet({ type: SNIPPET_TO_FRAME.invokeResult, callId, ...result });
+  async function loadState(): Promise<{ app: JsonValue | null; controls: SnippetControlValue[] }> {
+    const empty = { app: null, controls: [] };
+    const docId = await stateDocId;
+    const response = await deps.request(
+      "GET",
+      storeUrl(dataStoreOf(state.manifest), ["docs", "_state", docId]),
+    );
+    if (!response.ok || !isRecord(response.body) || !isRecord(response.body.data)) return empty;
+    const { data } = response.body;
+    const controls = parseControls(data.controls ?? []);
+    if (data.instanceId !== state.manifest.instanceId || controls === null) return empty;
+    return { app: (data.app ?? null) as JsonValue | null, controls };
   }
 
-  function buildContext(): Record<string, unknown> {
+  function buildContext(saved: {
+    app: JsonValue | null;
+    controls: SnippetControlValue[];
+  }): Record<string, unknown> {
     const { manifest } = state;
-    const read = readSnippetRecord(deps.storage, sessionId, manifest.snippetId);
-    const record = read.ok && read.value?.instanceId === manifest.instanceId ? read.value : null;
     const fonts = deps.getFonts();
     return {
       sessionId,
@@ -406,9 +662,12 @@ export function createSnippetHost(
       instanceId: manifest.instanceId,
       revision: manifest.revision,
       previousRevision,
-      state: record?.state.app ?? null,
-      controls: record?.state.controls ?? [],
+      dataStore: dataStoreOf(manifest),
+      agentStore: ownerStore,
+      state: saved.app,
+      controls: saved.controls,
       action: state.action ? eventOf(state.action) : null,
+      ...(agentState ? { agentStatus: agentStatusOf(agentState) } : {}),
       actions: manifest.actions.map((action) => ({ id: action.id, label: action.label })),
       theme: deps.getTheme(),
       fullscreen: state.fullscreen,
@@ -419,7 +678,7 @@ export function createSnippetHost(
 
   function recordMount(): void {
     const { manifest } = state;
-    const read = readSnippetRecord(deps.storage, sessionId, manifest.snippetId);
+    const read = readSnippetRecord(deps.storage, sessionId, snippetId);
     const stored = read.ok ? read.value : null;
     previousRevision = stored?.instanceId === manifest.instanceId ? stored.lastRevision : null;
     updateRecord((record) => void (record.lastRevision = manifest.revision));
@@ -430,7 +689,7 @@ export function createSnippetHost(
   }
 
   function readGates(): GateStorage {
-    const record = readSnippetRecord(deps.storage, sessionId, state.manifest.snippetId);
+    const record = readSnippetRecord(deps.storage, sessionId, snippetId);
     const budget = readSnippetBudget(deps.storage, sessionId);
     if (!record.ok || !budget.ok) return { ok: false };
     const unconfirmedRevision =
@@ -447,74 +706,32 @@ export function createSnippetHost(
     );
   }
 
-  function decide(
-    actionId: string,
-    payload: unknown,
-    retryOf: string | undefined,
-    trusted: boolean,
-  ): { decision: DecideResult; requestId: string } {
-    const requestId = deps.uuid();
-    const decision = decideInvoke({
-      connected: state.phase === "connected",
-      conflict: state.conflict,
-      manifest: state.manifest,
-      sessionId,
-      actionId,
-      payload,
-      canSend,
-      busy: isBusy(),
-      hasInteraction: hasInteraction(),
-      gates: readGates(),
-      requestId,
-      ...(retryOf ? { retryOf } : {}),
-      trusted,
-    });
-    return { decision, requestId };
-  }
-
-  function beginConfirm(
-    decision: Extract<DecideResult, { kind: "confirm" }>,
-    requestId: string,
-    actionId: string,
-    retryOf: string | undefined,
-    callId: string | null,
-  ): void {
-    pendingCallId = callId;
-    actionBeforeConfirm = state.action;
-    const confirm: PendingConfirm = {
-      requestId,
-      actionId,
-      label: decision.label,
-      reason: decision.reason,
-      payload: decision.payload,
-      prompt: decision.prompt,
-      ...(retryOf ? { retryOf } : {}),
-    };
+  function beginConfirm(confirm: PendingConfirm, callId: string | null): void {
+    confirmCallId = callId;
     set({ confirm });
-    publishAction(
-      {
-        requestId,
-        actionId,
-        status: "awaiting_confirm",
-        confirmReason: decision.reason,
-        ...(retryOf ? { retryOf } : {}),
-        prompt: decision.prompt,
-        instanceId: state.manifest.instanceId,
-        baseRevision: state.manifest.revision,
-        dispatchedAt: deps.now(),
-      },
-      false,
-    );
+    if (confirm.kind !== "invoke") return;
+    actionBeforeConfirm = state.action;
+    publishAction({
+      id: confirm.id,
+      actionId: confirm.actionId,
+      label: confirm.label,
+      payload: confirm.payload,
+      status: "awaiting_confirm",
+      confirmReason: confirm.reason,
+      createdAt: deps.now(),
+      rev: null,
+      ...(confirm.retryOf ? { retryOf: confirm.retryOf } : {}),
+    });
   }
 
-  // G3 and G4 are written before the POST. Any write failure means the caller
-  // must confirm instead.
-  function commitUnconfirmed(): boolean {
+  // The unconfirmed budget (and, for invokes, the per-revision mark) is written
+  // before the POST. Any write failure means the caller must confirm instead.
+  function commitUnconfirmed(markRevision: boolean): boolean {
     const budget = readSnippetBudget(deps.storage, sessionId);
     if (!budget.ok) return false;
-    const wroteRecord = updateRecord(
-      (record) => void (record.unconfirmedRevision = state.manifest.revision),
-    );
+    const wroteRecord =
+      !markRevision ||
+      updateRecord((record) => void (record.unconfirmedRevision = state.manifest.revision));
     return (
       wroteRecord &&
       writeSnippetBudget(deps.storage, sessionId, budget.value.unconfirmed + 1, deps.now())
@@ -522,147 +739,227 @@ export function createSnippetHost(
   }
 
   function dispatch(
-    requestId: string,
-    actionId: string,
-    prompt: string,
-    retryOf: string | undefined,
+    invoke: InvokeDraft,
+    callId: string | null,
     confirmReason?: SnippetConfirmReason,
   ): void {
-    const record: SnippetActionRecord = {
-      requestId,
-      actionId,
+    const { manifest } = state;
+    const action: SnippetAction = {
+      id: invoke.id,
+      actionId: invoke.actionId,
+      label: invoke.label,
+      payload: invoke.payload,
       status: "submitting",
-      prompt,
-      instanceId: state.manifest.instanceId,
-      baseRevision: state.manifest.revision,
-      dispatchedAt: deps.now(),
-      ...(retryOf ? { retryOf } : {}),
+      createdAt: deps.now(),
+      rev: null,
+      ...(invoke.retryOf ? { retryOf: invoke.retryOf } : {}),
       ...(confirmReason ? { confirmReason } : {}),
     };
     set({ confirm: null });
-    publishAction(record, true);
-    resolvePending({ ok: true, requestId });
-    void deps.send(prompt).then(
-      (outcome) => settleSend(requestId, outcome),
-      () => settleSend(requestId, { kind: "failure" }),
-    );
+    invokeCall = callId === null ? null : { callId, actionId: action.id };
+    publishAction(action);
+    // Only gated invokes reach this point, so every one carries the user gesture.
+    void deps
+      .request("POST", storeUrl(ownerStore, ["actions"]), {
+        id: action.id,
+        action: action.actionId,
+        label: action.label,
+        source: {
+          kind: "snippet",
+          snippetId,
+          instanceId: manifest.instanceId,
+          revision: manifest.revision,
+        },
+        payload: action.payload,
+        userGesture: true,
+        ...(action.retryOf ? { retryOf: action.retryOf } : {}),
+      })
+      .then(async (response) => {
+        if (disposed || state.action?.id !== action.id) return;
+        const doc = response.ok ? parseActionDoc(response.body) : await readActionDoc(action.id);
+        if (disposed || state.action?.id !== action.id) return;
+        if (doc) {
+          applyDoc(doc);
+          return;
+        }
+        const error = isRecord(response.body) ? response.body.error : undefined;
+        publishAction({
+          ...state.action,
+          status: "error",
+          httpStatus: response.status,
+          ...(typeof error === "string" ? { error } : {}),
+        });
+      });
   }
 
-  function settleSend(requestId: string, outcome: SnippetSendOutcome): void {
-    const current = state.action;
-    if (
-      disposed ||
-      !current ||
-      current.requestId !== requestId ||
-      current.status !== "submitting"
-    ) {
-      return;
-    }
-    if (current.instanceId !== state.manifest.instanceId) {
-      // Sent for a replaced instance (D7): never a retryable record under the new one.
-      publishAction({ ...current, status: "replaced" }, true);
-      return;
-    }
-    const result = classifySendOutcome(outcome);
-    const next: SnippetActionRecord = { ...current, status: result.status };
-    if (result.status === "accepted") next.acceptedAt = deps.now();
-    if ("httpStatus" in result && result.httpStatus !== undefined)
-      next.httpStatus = result.httpStatus;
-    publishAction(next, true);
-    if (session) updateSession(session);
+  function postSend(message: string, callId: string | null): void {
+    void deps
+      .request("POST", storeUrl(ownerStore, ["agent", "send"]), { message, userGesture: true })
+      .then((response) => {
+        if (!disposed && callId !== null) replyAgent(callId, response);
+      });
   }
 
-  function updateSession(update: SnippetSessionUpdate): void {
-    session = update;
-    if (canSend !== update.canSend) {
-      canSend = update.canSend;
-      if (!canSend) staleConfirm();
-      setAvailability(state.conflict);
-    }
-    const { action } = state;
-    if (!action) return;
-    const next = deriveActionStatus(
-      action,
-      update,
-      update.messages,
-      {
-        instanceId: state.manifest.instanceId,
-        revision: state.manifest.revision,
-        ...(state.manifest.respondsToRequestId
-          ? { respondsToRequestId: state.manifest.respondsToRequestId }
-          : {}),
-      },
-      deps.now(),
-    );
-    if (next !== action.status) publishAction({ ...action, status: next }, true);
+  // Payload of a retry: from the failed `_actions` doc (new id, retryOf), or the local
+  // payload when the POST never created a doc.
+  async function retrySource(
+    last: SnippetAction,
+  ): Promise<{ actionId: string; payload: unknown; retryOf?: string } | null> {
+    if (last.httpStatus !== undefined) return { actionId: last.actionId, payload: last.payload };
+    const doc = await readActionDoc(last.id);
+    if (!doc || doc.data.status !== "failed" || typeof doc.data.action !== "string") return null;
+    return { actionId: doc.data.action, payload: doc.data.payload, retryOf: last.id };
+  }
+
+  function retryable(last: SnippetAction | null): last is SnippetAction {
+    return last !== null && SNIPPET_RETRY_STATUSES.includes(last.status);
   }
 
   // ----- invoke from the snippet
 
-  function handleInvoke(message: Record<string, unknown>): void {
-    const { callId } = message;
-    if (typeof callId !== "string" || typeof message.actionId !== "string") return;
-    const retryOf = typeof message.retryOf === "string" ? message.retryOf : undefined;
-    const reply = (result: Record<string, unknown>): void =>
-      postToSnippet({ type: SNIPPET_TO_FRAME.invokeResult, callId, ...result });
-
-    let { actionId } = message as { actionId: string };
-    let payload: unknown = message.payload;
-    if (retryOf !== undefined) {
-      const last = state.action;
-      const parsed = last ? parseSnippetActionPrompt(last.prompt) : null;
-      if (
-        !last ||
-        !parsed ||
-        last.requestId !== retryOf ||
-        last.instanceId !== state.manifest.instanceId ||
-        !SNIPPET_RETRY_STATUSES.includes(last.status)
-      ) {
-        reply({ ok: false, reason: "stale" });
-        return;
-      }
-      actionId = last.actionId;
-      payload = parsed.payload;
-    }
-    const { decision, requestId } = decide(actionId, payload, retryOf, false);
+  function startInvoke(
+    callId: string,
+    actionId: string,
+    payload: unknown,
+    retryOf: string | undefined,
+  ): void {
+    const decision = decideInvoke({
+      connected: state.phase === "connected",
+      conflict: state.conflict,
+      manifest: state.manifest,
+      actionId,
+      payload,
+      canSend,
+      busy: isBusy(),
+      hasInteraction: hasInteraction(),
+      gates: readGates(),
+    });
     if (decision.kind === "reject") {
-      reply({
+      replyInvoke(callId, {
         ok: false,
         reason: decision.reason,
         ...(decision.issues ? { issues: decision.issues } : {}),
       });
       return;
     }
+    const invoke: InvokeDraft = {
+      id: deps.uuid(),
+      actionId,
+      label: decision.label,
+      payload: decision.payload,
+      ...(retryOf ? { retryOf } : {}),
+    };
     if (decision.kind === "confirm") {
-      beginConfirm(decision, requestId, actionId, retryOf, callId);
+      beginConfirm({ kind: "invoke", reason: decision.reason, ...invoke }, callId);
       return;
     }
-    if (!commitUnconfirmed()) {
+    if (!commitUnconfirmed(true)) {
+      beginConfirm({ kind: "invoke", reason: "storage_unavailable", ...invoke }, callId);
+      return;
+    }
+    dispatch(invoke, callId);
+  }
+
+  function handleInvoke(message: Record<string, unknown>): void {
+    const { callId } = message;
+    if (typeof callId !== "string") return;
+    if (message.retry !== true) {
+      if (typeof message.action !== "string") return;
+      startInvoke(callId, message.action, message.payload, undefined);
+      return;
+    }
+    const last = state.action;
+    if (!retryable(last)) {
+      replyInvoke(callId, { ok: false, reason: "stale" });
+      return;
+    }
+    const mount = mountCount;
+    void retrySource(last).then((source) => {
+      if (disposed || mount !== mountCount) return;
+      if (!source || state.action !== last) {
+        replyInvoke(callId, { ok: false, reason: "stale" });
+        return;
+      }
+      startInvoke(callId, source.actionId, source.payload, source.retryOf);
+    });
+  }
+
+  function handleAgent(message: Record<string, unknown>): void {
+    const { callId, op } = message;
+    if (typeof callId !== "string") return;
+    if (op === "status") {
+      void deps
+        .request("GET", storeUrl(ownerStore, ["agent", "status"]))
+        .then((response) => replyAgent(callId, response));
+      return;
+    }
+    if (op === "messages") {
+      const { from } = message;
+      const search =
+        typeof from === "number" && Number.isInteger(from) && from >= 0 ? `?from=${from}` : "";
+      void deps
+        .request("GET", storeUrl(ownerStore, ["agent", "messages"], search))
+        .then((response) => replyAgent(callId, response));
+      return;
+    }
+    if (op !== "send") return;
+    const decision = decideSend({
+      connected: state.phase === "connected",
+      message: message.message,
+      canSend,
+      confirmPending: state.confirm !== null,
+      hasInteraction: hasInteraction(),
+      gates: readGates(),
+    });
+    if (decision.kind === "reject") {
+      replyAgent(callId, { ok: false, status: 0, body: { error: decision.reason } });
+      return;
+    }
+    if (decision.kind === "confirm") {
+      beginConfirm({ kind: "send", reason: decision.reason, message: decision.message }, callId);
+      return;
+    }
+    if (!commitUnconfirmed(false)) {
       beginConfirm(
-        { ...decision, kind: "confirm", reason: "storage_unavailable" },
-        requestId,
-        actionId,
-        retryOf,
+        { kind: "send", reason: "storage_unavailable", message: decision.message },
         callId,
       );
       return;
     }
-    pendingCallId = callId;
-    dispatch(requestId, actionId, decision.prompt, retryOf);
+    postSend(decision.message, callId);
+  }
+
+  function handleDb(message: Record<string, unknown>): void {
+    const { callId, method, body } = message;
+    if (typeof callId !== "string" || typeof method !== "string") return;
+    const store = dataStoreOf(state.manifest);
+    const segments = parseDbPath(store, method, message.path);
+    if (!segments) {
+      postToSnippet({
+        type: SNIPPET_TO_HOST.db,
+        callId,
+        ok: false,
+        status: 400,
+        body: { error: "Store path not allowed" },
+      });
+      return;
+    }
+    void deps
+      .request(method as ProxyMethod, storeUrl(store, segments), body)
+      .then((response) => postToSnippet({ type: SNIPPET_TO_HOST.db, callId, ...response }));
   }
 
   function handleStateSet(message: Record<string, unknown>): void {
-    const { callId } = message;
-    if (typeof callId !== "string") return;
     const controls = parseControls(message.controls ?? []);
     const app = (message.app ?? null) as JsonValue | null;
-    const ok =
-      controls !== null &&
-      snippetByteLength({ app, controls }) <= SNIPPET_MAX_STATE_BYTES &&
-      updateRecord((record) => {
-        record.state = { app, controls };
-      });
-    postToSnippet({ type: SNIPPET_TO_FRAME.stateAck, callId, ok });
+    if (controls === null || snippetByteLength({ app, controls }) > SNIPPET_MAX_STATE_BYTES) return;
+    const { instanceId } = state.manifest;
+    const store = dataStoreOf(state.manifest);
+    void stateDocId.then((docId) =>
+      deps.request("POST", storeUrl(store, ["docs", "_state", docId]), {
+        data: { instanceId, app, controls },
+      }),
+    );
   }
 
   function handleFullscreen(message: Record<string, unknown>): void {
@@ -699,6 +996,21 @@ export function createSnippetHost(
       case SNIPPET_TO_HOST.invoke:
         handleInvoke(data);
         return;
+      case SNIPPET_TO_HOST.db:
+        handleDb(data);
+        return;
+      case SNIPPET_TO_HOST.dbSubscribe:
+        // The frame never names a store: the subscription is always the data store.
+        if (!dataUnsubscribe) {
+          dataUnsubscribe = deps.poller.subscribe(dataStoreOf(state.manifest), onDataChange);
+        }
+        return;
+      case SNIPPET_TO_HOST.dbUnsubscribe:
+        dropDataSubscription();
+        return;
+      case SNIPPET_TO_HOST.agent:
+        handleAgent(data);
+        return;
       case SNIPPET_TO_HOST.stateSet:
         handleStateSet(data);
         return;
@@ -722,7 +1034,7 @@ export function createSnippetHost(
   }
 
   function onWindowMessage(data: unknown, fromFrame: boolean): void {
-    if (state.phase !== "connecting" || !fromFrame) return;
+    if (state.phase !== "connecting" || !fromFrame || handshaking) return;
     if (!isRecord(data) || data.type !== SNIPPET_WINDOW_MSG.hello || data.nonce !== state.nonce)
       return;
     if (data.protocolVersion !== SNIPPET_PROTOCOL_VERSION) {
@@ -730,16 +1042,31 @@ export function createSnippetHost(
       return;
     }
     clearTimeout(helloTimer);
-    const channel = deps.createChannel();
-    port = channel.hostPort;
-    port.onmessage = (event) => onPortMessage(event.data);
-    set({ phase: "connected" });
-    deps.postToFrame({ type: SNIPPET_WINDOW_MSG.connect, context: buildContext() }, [
-      channel.framePort,
-    ]);
+    handshaking = true;
+    const mount = mountCount;
+    const current = () => !disposed && mount === mountCount && state.phase === "connecting";
+    loadState().then(
+      (saved) => {
+        if (!current()) return;
+        handshaking = false;
+        const channel = deps.createChannel();
+        port = channel.hostPort;
+        port.onmessage = (event) => onPortMessage(event.data);
+        set({ phase: "connected" });
+        deps.postToFrame({ type: SNIPPET_WINDOW_MSG.connect, context: buildContext(saved) }, [
+          channel.framePort,
+        ]);
+      },
+      // No state doc id (crypto.subtle missing outside a secure context): no connect.
+      () => {
+        if (!current()) return;
+        handshaking = false;
+        fail("protocol");
+      },
+    );
   }
 
-  // ----- file changes (D8)
+  // ----- file changes
 
   function applyFile(manifest: SnippetManifest, html: string): ApplyFileResult {
     const current = state.manifest;
@@ -753,30 +1080,39 @@ export function createSnippetHost(
       if (manifest.revision < current.revision) return "lower_revision";
     }
     staleConfirm();
-    // A new instance is a new snippet (D8): its predecessor's retryable action must not be re-sent.
-    const retired =
-      manifest.instanceId !== current.instanceId &&
-      state.action !== null &&
-      SNIPPET_RETRY_STATUSES.includes(state.action.status);
+    // A new instance is a new snippet: its predecessor's action is not shown or retried.
+    const newInstance = manifest.instanceId !== current.instanceId;
     set({
       manifest,
       html,
       conflict: false,
       availability: availabilityFor(false),
-      ...(retired ? { action: null } : {}),
+      ...(newInstance ? { action: null } : {}),
     });
     recordMount();
     beginMount(false);
-    updateSession(
-      session ?? {
-        canSend,
-        state: "working",
-        queuedMessages: [],
-        messages: [],
-        fileSettled: false,
-      },
-    );
+    if (newInstance) restoreAction();
     return "mounted";
+  }
+
+  function updateSession(update: SnippetSessionUpdate): void {
+    agentWorking = update.state === "working";
+    const nextAgentState = agentStateOf(update);
+    if (nextAgentState !== agentState) {
+      agentState = nextAgentState;
+      // Same `agent` event a page gets from its stream, so spur.on("agent") holds in snippets.
+      postToSnippet({ type: SNIPPET_TO_FRAME.agentEvent, status: agentStatusOf(nextAgentState) });
+    }
+    if (canSend !== update.canSend) {
+      canSend = update.canSend;
+      if (!canSend) staleConfirm();
+      setAvailability(state.conflict);
+    }
+    const { action } = state;
+    if (action && (action.status === "queued" || action.status === "processing")) {
+      const next = agentWorking ? "processing" : "queued";
+      if (next !== action.status) publishAction({ ...action, status: next });
+    }
   }
 
   // ----- trusted host chrome
@@ -791,25 +1127,55 @@ export function createSnippetHost(
       return;
     }
     writeSnippetBudget(deps.storage, sessionId, 0, deps.now());
-    dispatch(pending.requestId, pending.actionId, pending.prompt, pending.retryOf, pending.reason);
+    const callId = confirmCallId;
+    confirmCallId = null;
+    if (pending.kind === "invoke") {
+      dispatch(pending, callId, pending.reason);
+      return;
+    }
+    set({ confirm: null });
+    postSend(pending.message, callId);
   }
 
   function confirmDiscard(trusted: boolean): void {
-    if (!trusted || !state.confirm) return;
-    resolvePending({ ok: false, reason: "declined" });
-    set({ confirm: null, action: actionBeforeConfirm });
+    const pending = state.confirm;
+    if (!trusted || !pending) return;
+    resolveConfirmCall("declined");
+    set({ confirm: null });
+    if (pending.kind === "invoke") set({ action: actionBeforeConfirm });
   }
 
   function retry(trusted: boolean): void {
     const last = state.action;
-    if (!trusted || !last || !SNIPPET_RETRY_STATUSES.includes(last.status)) return;
-    if (last.instanceId !== state.manifest.instanceId) return;
-    const parsed = parseSnippetActionPrompt(last.prompt);
-    if (!parsed) return;
-    const { decision, requestId } = decide(last.actionId, parsed.payload, last.requestId, true);
-    if (decision.kind !== "send") return;
-    writeSnippetBudget(deps.storage, sessionId, 0, deps.now());
-    dispatch(requestId, last.actionId, decision.prompt, last.requestId);
+    if (!trusted || !retryable(last)) return;
+    const mount = mountCount;
+    void retrySource(last).then((source) => {
+      if (disposed || mount !== mountCount || !source || state.action !== last) return;
+      const decision = decideInvoke({
+        connected: state.phase === "connected",
+        conflict: state.conflict,
+        manifest: state.manifest,
+        actionId: source.actionId,
+        payload: source.payload,
+        canSend,
+        busy: isBusy(),
+        hasInteraction: hasInteraction(),
+        gates: readGates(),
+        trusted: true,
+      });
+      if (decision.kind !== "send") return;
+      writeSnippetBudget(deps.storage, sessionId, 0, deps.now());
+      dispatch(
+        {
+          id: deps.uuid(),
+          actionId: source.actionId,
+          label: decision.label,
+          payload: decision.payload,
+          ...(source.retryOf ? { retryOf: source.retryOf } : {}),
+        },
+        null,
+      );
+    });
   }
 
   function reload(trusted: boolean): void {
@@ -824,23 +1190,11 @@ export function createSnippetHost(
     postToSnippet({ type: SNIPPET_TO_FRAME.fullscreen, fullscreen: open });
   }
 
-  // ----- init: restore the last action, reload during submitting = delivery_unknown
+  // ----- init
 
-  const restored = readSnippetRecord(deps.storage, sessionId, initial.manifest.snippetId);
-  if (restored.ok && restored.value && restored.value.instanceId === initial.manifest.instanceId) {
-    const { action } = restored.value;
-    if (action) {
-      state = {
-        ...state,
-        action: action.status === "submitting" ? { ...action, status: "delivery_unknown" } : action,
-      };
-    }
-  }
   recordMount();
-  if (state.action && restored.ok && restored.value?.action?.status === "submitting") {
-    updateRecord((record) => void (record.action = state.action));
-  }
   beginMount(false);
+  restoreAction();
 
   return {
     getState: () => state,
@@ -856,7 +1210,7 @@ export function createSnippetHost(
       if (loads >= 2 && state.phase !== "error") fail("navigated");
     },
     noteFrameFocus() {
-      // D4: only a blur observed after connect counts.
+      // Only a blur observed after connect counts.
       if (state.phase === "connected") blurObserved = true;
     },
     themeChanged() {
@@ -868,9 +1222,11 @@ export function createSnippetHost(
     reload,
     setFullscreen,
     dispose() {
+      staleConfirm();
+      failInvokeCall();
       disposed = true;
-      resolvePending({ ok: false, reason: "stale" });
       closePort();
+      ownerUnsubscribe();
       listeners.clear();
     },
   };

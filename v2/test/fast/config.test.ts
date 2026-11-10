@@ -4199,6 +4199,46 @@ projects:
     );
   });
 
+  it("rejects the reserved page session prefix pg- and project id prefix spur-page-", async () => {
+    const derived = await writeConfig(`
+projects:
+  pg-x:
+    path: $REPO_PATH
+`);
+    expect(() => loadConfig(derived)).toThrow(
+      'sessionPrefix "pg-x" uses the reserved page prefix pg-',
+    );
+    const explicit = await writeConfig(`
+projects:
+  films:
+    path: $REPO_PATH
+    sessionPrefix: pg-x
+`);
+    expect(() => loadConfig(explicit)).toThrow(
+      'sessionPrefix "pg-x" uses the reserved page prefix pg-',
+    );
+    const pageId = await writeConfig(`
+projects:
+  spur-page-x:
+    path: $REPO_PATH
+    sessionPrefix: spx
+`);
+    expect(() => loadConfig(pageId)).toThrow(
+      'project id "spur-page-x" uses the reserved prefix spur-page-',
+    );
+    const allowed = await writeConfig(`
+projects:
+  a:
+    path: $REPO_PATH
+    sessionPrefix: pg
+  b:
+    path: $REPO_PATH
+    sessionPrefix: pgx
+`);
+    expect(loadConfig(allowed).projects["a"]?.sessionPrefix).toBe("pg");
+    expect(loadConfig(allowed).projects["b"]?.sessionPrefix).toBe("pgx");
+  });
+
   it("parses devServer as sidecar backward compat", async () => {
     const configPath = await writeConfig(`
 projects:

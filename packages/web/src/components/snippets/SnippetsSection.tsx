@@ -15,7 +15,6 @@ import {
   SNIPPET_MAX_MOUNTED,
 } from "@/lib/snippets/snippet-protocol";
 import type { SnippetSessionUpdate } from "@/lib/snippets/snippet-host";
-import type { ConversationMessage } from "@/lib/types";
 
 interface LoadedSnippet {
   manifest: SnippetManifest;
@@ -33,14 +32,12 @@ interface FileEntry {
   key: string;
   loaded: LoadedSnippet | null;
   problem: FileProblem | null;
-  fetching: boolean;
 }
 
 export interface SnippetsSectionProps {
   sessionId: string;
   files: readonly OwnedSnippetArtifact[];
-  session: Omit<SnippetSessionUpdate, "messages" | "fileSettled">;
-  messages: readonly ConversationMessage[];
+  session: SnippetSessionUpdate;
 }
 
 const listingKeyOf = ({ artifact }: OwnedSnippetArtifact): string =>
@@ -130,7 +127,7 @@ const PROBLEM_CARD: Record<FileProblem["code"], { chip: string; message: string 
   },
 };
 
-export function SnippetsSection({ sessionId, files, session, messages }: SnippetsSectionProps) {
+export function SnippetsSection({ sessionId, files, session }: SnippetsSectionProps) {
   const [entries, setEntries] = useState<Record<string, FileEntry>>({});
   // Snippets whose newest file the panel's controller refused as a lower revision.
   const [refused, setRefused] = useState<Record<string, boolean>>({});
@@ -168,15 +165,6 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
       const { signal } = fetchController;
       const abortFetch = () => fetchController.abort();
       controller.signal.addEventListener("abort", abortFetch, { once: true });
-      setEntries((previous) => ({
-        ...previous,
-        [snippetId]: {
-          key,
-          loaded: previous[snippetId]?.loaded ?? null,
-          problem: previous[snippetId]?.problem ?? null,
-          fetching: true,
-        },
-      }));
       const settle = (result: { html: string } | { problem: FileProblem }) => {
         controller.signal.removeEventListener("abort", abortFetch);
         if (signal.aborted) return;
@@ -188,7 +176,6 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
           [snippetId]: {
             key,
             ...resolveLoad(result, previous[snippetId]?.loaded ?? null, { sessionId, snippetId }),
-            fetching: false,
           },
         }));
       };
@@ -237,11 +224,8 @@ export function SnippetsSection({ sessionId, files, session, messages }: Snippet
               {card}
               {entry?.loaded ? (
                 <SnippetPanel
-                  fetching={entry.fetching}
                   html={entry.loaded.html}
-                  listingKey={listingKeyOf(file)}
                   manifest={entry.loaded.manifest}
-                  messages={messages}
                   onApplyResult={(result) => {
                     const lower = result === "lower_revision";
                     const title = entry.loaded?.manifest.title;

@@ -155,6 +155,8 @@ async function runPrune(options: {
   psArgsFail?: boolean;
   psPidOutput?: string;
   psPidFail?: boolean;
+  psCallLog?: string;
+  refreshDuringPs?: string;
   fileSizeLimit?: 0;
   fakeBinDir: string;
   // GATE C (859/B2): HOME + GIT_CONFIG_GLOBAL for the real `git` calls
@@ -193,9 +195,15 @@ async function runPrune(options: {
     // a silent real-ps passthrough that happens to still look fine.
     `#!/usr/bin/env bash
 set -euo pipefail
+if [[ -n "$PRUNE_TEST_PS_CALL_LOG" ]]; then
+  printf '%s\\n' "$*" >> "$PRUNE_TEST_PS_CALL_LOG"
+fi
 if [[ "$#" -eq 2 && "$1" == "-eo" && "$2" == "args=" ]]; then
   if [[ "${psArgsFail ? "1" : "0"}" == "1" ]]; then
     exit 1
+  fi
+  if [[ -n "$PRUNE_TEST_REFRESH_DIR" ]]; then
+    touch "$PRUNE_TEST_REFRESH_DIR"
   fi
   cat "$PRUNE_TEST_PS_ARGS_FILE"
   exit 0
@@ -222,6 +230,8 @@ exit 97
       CONFIG_DIR: configDir,
       PRUNE_TEST_PS_ARGS_FILE: psArgsFile,
       PRUNE_TEST_PS_PID_OUTPUT: psPidOutput,
+      PRUNE_TEST_PS_CALL_LOG: options.psCallLog ?? "",
+      PRUNE_TEST_REFRESH_DIR: options.refreshDuringPs ?? "",
       HOME: resolvedGitHome.home,
       GIT_CONFIG_GLOBAL: join(resolvedGitHome.home, ".gitconfig"),
     },
@@ -229,20 +239,67 @@ exit 97
 }
 
 describe("spur-isolated-daemon.sh prune_stale_config_dirs", () => {
+  it.each([false, true])(
+    "skips process inventory with no stale candidate besides current config (current stale: %s)",
+    async (currentStale) => {
+      const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
+      cleanupPaths.push(tmpRoot);
+      const configDir = await makeStaleDir(
+        tmpRoot,
+        "spur-isolated-daemon.self",
+        currentStale ? 120 : 0,
+      );
+      const fresh = await makeStaleDir(tmpRoot, "spur-isolated-daemon.fresh", 0);
+      const psCallLog = join(tmpRoot, "ps-calls");
+
+      await runPrune({ tmpRoot, configDir, psCallLog, fakeBinDir: join(tmpRoot, "bin") });
+
+      expect(existsSync(psCallLog)).toBe(false);
+      expect(existsSync(configDir)).toBe(true);
+      expect(existsSync(fresh)).toBe(true);
+    },
+  );
+
+  it("keeps a stale candidate refreshed during process inventory", async () => {
+    const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
+    cleanupPaths.push(tmpRoot);
+    const configDir = join(tmpRoot, "spur-isolated-daemon.self");
+    mkdirSync(configDir);
+    const refreshed = await makeStaleDir(tmpRoot, "spur-isolated-daemon.refreshed", 120);
+    const psCallLog = join(tmpRoot, "ps-calls");
+
+    await runPrune({
+      tmpRoot,
+      configDir,
+      psCallLog,
+      refreshDuringPs: refreshed,
+      fakeBinDir: join(tmpRoot, "bin"),
+    });
+
+    expect(readFileSync(psCallLog, "utf8").trim().split("\n")).toHaveLength(2);
+    expect(existsSync(refreshed)).toBe(true);
+  });
+
   it("removes a stale, unreferenced dir", async () => {
     const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
     cleanupPaths.push(tmpRoot);
     const configDir = join(tmpRoot, "spur-isolated-daemon.self");
     mkdirSync(configDir, { recursive: true });
     const stale = await makeStaleDir(tmpRoot, "spur-isolated-daemon.stale1", 120);
+    const psCallLog = join(tmpRoot, "ps-calls");
 
     await runPrune({
       tmpRoot,
       configDir,
+      psCallLog,
       fakeBinDir: join(tmpRoot, "bin"),
     });
 
     expect(existsSync(stale)).toBe(false);
+    expect(readFileSync(psCallLog, "utf8").trim().split("\n")).toEqual([
+      "-eo args=",
+      expect.stringMatching(/^-o pid= -u \d+$/),
+    ]);
   });
 
   it("keeps a stale dir named in ps argv output (GATE A)", async () => {

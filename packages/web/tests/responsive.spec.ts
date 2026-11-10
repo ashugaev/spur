@@ -465,13 +465,7 @@ test.describe("R2: Tablet viewport (768px)", () => {
     await expect(page.getByText("claude").first()).toBeVisible();
   });
 
-  // Previously named "header controls wrap one element at a time before
-  // compact stat labels" and asserted a multi-row wrap at 700px/430px. The
-  // redesign collapses the header to ONE row at every width below md — the
-  // project name and stat cluster that used to force a wrap no longer live
-  // in the header at all (project name is hidden below md; stats moved into
-  // the Filters modal). Rewritten to assert the one-row invariant holds at
-  // both widths instead of forcing the old wrap behavior to stay green.
+  // Keep the mobile project menu reachable while preserving one header row.
   test("header stays one row at 700px and 390px, below the md breakpoint", async ({ page }) => {
     await mockSessions(page, []);
 
@@ -492,9 +486,8 @@ test.describe("R2: Tablet viewport (768px)", () => {
       shepherd.boundingBox(),
     ]);
     expectOneRowBand([glyphBox700, filtersBox700, searchBox700, shepherdBox700]);
-    // Project name is hidden below md; the header spawn button is replaced
-    // by the FAB, so only one "Spawn Session" node exists.
-    await expect(page.getByRole("button", { name: /Project filter:/ })).toHaveCount(0);
+    // The same selector exposes Pages; the FAB owns mobile session creation.
+    await expect(page.getByRole("button", { name: /Project filter:/ })).toBeVisible();
     await expect(page.getByRole("button", { name: "Spawn Session" })).toHaveCount(1);
 
     await page.setViewportSize({ width: 390, height: 844 });
