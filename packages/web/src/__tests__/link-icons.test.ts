@@ -1036,6 +1036,56 @@ describe("shared PR poller", () => {
     expect(starts[4]).toBe(1_800_000);
   });
 
+  it.each([false, true])(
+    "backs off a route-cached GitLab error with a cold client (mixed providers: %s)",
+    async (mixed) => {
+      const gitlab = `https://gitlab.com/org/repo/-/merge_requests/${mixed ? 2201 : 2200}`;
+      const github = "https://github.com/org/repo/pull/2200";
+      const baseline = Date.now();
+      const starts: number[] = [];
+      const staleInfo = {
+        ...openPr,
+        ciStatus: "success",
+        fetchedAt: baseline - 60_000,
+        stale: true,
+        error: "GitLab API 503",
+      };
+      mockFetch.mockImplementation(async (input) => {
+        if (input === "/api/pr-status/batch")
+          return jsonResponse({ results: { [github]: openPr } });
+        starts.push(Date.now() - baseline);
+        return jsonResponse(
+          starts.length === 1
+            ? staleInfo
+            : { ...openPr, state: "merged", fetchedAt: Date.now(), stale: false },
+        );
+      });
+      if (mixed) renderHook(() => usePrInfo(github));
+      const { result } = renderHook(() => usePrInfo(gitlab));
+      expect(result.current.state).toBeNull();
+      await advance(0);
+      expect(result.current).toMatchObject({
+        state: "open",
+        ciStatus: "success",
+        fetchedAt: staleInfo.fetchedAt,
+        stale: true,
+      });
+      expect(starts).toEqual([0]);
+      await advance(120_000);
+      expect(starts).toEqual([0]);
+      await advance(119_999);
+      expect(starts).toEqual([0]);
+      expect(result.current.state).toBe("open");
+      await advance(1);
+      expect(starts).toEqual([0, 240_000]);
+      expect(result.current).toMatchObject({ state: "merged", stale: false });
+      await advance(119_999);
+      expect(starts).toHaveLength(2);
+      await advance(1);
+      expect(starts).toEqual([0, 240_000, 360_000]);
+    },
+  );
+
   it("does not let a successful GitHub batch mask a GitLab failure", async () => {
     const github = "https://github.com/org/repo/pull/2100";
     const gitlab = "https://gitlab.com/org/repo/-/merge_requests/mixed-failure";

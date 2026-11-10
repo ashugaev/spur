@@ -204,7 +204,7 @@ async function fetchPrInfoResult(url: string): Promise<PrFetchResult> {
       const parsed = parsePrInfoPayload(obj);
       if (error && parsed.state === null)
         return { info: cachedOrEmpty(url), outcome: "failed" };
-      return { info: parsed, outcome: "ok" };
+      return { info: parsed, outcome: error ? "failed" : "ok" };
     } catch {
       return { info: cachedOrEmpty(url), outcome: "failed" };
     } finally {
