@@ -1,5 +1,6 @@
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { homedir } from "node:os";
 import { basename } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { URL } from "node:url";
@@ -19,6 +20,7 @@ import {
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { AutoPingError, AutoPingService, redactAutoPingHandles } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
+import { PrAlertOwnerRequestError } from "./pr-alert-owner.js";
 import { projectConversationPage } from "./conversation-page.js";
 import { readCronJobs, UnknownCronProjectError } from "./cron-jobs.js";
 import {
@@ -64,6 +66,7 @@ import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import { captureTmuxPane } from "./runtime-tmux.js";
 import { getReleases } from "./releases-cache.js";
+import { buildUsageReport } from "./usage-report.js";
 import {
   AgentExitedBeforeSendError,
   GithubPrCheckUnavailableError,
@@ -672,6 +675,7 @@ export function parseRestoreSessionRequest(raw: unknown): RestoreSessionRequest 
   const operationId = parseLifecycleOperationId(raw["operationId"]);
   return {
     ...(operationId ? { operationId } : {}),
+    ...(raw["restart"] === true ? { restart: true } : {}),
     ...(raw["force"] === true ? { force: true } : {}),
     ...(raw["overrideTokenBudget"] === true ? { overrideTokenBudget: true } : {}),
   };
@@ -1116,6 +1120,24 @@ export async function startServer(
 
       if (method === "GET" && path === "/headroom") {
         sendJson(response, 200, await service.getHeadroom());
+        return;
+      }
+
+      if (method === "GET" && path === "/usage") {
+        const nowMs = Date.now();
+        const todayStart = new Date(nowMs);
+        todayStart.setHours(0, 0, 0, 0);
+        sendJson(
+          response,
+          200,
+          await buildUsageReport({
+            fetch: globalThis.fetch,
+            homeDir: homedir(),
+            dataDir: service.config.dataDir,
+            nowMs,
+            todayStartMs: todayStart.getTime(),
+          }),
+        );
         return;
       }
 
@@ -2066,7 +2088,11 @@ export async function startServer(
 
       if (method === "POST" && path === "/sessions") {
         const body = await readJsonBody<SpawnSessionRequest>(request, 15_000_000);
-        sendJson(response, 201, await service.spawn(mergeSpawnStateSubscriptions(body)));
+        sendJson(
+          response,
+          201,
+          await service.spawn(mergeSpawnStateSubscriptions(body), { acceptQueued: true }),
+        );
         return;
       }
 
@@ -2525,7 +2551,8 @@ export async function startServer(
         error instanceof OpenPrActionRequiredError ||
         error instanceof GithubPrCheckUnavailableError ||
         error instanceof SessionNotRestorableError ||
-        error instanceof SpawnBatchConflictError
+        error instanceof SpawnBatchConflictError ||
+        error instanceof PrAlertOwnerRequestError
       ) {
         failRequest(response, error.statusCode, message, {
           method,

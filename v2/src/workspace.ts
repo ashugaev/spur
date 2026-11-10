@@ -331,35 +331,161 @@ export async function readRemoteUrls(repoPath: string): Promise<Map<string, stri
   return urls;
 }
 
-export async function readBranchPushUrl(repoPath: string, branch: string): Promise<string | null> {
+export interface BranchDestination {
+  url: string;
+  branch: string;
+}
+
+export type BranchDestinationContext =
+  | { status: "known"; push: BranchDestination | null; upstream: BranchDestination | null }
+  | { status: "unknown" };
+
+export async function readBranchDestination(
+  repoPath: string,
+  branch: string,
+): Promise<BranchDestinationContext> {
   const ref = `refs/heads/${branch}`;
   try {
     const refs = await runGit(
       repoPath,
-      ["for-each-ref", "--format=%(refname)\t%(push:remotename)\t%(push)", ref],
+      [
+        "for-each-ref",
+        "--format=%(refname)\t%(push:remotename)\t%(push)\t%(upstream:remotename)\t%(upstream)",
+        ref,
+      ],
       GIT_READ_TIMEOUT_MS,
     );
     const rows = refs.split("\n");
-    if (rows.length !== 1) return null;
-    const [name, remote, push] = rows[0]?.split("\t") ?? [];
-    if (name !== ref || !remote || push !== `refs/remotes/${remote}/${branch}`) return null;
-    const fetch = await runGit(
-      repoPath,
-      ["config", "--get-all", `remote.${remote}.fetch`],
-      GIT_READ_TIMEOUT_MS,
-    );
-    const canonicalFetch = `refs/heads/*:refs/remotes/${remote}/*`;
-    if (fetch !== canonicalFetch && fetch !== `+${canonicalFetch}`) return null;
-    const urls = await runGit(
-      repoPath,
-      ["remote", "get-url", "--push", "--all", remote],
-      GIT_READ_TIMEOUT_MS,
-    );
-    const candidates = urls.split("\n").filter(Boolean);
-    return candidates.length === 1 ? (candidates[0] ?? null) : null;
+    if (rows.length !== 1) return { status: "unknown" };
+    const [name, atomPushRemote, pushRef, atomUpstreamRemote, upstreamRef] =
+      rows[0]?.split("\t") ?? [];
+    if (name !== ref) return { status: "unknown" };
+    const rawConfig = await runGit(repoPath, ["config", "--list"], GIT_READ_TIMEOUT_MS);
+    const config = new Map<string, string[]>();
+    for (const line of rawConfig.split("\n")) {
+      const equals = line.indexOf("=");
+      if (equals < 0) continue;
+      const key = line.slice(0, equals);
+      if (
+        !key.startsWith("remote.") &&
+        !key.startsWith(`branch.${branch}.`) &&
+        key !== "push.default"
+      )
+        continue;
+      const values = config.get(key) ?? [];
+      values.push(line.slice(equals + 1));
+      config.set(key, values);
+    }
+    const last = (key: string): string | undefined => config.get(key)?.at(-1);
+    const configuredMode = last("push.default") ?? "simple";
+    const mode = configuredMode === "tracking" ? "upstream" : configuredMode;
+    if (!["simple", "current", "matching", "upstream", "nothing"].includes(mode)) {
+      return { status: "unknown" };
+    }
+    const remoteNames = [...config.keys()].flatMap((key) => {
+      const match = /^remote\.(.+)\.url$/.exec(key);
+      return match?.[1] ? [match[1]] : [];
+    });
+    const trackedRemote = last(`branch.${branch}.remote`);
+    const merges = config.get(`branch.${branch}.merge`) ?? [];
+    if (merges.length > 1 || (merges.length === 1 && !trackedRemote)) {
+      return { status: "unknown" };
+    }
+    const trackedRef = merges[0];
+    if (
+      trackedRef &&
+      (!trackedRef.startsWith("refs/heads/") ||
+        (atomUpstreamRemote && atomUpstreamRemote !== trackedRemote) ||
+        (upstreamRef && upstreamRef !== `refs/remotes/${trackedRemote}/${trackedRef.slice(11)}`))
+    )
+      return { status: "unknown" };
+    if (!trackedRef && (atomUpstreamRemote || upstreamRef)) return { status: "unknown" };
+    let pushRemote =
+      atomPushRemote ||
+      last(`branch.${branch}.pushremote`) ||
+      last("remote.pushdefault") ||
+      trackedRemote;
+    if (pushRef && !pushRemote) {
+      const candidates = remoteNames.filter((remote) =>
+        pushRef.startsWith(`refs/remotes/${remote}/`),
+      );
+      if (candidates.length !== 1) return { status: "unknown" };
+      pushRemote = candidates[0];
+    }
+    const prefix = `refs/remotes/${pushRemote}/`;
+    if (pushRef && (!pushRemote || !pushRef.startsWith(prefix))) return { status: "unknown" };
+    const pushBranch = pushRef?.slice(prefix.length);
+    if (pushRef && !pushBranch) return { status: "unknown" };
+    const pushSpecs = pushRemote ? (config.get(`remote.${pushRemote}.push`) ?? []) : [];
+    const pushTargets = new Set<string>();
+    for (const pushSpec of pushSpecs) {
+      const spec = pushSpec.startsWith("+") ? pushSpec.slice(1) : pushSpec;
+      if (spec === "refs/heads/*:refs/heads/*") {
+        pushTargets.add(ref);
+        continue;
+      }
+      const [source, destination = source, ...extra] = spec.split(":");
+      if (!source || extra.length > 0 || source.includes("*")) return { status: "unknown" };
+      if (source !== ref && source !== branch) {
+        if (source.startsWith("refs/heads/") || source.startsWith("refs/tags/")) continue;
+        return { status: "unknown" };
+      }
+      if (!destination || destination.includes("*")) return { status: "unknown" };
+      pushTargets.add(destination.startsWith("refs/") ? destination : `refs/heads/${destination}`);
+    }
+    if (
+      pushTargets.size > 1 ||
+      (pushTargets.size === 1 && (!pushBranch || !pushTargets.has(`refs/heads/${pushBranch}`))) ||
+      (pushRef && pushSpecs.length > 0 && pushTargets.size === 0)
+    ) {
+      return { status: "unknown" };
+    }
+    if (
+      !pushRef &&
+      (mode === "current" || mode === "matching") &&
+      remoteNames.length > 0 &&
+      pushSpecs.length === 0
+    )
+      return { status: "unknown" };
+    const location = async (
+      remote: string,
+      remoteBranch: string,
+      pushing: boolean,
+    ): Promise<BranchDestination> => {
+      const fetches = config.get(`remote.${remote}.fetch`) ?? [];
+      const canonical = `refs/heads/*:refs/remotes/${remote}/*`;
+      if (
+        !remoteBranch ||
+        fetches.length !== 1 ||
+        (fetches[0] !== canonical && fetches[0] !== `+${canonical}`)
+      )
+        throw new Error("Unproven remote fetch mapping");
+      const urls = await runGit(
+        repoPath,
+        ["remote", "get-url", ...(pushing ? ["--push"] : []), "--all", remote],
+        GIT_READ_TIMEOUT_MS,
+      );
+      const candidates = urls.split("\n").filter(Boolean);
+      const url = candidates.length === 1 ? candidates[0] : undefined;
+      if (!url) throw new Error("Ambiguous remote URL");
+      return { url, branch: remoteBranch };
+    };
+    return {
+      status: "known",
+      push: pushRemote && pushBranch ? await location(pushRemote, pushBranch, true) : null,
+      upstream:
+        trackedRemote && trackedRef
+          ? await location(trackedRemote, trackedRef.slice(11), false)
+          : null,
+    };
   } catch {
-    return null;
+    return { status: "unknown" };
   }
+}
+
+export async function readBranchPushUrl(repoPath: string, branch: string): Promise<string | null> {
+  const context = await readBranchDestination(repoPath, branch);
+  return context.status === "known" && context.push?.branch === branch ? context.push.url : null;
 }
 
 function normalizeBranchHint(value: string | undefined): string | undefined {

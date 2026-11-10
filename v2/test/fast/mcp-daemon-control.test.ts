@@ -12,6 +12,38 @@ afterEach(() => vi.clearAllMocks());
 const identity = { pid: 12345, lifecycleInstanceId: "before" };
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+it.each([
+  "00000000-0000-0000-0000-000000000000",
+  "ffffffff-ffff-ffff-ffff-ffffffffffff",
+  "ABCDEFAB-CDEF-9ABC-0DEF-ABCDEFABCDEF",
+])("retains legacy UUID-shaped receipt %s without readmission or changed ID bytes", async (id) => {
+  const data = await createTempDir("mcp-legacy-id-");
+  const control = new McpDaemonControl(data, join(data, "config.yaml"));
+  const receipt = {
+    operationId: id,
+    action: "daemon.restart",
+    status: "completed",
+    acceptedAt: "2026-01-01T00:00:00.000Z",
+    previousPid: identity.pid,
+    previousInstanceId: identity.lifecycleInstanceId,
+    executorPid: process.pid,
+  };
+  writeFileSync(join(data, "mcp-operator-actions", `${id}.json`), JSON.stringify(receipt));
+  expect(control.get(id)).toEqual(receipt);
+  expect(control.accept(id, identity)).toEqual({ duplicate: true, receipt });
+  expect(restartDaemonIfRunning).not.toHaveBeenCalled();
+});
+
+it("rejects malformed IDs before filesystem admission or restart", async () => {
+  const data = await createTempDir("mcp-invalid-id-");
+  const control = new McpDaemonControl(data, join(data, "config.yaml"));
+  for (const id of ["", "../escape", "not-a-uuid", "gggggggg-0000-0000-0000-000000000000"]) {
+    expect(() => control.accept(id, identity)).toThrow();
+    expect(() => control.get(id)).toThrow();
+  }
+  expect(restartDaemonIfRunning).not.toHaveBeenCalled();
+});
+
 it("admits once across MCP hosts, retains the receipt and audit, reconciles a ready new generation", async () => {
   const data = await createTempDir("mcp-control-");
   vi.mocked(restartDaemonIfRunning).mockResolvedValue({

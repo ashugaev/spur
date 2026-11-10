@@ -184,7 +184,7 @@ export async function POST(request: NextRequest) {
       const missError = aliasError ?? queryWide;
       let response: PrStatusResponse;
       if (isGitHubPrNode(node)) {
-        response = recordGitHubPrNode(entry.key, node, aliasError);
+        response = await recordGitHubPrNode(entry.key, node, aliasError);
       } else if (missError) {
         response = recordGitHubPrError(entry.key, missError);
       } else {

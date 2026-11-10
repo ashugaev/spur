@@ -113,8 +113,17 @@ const spawn = body("SpawnSessionRequest", [
     "boolean",
     "Agent write restriction setting; does not restrict MCP rights.",
   ),
-  field("allowedTriggers", "string[]", "Allowed configured trigger IDs."),
+  field(
+    "allowedTriggers",
+    "string[]",
+    "Allowed send trigger IDs. Omit to allow all; [] blocks every send trigger, including CI failure alerts. Carried by respawn and handoff.",
+  ),
   field("branch", "string", "Workspace branch; project naming constraints apply."),
+  field(
+    "prAlertOwner",
+    "boolean",
+    "Opt into exclusive native PR CI and conflict alerts; requires an allowed send route for each class.",
+  ),
   overrides,
   field("reuseWorkspaceSessionId", "string", "Reuse the named session workspace."),
   field("originalTaskPrompt", "string", "Original task retained across task handoffs."),
@@ -139,6 +148,13 @@ const send = body("SendMessageRequest", [
 ]);
 const restore = body("RestoreSessionRequest", [
   field("operationId", "string", "Optional lifecycle operation ID for receipt reconciliation."),
+  field(
+    "restart",
+    "boolean",
+    "Restart a running terminal session; restore endpoint only.",
+    false,
+    false,
+  ),
   field(
     "force",
     "boolean",
@@ -444,6 +460,12 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     { response: "RuntimeInfo" },
   ),
   operation("get_headroom", "GET", "/headroom", "Host/session admission capacity."),
+  operation(
+    "get_usage",
+    "GET",
+    "/usage",
+    "Provider quota windows and session token totals; tokens excluded.",
+  ),
   operation(
     "list_deploy_versions",
     "GET",
@@ -912,19 +934,21 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
         },
       ],
       status: 201,
-      response: "SessionView",
+      response:
+        "SessionView; under resource admission pressure, accepts a spawning identity before launch. Healthy foreground requests wait for launch.",
     },
   ),
   operation(
     "spawn_background_session",
     "POST",
     "/sessions/background",
-    "Spawn session in background; same complete spawn contract.",
+    "Spawn session in background; accepts identity before resource recovery and launch.",
     {
       body: spawn,
       examples: [{ body: { project: "example-project", prompt: "Inspect code", agent: "codex" } }],
       status: 201,
-      response: "SessionView",
+      response:
+        "SessionView with accepted spawning identity; durable launch intent retains that identity across daemon restart. Uncertain runtime ownership remains held.",
     },
   ),
   operation("spawn_shepherd", "POST", "/shepherd/spawn", "Spawn or reuse shepherd session.", {

@@ -11,11 +11,13 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join, relative, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { isCursorDeliveryId } from "./agents/cursor-submit-ack.js";
 import { appendEventLog } from "./event-log.js";
 import { parseConsent, type InterfaceConsent } from "./review-interface-consent.js";
 import {
   isSessionState,
+  isTerminalSessionStatus,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   DELIVERY_MAX_ATTEMPTS,
   type AvailableBacklogItem,
@@ -46,8 +48,10 @@ import { normalizeSessionPrBinding, parseSessionPrBinding } from "./session-pr.j
 import { workspaceIdOf } from "./session-desk.js";
 import { aggregateTokenUsage } from "./token-usage.js";
 import { normalizePreflightTotals } from "./preflight-usage-store.js";
+import { parseArtifactRelativePath } from "./session-artifacts.js";
+import { parseSpawnOverrides } from "./spawn-overrides.js";
 
-function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
+export function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
 }
 
@@ -871,6 +875,13 @@ function parseReviewSnapshot(path: string): ReviewSnapshot {
     | undefined;
   const prNumber = typeof envelope?.prNumber === "number" ? envelope.prNumber : null;
   const mergeConflictClearId = envelope?.mergeConflictClearId;
+  const ownerRollbackId = envelope?.ownerRollbackId;
+  if (
+    ownerRollbackId !== undefined &&
+    (typeof ownerRollbackId !== "string" || !ownerRollbackId.trim())
+  ) {
+    throw new Error("Invalid PR alert rollback identifier");
+  }
   if (
     mergeConflictClearId !== undefined &&
     (typeof mergeConflictClearId !== "string" || !/^[0-9a-f-]{36}$/.test(mergeConflictClearId))
@@ -880,6 +891,7 @@ function parseReviewSnapshot(path: string): ReviewSnapshot {
   return {
     prNumber,
     ...(mergeConflictClearId !== undefined ? { mergeConflictClearId } : {}),
+    ...(ownerRollbackId !== undefined ? { ownerRollbackId } : {}),
     signals: new Map(
       (signalsRaw ?? []).map((signal) => [signal.key, signal] satisfies [string, ReviewSignal]),
     ),
@@ -1183,7 +1195,308 @@ function normalizePreflightTokenUsage(value: unknown): SessionRecord["preflightT
   };
 }
 
+function durableObject(
+  value: unknown,
+  keys: readonly string[],
+  label: string,
+): Record<string, unknown> {
+  if (
+    !isRecord(value) ||
+    Array.isArray(value) ||
+    Object.keys(value).some((key) => !keys.includes(key))
+  ) {
+    throw new Error(`Invalid durable spawn metadata: ${label}`);
+  }
+  return value;
+}
+
+function durableCheck(valid: boolean, label: string): asserts valid {
+  if (!valid) throw new Error(`Invalid durable spawn metadata: ${label}`);
+}
+
+function durableString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function durableStrings(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(durableString);
+}
+
+function durableEffort(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(value)
+  );
+}
+
+function validateDurableSpawnFields(session: SessionRecord): void {
+  if (session.spawnReceipt !== undefined) {
+    const receipt = durableObject(session.spawnReceipt, ["version", "acceptedAt"], "receipt");
+    durableCheck(
+      receipt["version"] === 1 &&
+        durableString(receipt["acceptedAt"]) &&
+        Number.isFinite(Date.parse(receipt["acceptedAt"])),
+      "receipt version/time",
+    );
+  }
+  if (session.spawnIntent === undefined) return;
+  durableCheck(
+    session.spawnReceipt !== undefined && !isTerminalSessionStatus(session.status),
+    "intent ownership",
+  );
+  durableCheck(["claude", "codex", "cursor", "opencode"].includes(session.agent), "intent agent");
+  durableCheck(
+    ["spawning", "running", "stopped", "paused", "budget_limited", "errored"].includes(
+      session.status,
+    ),
+    "intent status",
+  );
+  const intent = durableObject(
+    session.spawnIntent,
+    [
+      "version",
+      "phase",
+      "request",
+      "mode",
+      "defaultBranch",
+      "preflightBatchId",
+      "startupAttachments",
+      "launchSelection",
+      "submission",
+      "pane",
+      "telegramOrigin",
+    ],
+    "intent",
+  );
+  durableCheck(
+    intent["version"] === 1 &&
+      typeof intent["phase"] === "string" &&
+      ["queued", "workspace_ready", "launching", "submitted"].includes(intent["phase"]),
+    "intent version/phase",
+  );
+  durableCheck(
+    durableString(intent["defaultBranch"]) && durableString(intent["preflightBatchId"]),
+    "intent branch/preflight",
+  );
+  const request = durableObject(
+    intent["request"],
+    [
+      "project",
+      "prompt",
+      "steps",
+      "agent",
+      "model",
+      "reasoningEffort",
+      "mode",
+      "planMode",
+      "restrictWrites",
+      "allowedTriggers",
+      "prAlertOwner",
+      "branch",
+      "overrides",
+      "reuseWorkspaceSessionId",
+      "originalTaskPrompt",
+      "bareSpawnMessage",
+      "preflightBatchId",
+      "slots",
+      "selfDestruct",
+      "bootstrap",
+      "claudeAccountId",
+      "subscriptions",
+    ],
+    "request",
+  );
+  durableCheck(request["project"] === session.project, "request project");
+  for (const key of [
+    "model",
+    "mode",
+    "branch",
+    "reuseWorkspaceSessionId",
+    "preflightBatchId",
+    "claudeAccountId",
+  ]) {
+    durableCheck(request[key] === undefined || durableString(request[key]), `request ${key}`);
+  }
+  for (const key of ["prompt", "originalTaskPrompt"]) {
+    durableCheck(request[key] === undefined || typeof request[key] === "string", `request ${key}`);
+  }
+  for (const key of [
+    "planMode",
+    "restrictWrites",
+    "bareSpawnMessage",
+    "bootstrap",
+    "prAlertOwner",
+  ]) {
+    durableCheck(request[key] === undefined || typeof request[key] === "boolean", `request ${key}`);
+  }
+  for (const key of ["steps", "allowedTriggers"]) {
+    durableCheck(request[key] === undefined || durableStrings(request[key]), `request ${key}`);
+  }
+  durableCheck(
+    request["agent"] === undefined || request["agent"] === session.agent,
+    "request agent",
+  );
+  durableCheck(
+    request["reasoningEffort"] === undefined || durableEffort(request["reasoningEffort"]),
+    "request effort",
+  );
+  if (request["overrides"] !== undefined)
+    parseSpawnOverrides(request["overrides"], "durable spawn request overrides");
+  if (request["selfDestruct"] !== undefined) {
+    const value = durableObject(request["selfDestruct"], ["enabled", "conditions"], "selfDestruct");
+    durableCheck(
+      typeof value["enabled"] === "boolean" &&
+        (value["conditions"] === undefined || typeof value["conditions"] === "string"),
+      "selfDestruct values",
+    );
+  }
+  if (request["slots"] !== undefined) {
+    const slots = durableObject(request["slots"], ["links"], "slots");
+    if (slots["links"] !== undefined) {
+      durableCheck(Array.isArray(slots["links"]), "links");
+      for (const raw of slots["links"]) {
+        const link = durableObject(raw, ["label", "url"], "link");
+        durableCheck(durableString(link["label"]) && durableString(link["url"]), "link values");
+      }
+    }
+  }
+  if (request["subscriptions"] !== undefined) {
+    durableCheck(Array.isArray(request["subscriptions"]), "subscriptions");
+    for (const raw of request["subscriptions"]) {
+      const subscription = durableObject(
+        raw,
+        ["targetSessionId", "states", "message"],
+        "subscription",
+      );
+      durableCheck(
+        durableString(subscription["targetSessionId"]) &&
+          Array.isArray(subscription["states"]) &&
+          subscription["states"].length > 0 &&
+          subscription["states"].every(isSessionState) &&
+          (subscription["message"] === undefined || typeof subscription["message"] === "string"),
+        "subscription values",
+      );
+    }
+  }
+  if (intent["mode"] !== undefined) {
+    const mode = durableObject(intent["mode"], ["name", "skill"], "mode");
+    durableCheck(durableString(mode["name"]) && durableString(mode["skill"]), "mode values");
+  }
+  durableCheck(Array.isArray(intent["startupAttachments"]), "attachments");
+  for (const raw of intent["startupAttachments"]) {
+    const attachment = durableObject(raw, ["id", "name"], "attachment");
+    durableCheck(
+      durableString(attachment["id"]) &&
+        parseArtifactRelativePath(attachment["id"]) === attachment["id"] &&
+        durableString(attachment["name"]),
+      "attachment ref",
+    );
+  }
+  const selection = durableObject(
+    intent["launchSelection"],
+    ["model", "reasoningEffort", "reasoningVariantNames"],
+    "launch selection",
+  );
+  durableCheck(
+    (selection["model"] === undefined || durableString(selection["model"])) &&
+      (selection["reasoningEffort"] === undefined || durableEffort(selection["reasoningEffort"])) &&
+      (selection["reasoningVariantNames"] === undefined ||
+        durableStrings(selection["reasoningVariantNames"])),
+    "launch selection values",
+  );
+  const submission = durableObject(
+    intent["submission"],
+    ["state", "uncertainAt", "message", "ackBaseline"],
+    "submission",
+  );
+  durableCheck(
+    typeof submission["state"] === "string" &&
+      ["pending", "uncertain", "confirmed"].includes(submission["state"]),
+    "submission state",
+  );
+  durableCheck(
+    submission["uncertainAt"] === undefined ||
+      (durableString(submission["uncertainAt"]) &&
+        Number.isFinite(Date.parse(submission["uncertainAt"]))),
+    "submission uncertainty time",
+  );
+  durableCheck(
+    submission["state"] !== "uncertain" || submission["uncertainAt"] !== undefined,
+    "submission uncertainty",
+  );
+  durableCheck(
+    submission["message"] === undefined || typeof submission["message"] === "string",
+    "submission message",
+  );
+  if (submission["ackBaseline"] !== undefined) {
+    const normalized = normalizeSubmitAckBaseline(submission["ackBaseline"]);
+    durableCheck(
+      normalized !== undefined && isDeepStrictEqual(normalized, submission["ackBaseline"]),
+      "submission ack baseline",
+    );
+    const validOffset = (value: number): boolean => Number.isSafeInteger(value) && value >= 0;
+    if (normalized.agent === "claude" || normalized.agent === "cursor") {
+      durableCheck(
+        (normalized.file === null || durableString(normalized.file)) &&
+          validOffset(normalized.size),
+        "submission transcript offset",
+      );
+      if (normalized.agent === "cursor" && normalized.rotated) {
+        durableCheck(
+          durableString(normalized.rotated.file) && validOffset(normalized.rotated.size),
+          "submission rotated offset",
+        );
+      }
+    } else if (normalized.agent === "codex") {
+      durableCheck(
+        Object.entries(normalized.offsets).every(
+          ([file, offset]) => durableString(file) && validOffset(offset),
+        ),
+        "submission rollout offsets",
+      );
+    } else {
+      durableCheck(
+        durableString(normalized.sessionId) &&
+          (normalized.after === null ||
+            (validOffset(normalized.after.createdMs) && durableString(normalized.after.id))),
+        "submission message baseline",
+      );
+    }
+  }
+  if (intent["pane"] !== undefined) {
+    const pane = durableObject(intent["pane"], ["pid", "starttime"], "pane");
+    durableCheck(
+      typeof pane["pid"] === "number" &&
+        Number.isSafeInteger(pane["pid"]) &&
+        pane["pid"] > 0 &&
+        typeof pane["starttime"] === "number" &&
+        Number.isSafeInteger(pane["starttime"]) &&
+        pane["starttime"] >= 0,
+      "pane identity",
+    );
+  }
+  if (intent["telegramOrigin"] !== undefined) {
+    const origin = durableObject(
+      intent["telegramOrigin"],
+      ["projectId", "sourceId", "chatId", "messageThreadId"],
+      "Telegram origin",
+    );
+    durableCheck(
+      durableString(origin["projectId"]) &&
+        durableString(origin["sourceId"]) &&
+        typeof origin["chatId"] === "number" &&
+        Number.isSafeInteger(origin["chatId"]) &&
+        (origin["messageThreadId"] === undefined ||
+          (typeof origin["messageThreadId"] === "number" &&
+            Number.isSafeInteger(origin["messageThreadId"]) &&
+            origin["messageThreadId"] > 0)),
+      "Telegram origin values",
+    );
+  }
+}
+
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
+  validateDurableSpawnFields(session);
   const normalizedSession = normalizeSessionPrBinding(session);
   // The request is an equality fingerprint, never replayed as executable input.
   const birthRequest = normalizedSession.triggerBirthRequest;
@@ -1215,6 +1528,24 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     normalizedSession.submitUnconfirmedAt ??
     (typeof legacyUnconfirmed === "string" ? legacyUnconfirmed : undefined);
   const workspaceId = workspaceIdOf(normalizedSession);
+  const rawPrAlertTransfer: unknown = normalizedSession.prAlertTransfer;
+  let prAlertTransfer: SessionRecord["prAlertTransfer"];
+  if (rawPrAlertTransfer !== undefined) {
+    if (
+      !isRecord(rawPrAlertTransfer) ||
+      (rawPrAlertTransfer["kind"] !== "owner" && rawPrAlertTransfer["kind"] !== "suppressed") ||
+      typeof rawPrAlertTransfer["predecessorWorkspaceId"] !== "string" ||
+      !rawPrAlertTransfer["predecessorWorkspaceId"].trim() ||
+      typeof rawPrAlertTransfer["predecessorSessionId"] !== "string" ||
+      !rawPrAlertTransfer["predecessorSessionId"].trim()
+    )
+      throw new Error("Invalid PR alert transfer metadata");
+    prAlertTransfer = {
+      kind: rawPrAlertTransfer["kind"],
+      predecessorWorkspaceId: rawPrAlertTransfer["predecessorWorkspaceId"],
+      predecessorSessionId: rawPrAlertTransfer["predecessorSessionId"],
+    };
+  }
   const closeoutOwner =
     typeof normalizedSession.closeoutOwner === "boolean"
       ? normalizedSession.closeoutOwner
@@ -1241,6 +1572,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { restrictWrites: normalizedSession.restrictWrites }
       : {}),
     closeoutOwner,
+    ...(prAlertTransfer ? { prAlertTransfer } : {}),
     ...(normalizedSession.allowedTriggers !== undefined
       ? { allowedTriggers: normalizedSession.allowedTriggers }
       : {}),
@@ -1264,6 +1596,12 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { restoredAt: normalizedSession.restoredAt }
       : {}),
     prompt: normalizedSession.prompt,
+    ...(normalizedSession.spawnIntent !== undefined
+      ? { spawnIntent: normalizedSession.spawnIntent }
+      : {}),
+    ...(normalizedSession.spawnReceipt !== undefined
+      ? { spawnReceipt: normalizedSession.spawnReceipt }
+      : {}),
     ...(normalizedSession.originalTaskPrompt
       ? { originalTaskPrompt: normalizedSession.originalTaskPrompt }
       : {}),
@@ -1500,6 +1838,19 @@ export function readSession(dataDir: string, sessionId: string): SessionRecord |
   return path ? readSessionFileCached(path) : null;
 }
 
+// Archived record lookup for the Telegram topic GC. Throws on an unreadable
+// or invalid file (unknown, never "missing").
+export function readArchivedSession(dataDir: string, sessionId: string): SessionRecord | null {
+  const root = join(dataDir, "sessions-archive");
+  if (!existsSync(root)) return null;
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const path = join(root, entry.name, `${sessionId}.json`);
+    if (existsSync(path)) return readSessionFile(path);
+  }
+  return null;
+}
+
 // Group-atomic archival for session GC: moves every member's record (and its
 // per-session log shard dir, if any) out of dataDir/sessions/ into the
 // sibling dataDir/sessions-archive/ tree, then rewrites the index once. Files
@@ -1712,6 +2063,9 @@ export function writeReviewSourceSnapshot(
     signals: [...snapshot.signals.values()],
     ...(snapshot.mergeConflictClearId !== undefined
       ? { mergeConflictClearId: snapshot.mergeConflictClearId }
+      : {}),
+    ...(snapshot.ownerRollbackId !== undefined
+      ? { ownerRollbackId: snapshot.ownerRollbackId }
       : {}),
   });
 }
@@ -2380,6 +2734,19 @@ export function hasPendingTelegramSend(
   return false;
 }
 
+/**
+ * Work ids of this session's persisted non-Telegram send batches, claimed or
+ * not. A legacy record without a workId is identified by its queue key.
+ */
+export function pendingTriggerSendWorkIds(dataDir: string, sessionId: string): string[] {
+  const workIds: string[] = [];
+  for (const record of readPendingSendBatches(dataDir).values()) {
+    if (record.batch.kind === "telegram" || record.batch.sessionId !== sessionId) continue;
+    workIds.push(record.workId ?? record.queueKey);
+  }
+  return workIds;
+}
+
 export function recordPendingSendBatch(dataDir: string, record: PersistedPendingBatch): void {
   const records = readPendingSendBatches(dataDir);
   records.set(record.queueKey, record);
@@ -2776,6 +3143,88 @@ export function readTelegramReplyTarget(
   } catch {
     return null;
   }
+}
+
+// Session ids that hold Telegram topic state: bindings of the given projects
+// plus every reply-target file.
+export function listTelegramTopicSessionIds(
+  dataDir: string,
+  projectIds: readonly string[],
+): Set<string> {
+  const ids = new Set<string>();
+  for (const projectId of projectIds) {
+    const dir = join(dataDir, "source-state", "telegram", projectId);
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const sourceId = entry.name.slice(0, -".json".length);
+      for (const binding of readTelegramBindings(dataDir, projectId, sourceId).values()) {
+        ids.add(binding.sessionId);
+      }
+    }
+  }
+  const targetDir = join(dataDir, "source-state", "telegram", "reply-targets");
+  if (existsSync(targetDir)) {
+    for (const entry of readdirSync(targetDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      try {
+        ids.add(decodeURIComponent(entry.name.slice(0, -".json".length)));
+      } catch {
+        continue;
+      }
+    }
+  }
+  return ids;
+}
+
+function telegramTopicGcClockPath(dataDir: string): string {
+  return join(dataDir, "source-state", "telegram-topic-gc.json");
+}
+
+export function readTelegramTopicGcClock(dataDir: string): number | null {
+  const path = telegramTopicGcClockPath(dataDir);
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as { lastSweepAt?: unknown } | null;
+    return typeof parsed?.lastSweepAt === "number" && Number.isFinite(parsed.lastSweepAt)
+      ? parsed.lastSweepAt
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeTelegramTopicGcClock(dataDir: string, lastSweepAt: number): void {
+  writePrivateJsonFile(telegramTopicGcClockPath(dataDir), { lastSweepAt });
+}
+
+function telegramTopicGcFailuresPath(dataDir: string): string {
+  return join(dataDir, "source-state", "telegram-topic-gc-failures.json");
+}
+
+// Failed GC sweeps per session id; restart-safe retry budget.
+export function readTelegramTopicGcFailures(dataDir: string): Record<string, number> {
+  const path = telegramTopicGcFailuresPath(dataDir);
+  if (!existsSync(path)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, number] =>
+          typeof entry[1] === "number" && Number.isInteger(entry[1]) && entry[1] > 0,
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+export function writeTelegramTopicGcFailures(
+  dataDir: string,
+  failures: Record<string, number>,
+): void {
+  writePrivateJsonFile(telegramTopicGcFailuresPath(dataDir), failures);
 }
 
 export function writeTelegramReplyTarget(

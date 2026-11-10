@@ -6,6 +6,7 @@ Instance selection: `--config` > `SPUR_CONFIG` > private `~/.spur/installed-inst
 Project config: nearest `spur.yaml`/`spur.yml`, `projects:` only; merge/per-session resolution: `v2/src/config.ts`; voice: [voice.md](voice.md).
 
 Spur ToDo is always on, no config field. See [todo](commands.md#todo).
+OpenCode worker heartbeat expiry: session state `error`; `v2/src/agents/opencode.ts`, `v2/src/session-service.ts`.
 `mcp.port` (instance-only, `1..65535`, loopback, default first port from `4311` distinct from daemon/UI): `v2/src/config.ts`, `v2/src/ports.ts`; [MCP](mcp.md).
 `SPUR_MCP_TUNNEL_PROFILE`, `CONTROL_PLANE_API_KEY`, `SPUR_MCP_TUNNEL_ENV_FILE`: `v2/src/mcp-tunnel.ts`; [tunnel setup](mcp.md#connect-openai-products).
 Reviewer App JSON `repositories`, `receiptRoot`, `code|browser.{appId,keyPath}`: caller-owned `--app-config` file; `v2/src/review-app.ts`.
@@ -54,6 +55,7 @@ A mode is a prompt suffix naming a skill, set via `projects.<id>.modes.<name>.{s
 
 `chatId<0` selects canonical agent forum; missing/positive `chatId` disables agent communication; `allowedUsers`/`allowedChats` gates manual access — `v2/src/session-service.ts`, `v2/src/event-sources/telegram.ts`.
 Task launch, attention cards, topic lifecycle: [`/new`, `/work`, `/complete`, `/kill`](commands.md#source-reply); complete/kill topic deletion requires bot administrator `can_delete_messages`.
+A daily daemon sweep deletes topics still bound to completed/killed/archived/missing sessions (20 sessions per sweep, first sweep 24h after first boot) and posts a `removed by daily cleanup` notice in the group main topic — `v2/src/session-service.ts`.
 [`source reply`](commands.md#source-reply), questions, attention and typing use assigned topic; Telegram spawn assigns before launch; legacy destinations migrate on input/output — `v2/src/session-service.ts`.
 DMs support commands/spawn tasks; existing-agent text, buttons and voice outside assigned topic redirect without delivery — `v2/src/event-sources/telegram.ts`.
 Telegram attachments (photo/document/audio/video/animation/voice/video_note/sticker): spawn/followup artifact references, optional captions, 10 files × 5 MiB; grouped albums reject late members — `v2/src/event-sources/telegram.ts`, `v2/src/types.ts`.
@@ -115,26 +117,32 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `projects.<id>.sources.<sourceId>.type` (required, `cron|script|github|github-ci|gitlab|jira|sentry|service|telegram|webhook`), `.runOnStart` (`false`, unsupported by jira and webhook), `.schedule` (`cron`), `.intervalMs` (`60000` github/jira, `2000` service), `.query` (github/jira), `.draft` (`false`, github, poll drafts only), `.emitExisting` (`false`), `.maxResults` (`100`, jira, clamped), `.adaptivePoll.{slowIntervalMs,activeGraceMs 600000}`, `.maxReviewBatchTargets`, `.pollDisabledRecheckMs` (`86400000`, github), `.ignoreChecks` (`[]`, github, exact case-sensitive check-run/status-context names dropped from `ci_failed`, e.g. `approvals`, not the workflow name), `.service`, `.tailLines` (`200`), `.rules.<ruleId>.{match,clear,cooldownMs 60000}`, `.token`, `.baseUrl`, `.email` (jira, `${VAR}`-resolvable), `.allowedUsers`, `.allowedChats` (telegram, integer array or `${VAR}` comma-separated list), `.chatId` (telegram, canonical forum destination when `<0`; see [Telegram binding](#telegram-binding); must be in `allowedChats` when set), `.autoSpawn.{enabled true,project spur-shepherd,agent opencode,model,selfDestruct}`. Full per-type shape: `v2/src/config.ts`, event names: [Events](#events).
 - Footer Cron editor saves existing spawn-job settings to YAML; runtime activation requires config reload or daemon restart; `v2/src/cron-job-editor.ts`.
 - `projects.<id>.sources.<sourceId>` with `type: script`: `command` argv, `schedule` cron, `timeoutMs` (`60000`), `env`, `emitExisting`/`runOnStart` (`false`); stdout items, limits, replay contract and `script:item.new` spawn event: `v2/src/event-sources/script.ts`, validation: `v2/src/config.ts`, process/environment: `v2/src/event-sources/script-process.ts`.
-- `projects.<id>.sources.<sourceId>.selfMarker` (github, optional): nonempty template requiring `{session}`; replace each placeholder with the session ID, then filter inline comments, review bodies, and issue comments with a case-sensitive match in contiguous unquoted body text (`>` quote lines excluded), regardless of author login. Unset: filter new feedback by polling login; previously filtered feedback stays filtered after config changes. `v2/src/config.ts`, `v2/src/review-providers/github.ts`.
+- `projects.<id>.sources.<sourceId>.selfMarker` (github, optional): nonempty `{session}` template overrides terminal session-footer attribution for comments, approvals and current change requests; custom matching and retained ignored feedback: `v2/src/config.ts`, `v2/src/review-providers/github.ts`.
 - `projects.<id>.sources.<sourceId>.signPosts` (`false`, github): requires `selfMarker` with no line break, leading `>` or backtick, equal to every other github `selfMarker` in the project; adds a `GitHub posts:` block to session launch prompts project-wide. `v2/src/config.ts`, `v2/src/session-service.ts`.
 - Webhook `.host` (IP literal, `127.0.0.1`; no hostname or zone id), `.port` (required integer `1..65535`; same-port bind cannot overlap another webhook, server, or UI bind; a server hostname overlaps every webhook host), `.path` (required exact path, 1..2048 visible ASCII bytes; one leading `/`; no query, fragment, whitespace, or control byte), `.secret` (required 16..512 visible ASCII bytes; `${VAR}`-resolvable).
 - `projects.<id>.triggers.<triggerId>.{source,event,spawn|send}`.
-- `spawn[].{prompt,steps,agent,model,reasoningEffort,mode,selfDestruct,branch,overrides.worktree,overrides.defaultBranch,restrictWrites,autoComplete}`, `spawnDeskGroup`: `model` requires `agent` in the same block, overrides `defaultModels`; effort overrides project default; `v2/src/config.ts`; see [Desk groups](#desk-groups), [selfDestruct](#selfdestruct-steps).
+- `spawn[].{prompt,steps,agent,model,reasoningEffort,mode,selfDestruct,branch,overrides.worktree,overrides.defaultBranch,restrictWrites,autoComplete}`, `spawn.allowedTriggers` (spawn level, not per block; omitted = all send triggers, `[]` = none incl. CI failure alerts; ids checked against project triggers), `spawnDeskGroup`: `model` requires `agent` in the same block, overrides `defaultModels`; effort overrides project default; `v2/src/config.ts`; see [Desk groups](#desk-groups), [selfDestruct](#selfdestruct-steps).
 - `send.{interrupt false, prompt}`. `false` opens a send window (default 30s, `SPUR_IDLE_WAIT_BEFORE_FLUSH_MS`; `telegram:message` batches use 2s, never above the env value), counted from the agent's last activity.
 - `projects.<id>.backlog.<backlogId>.{source,query,intervalMs 60000,runOnStart false}` (`.spawn` parsed, ignored — wire a `jira:work_item.new` trigger instead).
 - Launch UI (spawn, respawn, handoff, desk spawn): agent/model-supported Reasoning choices; Default inherits live project effort; same-agent respawn/handoff carries current effort until Default clears it; [API](daemon-api.md).
 
 ## Admission control
 
-Cap limits concurrent live sessions at spawn, restore, and the wake of a stale-parked or memory-shed session. Over cap: `429` naming stop candidates. Reporting route: [`GET /headroom`](daemon-api.md). CLI: [`spur doctor`](commands.md#doctor). Schema `v2/src/config.ts`, enforcement `v2/src/session-service.ts`.
+Spawn waits automatically for memory-guard or live-session-cap recovery; `v2/src/session-service.ts`.
+Accepted background and resource-queued HTTP spawns retain session id, launch intent, messages, attachments, and selected account across daemon restart; `v2/src/session-service.ts`, `v2/src/metadata.ts`.
+Recovery adopts confirmed existing runtime; uncertain runtime or startup delivery holds and rechecks automatically; `v2/src/session-service.ts`.
+OpenCode recovery without a persisted native session id stays `session.spawn.recovery_held`; history and prompt acknowledgment cannot supply ownership; `v2/src/session-service.ts`.
+
+Restore and wake reject memory-guard or cap denial (`429`); `v2/src/session-service.ts`.
+Limits: `v2/src/config.ts`; reports: [`GET /headroom`](daemon-api.md), [`spur doctor`](commands.md#doctor).
 
 `stopReason: "runtime_lost"`: confirmed runtime loss becomes restorable `stopped`, retains error evidence, releases capacity; unknown probes retain capacity (`v2/src/session-service.ts`).
 
 The shed's session stop writes `status: "stopped"`, `stopReason: "memory_shed"`. Queued trigger batches for such a session are held, not dropped, and its wake passes the admission gate.
 
-Memory guard floors (`enforceFloors`) also deny spawn, restore, and wake while the daemon cgroup's `memory.max` headroom is within the shed's emergency threshold, or its release band while the shed is latched. Unreadable cgroup or unlimited `memory.max` adds no denial.
+Memory guard floors (`enforceFloors`) also defer spawn and deny restore or wake while the daemon cgroup's `memory.max` headroom is within the shed's emergency threshold, or its release band while the shed is latched. Unreadable cgroup or unlimited `memory.max` adds no denial.
 
-Events: `daemon.memory.shed`(`.failed`), `session.admission.denied`, `session.admission.memory_guard`, `daemon.memory.unbounded`, `daemon.memory.hold.engaged`(`.cleared`/`.failed`), `trigger.send.suppressed_memory_guard`.
+Events: `daemon.memory.shed`(`.failed`), `session.admission.denied`, `session.admission.memory_guard`, `session.spawn.recovery_held`, `daemon.memory.unbounded`, `daemon.memory.hold.engaged`(`.cleared`/`.failed`), `trigger.send.suppressed_memory_guard`.
 
 ## Artifact retention
 
@@ -154,9 +162,13 @@ The same pass also runs a detect-only step over one shared process-table snapsho
 
 `staleAfterMinutes` (default `720`) parks an idle session: `status: "stopped"`, `stopReason: "stale_timeout"`, state `stale`; `0` disables. Wake: any system message, through the [admission gate](#admission-control). Mechanics: `v2/src/session-service.ts`.
 
+## PR alert ownership
+
+- Native spawn `prAlertOwner` (default `false`): exclusive workspace CI/conflict recipient; eligibility, lifecycle and permissions: `v2/src/pr-alert-owner.ts`, `v2/src/session-service.ts`; [spawn API](daemon-api.md#session-routes).
+
 ## Automatic reminders
 
-Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 attempts for unchanged open work/blockers/empty ledger — see [todo](commands.md#todo). Pending automatic GitHub/Jira sends: 8 attempts per unchanged item. `ci_failed` pings once per head commit and failing check name, a re-run of the same check on that commit does not ping again, a new head commit does; no reminder loop. `merge_conflict` pings at most once per head+base pair. Failing CI or a conflict present at a PR's first observation pings once; a persisted or legacy snapshot does not replay it.
+Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 attempts for unchanged open work/blockers/empty ledger — see [todo](commands.md#todo). Pending automatic GitHub/Jira sends: 8 attempts per unchanged item. `ci_failed` pings once per head commit and failing check name, a re-run of the same check on that commit does not ping again, a new head commit does; no reminder loop. `merge_conflict` pings at most once per head+base pair. Failing CI or a conflict present at a PR's first observation pings once; legacy/unclaimed persisted snapshots do not replay it. Explicit owner-return recheck: `v2/src/event-sources/github.ts`.
 
 A session bound to a PR GitHub reports as nonexistent stops signal polling after one attempt, logs `source.poll.disabled` once (`warn`), and persists the disable per source under `<dataDir>/source-state/github-poll-disabled/<projectId>/<sourceId>.json` across source reload and daemon restart. Clear via rebind away from that PR, [`spur source poll-enable`](commands.md#source), or `spur restore`/`spur reopen`. Bounded recheck every `pollDisabledRecheckMs` (default 24h); a still-missing PR does not re-emit `source.poll.disabled`. A resolved recheck logs `source.poll.enabled` once.
 

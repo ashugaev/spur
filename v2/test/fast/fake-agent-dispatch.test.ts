@@ -5,7 +5,136 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { cursorDeliveryInput, isCursorDeliveryId } from "../../src/agents/cursor-submit-ack.js";
 import { toCursorProjectPath } from "../../src/cursor-jsonl-state.js";
-import { fakeAgentScript } from "../helpers/runtime.js";
+import { FAKE_CODEX_PREFLIGHT_LOG, fakeAgentScript } from "../helpers/runtime.js";
+import { execFileAsync } from "../helpers/common.js";
+
+async function withCodexPreflight(
+  run: (fixture: {
+    exec: (
+      prompt: string,
+    ) => Promise<{ stdout: string; stderr: string; output: string; inputCharacters: number }>;
+    diagnostics: () => Promise<unknown[]>;
+  }) => Promise<void>,
+) {
+  const tempDir = await mkdtemp(join(tmpdir(), "fake-codex-preflight-"));
+  try {
+    const scriptPath = join(tempDir, "codex");
+    const outputPath = join(tempDir, "output.txt");
+    await writeFile(scriptPath, fakeAgentScript("codex"), "utf8");
+    await chmod(scriptPath, 0o755);
+    await run({
+      exec: async (prompt) => {
+        await writeFile(outputPath, "output must be truncated");
+        const args = ["exec", "--output-last-message", outputPath, prompt];
+        const result = await execFileAsync(scriptPath, args, {
+          cwd: tempDir,
+          env: {
+            ...process.env,
+            HOME: tempDir,
+            CODEX_HOME: join(tempDir, "codex-home"),
+            SPUR_FAKE_AGENT_LOG_DIR: tempDir,
+          },
+          timeout: 5_000,
+          maxBuffer: 4096,
+        });
+        return {
+          ...result,
+          output: await readFile(outputPath, "utf8"),
+          inputCharacters: [...args.join(" ")].length,
+        };
+      },
+      diagnostics: async () =>
+        (await readFile(join(tempDir, FAKE_CODEX_PREFLIGHT_LOG), "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => {
+            expect(Buffer.byteLength(line, "utf8")).toBeLessThanOrEqual(256);
+            try {
+              return JSON.parse(line) as unknown;
+            } catch (cause) {
+              throw new Error("Invalid fake Codex dispatch record", { cause });
+            }
+          }),
+    });
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+describe("Codex preflight", () => {
+  it("returns empty output on three long multiline marked attempts", async () => {
+    await withCodexPreflight(async ({ exec, diagnostics }) => {
+      const prompt = [
+        "Project instructions:",
+        "empty preflight output",
+        "x".repeat(64 * 1024),
+        "Previous attempt feedback:",
+        "Return a corrected result",
+      ].join("\n");
+      const lengths: number[] = [];
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const result = await exec(prompt);
+        lengths.push(result.inputCharacters);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toBe("");
+        expect(result.output).toBe("");
+      }
+      expect(await diagnostics()).toEqual(
+        lengths.map((inputCharacters) => ({
+          firstCommand: "exec",
+          argumentCount: 4,
+          inputCharacters,
+          emptyMarker: true,
+          retryMarker: true,
+          dispatch: "empty",
+        })),
+      );
+    });
+  });
+
+  it("keeps the no-marker no-rules sentinel", async () => {
+    await withCodexPreflight(async ({ exec, diagnostics }) => {
+      const result = await exec("No branch instructions");
+      expect(result.stdout).toBe("");
+      expect(result.output).toBe("NO_PROJECT_RULES\n");
+      expect(await diagnostics()).toEqual([
+        {
+          firstCommand: "exec",
+          argumentCount: 4,
+          inputCharacters: result.inputCharacters,
+          emptyMarker: false,
+          retryMarker: false,
+          dispatch: "no_project_rules",
+        },
+      ]);
+    });
+  });
+
+  it("selects the retry hint after long multiline feedback", async () => {
+    await withCodexPreflight(async ({ exec, diagnostics }) => {
+      const result = await exec(
+        [
+          "branch hint: feature/primary",
+          "Previous attempt feedback:",
+          "x".repeat(64 * 1024),
+          "retry branch hint: feature/retry",
+        ].join("\n"),
+      );
+      expect(result.stdout).toBe("");
+      expect(result.output).toBe("feature/retry\n");
+      expect(await diagnostics()).toEqual([
+        {
+          firstCommand: "exec",
+          argumentCount: 4,
+          inputCharacters: result.inputCharacters,
+          emptyMarker: false,
+          retryMarker: true,
+          dispatch: "branch_hint",
+        },
+      ]);
+    });
+  });
+});
 
 interface FixtureRecord {
   role?: string;

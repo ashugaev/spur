@@ -12,6 +12,8 @@ import {
   isPrInfoShape,
   isPrReady,
   isPrState,
+  isPrReviewers,
+  isReviewRequirement,
   parseReviewDecision,
   prInfosEqual,
 } from "@/lib/pr-status-shape";
@@ -46,7 +48,11 @@ interface CacheEntry {
 }
 
 const prCache = new Map<string, CacheEntry>();
-const pendingPrRequests = new Map<string, Promise<PrInfo>>();
+interface PrFetchResult {
+  info: PrInfo;
+  outcome: PollOutcome;
+}
+const pendingPrRequests = new Map<string, Promise<PrFetchResult>>();
 
 // Notified from setPrCache so a `primePrInfo` write from anywhere (a batch
 // fetch, a merge action) re-renders every already-mounted `usePrInfo`
@@ -152,6 +158,10 @@ function parsePrInfoPayload(obj: Record<string, unknown>): PrInfo {
   return {
     state: isPrState(obj["state"]) ? obj["state"] : null,
     reviewDecision: parseReviewDecision(obj["reviewDecision"]),
+    reviewers: isPrReviewers(obj["reviewers"]) ? obj["reviewers"] : null,
+    reviewRequirement: isReviewRequirement(obj["reviewRequirement"])
+      ? obj["reviewRequirement"]
+      : "unavailable",
     ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
     canMerge: typeof obj["canMerge"] === "boolean" ? obj["canMerge"] : false,
     mergeConflict: typeof obj["mergeConflict"] === "boolean" ? obj["mergeConflict"] : false,
@@ -180,22 +190,23 @@ async function fetchPrJson(
   }
 }
 
-export async function fetchPrInfo(url: string): Promise<PrInfo> {
+async function fetchPrInfoResult(url: string): Promise<PrFetchResult> {
   const existing = pendingPrRequests.get(url);
   if (existing) return existing;
 
-  const request = (async () => {
+  const request = (async (): Promise<PrFetchResult> => {
     try {
       const { ok, data } = await fetchPrJson(`/api/pr-status?url=${encodeURIComponent(url)}`);
-      if (!ok) return cachedOrEmpty(url);
-      if (typeof data !== "object" || data === null) return cachedOrEmpty(url);
+      if (!ok || typeof data !== "object" || data === null)
+        return { info: cachedOrEmpty(url), outcome: "failed" };
       const obj = data as Record<string, unknown>;
       const error = typeof obj["error"] === "string" ? obj["error"] : null;
       const parsed = parsePrInfoPayload(obj);
-      if (error && parsed.state === null) return cachedOrEmpty(url);
-      return parsed;
+      if (error && parsed.state === null)
+        return { info: cachedOrEmpty(url), outcome: "failed" };
+      return { info: parsed, outcome: "ok" };
     } catch {
-      return cachedOrEmpty(url);
+      return { info: cachedOrEmpty(url), outcome: "failed" };
     } finally {
       pendingPrRequests.delete(url);
     }
@@ -203,6 +214,10 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
 
   pendingPrRequests.set(url, request);
   return request;
+}
+
+export async function fetchPrInfo(url: string): Promise<PrInfo> {
+  return (await fetchPrInfoResult(url)).info;
 }
 
 // Matches the route's cap (route.ts MAX_BATCH_URLS): requests above this are
@@ -310,11 +325,12 @@ function stampPrFresh(url: string): void {
   persistPrCache();
 }
 
-async function fetchPrInfoSingle(url: string): Promise<void> {
-  const result = await fetchPrInfo(url);
+async function fetchPrInfoSingle(url: string): Promise<PollOutcome> {
+  const { info, outcome } = await fetchPrInfoResult(url);
   const prev = prCache.get(url)?.data;
-  if (!prev || !prInfosEqual(prev, result)) setPrCache(url, result);
+  if (!prev || !prInfosEqual(prev, info)) setPrCache(url, info);
   stampPrFresh(url);
+  return outcome;
 }
 
 async function executePrPoll(): Promise<PollOutcome> {
@@ -322,9 +338,13 @@ async function executePrPoll(): Promise<PollOutcome> {
   const due = [...prSubscriptions.keys()].filter((url) => !isPrFresh(url));
   const github = due.filter((url) => reviewProviderFromUrl(url) === "github");
   const others = due.filter((url) => reviewProviderFromUrl(url) !== "github");
-  const [batchOk] = await Promise.all([fetchPrInfoBatch(github), ...others.map(fetchPrInfoSingle)]);
+  const [batchOk, ...singleOutcomes] = await Promise.all([
+    fetchPrInfoBatch(github),
+    ...others.map(fetchPrInfoSingle),
+  ]);
   if (batchOk) for (const url of github) stampPrFresh(url);
-  const outcome: PollOutcome = batchOk ? "ok" : "failed";
+  const outcome: PollOutcome =
+    batchOk && singleOutcomes.every((result) => result === "ok") ? "ok" : "failed";
   for (const listener of prRunListeners) listener(seq, outcome);
   return outcome;
 }
@@ -573,10 +593,12 @@ function CompositeCiReviewMark({
   className,
   reviewColor,
   title,
+  showTitle = true,
 }: {
   className?: string;
   reviewColor: string;
   title: string;
+  showTitle?: boolean;
 }) {
   const halo = "var(--color-bg-base)";
 
@@ -592,7 +614,7 @@ function CompositeCiReviewMark({
       aria-label={title}
       className={`inline-flex shrink-0 ${className ?? ""}`.trim()}
       role="img"
-      title={title}
+      title={showTitle ? title : undefined}
     >
       <svg
         aria-hidden="true"
@@ -612,20 +634,78 @@ function CompositeCiReviewMark({
 export function ReviewDecisionDot({
   decision,
   className,
+  showTitle = true,
 }: {
   decision: "approved" | "changes_requested";
   className?: string;
+  showTitle?: boolean;
 }) {
   if (decision === "approved")
     return (
       <span className={className} data-pr-review-decision="approved">
-        <CompositeCiReviewMark reviewColor="var(--color-status-ready)" title="Approved" />
+        <CompositeCiReviewMark
+          reviewColor="var(--color-status-ready)"
+          title="Approved"
+          showTitle={showTitle}
+        />
       </span>
     );
 
   return (
     <span className={className} data-pr-review-decision="changes_requested">
-      <CompositeCiReviewMark reviewColor="var(--color-status-error)" title="Changes requested" />
+      <CompositeCiReviewMark
+        reviewColor="var(--color-status-error)"
+        title="Changes requested"
+        showTitle={showTitle}
+      />
+    </span>
+  );
+}
+
+export function ReviewersBadge({ info }: { info: PrInfo }) {
+  if (info.reviewRequirement !== "required") return null;
+  const changesRequested =
+    info.reviewDecision === "changes_requested" ||
+    (info.reviewers?.changesRequested.length ?? 0) > 0;
+  const approved = !changesRequested && info.reviewDecision === "approved";
+  const status = changesRequested
+    ? "Changes requested"
+    : approved
+      ? "Review approved"
+      : "Review required";
+  const color = changesRequested
+    ? "text-[var(--color-status-error)]"
+    : approved
+      ? "text-[var(--color-status-ready)]"
+      : "text-[var(--color-status-attention)]";
+  const title = info.reviewers
+    ? [
+        status,
+        `Approvals: ${info.reviewers.approved.length}${info.reviewers.approved.length ? ` · ${info.reviewers.approved.map((login) => `@${login}`).join(", ")}` : ""}`,
+        `Changes requested: ${info.reviewers.changesRequested.length}${info.reviewers.changesRequested.length ? ` · ${info.reviewers.changesRequested.map((login) => `@${login}`).join(", ")}` : ""}`,
+      ].join("\n")
+    : `${status}\nReview history unavailable`;
+  return (
+    <span
+      data-pr-reviewers
+      aria-label={title}
+      title={title}
+      className={`inline-flex items-center gap-0.5 text-[10px] font-bold ${color}`}
+    >
+      <svg
+        aria-hidden="true"
+        className="h-3 w-3 shrink-0"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <circle cx="12" cy="7" r="4" />
+        <path d="M5 21v-3a7 7 0 0 1 14 0v3" />
+      </svg>
+      {info.reviewers ? info.reviewers.approved.length : null}
     </span>
   );
 }

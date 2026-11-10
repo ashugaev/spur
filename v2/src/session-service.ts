@@ -56,6 +56,7 @@ import {
 } from "./agents/index.js";
 import {
   captureOpenCodeSessionBaseline,
+  openCodeHeartbeatExpired,
   readOpenCodeStructuredState,
   resolveNewOpenCodeSessionId,
   waitForOpenCodeLaunchMessage,
@@ -118,6 +119,7 @@ import {
 } from "./agents/claude.js";
 import { extractGithubErrorText, isGitHubRateLimitError, runGhPollCycle } from "./gh.js";
 import {
+  CODEX_HOME_DIR,
   codexHookHomePath,
   findLatestCodexSessionFile,
   readCodexConversationTail,
@@ -258,12 +260,19 @@ import {
   deleteTelegramReplyTarget,
   deleteTelegramSourceStateForSession,
   hasPendingTelegramSend,
+  pendingTriggerSendWorkIds,
   listActiveServiceProblems,
   readAvailableBacklogItems,
   listServiceInstances,
   listServiceInstancesForSession,
   listSessions,
   readTelegramBindings,
+  readArchivedSession,
+  listTelegramTopicSessionIds,
+  readTelegramTopicGcClock,
+  writeTelegramTopicGcClock,
+  readTelegramTopicGcFailures,
+  writeTelegramTopicGcFailures,
   retireTelegramLegacyState,
   readServiceInstance,
   readSession,
@@ -376,10 +385,12 @@ import {
 import { readDiskBudgetReport } from "./disk-budget.js";
 import {
   deleteWorkspaceState,
+  readPrAlertOwnership,
   resolveWorkspaceState,
   writeWorkspaceState,
   type WorkspaceState,
 } from "./workspace-store.js";
+import { assertPrAlertRoutes, PrAlertOwnerRequestError } from "./pr-alert-owner.js";
 import { normalizeSelfDestructConfig, withSelfDestructInstructions } from "./self-destruct.js";
 import {
   getSessionMemoryRecord,
@@ -402,6 +413,7 @@ import {
   closeSessionPr,
   deriveSessionSlots,
   parseSessionPrBinding,
+  normalizeSessionPrBinding,
   prLookupBindingOf,
   resolvePrDiscoveryBranch,
   resolveSessionPrBinding,
@@ -535,6 +547,8 @@ import {
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
+  type PrAlertTransfer,
+  type DurableSpawnIntent,
   type CursorRestoreBoundary,
   type SessionSlots,
   type SessionStatus,
@@ -828,6 +842,14 @@ const REAP_INTERVAL_MS = 5 * 60 * 1000;
 // this.config on every tick, so a config-only reload takes effect without a
 // daemon restart).
 const SESSION_GC_TICK_MS = 5 * 60_000;
+const TELEGRAM_TOPIC_GC_INTERVAL_MS = 24 * 60 * 60_000;
+const TELEGRAM_TOPIC_GC_MAX_SESSIONS = 20;
+const TELEGRAM_TOPIC_GC_MAX_FAILED_SWEEPS = 3;
+
+// Session-like owner of Telegram topic state; "missing" = no record on disk.
+type TelegramTopicOwner = Pick<SessionRecord, "id" | "project" | "slots"> & {
+  status: SessionStatus | "missing";
+};
 // isTerminalSessionStatus deliberately excludes "stopped" (used to gate live
 // polling loops that must keep tracking a stopped-but-not-yet-reconciled
 // session). The reaper needs the full set of statuses that mean "this
@@ -3281,7 +3303,10 @@ interface SessionSpawnOptions {
   admissionReservation?: symbol;
   validatedLaunchSelection?: AgentLaunchSelection;
   closeoutOwnerTransfer?: boolean;
+  prAlertOwnerTransfer?: PrAlertTransfer;
   receiptToken?: symbol;
+  /** HTTP accepts a spawning identity when admission must wait. */
+  acceptQueued?: boolean;
   /** Set by source adapters, never from the HTTP body. */
   telegramOrigin?: TelegramSpawnOrigin;
   triggerBirthKey?: string;
@@ -3305,9 +3330,41 @@ interface PreparedSpawn {
   resolvedBranch?: ResolvedSpawnBranch;
   reuseWorkspacePath?: string;
   placeholder: SessionRecord;
-  sessionToolDir: string;
   startupAttachments: StoredImageAttachment[];
   preflightBatchId: string;
+}
+
+class SpawnAdmissionCancelledError extends Error {
+  constructor(readonly reason: "disposed" | "killed" | "handoff") {
+    super(`Spawn admission cancelled: ${reason}`);
+  }
+}
+
+interface SpawnAdmissionWaiter {
+  projectId: string;
+  sessionId?: string;
+  replacingSessionId?: string;
+  reservation?: symbol;
+  resolve: (reservation: symbol) => void;
+  reject: (error: SpawnAdmissionCancelledError) => void;
+}
+
+interface HandoffAdmission {
+  token: symbol;
+  session: SessionRecord;
+  launchSelection: AgentLaunchSelection;
+  admissionReservation: symbol;
+}
+
+interface BackgroundSpawnOptions {
+  triggerBirthKey?: string;
+  triggerBirthRequest?: SpawnSessionRequest;
+  modeResolution?: "strict" | "carried";
+  telegramOrigin?: TelegramSpawnOrigin;
+  promptKind?: UserInputKind;
+  validatedLaunchSelection?: AgentLaunchSelection;
+  closeoutOwnerTransfer?: boolean;
+  prAlertOwnerTransfer?: PrAlertTransfer;
 }
 
 function resolveCarriedSpawnModel(
@@ -3655,6 +3712,9 @@ export class SessionService {
   // Epoch ms at which the last queued delivery's submit ack was confirmed;
   // lets waitForQueuedMessage release the prompt hold without its grace.
   private readonly queuedDeliveryAckedAt = new Map<string, number>();
+  // Epoch ms of the first drain-ready poll that yielded to each pending
+  // send-trigger batch (session -> workId); bounds yieldsToTriggerBatch.
+  private readonly triggerBatchYieldSince = new Map<string, Map<string, number>>();
   // Epoch ms at which the latest pane write to the session started
   // (recordPaneWrite); queuedDeliveryState's fence.
   private readonly paneWriteFenceAt = new Map<string, number>();
@@ -3786,6 +3846,8 @@ export class SessionService {
   private compactCursor = 0;
   private sessionGcTimer: NodeJS.Timeout | null = null;
   private sessionGcRunning = false;
+  private telegramTopicGcRunning = false;
+  private telegramTopicGcClaimAt: number | null = null;
   private backgroundLoopsStarted = false;
   // Construction time, not epoch 0: a daemon restart must not treat "never
   // swept before" as "due immediately" — the first tick after a restart
@@ -3843,6 +3905,7 @@ export class SessionService {
   // Parking intentionally removes the runtime before committing stale state.
   private readonly staleParksInFlight = new Set<string>();
   private readonly spawnsPreparing = new Set<string>();
+  private readonly prAlertReservations = new Set<string>();
   // Session ids this process is launching in place: dead-agent recovery
   // (relaunchSessionInPlace) and restore()/reopen(). Each writes `running`
   // before the agent reaches its prompt and settles the record itself, so a
@@ -3853,6 +3916,18 @@ export class SessionService {
     { request: SpawnSessionRequest; result: Promise<SessionView> }
   >();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
+  private readonly durableSpawnRuns = new Set<string>();
+  private readonly durableSpawnIds = new Set<string>();
+  private durableRecoveryBusy = false;
+  private readonly spawnCompletions = new Map<
+    string,
+    {
+      promise: Promise<SessionView>;
+      resolve: (session: SessionView) => void;
+      reject: (error: Error) => void;
+    }
+  >();
+  private durableRecoveryCursor = 0;
   private readonly backgroundLoopRuns = new Set<Promise<void>>();
   // startQueuedDeliveryAttempt runs, drained by settleBackgroundSpawns.
   private readonly queuedDeliveryAttempts = new Set<Promise<boolean>>();
@@ -3860,10 +3935,16 @@ export class SessionService {
   // admission check until its spawning record is written. Other admissions
   // count the slot; a handoff passes its existing reservation to its successor.
   private readonly admissionReservations = new Map<symbol, string>();
+  private readonly spawnAdmissionWaiters = new Set<SpawnAdmissionWaiter>();
+  private readonly pendingSpawnIds = new Set<string>();
+  private admissionStopped = false;
   private readonly foregroundSpawnReceipts = new Map<symbol, ForegroundSpawnReceipt>();
   private readonly handoffsInFlight = new Map<
     string,
-    { token: symbol; lifecycleIds: string[]; sourceStamp: HandoffSourceStamp }
+    {
+      token: symbol;
+      phase: "waiting" | "activating";
+    }
   >();
   // Session ids this process is actively reopening. Guards against two
   // overlapping reopen() calls both passing the completed-status check and
@@ -4124,6 +4205,14 @@ export class SessionService {
   }
 
   dispose(): void {
+    this.admissionStopped = true;
+    for (const waiter of this.spawnAdmissionWaiters) {
+      this.cancelSpawnAdmission(waiter, "disposed");
+    }
+    for (const completion of this.spawnCompletions.values()) {
+      completion.reject(new SpawnAdmissionCancelledError("disposed"));
+    }
+    this.spawnCompletions.clear();
     // Settles every queued lookup as skipped:cancelled so a prCheckRuns drain
     // cannot hang on a batch that will never flush.
     cancelPendingPrLookups();
@@ -4132,6 +4221,7 @@ export class SessionService {
     this.codexRateLimitPoller.dispose();
     this.scheduledWakeClaims.clear();
     this.scheduledWakeLastFailure.clear();
+    this.triggerBatchYieldSince.clear();
     this.sidecarEndpoints.clear();
     this.sidecarObservation = undefined;
     this.sidecarObservationRevision += 1;
@@ -4181,6 +4271,8 @@ export class SessionService {
   }
 
   private async runMemoryShedTick(): Promise<void> {
+    await this.recoverDurableSpawns();
+    this.drainSpawnAdmissions();
     // One host-memory read shared by both calls below: updateMemoryHold's
     // wake-context check and runMemoryShed's opening pressure sample would
     // otherwise each take their own /proc read microseconds apart for the
@@ -6195,6 +6287,10 @@ export class SessionService {
         (entry) => !removeIds.has(entry.id),
       ),
     }));
+    this.protectDurableSpawns();
+    queueMicrotask(() => {
+      if (!this.admissionStopped) void this.trackBackgroundLoop(this.recoverDurableSpawns());
+    });
     this.resumeSessionDelivery();
   }
 
@@ -6500,6 +6596,9 @@ export class SessionService {
     operationId: string | undefined,
     work: () => Promise<SessionView | { completedIds: string[] }>,
   ): Promise<SessionView | CompleteDeskResponse> {
+    if (action === "complete") {
+      for (const id of targetIds) this.cancelWaitingHandoff(id);
+    }
     for (const id of targetIds) {
       if (!readSession(this.config.dataDir, id)) {
         throw new SessionResourceNotFoundError(`Session not found: ${id}`);
@@ -6973,13 +7072,22 @@ export class SessionService {
   private withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
     const session = readSession(this.config.dataDir, sessionId);
     return this.withSessionLifecycleLocks(
-      session ? [session.id, workspaceIdOf(session)] : [sessionId],
+      session ? this.lifecycleIdsFor(session) : [sessionId],
       task,
     );
   }
 
-  private lifecycleIdsFor(session: SessionRecord): string[] {
-    return [...new Set([session.id, workspaceIdOf(session)])].sort();
+  private lifecycleIdsFor(
+    session: Pick<SessionRecord, "id" | "workspaceId" | "deskId" | "prAlertTransfer">,
+  ): string[] {
+    const ids = [session.id, workspaceIdOf(session)];
+    if (session.prAlertTransfer) {
+      ids.push(
+        session.prAlertTransfer.predecessorSessionId,
+        session.prAlertTransfer.predecessorWorkspaceId,
+      );
+    }
+    return [...new Set(ids)].sort();
   }
 
   private async capturePaneGeneration(session: SessionRecord): Promise<PaneGeneration> {
@@ -8226,6 +8334,7 @@ export class SessionService {
       void this.runSessionGcSweep();
       void this.runDiskBudgetSweep();
       this.runArtifactRetentionSweep();
+      void this.runTelegramTopicGcSweep();
     }, SESSION_GC_TICK_MS);
     this.sessionGcTimer.unref();
   }
@@ -8626,6 +8735,7 @@ export class SessionService {
       }
 
       const nextState: WorkspaceState = {
+        ...resolved,
         ...(resolved.slots ? { slots: resolved.slots } : {}),
         pr: binding,
       };
@@ -8678,7 +8788,7 @@ export class SessionService {
     });
     // No pr to preserve here: the early return above already covers
     // `resolved.pr` being set.
-    const nextState: WorkspaceState = { ...(slots ? { slots } : {}) };
+    const nextState: WorkspaceState = { ...resolved, ...(slots ? { slots } : {}) };
     this.writeWorkspaceStateWithLegacyMirror(current, nextState);
     this.logEvent("session.pr_auto_detect.found", {
       level: "info",
@@ -8740,7 +8850,10 @@ export class SessionService {
     return { target, source };
   }
 
-  private telegramTopicHasOtherOwner(session: SessionRecord, target: TelegramReplyTarget): boolean {
+  private telegramTopicHasOtherOwner(
+    session: Pick<SessionRecord, "id" | "project">,
+    target: TelegramReplyTarget,
+  ): boolean {
     const projects = new Set([
       ...Object.keys(this.config.projects),
       session.project,
@@ -8762,10 +8875,18 @@ export class SessionService {
   }
 
   private async retireTelegramTopics(
-    session: SessionRecord,
+    session: TelegramTopicOwner,
     targets: { target: TelegramReplyTarget; owned: boolean }[],
     publicationFailure = false,
-  ): Promise<void> {
+    notice: "terminal" | "gc" = "terminal",
+  ): Promise<{
+    failed: TelegramReplyTarget[];
+    removed: { source: TelegramSourceConfig; topicId: number }[];
+  }> {
+    const outcome = {
+      failed: [] as TelegramReplyTarget[],
+      removed: [] as { source: TelegramSourceConfig; topicId: number }[],
+    };
     const groups = new Map<number, { source: TelegramSourceConfig; results: string[] }>();
     const seen = new Set<string>();
     for (const { target, owned } of targets) {
@@ -8801,14 +8922,17 @@ export class SessionService {
         group?.results.push(
           `Topic ${topicId} ${result === "deleted" ? "deleted with the agent" : "already deleted"}.`,
         );
+        outcome.removed.push({ source, topicId });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Telegram request failed";
+        outcome.failed.push(target);
         group?.results.push(`Topic ${topicId} could not be deleted: ${message}.`);
         this.logTelegramNoticeFailure(session.id, "topic deletion", error);
       } finally {
         release();
       }
     }
+    if (notice === "gc") return outcome;
     for (const [chatId, { source, results }] of groups) {
       try {
         await sendTelegramReply(
@@ -8825,6 +8949,7 @@ export class SessionService {
         );
       }
     }
+    return outcome;
   }
 
   private async cleanupTerminalTelegram(session: SessionRecord): Promise<void> {
@@ -8858,6 +8983,198 @@ export class SessionService {
       targets.push({ target: latest, owned: false });
     }
     await this.retireTelegramTopics(session, targets);
+  }
+
+  // GC variant of the terminal cleanup: Telegram state is the retry locator,
+  // so it is removed only after every topic delete is confirmed (or the retry
+  // budget is spent). An orphaned reply-target topic counts as owned;
+  // retireTelegramTopics still retains it when another session's binding holds it.
+  private async cleanupOrphanedTelegram(owner: TelegramTopicOwner): Promise<void> {
+    const dataDir = this.config.dataDir;
+    const latest = readTelegramReplyTarget(dataDir, owner.id);
+    const projectIds = new Set([
+      ...Object.keys(this.config.projects),
+      owner.project,
+      ...(latest ? [latest.projectId] : []),
+    ]);
+    const targets: { target: TelegramReplyTarget; owned: boolean }[] = [];
+    for (const projectId of projectIds) {
+      const sourceIds = new Set([
+        ...Object.keys(this.config.projects[projectId]?.sources ?? {}),
+        ...(latest?.projectId === projectId ? [latest.sourceId] : []),
+      ]);
+      for (const sourceId of sourceIds) {
+        for (const binding of readTelegramBindings(dataDir, projectId, sourceId).values()) {
+          if (binding.sessionId !== owner.id) continue;
+          targets.push({
+            target: { ...binding, projectId, sourceId, updatedAt: nowIso() },
+            owned: true,
+          });
+        }
+      }
+    }
+    if (latest) targets.push({ target: latest, owned: true });
+    const bound = targets.filter(({ target }) => target !== latest).map(({ target }) => target);
+    const outcome = await this.retireTelegramTopics(owner, targets, false, "gc");
+    // Each topic settles on its own: its locator goes once the topic is gone
+    // (or retained by another owner); a failed topic keeps its locator.
+    const failedKeys = new Set(
+      outcome.failed.map((target) => telegramBindingKey(target.chatId, target.messageThreadId)),
+    );
+    for (const target of bound) {
+      const key = telegramBindingKey(target.chatId, target.messageThreadId);
+      if (failedKeys.has(key)) continue;
+      writeTelegramBindings(dataDir, target.projectId, target.sourceId, [], {
+        preserveExisting: true,
+        removeKeys: [key],
+      });
+    }
+    if (latest && !failedKeys.has(telegramBindingKey(latest.chatId, latest.messageThreadId))) {
+      deleteTelegramReplyTarget(dataDir, owner.id);
+    }
+    for (const { source, topicId } of outcome.removed) {
+      if (source.chatId === undefined || source.chatId > 0) continue;
+      try {
+        await sendTelegramReply(
+          source,
+          { chatId: source.chatId },
+          `Session ${owner.status === "missing" ? owner.id : telegramSessionLabel(owner)} topic ${topicId} removed by daily cleanup (status: ${owner.status}).`,
+          { lifecycle: true },
+        );
+      } catch {
+        this.logTelegramNoticeFailure(
+          owner.id,
+          "lifecycle notice",
+          new Error("Telegram notice failed or timed out"),
+        );
+      }
+    }
+    const failures = readTelegramTopicGcFailures(dataDir);
+    const failedSweeps = (failures[owner.id] ?? 0) + 1;
+    if (outcome.failed.length > 0 && failedSweeps < TELEGRAM_TOPIC_GC_MAX_FAILED_SWEEPS) {
+      writeTelegramTopicGcFailures(dataDir, { ...failures, [owner.id]: failedSweeps });
+      return;
+    }
+    for (const projectId of projectIds) {
+      deleteTelegramSourceStateForSession(dataDir, projectId, owner.id);
+    }
+    if (owner.id in failures) {
+      const { [owner.id]: _cleared, ...rest } = failures;
+      writeTelegramTopicGcFailures(dataDir, rest);
+    }
+    if (outcome.failed.length > 0) {
+      this.logEvent("source.telegram.topic_gc.gave_up", {
+        level: "warn",
+        sessionId: owner.id,
+        message: `Telegram topic GC gave up on ${owner.id} after ${failedSweeps} failed sweeps`,
+      });
+    }
+  }
+
+  // Dead = completed | killed (live or archived record) | missing. A read
+  // failure throws: unknown is never dead.
+  private classifyTelegramTopicOwner(sessionId: string): TelegramTopicOwner | null {
+    const record =
+      readSession(this.config.dataDir, sessionId) ??
+      readArchivedSession(this.config.dataDir, sessionId);
+    if (record) {
+      return record.status === "completed" || record.status === "killed"
+        ? {
+            id: record.id,
+            project: record.project,
+            ...(record.slots ? { slots: record.slots } : {}),
+            status: record.status,
+          }
+        : null;
+    }
+    const project = Object.keys(this.config.projects)[0];
+    return project ? { id: sessionId, project, status: "missing" } : null;
+  }
+
+  // Drops failure counts of ids that left the scan (state removed elsewhere) or
+  // are no longer dead (reopened). An unreadable record keeps its count.
+  private pruneTelegramTopicGcFailures(scanned: ReadonlySet<string>): void {
+    const dataDir = this.config.dataDir;
+    const failures = readTelegramTopicGcFailures(dataDir);
+    const kept: Record<string, number> = {};
+    for (const [id, count] of Object.entries(failures)) {
+      if (!scanned.has(id)) continue;
+      try {
+        if (!this.classifyTelegramTopicOwner(id)) continue;
+      } catch {
+        // unknown: keep
+      }
+      kept[id] = count;
+    }
+    if (Object.keys(kept).length !== Object.keys(failures).length) {
+      writeTelegramTopicGcFailures(dataDir, kept);
+    }
+  }
+
+  // Daily daemon sweep of Telegram topics whose session is dead. Rides the
+  // session GC tick; the clock is persisted so restarts never re-sweep.
+  private async runTelegramTopicGcSweep(): Promise<void> {
+    if (this.telegramTopicGcRunning) return;
+    this.telegramTopicGcRunning = true;
+    try {
+      const dataDir = this.config.dataDir;
+      const now = Date.now();
+      // The in-memory claim is set before the write, so a failing write still
+      // defers the next sweep (and its warning) by a full interval.
+      const last = this.telegramTopicGcClaimAt ?? readTelegramTopicGcClock(dataDir);
+      if (last === null) {
+        this.telegramTopicGcClaimAt = now;
+        writeTelegramTopicGcClock(dataDir, now);
+        return;
+      }
+      if (now - last < TELEGRAM_TOPIC_GC_INTERVAL_MS) return;
+      this.telegramTopicGcClaimAt = now;
+      writeTelegramTopicGcClock(dataDir, now);
+      const candidates: string[] = [];
+      const skipped: string[] = [];
+      const scanned = listTelegramTopicSessionIds(dataDir, Object.keys(this.config.projects));
+      this.pruneTelegramTopicGcFailures(scanned);
+      for (const id of [...scanned].sort()) {
+        if (candidates.length >= TELEGRAM_TOPIC_GC_MAX_SESSIONS) break;
+        try {
+          if (this.classifyTelegramTopicOwner(id)) candidates.push(id);
+        } catch {
+          skipped.push(id);
+        }
+      }
+      const retired: string[] = [];
+      for (const id of candidates) {
+        try {
+          await this.withWorkspaceLifecycleLocks(id, async () => {
+            const owner = this.classifyTelegramTopicOwner(id);
+            if (!owner) return;
+            await this.cleanupOrphanedTelegram(owner);
+            retired.push(id);
+          });
+        } catch {
+          skipped.push(id);
+        }
+      }
+      if (skipped.length > 0) {
+        this.logEvent("source.telegram.topic_gc.failed", {
+          level: "warn",
+          message: `Telegram topic GC skipped ${skipped.length} session(s): ${skipped.join(", ")}`,
+        });
+      }
+      if (retired.length > 0) {
+        this.logEvent("source.telegram.topic_gc.completed", {
+          level: "info",
+          message: `Telegram topic GC retired ${retired.join(", ")}`,
+        });
+      }
+    } catch (error) {
+      this.logEvent("source.telegram.topic_gc.failed", {
+        level: "warn",
+        message: `Telegram topic GC failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    } finally {
+      this.telegramTopicGcRunning = false;
+    }
   }
 
   private logTelegramNoticeFailure(sessionId: string, context: string, error: unknown): void {
@@ -10481,14 +10798,11 @@ export class SessionService {
     );
     operation?.assertActive();
 
-    const existingToolDir = join(this.config.dataDir, "session-tools", reservedSession.id);
-    const sessionToolDir = existsSync(existingToolDir)
-      ? existingToolDir
-      : this.prepareSessionTools(
-          reservedSession.id,
-          reservedSession.agent,
-          reservedSession.project,
-        );
+    const sessionToolDir = this.prepareSessionTools(
+      reservedSession.id,
+      reservedSession.agent,
+      reservedSession.project,
+    );
     const sessionEnv = buildSessionEnv({
       agent: reservedSession.agent,
       projectId: reservedSession.project,
@@ -12518,6 +12832,16 @@ export class SessionService {
     request: SpawnSessionRequest,
     modeResolution: "strict" | "carried" = "strict",
   ): SpawnTarget {
+    if (request.prAlertOwner !== undefined && typeof request.prAlertOwner !== "boolean")
+      throw new PrAlertOwnerRequestError("invalid", "prAlertOwner must be a boolean");
+    if (request.prAlertOwner === true) {
+      if (request.bootstrap === true)
+        throw new PrAlertOwnerRequestError(
+          "invalid",
+          "prAlertOwner requires configured GitHub send routes",
+        );
+      assertPrAlertRoutes(this.getProject(request.project), request.allowedTriggers);
+    }
     if (request.project === SHEPHERD_PROJECT_ID) {
       ensureShepherdWorkspace(this.config.dataDir);
       const project = this.getProject(request.project);
@@ -12590,6 +12914,17 @@ export class SessionService {
   }
 
   private assertSpawnNotKilled(sessionId: string): void {
+    const current = readSession(this.config.dataDir, sessionId);
+    if (this.admissionStopped && current?.spawnIntent) {
+      throw new SpawnAdmissionCancelledError("disposed");
+    }
+    if (
+      current?.spawnReceipt &&
+      (isTerminalSessionStatus(current.status) ||
+        (!current.spawnIntent && current.status !== "running"))
+    ) {
+      throw new SpawnAdmissionCancelledError("killed");
+    }
     if (this.spawnWasKilled(sessionId)) {
       throw new Error(
         `Session ${sessionId} was ${readSession(this.config.dataDir, sessionId)?.status} while spawning`,
@@ -12850,9 +13185,30 @@ export class SessionService {
   // messages carry over. Check, read, and write run in one synchronous span.
   private writeSpawnRecord(record: SessionRecord): SessionRecord {
     this.assertSpawnNotKilled(record.id);
-    const carried = this.carrySpawnQueue(record);
+    const persisted = readSession(this.config.dataDir, record.id);
+    if (
+      record.spawnIntent &&
+      persisted?.spawnReceipt &&
+      (!persisted.spawnIntent ||
+        ((persisted.spawnIntent.phase === "launching" ||
+          persisted.spawnIntent.phase === "submitted") &&
+          record.agentLaunchId !== persisted.agentLaunchId))
+    ) {
+      throw new SpawnAdmissionCancelledError("killed");
+    }
+    const carried = this.carrySpawnQueue({ ...persisted, ...record });
     writeSession(this.config.dataDir, carried);
     return carried;
+  }
+
+  private assertSpawnAccountReady(accountId?: string): void {
+    if (!accountId) return;
+    const account = findAccount(this.config.dataDir, accountId);
+    if (!account || !isAccountReady(account)) {
+      throw new Error(
+        `Claude account ${accountId} is not ready (credentials or onboarding incomplete)`,
+      );
+    }
   }
 
   async spawn(request: SpawnSessionRequest, options?: SessionSpawnOptions): Promise<SessionView> {
@@ -12909,12 +13265,8 @@ export class SessionService {
   ): Promise<SessionView> {
     const triggerBirthRequest = options?.triggerBirthKey ? structuredClone(request) : undefined;
     request = normalizeShepherdSpawnRequest(request);
-    const admissionReservation =
-      options?.admissionReservation ??
-      this.reserveAdmission(request.project, "spawn", {
-        ...(options?.replacingSessionId ? { replacingSessionId: options.replacingSessionId } : {}),
-      });
-    let admissionReserved = true;
+    let admissionReservation = options?.admissionReservation;
+    let admissionReserved = admissionReservation !== undefined;
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -12923,7 +13275,10 @@ export class SessionService {
     let workspacePath = "";
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let createdAt: string | undefined;
-    let placeholderWritten = false;
+    const placeholderState = { written: false };
+    let prAlertReservation: string | undefined;
+    let prAlertLaunchStarted = false;
+    let prAlertBirthConfirmed = false;
     let launchedRecord: SessionRecord | undefined;
     let launchCandidate: SessionRecord | undefined;
     let resolvedModel: string | undefined;
@@ -12951,6 +13306,7 @@ export class SessionService {
     try {
       ({ project, prompt, steps, mode, planMode, restrictWrites, allowedTriggers, selfDestruct } =
         this.resolveSpawnTarget(request, options?.modeResolution ?? "strict"));
+      prAlertReservation = this.reservePrAlertOwner(request, options?.prAlertOwnerTransfer);
       await this.warnIfHostDiskLow();
       if (
         request.branch !== undefined &&
@@ -12973,6 +13329,36 @@ export class SessionService {
           this.config.models.codexHome,
         ));
       resolvedModel = launchSelection.model;
+      this.assertSpawnAccountReady(request.claudeAccountId);
+      if (request.branch && !reuseCtx) {
+        await resolveSpawnBranch({
+          repoPath: project.path,
+          requestBranch: request.branch,
+          requestBranchSource: "explicit",
+          worktree,
+          fallbackBranch: "",
+          project,
+        });
+      }
+      if (admissionReservation === undefined) {
+        this.drainSpawnAdmissions();
+        admissionReservation =
+          this.tryReserveSpawnAdmission(request.project, options?.replacingSessionId, false) ??
+          undefined;
+        if (admissionReservation === undefined) {
+          if (prAlertReservation) this.prAlertReservations.delete(prAlertReservation);
+          prAlertReservation = undefined;
+          const accepted = await this.acceptBackgroundSpawn(request, {
+            ...options,
+            ...(triggerBirthRequest ? { triggerBirthRequest } : {}),
+            validatedLaunchSelection: launchSelection,
+          });
+          if (options?.acceptQueued) return accepted.session;
+          return await accepted.completion;
+        }
+        admissionReserved = true;
+      }
+      this.consumeSpawnAdmission(admissionReservation);
       if (
         request.preflightBatchId ||
         (!reuseCtx && !request.branch && worktree && project.preflight && prompt)
@@ -13129,6 +13515,7 @@ export class SessionService {
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
         closeoutOwner,
+        ...(options?.prAlertOwnerTransfer ? { prAlertTransfer: options.prAlertOwnerTransfer } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: resolvedBranch.branch,
@@ -13151,10 +13538,11 @@ export class SessionService {
         originalTaskPrompt,
       };
       this.assertReuseAnchorPresent(reuseCtx);
-      writeSession(this.config.dataDir, placeholder);
+      await this.persistSpawnPlaceholder(placeholder, request.prAlertOwner === true, () => {
+        placeholderState.written = true;
+      });
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
-      placeholderWritten = true;
       // Before the launch prompt exists: an agent that replies ahead of the
       // source's own bind step must answer the chat that asked for it.
       if (options?.telegramOrigin) {
@@ -13309,14 +13697,7 @@ export class SessionService {
       // sharing one worktree bind to their own transcript instead of guessing
       // by newest mtime.
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
-      if (request.claudeAccountId) {
-        const account = findAccount(this.config.dataDir, request.claudeAccountId);
-        if (!account || !isAccountReady(account)) {
-          throw new Error(
-            `Claude account ${request.claudeAccountId} is not ready (credentials or onboarding incomplete)`,
-          );
-        }
-      }
+      this.assertSpawnAccountReady(request.claudeAccountId);
       const launchOptions = {
         ...planOptions,
         ...this.resolveClaudeAuthPlanOptions({
@@ -13391,6 +13772,7 @@ export class SessionService {
           this.assertSpawnNotKilled(launchSessionId),
         );
         launchCandidate = runningRecord;
+        prAlertLaunchStarted = true;
         await createTmuxSession({
           sessionName: tmuxSession,
           cwd: workspacePath,
@@ -13472,6 +13854,7 @@ export class SessionService {
         initialGeneration = sent.generation;
         runningRecord = this.withLaunchSubmitOutcome(runningRecord, sendOutcome, launchSentAt);
         firstStepSubmitted = sendOutcome === "submitted";
+        prAlertBirthConfirmed = firstStepSubmitted;
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -13493,6 +13876,7 @@ export class SessionService {
           throw new Error("OpenCode did not persist the launch prompt");
         }
         firstStepSubmitted = true;
+        prAlertBirthConfirmed = true;
         if (options?.receiptToken) {
           initialGeneration = await this.withPaneWriteLock(runningRecord.tmuxSession, () =>
             this.capturePaneGeneration(runningRecord),
@@ -13539,6 +13923,10 @@ export class SessionService {
 
       updatedRecord = this.writeSpawnRecord(updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
+      if (prAlertBirthConfirmed && updatedRecord.prAlertTransfer) {
+        updatedRecord = this.settlePrAlertTransferLocked(updatedRecord, "commit");
+        writeSession(this.config.dataDir, updatedRecord);
+      }
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
@@ -13558,6 +13946,7 @@ export class SessionService {
 
       return await this.enrich(updatedRecord);
     } catch (error) {
+      if (error instanceof SpawnAdmissionCancelledError) throw error;
       const failureReceipt = options?.receiptToken
         ? this.foregroundSpawnReceipts.get(options.receiptToken)
         : undefined;
@@ -13577,7 +13966,7 @@ export class SessionService {
         const retained = await this.retainLaunchedError(launchedRecord, error);
         if (!isTerminalSessionStatus(retained.status)) throw error;
       }
-      if (sessionId && project && placeholderWritten && agent) {
+      if (sessionId && project && placeholderState.written && agent) {
         const failedSessionId = sessionId;
         const failedProject = project;
         const failedAgent = agent;
@@ -13649,6 +14038,9 @@ export class SessionService {
           const erroredRecord: SessionRecord = {
             id: sessionId,
             project: request.project,
+            ...(options?.prAlertOwnerTransfer
+              ? { prAlertTransfer: options.prAlertOwnerTransfer }
+              : {}),
             ...(options?.triggerBirthKey && triggerBirthRequest
               ? { triggerBirthKey: options.triggerBirthKey, triggerBirthRequest }
               : {}),
@@ -13669,7 +14061,12 @@ export class SessionService {
             errorSource: "other",
           };
           const killed = this.spawnWasKilled(sessionId);
-          const persistedFailure = killed ? null : this.carrySpawnQueue(erroredRecord);
+          const settledFailure = prAlertBirthConfirmed
+            ? this.settlePrAlertTransferLocked(erroredRecord, "commit")
+            : !prAlertLaunchStarted
+              ? this.settlePrAlertTransferLocked(erroredRecord, "rollback")
+              : erroredRecord;
+          const persistedFailure = killed ? null : this.carrySpawnQueue(settledFailure);
           if (persistedFailure) {
             writeSession(this.config.dataDir, persistedFailure);
           }
@@ -13694,7 +14091,13 @@ export class SessionService {
         if (failureReceipt) {
           return await this.withPaneWriteLock(failureReceipt.generation.tmuxSession, () =>
             this.withSessionLifecycleLocks(
-              [failureReceipt.sessionId, failureReceipt.workspaceId],
+              this.lifecycleIdsFor({
+                id: failureReceipt.sessionId,
+                workspaceId: failureReceipt.workspaceId,
+                ...(options?.prAlertOwnerTransfer
+                  ? { prAlertTransfer: options.prAlertOwnerTransfer }
+                  : {}),
+              }),
               async () => {
                 const latest = readSession(this.config.dataDir, failureReceipt.sessionId);
                 if (
@@ -13713,7 +14116,16 @@ export class SessionService {
             ),
           );
         }
-        return await cleanupFailedSpawn();
+        return await this.withSessionLifecycleLocks(
+          this.lifecycleIdsFor({
+            id: sessionId,
+            workspaceId: reuseCtx?.workspaceId ?? sessionId,
+            ...(options?.prAlertOwnerTransfer
+              ? { prAlertTransfer: options.prAlertOwnerTransfer }
+              : {}),
+          }),
+          cleanupFailedSpawn,
+        );
       }
 
       const message = error instanceof Error ? error.message : String(error);
@@ -13739,7 +14151,8 @@ export class SessionService {
       });
       throw error;
     } finally {
-      if (admissionReserved) {
+      if (prAlertReservation) this.prAlertReservations.delete(prAlertReservation);
+      if (admissionReserved && admissionReservation !== undefined) {
         this.admissionReservations.delete(admissionReservation);
       }
       if (sessionId) {
@@ -14011,6 +14424,261 @@ export class SessionService {
     return readSession(this.config.dataDir, anchorId) ?? session;
   }
 
+  private writePrAlertRoleLocked(
+    record: SessionRecord,
+    prAlertOwner: NonNullable<WorkspaceState["prAlertOwner"]>,
+  ): void {
+    writeWorkspaceState(this.config.dataDir, workspaceIdOf(record), {
+      ...resolveWorkspaceState(this.config.dataDir, record),
+      prAlertOwner,
+    });
+  }
+
+  private async persistSpawnPlaceholder(
+    record: SessionRecord,
+    alertsRequested: boolean,
+    onWritten: () => void,
+  ): Promise<void> {
+    if (!alertsRequested && !record.prAlertTransfer) {
+      writeSession(this.config.dataDir, record);
+      onWritten();
+      return;
+    }
+    record = normalizeSessionPrBinding(record);
+    await this.withSessionLifecycleLocks(this.lifecycleIdsFor(record), async () => {
+      const workspaceId = workspaceIdOf(record);
+      const owner = readPrAlertOwnership(this.config.dataDir, workspaceId);
+      const transfer = record.prAlertTransfer;
+      if (transfer?.kind === "owner" && transfer.predecessorWorkspaceId === workspaceId) {
+        if (owner.state !== "owned" || owner.sessionId !== transfer.predecessorSessionId)
+          throw new PrAlertOwnerRequestError(
+            "conflict",
+            "PR alert predecessor changed before placeholder",
+          );
+      } else {
+        if (owner.state !== "unclaimed")
+          throw new PrAlertOwnerRequestError("conflict", "PR alert target already has authority");
+        if (transfer?.kind === "suppressed") {
+          this.claimPrAlertsLocked(record, "birth");
+        } else if (transfer) {
+          const predecessor = readSession(this.config.dataDir, transfer.predecessorSessionId);
+          const prior = readPrAlertOwnership(this.config.dataDir, transfer.predecessorWorkspaceId);
+          if (
+            !predecessor ||
+            workspaceIdOf(predecessor) !== transfer.predecessorWorkspaceId ||
+            prior.state !== "owned" ||
+            prior.sessionId !== predecessor.id
+          )
+            throw new PrAlertOwnerRequestError(
+              "conflict",
+              "PR alert predecessor changed before placeholder",
+            );
+          this.writePrAlertRoleLocked(record, {
+            state: "retired",
+            successorWorkspaceId: transfer.predecessorWorkspaceId,
+            successorSessionId: predecessor.id,
+          });
+        } else {
+          this.writePrAlertRoleLocked(record, { state: "owned", sessionId: record.id });
+        }
+      }
+      writeSession(this.config.dataDir, record);
+      onWritten();
+      if (transfer?.kind !== "suppressed") this.claimPrAlertsLocked(record, "birth");
+    });
+  }
+
+  private prAlertBirthUnlaunched(session: SessionRecord): boolean {
+    const intent = session.spawnIntent;
+    return (
+      intent !== undefined &&
+      intent.submission.state === "pending" &&
+      (intent.phase === "queued" || intent.phase === "workspace_ready")
+    );
+  }
+
+  private prAlertTransferFrom(
+    session: SessionRecord,
+    operation: "respawn" | "handoff",
+  ): PrAlertTransfer | undefined {
+    const predecessorWorkspaceId = workspaceIdOf(session);
+    const owner = readPrAlertOwnership(this.config.dataDir, predecessorWorkspaceId);
+    if (owner.state === "invalid" && operation === "respawn")
+      throw new PrAlertOwnerRequestError("conflict", "PR alert source authority is invalid");
+    if (owner.state === "unclaimed" || owner.state === "invalid") return undefined;
+    const activeOwner = owner.state === "owned" && owner.sessionId === session.id;
+    if (!activeOwner && operation === "handoff") return undefined;
+    return {
+      kind: activeOwner ? "owner" : "suppressed",
+      predecessorWorkspaceId,
+      predecessorSessionId: session.id,
+    };
+  }
+
+  private reservePrAlertOwner(
+    request: SpawnSessionRequest,
+    transfer?: PrAlertTransfer,
+  ): string | undefined {
+    if (request.prAlertOwner !== true && !transfer) return undefined;
+    if (request.prAlertOwner === true || transfer?.kind === "owner")
+      assertPrAlertRoutes(this.getProject(request.project), request.allowedTriggers);
+    const reuseId = request.reuseWorkspaceSessionId?.trim();
+    if (!reuseId) return undefined;
+    const anchor = readSession(this.config.dataDir, reuseId);
+    if (!anchor || anchor.project !== request.project)
+      throw new PrAlertOwnerRequestError(
+        "invalid",
+        "PR alert workspace must belong to the selected project",
+      );
+    const workspaceId = workspaceIdOf(anchor);
+    const owner = readPrAlertOwnership(this.config.dataDir, workspaceId);
+    const transferring =
+      transfer?.kind === "owner" &&
+      transfer.predecessorWorkspaceId === workspaceId &&
+      owner.state === "owned" &&
+      owner.sessionId === transfer.predecessorSessionId;
+    if (this.prAlertReservations.has(workspaceId) || (owner.state !== "unclaimed" && !transferring))
+      throw new PrAlertOwnerRequestError(
+        "conflict",
+        "Workspace already has a PR alert owner or pending claim",
+      );
+    this.prAlertReservations.add(workspaceId);
+    return workspaceId;
+  }
+
+  private claimPrAlertsLocked(record: SessionRecord, evidence: "birth" | "resume"): void {
+    if (evidence === "resume" && !this.prAlertBirthUnlaunched(record))
+      throw new Error("PR alert recovery lacks a pending native birth; ownership held");
+    const workspaceId = workspaceIdOf(record);
+    const owner = readPrAlertOwnership(this.config.dataDir, workspaceId);
+    const transfer = record.prAlertTransfer;
+    if (transfer?.kind === "suppressed") {
+      const source = readSession(this.config.dataDir, transfer.predecessorSessionId);
+      if (!source || workspaceIdOf(source) !== transfer.predecessorWorkspaceId)
+        throw new PrAlertOwnerRequestError(
+          "conflict",
+          "PR alert suppression source is unavailable",
+        );
+      const sourceOwner = readPrAlertOwnership(
+        this.config.dataDir,
+        transfer.predecessorWorkspaceId,
+      );
+      const retirement =
+        sourceOwner.state === "retired"
+          ? sourceOwner
+          : sourceOwner.state === "owned" && sourceOwner.sessionId !== source.id
+            ? {
+                state: "retired" as const,
+                successorWorkspaceId: transfer.predecessorWorkspaceId,
+                successorSessionId: sourceOwner.sessionId,
+              }
+            : undefined;
+      if (!retirement || (owner.state !== "unclaimed" && owner.state !== "retired"))
+        throw new PrAlertOwnerRequestError(
+          "conflict",
+          "PR alert suppression source or target changed",
+        );
+      this.writePrAlertRoleLocked(record, retirement);
+      return;
+    }
+    if (owner.state === "owned" && owner.sessionId === record.id) return;
+    const sameWorkspace = transfer?.predecessorWorkspaceId === workspaceId;
+    const stagedHold =
+      transfer?.kind === "owner" &&
+      !sameWorkspace &&
+      owner.state === "retired" &&
+      owner.successorWorkspaceId === transfer.predecessorWorkspaceId &&
+      owner.successorSessionId === transfer.predecessorSessionId;
+    if (
+      !stagedHold &&
+      !(
+        sameWorkspace &&
+        owner.state === "owned" &&
+        owner.sessionId === transfer.predecessorSessionId
+      )
+    )
+      throw new PrAlertOwnerRequestError("conflict", "PR alert owner changed before claim");
+    if (!sameWorkspace) {
+      const predecessor = readSession(this.config.dataDir, transfer.predecessorSessionId);
+      if (!predecessor || workspaceIdOf(predecessor) !== transfer.predecessorWorkspaceId)
+        throw new PrAlertOwnerRequestError("conflict", "PR alert predecessor is unavailable");
+      const prior = readPrAlertOwnership(this.config.dataDir, transfer.predecessorWorkspaceId);
+      const alreadyRetired =
+        prior.state === "retired" &&
+        prior.successorWorkspaceId === workspaceId &&
+        prior.successorSessionId === record.id;
+      if (!alreadyRetired && !(prior.state === "owned" && prior.sessionId === predecessor.id))
+        throw new PrAlertOwnerRequestError(
+          "conflict",
+          "PR alert predecessor changed before transfer",
+        );
+      this.writePrAlertRoleLocked(predecessor, {
+        state: "retired",
+        successorWorkspaceId: workspaceId,
+        successorSessionId: record.id,
+      });
+    }
+    this.writePrAlertRoleLocked(record, { state: "owned", sessionId: record.id });
+  }
+
+  private settlePrAlertTransferLocked(
+    record: SessionRecord,
+    outcome: "commit" | "rollback",
+  ): SessionRecord {
+    const transfer = record.prAlertTransfer;
+    if (!transfer) return record;
+    if (outcome === "rollback" && transfer.kind === "owner") {
+      const workspaceId = workspaceIdOf(record);
+      const predecessor = readSession(this.config.dataDir, transfer.predecessorSessionId);
+      if (!predecessor || workspaceIdOf(predecessor) !== transfer.predecessorWorkspaceId)
+        throw new Error("PR alert transfer predecessor is unavailable; ownership held");
+      const owner = readPrAlertOwnership(this.config.dataDir, workspaceId);
+      if (workspaceId === transfer.predecessorWorkspaceId) {
+        if (
+          owner.state !== "owned" ||
+          (owner.sessionId !== record.id && owner.sessionId !== predecessor.id)
+        )
+          throw new Error("PR alert transfer changed; ownership held");
+        if (owner.sessionId === record.id)
+          this.writePrAlertRoleLocked(predecessor, {
+            state: "owned",
+            sessionId: predecessor.id,
+            ownerRollbackId: record.id,
+          });
+      } else {
+        const held =
+          owner.state === "retired" &&
+          owner.successorWorkspaceId === transfer.predecessorWorkspaceId &&
+          owner.successorSessionId === predecessor.id;
+        if (!held && !(owner.state === "owned" && owner.sessionId === record.id))
+          throw new Error("PR alert transfer changed; ownership held");
+        const prior = readPrAlertOwnership(this.config.dataDir, transfer.predecessorWorkspaceId);
+        const predecessorUnchanged =
+          prior.state === "owned" && prior.sessionId === predecessor.id && held;
+        if (!predecessorUnchanged) {
+          if (
+            prior.state !== "retired" ||
+            prior.successorWorkspaceId !== workspaceId ||
+            prior.successorSessionId !== record.id
+          )
+            throw new Error("PR alert transfer predecessor changed; ownership held");
+          this.writePrAlertRoleLocked(record, {
+            state: "retired",
+            successorWorkspaceId: transfer.predecessorWorkspaceId,
+            successorSessionId: predecessor.id,
+          });
+          this.writePrAlertRoleLocked(predecessor, {
+            state: "owned",
+            sessionId: predecessor.id,
+            ownerRollbackId: record.id,
+          });
+        }
+      }
+    }
+    const { prAlertTransfer: _transfer, ...settled } = record;
+    return settled;
+  }
+
   // Persists workspace-owned state plus its transitional legacy mirror.
   //
   // The mirror has to land on the WORKSPACE OWNER's record, which is not
@@ -14098,18 +14766,21 @@ export class SessionService {
     );
   }
 
-  private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
+  private async prepareBackgroundSpawn(
+    request: SpawnSessionRequest,
+    options: BackgroundSpawnOptions = {},
+  ): Promise<PreparedSpawn> {
+    const triggerBirthRequest = options.triggerBirthRequest;
     request = normalizeShepherdSpawnRequest(request);
-    const admissionReservation = this.reserveAdmission(request.project, "spawn");
-    let admissionReserved = true;
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
     let agent: SessionRecord["agent"] | undefined;
     let worktree = false;
     let createdAt: string | undefined;
-    let placeholderWritten = false;
+    const placeholderState = { written: false };
     let ownedClaimBatchId: string | undefined;
+    let prAlertReservation: string | undefined;
     let prompt = "";
     let steps: string[] | undefined;
     let mode: ResolvedSessionMode | undefined;
@@ -14128,7 +14799,8 @@ export class SessionService {
     } | null = null;
     try {
       ({ project, prompt, steps, mode, planMode, restrictWrites, allowedTriggers, selfDestruct } =
-        this.resolveSpawnTarget(request));
+        this.resolveSpawnTarget(request, options.modeResolution ?? "strict"));
+      prAlertReservation = this.reservePrAlertOwner(request, options.prAlertOwnerTransfer);
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -14142,13 +14814,26 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = resolveSpawnAgent(request.agent, project, this.config);
-      launchSelection = await resolveSpawnRequestLaunchSelection(
-        request,
-        project,
-        agent,
-        this.config.models.codexHome,
-      );
+      launchSelection =
+        options.validatedLaunchSelection ??
+        (await resolveSpawnRequestLaunchSelection(
+          request,
+          project,
+          agent,
+          this.config.models.codexHome,
+        ));
       resolvedModel = launchSelection.model;
+      this.assertSpawnAccountReady(request.claudeAccountId);
+      if (worktree && request.branch && !reuseCtx) {
+        await resolveSpawnBranch({
+          repoPath: project.path,
+          requestBranch: request.branch,
+          requestBranchSource: "explicit",
+          worktree,
+          fallbackBranch: "",
+          project,
+        });
+      }
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
         request.project,
@@ -14186,6 +14871,9 @@ export class SessionService {
         restrictWrites,
         worktree,
         reusesWorkspace: reuseCtx !== null,
+        ...(options.closeoutOwnerTransfer !== undefined
+          ? { transferredOwner: options.closeoutOwnerTransfer }
+          : {}),
       });
       const preflightTokenUsage = await this.claimSpawnPreflightBatch(
         preflightBatchId,
@@ -14196,8 +14884,12 @@ export class SessionService {
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
+        ...(options.triggerBirthKey && triggerBirthRequest
+          ? { triggerBirthKey: options.triggerBirthKey, triggerBirthRequest }
+          : {}),
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
+        ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(request.reasoningEffort !== undefined
           ? { reasoningEffort: request.reasoningEffort }
@@ -14206,6 +14898,7 @@ export class SessionService {
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
         closeoutOwner,
+        ...(options.prAlertOwnerTransfer ? { prAlertTransfer: options.prAlertOwnerTransfer } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: placeholderBranch,
@@ -14228,13 +14921,53 @@ export class SessionService {
         originalTaskPrompt,
       };
       this.assertReuseAnchorPresent(reuseCtx);
-      writeSession(this.config.dataDir, placeholder);
-      ownedClaimBatchId = undefined;
+      const startupAttachments = this.storeAttachments(
+        workspaceIdOf(placeholder),
+        request.attachments,
+      );
+      const { attachments: _attachments, configPath: _configPath, ...storedRequest } = request;
+      placeholder.spawnReceipt = { version: 1, acceptedAt: createdAt };
+      placeholder.spawnIntent = {
+        version: 1,
+        phase: "queued",
+        request: {
+          ...storedRequest,
+          prompt,
+          agent,
+          ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+          ...(steps ? { steps } : {}),
+          planMode,
+          restrictWrites,
+          ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
+          ...(selfDestruct !== undefined ? { selfDestruct } : {}),
+        },
+        ...(mode ? { mode } : {}),
+        defaultBranch,
+        preflightBatchId,
+        startupAttachments: startupAttachments.map(({ id, name }) => ({ id, name })),
+        launchSelection,
+        submission: { state: "pending" },
+        ...(options.telegramOrigin ? { telegramOrigin: options.telegramOrigin } : {}),
+      };
+      if (startupAttachments.length > 0) {
+        placeholder.startupAttachmentIds = startupAttachments.map(({ id }) => id);
+      }
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
-      placeholderWritten = true;
-      this.admissionReservations.delete(admissionReservation);
-      admissionReserved = false;
+      if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
+      this.pendingSpawnIds.add(sessionId);
+      this.spawnsInFlight.add(sessionId);
+      await this.persistSpawnPlaceholder(placeholder, request.prAlertOwner === true, () => {
+        placeholderState.written = true;
+      });
+      ownedClaimBatchId = undefined;
+      if (options.telegramOrigin) {
+        writeTelegramReplyTarget(this.config.dataDir, {
+          sessionId,
+          ...options.telegramOrigin,
+          lastInboundAt: nowIso(),
+        });
+      }
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -14252,12 +14985,8 @@ export class SessionService {
         },
       });
 
-      const startupAttachments = this.storeAttachments(
-        workspaceIdOf(placeholder),
-        request.attachments,
-      );
       this.logUserInput(sessionId, request.project, {
-        kind: "spawn_prompt",
+        kind: options.promptKind ?? "spawn_prompt",
         text: prompt,
         source: "spawn_background",
         attachments: startupAttachments,
@@ -14281,13 +15010,26 @@ export class SessionService {
         ...(resolvedBranch ? { resolvedBranch } : {}),
         ...(reuseCtx ? { reuseWorkspacePath: reuseCtx.workspacePath } : {}),
         placeholder,
-        sessionToolDir: this.prepareSessionTools(sessionId, agent, request.project),
         startupAttachments,
         preflightBatchId,
       };
     } catch (error) {
+      if (sessionId) {
+        this.pendingSpawnIds.delete(sessionId);
+        this.spawnsInFlight.delete(sessionId);
+      }
+      if (ownedClaimBatchId !== undefined && sessionId) {
+        try {
+          if (readSession(this.config.dataDir, sessionId) === null) {
+            await this.preflightUsageStore.release(ownedClaimBatchId, request.project, sessionId);
+          }
+        } catch {
+          // Cleanup must not mask the spawn failure; an unreadable record keeps the claim.
+        }
+      }
+      if (error instanceof SpawnAdmissionCancelledError) throw error;
       const message = error instanceof Error ? error.message : String(error);
-      if (sessionId && project && placeholderWritten) {
+      if (sessionId && project && placeholderState.written) {
         const erroredWorkspaceId = reuseCtx?.workspaceId ?? sessionId;
         const claimedPreflightUsage = readSession(
           this.config.dataDir,
@@ -14300,9 +15042,12 @@ export class SessionService {
         });
         const erroredBranchSource =
           resolvedBranch?.branchSource ?? (worktree && explicitBranch ? "explicit" : undefined);
-        writeSession(this.config.dataDir, {
+        const failedRecord: SessionRecord = {
           id: sessionId,
           project: request.project,
+          ...(options.prAlertOwnerTransfer
+            ? { prAlertTransfer: options.prAlertOwnerTransfer }
+            : {}),
           workspaceId: erroredWorkspaceId,
           agent: agent ?? resolveSpawnAgent(request.agent, project, this.config),
           prompt,
@@ -14322,16 +15067,13 @@ export class SessionService {
           updatedAt: nowIso(),
           error: message,
           errorSource: "other",
+        };
+        await this.withSessionLifecycleLocks(this.lifecycleIdsFor(failedRecord), async () => {
+          writeSession(
+            this.config.dataDir,
+            this.settlePrAlertTransferLocked(failedRecord, "rollback"),
+          );
         });
-      }
-      if (ownedClaimBatchId !== undefined && sessionId) {
-        try {
-          if (readSession(this.config.dataDir, sessionId) === null) {
-            await this.preflightUsageStore.release(ownedClaimBatchId, request.project, sessionId);
-          }
-        } catch {
-          // Cleanup must not mask the spawn failure; an unreadable record keeps the claim.
-        }
       }
       this.logEvent("session.spawn.failed", {
         level: "error",
@@ -14347,10 +15089,8 @@ export class SessionService {
       });
       throw error;
     } finally {
+      if (prAlertReservation) this.prAlertReservations.delete(prAlertReservation);
       if (sessionId) this.spawnsPreparing.delete(sessionId);
-      if (admissionReserved) {
-        this.admissionReservations.delete(admissionReservation);
-      }
     }
   }
 
@@ -14376,6 +15116,24 @@ export class SessionService {
     let launchedRecord: SessionRecord | undefined;
     let launchCandidate: SessionRecord | undefined;
     try {
+      this.assertSpawnNotKilled(sessionId);
+      const current = readSession(this.config.dataDir, sessionId);
+      if (current?.spawnIntent) {
+        prepared.placeholder = { ...current };
+        if (current.error !== undefined) {
+          delete prepared.placeholder.error;
+          delete prepared.placeholder.errorSource;
+          writeSession(this.config.dataDir, prepared.placeholder);
+        }
+      }
+      const telegramOrigin = prepared.placeholder.spawnIntent?.telegramOrigin;
+      if (telegramOrigin) {
+        await this.ensureTelegramTopic(sessionId, telegramOrigin);
+        await this.withWorkspaceLifecycleLocks(sessionId, async () =>
+          this.assertSpawnNotKilled(sessionId),
+        );
+      }
+      const sessionToolDir = this.prepareSessionTools(sessionId, agent, request.project);
       let resolvedBranch = prepared.resolvedBranch;
       let preflightOutcome: SpawnPreflightSelection["outcome"] | undefined;
       let preflightBranch: string | undefined;
@@ -14558,6 +15316,11 @@ export class SessionService {
         });
       }
 
+      prepared.placeholder = this.checkpointSpawn(
+        { ...prepared.placeholder, worktreePath: workspacePath },
+        "workspace_ready",
+      );
+
       const firstStage = prepared.steps?.[0];
       const taskPrompt = buildSessionPrompt(prompt, planMode, restrictWrites, mode);
       const initialMessage =
@@ -14570,15 +15333,24 @@ export class SessionService {
         startupAttachments,
       );
       const sidecarNames = manualSidecarNames(resolveSessionSidecars({ agent }, project));
-      const spawnInitialMessage = buildInitialMessage(
-        [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
-        sidecarNames,
-        this.config.tags,
-        project.branchNaming?.regex,
-        selfDestruct,
-        telegramAgentInstructions(project, false),
-        githubPostInstructions(project, sessionId),
-      );
+      const composedInitialMessage = [...startupAttachmentLines, initialMessage]
+        .filter((line) => line.trim())
+        .join("\n");
+      const spawnInitialMessage = request.bareSpawnMessage
+        ? composedInitialMessage
+        : buildInitialMessage(
+            composedInitialMessage,
+            sidecarNames,
+            this.config.tags,
+            project.branchNaming?.regex,
+            selfDestruct,
+            telegramAgentInstructions(
+              telegramOrigin ? this.config.projects[telegramOrigin.projectId] : project,
+              telegramOrigin !== undefined,
+              telegramOrigin?.sourceId,
+            ),
+            githubPostInstructions(project, sessionId),
+          );
       const budgetLimited = this.holdBudgetLimitedLaunch({
         ...spawnPlaceholder,
         worktreePath: workspacePath,
@@ -14586,7 +15358,7 @@ export class SessionService {
         updatedAt: nowIso(),
       });
       if (budgetLimited) {
-        prepared.placeholder = budgetLimited;
+        prepared.placeholder = this.retireDurableSpawn(budgetLimited);
         return "completed";
       }
 
@@ -14599,21 +15371,31 @@ export class SessionService {
         dataDir: this.config.dataDir,
         sessionId,
         worktreePath: workspacePath,
-        sessionToolDir: prepared.sessionToolDir,
+        sessionToolDir,
         ...prepared.launchSelection,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
         ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
       });
-      // Pin a native session id at launch for claude (fresh per attempt so a
-      // retry never reuses a possibly-existing transcript id).
+      const sessionAgentConfig = this.sessionAgentConfig({
+        agent,
+        id: sessionId,
+        restrictWrites,
+      });
+      // Fresh native identity per attempt avoids reusing an existing transcript.
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
+      this.assertSpawnAccountReady(request.claudeAccountId);
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...withAgentModeOptions(
-          withProjectAgentOptions(project, { ...hookSetup, ...prepared.launchSelection }),
+          withProjectAgentOptions(project, {
+            ...hookSetup,
+            ...prepared.launchSelection,
+            ...(sessionAgentConfig.planOptions ?? {}),
+          }),
           { planMode, restrictWrites },
         ),
+        ...this.resolveClaudeAuthPlanOptions(prepared.placeholder),
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -14656,20 +15438,49 @@ export class SessionService {
         projectId: request.project,
         sessionId,
         artifactsSessionId: workspaceIdOf(runningRecord),
-        sessionToolDir: prepared.sessionToolDir,
+        sessionToolDir,
         dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
         closeoutOwner: runningRecord.closeoutOwner === true,
         agentLaunchId,
+        ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
       const launchAgent = agent;
       const launchSessionId = sessionId;
+      const startupMessage = launchPlan.initialMessage.trim()
+        ? launchPlan.initialMessage
+        : spawnInitialMessage;
+      const startupBinding =
+        startupMessage.trim() && agent !== "opencode" && agent !== "cursor"
+          ? await createAgentSubmitAckBinding(agent, {
+              ...this.submitAckContext(runningRecord),
+              freshLaunch: true,
+            })
+          : null;
+      runningRecord = this.checkpointSpawn(
+        { ...runningRecord, status: "spawning" },
+        agent === "opencode" ? "workspace_ready" : "launching",
+        {
+          state: promptDeliveredOnLaunch && agent !== "opencode" ? "uncertain" : "pending",
+          ...(promptDeliveredOnLaunch && agent !== "opencode" ? { uncertainAt: nowIso() } : {}),
+          message: startupMessage,
+          ...(startupBinding ? { ackBaseline: startupBinding.baseline } : {}),
+        },
+      );
+      prepared.placeholder = runningRecord;
       const launchAndBind = async (): Promise<void> => {
         const openCodeSessionBaseline =
           launchAgent === "opencode"
             ? await captureOpenCodeSessionBaseline(workspacePath)
             : undefined;
+        if (openCodeSessionBaseline) {
+          runningRecord = this.checkpointSpawn(runningRecord, "launching", {
+            ...runningRecord.spawnIntent?.submission,
+            state: promptDeliveredOnLaunch ? "uncertain" : "pending",
+            ...(promptDeliveredOnLaunch ? { uncertainAt: nowIso() } : {}),
+          });
+        }
 
         stage = attempt > 1 ? `retry.${attempt}.tmux.create` : "tmux.create";
         this.assertSpawnNotKilled(sessionId);
@@ -14678,15 +15489,27 @@ export class SessionService {
           sessionName: launchSessionId,
           cwd: workspacePath,
           launchCommand: launchPlan.launchCommand,
-          launchScriptDir: prepared.sessionToolDir,
+          launchScriptDir: sessionToolDir,
           env: sessionEnv,
+          beforeLaunch: () => this.assertSpawnNotKilled(launchSessionId),
         });
+        this.assertSpawnNotKilled(launchSessionId);
         const current = readSession(this.config.dataDir, runningRecord.id);
         if (current && hasQueuedMessages(current)) {
           runningRecord = withQueuedMessages(runningRecord, queuedMessages(current), true);
         }
         launchedRecord = runningRecord;
-        writeSession(this.config.dataDir, { ...runningRecord, status: "spawning" });
+        this.writeSpawnRecord(runningRecord);
+        const pane = await this.lookupPanePidQuietly(launchSessionId, { fresh: true });
+        if (pane.status === "ok" && pane.panePid !== null) {
+          const starttime = await readProcessStarttime(pane.panePid);
+          if (starttime !== null) {
+            runningRecord = this.checkpointSpawn(runningRecord, "launching", undefined, {
+              pid: pane.panePid,
+              starttime,
+            });
+          }
+        }
         this.logEvent("session.spawn.tmux_created", {
           level: "info",
           sessionId: launchSessionId,
@@ -14727,11 +15550,26 @@ export class SessionService {
 
       this.assertSpawnNotKilled(sessionId);
       let firstStepSubmitted = false;
+      let openCodeLaunchConfirmed = false;
       if (launchPlan.initialMessage.trim()) {
         stage = attempt > 1 ? `retry.${attempt}.prompt.send` : "prompt.send";
         const launchSentAt = Date.now();
+        runningRecord = this.checkpointSpawn(runningRecord, "launching", {
+          ...runningRecord.spawnIntent?.submission,
+          state: "uncertain",
+          uncertainAt: new Date(launchSentAt).toISOString(),
+          message: launchPlan.initialMessage,
+        });
         const sendOutcome = await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
           freshLaunch: true,
+          onPaneWritten: (ackBaseline, pastedAt) => {
+            runningRecord = this.checkpointSpawn(runningRecord, "launching", {
+              state: "uncertain",
+              uncertainAt: new Date(pastedAt).toISOString(),
+              message: launchPlan.initialMessage,
+              ...(ackBaseline ? { ackBaseline } : {}),
+            });
+          },
         });
         runningRecord = this.withLaunchSubmitOutcome(runningRecord, sendOutcome, launchSentAt);
         initialPromptSent = true;
@@ -14747,15 +15585,15 @@ export class SessionService {
           },
         });
       } else if (promptDeliveredOnLaunch) {
-        if (
-          agent === "opencode" &&
-          (!runningRecord.agentSessionId ||
-            !(await waitForOpenCodeLaunchMessage(
+        if (agent === "opencode") {
+          openCodeLaunchConfirmed =
+            runningRecord.agentSessionId !== undefined &&
+            (await waitForOpenCodeLaunchMessage(
               runningRecord.agentSessionId,
               runningRecord.worktreePath,
-            )))
-        ) {
-          throw new Error("OpenCode did not persist the launch prompt");
+            ));
+          if (!openCodeLaunchConfirmed)
+            throw new Error("OpenCode did not persist the launch prompt");
         }
         initialPromptSent = true;
         firstStepSubmitted = true;
@@ -14772,6 +15610,18 @@ export class SessionService {
           },
         });
       }
+      const deliveryConfirmed =
+        !startupMessage.trim() ||
+        (launchPlan.initialMessage.trim()
+          ? firstStepSubmitted
+          : openCodeLaunchConfirmed ||
+            (startupBinding !== null && (await startupBinding.scan(startupMessage)).found));
+      if (deliveryConfirmed) {
+        runningRecord = this.checkpointSpawn(runningRecord, "submitted", {
+          ...runningRecord.spawnIntent?.submission,
+          state: "confirmed",
+        });
+      }
       if (pipeline && firstStepSubmitted) {
         this.logFirstPipelineStepSent(sessionId, request.project, pipeline.steps.length);
       }
@@ -14781,6 +15631,7 @@ export class SessionService {
       if (latestBackground && hasQueuedMessages(latestBackground)) {
         runningRecord = withQueuedMessages(runningRecord, queuedMessages(latestBackground), true);
       }
+      runningRecord = { ...runningRecord, status: "running" };
       let updatedRecord = await this.captureAgentSessionId(
         runningRecord,
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
@@ -14793,6 +15644,9 @@ export class SessionService {
       }
       updatedRecord = this.writeSpawnRecord(updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
+      if (updatedRecord.spawnIntent?.submission.state === "confirmed") {
+        updatedRecord = this.retireDurableSpawn(updatedRecord);
+      }
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
@@ -14812,17 +15666,50 @@ export class SessionService {
       }
       return "completed";
     } catch (error) {
+      const interrupted = readSession(this.config.dataDir, sessionId);
+      if (
+        (this.admissionStopped && interrupted?.spawnIntent) ||
+        error instanceof SpawnAdmissionCancelledError ||
+        (interrupted?.spawnReceipt && !interrupted.spawnIntent)
+      ) {
+        if (!this.admissionStopped && launchCandidate) {
+          const cancelledLaunch = launchCandidate;
+          await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+            const current = readSession(this.config.dataDir, sessionId);
+            if (
+              current?.spawnReceipt &&
+              !current.spawnIntent &&
+              current.status !== "running" &&
+              current.agentLaunchId === cancelledLaunch.agentLaunchId
+            ) {
+              await this.killAgentPaneAndConfirmExit(cancelledLaunch, { failOnSurvivors: false });
+            }
+          });
+        }
+        return "completed";
+      }
+      let launchProvenAbsent = false;
+      if (interrupted?.spawnIntent?.phase === "launching") {
+        const evidence = await this.observeDurableRuntime(interrupted);
+        launchProvenAbsent =
+          evidence.state === "absent" && interrupted.spawnIntent.submission.state === "pending";
+        if (!launchProvenAbsent) {
+          this.holdDurableSpawn(sessionId, error instanceof Error ? error.message : String(error));
+          return "completed";
+        }
+      }
       const message = error instanceof Error ? error.message : String(error);
       const killedBeforeRetention = this.spawnWasKilled(sessionId);
       if (
         !killedBeforeRetention &&
+        !launchProvenAbsent &&
         !launchedRecord &&
         launchCandidate &&
         (await this.launchResourcesMayRemain(launchCandidate))
       ) {
         launchedRecord = launchCandidate;
       }
-      if (launchedRecord && !this.spawnWasKilled(sessionId)) {
+      if (launchedRecord && !launchProvenAbsent && !this.spawnWasKilled(sessionId)) {
         const retained = await this.retainLaunchedError(launchedRecord, error);
         if (retained.status !== "killed") return "completed";
       }
@@ -14854,12 +15741,20 @@ export class SessionService {
         });
       }
       if (!finalFailure) {
-        this.writeSpawnRecord({
-          ...prepared.placeholder,
+        const fresh = readSession(this.config.dataDir, sessionId);
+        if (!fresh?.spawnIntent)
+          throw new Error(`Missing launch intent for ${sessionId}`, { cause: error });
+        const { agentLaunchId: _launch, agentSessionId: _provider, ...unlaunched } = fresh;
+        const { pane: _pane, ...intent } = fresh.spawnIntent;
+        prepared.placeholder = {
+          ...unlaunched,
           launchCommand: "",
           status: "spawning",
           updatedAt: nowIso(),
-        });
+          spawnIntent: { ...intent, phase: "queued", submission: { state: "pending" } },
+        };
+        writeSession(this.config.dataDir, prepared.placeholder);
+        this.pendingSpawnIds.add(sessionId);
         this.logEvent("session.spawn.retrying", {
           level: "warn",
           sessionId,
@@ -14886,7 +15781,24 @@ export class SessionService {
             errorSource: "other",
           });
       if (persistedFailure) {
-        writeSession(this.config.dataDir, persistedFailure);
+        await this.withSessionLifecycleLocks(this.lifecycleIdsFor(persistedFailure), async () => {
+          const current = readSession(this.config.dataDir, persistedFailure.id);
+          if (!current || isTerminalSessionStatus(current.status)) return;
+          const failure = {
+            ...current,
+            ...persistedFailure,
+            ...(current.spawnIntent ? { spawnIntent: current.spawnIntent } : {}),
+          };
+          const outcome =
+            current.spawnIntent?.submission.state === "confirmed"
+              ? "commit"
+              : this.prAlertBirthUnlaunched(current) || launchProvenAbsent
+                ? "rollback"
+                : null;
+          this.retireDurableSpawn(
+            outcome ? this.settlePrAlertTransferLocked(failure, outcome) : failure,
+          );
+        });
       }
       this.logEvent("session.spawn.failed", {
         level: "error",
@@ -14908,21 +15820,109 @@ export class SessionService {
   }
 
   async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
-    const prepared = await this.prepareBackgroundSpawn(request);
-    this.spawnsInFlight.add(prepared.placeholder.id);
-    const placeholder = this.enrich(prepared.placeholder);
+    return (await this.acceptBackgroundSpawn(request)).session;
+  }
+
+  private async acceptBackgroundSpawn(
+    request: SpawnSessionRequest,
+    options?: BackgroundSpawnOptions,
+  ): Promise<{ session: SessionView; completion: Promise<SessionView> }> {
+    const prepared = await this.prepareBackgroundSpawn(request, options);
+    this.registerDurableSpawn(prepared.placeholder);
+    const completion = this.startBackgroundSpawn(prepared);
+    const session = await this.enrich(prepared.placeholder);
+    return { session, completion };
+  }
+
+  private startBackgroundSpawn(prepared: PreparedSpawn): Promise<SessionView> {
+    if (this.admissionStopped) {
+      const cancelled = Promise.reject<SessionView>(new SpawnAdmissionCancelledError("disposed"));
+      void cancelled.catch(() => {});
+      return cancelled;
+    }
+    const existing = this.spawnCompletions.get(prepared.sessionId);
+    if (this.durableSpawnRuns.has(prepared.sessionId)) {
+      if (!existing) throw new Error(`Missing spawn completion for ${prepared.sessionId}`);
+      return existing.promise;
+    }
+    this.durableSpawnRuns.add(prepared.sessionId);
+    if (!this.spawnCompletions.has(prepared.sessionId)) {
+      let resolve!: (session: SessionView) => void;
+      let reject!: (error: Error) => void;
+      const promise = new Promise<SessionView>((accept, fail) => {
+        resolve = accept;
+        reject = fail;
+      });
+      void promise.catch(() => {});
+      this.spawnCompletions.set(prepared.sessionId, { promise, resolve, reject });
+    }
     const run = new Promise<void>((resolve) => {
       queueMicrotask(() => {
         void (async () => {
           try {
             for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
+              const reservation = await this.waitForSpawnAdmission(prepared.request.project, {
+                sessionId: prepared.sessionId,
+              });
+              try {
+                await this.withWorkspaceLifecycleLocks(prepared.sessionId, async () => {
+                  this.consumeSpawnAdmission(reservation);
+                  const current = readSession(this.config.dataDir, prepared.sessionId);
+                  if (!current || current.status !== "spawning") {
+                    throw new SpawnAdmissionCancelledError("killed");
+                  }
+                  if (prepared.request.prAlertOwner === true || current.prAlertTransfer) {
+                    if (
+                      prepared.request.prAlertOwner === true ||
+                      current.prAlertTransfer?.kind === "owner"
+                    )
+                      assertPrAlertRoutes(
+                        this.getProject(current.project),
+                        current.allowedTriggers,
+                      );
+                    this.claimPrAlertsLocked(current, "resume");
+                  }
+                  this.pendingSpawnIds.delete(prepared.sessionId);
+                });
+              } finally {
+                this.admissionReservations.delete(reservation);
+              }
               const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
               if (result === "completed") {
                 return;
               }
             }
+          } catch (error) {
+            if (!(error instanceof SpawnAdmissionCancelledError)) {
+              this.holdDurableSpawn(
+                prepared.sessionId,
+                error instanceof Error ? error.message : String(error),
+              );
+            }
           } finally {
-            this.spawnsInFlight.delete(prepared.placeholder.id);
+            this.durableSpawnRuns.delete(prepared.sessionId);
+            const current = readSession(this.config.dataDir, prepared.sessionId);
+            if (!current?.spawnIntent) {
+              this.durableSpawnIds.delete(prepared.sessionId);
+              this.pendingSpawnIds.delete(prepared.sessionId);
+              this.spawnsInFlight.delete(prepared.sessionId);
+              const completion = this.spawnCompletions.get(prepared.sessionId);
+              if (current?.status === "running") {
+                if (completion) completion.resolve(await this.enrich(current));
+              } else {
+                completion?.reject(
+                  new Error(current?.error ?? `Spawn cancelled for ${prepared.sessionId}`),
+                );
+              }
+              this.spawnCompletions.delete(prepared.sessionId);
+            } else {
+              this.registerDurableSpawn(current);
+              if (current.status === "running") {
+                const completion = this.spawnCompletions.get(prepared.sessionId);
+                if (completion) completion.resolve(await this.enrich(current));
+                this.spawnCompletions.delete(prepared.sessionId);
+              }
+            }
             resolve();
           }
         })();
@@ -14930,7 +15930,443 @@ export class SessionService {
     });
     this.backgroundSpawnRuns.add(run);
     void run.finally(() => this.backgroundSpawnRuns.delete(run));
-    return placeholder;
+    const completion = this.spawnCompletions.get(prepared.sessionId);
+    if (!completion) throw new Error(`Missing spawn completion for ${prepared.sessionId}`);
+    return completion.promise;
+  }
+
+  private registerDurableSpawn(record: SessionRecord): void {
+    if (!record.spawnIntent || isTerminalSessionStatus(record.status)) return;
+    this.durableSpawnIds.add(record.id);
+    this.spawnsInFlight.add(record.id);
+    if (record.spawnIntent.phase === "queued" || record.spawnIntent.phase === "workspace_ready") {
+      this.pendingSpawnIds.add(record.id);
+    } else {
+      this.pendingSpawnIds.delete(record.id);
+    }
+  }
+
+  private protectDurableSpawns(): void {
+    for (const record of listSessions(this.config.dataDir).sort((a, b) =>
+      (a.spawnReceipt?.acceptedAt ?? a.createdAt).localeCompare(
+        b.spawnReceipt?.acceptedAt ?? b.createdAt,
+      ),
+    )) {
+      this.registerDurableSpawn(record);
+    }
+  }
+
+  private holdDurableSpawn(sessionId: string, reason: string): void {
+    if (this.admissionStopped) return;
+    const current = readSession(this.config.dataDir, sessionId);
+    if (!current?.spawnIntent || isTerminalSessionStatus(current.status)) return;
+    this.registerDurableSpawn(current);
+    if (current.error === reason) return;
+    writeSession(this.config.dataDir, { ...current, error: reason, errorSource: "other" });
+    this.logEvent("session.spawn.recovery_held", {
+      level: "warn",
+      sessionId,
+      projectId: current.project,
+      message: reason,
+    });
+  }
+
+  private async prepareRecoveredSpawn(record: SessionRecord): Promise<PreparedSpawn> {
+    const current = readSession(this.config.dataDir, record.id);
+    if (!current?.spawnIntent || isTerminalSessionStatus(current.status))
+      throw new SpawnAdmissionCancelledError("killed");
+    if (this.lifecycleIdsFor(current).join("\0") !== this.lifecycleIdsFor(record).join("\0"))
+      throw new Error(`PR alert recovery lineage changed for ${record.id}`);
+    record = current;
+    const intent = record.spawnIntent;
+    if (!intent) throw new Error(`Missing launch intent for ${record.id}`);
+    const project = intent.request.bootstrap
+      ? this.resolveSpawnTarget(intent.request, "carried").project
+      : this.getProject(record.project);
+    if (intent.request.prAlertOwner === true || record.prAlertTransfer) {
+      if (intent.request.prAlertOwner === true || record.prAlertTransfer?.kind === "owner")
+        assertPrAlertRoutes(project, record.allowedTriggers);
+      this.claimPrAlertsLocked(record, "resume");
+    }
+    this.assertSpawnAccountReady(record.claudeAccountId);
+    const startupAttachments = intent.startupAttachments.map(({ id, name }) => {
+      const artifact = readSessionArtifact(this.config.dataDir, workspaceIdOf(record), id);
+      if (!artifact) throw new Error(`Missing startup artifact ${id} for ${record.id}`);
+      return { id, name, path: artifact.path };
+    });
+    let reuseWorkspacePath =
+      intent.request.reuseWorkspaceSessionId || intent.phase !== "queued"
+        ? record.worktreePath
+        : undefined;
+    if (!reuseWorkspacePath && record.worktree && workspaceExists(record.worktreePath)) {
+      const ownedPath = await findWorktreePathForBranch(project.path, record.branch);
+      if (ownedPath && tryRealpath(ownedPath) === tryRealpath(record.worktreePath)) {
+        reuseWorkspacePath = record.worktreePath;
+      } else {
+        throw new Error(`Accepted workspace ownership is unresolved for ${record.id}`);
+      }
+    }
+    if (reuseWorkspacePath && !workspaceExists(reuseWorkspacePath)) {
+      throw new Error(`Missing accepted workspace for ${record.id}`);
+    }
+    return {
+      request: intent.request,
+      launchSelection: intent.launchSelection,
+      project,
+      agent: record.agent,
+      prompt: record.prompt,
+      ...(intent.request.steps ? { steps: intent.request.steps } : {}),
+      ...(intent.mode ? { mode: intent.mode } : {}),
+      planMode: record.planMode === true,
+      restrictWrites: record.restrictWrites === true,
+      ...(record.allowedTriggers ? { allowedTriggers: record.allowedTriggers } : {}),
+      ...(record.selfDestruct ? { selfDestruct: record.selfDestruct } : {}),
+      worktree: record.worktree,
+      defaultBranch: intent.defaultBranch,
+      sessionId: record.id,
+      ...(reuseWorkspacePath ? { reuseWorkspacePath } : {}),
+      ...(reuseWorkspacePath
+        ? {
+            resolvedBranch: {
+              branch: record.branch,
+              ...(record.branchSource ? { branchSource: record.branchSource } : {}),
+            },
+          }
+        : {}),
+      placeholder: record,
+      startupAttachments,
+      preflightBatchId: intent.preflightBatchId,
+    };
+  }
+
+  private checkpointSpawn(
+    record: SessionRecord,
+    phase: DurableSpawnIntent["phase"],
+    submission = record.spawnIntent?.submission,
+    pane = record.spawnIntent?.pane,
+  ): SessionRecord {
+    if (!record.spawnIntent || !submission)
+      throw new Error(`Missing launch intent for ${record.id}`);
+    return this.writeSpawnRecord({
+      ...record,
+      spawnIntent: { ...record.spawnIntent, phase, submission, ...(pane ? { pane } : {}) },
+    });
+  }
+
+  private retireDurableSpawn(record: SessionRecord, preserveCompletion = false): SessionRecord {
+    const completed =
+      record.spawnIntent?.submission.state === "confirmed"
+        ? this.settlePrAlertTransferLocked(record, "commit")
+        : record;
+    const { spawnIntent: _intent, ...settled } = completed;
+    writeSession(this.config.dataDir, settled);
+    this.durableSpawnIds.delete(record.id);
+    this.pendingSpawnIds.delete(record.id);
+    this.spawnsInFlight.delete(record.id);
+    if (record.status !== "running" && !preserveCompletion) {
+      this.spawnCompletions
+        .get(record.id)
+        ?.reject(new Error(record.error ?? `Spawn cancelled for ${record.id}`));
+      this.spawnCompletions.delete(record.id);
+    }
+    return settled;
+  }
+
+  private async observeDurableRuntime(
+    record: SessionRecord,
+  ): Promise<
+    | { state: "absent" }
+    | { state: "matching"; generation: PaneGeneration }
+    | { state: "unknown"; reason: string }
+  > {
+    const intent = record.spawnIntent;
+    if (!intent || !record.agentLaunchId || !record.launchCommand) {
+      return { state: "unknown", reason: `Incomplete launch ownership for ${record.id}` };
+    }
+    const [pane, capture] = await Promise.all([
+      this.lookupPanePidQuietly(record.tmuxSession, { fresh: true }),
+      captureAgentProcessesForLaunch({
+        sessionId: record.id,
+        agentLaunchId: record.agentLaunchId,
+        processMatchers: agentProcessMatchers(record.agent, record.launchCommand),
+        recovery: true,
+      }),
+    ]);
+    if (pane.status !== "ok" || capture.status !== "ok") {
+      return { state: "unknown", reason: `Launch ownership probe unavailable for ${record.id}` };
+    }
+    if (pane.panePid === null && capture.complete === true && capture.processes.length === 0) {
+      return { state: "absent" };
+    }
+    if (
+      pane.panePid === null ||
+      pane.paneDead ||
+      capture.processes.length === 0 ||
+      capture.processes.some((process) => process.identity === null)
+    ) {
+      return { state: "unknown", reason: `Launch ownership remains uncertain for ${record.id}` };
+    }
+    const starttime = await readProcessStarttime(pane.panePid);
+    const paneCapture = await capturePaneAgentProcesses({
+      sessionId: record.id,
+      agentLaunchId: record.agentLaunchId,
+      panePid: pane.panePid,
+      paneDead: pane.paneDead,
+      processMatchers: agentProcessMatchers(record.agent, record.launchCommand),
+    });
+    if (
+      starttime === null ||
+      paneCapture.status !== "ok" ||
+      !capture.processes.some((owned) =>
+        paneCapture.processes.some(
+          (child) => child.pid === owned.pid && child.identity === owned.identity,
+        ),
+      ) ||
+      (intent.pane && (intent.pane.pid !== pane.panePid || intent.pane.starttime !== starttime))
+    ) {
+      return { state: "unknown", reason: `Launch generation remains uncertain for ${record.id}` };
+    }
+    for (const process of capture.processes) {
+      const cwd = await readProcessCwd(process.pid);
+      if (!cwd || tryRealpath(cwd) !== tryRealpath(record.worktreePath)) {
+        return {
+          state: "unknown",
+          reason: `Launch workspace identity remains uncertain for ${record.id}`,
+        };
+      }
+    }
+    return {
+      state: "matching",
+      generation: {
+        tmuxSession: record.tmuxSession,
+        panePid: pane.panePid,
+        processStarttime: starttime,
+      },
+    };
+  }
+
+  private async recoverDurableRuntime(record: SessionRecord): Promise<void> {
+    const intent = record.spawnIntent;
+    if (!intent) return;
+    if (record.agent === "opencode" && !record.agentSessionId) {
+      throw new Error(`OpenCode native launch identity remains uncertain for ${record.id}`);
+    }
+    const evidence = await this.observeDurableRuntime(record);
+    if (evidence.state === "unknown") throw new Error(evidence.reason);
+    const openCodeLaunchConfirmed =
+      record.agent === "opencode" &&
+      record.agentSessionId !== undefined &&
+      (await waitForOpenCodeLaunchMessage(record.agentSessionId, record.worktreePath, 0));
+    if (evidence.state === "absent") {
+      await this.withWorkspaceLifecycleLocks(record.id, async () => {
+        const current = readSession(this.config.dataDir, record.id);
+        if (
+          !current?.spawnIntent ||
+          isTerminalSessionStatus(current.status) ||
+          current.agentLaunchId !== record.agentLaunchId
+        )
+          return;
+        const submission = current.spawnIntent.submission;
+        if (submission.state !== "pending") {
+          const binding = submission.ackBaseline
+            ? await resumeAgentSubmitAckBinding(
+                current.agent,
+                this.submitAckContext(current),
+                submission.ackBaseline,
+              )
+            : null;
+          if (
+            submission.state === "confirmed" ||
+            openCodeLaunchConfirmed ||
+            (binding && submission.message && (await binding.scan(submission.message)).found)
+          ) {
+            const stopped: SessionRecord = { ...current, status: "stopped", updatedAt: nowIso() };
+            delete stopped.error;
+            delete stopped.errorSource;
+            const settled = this.retireDurableSpawn(
+              this.settlePrAlertTransferLocked(stopped, "commit"),
+              true,
+            );
+            const completion = this.spawnCompletions.get(record.id);
+            if (completion) completion.resolve(await this.enrich(settled));
+            this.spawnCompletions.delete(record.id);
+            return;
+          }
+          throw new Error(`Startup submission remains uncertain for ${record.id}`);
+        }
+        const { agentLaunchId: _launch, agentSessionId: _provider, ...unlaunched } = current;
+        const { pane: _pane, ...baseIntent } = current.spawnIntent;
+        const resumed: SessionRecord = {
+          ...unlaunched,
+          launchCommand: "",
+          status: "spawning",
+          spawnIntent: {
+            ...baseIntent,
+            phase: "workspace_ready",
+            submission: { state: "pending" },
+          },
+        };
+        delete resumed.error;
+        delete resumed.errorSource;
+        writeSession(this.config.dataDir, resumed);
+        this.registerDurableSpawn(resumed);
+        void this.startBackgroundSpawn(await this.prepareRecoveredSpawn(resumed));
+      });
+      return;
+    }
+    const { panePid, processStarttime: starttime } = evidence.generation;
+    if (intent.submission.state !== "confirmed" && !openCodeLaunchConfirmed) {
+      const binding = intent.submission.ackBaseline
+        ? await resumeAgentSubmitAckBinding(
+            record.agent,
+            this.submitAckContext(record),
+            intent.submission.ackBaseline,
+          )
+        : null;
+      const message = intent.submission.message;
+      if (intent.submission.state === "pending" && message?.trim()) {
+        const freshBinding =
+          record.agent === "cursor"
+            ? null
+            : await createAgentSubmitAckBinding(record.agent, {
+                ...this.submitAckContext(record),
+                freshLaunch: true,
+              });
+        if (!freshBinding && record.agent !== "cursor")
+          throw new Error(`Startup provider identity unavailable for ${record.id}`);
+        const generation = {
+          tmuxSession: record.tmuxSession,
+          panePid,
+          processStarttime: starttime,
+        };
+        const uncertain = await this.withWorkspaceLifecycleLocks(record.id, async () => {
+          const current = readSession(this.config.dataDir, record.id);
+          if (
+            !current?.spawnIntent ||
+            isTerminalSessionStatus(current.status) ||
+            current.agentLaunchId !== record.agentLaunchId ||
+            !(await this.paneGenerationMatches(current, generation))
+          ) {
+            throw new SpawnAdmissionCancelledError("killed");
+          }
+          return this.checkpointSpawn(current, "launching", {
+            state: "uncertain",
+            uncertainAt: nowIso(),
+            message,
+            ...(freshBinding ? { ackBaseline: freshBinding.baseline } : {}),
+          });
+        });
+        const sent = await this.sendAgentMessageWithGeneration(
+          uncertain,
+          message,
+          {
+            freshLaunch: true,
+            ...(record.agent === "cursor"
+              ? {
+                  onPaneWritten: (ackBaseline: SubmitAckBaseline | null, pastedAt: number) => {
+                    const latest = readSession(this.config.dataDir, record.id);
+                    if (
+                      this.admissionStopped ||
+                      !latest?.spawnIntent ||
+                      isTerminalSessionStatus(latest.status) ||
+                      latest.agentLaunchId !== record.agentLaunchId
+                    )
+                      throw new SpawnAdmissionCancelledError("killed");
+                    this.checkpointSpawn(latest, "launching", {
+                      state: "uncertain",
+                      uncertainAt: new Date(pastedAt).toISOString(),
+                      message,
+                      ...(ackBaseline ? { ackBaseline } : {}),
+                    });
+                  },
+                }
+              : {}),
+          },
+          (actual) => {
+            const latest = readSession(this.config.dataDir, record.id);
+            if (
+              this.admissionStopped ||
+              !latest?.spawnIntent ||
+              isTerminalSessionStatus(latest.status) ||
+              latest.agentLaunchId !== record.agentLaunchId ||
+              actual.panePid !== generation.panePid ||
+              actual.processStarttime !== generation.processStarttime
+            )
+              throw new SpawnAdmissionCancelledError("killed");
+          },
+        );
+        if (sent.outcome !== "submitted")
+          throw new Error(`Startup submission remains uncertain for ${record.id}`);
+      } else if (!binding || !message || !(await binding.scan(message)).found) {
+        throw new Error(`Startup submission remains uncertain for ${record.id}`);
+      }
+    }
+    await this.withWorkspaceLifecycleLocks(record.id, async () => {
+      const current = readSession(this.config.dataDir, record.id);
+      if (
+        this.admissionStopped ||
+        !current?.spawnIntent ||
+        isTerminalSessionStatus(current.status) ||
+        current.agentLaunchId !== record.agentLaunchId
+      )
+        return;
+      if (
+        !(await this.paneGenerationMatches(current, {
+          tmuxSession: current.tmuxSession,
+          panePid,
+          processStarttime: starttime,
+        }))
+      )
+        throw new Error(`Launch generation changed for ${record.id}`);
+      const project = this.getProject(current.project);
+      let launched: SessionRecord = { ...current, status: "running", updatedAt: nowIso() };
+      delete launched.submitUnconfirmedAt;
+      delete launched.error;
+      delete launched.errorSource;
+      this.assertSpawnNotKilled(launched.id);
+      launched = this.carrySpawnQueue(launched);
+      writeSession(this.config.dataDir, launched);
+      launched = await this.startAutoStartSidecars(launched, project);
+      launched = this.applyRequestedStateSubscriptions(launched, intent.request.subscriptions);
+      launched = this.retireDurableSpawn(this.settlePrAlertTransferLocked(launched, "commit"));
+      const completion = this.spawnCompletions.get(record.id);
+      if (completion) completion.resolve(await this.enrich(launched));
+      this.spawnCompletions.delete(record.id);
+      if (this.shouldRunDelivery(launched)) this.scheduleDeliveryRunner(launched.id);
+    });
+  }
+
+  private async recoverDurableSpawns(): Promise<void> {
+    if (this.admissionStopped || this.durableRecoveryBusy) return;
+    const ids = [...this.durableSpawnIds].filter((id) => !this.durableSpawnRuns.has(id));
+    if (ids.length === 0) return;
+    const sessionId = ids[this.durableRecoveryCursor++ % ids.length];
+    if (!sessionId) return;
+    const record = readSession(this.config.dataDir, sessionId);
+    if (!record?.spawnIntent || isTerminalSessionStatus(record.status)) {
+      this.durableSpawnIds.delete(sessionId);
+      this.pendingSpawnIds.delete(sessionId);
+      this.spawnsInFlight.delete(sessionId);
+      return;
+    }
+    this.durableRecoveryBusy = true;
+    try {
+      if (record.spawnIntent.phase === "queued" || record.spawnIntent.phase === "workspace_ready") {
+        const prepared =
+          record.spawnIntent.request.prAlertOwner === true || record.prAlertTransfer
+            ? await this.withWorkspaceLifecycleLocks(record.id, () =>
+                this.prepareRecoveredSpawn(record),
+              )
+            : await this.prepareRecoveredSpawn(record);
+        void this.startBackgroundSpawn(prepared);
+      } else {
+        await this.recoverDurableRuntime(record);
+      }
+    } catch (error) {
+      this.holdDurableSpawn(sessionId, error instanceof Error ? error.message : String(error));
+    } finally {
+      this.durableRecoveryBusy = false;
+    }
   }
 
   async spawnShepherd(
@@ -16490,7 +17926,12 @@ export class SessionService {
   async deliver(
     sessionId: string,
     message: string,
-    options?: { interrupt?: boolean; sensitive?: true },
+    options?: {
+      interrupt?: boolean;
+      sensitive?: true;
+      allowDelivery?: () => boolean;
+      observeDelivery?: (stage: "input-started" | "accepted") => void;
+    },
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -16506,6 +17947,8 @@ export class SessionService {
     return this.deliverPrepared(sessionId, message, {
       ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
       ...(options?.sensitive ? { sensitive: true as const } : {}),
+      ...(options?.allowDelivery ? { allowDelivery: options.allowDelivery } : {}),
+      ...(options?.observeDelivery ? { observeDelivery: options.observeDelivery } : {}),
       entryPoint: "deliver",
     });
   }
@@ -17562,7 +19005,7 @@ export class SessionService {
       "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
     >,
     message: string,
-    options?: { interrupt?: boolean; freshLaunch?: boolean },
+    options?: Pick<AgentMessageWriteOptions, "interrupt" | "freshLaunch" | "onPaneWritten">,
     onGeneration?: (generation: PaneGeneration) => void,
   ): Promise<{ outcome: AgentSendOutcome; generation: PaneGeneration }> {
     return this.withPaneWriteLock(session.tmuxSession, async () => {
@@ -18094,7 +19537,7 @@ export class SessionService {
 
     const work = () =>
       this.withSessionLifecycleLocks(
-        candidates.flatMap((candidate) => [candidate.id, workspaceIdOf(candidate)]),
+        candidates.flatMap((candidate) => this.lifecycleIdsFor(candidate)),
         async () => {
           const emptySessionIds: string[] = [];
           const unfinishedBlocked: Array<{
@@ -18226,6 +19669,7 @@ export class SessionService {
     const slots = applied.slots;
     const nextPr = nativePr ? nativePr : unlinksPr && !hasGenericPrSlot ? undefined : current.pr;
     const nextState: WorkspaceState = {
+      ...(current.prAlertOwner ? { prAlertOwner: current.prAlertOwner } : {}),
       ...(slots ? { slots } : {}),
       ...(nextPr ? { pr: nextPr } : {}),
     };
@@ -18832,7 +20276,7 @@ export class SessionService {
       SessionRecord,
       "id" | "project" | "workspaceId" | "deskId" | "startupAttachmentIds"
     >,
-    options?: { preserveStartup?: boolean },
+    options?: { preserveStartup?: boolean; preserveAgentHistory?: boolean },
   ): { ranCleanup: boolean } {
     const sessionId = session.id;
     // Per-session cleanup: unconditional, regardless of desk membership.
@@ -18850,8 +20294,11 @@ export class SessionService {
     // A desk sibling's own session-tools dir is per-session, so it goes now.
     // The anchor's doubles as the tool dir of the desk's shared sidecars, so
     // it is treated as shared state below.
+    // Completion keeps the native agent history (Codex rollouts live under
+    // the tool dir's codex-home) so reopen can resume the same thread.
+    const ownKeep = options?.preserveAgentHistory ? [CODEX_HOME_DIR] : [];
     if (sessionId !== anchorId) {
-      removeSessionSlotTool(this.config.dataDir, sessionId);
+      removeSessionSlotTool(this.config.dataDir, sessionId, ownKeep);
     }
     // Shared-desk cleanup: the anchor's artifacts dir and session-tools dir
     // are still in use by any other live desk member (an anchor-owned
@@ -18880,10 +20327,20 @@ export class SessionService {
     } else {
       deleteSessionArtifactsDir(this.config.dataDir, anchorId);
     }
-    removeSessionSlotTool(this.config.dataDir, anchorId);
+    // A completed anchor can be reopened, so its codex-home outlives whichever
+    // member tears the desk down last.
+    const anchorKeep =
+      anchorId === sessionId
+        ? ownKeep
+        : deskMembers.find((m) => m.id === anchorId)?.status === "completed"
+          ? [CODEX_HOME_DIR]
+          : [];
+    removeSessionSlotTool(this.config.dataDir, anchorId, anchorKeep);
     // Last member's teardown: the workspace's shared slots/pr state goes
     // with the rest of its shared state.
-    deleteWorkspaceState(this.config.dataDir, anchorId);
+    if (readPrAlertOwnership(this.config.dataDir, anchorId).state === "unclaimed") {
+      deleteWorkspaceState(this.config.dataDir, anchorId);
+    }
     return { ranCleanup: true };
   }
 
@@ -19189,6 +20646,7 @@ export class SessionService {
       skipEnrichment: true;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
+      restoreOperation?: RestoreOperationContext;
     },
   ): Promise<void>;
   private async applyManualStatusLocked(
@@ -19201,6 +20659,7 @@ export class SessionService {
       todoActor?: TodoActor;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
+      restoreOperation?: RestoreOperationContext;
     },
   ): Promise<SessionView>;
   private async applyManualStatusLocked(
@@ -19213,6 +20672,7 @@ export class SessionService {
       todoActor?: TodoActor;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
+      restoreOperation?: RestoreOperationContext;
     },
   ): Promise<SessionView | void> {
     const reopenClaim = this.reopensInFlight.get(sessionId);
@@ -19285,12 +20745,41 @@ export class SessionService {
       if (targetStatus === "completed" && !request.skipPrCheck) {
         session = await this.applyOpenPrAction(session, request.prAction);
       }
+      if (
+        targetStatus === "completed" &&
+        session.prAlertTransfer &&
+        this.prAlertBirthUnlaunched(session)
+      ) {
+        session = this.settlePrAlertTransferLocked(session, "rollback");
+        writeSession(this.config.dataDir, session);
+      }
+      if (session.spawnIntent) {
+        session = this.retireDurableSpawn(
+          withQueuedMessages(
+            {
+              ...session,
+              status: targetStatus,
+              updatedAt: nowIso(),
+            },
+            [],
+            false,
+          ),
+        );
+        for (const waiter of this.spawnAdmissionWaiters) {
+          if (waiter.sessionId === sessionId) this.cancelSpawnAdmission(waiter, "killed");
+        }
+      }
       if (!request.skipRuntimeTeardown) {
-        await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
+        await this.killAgentPaneAndConfirmExit(session, {
+          failOnSurvivors: options?.restoreOperation !== undefined,
+          ...(options?.restoreOperation ? { operation: options.restoreOperation } : {}),
+        });
         await this.cleanupSessionServices(session);
       }
       if (targetStatus === "completed") {
-        const { ranCleanup } = this.removeSessionArtifacts(session);
+        const { ranCleanup } = this.removeSessionArtifacts(session, {
+          preserveAgentHistory: true,
+        });
         // removeSessionArtifacts never preserves this session's own startup
         // ids when preserveStartup is unset (as here) — a live desk sibling
         // can only keep ITS OWN ids, not this session's. So whenever it ran
@@ -19398,6 +20887,19 @@ export class SessionService {
           session = await this.applyOpenPrAction(session, request.prAction);
         }
       }
+      this.cancelWaitingHandoff(sessionId);
+      if (session.prAlertTransfer && this.prAlertBirthUnlaunched(session)) {
+        session = this.settlePrAlertTransferLocked(session, "rollback");
+        writeSession(this.config.dataDir, session);
+      }
+      if (session.spawnIntent) {
+        session = this.retireDurableSpawn(
+          withQueuedMessages({ ...session, status: "killed", updatedAt: nowIso() }, [], false),
+        );
+      }
+      for (const waiter of this.spawnAdmissionWaiters) {
+        if (waiter.sessionId === sessionId) this.cancelSpawnAdmission(waiter, "killed");
+      }
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
       await this.cleanupSessionServices(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
@@ -19414,7 +20916,7 @@ export class SessionService {
 
     this.stateCache.delete(sessionId);
 
-    if (session.status === "killed") {
+    if (currentSession.status === "killed") {
       await this.cleanupTerminalTelegram(session);
       this.logEvent("session.kill.noop", {
         level: "info",
@@ -19442,7 +20944,8 @@ export class SessionService {
     delete record.queuedMessageTyped;
     delete record.submitRequeuedMessage;
     delete record.submitFailedMessage;
-    writeSession(this.config.dataDir, record);
+    if (record.spawnIntent) this.retireDurableSpawn(record);
+    else writeSession(this.config.dataDir, record);
     await this.cleanupTerminalTelegram(record);
     if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
@@ -20492,6 +21995,29 @@ export class SessionService {
             if (!current || current.tmuxSession !== hint.tmuxSession) {
               throw new Error(`Session ${sessionId} changed before restore`);
             }
+            if (request.restart === true) {
+              operation?.assertActive();
+              if (current.status !== "running") {
+                throw new SessionNotRestorableError(
+                  sessionId,
+                  `Session ${sessionId} is not running`,
+                  restoreRecoveryActions(current.status),
+                );
+              }
+              this.assertTokenBudgetAllowsActivation(current);
+              this.assertAdmissible(current.project, "restore", { replacingSessionId: current.id });
+              await this.applyManualStatusLocked(
+                sessionId,
+                "stopped",
+                {},
+                { skipEnrichment: true, ...(operation ? { restoreOperation: operation } : {}) },
+              );
+              operation?.assertActive();
+              const stopped = readSession(this.config.dataDir, sessionId);
+              if (!stopped)
+                throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+              return this.lifecycleStamp(stopped);
+            }
             return this.lifecycleStamp(current);
           },
           operation,
@@ -21351,6 +22877,9 @@ export class SessionService {
   // whole launch transaction to restore(). Nothing completion destroyed
   // (Telegram binding, sidecarPorts, artifacts, work item) is recreated.
   async reopen(sessionId: string, request: RestoreSessionRequest = {}): Promise<SessionView> {
+    if (request.restart === true) {
+      throw new SessionNotReopenableError("restart is only supported by restore");
+    }
     return this.runLifecycle("reopen", [sessionId], request.operationId, () =>
       this.reopenTransaction(sessionId, request),
     );
@@ -21891,6 +23420,9 @@ export class SessionService {
     }
 
     const forceKillSource = request.forceKillSource === true;
+    const prAlertOwnerTransfer = this.prAlertTransferFrom(session, "respawn");
+    if (prAlertOwnerTransfer?.kind === "owner")
+      assertPrAlertRoutes(this.getProject(session.project), session.allowedTriggers);
     const bootstrap = this.isUnconfiguredProjectId(session.project);
     const respawnRequest = resolveRespawnRequest(session, {
       ...(bootstrap ? { bootstrap: true } : {}),
@@ -21964,6 +23496,7 @@ export class SessionService {
         modeResolution: "carried",
         validatedLaunchSelection: launchSelection,
         closeoutOwnerTransfer: session.closeoutOwner === true,
+        ...(prAlertOwnerTransfer ? { prAlertOwnerTransfer } : {}),
         ...(request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : {}),
       },
     );
@@ -21979,18 +23512,87 @@ export class SessionService {
     request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
   ): Promise<SessionView> {
-    return this.runLifecycle("complete", [sessionId], undefined, () =>
-      this.handoffTransaction(sessionId, request, options),
-    );
+    const waiting = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = this.validateHandoffSource(sessionId, options);
+      if (this.prAlertTransferFrom(session, "handoff")?.kind === "owner")
+        assertPrAlertRoutes(this.getProject(session.project), session.allowedTriggers);
+      if (this.handoffsInFlight.has(sessionId)) {
+        throw new Error(`Handoff already in flight for ${sessionId}`);
+      }
+      const agent = parseAgentName(request.agent);
+      const token = Symbol(`handoff:${sessionId}`);
+      this.handoffsInFlight.set(sessionId, {
+        token,
+        phase: "waiting",
+      });
+      try {
+        const launchSelection = await resolveSpawnRequestLaunchSelection(
+          resolveRespawnRequest(session, {
+            agent,
+            ...(request.model !== undefined ? { model: request.model } : {}),
+            ...(request.reasoningEffort !== undefined
+              ? { reasoningEffort: request.reasoningEffort }
+              : {}),
+          }),
+          this.getProject(session.project),
+          agent,
+          this.config.models.codexHome,
+        );
+        if (this.handoffsInFlight.get(sessionId)?.token !== token) {
+          throw new SpawnAdmissionCancelledError("handoff");
+        }
+        return { token, session, launchSelection };
+      } catch (error) {
+        if (this.handoffsInFlight.get(sessionId)?.token === token) {
+          this.handoffsInFlight.delete(sessionId);
+        }
+        throw error;
+      }
+    });
+    let reservation: symbol | undefined;
+    try {
+      if (this.handoffsInFlight.get(sessionId)?.token !== waiting.token) {
+        throw new SpawnAdmissionCancelledError("handoff");
+      }
+      reservation = await this.waitForSpawnAdmission(waiting.session.project, {
+        replacingSessionId: sessionId,
+      });
+      const claim = this.handoffsInFlight.get(sessionId);
+      if (claim?.token !== waiting.token) throw new SpawnAdmissionCancelledError("handoff");
+      this.consumeSpawnAdmission(reservation);
+      claim.phase = "activating";
+      const admissionReservation = reservation;
+      return await this.runLifecycle("complete", [sessionId], undefined, () =>
+        this.handoffTransaction(sessionId, request, options, {
+          ...waiting,
+          admissionReservation,
+        }),
+      );
+    } finally {
+      if (reservation !== undefined) this.admissionReservations.delete(reservation);
+      if (this.handoffsInFlight.get(sessionId)?.token === waiting.token) {
+        this.handoffsInFlight.delete(sessionId);
+      }
+    }
+  }
+
+  private cancelWaitingHandoff(sessionId: string): void {
+    const claim = this.handoffsInFlight.get(sessionId);
+    if (claim?.phase !== "waiting") return;
+    this.handoffsInFlight.delete(sessionId);
+    for (const waiter of this.spawnAdmissionWaiters) {
+      if (waiter.replacingSessionId === sessionId) this.cancelSpawnAdmission(waiter, "handoff");
+    }
   }
 
   private async handoffTransaction(
     sessionId: string,
     request: HandoffSessionRequest,
-    options?: { todoActor?: TodoActor },
+    options: { todoActor?: TodoActor } | undefined,
+    waiting: HandoffAdmission,
   ): Promise<SessionView> {
     const prepared = await this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.prepareHandoffLocked(sessionId, request, options),
+      this.prepareHandoffLocked(sessionId, request, options, waiting),
     );
     try {
       const spawned = await this.spawn(prepared.spawnRequest, prepared.spawnOptions);
@@ -22027,6 +23629,9 @@ export class SessionService {
               const workspaceState = resolveWorkspaceState(this.config.dataDir, successor);
               const slots = applySlotsUpdate(workspaceState.slots, { tags: prepared.carryTags });
               this.writeWorkspaceStateWithLegacyMirror(successor, {
+                ...(workspaceState.prAlertOwner
+                  ? { prAlertOwner: workspaceState.prAlertOwner }
+                  : {}),
                 ...(slots ? { slots } : {}),
                 ...(workspaceState.pr ? { pr: workspaceState.pr } : {}),
               });
@@ -22057,20 +23662,13 @@ export class SessionService {
       return await this.enrich(finalized);
     } finally {
       this.foregroundSpawnReceipts.delete(prepared.receiptToken);
-      await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
-        if (this.handoffsInFlight.get(sessionId)?.token === prepared.token) {
-          this.handoffsInFlight.delete(sessionId);
-        }
-      });
-      this.admissionReservations.delete(prepared.admissionReservation);
     }
   }
 
-  private async prepareHandoffLocked(
+  private validateHandoffSource(
     sessionId: string,
-    request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
-  ): Promise<PreparedHandoff> {
+  ): SessionRecord {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -22098,33 +23696,29 @@ export class SessionService {
       this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
       throw error;
     }
-    // Gate before any teardown below. The source session is still on-disk as
-    // running/spawning here, so a denial leaves it fully untouched — no kill,
-    // no status flip. The successor replaces the source rather than adding to
-    // the fleet, so exclude it from the live count: a handoff at exactly the
-    // cap is net-neutral (stop one, start one) and must be allowed.
-    const admissionReservation = this.reserveAdmission(session.project, "spawn", {
-      replacingSessionId: session.id,
-    });
+    return session;
+  }
+
+  private async prepareHandoffLocked(
+    sessionId: string,
+    request: HandoffSessionRequest,
+    options: { todoActor?: TodoActor } | undefined,
+    waiting: HandoffAdmission,
+  ): Promise<PreparedHandoff> {
+    const session = this.validateHandoffSource(sessionId, options);
+    const admissionReservation = waiting.admissionReservation;
+    if (
+      this.handoffsInFlight.get(sessionId)?.token !== waiting.token ||
+      workspaceIdOf(session) !== workspaceIdOf(waiting.session) ||
+      session.worktreePath !== waiting.session.worktreePath ||
+      session.closeoutOwner !== waiting.session.closeoutOwner
+    ) {
+      throw new Error(`Handoff source changed before admission for ${sessionId}`);
+    }
 
     try {
-      if (this.handoffsInFlight.has(sessionId)) {
-        throw new Error(`Handoff already in flight for ${sessionId}`);
-      }
       const agent = parseAgentName(request.agent);
-      const carriedRequest = resolveRespawnRequest(session, {
-        agent,
-        ...(request.model !== undefined ? { model: request.model } : {}),
-        ...(request.reasoningEffort !== undefined
-          ? { reasoningEffort: request.reasoningEffort }
-          : {}),
-      });
-      const launchSelection = await resolveSpawnRequestLaunchSelection(
-        carriedRequest,
-        this.getProject(session.project),
-        agent,
-        this.config.models.codexHome,
-      );
+      const launchSelection = waiting.launchSelection;
       const notes = request.notes?.trim();
       const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
       const { attachments: clonedAttachments, missingIds: missingStartupAttachmentIds } =
@@ -22195,7 +23789,7 @@ export class SessionService {
         },
       });
 
-      const token = Symbol(`handoff:${sessionId}`);
+      const token = waiting.token;
       const receiptToken = Symbol(`handoff-receipt:${sessionId}`);
       const lifecycleIds = this.lifecycleIdsFor(sourceForSpawn);
       const sourceStamp: HandoffSourceStamp = {
@@ -22208,9 +23802,10 @@ export class SessionService {
         updatedAt: sourceForSpawn.updatedAt,
         tmuxSession: sourceForSpawn.tmuxSession,
       };
-      this.handoffsInFlight.set(sessionId, { token, lifecycleIds, sourceStamp });
       const knownTags = new Set(this.config.tags.map((tag) => tag.name));
       const carryTags = (session.slots?.tags ?? []).filter((tag) => knownTags.has(tag));
+      const continuation = this.prAlertTransferFrom(sourceForSpawn, "handoff");
+      const prAlertOwnerTransfer = continuation?.kind === "owner" ? continuation : undefined;
       return {
         token,
         lifecycleIds,
@@ -22237,6 +23832,7 @@ export class SessionService {
           admissionReservation,
           modeResolution: "carried",
           closeoutOwnerTransfer: sourceForSpawn.closeoutOwner === true,
+          ...(prAlertOwnerTransfer ? { prAlertOwnerTransfer } : {}),
           validatedLaunchSelection: launchSelection,
           receiptToken,
         },
@@ -22352,6 +23948,29 @@ export class SessionService {
     return run;
   }
 
+  /**
+   * Whether a drain-ready queued message should wait for a pending send-trigger
+   * batch, which only delivers into a waiting agent after the idle window and
+   * would otherwise lose every window to the drain. Each batch workId holds the
+   * drain for at most twice the send window from its first drain-ready poll;
+   * Telegram batches never hold. A memory hold blocks trigger delivery, so it
+   * releases the drain.
+   */
+  private yieldsToTriggerBatch(sessionId: string): boolean {
+    const capMs = 2 * getIdleWaitBeforeFlushMs();
+    if (capMs === 0 || this.memoryHold.engaged) return false;
+    const workIds = pendingTriggerSendWorkIds(this.config.dataDir, sessionId);
+    const previous = this.triggerBatchYieldSince.get(sessionId);
+    if (workIds.length === 0) {
+      this.triggerBatchYieldSince.delete(sessionId);
+      return false;
+    }
+    const now = Date.now();
+    const current = new Map(workIds.map((workId) => [workId, previous?.get(workId) ?? now]));
+    this.triggerBatchYieldSince.set(sessionId, current);
+    return [...current.values()].some((firstSeenMs) => now - firstSeenMs < capMs);
+  }
+
   private async tryDeliverQueuedMessage(sessionId: string): Promise<boolean> {
     // Synchronous, before any await: a flush already registered for this
     // session owns the next attempt. Stand down instead of queuing behind
@@ -22397,6 +24016,8 @@ export class SessionService {
         const readySession = readSession(this.config.dataDir, sessionId);
         if (!readySession) return false;
         let settleObservation = readySession;
+        // Set by every settle pass: true only for plain waiting, not a wedge.
+        const settle = { holdable: false };
         // A live claude server-error wedge behaves like "waiting" for delivery
         // purposes: typing the queued message is exactly what un-wedges Claude
         // (the same mechanism as the reactivation nudge in processScheduledWakes),
@@ -22418,7 +24039,9 @@ export class SessionService {
               observePreparedSession(prepared);
             },
           );
-          if (this.queuedDeliveryState(classified) !== "waiting" && !classified.serverError) {
+          const state = this.queuedDeliveryState(classified);
+          settle.holdable = state === "waiting" && !classified.serverError;
+          if (state !== "waiting" && !classified.serverError) {
             return null;
           }
           const activityAt = resolveAgentActivityAt(classified);
@@ -22437,6 +24060,11 @@ export class SessionService {
           if (this.deliveryStopped || (await settleRemainingMs()) !== 0) {
             return false;
           }
+        }
+
+        // Before the claim: nothing is typed and remove/flush never 409 here.
+        if (settle.holdable && this.yieldsToTriggerBatch(sessionId)) {
+          return false;
         }
 
         const latest = readSession(this.config.dataDir, sessionId);
@@ -23397,7 +25025,10 @@ export class SessionService {
     records: SessionRecord[];
   } {
     const live = listSessions(this.config.dataDir).filter(
-      (session) => session.id !== excludeSessionId && this.isLiveSessionRecord(session),
+      (session) =>
+        session.id !== excludeSessionId &&
+        !this.pendingSpawnIds.has(session.id) &&
+        this.isLiveSessionRecord(session),
     );
     const byProject = new Map<string, number>();
     for (const session of live) {
@@ -23513,13 +25144,13 @@ export class SessionService {
   private assertAdmissible(
     projectId: string,
     context: "spawn" | "restore" | "wake",
-    opts?: { replacingSessionId?: string; admissionReservation?: symbol },
+    opts?: { replacingSessionId?: string; admissionReservation?: symbol; quiet?: boolean },
   ): void {
     const admission = this.config.admission;
     const sample = this.evaluateMemoryDenial(context);
     const legacyGuardDetail = sample?.legacyDetail;
     const floorGuardDetail = sample?.floorDetail;
-    if (legacyGuardDetail) {
+    if (legacyGuardDetail && !opts?.quiet) {
       this.logEvent("session.admission.memory_guard", {
         level: "warn",
         projectId,
@@ -23537,11 +25168,12 @@ export class SessionService {
         `Cannot ${context} session for project "${projectId}": memory guard crossed — ${denialDetail}`,
         "memory_guard",
       );
-      this.logEvent("session.admission.denied", {
-        level: "warn",
-        projectId,
-        message: denial.message,
-      });
+      if (!opts?.quiet)
+        this.logEvent("session.admission.denied", {
+          level: "warn",
+          projectId,
+          message: denial.message,
+        });
       throw denial;
     }
     const live = this.countLiveSessions(opts?.replacingSessionId);
@@ -23561,11 +25193,12 @@ export class SessionService {
         `Cannot ${context} session for project "${projectId}": at its per-project cap of ${projectCap} live sessions (${this.admissionOccupancy(projectLive, projectReserved)}). ${this.admissionDenialAction(projectCandidates)}`,
         "cap",
       );
-      this.logEvent("session.admission.denied", {
-        level: "warn",
-        projectId,
-        message: denial.message,
-      });
+      if (!opts?.quiet)
+        this.logEvent("session.admission.denied", {
+          level: "warn",
+          projectId,
+          message: denial.message,
+        });
       throw denial;
     }
     const totalLive = live.total + reservedTotal;
@@ -23574,24 +25207,85 @@ export class SessionService {
         `Cannot ${context} session for project "${projectId}": at the global cap of ${admission.maxLiveSessions} live sessions (${this.admissionOccupancy(live.total, reservedTotal)}). ${this.admissionDenialAction(live.records)}`,
         "cap",
       );
-      this.logEvent("session.admission.denied", {
-        level: "warn",
-        projectId,
-        message: denial.message,
-      });
+      if (!opts?.quiet)
+        this.logEvent("session.admission.denied", {
+          level: "warn",
+          projectId,
+          message: denial.message,
+        });
       throw denial;
     }
   }
 
-  private reserveAdmission(
+  private tryReserveSpawnAdmission(
     projectId: string,
-    context: "spawn" | "restore",
-    opts?: { replacingSessionId?: string },
-  ): symbol {
-    this.assertAdmissible(projectId, context, opts);
+    replacingSessionId?: string,
+    quiet = true,
+  ): symbol | null {
+    if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
+    try {
+      this.assertAdmissible(projectId, "spawn", {
+        ...(replacingSessionId ? { replacingSessionId } : {}),
+        quiet,
+      });
+    } catch (error) {
+      if (error instanceof SessionAdmissionDeniedError) return null;
+      throw error;
+    }
     const reservation = Symbol(projectId);
     this.admissionReservations.set(reservation, projectId);
     return reservation;
+  }
+
+  private waitForSpawnAdmission(
+    projectId: string,
+    opts: { sessionId?: string; replacingSessionId?: string } = {},
+  ): Promise<symbol> {
+    if (this.admissionStopped) return Promise.reject(new SpawnAdmissionCancelledError("disposed"));
+    return new Promise<symbol>((resolve, reject) => {
+      this.drainSpawnAdmissions();
+      const waiter: SpawnAdmissionWaiter = { projectId, ...opts, resolve, reject };
+      const reservation = this.tryReserveSpawnAdmission(projectId, opts.replacingSessionId, false);
+      this.spawnAdmissionWaiters.add(waiter);
+      if (reservation !== null) {
+        waiter.reservation = reservation;
+        resolve(reservation);
+      }
+    });
+  }
+
+  private drainSpawnAdmissions(): void {
+    if (this.admissionStopped) return;
+    for (const waiter of this.spawnAdmissionWaiters) {
+      if (waiter.reservation !== undefined) continue;
+      const reservation = this.tryReserveSpawnAdmission(
+        waiter.projectId,
+        waiter.replacingSessionId,
+      );
+      if (reservation === null) continue;
+      waiter.reservation = reservation;
+      waiter.resolve(reservation);
+    }
+  }
+
+  private consumeSpawnAdmission(reservation: symbol): void {
+    for (const waiter of this.spawnAdmissionWaiters) {
+      if (waiter.reservation !== reservation) continue;
+      this.spawnAdmissionWaiters.delete(waiter);
+      break;
+    }
+    if (this.admissionStopped || !this.admissionReservations.has(reservation)) {
+      throw new SpawnAdmissionCancelledError(this.admissionStopped ? "disposed" : "killed");
+    }
+  }
+
+  private cancelSpawnAdmission(
+    waiter: SpawnAdmissionWaiter,
+    reason: SpawnAdmissionCancelledError["reason"],
+  ): void {
+    this.spawnAdmissionWaiters.delete(waiter);
+    if (waiter.reservation !== undefined) this.admissionReservations.delete(waiter.reservation);
+    waiter.reject(new SpawnAdmissionCancelledError(reason));
   }
 
   // Cheap admission snapshot for the daemon-startup log: cap and live count
@@ -25015,6 +26709,16 @@ export class SessionService {
         classifiedDetail = structuredState
           ? `State: ${state} (opencode export, ${structuredState.reason})`
           : "State: working (opencode export unavailable)";
+        if (
+          (state === "working" || state === "waiting" || state === "needs_input") &&
+          (await openCodeHeartbeatExpired(
+            join(this.config.dataDir, "session-tools", session.id),
+            session.agentLaunchId,
+          ))
+        ) {
+          state = "error";
+          classifiedDetail = "State: error (opencode worker heartbeat expired)";
+        }
       }
 
       // Structured sources first; the generic tmux-banner scan only runs when they
@@ -25425,6 +27129,7 @@ export class SessionService {
       error: _error,
       errorSource: _errorSource,
       pr: _recordPr,
+      prAlertTransfer: _prAlertTransfer,
       ...dashboardSession
     } = session;
     const state = this.stabilizeState(
@@ -25840,6 +27545,7 @@ export class SessionService {
       queuedMessages: _queuedMessages,
       errorSource: _errorSource,
       pr: _recordPr,
+      prAlertTransfer: _prAlertTransfer,
       ...sessionWithoutDetailFields
     } = session;
 

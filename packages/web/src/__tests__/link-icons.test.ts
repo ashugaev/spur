@@ -51,6 +51,51 @@ function jsonResponse(body: unknown, ok = true, status = 200): Response {
 }
 
 describe("fetchPrInfo", () => {
+  it("preserves reviewer metadata through fetch, batch cache, storage, and last-good reads", async () => {
+    const url = "https://github.com/org/repo/pull/reviewers-cache";
+    const reviewers = { approved: ["alice", "bob"], changesRequested: ["carol"] };
+    const snapshot = {
+      state: "open",
+      reviewDecision: "approved",
+      ciStatus: "success",
+      canMerge: true,
+      mergeConflict: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      reviewers,
+      reviewRequirement: "required",
+    };
+    mockFetch.mockResolvedValueOnce(jsonResponse(snapshot));
+    expect(await fetchPrInfo(url)).toMatchObject({ reviewers, reviewRequirement: "required" });
+    mockFetch.mockResolvedValueOnce(jsonResponse({ results: { [url]: snapshot } }));
+    await fetchPrInfoBatch([url]);
+    const { result } = renderHook(() => usePrInfo(url));
+    expect(result.current.reviewers).toEqual(reviewers);
+    expect(result.current.reviewRequirement).toBe("required");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
+    expect(window.localStorage.getItem("spur:pr-status-cache:v1")).toContain("alice");
+    mockFetch.mockResolvedValueOnce(jsonResponse({}, false));
+    expect(await fetchPrInfo(url)).toMatchObject({ reviewers, reviewRequirement: "required" });
+  });
+
+  it("treats malformed reviewer metadata as unknown without losing aggregate data", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        state: "open",
+        reviewDecision: "approved",
+        reviewers: { approved: [42], changesRequested: [] },
+        reviewRequirement: "optional",
+      }),
+    );
+    const result = await fetchPrInfo("https://github.com/org/repo/pull/malformed-reviewers");
+    expect(result.state).toBe("open");
+    expect(result.reviewDecision).toBe("approved");
+    expect(result.reviewers).toBeNull();
+    expect(result.reviewRequirement).toBe("unavailable");
+  });
+
   it("maps state, ciStatus, totalThreads, unresolvedThreads from JSON", async () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({
@@ -931,6 +976,113 @@ describe("shared PR poller", () => {
     expect(batchBodies()).toHaveLength(0);
     await advance(120_000);
     expect(singleGets()).toHaveLength(2);
+  });
+
+  it.each(["HTTP", "rejected fetch", "failed decode", "malformed payload", "soft error"])(
+    "backs off a GitLab %s failure without losing last-good data",
+    async (failure) => {
+      const url = `https://gitlab.com/org/repo/-/merge_requests/failure-${failure}`;
+      const cached = { ...openPr, state: "open" as const, ciStatus: "success" as const };
+      primePrInfo(url, cached);
+      await advance(120_000);
+      mockFetch.mockImplementation(async () => {
+        if (failure === "rejected fetch") throw new Error("network down");
+        if (failure === "failed decode")
+          return {
+            ...jsonResponse(null),
+            json: async () => {
+              throw new Error("invalid JSON");
+            },
+          };
+        if (failure === "HTTP") return jsonResponse(null, false, 503);
+        if (failure === "malformed payload") return jsonResponse(null);
+        return jsonResponse({ state: null, error: "GitLab API 503" });
+      });
+      const { result } = renderHook(() => usePrInfo(url));
+      await advance(0);
+      expect(singleGets()).toHaveLength(1);
+      expect(result.current).toEqual(cached);
+      await advance(239_999);
+      expect(singleGets()).toHaveLength(1);
+      expect(result.current).toEqual(cached);
+      await advance(1);
+      expect(singleGets()).toHaveLength(2);
+      expect(result.current).toEqual(cached);
+    },
+  );
+
+  it("backs off consecutive GitLab failures and resets to 120s after recovery", async () => {
+    const url = "https://gitlab.com/org/repo/-/merge_requests/backoff-recovery";
+    const starts: number[] = [];
+    const baseline = Date.now();
+    mockFetch.mockImplementation(async () => {
+      starts.push(Date.now() - baseline);
+      return starts.length <= 3 ? jsonResponse(null, false, 503) : jsonResponse(openPr);
+    });
+    const { result } = renderHook(() => usePrInfo(url));
+    await advance(0);
+    for (const delay of [240_000, 480_000, 960_000]) {
+      const before = starts.length;
+      await advance(delay - 1);
+      expect(starts).toHaveLength(before);
+      await advance(1);
+      expect(starts).toHaveLength(before + 1);
+    }
+    expect(starts).toEqual([0, 240_000, 720_000, 1_680_000]);
+    expect(result.current.state).toBe("open");
+    await advance(119_999);
+    expect(starts).toHaveLength(4);
+    await advance(1);
+    expect(starts[4]).toBe(1_800_000);
+  });
+
+  it("does not let a successful GitHub batch mask a GitLab failure", async () => {
+    const github = "https://github.com/org/repo/pull/2100";
+    const gitlab = "https://gitlab.com/org/repo/-/merge_requests/mixed-failure";
+    mockFetch.mockImplementation(async (input) =>
+      input === "/api/pr-status/batch"
+        ? jsonResponse({ results: { [github]: openPr } })
+        : jsonResponse(null, false, 503),
+    );
+    const githubHook = renderHook(() => usePrInfo(github));
+    renderHook(() => usePrInfo(gitlab));
+    await advance(0);
+    expect(githubHook.result.current.state).toBe("open");
+    expect(batchBodies()).toHaveLength(1);
+    expect(singleGets()).toHaveLength(1);
+    await advance(239_999);
+    expect(batchBodies()).toHaveLength(1);
+    expect(singleGets()).toHaveLength(1);
+    await advance(1);
+    expect(batchBodies()).toHaveLength(2);
+    expect(singleGets()).toHaveLength(2);
+  });
+
+  it("backs off a GitLab timeout from settlement and recovers cached display", async () => {
+    const url = "https://gitlab.com/org/repo/-/merge_requests/timeout-recovery";
+    primePrInfo(url, { ...openPr, state: "open" });
+    await advance(120_000);
+    mockFetch.mockImplementationOnce(
+      (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        }),
+    );
+    mockFetch.mockResolvedValue(jsonResponse({ ...openPr, state: "merged" }));
+    const { result } = renderHook(() => usePrInfo(url));
+    await advance(0);
+    const signal = mockFetch.mock.calls[0]?.[1]?.signal;
+    await advance(29_999);
+    expect(signal?.aborted).toBe(false);
+    await advance(1);
+    expect(signal?.aborted).toBe(true);
+    expect(result.current.state).toBe("open");
+    await advance(239_999);
+    expect(singleGets()).toHaveLength(1);
+    expect(result.current.state).toBe("open");
+    await advance(1);
+    expect(singleGets()).toHaveLength(2);
+    expect(result.current.state).toBe("merged");
   });
 
   it("stops polling when every hook unmounts", async () => {
