@@ -43,7 +43,7 @@ describe("Page source snapshots", () => {
         (await sync.create({ id, source: { path: join(source, `${id}.html`) } })).sync?.state,
       ).toBe("synced");
     }
-    const stores = new StoreService({ dataDir: data, readSession: () => undefined });
+    const stores = new StoreService({ dataDir: data, readSession: () => null });
     await stores.set("page:training", "items", "one", { value: "training" });
     await stores.set("page:films", "items", "one", { value: "films" });
     const config = await output("page.yaml", "training");
@@ -95,7 +95,7 @@ describe("Page source snapshots", () => {
         await writeFile(asset, "old file");
       }
       await sync.create({ id: "site", source: { path: source } });
-      const stores = new StoreService({ dataDir: data, readSession: () => undefined });
+      const stores = new StoreService({ dataDir: data, readSession: () => null });
       await stores.set("page:site", "items", "one", { keep: true });
       const config = await output("page.yaml");
       await writeFile(join(pageDirPath(data, "site"), "manual.txt"), "unrelated");
