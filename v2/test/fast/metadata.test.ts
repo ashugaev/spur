@@ -1446,8 +1446,6 @@ describe("durable spawn metadata", () => {
         externalId: "acme/api#7",
         blockIndex: 0,
       };
-      session.codexRestoreStartedAt = session.createdAt;
-      session.codexRestoreLaunchId = "restore-owner";
       session.restoredAt = session.createdAt;
       session.spawnIntent.phase = phase;
       if (phase === "launching" || phase === "submitted") {
@@ -1465,10 +1463,8 @@ describe("durable spawn metadata", () => {
       expect(readSession(dataDir, session.id)).toMatchObject(session);
       expect(listSessions(dataDir)[0]?.spawnIntent).toEqual(session.spawnIntent);
       expect(readSession(dataDir, session.id)?.triggerOrigin).toEqual(session.triggerOrigin);
-      expect(readSession(dataDir, session.id)?.codexRestoreLaunchId).toBe("restore-owner");
       writeSession(dataDir, { ...session, restoredAt: "invalid" });
       expect(readSession(dataDir, session.id)).toMatchObject({
-        codexRestoreLaunchId: "restore-owner",
         spawnIntent: session.spawnIntent,
         spawnReceipt: session.spawnReceipt,
       });
@@ -1652,46 +1648,6 @@ describe("session workspaceId normalization", () => {
     createdAt: "2026-03-18T10:00:00.000Z",
     updatedAt: "2026-03-18T10:01:00.000Z",
   };
-
-  it("preserves an explicit Codex launch owner without backfilling legacy ownership", async () => {
-    const dataDir = await newDataDir();
-    const record: SessionRecord = {
-      ...legacyBase,
-      agent: "codex",
-      id: "api-1",
-      tmuxSession: "api-1",
-      agentLaunchId: "current-launch",
-      codexRestoreStartedAt: "2026-03-18T10:00:00.000Z",
-      codexRestoreLaunchId: "current-launch",
-    };
-    writeSession(dataDir, record);
-    expect(readSession(dataDir, record.id)).toMatchObject({
-      agentLaunchId: record.agentLaunchId,
-      codexRestoreStartedAt: record.codexRestoreStartedAt,
-      codexRestoreLaunchId: record.codexRestoreLaunchId,
-    });
-
-    writeSession(dataDir, { ...record, codexRestoreLaunchId: "previous-launch" });
-    expect(readSession(dataDir, record.id)?.codexRestoreLaunchId).toBe("previous-launch");
-
-    const { codexRestoreLaunchId: _owner, ...legacy } = record;
-    writeSession(dataDir, legacy);
-    expect(readSession(dataDir, record.id)?.codexRestoreStartedAt).toBe(
-      record.codexRestoreStartedAt,
-    );
-    expect(readSession(dataDir, record.id)?.codexRestoreLaunchId).toBeUndefined();
-
-    for (const owner of [null, 42, "", "   "]) {
-      writeSession(dataDir, { ...record, codexRestoreLaunchId: owner } as unknown as SessionRecord);
-      expect(readSession(dataDir, record.id)?.codexRestoreLaunchId).toBeUndefined();
-      expect(readSession(dataDir, record.id)?.codexRestoreStartedAt).toBe(
-        record.codexRestoreStartedAt,
-      );
-    }
-    writeSession(dataDir, { ...record, codexRestoreStartedAt: "invalid" });
-    expect(readSession(dataDir, record.id)?.codexRestoreLaunchId).toBe(record.codexRestoreLaunchId);
-    expect(readSession(dataDir, record.id)?.codexRestoreStartedAt).toBeUndefined();
-  });
 
   it("survives a write/read round-trip", async () => {
     // Guards the whitelist trap: normalizeSessionRecord drops any field it

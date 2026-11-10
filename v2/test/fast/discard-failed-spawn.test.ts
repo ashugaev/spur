@@ -258,6 +258,7 @@ describe("discardFailedSpawn", () => {
         readWorkItemLifecycles(f.dataDir, "api", "pr-watch").get(item.externalId)?.members[0],
       ).not.toHaveProperty("previousTriggerIds");
     } catch (error) {
+      // eslint-disable-next-line no-console -- Preserve fixture diagnostics before teardown.
       console.error("Retained namespace cleanup failed", {
         cleanupOutcome,
         warnings: warn.mock.calls,

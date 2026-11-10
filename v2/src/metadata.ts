@@ -1662,10 +1662,6 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     Number.isFinite(Date.parse(normalizedSession.codexRestoreStartedAt))
       ? { codexRestoreStartedAt: normalizedSession.codexRestoreStartedAt }
       : {}),
-    ...(typeof normalizedSession.codexRestoreLaunchId === "string" &&
-    normalizedSession.codexRestoreLaunchId.trim().length > 0
-      ? { codexRestoreLaunchId: normalizedSession.codexRestoreLaunchId }
-      : {}),
     ...(typeof normalizedSession.restoredAt === "string" &&
     Number.isFinite(Date.parse(normalizedSession.restoredAt))
       ? { restoredAt: normalizedSession.restoredAt }
