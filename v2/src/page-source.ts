@@ -362,8 +362,9 @@ export class PageSourceSync {
       });
     } finally {
       if (stage) {
-        await noLinks(stage)
-          .then(() => rm(stage, { recursive: true, force: true }))
+        const stagedDir = stage;
+        await noLinks(stagedDir)
+          .then(() => rm(stagedDir, { recursive: true, force: true }))
           .catch(() => undefined);
       }
     }
