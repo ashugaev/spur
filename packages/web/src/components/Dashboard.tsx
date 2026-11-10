@@ -625,7 +625,7 @@ function ProjectMenu({
         type="button"
         onClick={popover.toggle}
       >
-        <span className="inline-flex min-w-0 max-w-[230px] items-center gap-1 text-base font-bold uppercase tracking-[-0.02em]">
+        <span className="inline-flex min-w-0 max-w-[124px] items-center gap-1 text-[12px] font-bold uppercase tracking-[-0.02em] md:max-w-[230px] md:text-[16px]">
           <span className="block min-w-0 truncate">{activeProjectName}</span>
           <svg
             aria-hidden="true"
@@ -722,6 +722,28 @@ function ProjectMenu({
               ))}
             </ul>
           )}
+          <a
+            href={
+              selectedProjectId
+                ? `/pages?project=${encodeURIComponent(selectedProjectId)}`
+                : "/pages"
+            }
+            role="menuitem"
+            onClick={popover.dismiss}
+            className="mt-2 flex items-center gap-2 border-t border-[var(--color-border-subtle)] px-2 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:text-[var(--color-accent)]"
+          >
+            <svg
+              aria-hidden="true"
+              className="h-4 w-4"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+            >
+              <path d="M6 3h8l4 4v14H6zM14 3v5h4M9 12h6M9 16h6" />
+            </svg>
+            Pages
+          </a>
           <button
             className="mt-2 w-full bg-[var(--color-accent)] px-2 py-1.5 text-left font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
             onClick={() => {
@@ -2813,7 +2835,7 @@ export function Dashboard() {
         <header className="sticky top-0 z-40 border-b border-[var(--color-border-default)] bg-[var(--color-bg-base)]">
           <div className="mx-auto flex min-h-10 max-w-[1500px] items-center gap-2.5 px-4 py-[7px] sm:px-5 lg:px-6">
             <BrandGlyph />
-            <span className="hidden min-w-0 md:inline-flex">
+            <span className="inline-flex min-w-0">
               <ProjectMenu
                 activeProjectName={activeProjectName}
                 projects={filterProjectOptions}

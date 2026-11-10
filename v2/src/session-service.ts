@@ -195,6 +195,8 @@ import {
   SHEPHERD_PROJECT_ID,
   SHEPHERD_PROJECT_NAME,
 } from "./shepherd.js";
+import { buildPageProject, isPageProjectId, parsePageProjectId } from "./pages.js";
+import { assertProjectIdentityNotReserved } from "./page-identity.js";
 import { renderBootstrapPrompt, resolveBootstrapConfigReferencePath } from "./bootstrap-prompt.js";
 import {
   extractBareUserTask,
@@ -2736,6 +2738,11 @@ export function isForeignAgentProcessMessage(message: string): boolean {
   return message.includes(FOREIGN_AGENT_PROCESS_MARKER);
 }
 
+// Per-launch trust: Claude Code skips its workspace trust dialog when this is
+// set. Trust is not persisted: Claude still writes a project entry with
+// hasTrustDialogAccepted false for each launched dir (Claude Code 2.1.291).
+const CLAUDE_PAGE_TRUST_ENV = "CLAUDE_CODE_SANDBOXED";
+
 function buildSessionEnv(args: {
   agent: SessionRecord["agent"];
   projectId: string;
@@ -2797,6 +2804,10 @@ function buildSessionEnv(args: {
       existsSync(join(args.repoPath, "pnpm-workspace.yaml")))
   ) {
     env["npm_config_virtual_store_dir"] = join(args.repoPath, "node_modules/.pnpm");
+  }
+  // Page dirs are Spur-created: skip Claude's per-folder trust dialog.
+  if (args.agent === "claude" && isPageProjectId(args.projectId)) {
+    env[CLAUDE_PAGE_TRUST_ENV] = "1";
   }
   return {
     ...env,
@@ -6450,6 +6461,7 @@ export class SessionService {
       candidateId = `${baseId}-${suffix}`;
       suffix += 1;
     }
+    assertProjectIdentityNotReserved(candidateId, prefix);
 
     let absolutePath: string;
     if (rawPath) {
@@ -6514,6 +6526,7 @@ export class SessionService {
     if (!existingUnconfigured.some((entry) => entry.id === id)) {
       throw new SessionResourceNotFoundError(`Unknown unconfigured project: ${id}`);
     }
+    assertProjectIdentityNotReserved(id, prefix);
     const configuredPrefixes = Object.values(this.config.projects).map(
       (project) => project.sessionPrefix,
     );
@@ -9661,6 +9674,14 @@ export class SessionService {
     if (projectId === SHEPHERD_PROJECT_ID) {
       return buildShepherdProject(this.config.dataDir);
     }
+    const pageId = parsePageProjectId(projectId);
+    if (pageId !== null) {
+      try {
+        return buildPageProject(this.config.dataDir, pageId);
+      } catch {
+        throw new SessionResourceNotFoundError(`Unknown project: ${projectId}`);
+      }
+    }
     const project = this.config.projects[projectId];
     if (!project) {
       throw new SessionResourceNotFoundError(`Unknown project: ${projectId}`);
@@ -9673,6 +9694,14 @@ export class SessionService {
   ): ProjectConfig | undefined {
     if (session.project === SHEPHERD_PROJECT_ID) {
       return buildShepherdProject(this.config.dataDir);
+    }
+    const pageId = parsePageProjectId(session.project);
+    if (pageId !== null) {
+      try {
+        return buildPageProject(this.config.dataDir, pageId);
+      } catch {
+        return undefined;
+      }
     }
     const daemonProject = this.config.projects[session.project];
     // Only a config that lives in the session's own worktree counts. Walking
@@ -21511,8 +21540,11 @@ export class SessionService {
       }),
     );
     const recoverySidecarNames = manualSidecarNames(resolveSessionSidecars(session, project));
+    // A page agent's fresh launch gets its spawn prompt back, never the restore prefix.
     const recoveryContextMessage = buildInitialMessage(
-      buildRestorePrompt(session.prompt, planMode, restrictWrites, mode),
+      isPageProjectId(session.project)
+        ? buildSessionPrompt(session.prompt, planMode, restrictWrites, mode)
+        : buildRestorePrompt(session.prompt, planMode, restrictWrites, mode),
       recoverySidecarNames,
       this.config.tags,
       project.branchNaming?.regex,
@@ -22315,14 +22347,21 @@ export class SessionService {
       // status==="stopped" and would wrongly stop suppressing the restore
       // prompt for that case. This also gates on manual_pause alongside
       // stale_timeout, which isStaleParked does not cover.
+      // A page agent never gets the restore prompt: native resume stays silent,
+      // a fresh launch gets its spawn prompt back (gated below on freshLaunchFallback).
+      const isPageSession = isPageProjectId(current.project);
       const shouldSendRestoreMessage =
         current.status !== "paused" &&
         current.stopReason !== "manual_pause" &&
         current.stopReason !== "stale_timeout" &&
-        current.stopReason !== "memory_shed";
+        current.stopReason !== "memory_shed" &&
+        !isPageSession;
       const restorePrompt = shouldSendRestoreMessage
         ? buildRestorePrompt(current.prompt, planMode, restrictWrites, mode)
         : "";
+      const freshLaunchPrompt = isPageSession
+        ? buildSessionPrompt(current.prompt, planMode, restrictWrites, mode)
+        : restorePrompt;
       const planOptions = {
         ...withAgentModeOptions(
           withProjectAgentOptions(restoreProjectConfig, {
@@ -22366,7 +22405,7 @@ export class SessionService {
             ),
           );
       const effectivePlan =
-        launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, launchPlanOptions);
+        launchPlan ?? buildAgentLaunchPlan(current.agent, freshLaunchPrompt, launchPlanOptions);
       operation?.assertActive();
       await withLocks(async () => {
         const latest = readSession(this.config.dataDir, sessionId);
@@ -22548,7 +22587,8 @@ export class SessionService {
         throw new Error(`Session ${sessionId} changed during restore readiness`);
       }
       operation?.assertActive();
-      if (shouldSendRestoreMessage && effectivePlan.initialMessage.trim()) {
+      const sendsLaunchMessage = isPageSession ? freshLaunchFallback : shouldSendRestoreMessage;
+      if (sendsLaunchMessage && effectivePlan.initialMessage.trim()) {
         const restoreInitialMessage = buildInitialMessage(
           effectivePlan.initialMessage,
           restoreSidecarNames,

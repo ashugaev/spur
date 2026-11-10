@@ -245,6 +245,7 @@ import { resolveBootstrapConfigReferencePath } from "../../src/bootstrap-prompt.
 import { readPrAlertOwnership, writeWorkspaceState } from "../../src/workspace-store.js";
 import { allowsPrAlertBatch } from "../../src/pr-alert-owner.js";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
+import { createPage } from "../../src/pages.js";
 import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as sessionSlotsModule from "../../src/session-slots.js";
 import type * as metadataModule from "../../src/metadata.js";
@@ -46824,6 +46825,150 @@ describe("SessionService", () => {
     );
   });
 
+  it("restores a page agent in its page dir without a restore prompt or the spawn prompt", async () => {
+    const page = createPage(TEST_DATA_DIR, { id: "films", title: "Films" });
+    findAgentSessionIdMock.mockResolvedValue("session-uuid");
+    createSessionStore({
+      id: "pg-films-ab12",
+      project: "spur-page-films",
+      agent: "claude",
+      prompt: "page agent prompt",
+      branch: "main",
+      worktree: false,
+      worktreePath: page.path,
+      tmuxSession: "pg-films-ab12",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    mockExitedThenRestoredProcess();
+
+    const service = await createDisposedSessionService();
+    await service.restore("pg-films-ab12");
+
+    expect(buildAgentRestorePlanMock).toHaveBeenCalledWith("claude", page.path, "", {});
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
+    expect(createTmuxSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        env: expect.objectContaining({ CLAUDE_CODE_SANDBOXED: "1" }),
+      }),
+    );
+  });
+
+  it("trusts the workspace per launch only for claude page agents", async () => {
+    const { _buildSessionEnvForTests } = await import("../../src/session-service.js");
+    const envFor = (agent: "claude" | "codex", projectId: string) =>
+      _buildSessionEnvForTests({
+        agent,
+        projectId,
+        sessionId: "s-1",
+        artifactsSessionId: "s-1",
+        sessionToolDir: "/tmp/spur-session-tools/s-1",
+        dataDir: TEST_DATA_DIR,
+        repoPath: "/tmp/repo",
+        symlinks: [],
+      });
+    expect(envFor("claude", "spur-page-films")["CLAUDE_CODE_SANDBOXED"]).toBe("1");
+    expect(envFor("claude", "api")).not.toHaveProperty("CLAUDE_CODE_SANDBOXED");
+    expect(envFor("codex", "spur-page-films")).not.toHaveProperty("CLAUDE_CODE_SANDBOXED");
+  });
+
+  it("fresh-launch restore of a page agent sends its spawn prompt without the restore prefix", async () => {
+    const page = createPage(TEST_DATA_DIR, { id: "films", title: "Films" });
+    findAgentSessionIdMock.mockResolvedValue(null);
+    buildAgentRestorePlanMock.mockResolvedValue(null);
+    createSessionStore({
+      id: "pg-films-ab12",
+      project: "spur-page-films",
+      agent: "claude",
+      prompt: "page agent prompt",
+      branch: "main",
+      worktree: false,
+      worktreePath: page.path,
+      tmuxSession: "pg-films-ab12",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    tmuxSessionExistsMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true);
+    mockExitedThenRestoredProcess();
+
+    const service = await createDisposedSessionService();
+    mockTimerPromisesSleepWithFakeTimers();
+    await service.restore("pg-films-ab12");
+
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "page agent prompt", {});
+    expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    const sent = sendMessageToTmuxMock.mock.calls[0]?.[1];
+    expect(sent).toContain("page agent prompt");
+    expect(sent).not.toContain("This session was restored");
+    expect(sent).not.toContain("Pull the latest main");
+  });
+
+  it.each([
+    ["native resume sends no prompt", false],
+    ["fresh launch sends only the page spawn prompt", true],
+  ] as const)("send-driven relaunch of a page agent: %s", async (_scenario, resumeRefused) => {
+    const page = createPage(TEST_DATA_DIR, { id: "films", title: "Films" });
+    mockAgentWaitingState("claude");
+    findAgentSessionIdMock.mockResolvedValue("session-uuid");
+    const sessions = createSessionStore();
+    sessions.set("pg-films-ab12", {
+      id: "pg-films-ab12",
+      project: "spur-page-films",
+      agent: "claude",
+      agentSessionId: "session-uuid",
+      prompt: "page agent prompt",
+      branch: "main",
+      worktree: false,
+      worktreePath: page.path,
+      tmuxSession: "pg-films-ab12",
+      launchCommand: agentLaunchCommand("claude"),
+      status: "stopped",
+      stopReason: "stale_timeout",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T09:00:00.000Z",
+    });
+    listSessionsMock.mockReturnValue([]);
+    let relaunched = false;
+    tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+    // Refusing the resume pane before create forces the fresh-launch fallback.
+    let creates = 0;
+    createTmuxSessionMock.mockImplementation(async () => {
+      creates += 1;
+      if (resumeRefused && creates === 1) throw new Error("resume launch refused before create");
+      relaunched = true;
+    });
+    isProcessRunningInTmuxMock.mockImplementation(async () => true);
+
+    const service = await createDisposedSessionService();
+    const result = await service.send("pg-films-ab12", {
+      message: "the real trigger",
+      queue: false,
+    });
+
+    expect(result.status).toBe("running");
+    const sent = sendMessageToTmuxMock.mock.calls.map((call) => String(call[1]));
+    expect(sent.at(-1)).toContain("the real trigger");
+    for (const message of sent) {
+      expect(message).not.toContain("This session was restored");
+      expect(message).not.toContain("Pull the latest main");
+    }
+    if (resumeRefused) {
+      expect(sent).toHaveLength(2);
+      expect(sent[0]).toContain("page agent prompt");
+    } else {
+      expect(sent).toHaveLength(1);
+    }
+  });
+
   it("restores a manually stopped session without sending a restore prompt", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -60629,6 +60774,33 @@ describe("SessionService", () => {
           path: projectDir,
         }),
       ).toThrow(/sessionPrefix "api" is already in use/);
+    });
+
+    it("createUnconfiguredProject and updateUnconfiguredProject reject reserved page identities", async () => {
+      seedUnconfigured([{ id: "stub", displayName: "Stub", prefix: "stub", path: projectDir }]);
+      const service = await createDisposedSessionService();
+      expect(() =>
+        service.createUnconfiguredProject({
+          displayName: "Demo",
+          prefix: "pg-x",
+          path: projectDir,
+        }),
+      ).toThrow('sessionPrefix "pg-x" uses the reserved page prefix pg-');
+      expect(() =>
+        service.createUnconfiguredProject({
+          displayName: "Spur Page X",
+          prefix: "spx",
+          path: projectDir,
+        }),
+      ).toThrow('project id "spur-page-x" uses the reserved prefix spur-page-');
+      expect(() =>
+        service.updateUnconfiguredProject("stub", {
+          displayName: "Stub",
+          prefix: "pg-x",
+          path: projectDir,
+        }),
+      ).toThrow('sessionPrefix "pg-x" uses the reserved page prefix pg-');
+      expect(addUnconfiguredProjectMock).not.toHaveBeenCalled();
     });
 
     it("createUnconfiguredProject derives a suffixed id when displayName collides", async () => {

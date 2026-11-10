@@ -212,6 +212,10 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
   if (method !== "POST" && method !== "PATCH" && method !== "DELETE") {
     return null;
   }
+  // Store data writes are page/snippet traffic, not operator actions.
+  if (/^\/stores\/[^/]+\/((docs|query)\/|actions\/[^/]+\/complete$)/.test(path)) {
+    return null;
+  }
 
   if (method === "POST") {
     const autoPingMute = path.match(/^\/sessions\/([^/]+)\/auto-ping-suppressions\/mute$/);
@@ -230,6 +234,9 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
     const preflight = path.match(/^\/projects\/([^/]+)\/preflight$/);
     if (preflight?.[1]) return { action: "project.preflight", projectId: preflight[1] };
     if (path === "/projects") return { action: "project.create" };
+    if (path === "/pages") return { action: "page.create" };
+    if (/^\/stores\/[^/]+\/agent\/send$/.test(path)) return { action: "store.send" };
+    if (/^\/stores\/[^/]+\/actions$/.test(path)) return { action: "store.invoke" };
     if (path === "/deploy/switch") return { action: "deploy.switch" };
     if (path === "/deploy/auto-update") return { action: "deploy.auto_update" };
 
@@ -302,6 +309,7 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
   if (method === "DELETE") {
     const projectDelete = path.match(/^\/projects\/([^/]+)$/);
     if (projectDelete?.[1]) return { action: "project.delete", projectId: projectDelete[1] };
+    if (/^\/pages\/[^/]+$/.test(path)) return { action: "page.delete" };
     const sharedMemoryRemove = path.match(/^\/sessions\/([^/]+)\/shared-memory\/[^/]+\/[^/]+$/);
     if (sharedMemoryRemove?.[1]) {
       return { action: "shared.memory_remove", sessionId: sharedMemoryRemove[1] };

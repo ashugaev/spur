@@ -102,6 +102,26 @@ describe("user-action logging (server)", () => {
     expect(readUserActionLog(dataDir)).toHaveLength(0);
   });
 
+  it("does not log store document writes", async () => {
+    const { port, dataDir, stop } = await bootServer();
+    await mkdir(join(dataDir, "pages", "films"), { recursive: true });
+    try {
+      const base = `http://127.0.0.1:${port}/stores/page%3Afilms`;
+      const init = { headers: { "content-type": "application/json", "x-spur-origin": "ui" } };
+      const add = await fetch(`${base}/docs/notes`, {
+        ...init,
+        method: "POST",
+        body: JSON.stringify({ data: { text: "hi" } }),
+      });
+      expect(add.status).toBe(201);
+      const query = await fetch(`${base}/query/notes`, { ...init, method: "POST", body: "{}" });
+      expect(query.status).toBe(200);
+    } finally {
+      await stop();
+    }
+    expect(readUserActionLog(dataDir)).toHaveLength(0);
+  });
+
   it("logs an unrecognized mutating route as action unknown", async () => {
     const { port, dataDir, stop } = await bootServer();
     try {
