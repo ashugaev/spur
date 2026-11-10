@@ -47,7 +47,9 @@ test("Pages request failure retries to a compact empty catalogue", async ({ page
       : route.fulfill({ json: { pages: [] } });
   });
   await page.goto("/pages");
-  await expect(page.getByRole("alert")).toContainText("Could not load pages (503).");
+  await expect(page.getByRole("main").getByRole("alert")).toContainText(
+    "Could not load pages (503).",
+  );
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await expect(page.getByText("No pages yet.", { exact: true })).toBeVisible();
 });
