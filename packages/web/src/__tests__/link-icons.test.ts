@@ -922,6 +922,57 @@ describe("shared PR poller", () => {
     setVisibility("visible");
   });
 
+  it.each(["HTTP failure", "stale error"])(
+    "loads successful GitHub readiness while a GitLab %s backs off the shared poller",
+    async (failure) => {
+      const github = `https://github.com/org/repo/pull/${failure === "stale error" ? 2301 : 2300}`;
+      const gitlab = `https://gitlab.com/org/repo/-/merge_requests/${failure === "stale error" ? 2301 : 2300}`;
+      mockFetch.mockImplementation(async (input) =>
+        input === "/api/pr-status/batch"
+          ? jsonResponse({ results: { [github]: openPr } })
+          : failure === "stale error"
+            ? jsonResponse({
+                ...openPr,
+                stale: true,
+                fetchedAt: Date.now(),
+                error: "GitLab API 503",
+              })
+            : jsonResponse(null, false, 503),
+      );
+      const gitlabHook = renderHook(() => usePrInfo(gitlab));
+      const { result } = renderHook(() => usePrReadyUrls([github], true));
+      expect(result.current.loaded).toBe(false);
+      await advance(0);
+      expect(result.current.loaded).toBe(true);
+      expect([...result.current.ready]).toEqual([github]);
+      if (failure === "stale error") expect(gitlabHook.result.current.state).toBe("open");
+      await advance(120_000);
+      expect(batchBodies()).toHaveLength(1);
+      expect(singleGets()).toHaveLength(1);
+      await advance(119_999);
+      expect(batchBodies()).toHaveLength(1);
+      expect(singleGets()).toHaveLength(1);
+      await advance(1);
+      expect(batchBodies()).toHaveLength(2);
+      expect(singleGets()).toHaveLength(2);
+      expect(result.current.loaded).toBe(true);
+    },
+  );
+
+  it("keeps failed GitHub readiness unloaded even when the GitLab read succeeds", async () => {
+    const github = "https://github.com/org/repo/pull/2302";
+    const gitlab = "https://gitlab.com/org/repo/-/merge_requests/2302";
+    mockFetch.mockImplementation(async (input) =>
+      input === "/api/pr-status/batch" ? jsonResponse(null, false, 503) : jsonResponse(openPr),
+    );
+    const gitlabHook = renderHook(() => usePrInfo(gitlab));
+    const { result } = renderHook(() => usePrReadyUrls([github], true));
+    await advance(0);
+    expect(gitlabHook.result.current.state).toBe("open");
+    expect(result.current.loaded).toBe(false);
+    expect(result.current.ready.size).toBe(0);
+  });
+
   it("30 mounted hooks on GitHub URLs cost one batch per 120s cycle and no single GETs", async () => {
     mockEchoBackend();
     const urls = Array.from(

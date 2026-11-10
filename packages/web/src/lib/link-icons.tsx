@@ -305,7 +305,7 @@ export function extractLinkId(link: SpurSessionLink): string {
 // everything else (GitLab) one GET each. Subscription changes made in the same
 // tick coalesce into one run, and the poller stops once none remain.
 const prSubscriptions = new Map<string, number>();
-const prRunListeners = new Set<(seq: number, outcome: PollOutcome) => void>();
+const prRunListeners = new Set<(seq: number, githubOk: boolean) => void>();
 let prPoller: Poller | null = null;
 let prRunSeq = 0;
 let prRunRequested = false;
@@ -345,7 +345,7 @@ async function executePrPoll(): Promise<PollOutcome> {
   if (batchOk) for (const url of github) stampPrFresh(url);
   const outcome: PollOutcome =
     batchOk && singleOutcomes.every((result) => result === "ok") ? "ok" : "failed";
-  for (const listener of prRunListeners) listener(seq, outcome);
+  for (const listener of prRunListeners) listener(seq, batchOk);
   return outcome;
 }
 
@@ -404,7 +404,7 @@ function subscribePrPolling(url: string): () => void {
   };
 }
 
-function onPrRunSettled(listener: (seq: number, outcome: PollOutcome) => void): () => void {
+function onPrRunSettled(listener: (seq: number, githubOk: boolean) => void): () => void {
   prRunListeners.add(listener);
   return () => {
     prRunListeners.delete(listener);
@@ -439,8 +439,8 @@ export function usePrInfo(url: string | undefined): PrInfo {
 // GitHub-only URLs from `urls` join the shared PR poll while `enabled` is
 // true, and readiness is derived from the primed cache via `isPrReady`.
 // `loaded` stays false until a shared run started after the current URL set
-// subscribed settles successfully, so a filter consumer can no-op instead of
-// flashing an empty list while priming.
+// subscribed settles with a successful GitHub batch, so a filter consumer can
+// no-op instead of flashing an empty list while priming.
 export function usePrReadyUrls(
   urls: readonly string[],
   enabled: boolean,
@@ -471,16 +471,16 @@ export function usePrReadyUrls(
     // The URL set just changed (this effect re-runs on every `githubUrls`
     // identity change): the previous `ready` set belonged to a different set
     // of URLs, so it must stop gating the filter as "loaded" until a shared
-    // run that started after this subscription settles successfully —
+    // run that started after this subscription primes GitHub successfully —
     // otherwise a newly PR-ready session is filtered out for one round trip
-    // against stale readiness data. A failed run leaves the prior state: it
+    // against stale readiness data. A failed GitHub batch leaves the prior state: it
     // must not commit an unprimed (empty) `ready` set, which would narrow a
     // `prReadyOnly` filter to nothing instead of leaving it a no-op.
     setState((current) => ({ ready: current.ready, loaded: false }));
 
     const subscribedAtRun = prRunSeq;
-    const stopListening = onPrRunSettled((seq, outcome) => {
-      if (seq <= subscribedAtRun || outcome !== "ok") return;
+    const stopListening = onPrRunSettled((seq, githubOk) => {
+      if (seq <= subscribedAtRun || !githubOk) return;
       const ready = new Set(githubUrls.filter((url) => isPrReady(cachedOrEmpty(url))));
       setState({ ready, loaded: true });
     });
