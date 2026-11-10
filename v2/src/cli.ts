@@ -4685,6 +4685,7 @@ export function createProgram(cliEntrypoint: string): Command {
           if (Boolean(sourcePath) === Boolean(options.detach)) {
             throw new Error("page source requires a path or --detach, but not both");
           }
+          const path = sourcePath ? resolve(sourcePath) : null;
           await outputResult({
             json,
             label: `updating page ${id} source`,
@@ -4692,7 +4693,7 @@ export function createProgram(cliEntrypoint: string): Command {
               patchJson<PageSummary>(
                 cliEntrypoint,
                 `/pages/${encodeURIComponent(id)}/source`,
-                { path: options.detach ? null : resolve(sourcePath!) },
+                { path },
                 configPath,
               ),
             render: renderPage,

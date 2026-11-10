@@ -259,7 +259,8 @@ export class PageSourceSync {
           await rm(join(dir, entry.name), { recursive: true, force: true });
         }
       }
-      stage = await mkdtemp(join(dir, ".source-sync-"));
+      const snapshotDir = await mkdtemp(join(dir, ".source-sync-"));
+      stage = snapshotDir;
       const files: string[] = [];
       const snapshot = async (folder: string, prefix: string): Promise<void> => {
         for (const entry of await readdir(folder, { withFileTypes: true })) {
@@ -271,7 +272,7 @@ export class PageSourceSync {
           const stats = await lstat(path);
           if (stats.isDirectory()) await snapshot(path, name);
           else if (stats.isFile()) {
-            const target = join(stage!, name);
+            const target = join(snapshotDir, name);
             await mkdir(dirname(target), { recursive: true });
             await writeFile(target, await regularBytes(path));
             files.push(name);
@@ -375,7 +376,7 @@ export class PageSourceSync {
       const persist = async (value: Manifest): Promise<void> => {
         await stillCurrent();
         await noLinks(join(dir, MANIFEST), true);
-        const temporary = join(stage!, ".manifest");
+        const temporary = join(snapshotDir, ".manifest");
         await writeFile(temporary, JSON.stringify(value));
         await rename(temporary, join(dir, MANIFEST));
       };
@@ -427,8 +428,9 @@ export class PageSourceSync {
             }
           }
         }
-        status = { ...status, lastSyncedAt: new Date().toISOString() };
-        await persist({ version: 1, files, lastSyncedAt: status.lastSyncedAt! });
+        const lastSyncedAt = new Date().toISOString();
+        status = { ...status, lastSyncedAt };
+        await persist({ version: 1, files, lastSyncedAt });
       }
       this.statuses.set(key, { source, status: { ...status, state: "synced" } });
     } catch (error) {
