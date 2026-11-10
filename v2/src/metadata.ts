@@ -875,6 +875,13 @@ function parseReviewSnapshot(path: string): ReviewSnapshot {
     | undefined;
   const prNumber = typeof envelope?.prNumber === "number" ? envelope.prNumber : null;
   const mergeConflictClearId = envelope?.mergeConflictClearId;
+  const ownerRollbackId = envelope?.ownerRollbackId;
+  if (
+    ownerRollbackId !== undefined &&
+    (typeof ownerRollbackId !== "string" || !ownerRollbackId.trim())
+  ) {
+    throw new Error("Invalid PR alert rollback identifier");
+  }
   if (
     mergeConflictClearId !== undefined &&
     (typeof mergeConflictClearId !== "string" || !/^[0-9a-f-]{36}$/.test(mergeConflictClearId))
@@ -884,6 +891,7 @@ function parseReviewSnapshot(path: string): ReviewSnapshot {
   return {
     prNumber,
     ...(mergeConflictClearId !== undefined ? { mergeConflictClearId } : {}),
+    ...(ownerRollbackId !== undefined ? { ownerRollbackId } : {}),
     signals: new Map(
       (signalsRaw ?? []).map((signal) => [signal.key, signal] satisfies [string, ReviewSignal]),
     ),
@@ -1283,6 +1291,7 @@ function validateDurableSpawnFields(session: SessionRecord): void {
       "planMode",
       "restrictWrites",
       "allowedTriggers",
+      "prAlertOwner",
       "branch",
       "overrides",
       "reuseWorkspaceSessionId",
@@ -1311,7 +1320,13 @@ function validateDurableSpawnFields(session: SessionRecord): void {
   for (const key of ["prompt", "originalTaskPrompt"]) {
     durableCheck(request[key] === undefined || typeof request[key] === "string", `request ${key}`);
   }
-  for (const key of ["planMode", "restrictWrites", "bareSpawnMessage", "bootstrap"]) {
+  for (const key of [
+    "planMode",
+    "restrictWrites",
+    "bareSpawnMessage",
+    "bootstrap",
+    "prAlertOwner",
+  ]) {
     durableCheck(request[key] === undefined || typeof request[key] === "boolean", `request ${key}`);
   }
   for (const key of ["steps", "allowedTriggers"]) {
@@ -1513,6 +1528,24 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     normalizedSession.submitUnconfirmedAt ??
     (typeof legacyUnconfirmed === "string" ? legacyUnconfirmed : undefined);
   const workspaceId = workspaceIdOf(normalizedSession);
+  const rawPrAlertTransfer: unknown = normalizedSession.prAlertTransfer;
+  let prAlertTransfer: SessionRecord["prAlertTransfer"];
+  if (rawPrAlertTransfer !== undefined) {
+    if (
+      !isRecord(rawPrAlertTransfer) ||
+      (rawPrAlertTransfer["kind"] !== "owner" && rawPrAlertTransfer["kind"] !== "suppressed") ||
+      typeof rawPrAlertTransfer["predecessorWorkspaceId"] !== "string" ||
+      !rawPrAlertTransfer["predecessorWorkspaceId"].trim() ||
+      typeof rawPrAlertTransfer["predecessorSessionId"] !== "string" ||
+      !rawPrAlertTransfer["predecessorSessionId"].trim()
+    )
+      throw new Error("Invalid PR alert transfer metadata");
+    prAlertTransfer = {
+      kind: rawPrAlertTransfer["kind"],
+      predecessorWorkspaceId: rawPrAlertTransfer["predecessorWorkspaceId"],
+      predecessorSessionId: rawPrAlertTransfer["predecessorSessionId"],
+    };
+  }
   const closeoutOwner =
     typeof normalizedSession.closeoutOwner === "boolean"
       ? normalizedSession.closeoutOwner
@@ -1539,6 +1572,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { restrictWrites: normalizedSession.restrictWrites }
       : {}),
     closeoutOwner,
+    ...(prAlertTransfer ? { prAlertTransfer } : {}),
     ...(normalizedSession.allowedTriggers !== undefined
       ? { allowedTriggers: normalizedSession.allowedTriggers }
       : {}),
@@ -2029,6 +2063,9 @@ export function writeReviewSourceSnapshot(
     signals: [...snapshot.signals.values()],
     ...(snapshot.mergeConflictClearId !== undefined
       ? { mergeConflictClearId: snapshot.mergeConflictClearId }
+      : {}),
+    ...(snapshot.ownerRollbackId !== undefined
+      ? { ownerRollbackId: snapshot.ownerRollbackId }
       : {}),
   });
 }

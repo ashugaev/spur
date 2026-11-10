@@ -138,6 +138,22 @@ async function newDataDir(): Promise<string> {
 }
 
 describe("work-item registry", () => {
+  it("round-trips PR alert rollback source observation IDs and rejects malformed IDs", async () => {
+    const dataDir = await newDataDir();
+    const snapshot = { prNumber: 42, signals: new Map(), ownerRollbackId: "api-failed" };
+    writeReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1", snapshot);
+    expect(readReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1")).toEqual(
+      snapshot,
+    );
+    writeReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1", {
+      ...snapshot,
+      ownerRollbackId: "",
+    });
+    expect(() => readReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1")).toThrow(
+      "Invalid PR alert rollback identifier",
+    );
+  });
+
   it("round-trips confirmed conflict clear IDs and rejects malformed IDs", async () => {
     const dataDir = await newDataDir();
     const snapshot = {
@@ -1212,6 +1228,49 @@ describe("durable spawn metadata", () => {
       writeSession(dataDir, session);
       expect(readSession(dataDir, session.id)).toMatchObject(session);
       expect(listSessions(dataDir)[0]?.spawnIntent).toEqual(session.spawnIntent);
+    },
+  );
+
+  it.each(["owner", "suppressed"] as const)(
+    "round-trips explicit PR alert intent and internal %s provenance",
+    async (kind) => {
+      const dataDir = await newDataDir();
+      const session = acceptedSession();
+      session.spawnIntent.request.prAlertOwner = true;
+      session.prAlertTransfer = {
+        kind,
+        predecessorWorkspaceId: "api-old",
+        predecessorSessionId: "api-old",
+      };
+      writeSession(dataDir, session);
+      expect(readSession(dataDir, session.id)?.spawnIntent?.request.prAlertOwner).toBe(true);
+      expect(readSession(dataDir, session.id)?.prAlertTransfer).toEqual(session.prAlertTransfer);
+      expect(listSessions(dataDir)[0]?.prAlertTransfer).toEqual(session.prAlertTransfer);
+    },
+  );
+
+  it("rejects malformed PR alert transfer provenance before write", async () => {
+    const dataDir = await newDataDir();
+    const session = acceptedSession();
+    session.prAlertTransfer = {
+      kind: "owner",
+      predecessorWorkspaceId: "",
+      predecessorSessionId: "api-old",
+    };
+    expect(() => writeSession(dataDir, session)).toThrow("Invalid PR alert transfer");
+  });
+
+  it.each([null, "invalid", { kind: "helper" }])(
+    "rejects raw malformed PR alert provenance without rewriting it: %j",
+    async (prAlertTransfer) => {
+      const dataDir = await newDataDir();
+      const session = acceptedSession();
+      writeSession(dataDir, session);
+      const path = join(dataDir, "sessions", "api", "api-1.json");
+      const bytes = JSON.stringify({ ...session, prAlertTransfer });
+      writeFileSync(path, bytes);
+      expect(() => readSession(dataDir, session.id)).toThrow("Invalid PR alert transfer");
+      expect(readFileSync(path, "utf8")).toBe(bytes);
     },
   );
 

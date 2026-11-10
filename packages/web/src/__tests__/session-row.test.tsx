@@ -89,7 +89,7 @@ describe("SessionRow actions menu", () => {
   it.each([
     [
       { status: "running", runtimeAlive: true },
-      ["Desk agent", "Handoff", "Pause", "Complete", "Kill"],
+      ["Desk agent", "Handoff", "Pause", "Restart session", "Complete", "Kill"],
     ],
     [
       {
@@ -98,11 +98,11 @@ describe("SessionRow actions menu", () => {
         agent: "claude",
         claudeAccounts: [{ id: "work", authenticated: true }],
       },
-      ["Desk agent", "Handoff", "Pause", "Complete", "Kill"],
+      ["Desk agent", "Handoff", "Pause", "Restart session", "Complete", "Kill"],
     ],
     [
       { status: "running", runtimeAlive: true, workspaceExists: false },
-      ["Pause", "Recover", "Complete", "Kill"],
+      ["Pause", "Restart session", "Recover", "Complete", "Kill"],
     ],
     [
       { status: "stopped", state: "stopped", runtimeAlive: false },
@@ -133,15 +133,18 @@ describe("SessionRow actions menu", () => {
     expect(openMenu(makeSession(overrides))).toEqual(labels);
   });
 
-  it("dispatches the selected action and disables the trigger while it runs", async () => {
+  it("dispatches restart and disables the trigger while it runs", async () => {
     let finish!: () => void;
     onSessionAction.mockReturnValue(new Promise<void>((resolve) => (finish = resolve)));
     openMenu(makeSession({ status: "running", runtimeAlive: true }));
     const trigger = screen.getByRole("button", { name: "Actions for api-a1" });
     expect(trigger).toHaveAttribute("aria-haspopup", "menu");
     expect(trigger).toHaveAttribute("aria-expanded", "true");
-    fireEvent.click(screen.getByRole("menuitem", { name: "Kill" }));
-    expect(onSessionAction).toHaveBeenCalledWith(expect.objectContaining({ id: "api-a1" }), "kill");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Restart session" }));
+    expect(onSessionAction).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "api-a1" }),
+      "restart",
+    );
     expect(trigger).toBeDisabled();
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     finish();

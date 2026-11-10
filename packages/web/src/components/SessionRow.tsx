@@ -230,6 +230,7 @@ export type SessionRowAction =
   | "desk"
   | "handoff"
   | "pause"
+  | "restart"
   | "restore"
   | "continue"
   | "reopen"
@@ -264,7 +265,10 @@ function RowActionsMenu({
     items.push({ label, action, icon });
   if (canUseDeskCheckout(session)) add("Desk agent", "desk", <AccountsIcon className={ICON} />);
   if (canHandoff(session)) add("Handoff", "handoff", <SendIcon className={ICON} />);
-  if (canPause(session)) add("Pause", "pause", <PauseIcon className={ICON} />);
+  if (canPause(session)) {
+    add("Pause", "pause", <PauseIcon className={ICON} />);
+    add("Restart session", "restart", <RestoreIcon className={ICON} />);
+  }
   if (restorable && !budgetBlocked) add("Restore", "restore", <RestoreIcon className={ICON} />);
   if (restorable && budgetBlocked)
     add("Continue anyway", "continue", <PlayIcon className={ICON} />);

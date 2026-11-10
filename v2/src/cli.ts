@@ -36,6 +36,7 @@ import {
   getJson,
   getExistingJson,
   listProjects,
+  patchJson,
   postJson,
   postPreflight,
   restartDaemonIfRunning,
@@ -62,6 +63,8 @@ import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
 import type { UsageReport } from "./usage-report.js";
 import { appendAgentIssue, readAgentIssueLog, type AgentIssueRecord } from "./agent-issue-log.js";
 import type { UserActionRecord } from "./user-action-log.js";
+import type { StoreDoc } from "./stores.js";
+import type { PageSummary } from "./pages.js";
 import {
   accent,
   brandMark,
@@ -461,6 +464,22 @@ function parseSharedMemoryScope(value: unknown): SharedMemoryScope {
     throw new Error("--scope must be task, project, or global");
   }
   return scope;
+}
+
+function parseDbInteger(value: unknown, flag: string): number {
+  const text = String(value);
+  if (!/^\d+$/.test(text)) {
+    throw new Error(`${flag} must be a non-negative integer`);
+  }
+  return Number.parseInt(text, 10);
+}
+
+function parseDbJson(text: string, what: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new Error(`${what} must be valid JSON`);
+  }
 }
 
 function renderSourceInfo(response: SourceInfoResponse): string {
@@ -4416,6 +4435,259 @@ export function createProgram(cliEntrypoint: string): Command {
         throw new Error("memory action must be set, get, list, or rm");
       },
     );
+
+  program
+    .command("db")
+    .description("Read and write a page or session document store.")
+    .usage(
+      "<store> <get|list|query|add|set|update|rm> <collection> [doc-id] [json] [options] | <store> <done|fail> <action-id>",
+    )
+    .argument("<store>", "page:<id> or session:<sid>")
+    .argument("<op>", "get, list, query, add, set, update, rm, done, or fail")
+    .argument("[args...]", "Collection, document id and JSON, per op; action id for done|fail")
+    .option("--rev <number>", "Expected revision for set, update, or rm")
+    .option("--limit <number>", "Page size for list")
+    .option("--start-after <docId>", "Document id cursor for list")
+    .option("--result <json>", "Action result for done")
+    .option("--error <text>", "Action error for fail")
+    .option("--json", "Print raw JSON")
+    .action(async (store: string, op: string, args: string[], options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const json = Boolean(options.json);
+      const expected =
+        options.rev === undefined ? {} : { expectedRev: parseDbInteger(options.rev, "--rev") };
+      const take = (count: number, usage: string): string[] => {
+        if (args.length !== count) {
+          throw new Error(`Usage: spur db <store> ${op} ${usage}`);
+        }
+        return args;
+      };
+      const base = `/stores/${encodeURIComponent(store)}`;
+      const docPath = (collection: string, docId: string) =>
+        `${base}/docs/${encodeURIComponent(collection)}/${encodeURIComponent(docId)}`;
+      const collectionPath = (collection: string) =>
+        `${base}/docs/${encodeURIComponent(collection)}`;
+      const renderDoc = (doc: StoreDoc) => JSON.stringify(doc, null, 2);
+      const renderDocs = (response: { docs: StoreDoc[] }) =>
+        response.docs.length === 0
+          ? "No documents."
+          : response.docs
+              .map((doc) => JSON.stringify({ id: doc.id, rev: doc.rev, data: doc.data }))
+              .join("\n");
+
+      if (op === "get") {
+        const [collection, docId] = take(2, "<collection> <doc-id>") as [string, string];
+        await outputResult({
+          json,
+          label: `loading ${collection}/${docId}`,
+          action: () => getJson<StoreDoc>(cliEntrypoint, docPath(collection, docId), configPath),
+          render: renderDoc,
+        });
+        return;
+      }
+      if (op === "list") {
+        const [collection] = take(1, "<collection>") as [string];
+        const search = new URLSearchParams();
+        if (options.limit !== undefined)
+          search.set("limit", String(parseDbInteger(options.limit, "--limit")));
+        if (options.startAfter !== undefined) search.set("startAfter", String(options.startAfter));
+        const query = search.size > 0 ? `?${search}` : "";
+        await outputResult({
+          json,
+          label: `listing ${collection}`,
+          action: () =>
+            getJson<{ docs: StoreDoc[] }>(
+              cliEntrypoint,
+              `${collectionPath(collection)}${query}`,
+              configPath,
+            ),
+          render: renderDocs,
+        });
+        return;
+      }
+      if (op === "query") {
+        const [collection, queryJson] = take(2, "<collection> '<query-json>'") as [string, string];
+        const query = parseDbJson(queryJson, "query");
+        await outputResult({
+          json,
+          label: `querying ${collection}`,
+          action: () =>
+            postJson<{ docs: StoreDoc[] }>(
+              cliEntrypoint,
+              `${base}/query/${encodeURIComponent(collection)}`,
+              query,
+              configPath,
+            ),
+          render: renderDocs,
+        });
+        return;
+      }
+      if (op === "add") {
+        const [collection, dataJson] = take(2, "<collection> '<json>'") as [string, string];
+        const data = parseDbJson(dataJson, "document");
+        await outputResult({
+          json,
+          label: `adding to ${collection}`,
+          action: () =>
+            postJson<StoreDoc>(cliEntrypoint, collectionPath(collection), { data }, configPath),
+          success: (doc) => `Added ${collection}/${doc.id}.`,
+          render: renderDoc,
+        });
+        return;
+      }
+      if (op === "set" || op === "update") {
+        const [collection, docId, dataJson] = take(3, "<collection> <doc-id> '<json>'") as [
+          string,
+          string,
+          string,
+        ];
+        const payload = { data: parseDbJson(dataJson, "document"), ...expected };
+        await outputResult({
+          json,
+          label: `${op === "set" ? "writing" : "updating"} ${collection}/${docId}`,
+          action: () =>
+            op === "set"
+              ? postJson<StoreDoc>(cliEntrypoint, docPath(collection, docId), payload, configPath)
+              : patchJson<StoreDoc>(cliEntrypoint, docPath(collection, docId), payload, configPath),
+          success: (doc) => `Saved ${collection}/${doc.id} at rev ${doc.rev}.`,
+          render: renderDoc,
+        });
+        return;
+      }
+      if (op === "rm") {
+        const [collection, docId] = take(2, "<collection> <doc-id>") as [string, string];
+        const query =
+          expected.expectedRev === undefined ? "" : `?expectedRev=${expected.expectedRev}`;
+        await outputResult({
+          json,
+          label: `removing ${collection}/${docId}`,
+          action: () =>
+            deleteJson<{ deleted: true }>(
+              cliEntrypoint,
+              `${docPath(collection, docId)}${query}`,
+              configPath,
+            ),
+          render: () => `Removed ${collection}/${docId}.`,
+        });
+        return;
+      }
+      if (op === "done" || op === "fail") {
+        const [actionId] = take(
+          1,
+          op === "done" ? "<action-id> [--result '<json>']" : "<action-id> --error '<text>'",
+        ) as [string];
+        let payload: { status: "done"; result?: unknown } | { status: "failed"; error: string };
+        if (op === "done") {
+          if (options.error !== undefined) throw new Error("db done takes --result, not --error");
+          payload = {
+            status: "done",
+            ...(options.result !== undefined
+              ? { result: parseDbJson(String(options.result), "--result") }
+              : {}),
+          };
+        } else {
+          if (options.result !== undefined) throw new Error("db fail takes --error, not --result");
+          if (typeof options.error !== "string" || options.error.trim() === "") {
+            throw new Error("db fail requires --error '<text>'");
+          }
+          payload = { status: "failed", error: options.error };
+        }
+        await outputResult({
+          json,
+          label: `closing action ${actionId}`,
+          action: () =>
+            postJson<StoreDoc>(
+              cliEntrypoint,
+              `${base}/actions/${encodeURIComponent(actionId)}/complete`,
+              payload,
+              configPath,
+            ),
+          render: (doc) => `Action ${doc.id} ${String(doc.data["status"])}.`,
+        });
+        return;
+      }
+      throw new Error("db op must be get, list, query, add, set, update, rm, done, or fail");
+    });
+
+  program
+    .command("page")
+    .description("Create, list, locate, or remove Spur pages.")
+    .usage("<create|list|path|rm> [id] [options]")
+    .argument("<action>", "create, list, path, or rm")
+    .argument("[id]", "Page id")
+    .option("--title <title>", "Page title for create; defaults to the id")
+    .option("--runtime <agent>", "Page agent runtime for create: claude, codex, cursor, opencode")
+    .option("--model <model>", "Page agent model for create")
+    .option("--template <name>", "Starter files for create", "blank")
+    .option("--json", "Print raw JSON")
+    .action(async (action: string, id: string | undefined, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const json = Boolean(options.json);
+      const renderPage = (page: PageSummary) =>
+        `${page.id}  ${page.title}  ${page.url}  ${page.path}`;
+      if (action === "list") {
+        if (id !== undefined) throw new Error("page list takes no id");
+        await outputResult({
+          json,
+          label: "loading pages",
+          action: () => getJson<{ pages: PageSummary[] }>(cliEntrypoint, "/pages", configPath),
+          render: (response) =>
+            response.pages.length === 0 ? "No pages." : response.pages.map(renderPage).join("\n"),
+        });
+        return;
+      }
+      if (!id) throw new Error(`page ${action} requires an id`);
+      if (action === "create") {
+        const body = {
+          id,
+          template: options.template,
+          ...(options.title !== undefined ? { title: options.title } : {}),
+          ...(options.runtime !== undefined ? { runtime: options.runtime } : {}),
+          ...(options.model !== undefined ? { model: options.model } : {}),
+        };
+        await outputResult({
+          json,
+          label: `creating page ${id}`,
+          action: () => postJson<PageSummary>(cliEntrypoint, "/pages", body, configPath),
+          success: (page) => `Created page ${page.id}. Open ${page.url} on the Spur web UI.`,
+          render: (page) => page.path,
+        });
+        return;
+      }
+      if (action === "path") {
+        await outputResult({
+          json,
+          label: `locating page ${id}`,
+          action: async () => {
+            const { pages } = await getJson<{ pages: PageSummary[] }>(
+              cliEntrypoint,
+              "/pages",
+              configPath,
+            );
+            const page = pages.find((entry) => entry.id === id);
+            if (!page) throw new Error(`Page not found: ${id}`);
+            return page;
+          },
+          render: (page) => page.path,
+        });
+        return;
+      }
+      if (action === "rm") {
+        await outputResult({
+          json,
+          label: `removing page ${id}`,
+          action: () =>
+            deleteJson<{ deleted: true; id: string }>(
+              cliEntrypoint,
+              `/pages/${encodeURIComponent(id)}`,
+              configPath,
+            ),
+          render: () => `Removed page ${id}.`,
+        });
+        return;
+      }
+      throw new Error("page action must be create, list, path, or rm");
+    });
 
   program
     .command("actions")

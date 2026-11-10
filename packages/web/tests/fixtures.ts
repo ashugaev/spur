@@ -399,20 +399,48 @@ export async function mockPrStatusBatch(
   return { count: () => requestCount };
 }
 
-export async function mockPrState(page: Page, state: PrState): Promise<void> {
-  await page.route(/\/api\/pr-status\?/, (route) => {
+/**
+ * One handler for both PR status paths: GitHub pull URLs reach the app through
+ * POST /api/pr-status/batch, everything else (GitLab) through GET
+ * /api/pr-status?url=. The batch response echoes every requested URL.
+ */
+export async function mockPrStatusFor(
+  page: Page,
+  respond: (url: string) => Record<string, unknown>,
+): Promise<void> {
+  await page.route(/\/api\/pr-status(\?|\/batch$)/, (route) => {
+    const request = route.request();
+    if (request.method() === "POST") {
+      const payload = request.postDataJSON() as { urls?: unknown } | null;
+      const urls = Array.isArray(payload?.urls) ? payload.urls : [];
+      const results: Record<string, unknown> = {};
+      for (const url of urls) {
+        if (typeof url === "string") results[url] = respond(url);
+      }
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ results }),
+      });
+      return;
+    }
+    const url = new URL(request.url()).searchParams.get("url") ?? "";
     void route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({
-        state,
-        ciStatus: null,
-        canMerge: false,
-        totalThreads: 0,
-        unresolvedThreads: 0,
-      }),
+      body: JSON.stringify(respond(url)),
     });
   });
+}
+
+export async function mockPrState(page: Page, state: PrState): Promise<void> {
+  await mockPrStatusFor(page, () => ({
+    state,
+    ciStatus: null,
+    canMerge: false,
+    totalThreads: 0,
+    unresolvedThreads: 0,
+  }));
 }
 
 export async function mockTagCatalog(page: Page): Promise<void> {

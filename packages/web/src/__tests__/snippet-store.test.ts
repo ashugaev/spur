@@ -42,18 +42,29 @@ function record(overrides: Partial<SnippetRecord> = {}): SnippetRecord {
     instanceId: "inst-00000001",
     lastRevision: 3,
     unconfirmedRevision: 3,
-    state: { app: { big: "x" }, controls: [{ id: "c", value: "v" }] },
-    action: null,
     updatedAt: NOW,
     ...overrides,
   };
 }
 
 describe("snippet store", () => {
-  it("round-trips a record", () => {
+  it("round-trips a v2 record holding the gate fields only", () => {
     const storage = new MemoryStorage();
-    expect(writeSnippetRecord(storage, "s", "p", record())).toEqual({ ok: true, shrunk: false });
+    expect(writeSnippetRecord(storage, "s", "p", record())).toBe(true);
+    expect(recordKey("s", "p")).toBe("spur:snippet:v2:s:p");
+    expect(JSON.parse(storage.data.get(recordKey("s", "p")) ?? "")).toEqual({
+      instanceId: "inst-00000001",
+      lastRevision: 3,
+      unconfirmedRevision: 3,
+      updatedAt: NOW,
+    });
     expect(readSnippetRecord(storage, "s", "p")).toEqual({ ok: true, value: record() });
+  });
+
+  it("record write failure is reported", () => {
+    const storage = new MemoryStorage();
+    storage.failSet = () => true;
+    expect(writeSnippetRecord(storage, "s", "p", record())).toBe(false);
   });
 
   it("discards malformed JSON and invalid shapes, failing the read once", () => {
@@ -96,46 +107,13 @@ describe("snippet store", () => {
     });
   });
 
-  it("shrinks on quota error keeping the G3 fields and action", () => {
-    const storage = new MemoryStorage();
-    storage.failSet = (_key, value) => value.includes('"big"');
-    const action = {
-      requestId: "req-00000001",
-      actionId: "go",
-      status: "accepted" as const,
-      prompt: "p",
-      instanceId: "inst-00000001",
-      baseRevision: 3,
-      dispatchedAt: NOW,
-    };
-    expect(writeSnippetRecord(storage, "s", "p", record({ action }))).toEqual({
-      ok: true,
-      shrunk: true,
-    });
-    const read = readSnippetRecord(storage, "s", "p");
-    expect(read).toMatchObject({
-      ok: true,
-      value: { unconfirmedRevision: 3, lastRevision: 3, action },
-    });
-    expect(read.ok && read.value?.state).toEqual({ app: null, controls: [] });
-  });
-
-  it("shrinks an over-cap record and fails when the shrunk write fails too", () => {
-    const storage = new MemoryStorage();
-    const huge = record({ state: { app: "x".repeat(170 * 1024), controls: [] } });
-    expect(writeSnippetRecord(storage, "s", "p", huge)).toEqual({ ok: true, shrunk: true });
-    storage.failSet = () => true;
-    expect(writeSnippetRecord(storage, "s", "p", record())).toEqual({ ok: false });
-    // nothing served from memory: stored value is still the earlier shrunk write
-    storage.failSet = () => false;
-    expect(readSnippetRecord(storage, "s", "p")).toMatchObject({ value: { state: { app: null } } });
-  });
-
-  it("prunes only snippet records older than 7 days and keeps budget keys of any age", () => {
+  it("prunes every v1 key, v2 records older than 7 days, and keeps budget keys of any age", () => {
     const storage = new MemoryStorage();
     writeSnippetRecord(storage, "s", "old", record({ updatedAt: NOW - 8 * DAY }));
     writeSnippetRecord(storage, "s", "fresh", record({ updatedAt: NOW - 6 * DAY }));
     writeSnippetBudget(storage, "s", 3, NOW - 30 * DAY);
+    storage.data.set("spur:snippet:v1:s:fresh", JSON.stringify({ updatedAt: NOW }));
+    storage.data.set("spur:snippet:v1:s:broken", "{nope");
     storage.data.set("unrelated", "x");
     pruneSnippetRecords(storage, NOW);
     expect([...storage.data.keys()].sort()).toEqual(

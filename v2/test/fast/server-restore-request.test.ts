@@ -42,6 +42,13 @@ describe("parseRestoreSessionRequest", () => {
     expect(parseRestoreSessionRequest({ force: false })).toEqual({});
   });
 
+  it("accepts only explicit restart:true", () => {
+    expect(parseRestoreSessionRequest({ restart: true })).toEqual({ restart: true });
+    expect(parseRestoreSessionRequest({ restart: false })).toEqual({});
+    expect(parseRestoreSessionRequest({ restart: "true" })).toEqual({});
+    expect(parseRestoreSessionRequest({ restart: 1 })).toEqual({});
+  });
+
   it("ignores an unrecognized field", () => {
     expect(parseRestoreSessionRequest({ other: "x" })).toEqual({});
   });
@@ -460,10 +467,10 @@ describe("POST /sessions/:id/restore and /reopen forward the force override", ()
         const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/restore`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ force: true, overrideTokenBudget: true }),
+          body: JSON.stringify({ force: true, overrideTokenBudget: true, restart: true }),
         });
         expect(response.status).toBe(200);
-        expect(calls).toEqual([{ force: true, overrideTokenBudget: true }]);
+        expect(calls).toEqual([{ force: true, overrideTokenBudget: true, restart: true }]);
       });
     } finally {
       SessionService.prototype.restore = originalRestore;

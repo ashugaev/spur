@@ -249,7 +249,9 @@ test.each(
           state: "open",
           head: { sha: "a".repeat(40) },
           base: { sha: "b".repeat(40) },
+          user: { login: "human" },
         });
+      if (path.endsWith("/pulls/1/reviews")) return Response.json([]);
       if (path.endsWith("/issues/1/comments")) {
         if (options?.method !== "POST") return Response.json([]);
         let payload: { body: string };
@@ -364,7 +366,15 @@ test.each(
           `"feedbackPublication":{"status":"${mode === "verified-pending" ? "confirmed" : "failed"}"`,
         );
       }
-      expect(network.mock.calls.some(([url]) => String(url).includes("/reviews"))).toBe(false);
+      expect(
+        network.mock.calls.some(
+          ([url, options]) => String(url).includes("/reviews") && options?.method === "POST",
+        ),
+      ).toBe(false);
+      if (!mode.endsWith("-plan"))
+        expect(
+          network.mock.calls.some(([url]) => String(url).endsWith("/reviews?per_page=100&page=1")),
+        ).toBe(true);
     } finally {
       faults.pattern = "";
       output.mockRestore();

@@ -6,6 +6,7 @@ Instance selection: `--config` > `SPUR_CONFIG` > private `~/.spur/installed-inst
 Project config: nearest `spur.yaml`/`spur.yml`, `projects:` only; merge/per-session resolution: `v2/src/config.ts`; voice: [voice.md](voice.md).
 
 Spur ToDo is always on, no config field. See [todo](commands.md#todo).
+OpenCode worker heartbeat expiry: session state `error`; `v2/src/agents/opencode.ts`, `v2/src/session-service.ts`.
 `mcp.port` (instance-only, `1..65535`, loopback, default first port from `4311` distinct from daemon/UI): `v2/src/config.ts`, `v2/src/ports.ts`; [MCP](mcp.md).
 `SPUR_MCP_TUNNEL_PROFILE`, `CONTROL_PLANE_API_KEY`, `SPUR_MCP_TUNNEL_ENV_FILE`: `v2/src/mcp-tunnel.ts`; [tunnel setup](mcp.md#connect-openai-products).
 Reviewer App JSON `repositories`, `receiptRoot`, `code|browser.{appId,keyPath}`: caller-owned `--app-config` file; `v2/src/review-app.ts`.
@@ -98,7 +99,7 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `eventLog.{hotBytes 134217728, shardHotBytes 16777216, retainArchives 5, collapseWindowMs 60000}`, `userActionLog.{hotBytes 134217728, shardHotBytes 16777216, retainArchives 5}`: [Event log retention](#event-log-retention).
 - `admission.{enabled true, maxLiveSessions 100, perSessionBytes 1610612736, reserveFraction 0.7}`: [Admission control](#admission-control).
 - `admission.memoryGuard.{enforce false, enforceFloors true, shedEnabled true, minAvailableBytes 1073741824, minFreeSwapBytes 0, admissionFloorBytes, shedCriticalFloorBytes, pressureSomeAvg10Refuse 20, shedSwapUsedFraction 0.9}`: [Admission control](#admission-control).
-- `projects.<id>.path` (required), `.defaultBranch` (`main`), `.sessionPrefix` (sanitized id), `.worktree` (`true`), `.defaultAgent`, `.maxLiveSessions`, `.staleAfterMinutes`.
+- `projects.<id>.path` (required), `.defaultBranch` (`main`), `.sessionPrefix` (sanitized id; `pg-*` prefixes and `spur-page-*` project ids are reserved for page agents, [pages.md](pages.md)), `.worktree` (`true`), `.defaultAgent`, `.maxLiveSessions`, `.staleAfterMinutes`.
 - `projects.<id>.tokenBudget`: optional positive integer; omission disables the per-session gross preflight+main limit. Every measured preflight attempt counts; known usage at or above the limit blocks activation, and the attention sweep stops a live session. Unknown usage or read failure stays unenforced and never blocks execution. Usage persists; raising/removing the limit or approving an override permits manual restore, never automatic resume.
 - `projects.<id>.tokenBudgetWarnOnly`: boolean, default `false`; with `tokenBudget`, marks exceeded usage without blocking or stopping the session. Without `tokenBudget`, no effect. See `v2/src/config.ts`.
 - `projects.<id>.restoreAfterReboot` (`false`). See [Restore after reboot](#restore-after-reboot).
@@ -163,9 +164,13 @@ The same pass also runs a detect-only step over one shared process-table snapsho
 
 `staleAfterMinutes` (default `720`) parks an idle session: `status: "stopped"`, `stopReason: "stale_timeout"`, state `stale`; `0` disables. Wake: any system message, through the [admission gate](#admission-control). Mechanics: `v2/src/session-service.ts`.
 
+## PR alert ownership
+
+- Native spawn `prAlertOwner` (default `false`): exclusive workspace CI/conflict recipient; eligibility, lifecycle and permissions: `v2/src/pr-alert-owner.ts`, `v2/src/session-service.ts`; [spawn API](daemon-api.md#session-routes).
+
 ## Automatic reminders
 
-Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 attempts for unchanged open work/blockers/empty ledger — see [todo](commands.md#todo). Pending automatic GitHub/Jira sends: 8 attempts per unchanged item. `ci_failed` pings once per head commit and failing check name, a re-run of the same check on that commit does not ping again, a new head commit does; no reminder loop. `merge_conflict` pings at most once per head+base pair. Failing CI or a conflict present at a PR's first observation pings once; a persisted or legacy snapshot does not replay it.
+Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 attempts for unchanged open work/blockers/empty ledger — see [todo](commands.md#todo). Pending automatic GitHub/Jira sends: 8 attempts per unchanged item. `ci_failed` pings once per head commit and failing check name, a re-run of the same check on that commit does not ping again, a new head commit does; no reminder loop. `merge_conflict` pings at most once per head+base pair. Failing CI or a conflict present at a PR's first observation pings once; legacy/unclaimed persisted snapshots do not replay it. Explicit owner-return recheck: `v2/src/event-sources/github.ts`.
 
 A session bound to a PR GitHub reports as nonexistent stops signal polling after one attempt, logs `source.poll.disabled` once (`warn`), and persists the disable per source under `<dataDir>/source-state/github-poll-disabled/<projectId>/<sourceId>.json` across source reload and daemon restart. Clear via rebind away from that PR, [`spur source poll-enable`](commands.md#source), or `spur restore`/`spur reopen`. Bounded recheck every `pollDisabledRecheckMs` (default 24h); a still-missing PR does not re-emit `source.poll.disabled`. A resolved recheck logs `source.poll.enabled` once.
 

@@ -3,7 +3,7 @@
 > Scope: CLI usage index, names and syntax only. Full behavior: `v2/src/cli.ts`, the command's own source file, or `spur <cmd> --help`. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md). CI scheduling: [ci-admission.md](ci-admission.md).
 
 Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance; fallback: [configuration.md](configuration.md).
-`review-app prepare|block|recover|status|publish`, `node <package>/dist/review-app-cli.js`: review feedback and registered recovery; `v2/src/review-app.ts`, `v2/src/review-app-cli.ts`.
+`review-app prepare|block|recover|status|publish`, `node <package>/dist/review-app-cli.js`: review feedback; digest-bound legacy recovery requires authenticated current PR and empty native review history; `v2/src/review-app.ts`, `v2/src/review-app-cli.ts`.
 `review-gate evaluate`: approval aggregation with `GITHUB_TOKEN` and `--policy`; `v2/src/review-gate.ts`.
 `scripts/verify-package-tarball.sh`: candidate closure check; `scripts/verify-review-app-package.mjs`.
 `mcp [--http]`, `mcp-tunnel`: daemon MCP, durable backend restart receipts, bounded daemon logs, cache-only attached PR status; `v2/src/mcp.ts`, `v2/src/mcp-tunnel.ts`; [contracts/setup](mcp.md).
@@ -60,8 +60,7 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 ## list
 
 `spur list [--json]` reads `GET /sessions` ([daemon-api.md#session-routes](daemon-api.md#session-routes)). TTY: live selector (`Enter` attach, `l` log, `p` pause, `c` complete, `r` restore, `k` kill).
-`spur pause <sessionId> [--json]` — keeps the worktree.
-`spur complete <sessionId> [--pr-action leave_open|close] [--skip-pr-check] [--json]`.
+`spur pause <sessionId> [--json]` — keeps the worktree. `spur complete <sessionId> [--pr-action leave_open|close] [--skip-pr-check] [--json]`.
 `spur kill <sessionId> [--force] [--pr-action leave_open|close] [--skip-pr-check] [--json]` — `--force` skips the dirty-worktree/unpushed-commit confirmation.
 `spur restore <sessionId> [--force] [--json]`, `spur reopen <sessionId> [--force] [--json]` (in place, prompt not resent) — `--force` bypasses the foreign-live-process refusal; token-budget refusal: [configuration](configuration.md#field-reference). A restore/reopen that clears both gates also clears the session's durable GitHub poll-disable ([configuration.md#automatic-reminders](configuration.md#automatic-reminders)); one refused by either gate leaves it untouched.
 `spur respawn <sessionId> [--reasoning-effort <level>] [--force] [--json]` — fresh id; same-agent reasoning override inherited; `v2/src/cli.ts`.
@@ -87,8 +86,7 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 
 ## source
 
-`spur source poll-enable --session <id>` re-enables GitHub signal polling after a not-found PR permanently disabled a session (see [source.poll.disabled](configuration.md#events)). `--session` defaults to `SPUR_SESSION`. `--json` prints raw JSON. Clears the disable in every `github`-type source of the session's project, and in registry entries of removed or renamed sources; `cleared: []` when nothing was disabled. Route: [daemon-api.md#session-routes](daemon-api.md#session-routes).
-`spur source info [--session <id>] [--json]`: read published canonical topic/cached bot identity without allocation; null when absent/disabled/terminal; session defaults to `SPUR_SESSION` — `v2/src/cli.ts`, `v2/src/session-service.ts`.
+`spur source poll-enable --session <id>` re-enables GitHub signal polling after a not-found PR permanently disabled a session (see [source.poll.disabled](configuration.md#events)). `--session` defaults to `SPUR_SESSION`. `--json` prints raw JSON. Clears the disable in every `github`-type source of the session's project, and in registry entries of removed or renamed sources; `cleared: []` when nothing was disabled. Route: [daemon-api.md#session-routes](daemon-api.md#session-routes). `spur source info [--session <id>] [--json]`: read published canonical topic/cached bot identity without allocation; null when absent/disabled/terminal; session defaults to `SPUR_SESSION` — `v2/src/cli.ts`, `v2/src/session-service.ts`.
 
 ## source reply
 
@@ -99,15 +97,18 @@ Telegram `/complete`, `/kill`: finish bound forum-topic session, delete owned to
 
 ## spur-slots
 
-`spur-slots --title-if-absent "<title>"`, `spur-slots --link <label>=<url>`/`--unlink <label>`, `spur-slots --clear-title`, `spur-slots --tag <name>`/`--untag <name>`/`--list-tags` — session `PATH` helper for tmux title/links/tags.
-`spur actions [--session <id> | --global] [--limit <n>] [--json]` — logged mutating requests, one session or fleet-wide.
+`spur-slots --title-if-absent "<title>"`, `spur-slots --link <label>=<url>`/`--unlink <label>`, `spur-slots --clear-title`, `spur-slots --tag <name>`/`--untag <name>`/`--list-tags` — session `PATH` helper for tmux title/links/tags. `spur actions [--session <id> | --global] [--limit <n>] [--json]` — logged mutating requests, one session or fleet-wide.
 
 ## service, memory, agent-issue, comment-seen, subscribe
 
 `spur service run <id> --port <n> -- <command>` / `status <id>` — session-bound tmux sidecar wrapper. `<id>` must match a `sources.<name>` entry with `type: service` and `service: <id>` ([configuration.md](configuration.md#field-reference)), else `Unknown service`. One-shot commands (tests, lint, type-check) run directly, no service. `spur service logs [sessionId] [name] [--sidecar] [--limit <n>] [--json]` — retained pane and archived rows, default runtime scope and global 200-row limit; route 404/502 errors exit nonzero; `v2/src/cli.ts`. `spur memory set|get|list|rm [key] [body] --scope task|project|global [--session <id>] [--file <path>] [--json]` — one `.md` file per key. `spur session-memory <sessionId> list|get|set|resolve [key] [body] [--json]` — [daemon-api.md#session-routes](daemon-api.md#session-routes).
-`spur agent-issue log <text...>` / `list [--project <id>] [--session <id>] [--limit <n>] [--json]` — friction operating Spur itself, never a repo code defect.
-`spur comment-seen record <id...>` — marks GitHub review-comment ids seen, needs `SPUR_PROJECT`.
+`spur agent-issue log <text...>` / `list [--project <id>] [--session <id>] [--limit <n>] [--json]` — friction operating Spur itself, never a repo code defect. `spur comment-seen record <id...>` — marks GitHub review-comment ids seen, needs `SPUR_PROJECT`.
 `spur subscribe <targetSessionId> --state <state>... [--message <text>] [--session <id>] | --list | --remove <subscriptionId>`. States: `working|waiting|needs_input|rate_limited|stale|stopped|error|killed`.
+
+## db, page
+
+`spur db <page:<id>|session:<sid>> get|list|query|add|set|update|rm <collection> [doc-id] ['<json>'] [--rev <n>] [--limit <n>] [--start-after <id>] [--json]` — document store; `query` takes `'{"where":[...],"orderBy":{...},"limit":n}'`; `spur db <store> done <action-id> [--result '<json>']` / `fail <action-id> --error '<text>'` closes a `[spur-action v1]`; [stores.md](stores.md).
+`spur page create <id> [--title <t>] [--runtime claude|codex|cursor|opencode] [--model <id>] [--template blank] [--json]` / `list` / `path <id>` / `rm <id>` — [pages.md](pages.md).
 
 ## Sidecars
 

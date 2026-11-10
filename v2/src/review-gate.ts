@@ -50,6 +50,46 @@ export function workflowPath(value: unknown): string {
     separator = path.indexOf("@");
   return separator < 0 ? path : path.slice(0, separator);
 }
+async function check404Message(
+  response: Response,
+  signal: AbortSignal,
+  token: string,
+): Promise<string> {
+  if (response.body?.locked) return "unavailable";
+  const reader = response.body?.getReader();
+  if (!reader) return "unavailable";
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(), 1000);
+  const bounded = AbortSignal.any([signal, timeout.signal]);
+  let aborted: () => void = () => {};
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    aborted = () => reject(new Error("diagnostic-unavailable"));
+    bounded.addEventListener("abort", aborted, { once: true });
+    if (bounded.aborted) aborted();
+  });
+  try {
+    const bytes = new Uint8Array(4096);
+    let length = 0;
+    for (;;) {
+      const { done, value } = await Promise.race([reader.read(), cancelled]);
+      if (done) break;
+      if (value.length > bytes.length - length) return "unavailable";
+      bytes.set(value, length);
+      length += value.length;
+    }
+    const data: unknown = JSON.parse(new TextDecoder().decode(bytes.subarray(0, length)));
+    return object(data).message === "Not Found" && !"Not Found".includes(token)
+      ? "Not Found"
+      : "redacted";
+  } catch {
+    return "unavailable";
+  } finally {
+    clearTimeout(timer);
+    bounded.removeEventListener("abort", aborted);
+    void reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
 export class GateGitHub {
   constructor(
     private readonly token: string,
@@ -60,14 +100,15 @@ export class GateGitHub {
   }
   async request(path: string, method = "GET", body?: unknown): Promise<unknown> {
     if (this.scopeSignal?.aborted) throw new ReviewAppError("gate-reconciliation-timeout");
+    const signal = this.scopeSignal
+      ? AbortSignal.any([this.scopeSignal, AbortSignal.timeout(30_000)])
+      : AbortSignal.timeout(30_000);
     let response: Response;
     try {
       response = await this.transport(`https://api.github.com${path}`, {
         method,
         redirect: "error",
-        signal: this.scopeSignal
-          ? AbortSignal.any([this.scopeSignal, AbortSignal.timeout(30_000)])
-          : AbortSignal.timeout(30_000),
+        signal,
         headers: {
           Authorization: `Bearer ${this.token}`,
           Accept: "application/vnd.github+json",
@@ -81,7 +122,29 @@ export class GateGitHub {
       throw new ReviewAppError("gate-network");
     }
     if (this.scopeSignal?.aborted) throw new ReviewAppError("gate-reconciliation-timeout");
-    if (!response.ok) throw new ReviewAppError(`gate-http-${response.status}`);
+    if (!response.ok) {
+      const check = /^\/repos\/[\w.-]+\/[\w.-]+\/check-runs\/([1-9]\d*)$/.exec(path);
+      const checkId = Number(check?.[1]);
+      if (response.status === 404 && method === "PATCH" && Number.isSafeInteger(checkId)) {
+        const message = await check404Message(response, signal, this.token);
+        if (this.scopeSignal?.aborted) throw new ReviewAppError("gate-reconciliation-timeout");
+        const requestId = response.headers.get("x-github-request-id");
+        process.stderr.write(
+          `${JSON.stringify({
+            category: "gate-http-404",
+            endpoint: "check-run",
+            checkId,
+            method: "PATCH",
+            message,
+            requestId:
+              requestId && /^[a-f\d:-]{1,128}$/i.test(requestId) && !requestId.includes(this.token)
+                ? requestId
+                : undefined,
+          })}\n`,
+        );
+      }
+      throw new ReviewAppError(`gate-http-${response.status}`);
+    }
     try {
       const value: unknown = await response.json();
       if (this.scopeSignal?.aborted) throw new ReviewAppError("gate-reconciliation-timeout");

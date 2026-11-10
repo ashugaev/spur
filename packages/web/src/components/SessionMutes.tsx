@@ -3,6 +3,7 @@
 import { useCallback, useState } from "react";
 import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
 import { usePoll } from "@/hooks/usePoll";
+import type { PollOutcome } from "@/lib/poller";
 import { HARD_WRAP_TEXT_CLASS } from "@/design/classes";
 import { formatShortTimestamp } from "@/lib/format";
 import {
@@ -87,18 +88,20 @@ export function SessionMutes({ sessionId }: { sessionId: string }) {
   const [open, setOpen] = useState(false);
 
   const load = useCallback(
-    async (signal: AbortSignal) => {
+    async (signal: AbortSignal): Promise<PollOutcome> => {
       try {
         const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/auto-ping`, {
           cache: "no-store",
           signal,
         });
         const payload = (await response.json()) as unknown;
-        if (response.ok && isAutoPingMuteProjection(payload) && !signal.aborted) {
-          setProjection(payload);
-        }
+        if (signal.aborted) return "ok";
+        if (!response.ok || !isAutoPingMuteProjection(payload)) return "failed";
+        setProjection(payload);
+        return "ok";
       } catch {
         // The chip is a debugging aid: a failed poll keeps the last projection.
+        return signal.aborted ? "ok" : "failed";
       }
     },
     [sessionId],

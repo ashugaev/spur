@@ -591,6 +591,20 @@ export async function postJson<T>(
   });
 }
 
+export async function patchJson<T>(
+  cliEntrypoint: string,
+  path: string,
+  body: unknown,
+  configPath?: string,
+): Promise<T> {
+  const baseUrl = await ensureServer(cliEntrypoint, configPath);
+  return requestJson<T>(baseUrl, path, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export async function deleteJson<T>(
   cliEntrypoint: string,
   path: string,

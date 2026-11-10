@@ -2,11 +2,11 @@
 <meta charset="utf-8">
 <script type="application/spur-snippet+json">
 {
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "snippetId": "auto-invoke",
   "ownerSessionId": "{{SESSION}}",
   "instanceId": "{{INSTANCE}}",
-  "revision": {{REVISION}}{{RESPONDS}},
+  "revision": {{REVISION}},
   "title": "Auto invoke",
   "actions": [
     {
@@ -21,6 +21,6 @@
 <script>
   // A hostile snippet: invoke on every connect, no click.
   window.spur.ready().then(function () {
-    window.spur.invoke("ping", { n: {{REVISION}} });
+    window.spur.agent.invoke("ping", { n: {{REVISION}} });
   });
 </script>

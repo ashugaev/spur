@@ -859,6 +859,10 @@ globalThis.fetch = async (input, options) => {
   if (method === "GET" && path === "/repos/fixture/repo") return Response.json({ id: 4, full_name: "fixture/repo" });
   if (method === "GET" && path === "/repos/fixture/repo/pulls/7")
     return Response.json({ state: "open", head: { sha: "a".repeat(40) }, base: { sha: "b".repeat(40) }, user: { login: "fixture-author" } });
+  if (method === "GET" && path === "/repos/fixture/repo/pulls/7/reviews") {
+    assert(nativePosts === 0, "native review POST preceded legacy recovery");
+    return Response.json([]);
+  }
   if (path === "/repos/fixture/repo/issues/7/comments") {
     if (method === "GET") return Response.json(comments);
     if (method === "POST") {
@@ -914,11 +918,10 @@ process.env.SPUR_SESSION = "package-fixture";
 process.exitCode = undefined;
 comments.splice(0);
 badReadback = true;
+const beforeReadbackPosts = nativePosts;
 await run(recover);
-let failed;
-try { failed = JSON.parse((await readFile(receipt)).toString("utf8")); } catch { throw new Error("invalid failed receipt"); }
-// Ordinary FAIL replay adopts persisted feedback failure, not registered-denial replay semantics.
-assert(process.exitCode === 1 && failed.status === "BLOCKED" && failed.feedbackPublication?.status === "failed" && original.equals(await readFile(receipt + ".legacy-" + digest)), "readback failure not enforced");
+// Failed replay reports failure without replacing the canonical PENDING or its archive.
+assert(process.exitCode === 1 && pending.equals(await readFile(receipt)) && original.equals(await readFile(receipt + ".legacy-" + digest)) && nativePosts === beforeReadbackPosts, "readback failure not enforced");
 process.exitCode = undefined;
 const beforeConfigFailure = calls.length;
 await run(argv("status", "--app-config", join(root, "missing.json"), "--repo", "fixture/repo"));
