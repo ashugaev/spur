@@ -20,6 +20,7 @@ import {
   type LaneState,
 } from "../../src/review-state.js";
 import { manifestDigest, baselineDigest } from "../../src/review-interface.js";
+import { object } from "../../src/github-app.js";
 const H = "a".repeat(40),
   B = "b".repeat(40),
   M = "d".repeat(40);
@@ -31,6 +32,13 @@ const policy: GatePolicy = {
   ciWorkflowId: 100,
   ciJobs: ["Quality", "E2E"],
 };
+function requestBody(options: RequestInit | undefined): Record<string, unknown> {
+  try {
+    return object(JSON.parse(String(options?.body)));
+  } catch {
+    throw new Error("invalid fixture request body");
+  }
+}
 function fixture(): GateSnapshot {
   return {
     pr: {
@@ -1145,6 +1153,10 @@ test.each([
   "abort-read",
   "abort-before-write",
   "abort-during-success",
+  "completion-401",
+  "completion-403",
+  "positive-completion-404",
+  "uncertain-completion-404",
 ])(
   "producer API fixture %s writes in_progress before evidence and never stale success",
   async (scenario) => {
@@ -1180,6 +1192,8 @@ test.each([
       snapshot.reviews = snapshot.reviews.filter((row) => row.id !== policy.browserActor);
     if (["missing-both", "all-native-negative", "abort-negative-completion"].includes(mode))
       snapshot.reviews = [];
+    if (mode === "completion-401" || mode === "completion-403") snapshot.reviews = [];
+    if (mode === "uncertain-completion-404") snapshot.unresolved = 1;
     if (mode === "stale-native")
       snapshot.reviews[0] = { ...snapshot.reviews[0], commit_id: "f".repeat(40) };
     if (mode === "native-revoked")
@@ -1271,6 +1285,7 @@ test.each([
         });
       }
       if (/\/check-runs\/\d+$/.test(path)) {
+        expect(options?.method).toBe("PATCH");
         writes.push(
           JSON.parse(String(options?.body)) as {
             status: string;
@@ -1278,6 +1293,8 @@ test.each([
             output: { summary: string };
           },
         );
+        if (mode.includes("completion-") && writes.length === 2)
+          return Response.json({ message: "Not Found" }, { status: Number(mode.slice(-3)) });
         if (mode === "abort-during-success" || mode === "abort-negative-completion") {
           // Losing the response does not undo the server's completed check.
           expect(writes.at(-1)?.conclusion).toBe(
@@ -1434,7 +1451,8 @@ test.each([
           mode === "read-denied" ||
           mode === "native-page-fault" ||
           mode === "runs-502" ||
-          mode === "runs-502-two-prs"
+          mode === "runs-502-two-prs" ||
+          mode.includes("completion-")
         )
           await expect(
             producer(api, policy, mode === "runs-502-two-prs" ? { number: 5 } : {}),
@@ -1521,6 +1539,353 @@ test.each([
     }
   },
 );
+test.each([
+  "confirmed-first",
+  "confirmed-last",
+  "built-confirmed-first",
+  "prior-unresolved",
+  "later-unresolved",
+  "id",
+  "name",
+  "head",
+  "external-id",
+  "app-id",
+  "app-slug",
+  "missing-app",
+  "missing-output",
+  "queued",
+  "in-progress",
+  "null-conclusion",
+  "success",
+  "title",
+  "summary",
+  "stale-output",
+  "get-404",
+  "get-401",
+  "get-403",
+  "get-network",
+  "get-json",
+  "get-malformed",
+  "fallback-401",
+  "fallback-403",
+  "fallback-404",
+  "fallback-network",
+  "fallback-json",
+  "missing-created-app",
+  "missing-created-external",
+  "abort-before-get",
+  "abort-during-get",
+])(
+  "negative publication %s requires independent candidate-bound terminal failure",
+  async (mode) => {
+    const built = mode.startsWith("built-");
+    const gate: Pick<typeof GateModule, "GateGitHub"> = built
+      ? await import(/* @vite-ignore */ pathToFileURL(`${process.cwd()}/dist/review-gate.js`).href)
+      : { GateGitHub };
+    const producer: typeof produceGates = built
+      ? (
+          await import(
+            /* @vite-ignore */ pathToFileURL(`${process.cwd()}/dist/review-gate-producer.js`).href
+          )
+        ).produceGates
+      : produceGates;
+    const controller = new AbortController();
+    const trace = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const calls: { path: string; method: string }[] = [];
+    const writes: { id: number; body: Record<string, unknown> }[] = [];
+    const checks = new Map<number, Record<string, unknown>>();
+    const patches = new Map<number, number>();
+    let afterAbort = 0;
+    const order = mode === "confirmed-last" || mode === "prior-unresolved" ? [6, 5] : [5, 6];
+    const transport: typeof fetch = async (url, options) => {
+      if (controller.signal.aborted) afterAbort++;
+      const path = new URL(String(url)).pathname;
+      const method = options?.method ?? "GET";
+      calls.push({ path, method });
+      if (path.endsWith("/pulls"))
+        return Response.json(
+          order.map((number, index) => ({
+            number,
+            updated_at: String(10 - index).padStart(2, "0"),
+          })),
+        );
+      const prMatch = /\/pulls\/(5|6)$/.exec(path);
+      if (prMatch) {
+        const number = Number(prMatch[1]);
+        return Response.json({
+          head: { sha: number === 5 ? H : "c".repeat(40) },
+          base: { sha: B },
+        });
+      }
+      if (path.endsWith("/reviews")) return Response.json([]);
+      if (path.endsWith("/check-runs") && method === "POST") {
+        const body = requestBody(options);
+        const id = body.head_sha === H ? 95 : 96;
+        const created = { ...body, id, app: { id: 15368, slug: "github-actions" } };
+        checks.set(id, created);
+        return Response.json({
+          ...created,
+          ...(id === 95 && mode === "missing-created-app"
+            ? { app: { slug: "github-actions" } }
+            : {}),
+          ...(id === 95 && mode === "missing-created-external" ? { external_id: null } : {}),
+        });
+      }
+      const id = Number(path.split("/").at(-1));
+      const check = checks.get(id);
+      if (!check) throw new Error("unexpected fixture path");
+      if (method === "PATCH") {
+        const body = requestBody(options);
+        writes.push({ id, body });
+        const attempt = (patches.get(id) ?? 0) + 1;
+        patches.set(id, attempt);
+        if (id === 95 && attempt === 1)
+          return Response.json({ message: "Not Found" }, { status: 404 });
+        if (id === 96 && attempt === 1 && mode.endsWith("unresolved"))
+          return Response.json({}, { status: 403 });
+        Object.assign(check, body);
+        if (id === 95 && attempt === 2 && mode.startsWith("fallback-")) {
+          if (mode === "fallback-network") throw new Error("lost fallback acknowledgment");
+          if (mode === "fallback-json") return new Response("invalid JSON");
+          return Response.json({}, { status: Number(mode.slice(-3)) });
+        }
+        if (id === 95 && mode === "abort-before-get") controller.abort();
+        return Response.json({ id });
+      }
+      expect(method).toBe("GET");
+      expect(id).toBe(95);
+      if (mode === "abort-during-get") {
+        controller.abort();
+        throw new Error("scope aborted");
+      }
+      if (mode.startsWith("get-")) {
+        if (mode === "get-network") throw new Error("readback unavailable");
+        if (mode === "get-json") return new Response("invalid JSON");
+        if (mode === "get-malformed") return Response.json([]);
+        return Response.json({}, { status: Number(mode.slice(-3)) });
+      }
+      const changed: Record<string, unknown> = { ...check };
+      const output = object(check.output);
+      if (mode === "id") changed.id = 96;
+      if (mode === "name") changed.name = "Another check";
+      if (mode === "head") changed.head_sha = "c".repeat(40);
+      if (mode === "external-id") changed.external_id = `6:${H}:${"e".repeat(40)}`;
+      if (mode === "app-id") changed.app = { id: 99, slug: "github-actions" };
+      if (mode === "app-slug") changed.app = { id: 15368, slug: "another-writer" };
+      if (mode === "missing-app") delete changed.app;
+      if (mode === "missing-output") delete changed.output;
+      if (mode === "queued") changed.status = "queued";
+      if (mode === "in-progress") changed.status = "in_progress";
+      if (mode === "null-conclusion") changed.conclusion = null;
+      if (mode === "success") changed.conclusion = "success";
+      if (mode === "title") changed.output = { ...output, title: "Another failure" };
+      if (mode === "summary") changed.output = { ...output, summary: "Another failure" };
+      if (mode === "stale-output")
+        changed.output = { ...output, summary: "native-approval-missing" };
+      return Response.json(changed);
+    };
+    try {
+      const result = producer(new gate.GateGitHub("fixture", transport, controller.signal), policy);
+      if (mode.includes("confirmed-")) await result;
+      else
+        await expect(result).rejects.toThrow(
+          mode.startsWith("abort-")
+            ? "gate-reconciliation-timeout"
+            : "gate-reconciliation-incomplete",
+        );
+      expect(writes.every(({ body }) => body.conclusion === "failure")).toBe(true);
+      expect(object(checks.get(95)?.output).summary).toBe("Candidate evidence unavailable");
+      expect(writes.filter(({ id }) => id === 95)).toHaveLength(2);
+      const readbacks = calls.filter(
+        ({ path, method }) => method === "GET" && path.includes("/check-runs/"),
+      );
+      expect(readbacks).toHaveLength(
+        mode.startsWith("fallback-") ||
+          mode.startsWith("missing-created-") ||
+          mode === "abort-before-get"
+          ? 0
+          : 1,
+      );
+      expect(afterAbort).toBe(0);
+      if (!mode.startsWith("abort-"))
+        expect([...checks.keys()]).toEqual(order.map((number) => 90 + number));
+      if (mode.endsWith("unresolved")) {
+        expect(patches.get(96)).toBe(2);
+        expect(checks.get(96)?.conclusion).toBe("failure");
+        expect(trace.mock.calls.map(([line]) => String(line)).join("")).toContain(
+          '"phase":"failure-confirmed"',
+        );
+      }
+      if (mode.includes("confirmed-")) {
+        expect(object(checks.get(96)?.output).summary).toBe("native-approval-missing");
+        expect(checks.get(96)?.head_sha).toBe("c".repeat(40));
+      }
+    } finally {
+      trace.mockRestore();
+    }
+  },
+);
+
+test.each([
+  "safe",
+  "built-safe",
+  "message-secret",
+  "body-secret",
+  "malformed",
+  "locked",
+  "errored",
+  "oversized",
+  "stream-overflow",
+  "invalid-header",
+  "token-header",
+  "long-header",
+  "get",
+  "other-status",
+  "query",
+])("check404 diagnostics %s only expose bounded allowlisted metadata", async (mode) => {
+  const gate: Pick<typeof GateModule, "GateGitHub"> =
+    mode === "built-safe"
+      ? await import(/* @vite-ignore */ pathToFileURL(`${process.cwd()}/dist/review-gate.js`).href)
+      : { GateGitHub };
+  const token = "deadbeef";
+  const secret = "PRIVATE_BODY_SENTINEL";
+  let pulls = 0;
+  let cancelled = false;
+  const encoder = new TextEncoder();
+  const chunks =
+    mode === "oversized"
+      ? [new Uint8Array(5000)]
+      : mode === "stream-overflow"
+        ? [new Uint8Array(3000), new Uint8Array(2000), encoder.encode(secret)]
+        : [
+            encoder.encode(
+              mode === "malformed"
+                ? secret
+                : JSON.stringify({
+                    message: mode === "message-secret" ? `${token}:${secret}` : "Not Found",
+                    ...(mode === "body-secret" ? { secret: `${token}:${secret}` } : {}),
+                  }),
+            ),
+          ];
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        pulls++;
+        if (mode === "errored") {
+          controller.error(new Error(secret));
+          return;
+        }
+        const chunk = chunks.shift();
+        if (chunk) controller.enqueue(chunk);
+        else controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  const requestId =
+    mode === "invalid-header"
+      ? secret
+      : mode === "token-header"
+        ? `${token}:12`
+        : mode === "long-header"
+          ? "a".repeat(129)
+          : "AB12:CD-34";
+  const transport: typeof fetch = async () => {
+    const response = new Response(stream, {
+      status: mode === "other-status" ? 403 : 404,
+      headers: { "x-github-request-id": requestId, "x-private": secret },
+    });
+    if (mode === "locked") response.body?.getReader();
+    return response;
+  };
+  const trace = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  const parse = vi.spyOn(JSON, "parse");
+  try {
+    await expect(
+      new gate.GateGitHub(token, transport).request(
+        `/repos/owner/repo/check-runs/95${mode === "query" ? `?private=${secret}` : ""}`,
+        mode === "get" ? "GET" : "PATCH",
+        { secret: `${token}:${secret}` },
+      ),
+    ).rejects.toThrow(mode === "other-status" ? "gate-http-403" : "gate-http-404");
+    const output = trace.mock.calls.map(([line]) => String(line)).join("");
+    expect(output).not.toContain(token);
+    expect(output).not.toContain(secret);
+    if (["get", "other-status", "query"].includes(mode)) expect(output).toBe("");
+    else {
+      expect(output).toContain('"endpoint":"check-run"');
+      expect(output).toContain('"category":"gate-http-404"');
+      expect(output).toContain(
+        '"message":' +
+          JSON.stringify(
+            ["malformed", "locked", "errored", "oversized", "stream-overflow"].includes(mode)
+              ? "unavailable"
+              : mode === "message-secret"
+                ? "redacted"
+                : "Not Found",
+          ),
+      );
+      expect(output.includes('"requestId"')).toBe(
+        !["invalid-header", "token-header", "long-header"].includes(mode),
+      );
+    }
+    if (mode === "oversized" || mode === "stream-overflow") {
+      expect(parse).not.toHaveBeenCalled();
+      expect(cancelled).toBe(true);
+      expect(pulls).toBe(mode === "oversized" ? 1 : 2);
+    }
+  } finally {
+    trace.mockRestore();
+    parse.mockRestore();
+  }
+});
+
+test.each(["deadline", "scope-abort", "unbounded-cancel"])(
+  "check404 diagnostics %s preserve error category and bound stalled-body cleanup",
+  async (mode) => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+        if (mode === "unbounded-cancel") return new Promise<void>(() => {});
+      },
+    });
+    const trace = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const api = new GateGitHub(
+        "fixture",
+        async () => new Response(stream, { status: 404 }),
+        controller.signal,
+      );
+      const assertion = expect(
+        api.request("/repos/owner/repo/check-runs/95", "PATCH"),
+      ).rejects.toThrow(mode === "scope-abort" ? "gate-reconciliation-timeout" : "gate-http-404");
+      await vi.advanceTimersByTimeAsync(0);
+      if (mode === "scope-abort") controller.abort();
+      else {
+        await vi.advanceTimersByTimeAsync(999);
+        expect(cancelled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+      }
+      await assertion;
+      expect(cancelled).toBe(true);
+      if (mode !== "scope-abort")
+        expect(trace.mock.calls.map(([line]) => String(line)).join("")).toContain(
+          '"message":"unavailable"',
+        );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      trace.mockRestore();
+      vi.useRealTimers();
+    }
+  },
+);
+
 test.each(["pending", "failure", "cancelled", "skipped", "neutral", "missing", "stale"])(
   "CI %s never passes",
   (status) => {
