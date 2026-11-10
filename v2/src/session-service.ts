@@ -22221,7 +22221,11 @@ export class SessionService {
       );
     }
 
-    this.assertAdmissible(current.project, "restore");
+    this.assertAdmissible(
+      current.project,
+      "restore",
+      request.restart === true ? { replacingSessionId: current.id } : undefined,
+    );
     const restoreProjectConfig = this.getProject(current.project);
     const launchSelection = await wait(
       resolveSpawnRequestLaunchSelection(
