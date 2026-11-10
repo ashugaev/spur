@@ -85,6 +85,8 @@ export async function produceGates(
   for (const candidate of prs) {
     active();
     let checkId: number | undefined;
+    let failureCheck: { head: string; externalId: string; appId: number } | undefined;
+    let nativeNegativeCompletion = false;
     let phase = "candidate-read";
     const progress = (category?: string, outcome?: string) =>
       process.stderr.write(
@@ -121,6 +123,13 @@ export async function produceGates(
       )
         throw new ReviewAppError("unverified-check-writer");
       checkId = integer(check.id);
+      const app = object(check.app);
+      if (
+        check.external_id === `${number}:${H}:${B}` &&
+        Number.isSafeInteger(app.id) &&
+        Number(app.id) > 0
+      )
+        failureCheck = { head: H, externalId: `${number}:${H}:${B}`, appId: integer(app.id) };
       active();
       phase = "snapshot-before";
       progress();
@@ -159,6 +168,7 @@ export async function produceGates(
           ? after.reason
           : `Evidence changed during evaluation: ${changedEvidenceCategories(before, finalSnapshot)}`;
       }
+      nativeNegativeCompletion = !mayApprove;
       phase = "completion-write";
       progress();
       active();
@@ -182,7 +192,12 @@ export async function produceGates(
         throw new ReviewAppError("gate-reconciliation-timeout");
       }
       progress(error instanceof ReviewAppError ? error.category : "gate-candidate-unavailable");
-      incomplete = true;
+      const canConfirmFailure =
+        nativeNegativeCompletion &&
+        phase === "completion-write" &&
+        error instanceof ReviewAppError &&
+        error.category === "gate-http-404";
+      let failureConfirmed = false;
       if (checkId !== undefined) {
         try {
           active();
@@ -194,12 +209,36 @@ export async function produceGates(
             output: { title: "Approval blocked", summary: "Candidate evidence unavailable" },
           });
           active();
+          if (canConfirmFailure && failureCheck) {
+            phase = "failure-readback";
+            progress();
+            const readback = object(await api.request(`${path}/${checkId}`));
+            active();
+            const writer = object(readback.app);
+            const output = object(readback.output);
+            failureConfirmed =
+              readback.id === checkId &&
+              readback.name === "Spur Approval Gate" &&
+              readback.head_sha === failureCheck.head &&
+              readback.external_id === failureCheck.externalId &&
+              writer.id === failureCheck.appId &&
+              writer.slug === "github-actions" &&
+              readback.status === "completed" &&
+              readback.conclusion === "failure" &&
+              output.title === "Approval blocked" &&
+              output.summary === "Candidate evidence unavailable";
+            if (failureConfirmed) {
+              phase = "failure-confirmed";
+              progress();
+            }
+          }
         } catch {
           if (api.scopeSignal?.aborted) progress("gate-reconciliation-timeout", "UNKNOWN");
           active();
-          /* An unconfirmed completion leaves the candidate's check in progress. */
+          /* Publication remains unconfirmed. */
         }
       }
+      incomplete ||= !failureConfirmed;
     }
   }
   active();
