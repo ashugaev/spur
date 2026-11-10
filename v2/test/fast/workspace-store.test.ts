@@ -2,11 +2,12 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { writeSession } from "../../src/metadata.js";
+import { sessionFilePath, writeSession } from "../../src/metadata.js";
 import type { SessionRecord } from "../../src/types.js";
 import {
   deleteWorkspaceState,
   readWorkspaceState,
+  readPrAlertOwnership,
   resolveWorkspaceState,
   writeWorkspaceState,
 } from "../../src/workspace-store.js";
@@ -43,6 +44,73 @@ function baseSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
     ...overrides,
   };
 }
+
+describe("PR alert authority", () => {
+  it("retains an explicit owner and a retired predecessor across unrelated state writes", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, baseSession());
+    const prAlertOwner = {
+      state: "owned",
+      sessionId: "api-1",
+      ownerRollbackId: "api-failed",
+    } as const;
+    writeWorkspaceState(dataDir, "api-1", { prAlertOwner });
+    expect(readPrAlertOwnership(dataDir, "api-1")).toEqual(prAlertOwner);
+    expect(() => writeWorkspaceState(dataDir, "api-1", { slots: { links: [] } })).toThrow("retain");
+    writeWorkspaceState(dataDir, "api-1", {
+      ...readWorkspaceState(dataDir, "api-1"),
+      slots: { title: "owner", links: [] },
+    });
+    expect(readPrAlertOwnership(dataDir, "api-1")).toEqual(prAlertOwner);
+    const retired = {
+      state: "retired",
+      successorWorkspaceId: "api-2",
+      successorSessionId: "api-2",
+    } as const;
+    writeWorkspaceState(dataDir, "api-1", { prAlertOwner: retired });
+    expect(readPrAlertOwnership(dataDir, "api-1")).toEqual(retired);
+  });
+
+  it.each([
+    '{"prAlertOwner":{"state":"owned","sessionId":""}}',
+    '{"prAlertOwner":{"state":"owned","sessionId":"api-1","ownerRollbackId":""}}',
+    "{bad json",
+  ])(
+    "refuses slot and PR writes over invalid authority without changing bytes: %s",
+    async (bytes) => {
+      const dataDir = await newDataDir();
+      writeWorkspaceState(dataDir, "api-1", {});
+      const path = join(dataDir, "workspaces", "api-1.json");
+      writeFileSync(path, bytes);
+      expect(readPrAlertOwnership(dataDir, "api-1")).toEqual({ state: "invalid" });
+      expect(() => writeWorkspaceState(dataDir, "api-1", { slots: { links: [] } })).toThrow(
+        "invalid",
+      );
+      expect(() =>
+        writeWorkspaceState(dataDir, "api-1", {
+          pr: { number: 1, repo: "example/repo", url: "https://github.com/example/repo/pull/1" },
+        }),
+      ).toThrow("invalid");
+      expect(readFileSync(path, "utf8")).toBe(bytes);
+    },
+  );
+
+  it("holds a role whose identity is missing or belongs to another workspace", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, baseSession({ workspaceId: "api-2" }));
+    writeWorkspaceState(dataDir, "api-1", { prAlertOwner: { state: "owned", sessionId: "api-1" } });
+    expect(readPrAlertOwnership(dataDir, "api-1")).toEqual({ state: "invalid" });
+    expect(readPrAlertOwnership(dataDir, "api-3")).toEqual({ state: "unclaimed" });
+  });
+
+  it("holds unreadable owner membership instead of throwing into other source events", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, baseSession());
+    writeWorkspaceState(dataDir, "api-1", { prAlertOwner: { state: "owned", sessionId: "api-1" } });
+    writeFileSync(sessionFilePath(dataDir, "api", "api-1"), "{broken");
+    expect(readPrAlertOwnership(dataDir, "api-1")).toEqual({ state: "invalid" });
+  });
+});
 
 describe("readWorkspaceState", () => {
   it("returns null when no file exists", async () => {

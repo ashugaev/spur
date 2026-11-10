@@ -3067,7 +3067,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 aria-expanded={sessionMenuOpen}
                 aria-haspopup="menu"
                 aria-label="More session actions"
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                disabled={busyAction !== null}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                 onClick={() => setSessionMenuOpen((value) => !value)}
                 ref={sessionMenu.buttonRef}
                 type="button"
@@ -3082,6 +3083,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   role="menu"
                   style={sessionMenu.menuStyle}
                 >
+                  {canPause(session) ? (
+                    <button
+                      className="block w-full px-3 py-1.5 text-left font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                      disabled={busyAction !== null}
+                      onClick={() => {
+                        setSessionMenuOpen(false);
+                        void handleAction("restore", { restart: true });
+                      }}
+                      role="menuitem"
+                      type="button"
+                    >
+                      Restart session
+                    </button>
+                  ) : null}
                   <button
                     className="block w-full px-3 py-1.5 text-left font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
                     onClick={() => {

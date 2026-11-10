@@ -90,6 +90,7 @@ const waitForOpenCodeLaunchMessageMock: Mock = vi.fn();
 const withOpenCodeLaunchIdentityLockMock: Mock = vi.fn();
 const readOpenCodeStateMock: Mock = vi.fn();
 const readOpenCodeStructuredStateMock: Mock = vi.fn();
+const openCodeHeartbeatExpiredMock: Mock = vi.fn();
 const resolveCursorLaunchModelMock = vi.fn(
   async (model: string | undefined): Promise<string | undefined> => model,
 );
@@ -312,6 +313,7 @@ const hasUncommittedChangesMock: Mock = vi.fn();
 const isGitWorktreeMock: Mock = vi.fn();
 const hasUnpushedCommitsMock: Mock = vi.fn();
 const readCurrentBranchMock: Mock = vi.fn();
+const readBranchDestinationMock: Mock = vi.fn();
 const readRemoteUrlsMock: Mock = vi.fn();
 const removeWorktreeMock: Mock = vi.fn();
 const pruneRepoWorktreesMock: Mock = vi.fn();
@@ -422,6 +424,12 @@ const consentPolicyMock: Mock = vi.fn();
 const consentRepositoryMock: Mock = vi.fn();
 const readTelegramBindingsMock: Mock = vi.fn();
 const readTelegramReplyTargetMock: Mock = vi.fn();
+const readArchivedSessionMock: Mock = vi.fn();
+const listTelegramTopicSessionIdsMock: Mock = vi.fn();
+const readTelegramTopicGcClockMock: Mock = vi.fn();
+const writeTelegramTopicGcClockMock: Mock = vi.fn();
+const readTelegramTopicGcFailuresMock: Mock = vi.fn();
+const writeTelegramTopicGcFailuresMock: Mock = vi.fn();
 const sendTelegramReplyMock: Mock = vi.fn();
 const sendTelegramChatActionMock: Mock = vi.fn();
 const editTelegramTopicMock: Mock = vi.fn();
@@ -537,6 +545,7 @@ vi.mock("../../src/agents/opencode.js", async (importOriginal) => {
     withOpenCodeLaunchIdentityLock: withOpenCodeLaunchIdentityLockMock,
     readOpenCodeState: readOpenCodeStateMock,
     readOpenCodeStructuredState: readOpenCodeStructuredStateMock,
+    openCodeHeartbeatExpired: openCodeHeartbeatExpiredMock,
   };
 });
 
@@ -705,6 +714,12 @@ vi.mock("../../src/metadata.js", () => ({
   readSession: readSessionMock,
   readTelegramBindings: readTelegramBindingsMock,
   readTelegramReplyTarget: readTelegramReplyTargetMock,
+  readArchivedSession: readArchivedSessionMock,
+  listTelegramTopicSessionIds: listTelegramTopicSessionIdsMock,
+  readTelegramTopicGcClock: readTelegramTopicGcClockMock,
+  writeTelegramTopicGcClock: writeTelegramTopicGcClockMock,
+  readTelegramTopicGcFailures: readTelegramTopicGcFailuresMock,
+  writeTelegramTopicGcFailures: writeTelegramTopicGcFailuresMock,
   recordTelegramMessages: recordTelegramMessagesMock,
   requestGitHubMergeConflictRestoreReplay: requestGitHubMergeConflictRestoreReplayMock,
   writeTelegramBindings: writeTelegramBindingsMock,
@@ -966,6 +981,7 @@ vi.mock("../../src/workspace.js", () => ({
   isGitWorktree: isGitWorktreeMock,
   pruneRepoWorktrees: pruneRepoWorktreesMock,
   readCurrentBranch: readCurrentBranchMock,
+  readBranchDestination: readBranchDestinationMock,
   readRemoteUrls: readRemoteUrlsMock,
   removeWorktree: removeWorktreeMock,
   resolveRepoPathFromWorktree: resolveRepoPathFromWorktreeMock,
@@ -1454,6 +1470,7 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   readOpenCodeStructuredStateMock.mockReset().mockImplementation(async (...args: unknown[]) => ({
     state: await readOpenCodeStateMock(...args),
   }));
+  openCodeHeartbeatExpiredMock.mockReset().mockResolvedValue(false);
   agentProcessMatchersMock
     .mockReset()
     .mockImplementation((agent: string, launchCommand: string) => {
@@ -1574,6 +1591,12 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
       : new Map();
   });
   readTelegramReplyTargetMock.mockReset().mockReturnValue(null);
+  readArchivedSessionMock.mockReset().mockReturnValue(null);
+  listTelegramTopicSessionIdsMock.mockReset().mockReturnValue(new Set());
+  readTelegramTopicGcClockMock.mockReset().mockReturnValue(null);
+  writeTelegramTopicGcClockMock.mockReset();
+  readTelegramTopicGcFailuresMock.mockReset().mockReturnValue({});
+  writeTelegramTopicGcFailuresMock.mockReset();
   sendTelegramReplyMock.mockReset().mockResolvedValue({ messageIds: [] });
   recordTelegramMessagesMock.mockReset();
   sendTelegramChatActionMock.mockReset().mockResolvedValue({});
@@ -1752,6 +1775,13 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   hasUnpushedCommitsMock.mockReset().mockResolvedValue(false);
   isGitWorktreeMock.mockReset().mockResolvedValue(true);
   readCurrentBranchMock.mockReset().mockResolvedValue("main");
+  readBranchDestinationMock
+    .mockReset()
+    .mockImplementation(async (_path: string, branch: string) => ({
+      status: "known",
+      push: { url: "git@github.com:acme/api.git", branch },
+      upstream: null,
+    }));
   readRemoteUrlsMock
     .mockReset()
     .mockResolvedValue(new Map([["origin", "git@github.com:acme/api.git"]]));
@@ -1988,6 +2018,7 @@ export {
   withOpenCodeLaunchIdentityLockMock,
   readOpenCodeStateMock,
   readOpenCodeStructuredStateMock,
+  openCodeHeartbeatExpiredMock,
   resolveCursorLaunchModelMock,
   validateOpenCodeModelMock,
   resolveAgentReasoningEffortMock,
@@ -2075,6 +2106,7 @@ export {
   isGitWorktreeMock,
   hasUnpushedCommitsMock,
   readCurrentBranchMock,
+  readBranchDestinationMock,
   removeWorktreeMock,
   pruneRepoWorktreesMock,
   resolveRepoPathFromWorktreeMock,
@@ -2134,6 +2166,12 @@ export {
   consentRepositoryMock,
   readTelegramBindingsMock,
   readTelegramReplyTargetMock,
+  readArchivedSessionMock,
+  listTelegramTopicSessionIdsMock,
+  readTelegramTopicGcClockMock,
+  writeTelegramTopicGcClockMock,
+  readTelegramTopicGcFailuresMock,
+  writeTelegramTopicGcFailuresMock,
   sendTelegramReplyMock,
   sendTelegramChatActionMock,
   editTelegramTopicMock,

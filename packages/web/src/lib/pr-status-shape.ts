@@ -1,11 +1,18 @@
 export const PR_STATES = ["draft", "open", "merged", "closed"] as const;
 export const CI_STATUSES = ["success", "failure", "pending"] as const;
 export const REVIEW_DECISIONS = ["approved", "changes_requested", "review_required"] as const;
+export const REVIEW_REQUIREMENTS = ["required", "none", "unavailable"] as const;
 
 export type PrState = (typeof PR_STATES)[number];
 export type CiStatus = (typeof CI_STATUSES)[number] | null;
 export type ReviewDecision = (typeof REVIEW_DECISIONS)[number] | null;
+export type ReviewRequirement = (typeof REVIEW_REQUIREMENTS)[number];
 type ReviewDecisionValue = Exclude<ReviewDecision, null>;
+
+export interface PrReviewers {
+  approved: string[];
+  changesRequested: string[];
+}
 
 export interface PrInfo {
   state: PrState | null;
@@ -15,6 +22,8 @@ export interface PrInfo {
   mergeConflict: boolean;
   totalThreads: number;
   unresolvedThreads: number;
+  reviewers?: PrReviewers | null;
+  reviewRequirement?: ReviewRequirement;
   fetchedAt?: number;
   stale?: boolean;
 }
@@ -22,6 +31,7 @@ export interface PrInfo {
 const PR_STATE_SET: ReadonlySet<unknown> = new Set(PR_STATES);
 const CI_STATUS_SET: ReadonlySet<unknown> = new Set(CI_STATUSES);
 const REVIEW_DECISION_SET: ReadonlySet<unknown> = new Set(REVIEW_DECISIONS);
+const REVIEW_REQUIREMENT_SET: ReadonlySet<unknown> = new Set(REVIEW_REQUIREMENTS);
 const REVIEW_DECISION_ALIASES: Record<string, ReviewDecisionValue> = {
   APPROVED: "approved",
   CHANGES_REQUESTED: "changes_requested",
@@ -40,10 +50,24 @@ export function isReviewDecision(value: unknown): value is ReviewDecision {
   return value === null || REVIEW_DECISION_SET.has(value);
 }
 
+export function isReviewRequirement(value: unknown): value is ReviewRequirement {
+  return REVIEW_REQUIREMENT_SET.has(value);
+}
+
 export function parseReviewDecision(value: unknown): ReviewDecision {
   if (value === null) return null;
   if (typeof value !== "string") return null;
   return REVIEW_DECISION_ALIASES[value] ?? (isReviewDecision(value) ? value : null);
+}
+
+export function isPrReviewers(value: unknown): value is PrReviewers {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return [v["approved"], v["changesRequested"]].every(
+    (logins) =>
+      Array.isArray(logins) &&
+      logins.every((login) => typeof login === "string" && login.length > 0),
+  );
 }
 
 export function isPrInfoShape(value: unknown): value is PrInfo {
@@ -56,7 +80,9 @@ export function isPrInfoShape(value: unknown): value is PrInfo {
     typeof v["canMerge"] === "boolean" &&
     typeof v["mergeConflict"] === "boolean" &&
     typeof v["totalThreads"] === "number" &&
-    typeof v["unresolvedThreads"] === "number"
+    typeof v["unresolvedThreads"] === "number" &&
+    (v["reviewers"] === undefined || v["reviewers"] === null || isPrReviewers(v["reviewers"])) &&
+    (v["reviewRequirement"] === undefined || isReviewRequirement(v["reviewRequirement"]))
   );
 }
 
@@ -94,6 +120,9 @@ export function prInfosEqual(a: PrInfo, b: PrInfo): boolean {
     a.totalThreads === b.totalThreads &&
     a.unresolvedThreads === b.unresolvedThreads &&
     a.fetchedAt === b.fetchedAt &&
-    a.stale === b.stale
+    a.stale === b.stale &&
+    (a.reviewRequirement ?? "unavailable") === (b.reviewRequirement ?? "unavailable") &&
+    a.reviewers?.approved.join("\n") === b.reviewers?.approved.join("\n") &&
+    a.reviewers?.changesRequested.join("\n") === b.reviewers?.changesRequested.join("\n")
   );
 }

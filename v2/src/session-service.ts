@@ -57,6 +57,7 @@ import {
 } from "./agents/index.js";
 import {
   captureOpenCodeSessionBaseline,
+  openCodeHeartbeatExpired,
   readOpenCodeStructuredState,
   resolveNewOpenCodeSessionId,
   waitForOpenCodeLaunchMessage,
@@ -119,6 +120,7 @@ import {
 } from "./agents/claude.js";
 import { extractGithubErrorText, isGitHubRateLimitError, runGhPollCycle } from "./gh.js";
 import {
+  CODEX_HOME_DIR,
   codexHookHomePath,
   findLatestCodexSessionFile,
   readCodexConversationTail,
@@ -266,6 +268,12 @@ import {
   listServiceInstancesForSession,
   listSessions,
   readTelegramBindings,
+  readArchivedSession,
+  listTelegramTopicSessionIds,
+  readTelegramTopicGcClock,
+  writeTelegramTopicGcClock,
+  readTelegramTopicGcFailures,
+  writeTelegramTopicGcFailures,
   retireTelegramLegacyState,
   readServiceInstance,
   readSession,
@@ -379,10 +387,12 @@ import {
 import { readDiskBudgetReport } from "./disk-budget.js";
 import {
   deleteWorkspaceState,
+  readPrAlertOwnership,
   resolveWorkspaceState,
   writeWorkspaceState,
   type WorkspaceState,
 } from "./workspace-store.js";
+import { assertPrAlertRoutes, PrAlertOwnerRequestError } from "./pr-alert-owner.js";
 import { normalizeSelfDestructConfig, withSelfDestructInstructions } from "./self-destruct.js";
 import {
   getSessionMemoryRecord,
@@ -405,6 +415,7 @@ import {
   closeSessionPr,
   deriveSessionSlots,
   parseSessionPrBinding,
+  normalizeSessionPrBinding,
   prLookupBindingOf,
   resolvePrDiscoveryBranch,
   resolveSessionPrBinding,
@@ -539,6 +550,7 @@ import {
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
+  type PrAlertTransfer,
   type DurableSpawnIntent,
   type CursorRestoreBoundary,
   type SessionSlots,
@@ -834,6 +846,14 @@ const REAP_INTERVAL_MS = 5 * 60 * 1000;
 // this.config on every tick, so a config-only reload takes effect without a
 // daemon restart).
 const SESSION_GC_TICK_MS = 5 * 60_000;
+const TELEGRAM_TOPIC_GC_INTERVAL_MS = 24 * 60 * 60_000;
+const TELEGRAM_TOPIC_GC_MAX_SESSIONS = 20;
+const TELEGRAM_TOPIC_GC_MAX_FAILED_SWEEPS = 3;
+
+// Session-like owner of Telegram topic state; "missing" = no record on disk.
+type TelegramTopicOwner = Pick<SessionRecord, "id" | "project" | "slots"> & {
+  status: SessionStatus | "missing";
+};
 // isTerminalSessionStatus deliberately excludes "stopped" (used to gate live
 // polling loops that must keep tracking a stopped-but-not-yet-reconciled
 // session). The reaper needs the full set of statuses that mean "this
@@ -3320,6 +3340,7 @@ interface SessionSpawnOptions {
   admissionReservation?: symbol;
   validatedLaunchSelection?: AgentLaunchSelection;
   closeoutOwnerTransfer?: boolean;
+  prAlertOwnerTransfer?: PrAlertTransfer;
   receiptToken?: symbol;
   /** HTTP accepts a spawning identity when admission must wait. */
   acceptQueued?: boolean;
@@ -3382,6 +3403,7 @@ interface BackgroundSpawnOptions {
   promptKind?: UserInputKind;
   validatedLaunchSelection?: AgentLaunchSelection;
   closeoutOwnerTransfer?: boolean;
+  prAlertOwnerTransfer?: PrAlertTransfer;
 }
 
 function resolveCarriedSpawnModel(
@@ -3864,6 +3886,8 @@ export class SessionService {
   private compactCursor = 0;
   private sessionGcTimer: NodeJS.Timeout | null = null;
   private sessionGcRunning = false;
+  private telegramTopicGcRunning = false;
+  private telegramTopicGcClaimAt: number | null = null;
   private backgroundLoopsStarted = false;
   // Construction time, not epoch 0: a daemon restart must not treat "never
   // swept before" as "due immediately" — the first tick after a restart
@@ -3921,6 +3945,7 @@ export class SessionService {
   // Parking intentionally removes the runtime before committing stale state.
   private readonly staleParksInFlight = new Set<string>();
   private readonly spawnsPreparing = new Set<string>();
+  private readonly prAlertReservations = new Set<string>();
   // Session ids this process is launching in place: dead-agent recovery
   // (relaunchSessionInPlace) and restore()/reopen(). Each writes `running`
   // before the agent reaches its prompt and settles the record itself, so a
@@ -7104,13 +7129,22 @@ export class SessionService {
   private withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
     const session = readSession(this.config.dataDir, sessionId);
     return this.withSessionLifecycleLocks(
-      session ? [session.id, workspaceIdOf(session)] : [sessionId],
+      session ? this.lifecycleIdsFor(session) : [sessionId],
       task,
     );
   }
 
-  private lifecycleIdsFor(session: SessionRecord): string[] {
-    return [...new Set([session.id, workspaceIdOf(session)])].sort();
+  private lifecycleIdsFor(
+    session: Pick<SessionRecord, "id" | "workspaceId" | "deskId" | "prAlertTransfer">,
+  ): string[] {
+    const ids = [session.id, workspaceIdOf(session)];
+    if (session.prAlertTransfer) {
+      ids.push(
+        session.prAlertTransfer.predecessorSessionId,
+        session.prAlertTransfer.predecessorWorkspaceId,
+      );
+    }
+    return [...new Set(ids)].sort();
   }
 
   private async capturePaneGeneration(session: SessionRecord): Promise<PaneGeneration> {
@@ -8370,6 +8404,7 @@ export class SessionService {
       void this.runSessionGcSweep();
       void this.runDiskBudgetSweep();
       this.runArtifactRetentionSweep();
+      void this.runTelegramTopicGcSweep();
     }, SESSION_GC_TICK_MS);
     this.sessionGcTimer.unref();
   }
@@ -8772,6 +8807,7 @@ export class SessionService {
       }
 
       const nextState: WorkspaceState = {
+        ...resolved,
         ...(resolved.slots ? { slots: resolved.slots } : {}),
         pr: binding,
       };
@@ -8824,7 +8860,7 @@ export class SessionService {
     });
     // No pr to preserve here: the early return above already covers
     // `resolved.pr` being set.
-    const nextState: WorkspaceState = { ...(slots ? { slots } : {}) };
+    const nextState: WorkspaceState = { ...resolved, ...(slots ? { slots } : {}) };
     this.writeWorkspaceStateWithLegacyMirror(current, nextState);
     this.logEvent("session.pr_auto_detect.found", {
       level: "info",
@@ -8886,7 +8922,10 @@ export class SessionService {
     return { target, source };
   }
 
-  private telegramTopicHasOtherOwner(session: SessionRecord, target: TelegramReplyTarget): boolean {
+  private telegramTopicHasOtherOwner(
+    session: Pick<SessionRecord, "id" | "project">,
+    target: TelegramReplyTarget,
+  ): boolean {
     const projects = new Set([
       ...Object.keys(this.config.projects),
       session.project,
@@ -8908,10 +8947,18 @@ export class SessionService {
   }
 
   private async retireTelegramTopics(
-    session: SessionRecord,
+    session: TelegramTopicOwner,
     targets: { target: TelegramReplyTarget; owned: boolean }[],
     publicationFailure = false,
-  ): Promise<void> {
+    notice: "terminal" | "gc" = "terminal",
+  ): Promise<{
+    failed: TelegramReplyTarget[];
+    removed: { source: TelegramSourceConfig; topicId: number }[];
+  }> {
+    const outcome = {
+      failed: [] as TelegramReplyTarget[],
+      removed: [] as { source: TelegramSourceConfig; topicId: number }[],
+    };
     const groups = new Map<number, { source: TelegramSourceConfig; results: string[] }>();
     const seen = new Set<string>();
     for (const { target, owned } of targets) {
@@ -8947,14 +8994,17 @@ export class SessionService {
         group?.results.push(
           `Topic ${topicId} ${result === "deleted" ? "deleted with the agent" : "already deleted"}.`,
         );
+        outcome.removed.push({ source, topicId });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Telegram request failed";
+        outcome.failed.push(target);
         group?.results.push(`Topic ${topicId} could not be deleted: ${message}.`);
         this.logTelegramNoticeFailure(session.id, "topic deletion", error);
       } finally {
         release();
       }
     }
+    if (notice === "gc") return outcome;
     for (const [chatId, { source, results }] of groups) {
       try {
         await sendTelegramReply(
@@ -8971,6 +9021,7 @@ export class SessionService {
         );
       }
     }
+    return outcome;
   }
 
   private async cleanupTerminalTelegram(session: SessionRecord): Promise<void> {
@@ -9004,6 +9055,198 @@ export class SessionService {
       targets.push({ target: latest, owned: false });
     }
     await this.retireTelegramTopics(session, targets);
+  }
+
+  // GC variant of the terminal cleanup: Telegram state is the retry locator,
+  // so it is removed only after every topic delete is confirmed (or the retry
+  // budget is spent). An orphaned reply-target topic counts as owned;
+  // retireTelegramTopics still retains it when another session's binding holds it.
+  private async cleanupOrphanedTelegram(owner: TelegramTopicOwner): Promise<void> {
+    const dataDir = this.config.dataDir;
+    const latest = readTelegramReplyTarget(dataDir, owner.id);
+    const projectIds = new Set([
+      ...Object.keys(this.config.projects),
+      owner.project,
+      ...(latest ? [latest.projectId] : []),
+    ]);
+    const targets: { target: TelegramReplyTarget; owned: boolean }[] = [];
+    for (const projectId of projectIds) {
+      const sourceIds = new Set([
+        ...Object.keys(this.config.projects[projectId]?.sources ?? {}),
+        ...(latest?.projectId === projectId ? [latest.sourceId] : []),
+      ]);
+      for (const sourceId of sourceIds) {
+        for (const binding of readTelegramBindings(dataDir, projectId, sourceId).values()) {
+          if (binding.sessionId !== owner.id) continue;
+          targets.push({
+            target: { ...binding, projectId, sourceId, updatedAt: nowIso() },
+            owned: true,
+          });
+        }
+      }
+    }
+    if (latest) targets.push({ target: latest, owned: true });
+    const bound = targets.filter(({ target }) => target !== latest).map(({ target }) => target);
+    const outcome = await this.retireTelegramTopics(owner, targets, false, "gc");
+    // Each topic settles on its own: its locator goes once the topic is gone
+    // (or retained by another owner); a failed topic keeps its locator.
+    const failedKeys = new Set(
+      outcome.failed.map((target) => telegramBindingKey(target.chatId, target.messageThreadId)),
+    );
+    for (const target of bound) {
+      const key = telegramBindingKey(target.chatId, target.messageThreadId);
+      if (failedKeys.has(key)) continue;
+      writeTelegramBindings(dataDir, target.projectId, target.sourceId, [], {
+        preserveExisting: true,
+        removeKeys: [key],
+      });
+    }
+    if (latest && !failedKeys.has(telegramBindingKey(latest.chatId, latest.messageThreadId))) {
+      deleteTelegramReplyTarget(dataDir, owner.id);
+    }
+    for (const { source, topicId } of outcome.removed) {
+      if (source.chatId === undefined || source.chatId > 0) continue;
+      try {
+        await sendTelegramReply(
+          source,
+          { chatId: source.chatId },
+          `Session ${owner.status === "missing" ? owner.id : telegramSessionLabel(owner)} topic ${topicId} removed by daily cleanup (status: ${owner.status}).`,
+          { lifecycle: true },
+        );
+      } catch {
+        this.logTelegramNoticeFailure(
+          owner.id,
+          "lifecycle notice",
+          new Error("Telegram notice failed or timed out"),
+        );
+      }
+    }
+    const failures = readTelegramTopicGcFailures(dataDir);
+    const failedSweeps = (failures[owner.id] ?? 0) + 1;
+    if (outcome.failed.length > 0 && failedSweeps < TELEGRAM_TOPIC_GC_MAX_FAILED_SWEEPS) {
+      writeTelegramTopicGcFailures(dataDir, { ...failures, [owner.id]: failedSweeps });
+      return;
+    }
+    for (const projectId of projectIds) {
+      deleteTelegramSourceStateForSession(dataDir, projectId, owner.id);
+    }
+    if (owner.id in failures) {
+      const { [owner.id]: _cleared, ...rest } = failures;
+      writeTelegramTopicGcFailures(dataDir, rest);
+    }
+    if (outcome.failed.length > 0) {
+      this.logEvent("source.telegram.topic_gc.gave_up", {
+        level: "warn",
+        sessionId: owner.id,
+        message: `Telegram topic GC gave up on ${owner.id} after ${failedSweeps} failed sweeps`,
+      });
+    }
+  }
+
+  // Dead = completed | killed (live or archived record) | missing. A read
+  // failure throws: unknown is never dead.
+  private classifyTelegramTopicOwner(sessionId: string): TelegramTopicOwner | null {
+    const record =
+      readSession(this.config.dataDir, sessionId) ??
+      readArchivedSession(this.config.dataDir, sessionId);
+    if (record) {
+      return record.status === "completed" || record.status === "killed"
+        ? {
+            id: record.id,
+            project: record.project,
+            ...(record.slots ? { slots: record.slots } : {}),
+            status: record.status,
+          }
+        : null;
+    }
+    const project = Object.keys(this.config.projects)[0];
+    return project ? { id: sessionId, project, status: "missing" } : null;
+  }
+
+  // Drops failure counts of ids that left the scan (state removed elsewhere) or
+  // are no longer dead (reopened). An unreadable record keeps its count.
+  private pruneTelegramTopicGcFailures(scanned: ReadonlySet<string>): void {
+    const dataDir = this.config.dataDir;
+    const failures = readTelegramTopicGcFailures(dataDir);
+    const kept: Record<string, number> = {};
+    for (const [id, count] of Object.entries(failures)) {
+      if (!scanned.has(id)) continue;
+      try {
+        if (!this.classifyTelegramTopicOwner(id)) continue;
+      } catch {
+        // unknown: keep
+      }
+      kept[id] = count;
+    }
+    if (Object.keys(kept).length !== Object.keys(failures).length) {
+      writeTelegramTopicGcFailures(dataDir, kept);
+    }
+  }
+
+  // Daily daemon sweep of Telegram topics whose session is dead. Rides the
+  // session GC tick; the clock is persisted so restarts never re-sweep.
+  private async runTelegramTopicGcSweep(): Promise<void> {
+    if (this.telegramTopicGcRunning) return;
+    this.telegramTopicGcRunning = true;
+    try {
+      const dataDir = this.config.dataDir;
+      const now = Date.now();
+      // The in-memory claim is set before the write, so a failing write still
+      // defers the next sweep (and its warning) by a full interval.
+      const last = this.telegramTopicGcClaimAt ?? readTelegramTopicGcClock(dataDir);
+      if (last === null) {
+        this.telegramTopicGcClaimAt = now;
+        writeTelegramTopicGcClock(dataDir, now);
+        return;
+      }
+      if (now - last < TELEGRAM_TOPIC_GC_INTERVAL_MS) return;
+      this.telegramTopicGcClaimAt = now;
+      writeTelegramTopicGcClock(dataDir, now);
+      const candidates: string[] = [];
+      const skipped: string[] = [];
+      const scanned = listTelegramTopicSessionIds(dataDir, Object.keys(this.config.projects));
+      this.pruneTelegramTopicGcFailures(scanned);
+      for (const id of [...scanned].sort()) {
+        if (candidates.length >= TELEGRAM_TOPIC_GC_MAX_SESSIONS) break;
+        try {
+          if (this.classifyTelegramTopicOwner(id)) candidates.push(id);
+        } catch {
+          skipped.push(id);
+        }
+      }
+      const retired: string[] = [];
+      for (const id of candidates) {
+        try {
+          await this.withWorkspaceLifecycleLocks(id, async () => {
+            const owner = this.classifyTelegramTopicOwner(id);
+            if (!owner) return;
+            await this.cleanupOrphanedTelegram(owner);
+            retired.push(id);
+          });
+        } catch {
+          skipped.push(id);
+        }
+      }
+      if (skipped.length > 0) {
+        this.logEvent("source.telegram.topic_gc.failed", {
+          level: "warn",
+          message: `Telegram topic GC skipped ${skipped.length} session(s): ${skipped.join(", ")}`,
+        });
+      }
+      if (retired.length > 0) {
+        this.logEvent("source.telegram.topic_gc.completed", {
+          level: "info",
+          message: `Telegram topic GC retired ${retired.join(", ")}`,
+        });
+      }
+    } catch (error) {
+      this.logEvent("source.telegram.topic_gc.failed", {
+        level: "warn",
+        message: `Telegram topic GC failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    } finally {
+      this.telegramTopicGcRunning = false;
+    }
   }
 
   private logTelegramNoticeFailure(sessionId: string, context: string, error: unknown): void {
@@ -10627,14 +10870,11 @@ export class SessionService {
     );
     operation?.assertActive();
 
-    const existingToolDir = join(this.config.dataDir, "session-tools", reservedSession.id);
-    const sessionToolDir = existsSync(existingToolDir)
-      ? existingToolDir
-      : this.prepareSessionTools(
-          reservedSession.id,
-          reservedSession.agent,
-          reservedSession.project,
-        );
+    const sessionToolDir = this.prepareSessionTools(
+      reservedSession.id,
+      reservedSession.agent,
+      reservedSession.project,
+    );
     const sessionEnv = buildSessionEnv({
       agent: reservedSession.agent,
       projectId: reservedSession.project,
@@ -12721,6 +12961,16 @@ export class SessionService {
     request: SpawnSessionRequest,
     modeResolution: "strict" | "carried" = "strict",
   ): SpawnTarget {
+    if (request.prAlertOwner !== undefined && typeof request.prAlertOwner !== "boolean")
+      throw new PrAlertOwnerRequestError("invalid", "prAlertOwner must be a boolean");
+    if (request.prAlertOwner === true) {
+      if (request.bootstrap === true)
+        throw new PrAlertOwnerRequestError(
+          "invalid",
+          "prAlertOwner requires configured GitHub send routes",
+        );
+      assertPrAlertRoutes(this.getProject(request.project), request.allowedTriggers);
+    }
     if (request.project === SHEPHERD_PROJECT_ID) {
       ensureShepherdWorkspace(this.config.dataDir);
       const project = this.getProject(request.project);
@@ -13187,7 +13437,10 @@ export class SessionService {
     let workspacePath = "";
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let createdAt: string | undefined;
-    let placeholderWritten = false;
+    const placeholderState = { written: false };
+    let prAlertReservation: string | undefined;
+    let prAlertLaunchStarted = false;
+    let prAlertBirthConfirmed = false;
     let launchedRecord: SessionRecord | undefined;
     let launchCandidate: SessionRecord | undefined;
     let resolvedModel: string | undefined;
@@ -13215,6 +13468,7 @@ export class SessionService {
     try {
       ({ project, prompt, steps, mode, planMode, restrictWrites, allowedTriggers, selfDestruct } =
         this.resolveSpawnTarget(request, options?.modeResolution ?? "strict"));
+      prAlertReservation = this.reservePrAlertOwner(request, options?.prAlertOwnerTransfer);
       await this.warnIfHostDiskLow();
       if (
         request.branch !== undefined &&
@@ -13254,6 +13508,8 @@ export class SessionService {
           this.tryReserveSpawnAdmission(request.project, options?.replacingSessionId, false) ??
           undefined;
         if (admissionReservation === undefined) {
+          if (prAlertReservation) this.prAlertReservations.delete(prAlertReservation);
+          prAlertReservation = undefined;
           const accepted = await this.acceptBackgroundSpawn(request, {
             ...options,
             ...(triggerBirthRequest ? { triggerBirthRequest } : {}),
@@ -13421,6 +13677,7 @@ export class SessionService {
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
         closeoutOwner,
+        ...(options?.prAlertOwnerTransfer ? { prAlertTransfer: options.prAlertOwnerTransfer } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: resolvedBranch.branch,
@@ -13444,10 +13701,11 @@ export class SessionService {
         originalTaskPrompt,
       };
       this.assertReuseAnchorPresent(reuseCtx);
-      writeSession(this.config.dataDir, placeholder);
+      await this.persistSpawnPlaceholder(placeholder, request.prAlertOwner === true, () => {
+        placeholderState.written = true;
+      });
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
-      placeholderWritten = true;
       // Before the launch prompt exists: an agent that replies ahead of the
       // source's own bind step must answer the chat that asked for it.
       if (options?.telegramOrigin) {
@@ -13684,6 +13942,7 @@ export class SessionService {
           }
         });
         launchCandidate = runningRecord;
+        prAlertLaunchStarted = true;
         await createTmuxSession({
           sessionName: tmuxSession,
           cwd: workspacePath,
@@ -13765,6 +14024,7 @@ export class SessionService {
         initialGeneration = sent.generation;
         runningRecord = this.withLaunchSubmitOutcome(runningRecord, sendOutcome, launchSentAt);
         firstStepSubmitted = sendOutcome === "submitted";
+        prAlertBirthConfirmed = firstStepSubmitted;
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -13786,6 +14046,7 @@ export class SessionService {
           throw new Error("OpenCode did not persist the launch prompt");
         }
         firstStepSubmitted = true;
+        prAlertBirthConfirmed = true;
         if (options?.receiptToken) {
           initialGeneration = await this.withPaneWriteLock(runningRecord.tmuxSession, () =>
             this.capturePaneGeneration(runningRecord),
@@ -13832,6 +14093,10 @@ export class SessionService {
 
       updatedRecord = this.writeSpawnRecord(updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
+      if (prAlertBirthConfirmed && updatedRecord.prAlertTransfer) {
+        updatedRecord = this.settlePrAlertTransferLocked(updatedRecord, "commit");
+        writeSession(this.config.dataDir, updatedRecord);
+      }
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
@@ -13871,7 +14136,7 @@ export class SessionService {
         const retained = await this.retainLaunchedError(launchedRecord, error);
         if (!isTerminalSessionStatus(retained.status)) throw error;
       }
-      if (sessionId && project && placeholderWritten && agent) {
+      if (sessionId && project && placeholderState.written && agent) {
         const failedSessionId = sessionId;
         const failedProject = project;
         const failedAgent = agent;
@@ -13943,6 +14208,9 @@ export class SessionService {
           const erroredRecord: SessionRecord = {
             id: sessionId,
             project: request.project,
+            ...(options?.prAlertOwnerTransfer
+              ? { prAlertTransfer: options.prAlertOwnerTransfer }
+              : {}),
             ...(options?.triggerBirthKey && triggerBirthRequest
               ? { triggerBirthKey: options.triggerBirthKey, triggerBirthRequest }
               : {}),
@@ -13971,7 +14239,12 @@ export class SessionService {
             ...(options?.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
           };
           const killed = this.spawnWasKilled(sessionId);
-          const persistedFailure = killed ? null : this.carrySpawnQueue(erroredRecord);
+          const settledFailure = prAlertBirthConfirmed
+            ? this.settlePrAlertTransferLocked(erroredRecord, "commit")
+            : !prAlertLaunchStarted
+              ? this.settlePrAlertTransferLocked(erroredRecord, "rollback")
+              : erroredRecord;
+          const persistedFailure = killed ? null : this.carrySpawnQueue(settledFailure);
           if (persistedFailure) {
             writeSession(this.config.dataDir, persistedFailure);
           }
@@ -13996,7 +14269,13 @@ export class SessionService {
         if (failureReceipt) {
           return await this.withPaneWriteLock(failureReceipt.generation.tmuxSession, () =>
             this.withSessionLifecycleLocks(
-              [failureReceipt.sessionId, failureReceipt.workspaceId],
+              this.lifecycleIdsFor({
+                id: failureReceipt.sessionId,
+                workspaceId: failureReceipt.workspaceId,
+                ...(options?.prAlertOwnerTransfer
+                  ? { prAlertTransfer: options.prAlertOwnerTransfer }
+                  : {}),
+              }),
               async () => {
                 const latest = readSession(this.config.dataDir, failureReceipt.sessionId);
                 if (
@@ -14015,7 +14294,16 @@ export class SessionService {
             ),
           );
         }
-        return await cleanupFailedSpawn();
+        return await this.withSessionLifecycleLocks(
+          this.lifecycleIdsFor({
+            id: sessionId,
+            workspaceId: reuseCtx?.workspaceId ?? sessionId,
+            ...(options?.prAlertOwnerTransfer
+              ? { prAlertTransfer: options.prAlertOwnerTransfer }
+              : {}),
+          }),
+          cleanupFailedSpawn,
+        );
       }
 
       const message = error instanceof Error ? error.message : String(error);
@@ -14041,6 +14329,7 @@ export class SessionService {
       });
       throw error;
     } finally {
+      if (prAlertReservation) this.prAlertReservations.delete(prAlertReservation);
       if (admissionReserved && admissionReservation !== undefined) {
         this.admissionReservations.delete(admissionReservation);
       }
@@ -14314,6 +14603,261 @@ export class SessionService {
     return readSession(this.config.dataDir, anchorId) ?? session;
   }
 
+  private writePrAlertRoleLocked(
+    record: SessionRecord,
+    prAlertOwner: NonNullable<WorkspaceState["prAlertOwner"]>,
+  ): void {
+    writeWorkspaceState(this.config.dataDir, workspaceIdOf(record), {
+      ...resolveWorkspaceState(this.config.dataDir, record),
+      prAlertOwner,
+    });
+  }
+
+  private async persistSpawnPlaceholder(
+    record: SessionRecord,
+    alertsRequested: boolean,
+    onWritten: () => void,
+  ): Promise<void> {
+    if (!alertsRequested && !record.prAlertTransfer) {
+      writeSession(this.config.dataDir, record);
+      onWritten();
+      return;
+    }
+    record = normalizeSessionPrBinding(record);
+    await this.withSessionLifecycleLocks(this.lifecycleIdsFor(record), async () => {
+      const workspaceId = workspaceIdOf(record);
+      const owner = readPrAlertOwnership(this.config.dataDir, workspaceId);
+      const transfer = record.prAlertTransfer;
+      if (transfer?.kind === "owner" && transfer.predecessorWorkspaceId === workspaceId) {
+        if (owner.state !== "owned" || owner.sessionId !== transfer.predecessorSessionId)
+          throw new PrAlertOwnerRequestError(
+            "conflict",
+            "PR alert predecessor changed before placeholder",
+          );
+      } else {
+        if (owner.state !== "unclaimed")
+          throw new PrAlertOwnerRequestError("conflict", "PR alert target already has authority");
+        if (transfer?.kind === "suppressed") {
+          this.claimPrAlertsLocked(record, "birth");
+        } else if (transfer) {
+          const predecessor = readSession(this.config.dataDir, transfer.predecessorSessionId);
+          const prior = readPrAlertOwnership(this.config.dataDir, transfer.predecessorWorkspaceId);
+          if (
+            !predecessor ||
+            workspaceIdOf(predecessor) !== transfer.predecessorWorkspaceId ||
+            prior.state !== "owned" ||
+            prior.sessionId !== predecessor.id
+          )
+            throw new PrAlertOwnerRequestError(
+              "conflict",
+              "PR alert predecessor changed before placeholder",
+            );
+          this.writePrAlertRoleLocked(record, {
+            state: "retired",
+            successorWorkspaceId: transfer.predecessorWorkspaceId,
+            successorSessionId: predecessor.id,
+          });
+        } else {
+          this.writePrAlertRoleLocked(record, { state: "owned", sessionId: record.id });
+        }
+      }
+      writeSession(this.config.dataDir, record);
+      onWritten();
+      if (transfer?.kind !== "suppressed") this.claimPrAlertsLocked(record, "birth");
+    });
+  }
+
+  private prAlertBirthUnlaunched(session: SessionRecord): boolean {
+    const intent = session.spawnIntent;
+    return (
+      intent !== undefined &&
+      intent.submission.state === "pending" &&
+      (intent.phase === "queued" || intent.phase === "workspace_ready")
+    );
+  }
+
+  private prAlertTransferFrom(
+    session: SessionRecord,
+    operation: "respawn" | "handoff",
+  ): PrAlertTransfer | undefined {
+    const predecessorWorkspaceId = workspaceIdOf(session);
+    const owner = readPrAlertOwnership(this.config.dataDir, predecessorWorkspaceId);
+    if (owner.state === "invalid" && operation === "respawn")
+      throw new PrAlertOwnerRequestError("conflict", "PR alert source authority is invalid");
+    if (owner.state === "unclaimed" || owner.state === "invalid") return undefined;
+    const activeOwner = owner.state === "owned" && owner.sessionId === session.id;
+    if (!activeOwner && operation === "handoff") return undefined;
+    return {
+      kind: activeOwner ? "owner" : "suppressed",
+      predecessorWorkspaceId,
+      predecessorSessionId: session.id,
+    };
+  }
+
+  private reservePrAlertOwner(
+    request: SpawnSessionRequest,
+    transfer?: PrAlertTransfer,
+  ): string | undefined {
+    if (request.prAlertOwner !== true && !transfer) return undefined;
+    if (request.prAlertOwner === true || transfer?.kind === "owner")
+      assertPrAlertRoutes(this.getProject(request.project), request.allowedTriggers);
+    const reuseId = request.reuseWorkspaceSessionId?.trim();
+    if (!reuseId) return undefined;
+    const anchor = readSession(this.config.dataDir, reuseId);
+    if (!anchor || anchor.project !== request.project)
+      throw new PrAlertOwnerRequestError(
+        "invalid",
+        "PR alert workspace must belong to the selected project",
+      );
+    const workspaceId = workspaceIdOf(anchor);
+    const owner = readPrAlertOwnership(this.config.dataDir, workspaceId);
+    const transferring =
+      transfer?.kind === "owner" &&
+      transfer.predecessorWorkspaceId === workspaceId &&
+      owner.state === "owned" &&
+      owner.sessionId === transfer.predecessorSessionId;
+    if (this.prAlertReservations.has(workspaceId) || (owner.state !== "unclaimed" && !transferring))
+      throw new PrAlertOwnerRequestError(
+        "conflict",
+        "Workspace already has a PR alert owner or pending claim",
+      );
+    this.prAlertReservations.add(workspaceId);
+    return workspaceId;
+  }
+
+  private claimPrAlertsLocked(record: SessionRecord, evidence: "birth" | "resume"): void {
+    if (evidence === "resume" && !this.prAlertBirthUnlaunched(record))
+      throw new Error("PR alert recovery lacks a pending native birth; ownership held");
+    const workspaceId = workspaceIdOf(record);
+    const owner = readPrAlertOwnership(this.config.dataDir, workspaceId);
+    const transfer = record.prAlertTransfer;
+    if (transfer?.kind === "suppressed") {
+      const source = readSession(this.config.dataDir, transfer.predecessorSessionId);
+      if (!source || workspaceIdOf(source) !== transfer.predecessorWorkspaceId)
+        throw new PrAlertOwnerRequestError(
+          "conflict",
+          "PR alert suppression source is unavailable",
+        );
+      const sourceOwner = readPrAlertOwnership(
+        this.config.dataDir,
+        transfer.predecessorWorkspaceId,
+      );
+      const retirement =
+        sourceOwner.state === "retired"
+          ? sourceOwner
+          : sourceOwner.state === "owned" && sourceOwner.sessionId !== source.id
+            ? {
+                state: "retired" as const,
+                successorWorkspaceId: transfer.predecessorWorkspaceId,
+                successorSessionId: sourceOwner.sessionId,
+              }
+            : undefined;
+      if (!retirement || (owner.state !== "unclaimed" && owner.state !== "retired"))
+        throw new PrAlertOwnerRequestError(
+          "conflict",
+          "PR alert suppression source or target changed",
+        );
+      this.writePrAlertRoleLocked(record, retirement);
+      return;
+    }
+    if (owner.state === "owned" && owner.sessionId === record.id) return;
+    const sameWorkspace = transfer?.predecessorWorkspaceId === workspaceId;
+    const stagedHold =
+      transfer?.kind === "owner" &&
+      !sameWorkspace &&
+      owner.state === "retired" &&
+      owner.successorWorkspaceId === transfer.predecessorWorkspaceId &&
+      owner.successorSessionId === transfer.predecessorSessionId;
+    if (
+      !stagedHold &&
+      !(
+        sameWorkspace &&
+        owner.state === "owned" &&
+        owner.sessionId === transfer.predecessorSessionId
+      )
+    )
+      throw new PrAlertOwnerRequestError("conflict", "PR alert owner changed before claim");
+    if (!sameWorkspace) {
+      const predecessor = readSession(this.config.dataDir, transfer.predecessorSessionId);
+      if (!predecessor || workspaceIdOf(predecessor) !== transfer.predecessorWorkspaceId)
+        throw new PrAlertOwnerRequestError("conflict", "PR alert predecessor is unavailable");
+      const prior = readPrAlertOwnership(this.config.dataDir, transfer.predecessorWorkspaceId);
+      const alreadyRetired =
+        prior.state === "retired" &&
+        prior.successorWorkspaceId === workspaceId &&
+        prior.successorSessionId === record.id;
+      if (!alreadyRetired && !(prior.state === "owned" && prior.sessionId === predecessor.id))
+        throw new PrAlertOwnerRequestError(
+          "conflict",
+          "PR alert predecessor changed before transfer",
+        );
+      this.writePrAlertRoleLocked(predecessor, {
+        state: "retired",
+        successorWorkspaceId: workspaceId,
+        successorSessionId: record.id,
+      });
+    }
+    this.writePrAlertRoleLocked(record, { state: "owned", sessionId: record.id });
+  }
+
+  private settlePrAlertTransferLocked(
+    record: SessionRecord,
+    outcome: "commit" | "rollback",
+  ): SessionRecord {
+    const transfer = record.prAlertTransfer;
+    if (!transfer) return record;
+    if (outcome === "rollback" && transfer.kind === "owner") {
+      const workspaceId = workspaceIdOf(record);
+      const predecessor = readSession(this.config.dataDir, transfer.predecessorSessionId);
+      if (!predecessor || workspaceIdOf(predecessor) !== transfer.predecessorWorkspaceId)
+        throw new Error("PR alert transfer predecessor is unavailable; ownership held");
+      const owner = readPrAlertOwnership(this.config.dataDir, workspaceId);
+      if (workspaceId === transfer.predecessorWorkspaceId) {
+        if (
+          owner.state !== "owned" ||
+          (owner.sessionId !== record.id && owner.sessionId !== predecessor.id)
+        )
+          throw new Error("PR alert transfer changed; ownership held");
+        if (owner.sessionId === record.id)
+          this.writePrAlertRoleLocked(predecessor, {
+            state: "owned",
+            sessionId: predecessor.id,
+            ownerRollbackId: record.id,
+          });
+      } else {
+        const held =
+          owner.state === "retired" &&
+          owner.successorWorkspaceId === transfer.predecessorWorkspaceId &&
+          owner.successorSessionId === predecessor.id;
+        if (!held && !(owner.state === "owned" && owner.sessionId === record.id))
+          throw new Error("PR alert transfer changed; ownership held");
+        const prior = readPrAlertOwnership(this.config.dataDir, transfer.predecessorWorkspaceId);
+        const predecessorUnchanged =
+          prior.state === "owned" && prior.sessionId === predecessor.id && held;
+        if (!predecessorUnchanged) {
+          if (
+            prior.state !== "retired" ||
+            prior.successorWorkspaceId !== workspaceId ||
+            prior.successorSessionId !== record.id
+          )
+            throw new Error("PR alert transfer predecessor changed; ownership held");
+          this.writePrAlertRoleLocked(record, {
+            state: "retired",
+            successorWorkspaceId: transfer.predecessorWorkspaceId,
+            successorSessionId: predecessor.id,
+          });
+          this.writePrAlertRoleLocked(predecessor, {
+            state: "owned",
+            sessionId: predecessor.id,
+            ownerRollbackId: record.id,
+          });
+        }
+      }
+    }
+    const { prAlertTransfer: _transfer, ...settled } = record;
+    return settled;
+  }
+
   // Persists workspace-owned state plus its transitional legacy mirror.
   //
   // The mirror has to land on the WORKSPACE OWNER's record, which is not
@@ -14413,8 +14957,9 @@ export class SessionService {
     let agent: SessionRecord["agent"] | undefined;
     let worktree = false;
     let createdAt: string | undefined;
-    let placeholderWritten = false;
+    const placeholderState = { written: false };
     let ownedClaimBatchId: string | undefined;
+    let prAlertReservation: string | undefined;
     let prompt = "";
     let steps: string[] | undefined;
     let mode: ResolvedSessionMode | undefined;
@@ -14434,6 +14979,7 @@ export class SessionService {
     try {
       ({ project, prompt, steps, mode, planMode, restrictWrites, allowedTriggers, selfDestruct } =
         this.resolveSpawnTarget(request, options.modeResolution ?? "strict"));
+      prAlertReservation = this.reservePrAlertOwner(request, options.prAlertOwnerTransfer);
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -14532,6 +15078,7 @@ export class SessionService {
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
         closeoutOwner,
+        ...(options.prAlertOwnerTransfer ? { prAlertTransfer: options.prAlertOwnerTransfer } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: placeholderBranch,
@@ -14590,8 +15137,9 @@ export class SessionService {
       if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
       this.pendingSpawnIds.add(sessionId);
       this.spawnsInFlight.add(sessionId);
-      writeSession(this.config.dataDir, placeholder);
-      placeholderWritten = true;
+      await this.persistSpawnPlaceholder(placeholder, request.prAlertOwner === true, () => {
+        placeholderState.written = true;
+      });
       ownedClaimBatchId = undefined;
       if (options.telegramOrigin) {
         writeTelegramReplyTarget(this.config.dataDir, {
@@ -14661,7 +15209,7 @@ export class SessionService {
       }
       if (error instanceof SpawnAdmissionCancelledError) throw error;
       const message = error instanceof Error ? error.message : String(error);
-      if (sessionId && project && placeholderWritten) {
+      if (sessionId && project && placeholderState.written) {
         const erroredWorkspaceId = reuseCtx?.workspaceId ?? sessionId;
         const claimedPreflightUsage = readSession(
           this.config.dataDir,
@@ -14674,10 +15222,13 @@ export class SessionService {
         });
         const erroredBranchSource =
           resolvedBranch?.branchSource ?? (worktree && explicitBranch ? "explicit" : undefined);
-        writeSession(this.config.dataDir, {
+        const failedRecord: SessionRecord = {
           id: sessionId,
           project: request.project,
           ...(options.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
+          ...(options.prAlertOwnerTransfer
+            ? { prAlertTransfer: options.prAlertOwnerTransfer }
+            : {}),
           workspaceId: erroredWorkspaceId,
           agent: agent ?? resolveSpawnAgent(request.agent, project, this.config),
           prompt,
@@ -14697,6 +15248,12 @@ export class SessionService {
           updatedAt: nowIso(),
           error: message,
           errorSource: "other",
+        };
+        await this.withSessionLifecycleLocks(this.lifecycleIdsFor(failedRecord), async () => {
+          writeSession(
+            this.config.dataDir,
+            this.settlePrAlertTransferLocked(failedRecord, "rollback"),
+          );
         });
       }
       this.logEvent("session.spawn.failed", {
@@ -14713,6 +15270,7 @@ export class SessionService {
       });
       throw error;
     } finally {
+      if (prAlertReservation) this.prAlertReservations.delete(prAlertReservation);
       if (sessionId) this.spawnsPreparing.delete(sessionId);
     }
   }
@@ -15404,7 +15962,24 @@ export class SessionService {
             errorSource: "other",
           });
       if (persistedFailure) {
-        this.retireDurableSpawn(persistedFailure);
+        await this.withSessionLifecycleLocks(this.lifecycleIdsFor(persistedFailure), async () => {
+          const current = readSession(this.config.dataDir, persistedFailure.id);
+          if (!current || isTerminalSessionStatus(current.status)) return;
+          const failure = {
+            ...current,
+            ...persistedFailure,
+            ...(current.spawnIntent ? { spawnIntent: current.spawnIntent } : {}),
+          };
+          const outcome =
+            current.spawnIntent?.submission.state === "confirmed"
+              ? "commit"
+              : this.prAlertBirthUnlaunched(current) || launchProvenAbsent
+                ? "rollback"
+                : null;
+          this.retireDurableSpawn(
+            outcome ? this.settlePrAlertTransferLocked(failure, outcome) : failure,
+          );
+        });
       }
       this.logEvent("session.spawn.failed", {
         level: "error",
@@ -15476,6 +16051,17 @@ export class SessionService {
                   const current = readSession(this.config.dataDir, prepared.sessionId);
                   if (!current || current.status !== "spawning") {
                     throw new SpawnAdmissionCancelledError("killed");
+                  }
+                  if (prepared.request.prAlertOwner === true || current.prAlertTransfer) {
+                    if (
+                      prepared.request.prAlertOwner === true ||
+                      current.prAlertTransfer?.kind === "owner"
+                    )
+                      assertPrAlertRoutes(
+                        this.getProject(current.project),
+                        current.allowedTriggers,
+                      );
+                    this.claimPrAlertsLocked(current, "resume");
                   }
                   this.pendingSpawnIds.delete(prepared.sessionId);
                 });
@@ -15567,11 +16153,22 @@ export class SessionService {
   }
 
   private async prepareRecoveredSpawn(record: SessionRecord): Promise<PreparedSpawn> {
+    const current = readSession(this.config.dataDir, record.id);
+    if (!current?.spawnIntent || isTerminalSessionStatus(current.status))
+      throw new SpawnAdmissionCancelledError("killed");
+    if (this.lifecycleIdsFor(current).join("\0") !== this.lifecycleIdsFor(record).join("\0"))
+      throw new Error(`PR alert recovery lineage changed for ${record.id}`);
+    record = current;
     const intent = record.spawnIntent;
     if (!intent) throw new Error(`Missing launch intent for ${record.id}`);
     const project = intent.request.bootstrap
       ? this.resolveSpawnTarget(intent.request, "carried").project
       : this.getProject(record.project);
+    if (intent.request.prAlertOwner === true || record.prAlertTransfer) {
+      if (intent.request.prAlertOwner === true || record.prAlertTransfer?.kind === "owner")
+        assertPrAlertRoutes(project, record.allowedTriggers);
+      this.claimPrAlertsLocked(record, "resume");
+    }
     this.assertSpawnAccountReady(record.claudeAccountId);
     const startupAttachments = intent.startupAttachments.map(({ id, name }) => {
       const artifact = readSessionArtifact(this.config.dataDir, workspaceIdOf(record), id);
@@ -15638,7 +16235,11 @@ export class SessionService {
   }
 
   private retireDurableSpawn(record: SessionRecord, preserveCompletion = false): SessionRecord {
-    const { spawnIntent: _intent, ...settled } = record;
+    const completed =
+      record.spawnIntent?.submission.state === "confirmed"
+        ? this.settlePrAlertTransferLocked(record, "commit")
+        : record;
+    const { spawnIntent: _intent, ...settled } = completed;
     writeSession(this.config.dataDir, settled);
     this.durableSpawnIds.delete(record.id);
     this.pendingSpawnIds.delete(record.id);
@@ -15763,7 +16364,10 @@ export class SessionService {
             const stopped: SessionRecord = { ...current, status: "stopped", updatedAt: nowIso() };
             delete stopped.error;
             delete stopped.errorSource;
-            const settled = this.retireDurableSpawn(stopped, true);
+            const settled = this.retireDurableSpawn(
+              this.settlePrAlertTransferLocked(stopped, "commit"),
+              true,
+            );
             const completion = this.spawnCompletions.get(record.id);
             if (completion) completion.resolve(await this.enrich(settled));
             this.spawnCompletions.delete(record.id);
@@ -15905,7 +16509,7 @@ export class SessionService {
       writeSession(this.config.dataDir, launched);
       launched = await this.startAutoStartSidecars(launched, project);
       launched = this.applyRequestedStateSubscriptions(launched, intent.request.subscriptions);
-      launched = this.retireDurableSpawn(launched);
+      launched = this.retireDurableSpawn(this.settlePrAlertTransferLocked(launched, "commit"));
       const completion = this.spawnCompletions.get(record.id);
       if (completion) completion.resolve(await this.enrich(launched));
       this.spawnCompletions.delete(record.id);
@@ -15929,7 +16533,13 @@ export class SessionService {
     this.durableRecoveryBusy = true;
     try {
       if (record.spawnIntent.phase === "queued" || record.spawnIntent.phase === "workspace_ready") {
-        void this.startBackgroundSpawn(await this.prepareRecoveredSpawn(record));
+        const prepared =
+          record.spawnIntent.request.prAlertOwner === true || record.prAlertTransfer
+            ? await this.withWorkspaceLifecycleLocks(record.id, () =>
+                this.prepareRecoveredSpawn(record),
+              )
+            : await this.prepareRecoveredSpawn(record);
+        void this.startBackgroundSpawn(prepared);
       } else {
         await this.recoverDurableRuntime(record);
       }
@@ -17497,7 +18107,12 @@ export class SessionService {
   async deliver(
     sessionId: string,
     message: string,
-    options?: { interrupt?: boolean; sensitive?: true },
+    options?: {
+      interrupt?: boolean;
+      sensitive?: true;
+      allowDelivery?: () => boolean;
+      observeDelivery?: (stage: "input-started" | "accepted") => void;
+    },
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -17513,6 +18128,8 @@ export class SessionService {
     return this.deliverPrepared(sessionId, message, {
       ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
       ...(options?.sensitive ? { sensitive: true as const } : {}),
+      ...(options?.allowDelivery ? { allowDelivery: options.allowDelivery } : {}),
+      ...(options?.observeDelivery ? { observeDelivery: options.observeDelivery } : {}),
       entryPoint: "deliver",
     });
   }
@@ -19101,7 +19718,7 @@ export class SessionService {
 
     const work = () =>
       this.withSessionLifecycleLocks(
-        candidates.flatMap((candidate) => [candidate.id, workspaceIdOf(candidate)]),
+        candidates.flatMap((candidate) => this.lifecycleIdsFor(candidate)),
         async () => {
           const emptySessionIds: string[] = [];
           const unfinishedBlocked: Array<{
@@ -19233,6 +19850,7 @@ export class SessionService {
     const slots = applied.slots;
     const nextPr = nativePr ? nativePr : unlinksPr && !hasGenericPrSlot ? undefined : current.pr;
     const nextState: WorkspaceState = {
+      ...(current.prAlertOwner ? { prAlertOwner: current.prAlertOwner } : {}),
       ...(slots ? { slots } : {}),
       ...(nextPr ? { pr: nextPr } : {}),
     };
@@ -19839,7 +20457,7 @@ export class SessionService {
       SessionRecord,
       "id" | "project" | "workspaceId" | "deskId" | "startupAttachmentIds"
     >,
-    options?: { preserveStartup?: boolean },
+    options?: { preserveStartup?: boolean; preserveAgentHistory?: boolean },
   ): { ranCleanup: boolean } {
     const sessionId = session.id;
     // Per-session cleanup: unconditional, regardless of desk membership.
@@ -19857,8 +20475,11 @@ export class SessionService {
     // A desk sibling's own session-tools dir is per-session, so it goes now.
     // The anchor's doubles as the tool dir of the desk's shared sidecars, so
     // it is treated as shared state below.
+    // Completion keeps the native agent history (Codex rollouts live under
+    // the tool dir's codex-home) so reopen can resume the same thread.
+    const ownKeep = options?.preserveAgentHistory ? [CODEX_HOME_DIR] : [];
     if (sessionId !== anchorId) {
-      removeSessionSlotTool(this.config.dataDir, sessionId);
+      removeSessionSlotTool(this.config.dataDir, sessionId, ownKeep);
     }
     // Shared-desk cleanup: the anchor's artifacts dir and session-tools dir
     // are still in use by any other live desk member (an anchor-owned
@@ -19887,10 +20508,20 @@ export class SessionService {
     } else {
       deleteSessionArtifactsDir(this.config.dataDir, anchorId);
     }
-    removeSessionSlotTool(this.config.dataDir, anchorId);
+    // A completed anchor can be reopened, so its codex-home outlives whichever
+    // member tears the desk down last.
+    const anchorKeep =
+      anchorId === sessionId
+        ? ownKeep
+        : deskMembers.find((m) => m.id === anchorId)?.status === "completed"
+          ? [CODEX_HOME_DIR]
+          : [];
+    removeSessionSlotTool(this.config.dataDir, anchorId, anchorKeep);
     // Last member's teardown: the workspace's shared slots/pr state goes
     // with the rest of its shared state.
-    deleteWorkspaceState(this.config.dataDir, anchorId);
+    if (readPrAlertOwnership(this.config.dataDir, anchorId).state === "unclaimed") {
+      deleteWorkspaceState(this.config.dataDir, anchorId);
+    }
     return { ranCleanup: true };
   }
 
@@ -20196,6 +20827,7 @@ export class SessionService {
       skipEnrichment: true;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
+      restoreOperation?: RestoreOperationContext;
     },
   ): Promise<void>;
   private async applyManualStatusLocked(
@@ -20208,6 +20840,7 @@ export class SessionService {
       todoActor?: TodoActor;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
+      restoreOperation?: RestoreOperationContext;
     },
   ): Promise<SessionView>;
   private async applyManualStatusLocked(
@@ -20220,6 +20853,7 @@ export class SessionService {
       todoActor?: TodoActor;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
+      restoreOperation?: RestoreOperationContext;
     },
   ): Promise<SessionView | void> {
     const reopenClaim = this.reopensInFlight.get(sessionId);
@@ -20292,6 +20926,14 @@ export class SessionService {
       if (targetStatus === "completed" && !request.skipPrCheck) {
         session = await this.applyOpenPrAction(session, request.prAction);
       }
+      if (
+        targetStatus === "completed" &&
+        session.prAlertTransfer &&
+        this.prAlertBirthUnlaunched(session)
+      ) {
+        session = this.settlePrAlertTransferLocked(session, "rollback");
+        writeSession(this.config.dataDir, session);
+      }
       if (session.spawnIntent) {
         session = this.retireDurableSpawn(
           withQueuedMessages(
@@ -20309,11 +20951,16 @@ export class SessionService {
         }
       }
       if (!request.skipRuntimeTeardown) {
-        await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
+        await this.killAgentPaneAndConfirmExit(session, {
+          failOnSurvivors: options?.restoreOperation !== undefined,
+          ...(options?.restoreOperation ? { operation: options.restoreOperation } : {}),
+        });
         await this.cleanupSessionServices(session);
       }
       if (targetStatus === "completed") {
-        const { ranCleanup } = this.removeSessionArtifacts(session);
+        const { ranCleanup } = this.removeSessionArtifacts(session, {
+          preserveAgentHistory: true,
+        });
         // removeSessionArtifacts never preserves this session's own startup
         // ids when preserveStartup is unset (as here) — a live desk sibling
         // can only keep ITS OWN ids, not this session's. So whenever it ran
@@ -20436,6 +21083,10 @@ export class SessionService {
         }
       }
       this.cancelWaitingHandoff(sessionId);
+      if (session.prAlertTransfer && this.prAlertBirthUnlaunched(session)) {
+        session = this.settlePrAlertTransferLocked(session, "rollback");
+        writeSession(this.config.dataDir, session);
+      }
       if (session.spawnIntent) {
         session = this.retireDurableSpawn(
           withQueuedMessages({ ...session, status: "killed", updatedAt: nowIso() }, [], false),
@@ -21637,6 +22288,29 @@ export class SessionService {
             if (!current || current.tmuxSession !== hint.tmuxSession) {
               throw new Error(`Session ${sessionId} changed before restore`);
             }
+            if (request.restart === true) {
+              operation?.assertActive();
+              if (current.status !== "running") {
+                throw new SessionNotRestorableError(
+                  sessionId,
+                  `Session ${sessionId} is not running`,
+                  restoreRecoveryActions(current.status),
+                );
+              }
+              this.assertTokenBudgetAllowsActivation(current);
+              this.assertAdmissible(current.project, "restore", { replacingSessionId: current.id });
+              await this.applyManualStatusLocked(
+                sessionId,
+                "stopped",
+                {},
+                { skipEnrichment: true, ...(operation ? { restoreOperation: operation } : {}) },
+              );
+              operation?.assertActive();
+              const stopped = readSession(this.config.dataDir, sessionId);
+              if (!stopped)
+                throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+              return this.lifecycleStamp(stopped);
+            }
             return this.lifecycleStamp(current);
           },
           operation,
@@ -22515,6 +23189,9 @@ export class SessionService {
   // whole launch transaction to restore(). Nothing completion destroyed
   // (Telegram binding, sidecarPorts, artifacts, work item) is recreated.
   async reopen(sessionId: string, request: RestoreSessionRequest = {}): Promise<SessionView> {
+    if (request.restart === true) {
+      throw new SessionNotReopenableError("restart is only supported by restore");
+    }
     return this.runLifecycle("reopen", [sessionId], request.operationId, () =>
       this.reopenTransaction(sessionId, request),
     );
@@ -23055,6 +23732,9 @@ export class SessionService {
     }
 
     const forceKillSource = request.forceKillSource === true;
+    const prAlertOwnerTransfer = this.prAlertTransferFrom(session, "respawn");
+    if (prAlertOwnerTransfer?.kind === "owner")
+      assertPrAlertRoutes(this.getProject(session.project), session.allowedTriggers);
     const bootstrap = this.isUnconfiguredProjectId(session.project);
     const respawnRequest = resolveRespawnRequest(session, {
       ...(bootstrap ? { bootstrap: true } : {}),
@@ -23128,6 +23808,7 @@ export class SessionService {
         modeResolution: "carried",
         validatedLaunchSelection: launchSelection,
         closeoutOwnerTransfer: session.closeoutOwner === true,
+        ...(prAlertOwnerTransfer ? { prAlertOwnerTransfer } : {}),
         ...(request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : {}),
       },
     );
@@ -23145,6 +23826,8 @@ export class SessionService {
   ): Promise<SessionView> {
     const waiting = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const session = this.validateHandoffSource(sessionId, options);
+      if (this.prAlertTransferFrom(session, "handoff")?.kind === "owner")
+        assertPrAlertRoutes(this.getProject(session.project), session.allowedTriggers);
       if (this.handoffsInFlight.has(sessionId)) {
         throw new Error(`Handoff already in flight for ${sessionId}`);
       }
@@ -23258,6 +23941,9 @@ export class SessionService {
               const workspaceState = resolveWorkspaceState(this.config.dataDir, successor);
               const slots = applySlotsUpdate(workspaceState.slots, { tags: prepared.carryTags });
               this.writeWorkspaceStateWithLegacyMirror(successor, {
+                ...(workspaceState.prAlertOwner
+                  ? { prAlertOwner: workspaceState.prAlertOwner }
+                  : {}),
                 ...(slots ? { slots } : {}),
                 ...(workspaceState.pr ? { pr: workspaceState.pr } : {}),
               });
@@ -23430,6 +24116,8 @@ export class SessionService {
       };
       const knownTags = new Set(this.config.tags.map((tag) => tag.name));
       const carryTags = (session.slots?.tags ?? []).filter((tag) => knownTags.has(tag));
+      const continuation = this.prAlertTransferFrom(sourceForSpawn, "handoff");
+      const prAlertOwnerTransfer = continuation?.kind === "owner" ? continuation : undefined;
       return {
         token,
         lifecycleIds,
@@ -23456,6 +24144,7 @@ export class SessionService {
           admissionReservation,
           modeResolution: "carried",
           closeoutOwnerTransfer: sourceForSpawn.closeoutOwner === true,
+          ...(prAlertOwnerTransfer ? { prAlertOwnerTransfer } : {}),
           validatedLaunchSelection: launchSelection,
           receiptToken,
         },
@@ -26432,6 +27121,16 @@ export class SessionService {
         classifiedDetail = structuredState
           ? `State: ${state} (opencode export, ${structuredState.reason})`
           : "State: working (opencode export unavailable)";
+        if (
+          (state === "working" || state === "waiting" || state === "needs_input") &&
+          (await openCodeHeartbeatExpired(
+            join(this.config.dataDir, "session-tools", session.id),
+            session.agentLaunchId,
+          ))
+        ) {
+          state = "error";
+          classifiedDetail = "State: error (opencode worker heartbeat expired)";
+        }
       }
 
       // Structured sources first; the generic tmux-banner scan only runs when they
@@ -26867,6 +27566,7 @@ export class SessionService {
       error: _error,
       errorSource: _errorSource,
       pr: _recordPr,
+      prAlertTransfer: _prAlertTransfer,
       ...dashboardSession
     } = session;
     const state = this.stabilizeState(
@@ -27326,6 +28026,7 @@ export class SessionService {
       queuedMessages: _queuedMessages,
       errorSource: _errorSource,
       pr: _recordPr,
+      prAlertTransfer: _prAlertTransfer,
       ...sessionWithoutDetailFields
     } = session;
 

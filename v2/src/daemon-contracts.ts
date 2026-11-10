@@ -119,6 +119,11 @@ const spawn = body("SpawnSessionRequest", [
     "Allowed send trigger IDs. Omit to allow all; [] blocks every send trigger, including CI failure alerts. Carried by respawn and handoff.",
   ),
   field("branch", "string", "Workspace branch; project naming constraints apply."),
+  field(
+    "prAlertOwner",
+    "boolean",
+    "Opt into exclusive native PR CI and conflict alerts; requires an allowed send route for each class.",
+  ),
   overrides,
   field("reuseWorkspaceSessionId", "string", "Reuse the named session workspace."),
   field("originalTaskPrompt", "string", "Original task retained across task handoffs."),
@@ -143,6 +148,13 @@ const send = body("SendMessageRequest", [
 ]);
 const restore = body("RestoreSessionRequest", [
   field("operationId", "string", "Optional lifecycle operation ID for receipt reconciliation."),
+  field(
+    "restart",
+    "boolean",
+    "Restart a running terminal session; restore endpoint only.",
+    false,
+    false,
+  ),
   field(
     "force",
     "boolean",

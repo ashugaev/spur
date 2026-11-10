@@ -19,9 +19,10 @@ import type {
   PersistedSpawnWork,
   ReviewSignal,
   ReviewSnapshot,
+  SendBatchRetryEntry,
+  SessionRecord,
   WorkItemLifecycleRecord,
   WorkItemMember,
-  SessionRecord,
 } from "../../src/types.js";
 import {
   buildWorkItemRecord,
@@ -84,7 +85,8 @@ vi.mock("../../src/event-log.js", async (importOriginal) => {
   };
 });
 
-vi.mock("../../src/metadata.js", () => ({
+vi.mock("../../src/metadata.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof metadataModule>()),
   readPendingSpawnWork: readPendingSpawnWorkMock,
   writePendingSpawnWork: writePendingSpawnWorkMock,
   deletePendingSpawnWork: deletePendingSpawnWorkMock,
@@ -1267,6 +1269,178 @@ describe("startConfiguredTriggers", () => {
       }
     });
   });
+  it.each([
+    { accepted: false, reject: false, merge: false, kind: "ci_failed" as const },
+    { accepted: true, reject: false, merge: false, kind: "ci_failed" as const },
+    { accepted: false, reject: true, merge: false, kind: "ci_failed" as const },
+    { accepted: true, reject: true, merge: false, kind: "ci_failed" as const },
+    { accepted: false, reject: false, merge: true, kind: "ci_failed" as const },
+    { accepted: false, reject: false, merge: true, kind: "merge_conflict" as const },
+    {
+      accepted: false,
+      reject: false,
+      merge: false,
+      kind: "ci_failed" as const,
+      settlementReject: true,
+    },
+  ])(
+    "explicit PR alert owner preserves $kind accepted=$accepted/reject=$reject/merge=$merge/settlementReject=$settlementReject across deny then reallow",
+    async (scenario) => {
+      const { accepted, reject, merge, kind } = scenario;
+      const settlementReject = "settlementReject" in scenario && scenario.settlementReject === true;
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const actual = await vi.importActual<typeof metadataModule>("../../src/metadata.js");
+      readSessionMock.mockImplementation(actual.readSession);
+      writeSessionMock.mockImplementation(actual.writeSession);
+      const { writeSession } = await import("../../src/metadata.js");
+      const { writeWorkspaceState } = await import("../../src/workspace-store.js");
+      const dataDir = mkdtempSync(join(tmpdir(), "spur-alert-delivery-"));
+      const owner: SessionRecord = {
+        id: "api-1",
+        workspaceId: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "owner",
+        branch: "feature/test",
+        worktree: true,
+        worktreePath: ".",
+        tmuxSession: "api-1",
+        launchCommand: "claude",
+        status: "running",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      writeSession(dataDir, owner);
+      const pr = { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" };
+      const claim = { state: "owned", sessionId: owner.id } as const;
+      writeWorkspaceState(dataDir, owner.id, { pr, prAlertOwner: claim });
+      const autoPing = new AutoPingService(dataDir);
+      const markCi = vi.spyOn(autoPing, "markCiDelivered");
+      const markConflict = vi.spyOn(autoPing, "markMergeConflictDelivered");
+      let replayEvent: ReturnType<typeof ciFailedEvent> | ReturnType<typeof mergeConflictEvent> =
+        kind === "ci_failed" ? ciFailedEvent() : mergeConflictEvent();
+      const deliver = vi.fn(
+        async (
+          _id: string,
+          _message: string,
+          options?: {
+            allowDelivery?: () => boolean;
+            observeDelivery?: (stage: "input-started" | "accepted") => void;
+          },
+        ) => {
+          if (deliver.mock.calls.length > 1) {
+            options?.observeDelivery?.("accepted");
+            return;
+          }
+          if (accepted) options?.observeDelivery?.("accepted");
+          writeWorkspaceState(dataDir, owner.id, {
+            pr,
+            prAlertOwner: {
+              state: "retired",
+              successorWorkspaceId: "api-2",
+              successorSessionId: "api-2",
+            },
+          });
+          expect(options?.allowDelivery?.()).toBe(false);
+          writeWorkspaceState(dataDir, owner.id, { pr, prAlertOwner: claim });
+          if (settlementReject) {
+            vi.spyOn(autoPing, "withRouteLock").mockImplementationOnce(async () => {
+              throw new Error("denial settlement persistence failed");
+            });
+          }
+          if (merge) {
+            const revision = [...readPendingSendBatchesMock().values()][0]?.revision ?? 0;
+            bus.emit(replayEvent);
+            await vi.waitFor(() =>
+              expect([...readPendingSendBatchesMock().values()][0]?.revision).toBeGreaterThan(
+                revision,
+              ),
+            );
+          }
+          if (reject) throw new Error("Session changed during native delivery");
+        },
+      );
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: { ...config({ event: `github:${kind}`, interrupt: true }), dataDir } as never,
+        bus,
+        autoPing,
+        sessionService: {
+          get: vi.fn().mockResolvedValue({
+            ...owner,
+            state: "waiting",
+            workspaceExists: true,
+            lastActivityAt: staleActivity(),
+          }),
+          deliver,
+        } as never,
+      });
+      try {
+        const event = replayEvent;
+        const signal: ReviewSignal = {
+          ...event.data.signals[0],
+          key: kind,
+          kind,
+          text: "failed",
+          ...(kind === "ci_failed" ? { ciRun: { head: "head-1", checks: ["test"] } } : {}),
+        };
+        readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot([signal]));
+        replayEvent = { ...event, data: { ...event.data, prUrl: pr.url, signals: [signal] } };
+        bus.emit(replayEvent);
+        await advanceSendWindow();
+        if (merge) {
+          await vi.waitFor(() =>
+            expect([...readPendingSendBatchesMock().values()][0]?.claim).toBeUndefined(),
+          );
+          const fresh = [...readPendingSendBatchesMock().values()][0];
+          expect(fresh?.claim).toBeUndefined();
+          expect(
+            fresh?.retryAccounting?.every(
+              (entry: SendBatchRetryEntry) => entry.deliveryAttempts === 0,
+            ),
+          ).toBe(true);
+          await advanceSendWindow();
+        }
+        if (settlementReject) {
+          expect(deliver).toHaveBeenCalledTimes(1);
+          expect(markCi).not.toHaveBeenCalled();
+          const pending = [...readPendingSendBatchesMock().values()][0];
+          expect(pending?.claim).toBeUndefined();
+          expect(pending?.retryAccounting?.[0]?.deliveryAttempts).toBe(1);
+          expect(
+            logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "trigger.send.failed"),
+          ).toBe(true);
+          expect(
+            logSpurEventMock.mock.calls.some(
+              ([, entry]) => entry.event === "trigger.send.delivered",
+            ),
+          ).toBe(false);
+          return;
+        }
+        expect(deliver).toHaveBeenCalledTimes(merge ? 2 : 1);
+        expect(kind === "ci_failed" ? markCi : markConflict).toHaveBeenCalledTimes(
+          accepted || merge ? 1 : 0,
+        );
+        expect(
+          logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "trigger.send.delivered"),
+        ).toBe(accepted || merge);
+        expect(
+          logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "trigger.send.failed"),
+        ).toBe(false);
+        expect(readPendingSendBatchesMock().size).toBe(0);
+        if (accepted || merge) {
+          bus.emit(replayEvent);
+          await advanceSendWindow();
+          expect(deliver).toHaveBeenCalledTimes(merge ? 2 : 1);
+          expect(kind === "ci_failed" ? markCi : markConflict).toHaveBeenCalledTimes(1);
+        }
+      } finally {
+        await controller.stop();
+        autoPing.dispose();
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   describe("stale teardown", () => {
     it.each(
@@ -10298,6 +10472,59 @@ describe("startConfiguredTriggers", () => {
         expect.stringContaining("A new comment arrived."),
         { interrupt: false },
       );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("drops queued send triggers when the session allowlist excludes them", async () => {
+    const persisted: PersistedPendingBatch = {
+      queueKey: "api:send:api-1",
+      projectId: "api",
+      triggerId: "send",
+      sourceId: "pr-watch",
+      batch: {
+        kind: "review",
+        providerId: "github",
+        projectId: "api",
+        sourceId: "pr-watch",
+        sessionId: "api-1",
+        prUrl: "https://github.com/acme/api/pull/42",
+        prNumber: 42,
+        prTitle: "Tighten coverage",
+        signals: [{ key: "comment:1", kind: "comment", text: "A new comment arrived." }],
+      },
+    };
+    readPendingSendBatchesMock.mockReturnValue(new Map([[persisted.queueKey, persisted]]));
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+    const session = {
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+      allowedTriggers: [],
+    };
+    const deliver = vi.fn();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus: new EventBus(),
+      sessionService: { get: vi.fn().mockResolvedValue(session), deliver } as never,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      await advanceSendWindow();
+      expect(deliver).not.toHaveBeenCalled();
+      expect(session.allowedTriggers).toEqual([]);
+      expect(readPendingSendBatchesMock().size).toBe(0);
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) =>
+            entry.event === "trigger.send.dropped" &&
+            entry.details?.reason === "trigger_not_allowed",
+        ),
+      ).toBe(true);
     } finally {
       await controller.stop();
     }

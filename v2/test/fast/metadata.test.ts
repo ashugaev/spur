@@ -13,6 +13,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   archiveSessions,
+  listTelegramTopicSessionIds,
+  readArchivedSession,
+  readTelegramTopicGcClock,
+  writeTelegramTopicGcClock,
+  readTelegramTopicGcFailures,
+  writeTelegramTopicGcFailures,
   deletePendingSendBatch,
   deletePendingSendBatchConditional,
   deleteTelegramSourceStateForSession,
@@ -134,6 +140,22 @@ async function newDataDir(): Promise<string> {
 }
 
 describe("work-item registry", () => {
+  it("round-trips PR alert rollback source observation IDs and rejects malformed IDs", async () => {
+    const dataDir = await newDataDir();
+    const snapshot = { prNumber: 42, signals: new Map(), ownerRollbackId: "api-failed" };
+    writeReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1", snapshot);
+    expect(readReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1")).toEqual(
+      snapshot,
+    );
+    writeReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1", {
+      ...snapshot,
+      ownerRollbackId: "",
+    });
+    expect(() => readReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1")).toThrow(
+      "Invalid PR alert rollback identifier",
+    );
+  });
+
   it("round-trips confirmed conflict clear IDs and rejects malformed IDs", async () => {
     const dataDir = await newDataDir();
     const snapshot = {
@@ -1451,6 +1473,49 @@ describe("durable spawn metadata", () => {
         spawnReceipt: session.spawnReceipt,
       });
       expect(readSession(dataDir, session.id)?.restoredAt).toBeUndefined();
+    },
+  );
+
+  it.each(["owner", "suppressed"] as const)(
+    "round-trips explicit PR alert intent and internal %s provenance",
+    async (kind) => {
+      const dataDir = await newDataDir();
+      const session = acceptedSession();
+      session.spawnIntent.request.prAlertOwner = true;
+      session.prAlertTransfer = {
+        kind,
+        predecessorWorkspaceId: "api-old",
+        predecessorSessionId: "api-old",
+      };
+      writeSession(dataDir, session);
+      expect(readSession(dataDir, session.id)?.spawnIntent?.request.prAlertOwner).toBe(true);
+      expect(readSession(dataDir, session.id)?.prAlertTransfer).toEqual(session.prAlertTransfer);
+      expect(listSessions(dataDir)[0]?.prAlertTransfer).toEqual(session.prAlertTransfer);
+    },
+  );
+
+  it("rejects malformed PR alert transfer provenance before write", async () => {
+    const dataDir = await newDataDir();
+    const session = acceptedSession();
+    session.prAlertTransfer = {
+      kind: "owner",
+      predecessorWorkspaceId: "",
+      predecessorSessionId: "api-old",
+    };
+    expect(() => writeSession(dataDir, session)).toThrow("Invalid PR alert transfer");
+  });
+
+  it.each([null, "invalid", { kind: "helper" }])(
+    "rejects raw malformed PR alert provenance without rewriting it: %j",
+    async (prAlertTransfer) => {
+      const dataDir = await newDataDir();
+      const session = acceptedSession();
+      writeSession(dataDir, session);
+      const path = join(dataDir, "sessions", "api", "api-1.json");
+      const bytes = JSON.stringify({ ...session, prAlertTransfer });
+      writeFileSync(path, bytes);
+      expect(() => readSession(dataDir, session.id)).toThrow("Invalid PR alert transfer");
+      expect(readFileSync(path, "utf8")).toBe(bytes);
     },
   );
 
@@ -3485,6 +3550,74 @@ describe("hasPendingTelegramSend", () => {
     expect(hasPendingTelegramSend(dataDir, "api-1", { unclaimedOnly: true })).toBe(false);
     recordPendingSendBatch(dataDir, telegramRecord("api:chat:api-1", "api-1"));
     expect(hasPendingTelegramSend(dataDir, "api-1", { unclaimedOnly: true })).toBe(true);
+  });
+});
+
+describe("telegram topic gc state", () => {
+  it("lists binding owners and reply-target-only sessions", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramBindings(dataDir, "api", "tg", [
+      { sessionId: "api-1", chatId: -1001, messageThreadId: 22 },
+    ]);
+    writeTelegramReplyTarget(dataDir, {
+      sessionId: "api-2",
+      projectId: "api",
+      sourceId: "tg",
+      chatId: -1001,
+      messageThreadId: 23,
+    });
+    writeTelegramReplyTarget(dataDir, {
+      sessionId: "a/b",
+      projectId: "api",
+      sourceId: "tg",
+      chatId: -1001,
+      messageThreadId: 24,
+    });
+
+    expect([...listTelegramTopicSessionIds(dataDir, ["api", "absent"])].sort()).toEqual([
+      "a/b",
+      "api-1",
+      "api-2",
+    ]);
+    expect(listTelegramTopicSessionIds(await newDataDir(), ["api"]).size).toBe(0);
+  });
+
+  it("reads an archived record and returns null when none exists", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    archiveSessions(dataDir, [{ id: "api-1", project: "api" }]);
+
+    expect(readArchivedSession(dataDir, "api-1")?.id).toBe("api-1");
+    expect(readArchivedSession(dataDir, "api-2")).toBeNull();
+  });
+
+  it("throws on an invalid archived record", async () => {
+    const dataDir = await newDataDir();
+    await mkdir(join(dataDir, "sessions-archive", "api"), { recursive: true });
+    await writeFile(join(dataDir, "sessions-archive", "api", "api-1.json"), "{not json");
+
+    expect(() => readArchivedSession(dataDir, "api-1")).toThrow();
+  });
+
+  it("round-trips the sweep clock and treats an invalid file as absent", async () => {
+    const dataDir = await newDataDir();
+    expect(readTelegramTopicGcClock(dataDir)).toBeNull();
+    writeTelegramTopicGcClock(dataDir, 1234);
+    expect(readTelegramTopicGcClock(dataDir)).toBe(1234);
+    await writeFile(join(dataDir, "source-state", "telegram-topic-gc.json"), "{nope");
+    expect(readTelegramTopicGcClock(dataDir)).toBeNull();
+  });
+
+  it("round-trips GC failure counts and ignores invalid entries", async () => {
+    const dataDir = await newDataDir();
+    expect(readTelegramTopicGcFailures(dataDir)).toEqual({});
+    writeTelegramTopicGcFailures(dataDir, { "api-1": 2 });
+    expect(readTelegramTopicGcFailures(dataDir)).toEqual({ "api-1": 2 });
+    await writeFile(
+      join(dataDir, "source-state", "telegram-topic-gc-failures.json"),
+      JSON.stringify({ "api-1": "x", "api-2": 1.5, "api-3": 1 }),
+    );
+    expect(readTelegramTopicGcFailures(dataDir)).toEqual({ "api-3": 1 });
   });
 });
 
