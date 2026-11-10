@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionMutes } from "@/components/SessionMutes.js";
 import type { AutoPingMute, AutoPingMuteProjection } from "@/lib/types.js";
@@ -117,5 +117,31 @@ describe("SessionMutes", () => {
     const { container } = render(<SessionMutes sessionId="api-1" />);
     await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("backs the poll off to 2x the 5s base after a failed read", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(
+          async () => new Response(JSON.stringify({ error: "down" }), { status: 502 }),
+        );
+      render(<SessionMutes sessionId="api-1" />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9_999);
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

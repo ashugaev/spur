@@ -474,6 +474,13 @@ describe("Dashboard project create/delete", () => {
       "aria-checked",
       "false",
     );
+    const pages = screen.getByRole("menuitem", { name: "Pages" });
+    expect(pages).toHaveAttribute("href", "/pages?project=api");
+    expect(screen.getByRole("menuitem", { name: /New project/ })).toBeInTheDocument();
+    pages.addEventListener("click", (event) => event.preventDefault());
+    fireEvent.click(pages);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(projectFilterButton()).toHaveAccessibleName("Project filter: API");
   });
 
   it("confirms project deletion in app instead of using window confirm", async () => {

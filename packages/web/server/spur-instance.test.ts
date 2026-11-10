@@ -37,6 +37,10 @@ function harnessTempDirs(): string[] {
   return readdirSync(tmpdir()).filter((entry) => entry.startsWith("spur-web-test-"));
 }
 
+function expectIsolatedDaemonUrl(url: string | undefined): void {
+  expect(new URL(url ?? "").port).not.toBe("4310");
+}
+
 afterEach(() => {
   vi.unstubAllEnvs();
 });
@@ -50,7 +54,8 @@ describe("createIsolatedWebTestTarget", () => {
     stubHarnessEnv();
     const target = createIsolatedWebTestTarget();
     try {
-      expect(target.env["SPUR_DAEMON_URL"]).not.toContain(":4310");
+      expectIsolatedDaemonUrl(target.env["SPUR_DAEMON_URL"]);
+      expect(readSpurInstanceRuntimeConfig().daemonUrl).toBe(target.env["SPUR_DAEMON_URL"]);
       expect(target.env["SPUR_CONFIG"]).not.toBe(join(homedir(), ".spur", "config.yaml"));
       expect(existsSync(target.env["SPUR_CONFIG"] ?? "")).toBe(true);
       expect(target.env["SPUR_TMUX_SOCKET_NAME"]).not.toBe("spur-4310");
@@ -73,7 +78,7 @@ describe("createIsolatedWebTestTarget", () => {
   // Pins the process-idempotence invariant: a Playwright worker re-requires
   // playwright.config.ts and re-runs its module-level allocation. Without the
   // memo the worker would resolve a uiPort no server ever bound.
-  it("reuses the first allocation and allocates nothing on a memoized env", () => {
+  it.each([false, true])("reuses a memoized env without allocating (port prefix: %s)", (prefix) => {
     stubHarnessEnv();
     const first = createIsolatedWebTestTarget();
     try {
@@ -84,12 +89,14 @@ describe("createIsolatedWebTestTarget", () => {
       for (const key of MEMO_KEYS) {
         workerEnv[key] = first.env[key] ?? "";
       }
+      if (prefix) workerEnv["SPUR_DAEMON_URL"] = "http://127.0.0.1:43101";
       stubHarnessEnv(workerEnv);
 
       const before = harnessTempDirs();
       const second = createIsolatedWebTestTarget();
       expect(second.uiPort).toBe(first.uiPort);
-      expect(second.env).toEqual(first.env);
+      expect(second.env).toEqual(workerEnv);
+      expectIsolatedDaemonUrl(second.env["SPUR_DAEMON_URL"]);
       expect(harnessTempDirs()).toEqual(before);
 
       // The worker path owns no cleanup: the allocating process's dir survives.

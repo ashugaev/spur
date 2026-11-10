@@ -47,7 +47,7 @@ import { ArtifactDownloadIcon } from "@/components/icons/ArtifactDownloadIcon";
 import { ArtifactOpenExternalIcon } from "@/components/icons/ArtifactOpenExternalIcon";
 import { ArtifactPreviewIcon } from "@/components/icons/ArtifactPreviewIcon";
 import { ConversationView } from "@/components/ConversationView";
-import { SnippetActionSummary } from "@/components/snippets/SnippetActionSummary";
+import { SpurActionSummary } from "@/components/snippets/SpurActionSummary";
 import { browserSnippetStorage } from "@/components/snippets/SnippetPanel";
 import { SnippetsSection } from "@/components/snippets/SnippetsSection";
 import { pruneSnippetRecords } from "@/lib/snippets/snippet-store";
@@ -96,6 +96,7 @@ import {
 import { insertTextAtCursor } from "@/lib/textarea";
 import { useToasts } from "@/hooks/useToasts";
 import { usePoll } from "@/hooks/usePoll";
+import type { PollOutcome } from "@/lib/poller";
 import {
   killConfirmText,
   SessionLifecycleConsumer,
@@ -124,7 +125,6 @@ import {
   isTokenBudgetBlocked,
   isTerminalSession,
   toDashboardSession,
-  type ConversationMessage,
   type ConversationResponse,
   type DashboardSession,
   type GithubPrCheckUnavailablePayload,
@@ -386,8 +386,6 @@ function ArtifactZoomResetIcon() {
 }
 
 const POLL_INTERVAL_MS = 4_000;
-// Stable identity so the snippet panels' session effect does not re-run on an empty conversation.
-const EMPTY_CONVERSATION_MESSAGES: ConversationMessage[] = [];
 
 // Daemon answers 503 while starting; the Next route answers 502 when it can't reach it.
 const TRANSIENT_LOAD_STATUSES: ReadonlySet<number> = new Set([502, 503]);
@@ -1748,7 +1746,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
 
   const fetchSession = useCallback(
-    async (signal: AbortSignal) => {
+    async (signal: AbortSignal): Promise<PollOutcome> => {
       const requestedSessionId = sessionId;
       const requestId = loadRequestIdRef.current + 1;
       loadRequestIdRef.current = requestId;
@@ -1764,7 +1762,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           requestId !== loadRequestIdRef.current ||
           currentSessionIdRef.current !== requestedSessionId
         ) {
-          return;
+          return "ok";
         }
         if (!response.ok) {
           if (response.status === 404) {
@@ -1774,7 +1772,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               requestId !== loadRequestIdRef.current ||
               currentSessionIdRef.current !== requestedSessionId
             )
-              return;
+              return "ok";
             if (baseline.ok) {
               const info = (await baseline.json()) as { lifecycleInstanceId?: string };
               if (
@@ -1782,7 +1780,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 requestId !== loadRequestIdRef.current ||
                 currentSessionIdRef.current !== requestedSessionId
               )
-                return;
+                return "ok";
               if (info.lifecycleInstanceId && consumer.accept(info.lifecycleInstanceId, [], read)) {
                 rawSessionRef.current = null;
                 sessionRef.current = null;
@@ -1804,11 +1802,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           requestId !== loadRequestIdRef.current ||
           currentSessionIdRef.current !== requestedSessionId
         ) {
-          return;
+          return "ok";
         }
         if (!payload.lifecycle) throw new Error("Invalid session lifecycle snapshot");
         const accepted = consumer.accept(payload.lifecycle.instanceId, [payload], read)?.[0];
-        if (!accepted) return;
+        if (!accepted) return "ok";
         const reconciling = lifecycleReconcileRef.current;
         if (reconciling && accepted === payload) {
           consumer.releaseUnmatched(reconciling);
@@ -1817,13 +1815,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         publishLifecycleSession(accepted);
         setError(null);
         dismissLoadErrorToast();
+        return "ok";
       } catch (loadError) {
         if (
           signal.aborted ||
           requestId !== loadRequestIdRef.current ||
           currentSessionIdRef.current !== requestedSessionId
         ) {
-          return;
+          return "ok";
         }
         const message = errorMessage(loadError, "Failed to load session");
         if (sessionRef.current?.id !== requestedSessionId) {
@@ -1834,12 +1833,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               loadError instanceof SessionLoadHttpError &&
               TRANSIENT_LOAD_STATUSES.has(loadError.status),
           });
-          return;
+          return "failed";
         }
-        if (lastLoadErrorToastRef.current?.message === message) return;
+        if (lastLoadErrorToastRef.current?.message === message) return "failed";
         dismissLoadErrorToast();
         const id = showErrorToast(message);
         lastLoadErrorToastRef.current = { id, message };
+        return "failed";
       }
     },
     [dismissLoadErrorToast, publishLifecycleSession, sessionId, showErrorToast],
@@ -1900,10 +1900,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   ]);
 
   const fetchConversation = useCallback(
-    async (signal: AbortSignal) => {
+    async (signal: AbortSignal): Promise<PollOutcome> => {
       if (!session) {
         setConversation(null);
-        return;
+        return "ok";
       }
       const query = fromIndex !== null ? `?from=${fromIndex}` : "";
       if (fromIndex !== null) olderRequestRef.current = signal;
@@ -1914,12 +1914,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         );
         if (!res.ok) {
           if (!signal.aborted) setConversation(null);
-          return;
+          return signal.aborted ? "ok" : "failed";
         }
         const payload = (await res.json()) as ConversationResponse;
         if (!signal.aborted) setConversation(payload);
+        return "ok";
       } catch {
-        if (!signal.aborted) setConversation(null);
+        if (signal.aborted) return "ok";
+        setConversation(null);
+        return "failed";
       } finally {
         if (olderRequestRef.current === signal) {
           olderRequestRef.current = null;
@@ -1979,7 +1982,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setShowAllDeskMembers(false);
   }, [sessionId]);
 
-  // Drop snippet records untouched for 7 days (budget keys are never pruned).
+  // Drop v1 snippet records and v2 records untouched for 7 days (budget keys are never pruned).
   useEffect(() => {
     pruneSnippetRecords(browserSnippetStorage(), Date.now());
   }, []);
@@ -1991,16 +1994,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [session?.artifacts, session?.id],
   );
   const genericArtifacts = snippetPartition.generic;
+  const snippetCanSend = session ? canSendMessage(session) : false;
+  const snippetState = session?.state;
+  const snippetStatus = session?.status;
   const snippetSessionView = useMemo(
     () =>
-      session
-        ? {
-            canSend: canSendMessage(session),
-            state: session.state,
-            queuedMessages: session.queuedMessages.messages,
-          }
+      snippetState && snippetStatus
+        ? { canSend: snippetCanSend, state: snippetState, status: snippetStatus }
         : null,
-    [session],
+    [snippetCanSend, snippetState, snippetStatus],
   );
 
   useEffect(() => {
@@ -3136,7 +3138,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {snippetSessionView && snippetPartition.owned.length > 0 ? (
                 <SnippetsSection
                   files={snippetPartition.owned}
-                  messages={conversation?.messages ?? EMPTY_CONVERSATION_MESSAGES}
                   session={snippetSessionView}
                   sessionId={session.id}
                 />
@@ -3200,7 +3201,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             <div
                               className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
                             >
-                              <SnippetActionSummary text={queuedMessage} fallback={queuedMessage} />
+                              <SpurActionSummary text={queuedMessage} fallback={queuedMessage} />
                             </div>
                           </li>
                         );

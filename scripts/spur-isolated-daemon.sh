@@ -59,9 +59,12 @@ trap cleanup EXIT
 # $ISOLATED_WRAPPER (lives in $TOOL_DIR, outside ${TMPDIR:-/tmp}) or
 # $CONFIG_DIR itself.
 prune_stale_config_dirs() {
-  local tmp_root ps_output own_pids pid cwd dir matched candidate_cwd
+  local tmp_root ps_output own_pids pid cwd dir matched candidate_cwd has_candidates=0
 
   tmp_root="${TMPDIR:-/tmp}"
+  local -a candidate_find_args=(
+    "$tmp_root" -maxdepth 1 -type d -name 'spur-isolated-daemon.*' -mmin +60 -print0
+  )
 
   # GATE C: refuses to prune a dir whose worktrees/<project>/<session> holds
   # unsaved or unevaluable work — uncommitted changes, unpushed commits,
@@ -114,6 +117,17 @@ prune_stale_config_dirs() {
     done
     return 1
   }
+
+  # Skip host inventory when cleanup has no eligible work. Recheck eligibility
+  # after inventory: another process can refresh a stale dir during the scan.
+  while IFS= read -r -d '' dir; do
+    [[ "$dir" == "$CONFIG_DIR" ]] && continue
+    has_candidates=1
+    break
+  done < <(find "${candidate_find_args[@]}" 2>/dev/null)
+  if [[ "$has_candidates" -eq 0 ]]; then
+    return 0
+  fi
 
   # GATE A source: a live isolated daemon always names its own CONFIG_DIR in
   # argv (this script's own `exec "$NODE_BIN" "$CLI_PATH" --config
@@ -170,7 +184,7 @@ prune_stale_config_dirs() {
     # $CONFIG_DIR with no reclaimer.
     rm -rf "$dir" || true
   done < <(
-    find "$tmp_root" -maxdepth 1 -type d -name 'spur-isolated-daemon.*' -mmin +60 -print0 2>/dev/null
+    find "${candidate_find_args[@]}" 2>/dev/null
   )
 }
 prune_stale_config_dirs

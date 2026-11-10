@@ -49,6 +49,7 @@ import {
 } from "@/lib/file-attachments";
 import { JiraIcon, isReviewLinkLabel, usePrReadyUrls } from "@/lib/link-icons";
 import { matchesSessionSearch } from "@/lib/session-search";
+import { nextPollDelayMs } from "@/lib/poller";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
@@ -625,7 +626,7 @@ function ProjectMenu({
         type="button"
         onClick={popover.toggle}
       >
-        <span className="inline-flex min-w-0 max-w-[230px] items-center gap-1 text-base font-bold uppercase tracking-[-0.02em]">
+        <span className="inline-flex min-w-0 max-w-[124px] items-center gap-1 text-[12px] font-bold uppercase tracking-[-0.02em] md:max-w-[230px] md:text-[16px]">
           <span className="block min-w-0 truncate">{activeProjectName}</span>
           <svg
             aria-hidden="true"
@@ -722,6 +723,28 @@ function ProjectMenu({
               ))}
             </ul>
           )}
+          <a
+            href={
+              selectedProjectId
+                ? `/pages?project=${encodeURIComponent(selectedProjectId)}`
+                : "/pages"
+            }
+            role="menuitem"
+            onClick={popover.dismiss}
+            className="mt-2 flex items-center gap-2 border-t border-[var(--color-border-subtle)] px-2 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:text-[var(--color-accent)]"
+          >
+            <svg
+              aria-hidden="true"
+              className="h-4 w-4"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+            >
+              <path d="M6 3h8l4 4v14H6zM14 3v5h4M9 12h6M9 16h6" />
+            </svg>
+            Pages
+          </a>
           <button
             className="mt-2 w-full bg-[var(--color-accent)] px-2 py-1.5 text-left font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
             onClick={() => {
@@ -1309,6 +1332,18 @@ export function Dashboard() {
   const queryClient = useQueryClient();
   const sessionsQueryKey = useMemo(() => ["sessions"] as const, []);
   const lifecycleRef = useRef(new SessionLifecycleConsumer());
+  const sessionsReadMsRef = useRef(0);
+  const sessionsErrorBaselineRef = useRef(0);
+  const sessionsFailures = (state: {
+    dataUpdatedAt: number;
+    errorUpdatedAt: number;
+    errorUpdateCount: number;
+  }) => {
+    if (state.dataUpdatedAt >= state.errorUpdatedAt) {
+      sessionsErrorBaselineRef.current = state.errorUpdateCount;
+    }
+    return state.errorUpdateCount - sessionsErrorBaselineRef.current;
+  };
   const [lifecycleVersion, setLifecycleVersion] = useState(0);
   const publishTransitions = () => setLifecycleVersion((version) => version + 1);
   const {
@@ -1318,27 +1353,43 @@ export function Dashboard() {
   } = useQuery<SpurSessionsResponse>({
     queryKey: sessionsQueryKey,
     queryFn: async ({ signal }) => {
-      const read = lifecycleRef.current.beginRead();
-      const response = await fetch("/api/sessions", { signal });
-      if (signal.aborted) throw new Error("Session read aborted");
-      if (!response.ok) throw new Error(`sessions ${response.status}`);
-      const result = (await response.json()) as SpurSessionsResponse;
-      if (signal.aborted) throw new Error("Session read aborted");
-      const accepted = lifecycleRef.current.accept(
-        result.lifecycleInstanceId ?? "",
-        result.sessions,
-        read,
-      );
-      if (!accepted) {
-        const current = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
-        if (current) return current;
-        throw new Error("Session read superseded");
+      const startedAt = Date.now();
+      try {
+        const read = lifecycleRef.current.beginRead();
+        const response = await fetch("/api/sessions", { signal });
+        if (signal.aborted) throw new Error("Session read aborted");
+        if (!response.ok) throw new Error(`sessions ${response.status}`);
+        const result = (await response.json()) as SpurSessionsResponse;
+        if (signal.aborted) throw new Error("Session read aborted");
+        const accepted = lifecycleRef.current.accept(
+          result.lifecycleInstanceId ?? "",
+          result.sessions,
+          read,
+        );
+        if (!accepted) {
+          const current = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
+          if (current) return current;
+          throw new Error("Session read superseded");
+        }
+        publishTransitions();
+        return { ...result, sessions: accepted };
+      } finally {
+        sessionsReadMsRef.current = Date.now() - startedAt;
       }
-      publishTransitions();
-      return { ...result, sessions: accepted };
     },
-    refetchInterval: SESSIONS_POLL_INTERVAL_MS,
-    refetchIntervalInBackground: true,
+    // Consecutive final failures = errorUpdateCount since the last success
+    // (it bumps once per final failure; retry attempts do not count). Backoff and
+    // slow-read spacing share nextPollDelayMs with the other pollers.
+    refetchInterval: (query) =>
+      nextPollDelayMs(
+        SESSIONS_POLL_INTERVAL_MS,
+        sessionsFailures(query.state),
+        sessionsReadMsRef.current,
+      ),
+    refetchIntervalInBackground: false,
+    // A tab returning from hidden refetches at once, except while polls are
+    // failing: then the backoff schedule decides, so focus cannot bypass it.
+    refetchOnWindowFocus: (query) => sessionsFailures(query.state) === 0,
     placeholderData: (prev) => prev,
   });
   useEffect(() => {
@@ -1371,6 +1422,16 @@ export function Dashboard() {
   const sessionsErrorToastRef = useRef<{ id: number; message: string } | null>(null);
   const { phase: versionSwitchPhase } = useVersionSwitch();
   const { phase: backendPhase } = useBackendConnection();
+
+  // Outage polls back off up to 8x; a recovered backend must not wait that
+  // out. The refetch succeeds, which also resets the failure baseline.
+  const previousBackendPhaseRef = useRef(backendPhase);
+  useEffect(() => {
+    const recovered =
+      previousBackendPhaseRef.current === "disconnected" && backendPhase === "connected";
+    previousBackendPhaseRef.current = backendPhase;
+    if (recovered) void queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+  }, [backendPhase, queryClient, sessionsQueryKey]);
 
   useEffect(() => {
     if (!sessionsError) {
@@ -1598,7 +1659,8 @@ export function Dashboard() {
   // Bounded by prReady.loaded (itself bounded by prReadyOnly) rather than
   // its own facet query: computing this independently of the toggle would
   // require fetching PR readiness for every session at all times, which
-  // violates "no /api/pr-status/batch request while prReadyOnly is false".
+  // violates "while prReadyOnly is false, /api/pr-status/batch bodies carry
+  // only URLs of mounted rows and badges, never unmounted sessions".
   const prReadyCount = useMemo(() => {
     if (!prReady.loaded) return 0;
     const counts = buildFacetCounts(allSessions, "prReady", facetFilters, (s) => {
@@ -2813,7 +2875,7 @@ export function Dashboard() {
         <header className="sticky top-0 z-40 border-b border-[var(--color-border-default)] bg-[var(--color-bg-base)]">
           <div className="mx-auto flex min-h-10 max-w-[1500px] items-center gap-2.5 px-4 py-[7px] sm:px-5 lg:px-6">
             <BrandGlyph />
-            <span className="hidden min-w-0 md:inline-flex">
+            <span className="inline-flex min-w-0">
               <ProjectMenu
                 activeProjectName={activeProjectName}
                 projects={filterProjectOptions}
