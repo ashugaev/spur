@@ -1157,6 +1157,7 @@ test.each([
   "completion-403",
   "positive-completion-404",
   "uncertain-completion-404",
+  "unknown-completion-404",
 ])(
   "producer API fixture %s writes in_progress before evidence and never stale success",
   async (scenario) => {
@@ -1194,6 +1195,14 @@ test.each([
       snapshot.reviews = [];
     if (mode === "completion-401" || mode === "completion-403") snapshot.reviews = [];
     if (mode === "uncertain-completion-404") snapshot.unresolved = 1;
+    if (mode === "unknown-completion-404") {
+      const state = readStateBody(String(snapshot.comments[0]?.body));
+      if (!state.assessment) throw new Error("missing fixture assessment");
+      snapshot.comments[0] = {
+        ...snapshot.comments[0],
+        body: stateBody({ ...state, assessment: { ...state.assessment, status: "unknown" } }),
+      };
+    }
     if (mode === "stale-native")
       snapshot.reviews[0] = { ...snapshot.reviews[0], commit_id: "f".repeat(40) };
     if (mode === "native-revoked")
@@ -1258,6 +1267,8 @@ test.each([
     const prNumbers: number[] = [];
     let reviewRequests = 0;
     let checkCreates = 0;
+    let checkReadbacks = 0;
+    const checks = new Map<number, Record<string, unknown>>();
     const transport: typeof fetch = async (url, options) => {
       if (controller.signal.aborted) requestsAfterAbort++;
       const path = new URL(String(url)).pathname;
@@ -1276,15 +1287,23 @@ test.each([
           },
         });
       if (path.endsWith("/check-runs") && options?.method === "POST") {
-        writes.push(JSON.parse(String(options.body)) as { status: string });
-        return Response.json({
+        const body = requestBody(options);
+        writes.push({ status: String(body.status) });
+        const check = {
+          ...body,
           id: 90 + ++checkCreates,
-          name: "Spur Approval Gate",
-          head_sha: H,
-          app: { slug: "github-actions" },
-        });
+          app: { id: 15368, slug: "github-actions" },
+        };
+        checks.set(check.id, check);
+        return Response.json(check);
       }
       if (/\/check-runs\/\d+$/.test(path)) {
+        const check = checks.get(Number(path.split("/").at(-1)));
+        if (!check) throw new Error("missing fixture check");
+        if (options?.method === "GET") {
+          checkReadbacks++;
+          return Response.json(check);
+        }
         expect(options?.method).toBe("PATCH");
         writes.push(
           JSON.parse(String(options?.body)) as {
@@ -1295,6 +1314,7 @@ test.each([
         );
         if (mode.includes("completion-") && writes.length === 2)
           return Response.json({ message: "Not Found" }, { status: Number(mode.slice(-3)) });
+        Object.assign(check, requestBody(options));
         if (mode === "abort-during-success" || mode === "abort-negative-completion") {
           // Losing the response does not undo the server's completed check.
           expect(writes.at(-1)?.conclusion).toBe(
@@ -1458,6 +1478,24 @@ test.each([
             producer(api, policy, mode === "runs-502-two-prs" ? { number: 5 } : {}),
           ).rejects.toThrow("gate-reconciliation-incomplete");
         else await producer(api, policy, mode === "all-native-negative" ? { number: 5 } : {});
+        if (mode.endsWith("completion-404")) {
+          expect(checkReadbacks).toBe(0);
+          expect(writes).toHaveLength(3);
+          expect(writes[1]?.conclusion).toBe(
+            mode === "positive-completion-404" ? "success" : "failure",
+          );
+          expect(writes[1]?.output?.summary).toBe(
+            mode === "positive-completion-404"
+              ? "all-gates-pass"
+              : mode === "unknown-completion-404"
+                ? "interface-unknown"
+                : "unresolved-threads",
+          );
+          expect(object(checks.get(91)?.output)).toEqual({
+            title: "Approval blocked",
+            summary: "Candidate evidence unavailable",
+          });
+        }
         expect(writes[0]?.status).toBe("in_progress");
         expect(writes.at(-1)?.conclusion).toBe(
           mode === "clean" ||
@@ -1549,6 +1587,8 @@ test.each([
   "name",
   "head",
   "external-id",
+  "external-pr",
+  "external-base",
   "app-id",
   "app-slug",
   "missing-app",
@@ -1670,6 +1710,8 @@ test.each([
       if (mode === "name") changed.name = "Another check";
       if (mode === "head") changed.head_sha = "c".repeat(40);
       if (mode === "external-id") changed.external_id = `6:${H}:${"e".repeat(40)}`;
+      if (mode === "external-pr") changed.external_id = `6:${H}:${B}`;
+      if (mode === "external-base") changed.external_id = `5:${H}:${"e".repeat(40)}`;
       if (mode === "app-id") changed.app = { id: 99, slug: "github-actions" };
       if (mode === "app-slug") changed.app = { id: 15368, slug: "another-writer" };
       if (mode === "missing-app") delete changed.app;
