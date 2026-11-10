@@ -194,6 +194,7 @@ describe("discardFailedSpawn", () => {
     }));
     const spawn = vi.fn().mockResolvedValue({ id: "api-new" });
     const discardFailedSpawn = vi.fn(f.discard);
+    const warn = vi.fn();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
       config: {
@@ -214,8 +215,9 @@ describe("discardFailedSpawn", () => {
       bus,
       autoPing: new AutoPingService(f.dataDir),
       sessionService: { get, spawn, discardFailedSpawn } as never,
-      logger: { warn: vi.fn() },
+      logger: { warn },
     });
+    let cleanupOutcome: "archived" | "skipped" | "declined" | undefined;
     try {
       bus.emit({
         occurrenceId: "chain-cleanup-fixture",
@@ -224,7 +226,19 @@ describe("discardFailedSpawn", () => {
         name: "github:work_item.new",
         data: item,
       });
-      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => {
+        expect(warn).not.toHaveBeenCalled();
+        expect(discardFailedSpawn).toHaveBeenCalledWith("api-b");
+      });
+      const cleanupIndex = discardFailedSpawn.mock.calls.findIndex(([id]) => id === "api-b");
+      const cleanup = discardFailedSpawn.mock.results[cleanupIndex];
+      if (cleanup?.type !== "return") throw new Error("Failed-spawn cleanup did not start");
+      cleanupOutcome = await cleanup.value;
+      expect(cleanupOutcome).toBe("archived");
+      await vi.waitFor(() => {
+        expect(warn).not.toHaveBeenCalled();
+        expect(spawn).toHaveBeenCalledTimes(1);
+      });
       expect(discardFailedSpawn).toHaveBeenCalledWith("api-b");
       expect(readSession(f.dataDir, "api-b")).toBeNull();
       expect(existsSync(archivedPath(f, "api-b"))).toBe(true);
@@ -243,6 +257,17 @@ describe("discardFailedSpawn", () => {
       expect(
         readWorkItemLifecycles(f.dataDir, "api", "pr-watch").get(item.externalId)?.members[0],
       ).not.toHaveProperty("previousTriggerIds");
+    } catch (error) {
+      console.error("Retained namespace cleanup failed", {
+        cleanupOutcome,
+        warnings: warn.mock.calls,
+        discardCalls: discardFailedSpawn.mock.calls,
+        discardResults: discardFailedSpawn.mock.results.map(({ type }) => type),
+        spawnCalls: spawn.mock.calls.length,
+        retainedStatus: readSession(f.dataDir, "api-b")?.status,
+        members: readWorkItemLifecycles(f.dataDir, "api", "pr-watch").get(item.externalId)?.members,
+      });
+      throw error;
     } finally {
       await controller.stop();
     }
