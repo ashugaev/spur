@@ -202,8 +202,7 @@ async function fetchPrInfoResult(url: string): Promise<PrFetchResult> {
       const obj = data as Record<string, unknown>;
       const error = typeof obj["error"] === "string" ? obj["error"] : null;
       const parsed = parsePrInfoPayload(obj);
-      if (error && parsed.state === null)
-        return { info: cachedOrEmpty(url), outcome: "failed" };
+      if (error && parsed.state === null) return { info: cachedOrEmpty(url), outcome: "failed" };
       return { info: parsed, outcome: error ? "failed" : "ok" };
     } catch {
       return { info: cachedOrEmpty(url), outcome: "failed" };
