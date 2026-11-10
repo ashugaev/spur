@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -7,6 +7,7 @@ import {
   readdir,
   realpath,
   rename,
+  rmdir,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -53,7 +54,18 @@ async function noLinks(path: string, allowMissing = false): Promise<void> {
   try {
     if ((await lstat(path)).isSymbolicLink()) throw new Error(`Symlinks are not allowed: ${path}`);
   } catch (error) {
-    if (allowMissing && (error as NodeJS.ErrnoException).code === "ENOENT") return;
+    if (allowMissing && ["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? ""))
+      return;
+    throw error;
+  }
+}
+
+async function destinationStat(path: string): Promise<Stats | undefined> {
+  try {
+    return await lstat(path);
+  } catch (error) {
+    if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? ""))
+      return undefined;
     throw error;
   }
 }
@@ -294,21 +306,59 @@ export class PageSourceSync {
       };
       await stillCurrent();
       const planned = [...new Set([...manifest.files, ...files])];
+      const owned = new Set(manifest.files);
+      const removeFiles = new Set<string>();
+      const removeDirectories = new Set<string>();
+      const replaceDirectories = new Set<string>();
+      const inspectOwnedDirectory = async (name: string): Promise<void> => {
+        await noLinks(join(dir, name));
+        for (const entry of await readdir(join(dir, name), { withFileTypes: true })) {
+          const child = `${name}/${entry.name}`;
+          if (!validOwnedPath(child))
+            throw new Error(`Protected destination blocks source sync: ${child}`);
+          await noLinks(join(dir, child));
+          if (entry.isDirectory()) {
+            if (!owned.has(child) && !manifest.files.some((file) => file.startsWith(`${child}/`))) {
+              throw new Error(`Unowned destination blocks source sync: ${child}`);
+            }
+            await inspectOwnedDirectory(child);
+          } else if (entry.isFile() && owned.has(child)) removeFiles.add(child);
+          else throw new Error(`Unowned destination blocks source sync: ${child}`);
+        }
+        removeDirectories.add(name);
+      };
       for (const name of planned) {
         if (!validOwnedPath(name) || !inside(dir, join(dir, name)))
           throw new Error("Unsafe imported path");
         await noLinks(join(dir, name), true);
-        try {
-          if (!(await lstat(join(dir, name))).isFile()) {
+        const stats = await destinationStat(join(dir, name));
+        if (stats?.isDirectory() && files.includes(name)) {
+          if (!owned.has(name) && !manifest.files.some((file) => file.startsWith(`${name}/`))) {
             throw new Error(`Imported destination is not a regular file: ${name}`);
           }
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          await inspectOwnedDirectory(name);
+          replaceDirectories.add(name);
+        } else if (stats && !stats.isFile() && !stats.isDirectory()) {
+          throw new Error(`Imported destination is not a regular file: ${name}`);
+        }
+      }
+      for (const name of files) {
+        for (let parent = dirname(name); parent !== "."; parent = dirname(parent)) {
+          const stats = await destinationStat(join(dir, parent));
+          if (!stats || stats.isDirectory()) continue;
+          if (!stats.isFile() || !owned.has(parent)) {
+            throw new Error(`Unowned destination blocks source sync: ${parent}`);
+          }
+          removeFiles.add(parent);
         }
       }
       let changed = manifest.files.join("\n") !== files.join("\n") || !manifest.lastSyncedAt;
       const writes: string[] = [];
       for (const name of files) {
+        if (replaceDirectories.has(name)) {
+          writes.push(name);
+          continue;
+        }
         try {
           if (
             !(await regularBytes(join(dir, name))).equals(await regularBytes(join(stage, name)))
@@ -316,7 +366,8 @@ export class PageSourceSync {
             writes.push(name);
           }
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? ""))
+            throw error;
           writes.push(name);
         }
       }
@@ -331,6 +382,16 @@ export class PageSourceSync {
       if (changed) {
         // Persist union before mutation: a crash cannot orphan newly imported files.
         await persist({ ...manifest, files: planned });
+        for (const name of removeFiles) {
+          await stillCurrent();
+          await noLinks(join(dir, name), true);
+          await rm(join(dir, name), { force: true });
+        }
+        for (const name of [...removeDirectories].sort((a, b) => b.length - a.length)) {
+          await stillCurrent();
+          await noLinks(join(dir, name));
+          await rmdir(join(dir, name));
+        }
         for (const name of writes) {
           await stillCurrent();
           await noLinks(join(dir, name), true);
@@ -341,7 +402,9 @@ export class PageSourceSync {
           if (files.includes(name)) continue;
           await stillCurrent();
           await noLinks(join(dir, name), true);
-          await rm(join(dir, name), { force: true });
+          if ((await destinationStat(join(dir, name)))?.isFile()) {
+            await rm(join(dir, name), { force: true });
+          }
         }
         status = { ...status, lastSyncedAt: new Date().toISOString() };
         await persist({ version: 1, files, lastSyncedAt: status.lastSyncedAt! });
