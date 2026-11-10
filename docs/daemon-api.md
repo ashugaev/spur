@@ -114,7 +114,7 @@
 
 - `GET /pages` — [pages.md](pages.md); `v2/src/pages.ts`.
 - `POST /pages`
-- `PATCH /pages/:id/source` — `v2/src/server.ts`.
+- `PATCH /pages/:id/source` — MCP `update_page_source`; `v2/src/server.ts`, `v2/src/daemon-contracts.ts`.
 - `DELETE /pages/:id`
 - `GET /pages/:id/files/:path`
 - `GET /pages/:id/events` — `v2/src/sse.ts`.
