@@ -17944,7 +17944,7 @@ export class SessionService {
       const latest = readSession(this.config.dataDir, sessionId);
       if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       assertSendableStatus(latest);
-      return this.appendQueuedMessage(
+      const queued = this.appendQueuedMessage(
         this.lifecycleStampMatches(latest, activationStamp)
           ? { ...latest, status: "running" }
           : latest,
@@ -17954,6 +17954,12 @@ export class SessionService {
           submitPending(latest),
         wakeClaim,
       );
+      // Transfer admission to the persisted live row before yielding to delivery.
+      if (this.isLiveSessionRecord(queued)) {
+        if (wakeClaim) this.releaseScheduledWakeAdmission(wakeClaim);
+        this.releaseAdmissionReservation(wakeAdmissionReservation);
+      }
+      return queued;
     });
     const attempt =
       activeRecord.queuedMessages?.awaitingPrompt !== true

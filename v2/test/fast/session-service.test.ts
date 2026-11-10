@@ -65652,6 +65652,65 @@ describe("SessionService", () => {
         ["paused", "daily"],
       ] as const;
 
+      it.each(ordinaryWakeCases)(
+        "counts an already-live ordinary %s %s wake once during queued delivery",
+        async (status, kind) => {
+          capAt(2);
+          trackRuntimes(["api-1"]);
+          mockClaudeJsonlState("waiting");
+          reserveNextSessionIdMock.mockResolvedValue("api-2");
+          const sessions = createSessionStore({
+            ...warmingWakeRecord(status, kind),
+            stopReason: status === "stopped" ? "runtime_lost" : "manual_pause",
+          });
+          const service = await createDisposedSessionService();
+          const internals = service as unknown as {
+            readRuntimeSnapshot(session: SessionRecord): Promise<RuntimeSnapshot>;
+            startQueuedDeliveryAttempt(sessionId: string): Promise<boolean>;
+            admissionReservations: Map<symbol, string>;
+            countLiveSessions(): { total: number };
+          };
+          const readRuntimeSnapshot = internals.readRuntimeSnapshot.bind(service);
+          vi.spyOn(internals, "readRuntimeSnapshot").mockImplementation((session) =>
+            session.id === "api-1"
+              ? Promise.resolve({
+                  runtimeAlive: true,
+                  paneUsable: true,
+                  processAlive: true,
+                  tmuxActivityAt: null,
+                  probeUnresponsive: false,
+                })
+              : readRuntimeSnapshot(session),
+          );
+          let releaseDelivery!: () => void;
+          const delivery = new Promise<boolean>((resolve) => {
+            releaseDelivery = () => resolve(false);
+          });
+          let signalDelivery!: () => void;
+          const deliveryStarted = new Promise<void>((resolve) => {
+            signalDelivery = resolve;
+          });
+          vi.spyOn(internals, "startQueuedDeliveryAttempt").mockImplementation(() => {
+            signalDelivery();
+            return delivery;
+          });
+          const pendingWake = tick(service);
+          try {
+            await deliveryStarted;
+            expect(sessions.get("api-1")?.status).toBe("running");
+            expect(internals.countLiveSessions().total).toBe(1);
+            const spawned = await service.spawn({ project: "api", prompt: "remaining slot" });
+            expect(spawned.id).toBe("api-2");
+            expect(internals.countLiveSessions().total).toBe(2);
+            expect(internals.admissionReservations.size).toBe(0);
+          } finally {
+            releaseDelivery();
+            await pendingWake;
+            service.dispose();
+          }
+        },
+      );
+
       const warmingWakeCases = [
         ...ordinaryWakeCases,
         ["parked", "scheduled"],
