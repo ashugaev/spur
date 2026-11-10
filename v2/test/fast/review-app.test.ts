@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import type * as Crypto from "node:crypto";
 import {
   chmod,
   mkdir,
@@ -42,32 +41,6 @@ const faults = vi.hoisted(() => ({
   writes: 0,
   afterWrite: undefined as ((path: string) => Promise<void>) | undefined,
 }));
-// Mocked admission only: public sanitized bytes cannot prove real registry membership.
-const admittedBytes = vi.hoisted(() => new Map<string, string>());
-vi.mock("node:crypto", async (importOriginal) => {
-  const actual = await importOriginal<typeof Crypto>();
-  return {
-    ...actual,
-    createHash: (...args: Parameters<typeof actual.createHash>) => {
-      const hash = actual.createHash(...args);
-      const update = hash.update.bind(hash);
-      const digest = hash.digest.bind(hash);
-      const chunks: Buffer[] = [];
-      vi.spyOn(hash, "update").mockImplementation((data, encoding) => {
-        chunks.push(typeof data === "string" ? Buffer.from(data, encoding) : Buffer.from(data));
-        if (typeof data === "string") update(data, encoding);
-        else update(data);
-        return hash;
-      });
-      vi.spyOn(hash, "digest").mockImplementation(((encoding?: Crypto.BinaryToTextEncoding) => {
-        const admitted = admittedBytes.get(Buffer.concat(chunks).toString("base64"));
-        if (args[0] === "sha256" && admitted && encoding === "hex") return admitted;
-        return encoding === undefined ? digest() : digest(encoding);
-      }) as typeof hash.digest);
-      return hash;
-    },
-  };
-});
 vi.mock("../../src/review-state.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ReviewState>()),
   publishLaneState: vi.fn(async () => undefined),
@@ -103,9 +76,9 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     },
     open: async (...args: Parameters<typeof actual.open>) => {
       const file = await actual.open(...args);
-      if (faults.recovery === "registered-canonical-sync" && String(args[0]).endsWith("/1061"))
-        faults.recovery = "registered-sync";
-      else if (faults.recovery === "registered-sync" && String(args[0]).endsWith("/1061")) {
+      if (faults.recovery === "profile-canonical-sync" && String(args[0]).endsWith("/73"))
+        faults.recovery = "profile-sync";
+      else if (faults.recovery === "profile-sync" && String(args[0]).endsWith("/73")) {
         faults.recovery = "";
         vi.spyOn(file, "sync").mockRejectedValueOnce(new Error("fixture directory sync denied"));
       }
@@ -127,7 +100,6 @@ afterEach(async () => {
   faults.recovery = "";
   faults.writes = 0;
   faults.afterWrite = undefined;
-  admittedBytes.clear();
   vi.unstubAllGlobals();
   vi.mocked(publishLaneState).mockReset().mockResolvedValue(undefined);
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -1167,7 +1139,7 @@ test("legacy recovery archives exact bytes and retires both attempts without a n
   expect(f.comments).toHaveLength(1);
   expect(f.comments[0]?.body).toContain('"status":"PENDING"');
   expect(f.posts()).toBe(0);
-  expect(f.calls.some((call) => call.includes("/reviews"))).toBe(false);
+  expect(f.calls.filter((call) => call.includes("/reviews"))).toHaveLength(1);
   const next = { ...f.request, attempt: "next-attempt" };
   expect(await prepareReview(f.config, next, next.session, f.transport)).toMatchObject({
     status: "PENDING",
@@ -1195,17 +1167,14 @@ test.each(["success", "announcement-failure"])(
     if (mode === "announcement-failure") {
       f.comments.splice(0);
       f.failReadback();
-      expect(await f.recover()).toMatchObject({
-        status: "BLOCKED",
-        feedbackPublication: { status: "failed", error: "state-publication-mismatch" },
-      });
+      await expect(f.recover()).rejects.toThrow("state-publication-mismatch");
     } else {
       expect(await f.recover()).toMatchObject({
         status: "PENDING",
         feedbackPublication: { status: "confirmed" },
       });
-      expect(await readFile(f.request.receipt)).toEqual(current);
     }
+    expect(await readFile(f.request.receipt)).toEqual(current);
     expect(await readFile(f.archive)).toEqual(f.raw);
     expect(f.posts()).toBe(0);
   },
@@ -1271,7 +1240,10 @@ test.each(["archive-write", "archive-link", "directory-sync", "canonical-write"]
     faults.recovery = mode;
     await expect(f.recover()).rejects.toThrow();
     expect(await readFile(f.request.receipt)).toEqual(f.raw);
-    expect(f.calls).toEqual([]);
+    expect(f.calls.some((call) => call.includes("/reviews"))).toBe(true);
+    expect(f.calls.some((call) => call.startsWith("POST") && call.includes("/reviews"))).toBe(
+      false,
+    );
     expect(await f.recover()).toMatchObject({ status: "PENDING" });
     expect(await readFile(f.archive)).toEqual(f.raw);
   },
@@ -1516,64 +1488,151 @@ test.each([
   expect(await readFile(f.request.receipt)).toEqual(raw);
 });
 
-const registeredDigests = {
-  code: "372b4eef865e8bf7c5fe196105d90ed2e8ac76533bc504dc37a9f65b352f473f",
-  browser: "f74d0a206c31a3d5069a2895f4d951288a8d80749dcfdc2924c9a3270601badc",
-};
-
-async function registeredFixture(lane: "code" | "browser" = "code") {
-  const f = await lifecycleFixture();
-  const request = parseAttempt({
-    ...draft,
-    repo: "ashugaev/spur",
-    pr: 1061,
-    lane,
-    receipt: join(f.dir, "ashugaev", "spur", "1061", `${lane}.json`),
-  });
-  const config = { ...f.config, repositories: [request.repo] };
-  const legacy: Record<string, unknown> = {
-    repository: request.repo,
-    pr: request.pr,
+// Sanitized snapshots retain every observed key and row variant, not original bytes.
+function lineageSnapshot(lane: "code" | "browser") {
+  const common = {
+    repository: "ashugaev/spur",
+    pr: 887,
     lane,
     session: "historical-review",
     attempt: "historical-attempt",
-    H: "f61a0b6f9eb437cdc84037ca4d8d9b54c6b400a9",
-    B: "85c9d9e7487a6918fe6da0be1323107d0734e96d",
     contractDigest: "379384c38ef273c111a2576abc5c090b3fe08a3bd68af35de0580b45897f030a",
+    localVerdict: "APPROVED",
     status: "BLOCKED",
     reviewId: null,
-    updatedAt: "2026-10-04T05:33:00Z",
-    ...(lane === "code"
-      ? {
-          localVerdict: "APPROVED",
-          publication: "DENIED: self-author 422 on pinned APPROVE; needs non-author credential",
-          evidence: ["sanitized historical diagnostic"],
-          notification: "SENT task",
-          lastDeltaCheck: "2026-11-04T05:23:08Z",
-          deltaNote: "historical delta",
-        }
-      : {
-          localConclusion: "APPROVED",
-          publicationBlockReason:
-            "self-author restriction: active GitHub account example is PR author; non-author credential required for publication",
-          evidence: [
-            {
-              id: "SC-01",
-              boundary: "Dashboard",
-              action: "Open dashboard",
-              expected: "Loads",
-              status: "PASS",
-              artifact: "dashboard.png",
-            },
-          ],
-          ownerNotification: "SENT task",
-        }),
   };
+  if (lane === "code")
+    return {
+      ...common,
+      H: "f0257be2e9ac82ff87bf29a6200ed76a1c155249",
+      B: "31bf904dbfa8f08180baa0a1ebc7829f76b44b3a",
+      evidence: ["PASS", "PASS", "NOTE", "PASS", "PASS", "RETAINED"].map((status, i) => ({
+        id: `code-${i}`,
+        requirement: "Historical requirement",
+        action: "Historical check",
+        result: "Historical result",
+        status,
+      })),
+      prior: {
+        attempt: "historical-prior",
+        H: "8618c6c147da7c13fe4d0567fa357f4c18d539bf",
+        B: "d89def94df9331605d90196570785951643fc196",
+        localVerdict: "APPROVED",
+        status: "BLOCKED",
+      },
+      requestNote: "Historical request",
+      publication: {
+        attempted: null,
+        result: "Historical denial",
+        appStatus: "Historical capability",
+        prerequisite: "Historical prerequisite",
+      },
+      notification: "Historical notification",
+      head: "26e11a6700f27dfa54ec0d17dfc0ae8df2b9eb23",
+      base: "de90f1e2ffd2c74c887e404b86a3b01f2067614d",
+      delta: {
+        from: "Historical baseline",
+        commits: ["Historical commit"],
+        kind: "Historical delta",
+        conflicts: "Historical conflicts",
+        checks: "Historical checks",
+      },
+    };
+  return {
+    ...common,
+    H: "db67b3855a3a36e00ea20976be3d547676b1ecb2",
+    B: "a4a71c6bae94859e25e6c26dbf5f9f74142f7b77",
+    reason: "Historical blocker",
+    evidence: Array.from({ length: 7 }, (_, i) => ({
+      id: `browser-${i}`,
+      requirement: "Historical requirement",
+      variant: "Historical variant",
+      action: "Historical check",
+      result: "Historical result",
+      ...(i < 6 ? { artifact: "historical.png" } : { status: "PASS" }),
+      ...(i < 4 ? { retainedFrom: "Historical baseline", rationale: "Historical rationale" } : {}),
+    })),
+    updatedAt: "2026-10-09T05:12:52Z",
+  };
+}
+
+const legacyFamilies = ["fail", "diagnostic", "conclusion", "lineage", "reason"] as const;
+type LegacyFamily = (typeof legacyFamilies)[number];
+
+async function structuralFixture(
+  lane: "code" | "browser" = "code",
+  family: LegacyFamily = lane === "code" ? "diagnostic" : "conclusion",
+  identity = { repo: "fixtures/recovery", pr: 73 },
+) {
+  const f = await lifecycleFixture();
+  const request = parseAttempt({
+    ...draft,
+    repo: identity.repo,
+    pr: identity.pr,
+    lane,
+    receipt: join(f.dir, ...identity.repo.split("/"), String(identity.pr), `${lane}.json`),
+  });
+  const config = { ...f.config, repositories: [request.repo] };
+  const profile: Record<string, unknown> =
+    family === "lineage" || family === "reason"
+      ? lineageSnapshot(family === "lineage" ? "code" : "browser")
+      : {
+          repository: request.repo,
+          pr: request.pr,
+          lane,
+          session: "historical-review",
+          attempt: "historical-attempt",
+          H: "f61a0b6f9eb437cdc84037ca4d8d9b54c6b400a9",
+          B: "85c9d9e7487a6918fe6da0be1323107d0734e96d",
+          contractDigest: "379384c38ef273c111a2576abc5c090b3fe08a3bd68af35de0580b45897f030a",
+          status: "BLOCKED",
+          reviewId: null,
+          updatedAt: "2026-10-04T05:33:00Z",
+          ...(family === "diagnostic" || family === "fail"
+            ? {
+                localVerdict: "APPROVED",
+                publication: "Unrelated historical publication diagnostic",
+                evidence: ["sanitized historical diagnostic"],
+                notification: "SENT task",
+                lastDeltaCheck: "2026-11-04T05:23:08Z",
+                deltaNote: "historical delta",
+              }
+            : {
+                localConclusion: "APPROVED",
+                publicationBlockReason: "A different historical capability reason",
+                evidence: [
+                  {
+                    id: "SC-01",
+                    boundary: "Dashboard",
+                    action: "Open dashboard",
+                    expected: "Loads",
+                    status: "PASS",
+                    artifact: "dashboard.png",
+                  },
+                ],
+                ownerNotification: "SENT task",
+              }),
+        };
+  const legacy: Record<string, unknown> = {
+    ...profile,
+    repository: request.repo,
+    pr: request.pr,
+    lane,
+    H: "1".repeat(40),
+    B: "2".repeat(40),
+    contractDigest: "3".repeat(64),
+  };
+  if (family === "fail") {
+    Reflect.deleteProperty(legacy, "lastDeltaCheck");
+    Reflect.deleteProperty(legacy, "deltaNote");
+    legacy.localVerdict = "FAIL";
+    legacy.publicationVerdict = "BLOCKED";
+    legacy.previousAttempt = "historical-prior";
+  }
   const raw = Buffer.from(JSON.stringify(legacy));
-  await mkdir(join(f.dir, "ashugaev", "spur", "1061"), { recursive: true });
+  await mkdir(join(f.dir, ...request.repo.split("/"), String(request.pr)), { recursive: true });
   await writeFile(request.receipt, raw);
-  const sha256 = registeredDigests[lane];
-  admittedBytes.set(raw.toString("base64"), sha256);
+  const sha256 = createHash("sha256").update(raw).digest("hex");
   const archive = `${request.receipt}.legacy-${sha256}`;
   const calls: string[] = [];
   const comments: { id: number; body: string; user: { login: string } }[] = [];
@@ -1608,7 +1667,7 @@ async function registeredFixture(lane: "code" | "browser" = "code") {
         id: 4,
         full_name: mode === "repository" ? "other/repo" : request.repo,
       });
-    if (method === "GET" && path === `/repos/${request.repo}/pulls/1061`) {
+    if (method === "GET" && path === `/repos/${request.repo}/pulls/${request.pr}`) {
       freshReads++;
       return Response.json({
         state: mode === "closed" ? "closed" : "open",
@@ -1622,7 +1681,7 @@ async function registeredFixture(lane: "code" | "browser" = "code") {
         user: { login: mode === "author" ? `${lane}[bot]` : "author" },
       });
     }
-    if (method === "GET" && path === `/repos/${request.repo}/pulls/1061/reviews`) {
+    if (method === "GET" && path === `/repos/${request.repo}/pulls/${request.pr}/reviews`) {
       if (mode === "malformed-history") return Response.json({ reviews: [] });
       if (mode === "history") return Response.json([{ state: "PENDING" }]);
       if (["later-page", "failed-page"].includes(mode)) {
@@ -1634,7 +1693,7 @@ async function registeredFixture(lane: "code" | "browser" = "code") {
       }
       return Response.json([]);
     }
-    if (path === `/repos/${request.repo}/issues/1061/comments`) {
+    if (path === `/repos/${request.repo}/issues/${request.pr}/comments`) {
       if (method === "GET") return Response.json(comments);
       if (method === "POST") {
         let payload: { body: string };
@@ -1680,10 +1739,403 @@ async function registeredFixture(lane: "code" | "browser" = "code") {
   };
 }
 
+test.each(
+  legacyFamilies.flatMap((family) =>
+    (["code", "browser"] as const).map((lane) => ({ family, lane })),
+  ),
+)(
+  "generic real-hash $family on $lane clears authority and replays without writes",
+  async ({ family, lane }) => {
+    const f = await structuralFixture(lane, family, {
+      repo: lane === "code" ? "sample/first" : "different/second",
+      pr: lane === "code" ? 419 : 823,
+    });
+    const legacy = {
+      ...f.legacy,
+      session: `origin-${family}-${lane}`,
+      attempt: `source-${family}-${lane}`,
+      H: "7".repeat(40),
+      B: "8".repeat(40),
+      contractDigest: "9".repeat(64),
+    };
+    const raw = Buffer.from(JSON.stringify(legacy));
+    await writeFile(f.request.receipt, raw);
+    const sha256 = createHash("sha256").update(raw).digest("hex");
+    const archive = `${f.request.receipt}.legacy-${sha256}`;
+    const recover = () =>
+      recoverReview(f.config, f.request, f.request.session, sha256, f.transport);
+    const attempts = [legacy.attempt];
+    if (family === "lineage" || family === "fail") attempts.push("historical-prior");
+    expect(await recover()).toMatchObject({
+      status: "PENDING",
+      H: f.request.H,
+      B: f.request.B,
+      session: f.request.session,
+      attempt: f.request.attempt,
+      localVerdict: null,
+      evidence: [],
+      coverage: null,
+      reviewId: null,
+      inputDigest: null,
+      mutationStarted: false,
+      supersededAttempts: attempts,
+      legacyRecovery: {
+        version: 1,
+        digest: sha256,
+        session: legacy.session,
+        publication: "unknown",
+        attempts,
+      },
+      feedbackPublication: { status: "confirmed" },
+    });
+    expect(await readFile(archive)).toEqual(raw);
+    const pending = await readFile(f.request.receipt);
+    const writes = faults.writes;
+    expect(await recover()).toMatchObject({
+      status: "PENDING",
+      feedbackPublication: { status: "confirmed" },
+    });
+    expect(await readFile(f.request.receipt)).toEqual(pending);
+    expect(faults.writes).toBe(writes);
+    expect(f.calls.filter((row) => row.includes("/reviews?"))).toHaveLength(2);
+    f.comments.splice(0);
+    f.controls.mode = "readback";
+    await expect(recover()).rejects.toThrow("state-publication-mismatch");
+    expect(await readFile(f.request.receipt)).toEqual(pending);
+    expect(await readFile(archive)).toEqual(raw);
+    expect(faults.writes).toBe(writes);
+    expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
+  },
+);
+
 test.each(["code", "browser"] as const)(
-  "mocked-admission %s denial resets authority and replays exact archives",
+  "lineage/reason %s resets authority and replays exact archives",
   async (lane) => {
-    const f = await registeredFixture(lane);
+    const f = await structuralFixture(lane, lane === "code" ? "lineage" : "reason");
+    const attempts =
+      lane === "code" ? ["historical-attempt", "historical-prior"] : ["historical-attempt"];
+    expect(await f.recover()).toMatchObject({
+      status: "PENDING",
+      H: f.request.H,
+      B: f.request.B,
+      session: f.request.session,
+      attempt: f.request.attempt,
+      localVerdict: null,
+      evidence: [],
+      coverage: null,
+      reviewId: null,
+      inputDigest: null,
+      mutationStarted: false,
+      supersededAttempts: attempts,
+      legacyRecovery: { digest: f.sha256, publication: "unknown", attempts },
+      feedbackPublication: { status: "confirmed" },
+    });
+    expect(await readFile(f.archive)).toEqual(f.raw);
+    const pending = await readFile(f.request.receipt);
+    const writes = faults.writes;
+    expect(await f.recover()).toMatchObject({ status: "PENDING" });
+    expect(await readFile(f.request.receipt)).toEqual(pending);
+    expect(faults.writes).toBe(writes);
+    expect(f.comments).toHaveLength(1);
+    expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+  },
+);
+
+test.each(legacyFamilies)(
+  "generic %s initial and replay refuse native history and revision conflicts",
+  async (family) => {
+    for (const mode of ["history", "H"]) {
+      const f = await structuralFixture("browser", family);
+      f.controls.mode = mode;
+      await expect(f.recover()).rejects.toThrow();
+      expect(await readFile(f.request.receipt)).toEqual(f.raw);
+      await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(f.comments).toHaveLength(0);
+      f.controls.mode = "";
+      await f.recover();
+      const pending = await readFile(f.request.receipt);
+      const writes = faults.writes;
+      f.controls.mode = mode;
+      await expect(f.recover()).rejects.toThrow();
+      expect(await readFile(f.request.receipt)).toEqual(pending);
+      expect(await readFile(f.archive)).toEqual(f.raw);
+      expect(faults.writes).toBe(writes);
+      expect(f.calls.filter((row) => row === "GET /app").length).toBeGreaterThanOrEqual(3);
+      expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
+    }
+  },
+);
+
+test.each(legacyFamilies)(
+  "generic %s rejects partial modern authority with exact supplied bytes",
+  async (family) => {
+    const f = await structuralFixture("code", family);
+    for (const key of [
+      "PR",
+      "appId",
+      "inputDigest",
+      "mutationStarted",
+      "reviewBlocked",
+      "supersededAttempts",
+      "legacyRecovery",
+    ]) {
+      const raw = Buffer.from(JSON.stringify({ ...f.legacy, [key]: true }));
+      const sha256 = createHash("sha256").update(raw).digest("hex");
+      await writeFile(f.request.receipt, raw);
+      const writes = faults.writes;
+      await expect(
+        recoverReview(f.config, f.request, f.request.session, sha256, f.transport),
+      ).rejects.toThrow("legacy-receipt-invalid");
+      expect(await readFile(f.request.receipt)).toEqual(raw);
+      await expect(stat(`${f.request.receipt}.legacy-${sha256}`)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(faults.writes).toBe(writes);
+    }
+    expect(f.calls).toEqual([]);
+  },
+);
+
+test.each(legacyFamilies)(
+  "generic %s replays existing version1 archive metadata without registrations",
+  async (family) => {
+    const f = await structuralFixture("code", family);
+    await rm(f.request.receipt);
+    const pending = await prepareReview(f.config, f.request, f.request.session, f.transport);
+    const attempts =
+      family === "fail" || family === "lineage"
+        ? ["historical-attempt", "historical-prior"]
+        : ["historical-attempt"];
+    await writeFile(f.archive, f.raw, { mode: 0o600 });
+    await writeFile(
+      f.request.receipt,
+      JSON.stringify({
+        ...pending,
+        supersededAttempts: attempts,
+        legacyRecovery: {
+          version: 1,
+          digest: f.sha256,
+          attempts,
+          session: "historical-review",
+          publication: "unknown",
+        },
+      }),
+    );
+    const before = await readFile(f.request.receipt);
+    const writes = faults.writes;
+    expect(await f.recover()).toMatchObject({
+      status: "PENDING",
+      feedbackPublication: { status: "confirmed" },
+    });
+    expect(await readFile(f.request.receipt)).toEqual(before);
+    expect(await readFile(f.archive)).toEqual(f.raw);
+    expect(faults.writes).toBe(writes);
+    await writeFile(f.archive, "corrupted archive", { mode: 0o600 });
+    f.calls.splice(0);
+    await expect(f.recover()).rejects.toThrow("legacy-archive-invalid");
+    expect(await readFile(f.request.receipt)).toEqual(before);
+    expect(f.calls).toEqual([]);
+  },
+);
+
+test.each(["code", "browser"] as const)(
+  "real-hash lineage/reason %s binds exact selected bytes",
+  async (lane) => {
+    const f = await structuralFixture(lane, lane === "code" ? "lineage" : "reason");
+    expect(() =>
+      recoverReview(f.config, f.request, f.request.session, "invalid-digest", f.transport),
+    ).toThrow("invalid-hash");
+    for (const sha256 of ["0".repeat(64)]) {
+      await expect(
+        recoverReview(f.config, f.request, f.request.session, sha256, f.transport),
+      ).rejects.toThrow();
+      expect(await readFile(f.request.receipt)).toEqual(f.raw);
+      await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    const changed = Buffer.concat([f.raw, Buffer.from("\n")]);
+    await writeFile(f.request.receipt, changed);
+    await expect(
+      recoverReview(f.config, f.request, f.request.session, f.sha256, f.transport),
+    ).rejects.toThrow();
+    expect(await readFile(f.request.receipt)).toEqual(changed);
+    await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(f.calls).toEqual([]);
+  },
+);
+
+test.each(["code", "browser"] as const)(
+  "lineage/reason %s rejects unknown missing and malformed profile data",
+  async (lane) => {
+    const f = await structuralFixture(lane, lane === "code" ? "lineage" : "reason");
+    const changes: Record<string, unknown>[] = [
+      { extra: true },
+      { repository: "other/repo" },
+      { pr: 1061 },
+      { lane: lane === "code" ? "browser" : "code" },
+      { session: "invalid session" },
+      { attempt: "invalid attempt" },
+      { H: "bad" },
+      { B: false },
+      { contractDigest: "bad" },
+      { status: "PENDING" },
+      { localVerdict: "FAIL" },
+      { reviewId: 8 },
+      { publicationVerdict: "BLOCKED" },
+      { mutationStarted: true },
+      { inputDigest: "a".repeat(64) },
+      { evidence: [] },
+      { evidence: [{}] },
+    ];
+    if (lane === "code") {
+      changes.push(
+        { reason: "Mixed browser profile" },
+        { head: "bad" },
+        { base: false },
+        { requestNote: "" },
+        { notification: false },
+      );
+      for (const key of ["prior", "publication", "delta"] as const) {
+        const nested = object(f.legacy[key]);
+        changes.push({ [key]: { ...nested, extra: true } });
+        for (const field of Object.keys(nested)) {
+          const missing = { ...nested };
+          Reflect.deleteProperty(missing, field);
+          changes.push({ [key]: missing });
+        }
+      }
+      const prior = object(f.legacy.prior);
+      const publication = object(f.legacy.publication);
+      const delta = object(f.legacy.delta);
+      changes.push(
+        { prior: { ...prior, attempt: "invalid prior" } },
+        { prior: { ...prior, H: "bad" } },
+        { prior: { ...prior, B: false } },
+        { prior: { ...prior, status: "APPROVED" } },
+        { prior: { ...prior, localVerdict: "FAIL" } },
+        { publication: { ...publication, attempted: true } },
+        { publication: { ...publication, result: "" } },
+        { publication: { ...publication, appStatus: false } },
+        { publication: { ...publication, prerequisite: "" } },
+        { delta: { ...delta, commits: [] } },
+        { delta: { ...delta, commits: [false] } },
+        { delta: { ...delta, from: "" } },
+        { delta: { ...delta, kind: false } },
+        { delta: { ...delta, conflicts: "" } },
+        { delta: { ...delta, checks: false } },
+      );
+    } else {
+      changes.push(
+        { publication: { attempted: null } },
+        { updatedAt: "bad time" },
+        { updatedAt: false },
+        { reason: "" },
+      );
+    }
+    assert(Array.isArray(f.legacy.evidence));
+    for (const value of f.legacy.evidence) {
+      const row = object(value);
+      const rows: Record<string, unknown>[] = [{ ...row, extra: true }];
+      for (const key of Object.keys(row)) {
+        const missing = { ...row };
+        Reflect.deleteProperty(missing, key);
+        rows.push(missing, { ...row, [key]: false });
+      }
+      rows.push({ ...row, status: "FAIL" }, { ...row, result: "" });
+      if (lane === "browser") rows.push({ ...row, status: "PASS", artifact: "mixed.png" });
+      changes.push(...rows.map((row) => ({ evidence: [row] })));
+    }
+    const variants = changes.map((change) => ({ ...f.legacy, ...change }));
+    for (const key of Object.keys(f.legacy)) {
+      const missing = { ...f.legacy };
+      Reflect.deleteProperty(missing, key);
+      variants.push(missing);
+    }
+    for (const variant of variants) {
+      const raw = Buffer.from(JSON.stringify(variant));
+      await writeFile(f.request.receipt, raw);
+      const writes = faults.writes;
+      const sha256 = createHash("sha256").update(raw).digest("hex");
+      await expect(
+        recoverReview(f.config, f.request, f.request.session, sha256, f.transport),
+      ).rejects.toThrow();
+      expect(faults.writes).toBe(writes);
+      expect(await readFile(f.request.receipt)).toEqual(raw);
+      await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(stat(`${f.request.receipt}.legacy-${sha256}`)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }
+    expect(f.calls).toEqual([]);
+  },
+);
+
+test.each(["code", "browser"] as const)(
+  "lineage/reason %s preserves request identity and retires lineage",
+  async (lane) => {
+    const f = await structuralFixture(lane, lane === "code" ? "lineage" : "reason");
+    const retired =
+      lane === "code" ? ["historical-attempt", "historical-prior"] : ["historical-attempt"];
+    const otherLane = lane === "code" ? ("browser" as const) : ("code" as const);
+    const requests = [
+      { ...f.request, repo: "other/repo" },
+      { ...f.request, pr: 1061 },
+      { ...f.request, lane: otherLane },
+      { ...f.request, session: "other-session" },
+      ...retired.map((attempt) => ({ ...f.request, attempt })),
+    ];
+    for (const request of requests) {
+      await expect(
+        recoverReview(f.config, request, f.request.session, f.sha256, f.transport),
+      ).rejects.toThrow();
+      expect(await readFile(f.request.receipt)).toEqual(f.raw);
+      await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    expect(f.calls).toEqual([]);
+    await f.recover();
+    const pending = await readFile(f.request.receipt);
+    f.calls.splice(0);
+    for (const attempt of retired) {
+      await expect(
+        prepareReview(f.config, { ...f.request, attempt }, f.request.session, f.transport),
+      ).rejects.toThrow("attempt-superseded");
+      expect(await readFile(f.request.receipt)).toEqual(pending);
+    }
+    expect(f.calls).toEqual([]);
+  },
+);
+
+test.each(["code", "browser"] as const)(
+  "lineage/reason %s retains preflight and readback checks",
+  async (lane) => {
+    const f = await structuralFixture(lane, lane === "code" ? "lineage" : "reason");
+    for (const mode of ["history", "H"]) {
+      f.controls.mode = mode;
+      await expect(f.recover()).rejects.toThrow();
+      expect(await readFile(f.request.receipt)).toEqual(f.raw);
+      await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    f.controls.mode = "readback";
+    expect(await f.recover()).toMatchObject({ status: "BLOCKED", reviewBlocked: true });
+    expect(await readJson(f.request.receipt)).toMatchObject({
+      status: "BLOCKED",
+      localVerdict: null,
+      reviewId: null,
+      feedbackPublication: { status: "failed" },
+    });
+    expect(await readFile(f.archive)).toEqual(f.raw);
+    const blocked = await readFile(f.request.receipt);
+    f.controls.mode = "";
+    await expect(f.recover()).rejects.toThrow();
+    expect(await readFile(f.request.receipt)).toEqual(blocked);
+    expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
+  },
+);
+
+test.each(["code", "browser"] as const)(
+  "diagnostic/conclusion %s resets authority and replays exact archives",
+  async (lane) => {
+    const f = await structuralFixture(lane);
     expect(await f.recover()).toMatchObject({
       status: "PENDING",
       localVerdict: null,
@@ -1721,9 +2173,9 @@ test.each(["code", "browser"] as const)(
 );
 
 test.each([undefined, capability, {}])(
-  "registered recovery refuses invalid fresh plan %j before transport",
+  "legacy recovery refuses invalid fresh plan %j before transport",
   async (feedback) => {
-    const f = await registeredFixture();
+    const f = await structuralFixture();
     const writes = faults.writes;
     await expect(
       recoverReview(
@@ -1740,8 +2192,8 @@ test.each([undefined, capability, {}])(
   },
 );
 
-test("registered replay confirms feedback transiently and refuses a different prepared plan", async () => {
-  const f = await registeredFixture();
+test("legacy replay confirms feedback transiently and refuses a different prepared plan", async () => {
+  const f = await structuralFixture();
   await f.recover();
   const current = (await readJson(f.request.receipt)) as Record<string, unknown>;
   current.feedbackPublication = { status: "unconfirmed" };
@@ -1764,51 +2216,64 @@ test("registered replay confirms feedback transiently and refuses a different pr
 });
 
 test.each(["code", "browser"] as const)(
-  "real-hash %s sanitized lookalike and original digest both reject",
+  "real-hash %s accepts changed diagnostic text with a freshly selected digest",
   async (lane) => {
-    const f = await registeredFixture(lane);
-    admittedBytes.clear();
-    const realDigest = createHash("sha256").update(f.raw).digest("hex");
-    expect(realDigest).not.toBe(f.sha256);
-    for (const sha256 of [realDigest, f.sha256]) {
-      await expect(
-        recoverReview(f.config, f.request, f.request.session, sha256, f.transport),
-      ).rejects.toThrow();
-      expect(await readFile(f.request.receipt)).toEqual(f.raw);
-      await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
-    }
+    const f = await structuralFixture(lane);
+    const changed = Buffer.from(
+      JSON.stringify({
+        ...f.legacy,
+        ...(lane === "code"
+          ? { publication: "New unrelated diagnostic text" }
+          : { publicationBlockReason: "Another reason without actor-specific wording" }),
+      }),
+    );
+    await writeFile(f.request.receipt, changed);
+    await expect(f.recover()).rejects.toThrow();
     expect(f.calls).toEqual([]);
+    const sha256 = createHash("sha256").update(changed).digest("hex");
+    expect(
+      await recoverReview(f.config, f.request, f.request.session, sha256, f.transport),
+    ).toMatchObject({
+      status: "PENDING",
+      feedbackPublication: { status: "confirmed" },
+    });
+    expect(await readFile(`${f.request.receipt}.legacy-${sha256}`)).toEqual(changed);
   },
 );
 
 test.each(["code", "browser"] as const)(
-  "mocked-admission %s profile independently refuses malformed authority",
+  "diagnostic/conclusion %s profile independently refuses malformed authority",
   async (lane) => {
-    const f = await registeredFixture(lane);
+    const f = await structuralFixture(lane);
     for (const change of [
       { extra: true },
       { repository: "other/repo" },
       { pr: 7 },
       { lane: lane === "code" ? "browser" : "code" },
-      { H: draft.H },
-      { B: draft.B },
-      { contractDigest: draft.contractDigest },
+      { H: "bad" },
+      { B: false },
+      { contractDigest: "bad" },
       { reviewId: 8 },
       { status: "PENDING" },
       { mutationStarted: true },
       { inputDigest: "a".repeat(64) },
-      { publication: "UNKNOWN" },
+      { publication: false },
       { evidence: [lane === "code" ? {} : { status: "PASS" }] },
       { updatedAt: false },
       lane === "code" ? { localVerdict: "FAIL" } : { localConclusion: "FAIL" },
-      lane === "code" ? { publication: "DENIED" } : { publicationBlockReason: "self-author" },
+      lane === "code" ? { publication: "" } : { publicationBlockReason: "" },
     ]) {
       const raw = Buffer.from(JSON.stringify({ ...f.legacy, ...change }));
-      admittedBytes.set(raw.toString("base64"), f.sha256);
       await writeFile(f.request.receipt, raw);
-      await expect(f.recover()).rejects.toThrow();
+      const sha256 = createHash("sha256").update(raw).digest("hex");
+      await expect(
+        recoverReview(f.config, f.request, f.request.session, sha256, f.transport),
+      ).rejects.toThrow();
       expect(await readFile(f.request.receipt)).toEqual(raw);
       await expect(stat(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(stat(`${f.request.receipt}.legacy-${sha256}`)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
     }
     expect(f.calls).toEqual([]);
   },
@@ -1828,8 +2293,8 @@ test.each([
   "later-page",
   "failed-page",
   "second-fresh",
-])("mocked-admission preflight %s preserves original and replay bytes", async (mode) => {
-  const f = await registeredFixture();
+])("legacy preflight %s preserves original and replay bytes", async (mode) => {
+  const f = await structuralFixture();
   f.controls.mode = mode;
   await expect(f.recover()).rejects.toThrow();
   expect(await readFile(f.request.receipt)).toEqual(f.raw);
@@ -1851,9 +2316,9 @@ test.each([
 });
 
 test.each(["wrong-bytes", "public-mode", "symlink"])(
-  "mocked-admission %s archive rejects before network",
+  "legacy %s archive rejects before network",
   async (mode) => {
-    const f = await registeredFixture();
+    const f = await structuralFixture();
     if (mode === "symlink") await symlink(f.request.receipt, f.archive);
     else {
       await writeFile(f.archive, mode === "wrong-bytes" ? "conflict" : f.raw, {
@@ -1873,9 +2338,9 @@ test.each(["wrong-bytes", "public-mode", "symlink"])(
 );
 
 test.each(["authentication", "history", "fresh", "archive", "stage", "delete"])(
-  "mocked-admission detects canonical drift during %s and releases lock",
+  "legacy detects canonical drift during %s and releases lock",
   async (phase) => {
-    const f = await registeredFixture();
+    const f = await structuralFixture();
     const external = Buffer.from("external owner bytes");
     let changed = false;
     const change = async () => {
@@ -1891,7 +2356,7 @@ test.each(["authentication", "history", "fresh", "archive", "stage", "delete"])(
     } else {
       let reads = 0;
       f.controls.intercept = async (url) => {
-        if (url.pathname.endsWith("/pulls/1061")) reads++;
+        if (url.pathname.endsWith(`/pulls/${f.request.pr}`)) reads++;
         if (
           (phase === "authentication" && url.pathname === "/app") ||
           (["history", "delete"].includes(phase) && url.pathname.endsWith("/reviews")) ||
@@ -1920,9 +2385,9 @@ test.each(
     })),
   ),
 )(
-  "registered conversion $outcome feedback save preserves $phase external state",
+  "legacy conversion $outcome feedback save preserves $phase external state",
   async ({ outcome, phase }) => {
-    const f = await registeredFixture();
+    const f = await structuralFixture();
     const external = Buffer.from("external owner after first rename");
     let changed = false;
     const change = async () => {
@@ -1954,9 +2419,9 @@ test.each(
 );
 
 test.each(["preflight-drift", "announce-drift", "readback"])(
-  "mocked-admission replay %s never saves canonical",
+  "legacy replay %s never saves canonical",
   async (mode) => {
-    const f = await registeredFixture();
+    const f = await structuralFixture();
     await f.recover();
     const before = await readFile(f.request.receipt);
     const external = Buffer.from("external replay state");
@@ -1992,16 +2457,16 @@ test.each([
   "canonical-write",
   "canonical-sync",
   "readback",
-])("mocked-admission %s fault retains archive and ownership rules", async (mode) => {
-  const f = await registeredFixture();
+])("legacy %s fault retains archive and ownership rules", async (mode) => {
+  const f = await structuralFixture();
   if (mode === "readback" || mode === "canonical-sync") {
     if (mode === "readback") f.controls.mode = mode;
-    else faults.recovery = "registered-canonical-sync";
+    else faults.recovery = "profile-canonical-sync";
     expect(await f.recover()).toMatchObject({ status: "BLOCKED", reviewBlocked: true });
     await expect(f.recover()).rejects.toThrow();
   } else {
     faults.recovery = mode;
-    if (mode === "directory-sync") faults.recovery = "registered-sync";
+    if (mode === "directory-sync") faults.recovery = "profile-sync";
     await expect(f.recover()).rejects.toThrow();
     expect(await readFile(f.request.receipt)).toEqual(f.raw);
     expect(await f.recover()).toMatchObject({ status: "PENDING" });
@@ -2010,22 +2475,19 @@ test.each([
   expect(f.calls.some((row) => row.startsWith("POST") && row.includes("/reviews"))).toBe(false);
 });
 
-test.each(["conversion", "replay"])(
-  "mocked-admission %s refuses unsafe configured key",
-  async (phase) => {
-    const f = await registeredFixture();
-    if (phase === "replay") await f.recover();
-    const before = await readFile(f.request.receipt);
-    f.calls.splice(0);
-    await chmod(f.config.code.keyPath, 0o644);
-    await expect(f.recover()).rejects.toThrow("unsafe-key-permissions");
-    expect(await readFile(f.request.receipt)).toEqual(before);
-    expect(f.calls).toEqual([]);
-  },
-);
+test.each(["conversion", "replay"])("legacy %s refuses unsafe configured key", async (phase) => {
+  const f = await structuralFixture();
+  if (phase === "replay") await f.recover();
+  const before = await readFile(f.request.receipt);
+  f.calls.splice(0);
+  await chmod(f.config.code.keyPath, 0o644);
+  await expect(f.recover()).rejects.toThrow("unsafe-key-permissions");
+  expect(await readFile(f.request.receipt)).toEqual(before);
+  expect(f.calls).toEqual([]);
+});
 
-test("mocked-admission holds canonical alias lock during preflight and refuses stale owner", async () => {
-  const f = await registeredFixture();
+test("legacy holds canonical alias lock during preflight and refuses stale owner", async () => {
+  const f = await structuralFixture();
   const alias = `${f.config.receiptRoot}-alias`;
   await symlink(f.config.receiptRoot, alias);
   dirs.push(alias);
@@ -2051,7 +2513,7 @@ test("mocked-admission holds canonical alias lock during preflight and refuses s
   try {
     const request = {
       ...f.request,
-      receipt: join(alias, "ashugaev", "spur", "1061", "code.json"),
+      receipt: join(alias, ...f.request.repo.split("/"), String(f.request.pr), "code.json"),
     };
     await expect(
       recoverReview(
@@ -2076,31 +2538,48 @@ test("mocked-admission holds canonical alias lock during preflight and refuses s
   expect(f.calls).toEqual([]);
 });
 
-test.each(["evidence", "verdict", "mutation", "review-id", "lineage", "unknown", "raw-current"])(
-  "mocked-admission refuses touched registered PENDING %s before network",
-  async (mode) => {
-    const f = await registeredFixture();
-    await f.recover();
-    const current = (await readJson(f.request.receipt)) as Record<string, unknown>;
-    if (mode === "evidence")
-      current.evidence = [{ status: "passed", evidence: "already assessed" }];
-    if (mode === "verdict") current.localVerdict = "APPROVED";
-    if (mode === "mutation" || mode === "review-id") {
-      current.mutationStarted = true;
-      current.inputDigest = "d".repeat(64);
-    }
-    if (mode === "review-id") current.reviewId = 1;
-    if (mode === "lineage") current.supersededAttempts = [];
-    if (mode === "unknown") current.status = "UNKNOWN";
-    const raw = Buffer.from(JSON.stringify(current));
-    await writeFile(f.request.receipt, raw);
-    f.calls.splice(0);
-    const hash = mode === "raw-current" ? createHash("sha256").update(raw).digest("hex") : f.sha256;
+test.each([
+  "evidence",
+  "verdict",
+  "mutation",
+  "review-id",
+  "blocked-mutation",
+  "lineage",
+  "unknown",
+  "raw-current",
+])("legacy refuses touched modern %s before network", async (mode) => {
+  const f = await structuralFixture();
+  await f.recover();
+  const current = (await readJson(f.request.receipt)) as Record<string, unknown>;
+  if (mode === "evidence") current.evidence = [{ status: "passed", evidence: "already assessed" }];
+  if (mode === "verdict") current.localVerdict = "APPROVED";
+  if (["mutation", "review-id", "blocked-mutation", "unknown"].includes(mode)) {
+    current.mutationStarted = true;
+    current.inputDigest = "d".repeat(64);
+  }
+  if (mode === "review-id") current.reviewId = 1;
+  if (mode === "blocked-mutation") {
+    current.status = "BLOCKED";
+    current.reviewBlocked = true;
+  }
+  if (mode === "lineage") current.supersededAttempts = [];
+  if (mode === "unknown") current.status = "UNKNOWN";
+  const raw = Buffer.from(JSON.stringify(current));
+  await writeFile(f.request.receipt, raw);
+  f.calls.splice(0);
+  const currentSha256 = createHash("sha256").update(raw).digest("hex");
+  const digests = mode === "raw-current" ? [currentSha256] : [f.sha256, currentSha256];
+  for (const sha256 of digests) {
+    const writes = faults.writes;
     await expect(
-      recoverReview(f.config, f.request, f.request.session, hash, f.transport),
+      recoverReview(f.config, f.request, f.request.session, sha256, f.transport),
     ).rejects.toThrow();
     expect(await readFile(f.request.receipt)).toEqual(raw);
     expect(await readFile(f.archive)).toEqual(f.raw);
-    expect(f.calls).toEqual([]);
-  },
-);
+    await expect(stat(`${f.request.receipt}.legacy-${currentSha256}`)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(faults.writes).toBe(writes);
+  }
+  expect(f.calls).toEqual([]);
+});
