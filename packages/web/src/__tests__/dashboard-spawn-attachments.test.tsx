@@ -260,6 +260,7 @@ describe("Dashboard spawn photo preparation", () => {
     fireEvent.click(submit());
     await waitFor(() => expect(requests).toHaveLength(2));
     expect(sentBatchId(1)).toBe(sentBatchId(0));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(batchRequests).toBe(1);
   });
 

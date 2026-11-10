@@ -2004,8 +2004,8 @@ export function Dashboard() {
 
     setSpawnPreflightStatus("pending");
     let cancelled = false;
+    const owner = spawnPreflightOwnerRef.current;
     const timer = setTimeout(() => {
-      const owner = spawnPreflightOwnerRef.current;
       owner.queue = owner.queue.then(async () => {
         if (cancelled || owner !== spawnPreflightOwnerRef.current || spawningRef.current) return;
         try {
