@@ -4611,83 +4611,129 @@ export function createProgram(cliEntrypoint: string): Command {
 
   program
     .command("page")
-    .description("Create, list, locate, or remove Spur pages.")
-    .usage("<create|list|path|rm> [id] [options]")
-    .argument("<action>", "create, list, path, or rm")
+    .description("Create, list, bind sources, locate, or remove Spur pages.")
+    .usage("<create|list|source|path|rm> [id] [source-path] [options]")
+    .argument("<action>", "create, list, source, path, or rm")
     .argument("[id]", "Page id")
+    .argument(
+      "[source-path]",
+      "Site folder or HTML file; HTML publishes its parent folder including siblings",
+    )
+    .option(
+      "--source <path>",
+      "Create from a site folder or HTML file (publishes its parent folder including siblings)",
+    )
+    .option("--detach", "Detach source; retain published files and native SQL")
     .option("--title <title>", "Page title for create; defaults to the id")
     .option("--runtime <agent>", "Page agent runtime for create: claude, codex, cursor, opencode")
     .option("--model <model>", "Page agent model for create")
     .option("--template <name>", "Starter files for create", "blank")
     .option("--json", "Print raw JSON")
-    .action(async (action: string, id: string | undefined, options, command) => {
-      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
-      const json = Boolean(options.json);
-      const renderPage = (page: PageSummary) =>
-        `${page.id}  ${page.title}  ${page.url}  ${page.path}`;
-      if (action === "list") {
-        if (id !== undefined) throw new Error("page list takes no id");
-        await outputResult({
-          json,
-          label: "loading pages",
-          action: () => getJson<{ pages: PageSummary[] }>(cliEntrypoint, "/pages", configPath),
-          render: (response) =>
-            response.pages.length === 0 ? "No pages." : response.pages.map(renderPage).join("\n"),
-        });
-        return;
-      }
-      if (!id) throw new Error(`page ${action} requires an id`);
-      if (action === "create") {
-        const body = {
-          id,
-          template: options.template,
-          ...(options.title !== undefined ? { title: options.title } : {}),
-          ...(options.runtime !== undefined ? { runtime: options.runtime } : {}),
-          ...(options.model !== undefined ? { model: options.model } : {}),
-        };
-        await outputResult({
-          json,
-          label: `creating page ${id}`,
-          action: () => postJson<PageSummary>(cliEntrypoint, "/pages", body, configPath),
-          success: (page) => `Created page ${page.id}. Open ${page.url} on the Spur web UI.`,
-          render: (page) => page.path,
-        });
-        return;
-      }
-      if (action === "path") {
-        await outputResult({
-          json,
-          label: `locating page ${id}`,
-          action: async () => {
-            const { pages } = await getJson<{ pages: PageSummary[] }>(
-              cliEntrypoint,
-              "/pages",
-              configPath,
-            );
-            const page = pages.find((entry) => entry.id === id);
-            if (!page) throw new Error(`Page not found: ${id}`);
-            return page;
-          },
-          render: (page) => page.path,
-        });
-        return;
-      }
-      if (action === "rm") {
-        await outputResult({
-          json,
-          label: `removing page ${id}`,
-          action: () =>
-            deleteJson<{ deleted: true; id: string }>(
-              cliEntrypoint,
-              `/pages/${encodeURIComponent(id)}`,
-              configPath,
-            ),
-          render: () => `Removed page ${id}.`,
-        });
-        return;
-      }
-      throw new Error("page action must be create, list, path, or rm");
-    });
+    .action(
+      async (
+        action: string,
+        id: string | undefined,
+        sourcePath: string | undefined,
+        options,
+        command,
+      ) => {
+        const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+        const json = Boolean(options.json);
+        if (sourcePath !== undefined && action !== "source")
+          throw new Error("source-path requires page source");
+        if (options.source !== undefined && action !== "create")
+          throw new Error("--source requires page create");
+        if (options.detach && action !== "source") throw new Error("--detach requires page source");
+        const renderPage = (page: PageSummary) =>
+          `${page.id}  ${page.title}  ${page.url}  ${page.path}${
+            page.source
+              ? `  ${page.source.path}  ${page.sync?.state ?? "pending"}${page.sync?.error ? `: ${page.sync.error}` : ""}`
+              : ""
+          }`;
+        if (action === "list") {
+          if (id !== undefined) throw new Error("page list takes no id");
+          await outputResult({
+            json,
+            label: "loading pages",
+            action: () => getJson<{ pages: PageSummary[] }>(cliEntrypoint, "/pages", configPath),
+            render: (response) =>
+              response.pages.length === 0 ? "No pages." : response.pages.map(renderPage).join("\n"),
+          });
+          return;
+        }
+        if (!id) throw new Error(`page ${action} requires an id`);
+        if (action === "create") {
+          const body = {
+            id,
+            template: options.template,
+            ...(options.title !== undefined ? { title: options.title } : {}),
+            ...(options.runtime !== undefined ? { runtime: options.runtime } : {}),
+            ...(options.model !== undefined ? { model: options.model } : {}),
+            ...(options.source !== undefined ? { source: { path: resolve(options.source) } } : {}),
+          };
+          await outputResult({
+            json,
+            label: `creating page ${id}`,
+            action: () => postJson<PageSummary>(cliEntrypoint, "/pages", body, configPath),
+            success: (page) =>
+              `Created page ${page.id}. Open ${page.url} on the Spur web UI.${page.sync ? ` Source: ${page.sync.state}.` : ""}`,
+            render: (page) => (page.source ? renderPage(page) : page.path),
+          });
+          return;
+        }
+        if (action === "source") {
+          if (Boolean(sourcePath) === Boolean(options.detach)) {
+            throw new Error("page source requires a path or --detach, but not both");
+          }
+          await outputResult({
+            json,
+            label: `updating page ${id} source`,
+            action: () =>
+              patchJson<PageSummary>(
+                cliEntrypoint,
+                `/pages/${encodeURIComponent(id)}/source`,
+                { path: options.detach ? null : resolve(sourcePath!) },
+                configPath,
+              ),
+            render: renderPage,
+          });
+          return;
+        }
+        if (action === "path") {
+          await outputResult({
+            json,
+            label: `locating page ${id}`,
+            action: async () => {
+              const { pages } = await getJson<{ pages: PageSummary[] }>(
+                cliEntrypoint,
+                "/pages",
+                configPath,
+              );
+              const page = pages.find((entry) => entry.id === id);
+              if (!page) throw new Error(`Page not found: ${id}`);
+              return page;
+            },
+            render: (page) => page.path,
+          });
+          return;
+        }
+        if (action === "rm") {
+          await outputResult({
+            json,
+            label: `removing page ${id}`,
+            action: () =>
+              deleteJson<{ deleted: true; id: string }>(
+                cliEntrypoint,
+                `/pages/${encodeURIComponent(id)}`,
+                configPath,
+              ),
+            render: () => `Removed page ${id}.`,
+          });
+          return;
+        }
+        throw new Error("page action must be create, list, source, path, or rm");
+      },
+    );
 
   program
     .command("actions")
