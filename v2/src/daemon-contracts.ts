@@ -85,6 +85,8 @@ const storeExpectedRev = field(
   "Write only at this revision; 0 = absent.",
 );
 const storeLimit = field("limit", "integer 1..500", "Page size.", false, 100);
+const pageSummaryResponse =
+  'PageSummary {id,title,icon?,agent,path,url,source?:{path:string},sync?:{state:"pending"|"syncing"|"synced"|"error",root?:string,lastSyncedAt?:string,error?:string}}. Sync appears only for sourced Pages; lastSyncedAt is the last successful reconciliation ISO time and is retained on errors; error appears only in error state.';
 const storeTooLarge: ContractResponse = {
   status: 413,
   contentType: "application/json",
@@ -1543,29 +1545,59 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
       source: "v2/src/store-actions.ts",
     },
   ),
-  operation("list_pages", "GET", "/pages", "List pages with title, agent runtime, dir and URL.", {
-    response: "{pages:PageSummary[]}",
+  operation("list_pages", "GET", "/pages", "List pages with identity, source and sync status.", {
+    response: `{pages:PageSummary[]}. ${pageSummaryResponse}`,
     source: "v2/src/pages.ts",
   }),
-  operation("create_page", "POST", "/pages", "Create a page dir with page.yaml and a template.", {
-    body: body("CreatePageRequest", [
-      field("id", "string", "Page id ^[a-z0-9][a-z0-9-]{0,39}$.", true),
-      field("title", "string", "1..120 printable characters; defaults to id."),
-      field(
-        "runtime",
-        '"claude"|"codex"|"cursor"|"opencode"',
-        "Page agent runtime.",
-        false,
-        "claude",
-      ),
-      field("model", "string", "Page agent model."),
-      field("template", '"blank"', "Starter files.", false, "blank"),
-    ]),
-    examples: [{ body: { id: "films", title: "Films" } }],
-    response: "PageSummary",
-    status: 201,
-    source: "v2/src/pages.ts",
-  }),
+  operation(
+    "create_page",
+    "POST",
+    "/pages",
+    "Create a Page and attempt its optional source import before responding.",
+    {
+      body: body("CreatePageRequest", [
+        field("id", "string", "Page id ^[a-z0-9][a-z0-9-]{0,39}$.", true),
+        field("title", "string", "1..120 printable characters; defaults to id."),
+        field(
+          "runtime",
+          '"claude"|"codex"|"cursor"|"opencode"',
+          "Page agent runtime.",
+          false,
+          "claude",
+        ),
+        field("model", "string", "Page agent model."),
+        field("template", '"blank"', "Starter files.", false, "blank"),
+        field(
+          "source",
+          "{path:string}",
+          "Absolute daemon-host HTML/folder path without control characters. HTML publishes its parent folder, including siblings.",
+        ),
+      ]),
+      examples: [{ body: { id: "films", title: "Films" } }],
+      response: `${pageSummaryResponse} Initial source attempt completes before response; inaccessible source returns sync:error.`,
+      status: 201,
+      source: "v2/src/pages.ts",
+    },
+  ),
+  operation(
+    "update_page_source",
+    "PATCH",
+    "/pages/{pageId}/source",
+    "Update a Page source binding; detach retains publication and native SQL.",
+    {
+      body: body("object", [
+        field(
+          "path",
+          "string|null",
+          "Absolute daemon-host HTML/folder path without control characters; null detaches and retains publication/SQL. HTML publishes its parent folder, including siblings.",
+          true,
+        ),
+      ]),
+      examples: [{ body: { path: "/path/to/site" } }, { body: { path: null } }],
+      response: `${pageSummaryResponse} Initial source attempt completes before response; inaccessible source returns sync:error. Detach removes source/sync.`,
+      source: "v2/src/pages.ts",
+    },
+  ),
   operation(
     "delete_page",
     "DELETE",
@@ -1580,7 +1612,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "get_page_file",
     "GET",
     "/pages/{pageId}/files/{path}",
-    "Serve one page file; dot paths and the store file are hidden.",
+    "Serve one page file; dot paths, data.sqlite*, page.yaml and _spur are hidden at every depth. Native SDK routes remain available.",
     {
       catchAllPathParams: ["path"],
       response: "Raw file, PAGE_CONTENT_TYPES MIME, cache-control no-store.",
