@@ -59,7 +59,7 @@ async function noLinks(path: string, allowMissing = false): Promise<void> {
 }
 
 async function regularBytes(path: string): Promise<Buffer> {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     if (!(await handle.stat()).isFile()) throw new Error(`Not a regular file: ${path}`);
     return await handle.readFile();

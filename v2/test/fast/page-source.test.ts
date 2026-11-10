@@ -1,4 +1,5 @@
-import { mkdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, open, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -219,6 +220,39 @@ describe("Page source snapshots", () => {
       expect(await output("asset.txt")).toBe("keep");
     },
   );
+
+  it("reports a FIFO manifest without blocking another Page or shutdown", async () => {
+    const { data, source, sync, status, output } = await fixture();
+    for (const id of ["a-bad", "z-good"]) {
+      await sync.create({ id, source: { path: source } });
+    }
+    const fifo = join(pageDirPath(data, "a-bad"), ".source-sync.json");
+    await rm(fifo);
+    await promisify(execFile)("mkfifo", [fifo]);
+    await writeFile(join(source, "index.html"), "updated");
+    const reconciliation = sync.reconcile();
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("FIFO blocked source reconciliation")), 2000);
+    });
+    try {
+      await Promise.race([reconciliation, deadline]);
+      expect(status("a-bad").sync?.error).toContain("manifest");
+      expect(status("z-good").sync?.state).toBe("synced");
+      expect(await output("index.html", "a-bad")).toBe("<p>folder</p>");
+      expect(await output("index.html", "z-good")).toBe("updated");
+      await Promise.race([sync.stop(), deadline]);
+    } finally {
+      clearTimeout(timer);
+      // Release a blocked read on regression before afterEach drains the service.
+      const writer = await open(fifo, constants.O_RDWR | constants.O_NONBLOCK);
+      try {
+        await reconciliation;
+      } finally {
+        await writer.close();
+      }
+    }
+  });
 
   it("serializes detach/delete with queued attempts and drains before stop resolves", async () => {
     const { data, source, sync, status, output } = await fixture();
