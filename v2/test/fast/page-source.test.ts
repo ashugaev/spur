@@ -173,6 +173,30 @@ describe("Page source snapshots", () => {
     expect(await output("index.html")).toBe("<p>folder</p>");
   });
 
+  it("prunes empty imported directories for later replacement and retains unowned contents", async () => {
+    const { data, source, sync, status, output } = await fixture();
+    await mkdir(join(source, "assets/nested"), { recursive: true });
+    await mkdir(join(source, "kept"));
+    await writeFile(join(source, "assets/nested/old.txt"), "old");
+    await writeFile(join(source, "kept/old.txt"), "old");
+    await sync.create({ id: "site", source: { path: source } });
+    await writeFile(join(pageDirPath(data, "site"), "kept/manual.txt"), "unowned");
+    await rm(join(source, "assets/nested/old.txt"));
+    await rm(join(source, "kept/old.txt"));
+    await sync.reconcile();
+    expect(status().sync?.state).toBe("synced");
+    await expect(readdir(join(pageDirPath(data, "site"), "assets"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(await output("kept/manual.txt")).toBe("unowned");
+    await rm(join(source, "assets"), { recursive: true });
+    await writeFile(join(source, "assets"), "later file");
+    await sync.reconcile();
+    expect(status().sync?.state).toBe("synced");
+    expect(await output("assets")).toBe("later file");
+    expect(await output("kept/manual.txt")).toBe("unowned");
+  });
+
   it("skips native/service paths at every depth and preserves the native database", async () => {
     const { data, source, sync, output } = await fixture();
     for (const name of ["page.yaml", "data.sqlite", "data.sqlite-wal", ".secret"]) {

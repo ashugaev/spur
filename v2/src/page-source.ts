@@ -398,12 +398,33 @@ export class PageSourceSync {
           await mkdir(dirname(join(dir, name)), { recursive: true });
           await rename(join(stage, name), join(dir, name));
         }
+        const obsoleteDirectories = new Set<string>();
         for (const name of manifest.files) {
           if (files.includes(name)) continue;
           await stillCurrent();
           await noLinks(join(dir, name), true);
           if ((await destinationStat(join(dir, name)))?.isFile()) {
             await rm(join(dir, name), { force: true });
+          }
+          for (let parent = dirname(name); parent !== "."; parent = dirname(parent)) {
+            if (!files.includes(parent) && !files.some((file) => file.startsWith(`${parent}/`))) {
+              obsoleteDirectories.add(parent);
+            }
+          }
+        }
+        for (const name of [...obsoleteDirectories].sort((a, b) => b.length - a.length)) {
+          await stillCurrent();
+          await noLinks(join(dir, name), true);
+          try {
+            await rmdir(join(dir, name));
+          } catch (error) {
+            if (
+              !["ENOENT", "ENOTDIR", "ENOTEMPTY", "EEXIST"].includes(
+                (error as NodeJS.ErrnoException).code ?? "",
+              )
+            ) {
+              throw error;
+            }
           }
         }
         status = { ...status, lastSyncedAt: new Date().toISOString() };
