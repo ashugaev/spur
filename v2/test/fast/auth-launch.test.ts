@@ -51,7 +51,9 @@ describe("managed native authorization launch", () => {
     const launch = managedAuthLaunch({ ...registration, provider: "codex" }, "/fixture", [
       "--no-alt-screen",
     ]);
-    const plan = buildCodexPlan("task", { codexArgs: launch.codexArgs });
+    const plan = buildCodexPlan("task", {
+      ...(launch.codexArgs !== undefined ? { codexArgs: launch.codexArgs } : {}),
+    });
     expect(plan.launchCommand).toContain("supports_websockets=false");
     expect(plan.launchCommand).toContain("requires_openai_auth=false");
     expect(plan.launchCommand).toContain("--no-alt-screen");
