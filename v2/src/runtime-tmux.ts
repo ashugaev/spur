@@ -468,6 +468,25 @@ async function tmuxRead(...args: string[]): Promise<string> {
   return stdout.trimEnd();
 }
 
+export type TmuxServerPid =
+  | { status: "running"; pid: number }
+  | { status: "absent" }
+  | { status: "unavailable" };
+
+// Pid of the tmux server on the configured socket. "absent" only for the
+// known no-server shape (isKnownAbsentTmuxServer); any other failure or a
+// non-integer reply is "unavailable" so callers never read it as "no server".
+export async function readTmuxServerPid(): Promise<TmuxServerPid> {
+  let stdout: string;
+  try {
+    stdout = await tmuxRead("display-message", "-p", "#{pid}");
+  } catch (error) {
+    return isKnownAbsentTmuxServer(error) ? { status: "absent" } : { status: "unavailable" };
+  }
+  const pid = /^\d+$/.test(stdout) ? Number.parseInt(stdout, 10) : 0;
+  return pid > 0 ? { status: "running", pid } : { status: "unavailable" };
+}
+
 // Restore mutations wait for close, including after cancellation, before their
 // caller may release a pane or sidecar lock.
 async function runRestoreCommand(

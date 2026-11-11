@@ -16,11 +16,13 @@ import {
   listSessionMemberPids,
   readProcessCwd,
   readProcessEnvValue,
+  readProcessEnvValues,
   readProcessIdentity,
   readProcessStat,
   signalPid,
   snapshotProcesses,
   snapshotProcessLiveness,
+  type ProcessEnvRead,
   type ProcessIdentityReader,
   type ProcessSnapshotEntry,
 } from "./process-tree.js";
@@ -253,7 +255,10 @@ export async function capturePaneAgentProcesses(
       }
       const before = await readProcessStat(pid);
       if (before === null || before.sid !== panePid) continue;
-      if (!(await matchesLaunchMarkers(pid, sessionId, agentLaunchId))) continue;
+      const markers = await readSessionMarkers(pid);
+      if (!markersMatch(markers, { sessionId, launch: { kind: "exact", id: agentLaunchId } })) {
+        continue;
+      }
       const after = await readProcessStat(pid);
       if (after !== null && after.sid === panePid && after.identity === before.identity) {
         refs.push({ pid, identity: after.identity });
@@ -264,18 +269,49 @@ export async function capturePaneAgentProcesses(
   return { status: "ok", processes: refs };
 }
 
-async function matchesLaunchMarkers(
-  pid: number,
-  sessionId: string,
-  agentLaunchId: string,
-): Promise<boolean> {
-  const sessionEnv = await readProcessEnvValue(pid, "SPUR_SESSION");
-  const launchEnv = await readProcessEnvValue(pid, "SPUR_AGENT_LAUNCH_ID");
+interface SessionMarkers {
+  sessionEnv: ProcessEnvRead;
+  launchEnv: ProcessEnvRead;
+  toolDirEnv: ProcessEnvRead;
+}
+
+// One /proc/<pid>/environ read for every Spur ownership marker.
+async function readSessionMarkers(pid: number): Promise<SessionMarkers> {
+  const read = await readProcessEnvValues(pid, [
+    "SPUR_SESSION",
+    "SPUR_AGENT_LAUNCH_ID",
+    "SPUR_SESSION_TOOL_DIR",
+  ]);
+  if (read.status !== "ok") {
+    return {
+      sessionEnv: read,
+      launchEnv: read,
+      toolDirEnv: read,
+    };
+  }
+  return {
+    sessionEnv: { status: "ok", value: read.values.SPUR_SESSION },
+    launchEnv: { status: "ok", value: read.values.SPUR_AGENT_LAUNCH_ID },
+    toolDirEnv: { status: "ok", value: read.values.SPUR_SESSION_TOOL_DIR },
+  };
+}
+
+interface MarkerExpectation {
+  sessionId: string;
+  launch: { kind: "exact"; id: string } | { kind: "any-nonempty" };
+  toolDir?: string;
+}
+
+function markersMatch(markers: SessionMarkers, expect: MarkerExpectation): boolean {
+  const { sessionEnv, launchEnv, toolDirEnv } = markers;
+  if (sessionEnv.status !== "ok" || sessionEnv.value !== expect.sessionId) return false;
+  if (launchEnv.status !== "ok") return false;
+  if (expect.launch.kind === "exact" ? launchEnv.value !== expect.launch.id : !launchEnv.value) {
+    return false;
+  }
   return (
-    sessionEnv.status === "ok" &&
-    sessionEnv.value === sessionId &&
-    launchEnv.status === "ok" &&
-    launchEnv.value === agentLaunchId
+    expect.toolDir === undefined ||
+    (toolDirEnv.status === "ok" && toolDirEnv.value === expect.toolDir)
   );
 }
 
@@ -306,8 +342,8 @@ export async function captureAgentProcessesForLaunch(input: {
   for (const proc of snapshot.processes) {
     if (!matchers.some((matcher) => matcher.test(proc.args))) continue;
     const identity = input.recovery ? await readProcessIdentity(proc.pid) : null;
-    const sessionEnv = await readProcessEnvValue(proc.pid, "SPUR_SESSION");
-    const launchEnv = await readProcessEnvValue(proc.pid, "SPUR_AGENT_LAUNCH_ID");
+    const markers = await readSessionMarkers(proc.pid);
+    const { sessionEnv, launchEnv } = markers;
     const identityAfter = input.recovery ? await readProcessIdentity(proc.pid) : null;
     if (input.recovery)
       recoveryIdentities.set(proc.pid, identity === identityAfter ? identity : null);
@@ -321,10 +357,10 @@ export async function captureAgentProcessesForLaunch(input: {
       uncertainPids.push(proc.pid);
     }
     if (
-      sessionEnv.status === "ok" &&
-      sessionEnv.value === input.sessionId &&
-      launchEnv.status === "ok" &&
-      launchEnv.value === input.agentLaunchId
+      markersMatch(markers, {
+        sessionId: input.sessionId,
+        launch: { kind: "exact", id: input.agentLaunchId },
+      })
     ) {
       matching.push(proc);
     }
@@ -396,6 +432,59 @@ export async function terminateAgentProcesses(
   }
 
   return { status: "survivors", pids: survivors.map((ref) => ref.pid) };
+}
+
+// Terminal-teardown sweep for processes that left the pane (setsid/detached
+// daemons, e.g. a browser daemon) and were adopted by a subreaper, so neither
+// pane descent nor pane-session membership reaches them. Ownership is the
+// exact triple SPUR_SESSION === sessionId, SPUR_SESSION_TOOL_DIR ===
+// sessionToolDir (this instance's per-session dir; session ids repeat across
+// daemon instances) and a non-empty SPUR_AGENT_LAUNCH_ID of any generation
+// (sidecars carry an empty one). No agent matchers, no collapse: daemon and its
+// children are each targeted directly.
+// Never signals this process, its ancestors, or the tmux server. If this
+// process itself carries SPUR_SESSION === sessionId (daemon started from that
+// session's pane) the markers cannot tell it from its own children: unavailable.
+export async function terminateDetachedSessionProcesses(
+  input: { sessionId: string; sessionToolDir: string; tmuxServerPid: number | null },
+  options?: Parameters<typeof terminateAgentProcesses>[1],
+): Promise<AgentTerminationOutcome | { status: "unavailable" }> {
+  if (process.env.SPUR_SESSION === input.sessionId) {
+    return { status: "unavailable" };
+  }
+  if (!(await canReadProcessEnv())) {
+    return { status: "unavailable" };
+  }
+  const snapshot = await snapshotProcesses();
+  if (snapshot.status === "unavailable") {
+    return { status: "unavailable" };
+  }
+  const byPid = new Map(snapshot.processes.map((proc) => [proc.pid, proc]));
+  const excluded = new Set<number>([process.pid]);
+  if (input.tmuxServerPid !== null) excluded.add(input.tmuxServerPid);
+  for (
+    let pid = byPid.get(process.pid)?.ppid;
+    pid !== undefined && pid > 0 && !excluded.has(pid);
+    pid = byPid.get(pid)?.ppid
+  ) {
+    excluded.add(pid);
+  }
+  const expectation: MarkerExpectation = {
+    sessionId: input.sessionId,
+    launch: { kind: "any-nonempty" },
+    toolDir: input.sessionToolDir,
+  };
+  const refs: AgentProcessRef[] = [];
+  for (const proc of snapshot.processes) {
+    if (excluded.has(proc.pid)) continue;
+    const before = await readProcessIdentity(proc.pid);
+    if (before === null) continue;
+    if (!markersMatch(await readSessionMarkers(proc.pid), expectation)) continue;
+    if ((await readProcessIdentity(proc.pid)) === before) {
+      refs.push({ pid: proc.pid, identity: before });
+    }
+  }
+  return terminateAgentProcesses(refs, options);
 }
 
 // pids only: this scan is a launch-guard verdict, never a signalling target,

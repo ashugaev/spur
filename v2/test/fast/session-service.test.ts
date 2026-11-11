@@ -102,6 +102,8 @@ import {
   captureAgentProcessesForLaunchMock,
   capturePaneAgentProcessesMock,
   terminateAgentProcessesMock,
+  terminateDetachedSessionProcessesMock,
+  readTmuxServerPidMock,
   findForeignAgentProcessesForSessionMock,
   killTmuxSessionTreeMock,
   sendMessageToTmuxMock,
@@ -79103,6 +79105,160 @@ describe("SessionService", () => {
       expect(gcNotices()).toHaveLength(0);
       expect(state.get("api-1")).toMatchObject({ binding: true, target: true });
       service.dispose();
+    });
+  });
+
+  describe("terminal detached process sweep", () => {
+    const toolDir = (id: string) => join(TEST_DATA_DIR, "session-tools", id);
+    const runningRecord = (id = "api-1") =>
+      sessionRecord({ id, worktree: true, worktreePath: `/tmp/spur-worktrees/api/${id}` });
+    const sweepEvents = (event: string) =>
+      logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === event);
+
+    it("complete sweeps once with the session tool dir and tmux server pid, between pane kill and worktree removal", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningRecord());
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValueOnce(true).mockReturnValue(false);
+      const service = await createDisposedSessionService();
+      try {
+        await service.complete("api-1");
+        expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledExactlyOnceWith({
+          sessionId: "api-1",
+          sessionToolDir: toolDir("api-1"),
+          tmuxServerPid: 4844,
+        });
+        const [sweepOrder] = terminateDetachedSessionProcessesMock.mock.invocationCallOrder;
+        expect(killTmuxSessionMock.mock.invocationCallOrder[0]).toBeLessThan(sweepOrder ?? 0);
+        expect(sweepOrder).toBeLessThan(removeWorktreeMock.mock.invocationCallOrder[0] ?? 0);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("pause does not sweep", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningRecord());
+      const service = await createDisposedSessionService();
+      try {
+        await service.pause("api-1");
+        expect(sessions.get("api-1")?.status).toBe("stopped");
+        expect(terminateDetachedSessionProcessesMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("kill sweeps", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningRecord());
+      const service = await createDisposedSessionService();
+      try {
+        await service.kill("api-1");
+        expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ sessionId: "api-1", sessionToolDir: toolDir("api-1") }),
+        );
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("handoff completion of the source sweeps the source id", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningRecord());
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      try {
+        await service.handoff(
+          "api-1",
+          { agent: "cursor" },
+          { todoActor: { kind: "human", origin: "ui" } },
+        );
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ sessionId: "api-1" }),
+        );
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("restore does not sweep", async () => {
+      mockClaudeJsonlState("waiting");
+      const record = runningSession();
+      createSessionStore(record);
+      const service = await createDisposedSessionService();
+      try {
+        await service.pause(record.id);
+        expect((await service.restore(record.id)).lifecycle.operation?.phase).toBe("succeeded");
+        expect(terminateDetachedSessionProcessesMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("sweep survivors do not fail complete and are logged with reason detached_session", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningRecord());
+      terminateDetachedSessionProcessesMock.mockResolvedValue({ status: "survivors", pids: [77] });
+      const service = await createDisposedSessionService();
+      try {
+        await service.complete("api-1");
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        expect(sweepEvents("session.agent_process.survivors")).toEqual([
+          [
+            TEST_DATA_DIR,
+            expect.objectContaining({
+              level: "error",
+              details: { pids: [77], reason: "detached_session" },
+            }),
+          ],
+        ]);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("unreadable tmux server pid skips the sweep and logs capture_unavailable", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningRecord());
+      readTmuxServerPidMock.mockResolvedValue({ status: "unavailable" });
+      const service = await createDisposedSessionService();
+      try {
+        await service.complete("api-1");
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        expect(terminateDetachedSessionProcessesMock).not.toHaveBeenCalled();
+        expect(sweepEvents("session.agent_process.capture_unavailable")).toEqual([
+          [
+            TEST_DATA_DIR,
+            expect.objectContaining({
+              level: "warn",
+              details: { reason: "detached_session", cause: "tmux_server_pid_unreadable" },
+            }),
+          ],
+        ]);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("absent tmux server sweeps with no tmux exclusion and logs nothing", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningRecord());
+      readTmuxServerPidMock.mockResolvedValue({ status: "absent" });
+      const service = await createDisposedSessionService();
+      try {
+        await service.complete("api-1");
+        expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ sessionId: "api-1", tmuxServerPid: null }),
+        );
+        expect(sweepEvents("session.agent_process.capture_unavailable")).toEqual([]);
+      } finally {
+        service.dispose();
+      }
     });
   });
 });
