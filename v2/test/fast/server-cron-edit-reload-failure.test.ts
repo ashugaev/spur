@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type * as EventSources from "../../src/event-sources/index.js";
 import { startServer } from "../../src/server.js";
 import type { CronJobEditDraft, CronJobsResponse } from "../../src/types.js";
 import { cleanupTrackedTempDirs, createTempDir, findFreePort } from "../helpers/common.js";
@@ -8,7 +9,7 @@ import { cleanupTrackedTempDirs, createTempDir, findFreePort } from "../helpers/
 const sourceStarts = vi.hoisted(() => ({ calls: 0, failOn: new Set<number>() }));
 
 vi.mock("../../src/event-sources/index.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/event-sources/index.js")>();
+  const actual = await importOriginal<typeof EventSources>();
   return {
     ...actual,
     startConfiguredSources: async (

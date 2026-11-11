@@ -4,8 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionService } from "../../src/session-service.js";
 import { startServer } from "../../src/server.js";
-import type { SessionView } from "../../src/types.js";
-import type { CronJobEditDraft, CronJobsResponse } from "../../src/types.js";
+import type { CronJobEditDraft, CronJobsResponse, SessionView } from "../../src/types.js";
 import { cleanupTrackedTempDirs, createTempDir, findFreePort } from "../helpers/common.js";
 
 afterEach(async () => {
