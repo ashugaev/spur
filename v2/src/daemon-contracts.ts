@@ -78,6 +78,18 @@ const effort = field(
   "Provider-supported reasoning effort; provider validates supported values.",
 );
 const nullableEffort: ContractField = { ...effort, type: `${effort.type}|null` };
+const storeData = field("data", "object", "Document JSON object, at most 262144 bytes.", true);
+const storeExpectedRev = field(
+  "expectedRev",
+  "integer",
+  "Write only at this revision; 0 = absent.",
+);
+const storeLimit = field("limit", "integer 1..500", "Page size.", false, 100);
+const storeTooLarge: ContractResponse = {
+  status: 413,
+  contentType: "application/json",
+  description: "Document over 262144 bytes or store file over 64 MiB.",
+};
 const attachments = field(
   "attachments",
   "{name:string,data:string}[]",
@@ -119,6 +131,11 @@ const spawn = body("SpawnSessionRequest", [
     "Allowed send trigger IDs. Omit to allow all; [] blocks every send trigger, including CI failure alerts. Carried by respawn and handoff.",
   ),
   field("branch", "string", "Workspace branch; project naming constraints apply."),
+  field(
+    "prAlertOwner",
+    "boolean",
+    "Opt into exclusive native PR CI and conflict alerts; requires an allowed send route for each class.",
+  ),
   overrides,
   field("reuseWorkspaceSessionId", "string", "Reuse the named session workspace."),
   field("originalTaskPrompt", "string", "Original task retained across task handoffs."),
@@ -143,6 +160,13 @@ const send = body("SendMessageRequest", [
 ]);
 const restore = body("RestoreSessionRequest", [
   field("operationId", "string", "Optional lifecycle operation ID for receipt reconciliation."),
+  field(
+    "restart",
+    "boolean",
+    "Restart a running terminal session; restore endpoint only.",
+    false,
+    false,
+  ),
   field(
     "force",
     "boolean",
@@ -1310,6 +1334,277 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
         field("port", "number", "Service port override."),
       ]),
       examples: [{ body: { command: "pnpm dev", cwd: "." } }],
+    },
+  ),
+  operation(
+    "list_store_docs",
+    "GET",
+    "/stores/{store}/docs/{collection}",
+    "List store documents ordered by id; store is page:<id> or session:<sid>.",
+    {
+      query: [storeLimit, field("startAfter", "string", "Document id cursor.")],
+      examples: [{ query: { limit: "20" } }],
+      response: "{docs:StoreDoc[]}",
+      source: "v2/src/stores.ts",
+      extraResponses: [storeTooLarge],
+    },
+  ),
+  operation(
+    "add_store_doc",
+    "POST",
+    "/stores/{store}/docs/{collection}",
+    "Add a document with a generated id; _actions rejected.",
+    {
+      body: body("StoreWriteRequest", [storeData]),
+      examples: [{ body: { data: { title: "Dune" } } }],
+      response: "StoreDoc",
+      status: 201,
+      source: "v2/src/stores.ts",
+      extraResponses: [storeTooLarge],
+    },
+  ),
+  operation(
+    "get_store_doc",
+    "GET",
+    "/stores/{store}/docs/{collection}/{docId}",
+    "Read one store document.",
+    { response: "StoreDoc", source: "v2/src/stores.ts" },
+  ),
+  operation(
+    "set_store_doc",
+    "POST",
+    "/stores/{store}/docs/{collection}/{docId}",
+    "Create or replace a store document; expectedRev mismatch conflicts.",
+    {
+      body: body("StoreWriteRequest", [storeData, storeExpectedRev]),
+      examples: [
+        { body: { data: { title: "Dune" } } },
+        { body: { data: { n: 1 }, expectedRev: 0 } },
+      ],
+      response: "StoreDoc",
+      source: "v2/src/stores.ts",
+      extraResponses: [storeTooLarge],
+    },
+  ),
+  operation(
+    "update_store_doc",
+    "PATCH",
+    "/stores/{store}/docs/{collection}/{docId}",
+    "Merge-patch a store document (RFC 7386; null removes a key).",
+    {
+      body: body("StoreWriteRequest", [storeData, storeExpectedRev]),
+      examples: [{ body: { data: { watched: true } } }],
+      response: "StoreDoc",
+      source: "v2/src/stores.ts",
+      extraResponses: [storeTooLarge],
+    },
+  ),
+  operation(
+    "delete_store_doc",
+    "DELETE",
+    "/stores/{store}/docs/{collection}/{docId}",
+    "Delete a store document.",
+    {
+      query: [field("expectedRev", "integer", "Delete only at this revision.")],
+      response: "{deleted:true}",
+      source: "v2/src/stores.ts",
+    },
+  ),
+  operation(
+    "query_store_docs",
+    "POST",
+    "/stores/{store}/query/{collection}",
+    "Query store documents with where/orderBy/limit/startAfter.",
+    {
+      body: body("StoreQuery", [
+        field(
+          "where",
+          '{field:string,op:"=="|"!="|"<"|"<="|">"|">="|"in"|"contains",value:unknown}[]',
+          "At most 8 clauses; field is a dotted path into data.",
+        ),
+        field("orderBy", '{field:string,direction?:"asc"|"desc"}', "Sort field; ties by id."),
+        storeLimit,
+        field("startAfter", "string", "Document id cursor."),
+      ]),
+      examples: [{ body: { where: [{ field: "watched", op: "==", value: false }], limit: 20 } }],
+      response: "{docs:StoreDoc[]}",
+      source: "v2/src/stores.ts",
+    },
+  ),
+  operation(
+    "list_store_changes",
+    "GET",
+    "/stores/{store}/changes",
+    "Read store change rows after a sequence cursor; reset:true means refetch.",
+    {
+      query: [
+        field("since", "integer", "Last seen change seq.", false, 0),
+        field("limit", "integer 1..500", "Page size.", false, 500),
+      ],
+      examples: [{ query: { since: "0" } }],
+      response: "{changes:{seq,collection,id,op,rev}[],lastSeq:number,reset?:true}",
+      source: "v2/src/stores.ts",
+    },
+  ),
+  operation(
+    "send_store_agent",
+    "POST",
+    "/stores/{store}/agent/send",
+    "Queue a message to the store's agent; a page agent spawns or recovers on demand.",
+    {
+      body: body("StoreAgentSendRequest", [
+        field("message", "string", "1..20000 characters.", true),
+        field("userGesture", "boolean", "Sent from a trusted user click; resets loop budgets."),
+      ]),
+      examples: [{ body: { message: "Suggest three films" } }],
+      response: "{sessionId:string}; 429 delivery budget, 503 page recovery budget.",
+      source: "v2/src/store-agent.ts",
+    },
+  ),
+  operation(
+    "list_store_agent_messages",
+    "GET",
+    "/stores/{store}/agent/messages",
+    "Visible messages of the store's agent session plus its status.",
+    {
+      query: [
+        field("from", "integer", "Conversation entry cursor."),
+        field("limit", "integer 1..100", "Page size.", false, 50),
+      ],
+      examples: [{ query: { limit: "20" } }],
+      response:
+        "ConversationPage & {status:{state,sessionId}} | {sessionId:null,messages:[],status}",
+      source: "v2/src/store-agent.ts",
+    },
+  ),
+  operation(
+    "get_store_agent_status",
+    "GET",
+    "/stores/{store}/agent/status",
+    "Store agent status: none|working|idle|recovering|error|rate_limited.",
+    { response: "{state:string,sessionId:string|null}", source: "v2/src/store-agent.ts" },
+  ),
+  operation(
+    "invoke_store_action",
+    "POST",
+    "/stores/{store}/actions",
+    "Record an _actions doc and deliver [spur-action v1] to the store's agent once per id.",
+    {
+      body: body("InvokeActionRequest", [
+        field(
+          "id",
+          "string",
+          "Action id ^[A-Za-z0-9_-]{8,64}$; repeats return the existing doc.",
+          true,
+        ),
+        field("action", "string", "Action name ^[a-z0-9][a-z0-9_-]{0,63}$.", true),
+        field(
+          "label",
+          "string",
+          "1..80 chars, no control/quote/backslash/bracket/bidi; default action.",
+        ),
+        field(
+          "source",
+          '{kind:"page"}|{kind:"snippet",snippetId,instanceId,revision}',
+          "Origin.",
+          true,
+        ),
+        field("payload", "object", "JSON object, at most 49152 bytes.", true),
+        field("userGesture", "boolean", "Sent from a trusted user click."),
+        field("retryOf", "string", "Id of a failed action this retries."),
+      ]),
+      examples: [
+        {
+          body: {
+            id: "act-00000001",
+            action: "pick",
+            source: { kind: "page" },
+            payload: { film: "Dune" },
+          },
+        },
+      ],
+      response:
+        "StoreDoc (status pending); 409 closed store, 429 pending cap or budget, 503 recovery budget.",
+      source: "v2/src/store-actions.ts",
+    },
+  ),
+  operation(
+    "complete_store_action",
+    "POST",
+    "/stores/{store}/actions/{actionId}/complete",
+    "Close a pending action as done or failed; expired or closed actions conflict.",
+    {
+      body: body("CompleteActionRequest", [
+        field("status", '"done"|"failed"', "Outcome.", true),
+        field("result", "unknown", "JSON result for done."),
+        field("error", "string", "1..2000 chars for failed."),
+      ]),
+      examples: [{ body: { status: "done", result: { ok: true } } }],
+      response: "StoreDoc",
+      source: "v2/src/store-actions.ts",
+    },
+  ),
+  operation("list_pages", "GET", "/pages", "List pages with title, agent runtime, dir and URL.", {
+    response: "{pages:PageSummary[]}",
+    source: "v2/src/pages.ts",
+  }),
+  operation("create_page", "POST", "/pages", "Create a page dir with page.yaml and a template.", {
+    body: body("CreatePageRequest", [
+      field("id", "string", "Page id ^[a-z0-9][a-z0-9-]{0,39}$.", true),
+      field("title", "string", "1..120 printable characters; defaults to id."),
+      field(
+        "runtime",
+        '"claude"|"codex"|"cursor"|"opencode"',
+        "Page agent runtime.",
+        false,
+        "claude",
+      ),
+      field("model", "string", "Page agent model."),
+      field("template", '"blank"', "Starter files.", false, "blank"),
+    ]),
+    examples: [{ body: { id: "films", title: "Films" } }],
+    response: "PageSummary",
+    status: 201,
+    source: "v2/src/pages.ts",
+  }),
+  operation(
+    "delete_page",
+    "DELETE",
+    "/pages/{pageId}",
+    "Delete a page dir, its store and streams.",
+    {
+      response: "{deleted:true,id:string}",
+      source: "v2/src/pages.ts",
+    },
+  ),
+  operation(
+    "get_page_file",
+    "GET",
+    "/pages/{pageId}/files/{path}",
+    "Serve one page file; dot paths and the store file are hidden.",
+    {
+      catchAllPathParams: ["path"],
+      response: "Raw file, PAGE_CONTENT_TYPES MIME, cache-control no-store.",
+      source: "v2/src/pages.ts",
+    },
+  ),
+  operation(
+    "stream_page_events",
+    "GET",
+    "/pages/{pageId}/events",
+    "Page event stream (text/event-stream): change, reset, reload, agent.",
+    {
+      query: [field("since", "integer", "Replay changes after this seq; Last-Event-ID wins.")],
+      examples: [{ query: { since: "0" } }],
+      response: "text/event-stream; non-SSE Accept 406; 64 open streams 503.",
+      source: "v2/src/pages.ts",
+      extraResponses: [
+        {
+          status: 406,
+          contentType: "application/json",
+          description: "Accept lacks text/event-stream.",
+        },
+      ],
     },
   ),
 ];

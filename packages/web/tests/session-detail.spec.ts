@@ -13,6 +13,7 @@ import {
   makeSpawningSession,
   makeStoppedSession,
   mockAgentModels,
+  mockPrStatusFor,
   mockSpawnDefaults,
   installApiRouteGuardsOnContext,
 } from "./fixtures.js";
@@ -783,6 +784,45 @@ test.describe("S1: Session detail header", () => {
     await expect(page.getByLabel("Session title")).toHaveValue(
       "Implement the derived-title feature end to end",
     );
+  });
+
+  test("restarts from overflow and offers Restore after pre-launch failure", async ({ page }) => {
+    let current = makeWorkingSession({ id: "detail-restart" });
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    let calls = 0;
+    await page.route(`**/api/sessions/${current.id}`, (route) => route.fulfill({ json: current }));
+    await page.route(`**/api/sessions/${current.id}/restore`, async (route) => {
+      calls += 1;
+      const body = route.request().postDataJSON() as { restart: boolean; operationId: string };
+      expect(body).toEqual({ restart: true, operationId: expect.any(String) });
+      await held;
+      current = {
+        ...current,
+        status: "stopped",
+        state: "stopped",
+        runtimeAlive: false,
+        lifecycle: lifecycleReceipt(body.operationId, current.id, "restore", "failed", 2),
+      };
+      await route.fulfill({
+        status: 500,
+        json: { error: "Restart failed", lifecycle: current.lifecycle },
+      });
+    });
+    await page.goto(`/sessions/${current.id}`);
+    await page.getByRole("button", { name: "More session actions" }).click();
+    await page.getByRole("menuitem", { name: "Restart session" }).click();
+    await expect.poll(() => calls).toBe(1);
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "More session actions" })).toBeDisabled();
+    finish();
+    await expect(page.getByText("Restart failed")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Restore", exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: "More session actions" }).click();
+    await expect(page.getByRole("menuitem", { name: "Restart session" })).toHaveCount(0);
+    expect(calls).toBe(1);
   });
 
   test("kebab menu opens Change title on a touch device with no prior hover", async ({
@@ -3237,20 +3277,14 @@ test.describe("S4: Links section", () => {
       },
     });
     await mockSessionDetail(page, session);
-    await page.route(/\/api\/pr-status/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "open",
-          reviewDecision: "approved",
-          ciStatus: "success",
-          totalThreads: 0,
-          unresolvedThreads: 0,
-          canMerge: false,
-        }),
-      });
-    });
+    await mockPrStatusFor(page, () => ({
+      state: "open",
+      reviewDecision: "approved",
+      ciStatus: "success",
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      canMerge: false,
+    }));
     await page.goto(`/sessions/${session.id}`);
 
     await expect(page.locator(`a[href="${docsUrl}"]`)).toHaveCount(1);
@@ -3286,19 +3320,13 @@ test.describe("S4: Links section", () => {
         links: [{ label: "pr", url: prUrl }],
       },
     });
-    await page.route(/\/api\/pr-status/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "open",
-          reviewDecision: "approved",
-          ciStatus: "success",
-          totalThreads: 2,
-          unresolvedThreads: 0,
-        }),
-      });
-    });
+    await mockPrStatusFor(page, () => ({
+      state: "open",
+      reviewDecision: "approved",
+      ciStatus: "success",
+      totalThreads: 2,
+      unresolvedThreads: 0,
+    }));
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 

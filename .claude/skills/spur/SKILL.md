@@ -51,13 +51,15 @@ DOCS
   Commands, session tools and variables: docs/commands.md
   Cursor send correlation and retained acknowledgement baselines: docs/commands.md, docs/daemon-api.md.
   Review feedback, recovery, package checks: docs/commands.md
-  Routes, bounded conversation pages, pre-flight batches, lifecycle receipts, restore cancellation: docs/daemon-api.md
+  Routes, PR reviewer metadata, bounded conversation pages, pre-flight batches, lifecycle receipts, terminal restart, restore cancellation: docs/daemon-api.md
   Config, admission, trigger-spawn retry, reviewer App/consent, pane-child fallback, OpenCode heartbeat: docs/configuration.md; events: docs/configuration.md#events
   GitHub PR feedback attribution, ownership and custom markers: docs/configuration.md#field-reference
+  Native PR alert ownership: docs/configuration.md#pr-alert-ownership.
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
   Full-access daemon MCP, backend controls, logs and cached attached PR status; connection/setup: docs/mcp.md
-  Interactive session snippets: docs/snippets.md
+  Interactive session snippets: docs/snippets.md; SDK and components: docs/spur-sdk.md
+  Pages and document stores, `spur page`, `spur db`, `[spur-action v1]`: docs/pages.md, docs/stores.md
 
 EDITING THIS FILE
 

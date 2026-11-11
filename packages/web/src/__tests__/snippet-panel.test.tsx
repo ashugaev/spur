@@ -2,21 +2,22 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider, useTheme } from "@/lib/theme-context";
 import { SnippetPanel, type SnippetPanelProps } from "@/components/snippets/SnippetPanel";
-import type { SnippetChannel, SnippetPort } from "@/lib/snippets/snippet-host";
-import type { SnippetManifest } from "@/lib/snippets/snippet-manifest";
+import type { SnippetChannel } from "@/lib/snippets/snippet-host";
 import {
   SNIPPET_CONFIRM_REASON_TEXT,
-  type SnippetActionRecord,
   type SnippetActionStatus,
   type SnippetConfirmReason,
   type SnippetTheme,
 } from "@/lib/snippets/snippet-protocol";
+import { budgetKey, recordKey, type SnippetRecord } from "@/lib/snippets/snippet-store";
 import {
-  budgetKey,
-  recordKey,
-  type SnippetRecord,
-  type SnippetStorage,
-} from "@/lib/snippets/snippet-store";
+  FakeDaemon,
+  FakePoller,
+  FakePort,
+  manifest,
+  MemoryStorage,
+  SID,
+} from "./fixtures/snippet-host-rig";
 
 const dialog = vi.hoisted(() => ({
   // jsdom has no show/showModal; the stub keeps the declarative open attribute.
@@ -26,80 +27,22 @@ const dialog = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/snippets/snippet-dialog", () => dialog);
 
-const SID = "sp-ab12";
 const NOW = Date.parse("2026-11-03T10:00:00Z");
-
-class MemoryStorage implements SnippetStorage {
-  data = new Map<string, string>();
-  failAll = false;
-  get length(): number {
-    return this.data.size;
-  }
-  key(index: number): string | null {
-    return [...this.data.keys()][index] ?? null;
-  }
-  getItem(key: string): string | null {
-    if (this.failAll) throw new Error("denied");
-    return this.data.get(key) ?? null;
-  }
-  setItem(key: string, value: string): void {
-    if (this.failAll) throw new Error("denied");
-    this.data.set(key, value);
-  }
-  removeItem(key: string): void {
-    this.data.delete(key);
-  }
-}
-
-class FakePort implements SnippetPort {
-  onmessage: ((event: { data: unknown }) => void) | null = null;
-  toFrame: Array<Record<string, unknown>> = [];
-  closed = false;
-  postMessage(message: unknown): void {
-    this.toFrame.push(message as Record<string, unknown>);
-  }
-  close(): void {
-    this.closed = true;
-  }
-  emit(data: unknown): void {
-    this.onmessage?.({ data });
-  }
-}
-
-const payloadSchema = {
-  type: "object",
-  properties: { note: { type: "string", maxLength: 40 } },
-} as const;
-
-function manifest(overrides: Partial<SnippetManifest> = {}): SnippetManifest {
-  return {
-    protocolVersion: 1,
-    snippetId: "picker",
-    ownerSessionId: SID,
-    instanceId: "inst-00000001",
-    revision: 1,
-    title: "Picker",
-    actions: [
-      { id: "go", label: "Go", payload: payloadSchema },
-      { id: "danger", label: "Danger", payload: payloadSchema, confirm: "always" },
-    ],
-    ...overrides,
-  };
-}
 
 interface Setup {
   storage: MemoryStorage;
+  daemon: FakeDaemon;
   ports: FakePort[];
-  sent: string[];
   focused: { value: boolean };
   posts: Array<Record<string, unknown>>;
   props: SnippetPanelProps;
+  sent(): number;
 }
 
 function setup(overrides: Partial<SnippetPanelProps> = {}): Setup {
   const storage = new MemoryStorage();
+  const daemon = new FakeDaemon();
   const ports: FakePort[] = [];
-  const sent: string[] = [];
   const posts: Array<Record<string, unknown>> = [];
   const focused = { value: false };
   let counter = 0;
@@ -107,12 +50,11 @@ function setup(overrides: Partial<SnippetPanelProps> = {}): Setup {
     sessionId: SID,
     manifest: manifest(),
     html: "<p>a</p>",
-    listingKey: "k1",
-    fetching: false,
-    session: { canSend: true, state: "working", queuedMessages: [] },
-    messages: [],
+    session: { canSend: true, state: "working", status: "running" },
     bridge: {
       storage,
+      request: (method, url, body) => daemon.handle(method, url, body),
+      poller: new FakePoller(),
       now: () => NOW,
       uuid: () => `req-${String((counter += 1)).padStart(8, "0")}`,
       nonce: () => `nonce-${(counter += 1)}`,
@@ -126,51 +68,64 @@ function setup(overrides: Partial<SnippetPanelProps> = {}): Setup {
         ports.push(hostPort);
         return { hostPort, framePort: {} };
       },
-      send: (prompt) => {
-        sent.push(prompt);
-        return Promise.resolve({ kind: "response", status: 409 });
-      },
     },
     ...overrides,
   };
-  return { storage, ports, sent, focused, posts, props };
+  return {
+    storage,
+    daemon,
+    ports,
+    focused,
+    posts,
+    props,
+    sent: () => daemon.posts("/actions").length,
+  };
 }
 
 async function mount(s: Setup): Promise<{ port: FakePort; frame: HTMLIFrameElement }> {
-  const view = render(<SnippetPanel {...s.props} />);
-  void view;
+  const before = s.ports.length;
+  render(<SnippetPanel {...s.props} />);
   const frame = (await screen.findByTitle("Picker")) as HTMLIFrameElement;
   const nonce = /nonce:"([^"]+)"/.exec(frame.getAttribute("srcdoc") ?? "")?.[1];
   await act(async () => {
     window.dispatchEvent(
       new MessageEvent("message", {
-        data: { type: "spur:hello", protocolVersion: 1, nonce },
+        data: { type: "spur:hello", protocolVersion: 2, nonce },
         source: frame.contentWindow,
       }),
     );
   });
+  await waitFor(() => expect(s.ports.length).toBeGreaterThan(before));
   const port = s.ports[s.ports.length - 1] as FakePort;
   return { port, frame };
 }
 
-function invoke(port: FakePort, actionId = "go", payload: unknown = { note: "x" }): void {
-  act(() => port.emit({ type: "invoke", callId: "c1", actionId, payload }));
+function invoke(port: FakePort, action = "go", payload: unknown = { note: "x" }): void {
+  act(() => port.emit({ type: "invoke", callId: "c1", action, payload }));
 }
 
-function record(
-  status: SnippetActionStatus,
-  extra: Partial<SnippetActionRecord> = {},
-): SnippetActionRecord {
-  return {
-    requestId: "req-00000099",
-    actionId: "go",
-    status,
-    prompt: "p",
-    instanceId: "inst-00000001",
-    baseRevision: 1,
-    dispatchedAt: NOW - 5000,
-    ...extra,
-  };
+// Seeds the `_actions` doc the panel restores on mount.
+function seedAction(
+  daemon: FakeDaemon,
+  status: "pending" | "done" | "failed",
+  error?: string,
+): void {
+  const createdAt = new Date(NOW - 5000).toISOString();
+  daemon.actions.set("act-seeded-01", {
+    id: "act-seeded-01",
+    rev: 1,
+    createdAt,
+    updatedAt: createdAt,
+    data: {
+      action: "go",
+      label: "Go",
+      payload: { note: "x" },
+      source: { kind: "snippet", snippetId: "picker", instanceId: "inst-00000001", revision: 1 },
+      status,
+      createdAt,
+      ...(error ? { error } : {}),
+    },
+  });
 }
 
 function seedRecord(storage: MemoryStorage, partial: Partial<SnippetRecord>): void {
@@ -178,8 +133,6 @@ function seedRecord(storage: MemoryStorage, partial: Partial<SnippetRecord>): vo
     instanceId: "inst-00000001",
     lastRevision: 1,
     unconfirmedRevision: null,
-    state: { app: null, controls: [] },
-    action: null,
     updatedAt: NOW,
     ...partial,
   };
@@ -304,11 +257,11 @@ describe("confirm strip", () => {
       const s = setup();
       const actionId = prepare(s);
       const { port } = await mount(s);
-      if (reason === "storage_unavailable") s.storage.failAll = true;
+      if (reason === "storage_unavailable") s.storage.failGet = true;
       invoke(port, actionId);
       const strip = screen.getByLabelText("Confirm snippet action");
       expect(strip).toHaveTextContent(SNIPPET_CONFIRM_REASON_TEXT[reason]);
-      expect(s.sent).toHaveLength(0);
+      expect(s.sent()).toBe(0);
       document.body.innerHTML = "";
     }
   });
@@ -334,9 +287,21 @@ describe("confirm strip", () => {
     invoke(port);
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     fireEvent.click(screen.getByRole("button", { name: "Discard" }));
-    expect(s.sent).toHaveLength(0);
+    expect(s.sent()).toBe(0);
     expect(screen.getByLabelText("Confirm snippet action")).toBeInTheDocument();
     expect(port.toFrame.filter((message) => message.type === "invoke-result")).toHaveLength(0);
+  });
+
+  it("shows an agent message waiting for confirm as inert text with no action status", async () => {
+    const s = setup();
+    const { port } = await mount(s);
+    act(() => port.emit({ type: "agent", op: "send", message: "<b>hi</b>", callId: "a1" }));
+    const strip = screen.getByLabelText("Confirm snippet action");
+    expect(within(strip).getByText("Message to agent")).toBeInTheDocument();
+    expect(strip.querySelector("pre")?.textContent).toBe("<b>hi</b>");
+    expect(strip.querySelector("b")).toBeNull();
+    expect(document.querySelector("[data-snippet-status]")).toBeNull();
+    expect(s.daemon.posts("/agent/send")).toHaveLength(0);
   });
 
   it("does not move focus when the strip appears", async () => {
@@ -351,39 +316,52 @@ describe("confirm strip", () => {
 
 describe("status line", () => {
   const cases: Array<
-    [SnippetActionStatus, string, "alert" | "status", Partial<SnippetActionRecord>]
+    [SnippetActionStatus, string, "alert" | "status", "pending" | "done" | "failed", string?]
   > = [
-    ["accepted", "Sent", "status", { acceptedAt: NOW }],
-    ["queued", "Queued", "status", { acceptedAt: NOW }],
-    ["processing", "Agent working", "status", { acceptedAt: NOW }],
-    ["completed", "Done", "status", {}],
-    ["replaced", "Replaced", "status", {}],
-    ["error", "Send failed · HTTP 409", "alert", { httpStatus: 409 }],
-    ["delivery_unknown", "Delivery unknown", "alert", {}],
-    ["timeout", "No reply in 15 min", "status", { acceptedAt: NOW - 3_600_000 }],
+    ["queued", "Queued", "status", "pending"],
+    ["completed", "Done", "status", "done"],
+    ["error", "Failed", "alert", "failed", "no film"],
+    ["timeout", "No reply in 15 min", "status", "failed", "timeout"],
   ];
-  it.each(cases)("%s reads %s with role %s", async (status, label, role, extra) => {
-    const s = setup();
-    seedRecord(s.storage, { action: record(status, extra) });
+  it.each(cases)("%s reads %s with role %s", async (status, label, role, doc, error) => {
+    const s = setup({ session: { canSend: true, state: "idle", status: "running" } });
+    seedAction(s.daemon, doc, error);
     await mount(s);
-    const line = document.querySelector(`[data-snippet-status="${status}"]`) as HTMLElement;
-    expect(line).not.toBeNull();
+    const line = (await waitFor(() => {
+      const found = document.querySelector(`[data-snippet-status="${status}"]`);
+      expect(found).not.toBeNull();
+      return found;
+    })) as HTMLElement;
     expect(line).toHaveAttribute("role", role);
     expect(line).toHaveTextContent(label);
     expect(line).toHaveTextContent("Go");
   });
 
-  it("offers a host Retry on error, delivery_unknown and timeout only; untrusted clicks are ignored", async () => {
+  it("reads Agent working while a pending action's owner is working", async () => {
     const s = setup();
-    seedRecord(s.storage, { action: record("error", { httpStatus: 409 }) });
+    seedAction(s.daemon, "pending");
     await mount(s);
-    const retry = screen.getByRole("button", { name: "Retry" });
+    await waitFor(() =>
+      expect(document.querySelector('[data-snippet-status="processing"]')).toHaveTextContent(
+        "Agent working",
+      ),
+    );
+  });
+
+  it("offers a host Retry on error and timeout only; untrusted clicks are ignored", async () => {
+    const s = setup();
+    seedAction(s.daemon, "failed", "no film");
+    await mount(s);
+    const retry = await screen.findByRole("button", { name: "Retry" });
     fireEvent.click(retry);
-    expect(s.sent).toHaveLength(0);
+    expect(s.sent()).toBe(0);
     document.body.innerHTML = "";
     const done = setup();
-    seedRecord(done.storage, { action: record("completed") });
+    seedAction(done.daemon, "done");
     await mount(done);
+    await waitFor(() =>
+      expect(document.querySelector('[data-snippet-status="completed"]')).not.toBeNull(),
+    );
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   });
 
@@ -413,7 +391,7 @@ describe("error cards and banner", () => {
     expect(screen.getByRole("alert")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Reload" }));
     expect(screen.getByText("No connection")).toBeInTheDocument();
-    expect(s.sent).toHaveLength(0);
+    expect(s.sent()).toBe(0);
   });
 
   it("shows navigated with Reload after a second iframe load, and flood after 101 messages", async () => {
@@ -480,11 +458,12 @@ describe("theme, fullscreen failure and refused files", () => {
     await act(async () => {
       window.dispatchEvent(
         new MessageEvent("message", {
-          data: { type: "spur:hello", protocolVersion: 1, nonce },
+          data: { type: "spur:hello", protocolVersion: 2, nonce },
           source: frame.contentWindow,
         }),
       );
     });
+    await waitFor(() => expect(s.ports.length).toBeGreaterThan(0));
     const port = s.ports[s.ports.length - 1] as FakePort;
     expect(port.toFrame.filter((m) => m.type === "theme")).toHaveLength(0);
     await act(async () => {

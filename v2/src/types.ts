@@ -135,6 +135,16 @@ export interface SessionSlots {
   tags?: string[];
 }
 
+export type PrAlertOwner =
+  | { state: "owned"; sessionId: string; ownerRollbackId?: string }
+  | { state: "retired"; successorWorkspaceId: string; successorSessionId: string };
+
+export interface PrAlertTransfer {
+  kind: "owner" | "suppressed";
+  predecessorWorkspaceId: string;
+  predecessorSessionId: string;
+}
+
 export interface TagDefinition {
   name: string;
   description: string;
@@ -675,6 +685,7 @@ export interface ReviewSnapshot {
   prNumber: number | null;
   signals: Map<string, ReviewSignal>;
   mergeConflictClearId?: string;
+  ownerRollbackId?: string;
 }
 
 // The baseline to diff the next poll's signals against: the stored snapshot's
@@ -1209,6 +1220,7 @@ export interface SessionRecord {
   planMode?: boolean;
   restrictWrites?: boolean;
   closeoutOwner?: boolean;
+  prAlertTransfer?: PrAlertTransfer;
   claudeAccountId?: string;
   allowedTriggers?: string[];
   agentSessionId?: string;
@@ -1403,6 +1415,7 @@ export interface SessionSidecarView {
 export interface SessionView extends Omit<
   SessionRecord,
   | "queuedMessages"
+  | "prAlertTransfer"
   | "agentLaunchId"
   | "triggerBirthKey"
   | "triggerBirthRequest"
@@ -1450,6 +1463,7 @@ export interface SessionView extends Omit<
  */
 export type DashboardOmittedField =
   | "queuedMessages"
+  | "prAlertTransfer"
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
   | "restoredAt"
@@ -1561,6 +1575,7 @@ export interface SpawnSessionRequest {
   planMode?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
+  prAlertOwner?: boolean;
   branch?: string;
   overrides?: SpawnOverrides;
   reuseWorkspaceSessionId?: string;
@@ -1836,6 +1851,7 @@ export interface KillSessionRequest {
 // (pane-rooted) survivor check; a pid that survives SIGKILL always refuses.
 export interface RestoreSessionRequest {
   operationId?: string;
+  restart?: boolean;
   force?: boolean;
   overrideTokenBudget?: boolean;
 }
@@ -2175,6 +2191,8 @@ export interface ConversationPage {
   messages: {
     index: number;
     role: "user" | "assistant";
+    /** Store-agent chat view only: chat send, `[spur-action v1]` summary, or agent reply. */
+    kind?: "chat" | "action" | "reply";
     text: string;
     timestampMs?: number;
     textTruncated?: boolean;

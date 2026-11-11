@@ -9,6 +9,7 @@ PRODUCT
 INTERFACE
 
   Classify UI, CLI, config, prompts and workflow surfaces; architect records proposed behavior/constraints, scope digest and approval evidence/absence.
+  Ground before in bound base B; after covers the full proposed PR.
   Obtain matching user authorization before dependent coding; prior explicit approval covering proposed scope counts.
   Mirror required approval request in current channel and authorized session Telegram. Keep full canonical manifest; daemon appends every clause. In current channel, show manifest path or rendered clauses; route UI screenshots per telegram skill.
   When frozen clauses make request unreadable, mirror one separate buttonless summary pointing to existing authenticated choices. Never use ordinary buttons as consent or rewrite/re-hash manifest.

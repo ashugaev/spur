@@ -21,10 +21,10 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "1d48ff4874a00aec5a32c894669366d7296e065c792e2f0ea9835ff90f345f35",
-  "types.ts": "e2059c38b1c14d037d0968106974a2e0ea7cea8ef5bc0363f29554ea5b01c65e",
+  "server.ts": "b5953ceed55a81b265e6721ce5aa2e5f80148268a7b450d51b04a06e6030d06a",
+  "types.ts": "04b5d658b38b28bbb347ac477985a4615cecaec07a3b55e18d341f406bf3faa4",
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
-  "session-service.ts": "1f11876aea299427235c3f2529b5e0d5937f56393477ff2a5b550f49a12ee6e4",
+  "session-service.ts": "03152c793dc9785951c82a3ecc2c2b9d9495a3dc7c3bbecd37676b5d04a361b1",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "1d06c2d904fa46b95ef8bed971c5767fad76663482f22822f9a541b345f161ff",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -45,9 +45,9 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(84);
+    expect(routes).toHaveLength(102);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(84);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(102);
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("spawn_background_session")?.path).toBe("/sessions/background");
     expect(getDaemonOperation("missing")).toBeUndefined();
@@ -242,6 +242,19 @@ describe("daemon MCP operation contracts", () => {
     }
   });
 
+  it("exposes optional explicit PR alert ownership only on native spawn contracts", () => {
+    for (const operationId of ["spawn_session", "spawn_background_session"]) {
+      expect(
+        getDaemonOperation(operationId)?.body?.fields.find(({ name }) => name === "prAlertOwner"),
+      ).toMatchObject({ name: "prAlertOwner", type: "boolean", required: false });
+    }
+    expect(
+      getDaemonOperation("respawn_session")?.body?.fields.some(
+        ({ name }) => name === "prAlertOwner",
+      ),
+    ).toBe(false);
+  });
+
   it("provides examples, path/query/body metadata, errors and source references for every operation", () => {
     for (const entry of DAEMON_OPERATIONS) {
       expect(entry.summary.length, entry.operationId).toBeGreaterThan(12);
@@ -276,7 +289,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(84);
+      expect(page.total).toBe(102);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",

@@ -22,6 +22,7 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 import {
   MAX_NESTED_ARTIFACT_ROWS,
+  SESSION_WORK_DIR,
   deleteSessionArtifactById,
   deleteSessionArtifactsDir,
   deleteSessionArtifactsExcept,
@@ -34,6 +35,7 @@ import {
   sessionArtifactsDir,
   withSessionArtifactInstructions,
 } from "../../src/session-artifacts.js";
+import { StoreService } from "../../src/stores.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -352,6 +354,22 @@ describe("nested artifact listing", () => {
     expect(result.truncated).toBe(false);
     expect(ids.some((id) => id.startsWith(".spur-work"))).toBe(false);
   });
+
+  it("never lists the session store and removes it with the artifacts dir", async () => {
+    const dataDir = await newDataDir();
+    const sessionId = "api-store-1";
+    const store = new StoreService({
+      dataDir,
+      readSession: (id) => (id === sessionId ? { id, status: "running" } : null),
+    });
+    await store.set(`session:${sessionId}`, "notes", "n1", { text: "hi" });
+    const file = join(sessionArtifactsDir(dataDir, sessionId), SESSION_WORK_DIR, "data.sqlite");
+    expect(existsSync(file)).toBe(true);
+    expect(listSessionArtifacts(dataDir, sessionId).artifacts).toEqual([]);
+
+    deleteSessionArtifactsDir(dataDir, sessionId);
+    expect(existsSync(file)).toBe(false);
+  });
 });
 
 describe("session artifact instructions", () => {
@@ -556,14 +574,22 @@ describe("deleteSessionArtifactById", () => {
 describe("withSessionArtifactInstructions snippet bullet", () => {
   const SNIPPET_BULLET_PATH = "snippet.$SPUR_SESSION.<id>.html";
 
-  it("adds the interactive snippet bullet once, after the existing artifact bullets", () => {
+  it("adds the snippet bullet and then the pages bullet, after the existing artifact bullets", () => {
     const text = withSessionArtifactInstructions("Do the task.");
     expect(text.startsWith("Do the task.\n\nSession artifacts:\n")).toBe(true);
     expect(text.split(SNIPPET_BULLET_PATH)).toHaveLength(2);
-    expect(text.split("[spur-snippet-action v1]")).toHaveLength(2);
+    expect(text.split("[spur-action v1]")).toHaveLength(2);
+    expect(text).not.toContain("spur-snippet-action");
+    expect(text).toContain('"$SPUR_SESSION_TOOL_DIR/spur" db session:$SPUR_SESSION done <id>');
+    expect(text).toContain('"$SPUR_SESSION_TOOL_DIR/spur" db session:$SPUR_SESSION fail <id>');
+    expect(text).not.toMatch(/`spur (db|page) /);
     expect(text).toContain("https://raw.githubusercontent.com/ashugaev/spur/main/docs/snippets.md");
     const lines = text.split("\n");
-    expect(lines[lines.length - 1]).toContain(SNIPPET_BULLET_PATH);
+    expect(lines[lines.length - 2]).toContain(SNIPPET_BULLET_PATH);
+    expect(lines[lines.length - 1]).toContain('"$SPUR_SESSION_TOOL_DIR/spur" page create <id>');
+    expect(lines[lines.length - 1]).toContain(
+      "https://raw.githubusercontent.com/ashugaev/spur/main/docs/pages.md",
+    );
     expect(lines.filter((line) => line.includes("snippet."))).toHaveLength(1);
   });
 
