@@ -102,12 +102,14 @@ func run(ctx context.Context, cancel context.CancelFunc, dir string, input io.Re
 		return errors.New("could not initialize auth transport")
 	}
 	serverDone := make(chan error, 1)
-	go func() { serverDone <- service.Run(ctx) }()
+	go func() {
+		defer close(serverDone)
+		serverDone <- service.Run(ctx)
+	}()
 	defer func() {
 		cancel()
-		shutdownCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
-		defer stop()
-		_ = service.Shutdown(shutdownCtx)
+		for range serverDone {
+		}
 	}()
 	select {
 	case <-started:

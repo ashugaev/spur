@@ -280,5 +280,9 @@ func TestCompanionControlLifecycleAndEndpointHydration(t *testing.T) {
 			}
 		}
 		f.stop(t)
+		if resp, err := client.Get(f.endpoint + "/_spur/readiness"); err == nil {
+			_ = resp.Body.Close()
+			t.Fatal("companion endpoint remained open after stop")
+		}
 	}
 }
