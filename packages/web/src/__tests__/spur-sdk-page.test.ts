@@ -7,6 +7,29 @@ import { flush, pageRig, sdkSource } from "./fixtures/spur-sdk-rig";
 // Page transport stays at the Page root, including nested documents.
 
 describe("page transport", () => {
+  it.each([false, true])(
+    "restores only an open panel voice host on synthetic retained-document transitions (open: %s)",
+    async (open) => {
+      const r = await pageRig("", open ? "/p/films/?chat=open" : "/p/films/");
+      const root = r.doc.querySelector("[data-spur-page-widget]")!.shadowRoot!;
+      const input = root.querySelector("textarea")!;
+      input.value = "keep this draft";
+      for (let cycle = 0; cycle < 2; cycle++) {
+        r.win.dispatchEvent(new r.win.PageTransitionEvent("pagehide", { persisted: true }));
+        expect(root.querySelector("iframe")).toBeNull();
+        r.win.dispatchEvent(new r.win.PageTransitionEvent("pageshow", { persisted: false }));
+        expect(root.querySelector("iframe")).toBeNull();
+        r.win.dispatchEvent(new r.win.PageTransitionEvent("pageshow", { persisted: true }));
+        const restored = root.querySelector("iframe");
+        expect(root.querySelectorAll("iframe")).toHaveLength(open ? 1 : 0);
+        r.win.dispatchEvent(new r.win.PageTransitionEvent("pageshow", { persisted: true }));
+        expect(root.querySelector("iframe")).toBe(restored);
+        expect(input.value).toBe("keep this draft");
+      }
+      expect(r.sources).toHaveLength(1);
+      expect(r.requests.filter((request) => request.url.endsWith("agent/send"))).toHaveLength(0);
+    },
+  );
   it("keeps isolated host typography after its reset and responsive inset outside that reset", async () => {
     const r = await pageRig();
     const host = r.doc.querySelector("[data-spur-page-widget]") as HTMLElement;

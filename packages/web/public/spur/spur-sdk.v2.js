@@ -1921,13 +1921,12 @@
         setOpen(false);
       }
     });
-    window.addEventListener(
-      "pagehide",
-      function () {
-        chat.setVoiceActive(false);
-      },
-      { once: true },
-    );
+    window.addEventListener("pagehide", function () {
+      chat.setVoiceActive(false);
+    });
+    window.addEventListener("pageshow", function (event) {
+      if (event.persisted && open) chat.setVoiceActive(true);
+    });
     document.body.appendChild(host);
     const url = new URL(window.location.href);
     if (url.searchParams.get("chat") === "open") {

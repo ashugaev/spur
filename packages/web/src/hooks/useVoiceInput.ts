@@ -461,7 +461,6 @@ export function useVoiceInput(options: {
       }
     })();
     const disposeCapture = () => {
-      cancelled = true;
       generationRef.current += 1;
       if (mediaRecorderRef.current?.state === "recording") {
         mediaRecorderRef.current.stop();
@@ -478,10 +477,13 @@ export function useVoiceInput(options: {
         });
       }
       pendingSendCallbackRef.current = null;
+      setRecording(false);
+      setVoiceBusy(null);
       stopRetainedPlayback();
     };
     window.addEventListener("pagehide", disposeCapture);
     return () => {
+      cancelled = true;
       window.removeEventListener("pagehide", disposeCapture);
       disposeCapture();
     };

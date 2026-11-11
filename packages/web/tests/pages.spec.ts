@@ -105,7 +105,25 @@ for (const width of [1280, 390]) {
     const sendBounds = await page.getByRole("button", { name: "Send", exact: true }).boundingBox();
     expect(sendBounds!.height).toBeLessThanOrEqual(36);
     await expect(draft).toHaveValue("Build a reading list\nwith tags");
+    // Synthetic retained-document lifecycle; routed fixtures do not prove BFCache eligibility.
+    for (let cycle = 0; cycle < 2; cycle++) {
+      await page.evaluate(() =>
+        window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })),
+      );
+      await expect(page.locator('iframe[title="Voice input"]')).toHaveCount(0);
+      await page.evaluate(() =>
+        window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })),
+      );
+      await expect(voice.getByRole("button", { name: "Start voice recording" })).toBeVisible();
+      await expect(draft).toHaveValue("Build a reading list\nwith tags");
+      expect(sends).toBe(0);
+    }
     await page.getByRole("button", { name: "Close agent chat", exact: true }).first().click();
+    await page.evaluate(() => {
+      window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+      window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+    });
+    await expect(page.locator('iframe[title="Voice input"]')).toHaveCount(0);
     await page.getByRole("button", { name: "Open agent chat", exact: true }).click();
     await expect(draft).toHaveValue("Build a reading list\nwith tags");
     expect(sends).toBe(0);
