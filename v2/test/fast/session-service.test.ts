@@ -251,7 +251,8 @@ import type * as sessionSlotsModule from "../../src/session-slots.js";
 import type * as metadataModule from "../../src/metadata.js";
 import type { InterfaceConsent } from "../../src/review-interface-consent.js";
 import type { TelegramPhoto } from "../../src/telegram-source-state.js";
-import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
+import { detectClaudeRateLimit, detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
+import { classifyClaudeJsonlState, parseJsonlRecord } from "../../src/claude-jsonl-state.js";
 import type * as claudeModule from "../../src/agents/claude.js";
 import type * as codexModule from "../../src/agents/codex.js";
 import type * as agentIndexModule from "../../src/agents/index.js";
@@ -65644,6 +65645,75 @@ describe("SessionService", () => {
       expect(reactivationEventCount()).toBe(1);
       expect(suppressedEvents()).toHaveLength(0);
       service.dispose();
+    });
+
+    it.each([
+      { name: "before reset", now: "2026-11-11T07:59:59.999Z", blocked: true },
+      { name: "at reset", now: "2026-11-11T08:00:00.000Z", blocked: false },
+      { name: "after reset", now: "2026-11-11T08:47:17.778Z", blocked: false },
+      { name: "future reset", now: "2026-11-10T08:47:17.778Z", blocked: true },
+      { name: "missing own timestamp", timestamp: null, blocked: true },
+      { name: "invalid own timestamp", timestamp: "invalid", blocked: true },
+      { name: "non-UTC reset", clause: "resets Nov 11, 8am (PST)", blocked: true },
+      { name: "unconfirmed time-only reset", clause: "resets 8am (UTC)", blocked: true },
+    ])("uses parsed individual spend evidence for ordinary send: $name", async (scenario) => {
+      vi.setSystemTime(new Date(scenario.now ?? "2026-11-11T08:47:17.778Z"));
+      const timestamp =
+        scenario.timestamp === null
+          ? undefined
+          : (scenario.timestamp ?? "2026-11-08T19:32:49.242Z");
+      const record = parseJsonlRecord(
+        JSON.stringify({
+          type: "assistant",
+          error: "rate_limit",
+          timestamp,
+          message: {
+            role: "assistant",
+            model: "<synthetic>",
+            stop_reason: "stop_sequence",
+            content: [
+              {
+                type: "text",
+                text: `You've hit your individual spend limit · run /usage-credits to ask your admin for a higher limit · your weekly limit ${scenario.clause ?? "resets Nov 11, 8am (UTC)"}`,
+              },
+            ],
+          },
+        }),
+        Date.now(),
+      );
+      if (!record) throw new Error("Expected native assistant record");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ rateLimitedAt: "2026-11-08T19:32:49.242Z" }));
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: classifyClaudeJsonlState([record], Date.now()),
+        reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [record] },
+        rateLimit: detectClaudeRateLimit([record]),
+      });
+      captureTmuxPaneMock.mockResolvedValue("Ready for input");
+      const { SessionService, SessionRateLimitedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-11-08T19:00:00.000Z");
+      try {
+        const view = await service.get("api-1");
+        sendMessageToTmuxMock.mockClear();
+        if (scenario.blocked) {
+          expect(view.state).toBe("rate_limited");
+          await expect(
+            service.send("api-1", { message: "hello", queue: false }),
+          ).rejects.toBeInstanceOf(SessionRateLimitedError);
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        } else {
+          await service.send("api-1", { message: "hello", queue: false });
+          expect(view.state).toBe("waiting");
+          expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(sendMessageToTmuxMock).toHaveBeenCalledExactlyOnceWith("api-1", "hello", {
+            agent: "claude",
+          });
+        }
+      } finally {
+        service.dispose();
+      }
     });
 
     it("delivers send() normally once live state leaves rate_limited", async () => {
