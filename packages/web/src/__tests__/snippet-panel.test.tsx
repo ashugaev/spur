@@ -223,15 +223,13 @@ describe("projected per-input voice", () => {
     const cancel = vi.fn();
     const discard = vi.fn();
     const toggle = vi.fn(() =>
-      vi
-        .mocked(useVoiceInput)
-        .mockReturnValue(
-          voiceControls({
-            voiceBusy: "starting",
-            cancelRecording: cancel,
-            discardRetainedTake: discard,
-          }),
-        ),
+      vi.mocked(useVoiceInput).mockReturnValue(
+        voiceControls({
+          voiceBusy: "starting",
+          cancelRecording: cancel,
+          discardRetainedTake: discard,
+        }),
+      ),
     );
     vi.mocked(useVoiceInput).mockReturnValue(voiceControls({ toggleRecording: toggle }));
     const { frame, port } = await mount(s);
