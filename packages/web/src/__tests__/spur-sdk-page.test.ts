@@ -7,6 +7,43 @@ import { flush, pageRig, sdkSource } from "./fixtures/spur-sdk-rig";
 // Page transport stays at the Page root, including nested documents.
 
 describe("page transport", () => {
+  it("places the trusted frame inside the padded field and bounds identity-checked feedback", async () => {
+    const r = await pageRig("", "/p/films/?chat=open");
+    const root = r.doc.querySelector("[data-spur-page-widget]")!.shadowRoot!;
+    expect(root.querySelector(".head")?.textContent).toContain("Agent chat");
+    const frame = root.querySelector("iframe")!;
+    expect(frame.parentElement?.className).toBe("spur-chat-rail");
+    expect(frame.closest(".spur-chat-field")?.querySelector("textarea")).not.toBeNull();
+    const query = new URL(frame.src).searchParams;
+    const state = {
+      type: "spur:voice-state",
+      page: "films",
+      chat: query.get("chat"),
+      nonce: query.get("nonce"),
+      starting: true,
+      unavailable: false,
+      error: null,
+    };
+    const send = (data: unknown) =>
+      r.win.dispatchEvent(
+        new r.win.MessageEvent("message", {
+          origin: "http://host",
+          source: frame.contentWindow,
+          data,
+        }),
+      );
+    send({ ...state, nonce: "wrong" });
+    expect(root.querySelector(".spur-chat-feedback")?.textContent).toBe("");
+    send(state);
+    expect(root.querySelector('[aria-label="Starting microphone"]')).not.toBeNull();
+    send({ ...state, starting: false, error: "<b>denied</b>" });
+    expect(root.querySelector(".spur-chat-feedback")?.textContent).toBe("<b>denied</b>");
+    expect(root.querySelector(".spur-chat-feedback b")).toBeNull();
+    send({ ...state, error: "x".repeat(2001) });
+    expect(root.querySelector(".spur-chat-feedback")?.textContent).toBe("<b>denied</b>");
+    (root.querySelector('[aria-label="Close agent chat"]') as HTMLButtonElement).click();
+    expect(root.querySelector(".spur-chat-feedback")?.textContent).toBe("");
+  });
   it.each([false, true])(
     "restores only an open panel voice host on synthetic retained-document transitions (open: %s)",
     async (open) => {

@@ -47,7 +47,7 @@ Writes an `_actions` doc in the agent store; the owner gets one `[spur-action v1
 - `[data-spur-action="<id>"][data-spur-payload='<json>']`: any element invokes on click.
 - `<spur-status>`: action status, Retry, rejection text. Without one, a rejection renders one `<spur-error data-spur-fallback>` at the end of `body`.
 - `<spur-chat placeholder>`: message log, agent status, multiline draft (20,000 chars); SEND uses `agent.send`. Text renders as plain text.
-- Chat voice inserts into the editable draft; SEND stays explicit. Page microphone lives in the composer; snippet microphone lives in trusted panel controls. Recording/transcription failures preserve text; failed audio can be retried or discarded. Voice providers: [voice.md](voice.md).
+- Chat voice inserts into the editable draft; SEND stays explicit. Microphones sit inside eligible Page/snippet inputs; snippet capture stays in the trusted parent. Recording/transcription failures preserve text; failed audio can be retried or discarded. Voice providers: [voice.md](voice.md).
 - `<spur-loader aria-label>`, `<spur-empty>`, `<spur-error>`.
 - Fields with an `id` persist their value through `state`.
 - While an action is in flight, or actions are blocked, every library control and `[data-spur-action]` element is disabled.

@@ -86,6 +86,8 @@ describe("page ids and page.yaml", () => {
     });
     const html = await readFile(join(pageDirPath(dir, "films"), "index.html"), "utf8");
     expect(html).toContain("Your page starts here.");
+    expect(html).toContain("Open the agent chat");
+    expect(html).not.toContain("robot chat");
     expect(html).not.toContain("<spur-chat>");
     expect(html).toContain("Films &#60;&#38;&#62;");
     expect(html).not.toContain("innerHTML");

@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { ChatVoiceControls } from "@/components/ChatVoiceControls";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ChatVoiceControls, type ChatVoiceState } from "@/components/ChatVoiceControls";
 import { PAGE_ID_RE } from "@/lib/store-proxy";
 
 interface VoiceIdentity {
@@ -12,6 +12,16 @@ interface VoiceIdentity {
 export function PageVoiceHost() {
   const [identity, setIdentity] = useState<VoiceIdentity | null>(null);
   const controlsRef = useRef<HTMLDivElement>(null);
+  const reportState = useCallback(
+    (state: ChatVoiceState) => {
+      if (identity)
+        window.parent.postMessage(
+          { type: "spur:voice-state", ...identity, ...state },
+          window.location.origin,
+        );
+    },
+    [identity],
+  );
   useEffect(() => {
     const query = new URLSearchParams(window.location.search);
     const page = query.get("page") ?? "";
@@ -67,6 +77,7 @@ export function PageVoiceHost() {
     <div ref={controlsRef}>
       <ChatVoiceControls
         contextKey={`page-chat:${identity.page}:${identity.chat}`}
+        onState={reportState}
         onTranscribed={(text) => {
           window.parent.postMessage(
             { type: "spur:voice-transcript", ...identity, text },

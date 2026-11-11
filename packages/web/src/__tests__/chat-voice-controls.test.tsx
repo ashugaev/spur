@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ChatVoiceControls } from "@/components/ChatVoiceControls";
+import { ChatVoiceControls, ChatVoiceView } from "@/components/ChatVoiceControls";
 import { useVoiceInput, type UseVoiceInput } from "@/hooks/useVoiceInput";
 
 vi.mock("@/hooks/useVoiceInput", () => ({ useVoiceInput: vi.fn() }));
@@ -30,6 +30,21 @@ function controls(overrides: Partial<UseVoiceInput> = {}): UseVoiceInput {
 }
 beforeEach(() => vi.mocked(useVoiceInput).mockReset());
 describe("shared insert-only chat voice controls", () => {
+  it("uses an in-flow 108px rail for the complete retained stack without creating a recorder in views", () => {
+    const voice = controls({ hasRetainedTake: true });
+    const { container } = render(<ChatVoiceView voice={voice} />);
+    expect(useVoiceInput).not.toHaveBeenCalled();
+    const rail = container.firstElementChild!;
+    expect(rail.className).toContain("h-[108px]");
+    const buttons = Array.from(rail.querySelectorAll("button"));
+    expect(buttons.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Play failed voice recording",
+      "Retry failed voice recording",
+      "Discard failed voice recording",
+    ]);
+    expect(rail.querySelector('[class*="absolute"]')).toBeNull();
+    expect(buttons.every((button) => button.className.includes("h-8"))).toBe(true);
+  });
   it("announces microphone startup with a spinner and disables recording until ready", () => {
     vi.mocked(useVoiceInput).mockReturnValue(controls({ voiceBusy: "starting" }));
     render(<ChatVoiceControls contextKey="page-chat:one" onTranscribed={vi.fn()} />);

@@ -26,6 +26,51 @@ const FORM = `
 `;
 
 describe("handshake", () => {
+  it("does not reschedule geometry rAF for static inputs; coalesces dirty bursts and cleans heartbeat", async () => {
+    const r = await portRig("<spur-chat></spur-chat><spur-chat></spur-chat>");
+    r.frame();
+    expect(r.ofType("chat-layout")).toHaveLength(1);
+    expect(r.pendingFrames()).toBe(0);
+    r.frame();
+    expect(r.pendingFrames()).toBe(0);
+    for (let i = 0; i < 10; i++) r.win.dispatchEvent(new r.win.Event("scroll"));
+    expect(r.pendingFrames()).toBe(1);
+    r.frame();
+    expect(r.pendingFrames()).toBe(0);
+    r.advance(10000);
+    expect(r.ofType("chat-layout").length).toBeLessThanOrEqual(40);
+    expect(r.pendingFrames()).toBe(0);
+    expect(r.sent.length).toBeLessThan(100);
+    r.doc.querySelectorAll("spur-chat").forEach((chat) => chat.remove());
+    await flush();
+    const count = r.ofType("chat-layout").length;
+    r.advance(1000);
+    r.frame();
+    expect(r.ofType("chat-layout")).toHaveLength(count);
+  });
+  it("renders bounded target feedback as text below the field", async () => {
+    const r = await portRig("<spur-chat></spur-chat><spur-chat></spur-chat>");
+    const target = r.ofType("chat-register")[1]?.target;
+    r.fromHost({
+      type: "chat-voice-state",
+      target,
+      starting: false,
+      unavailable: false,
+      error: "<b>retry</b>",
+    });
+    const feedback = r.doc.querySelectorAll(".spur-chat-feedback");
+    expect(feedback[0]?.textContent).toBe("");
+    expect(feedback[1]?.textContent).toBe("<b>retry</b>");
+    expect(feedback[1]?.querySelector("b")).toBeNull();
+    r.fromHost({
+      type: "chat-voice-state",
+      target,
+      starting: true,
+      unavailable: false,
+      error: "x".repeat(2001),
+    });
+    expect(feedback[1]?.textContent).toBe("<b>retry</b>");
+  });
   it("sends an editable chat draft by button click without native form submission", async () => {
     const r = await portRig("<spur-chat></spur-chat>");
     const chat = r.doc.querySelector("spur-chat")!;

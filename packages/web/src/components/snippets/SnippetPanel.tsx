@@ -14,7 +14,9 @@ import { CloseIcon } from "@/components/icons/CloseIcon";
 import { SendIcon } from "@/components/icons/SendIcon";
 import { Spinner } from "@/components/icons/Spinner";
 import { LoadingBar } from "@/components/LoadingBar";
-import { ChatVoiceControls } from "@/components/ChatVoiceControls";
+import { ChatVoiceView } from "@/components/ChatVoiceControls";
+import { useVoiceInput, type UseVoiceInput } from "@/hooks/useVoiceInput";
+import { placeVoiceSlots } from "@/lib/snippets/snippet-voice-layout";
 import { formatRelativeTime } from "@/lib/format";
 import { useTheme } from "@/lib/theme-context";
 import {
@@ -42,6 +44,8 @@ import {
   snippetStatusLabel,
   type SnippetTheme,
   type SnippetThemeToken,
+  type ChatLayout,
+  type VoiceRect,
 } from "@/lib/snippets/snippet-protocol";
 import { enterFullscreen, exitFullscreen, setInline } from "@/lib/snippets/snippet-dialog";
 import type { SnippetStorage } from "@/lib/snippets/snippet-store";
@@ -410,6 +414,7 @@ export function SnippetPanel({
     onApplyResultRef.current = onApplyResult;
   }, [onApplyResult]);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const regionRef = useRef<HTMLDivElement | null>(null);
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
@@ -653,32 +658,37 @@ export function SnippetPanel({
             {state.manifest.snippetId} · r{state.manifest.revision} · Esc to exit
           </span>
         </div>
-        {srcDoc !== null ? (
-          <iframe
-            className="snippet-frame block w-full border-0 bg-transparent"
-            key={state.mountKey}
-            onLoad={() => host.frameLoaded()}
-            ref={iframeRef}
-            referrerPolicy="no-referrer"
-            sandbox={SNIPPET_FRAME_SANDBOX}
-            srcDoc={srcDoc}
-            style={{ height: state.height ?? 160 }}
-            title={state.manifest.title}
-          />
-        ) : (
-          <FramePlaceholder />
-        )}
-        {state.phase === "connected" &&
-        !state.conflict &&
-        state.availability.canInvoke &&
-        state.voiceTarget ? (
-          <SnippetVoice
-            host={host}
-            sessionId={sessionId}
-            mountKey={state.mountKey}
-            target={state.voiceTarget}
-          />
-        ) : null}
+        <div className="snippet-frame-region relative min-h-0 overflow-hidden" ref={regionRef}>
+          {srcDoc !== null ? (
+            <iframe
+              className="snippet-frame block w-full border-0 bg-transparent"
+              key={state.mountKey}
+              onLoad={() => host.frameLoaded()}
+              ref={iframeRef}
+              referrerPolicy="no-referrer"
+              sandbox={SNIPPET_FRAME_SANDBOX}
+              srcDoc={srcDoc}
+              style={{ height: state.height ?? 160 }}
+              title={state.manifest.title}
+            />
+          ) : (
+            <FramePlaceholder />
+          )}
+          {state.phase === "connected" &&
+          !state.conflict &&
+          state.availability.canInvoke &&
+          srcDoc !== null ? (
+            <SnippetVoice
+              key={`voice:${state.mountKey}`}
+              host={host}
+              sessionId={sessionId}
+              mountKey={state.mountKey}
+              frameRef={iframeRef}
+              regionRef={regionRef}
+              layout={state.voiceLayout}
+            />
+          ) : null}
+        </div>
         {state.confirm ? (
           <ConfirmStrip
             confirm={state.confirm}
@@ -696,24 +706,261 @@ function SnippetVoice({
   host,
   sessionId,
   mountKey,
-  target,
+  frameRef,
+  regionRef,
+  layout,
 }: {
   host: SnippetHost;
   sessionId: string;
   mountKey: string;
-  target: string;
+  frameRef: React.RefObject<HTMLIFrameElement | null>;
+  regionRef: React.RefObject<HTMLDivElement | null>;
+  layout: ChatLayout | null;
 }) {
-  const locked = useRef(target);
+  const [slots, setSlots] = useState<Array<{ target: string; rect: VoiceRect }>>([]);
+  const [owner, setOwner] = useState<string | null>(null);
+  const [errorTarget, setErrorTarget] = useState<string | null>(null);
+  const claim = useRef<{ target: string; generation: number } | null>(null);
+  const generation = useRef(0);
+  const suspended = useRef(false);
+  const currentLayout = useRef(layout);
+  currentLayout.current = layout;
+  const eligible = () => {
+    if (suspended.current) return [];
+    const frame = frameRef.current;
+    const region = regionRef.current;
+    return frame && region ? placeVoiceSlots(frame, region, currentLayout.current) : [];
+  };
+  const voice = useVoiceInput({
+    contextKey: `snippet-chat:${sessionId}:${mountKey}`,
+    onTranscribed: (text) => {
+      const take = claim.current;
+      if (
+        take &&
+        take.generation === generation.current &&
+        eligible().some((slot) => slot.target === take.target)
+      )
+        host.insertVoiceText(take.target, mountKey, text);
+    },
+  });
+  const live = useRef({ voice, eligible });
+  live.current = { voice, eligible };
+  const cancel = useCallback(() => {
+    generation.current += 1;
+    claim.current = null;
+    setOwner(null);
+    setErrorTarget(null);
+    live.current.voice.cancelRecording();
+    void live.current.voice.discardRetainedTake();
+    live.current.voice.clearVoiceError();
+  }, []);
+  useEffect(() => {
+    const frame = frameRef.current;
+    const region = regionRef.current;
+    if (!frame || !region) return;
+    let scheduled = 0;
+    const measure = () => {
+      const next = live.current.eligible();
+      if (claim.current && !next.some((slot) => slot.target === claim.current?.target)) cancel();
+      setSlots((previous) => (JSON.stringify(previous) === JSON.stringify(next) ? previous : next));
+    };
+    const invalidate = () => {
+      if (!scheduled)
+        scheduled = requestAnimationFrame(() => {
+          scheduled = 0;
+          measure();
+        });
+    };
+    const motion = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Element && target.contains(frame)) {
+        setSlots([]);
+        cancel();
+      }
+    };
+    const hide = () => {
+      suspended.current = true;
+      cancel();
+      setSlots([]);
+    };
+    const show = () => {
+      suspended.current = false;
+      invalidate();
+    };
+    const resize = new ResizeObserver(invalidate);
+    const mutation = new MutationObserver(invalidate);
+    for (let node: HTMLElement | null = frame; node; node = node.parentElement) {
+      resize.observe(node);
+      mutation.observe(node, {
+        attributes: true,
+        attributeFilter: ["class", "style", "open", "hidden"],
+      });
+    }
+    const events = [
+      "scroll",
+      "resize",
+      "transitionend",
+      "transitioncancel",
+      "animationend",
+      "animationcancel",
+    ];
+    events.forEach((name) => window.addEventListener(name, invalidate, true));
+    window.addEventListener("transitionrun", motion, true);
+    window.addEventListener("animationstart", motion, true);
+    window.addEventListener("pagehide", hide);
+    window.addEventListener("pageshow", show);
+    window.visualViewport?.addEventListener("scroll", invalidate);
+    window.visualViewport?.addEventListener("resize", invalidate);
+    const timer = window.setInterval(measure, 500);
+    invalidate();
+    return () => {
+      cancelAnimationFrame(scheduled);
+      clearInterval(timer);
+      resize.disconnect();
+      mutation.disconnect();
+      events.forEach((name) => window.removeEventListener(name, invalidate, true));
+      window.removeEventListener("transitionrun", motion, true);
+      window.removeEventListener("animationstart", motion, true);
+      window.removeEventListener("pagehide", hide);
+      window.removeEventListener("pageshow", show);
+      window.visualViewport?.removeEventListener("scroll", invalidate);
+      window.visualViewport?.removeEventListener("resize", invalidate);
+      generation.current += 1;
+      claim.current = null;
+      for (const slot of currentLayout.current?.slots ?? [])
+        host.voiceState(slot.target, mountKey, {
+          starting: false,
+          unavailable: false,
+          error: null,
+        });
+      live.current.voice.cancelRecording();
+      void live.current.voice.discardRetainedTake();
+    };
+  }, [cancel, frameRef, regionRef, host, mountKey]);
+  // A snapshot invalidates placement without rebuilding the controller or its observers.
+  useEffect(() => {
+    const next = eligible();
+    if (claim.current && !next.some((slot) => slot.target === claim.current?.target)) cancel();
+    setSlots((previous) => (JSON.stringify(previous) === JSON.stringify(next) ? previous : next));
+    if (!layout) return;
+    const expiry = window.setTimeout(
+      () => {
+        if (claim.current) cancel();
+        setSlots([]);
+      },
+      Math.max(0, layout.receivedAt + 750 - Date.now()),
+    );
+    return () => clearTimeout(expiry);
+  }, [layout, cancel]);
+  useEffect(() => {
+    if (voice.hasRetainedTake && !claim.current) {
+      void voice.discardRetainedTake();
+      return;
+    }
+    if (!voice.recording && !voice.voiceBusy && !voice.hasRetainedTake && claim.current) {
+      setErrorTarget(voice.voiceError ? claim.current.target : null);
+      claim.current = null;
+      setOwner(null);
+    }
+  }, [voice.recording, voice.voiceBusy, voice.hasRetainedTake, voice.voiceError]);
+  useEffect(() => {
+    for (const slot of layout?.slots ?? [])
+      host.voiceState(slot.target, mountKey, {
+        starting: slot.target === owner && voice.voiceBusy === "starting",
+        unavailable: !voice.canUseVoice,
+        error:
+          slot.target === (owner ?? errorTarget)
+            ? (voice.voiceError?.slice(0, 2000) ?? null)
+            : null,
+      });
+  }, [
+    host,
+    mountKey,
+    layout,
+    owner,
+    errorTarget,
+    voice.voiceBusy,
+    voice.canUseVoice,
+    voice.voiceError,
+  ]);
+  const gesture = useRef<{ target: string; rect: string; sequence: number } | null>(null);
   return (
-    <div className="border-t border-[var(--color-border-subtle)] px-2 py-1.5">
-      <ChatVoiceControls
-        key={mountKey}
-        contextKey={`snippet-chat:${sessionId}:${mountKey}`}
-        onTakeStart={() => {
-          locked.current = target;
-        }}
-        onTranscribed={(text) => host.insertVoiceText(locked.current, mountKey, text)}
-      />
+    <div
+      className="pointer-events-none absolute inset-0 overflow-hidden"
+      data-snippet-voice-overlay
+    >
+      {slots.map(({ target, rect }) => {
+        const other = owner !== null && owner !== target;
+        const view: UseVoiceInput = other
+          ? {
+              ...voice,
+              recording: false,
+              voiceBusy: "starting",
+              hasRetainedTake: false,
+              voiceError: null,
+            }
+          : {
+              ...voice,
+              toggleRecording: () => {
+                if (!claim.current) {
+                  claim.current = { target, generation: ++generation.current };
+                  setOwner(target);
+                  setErrorTarget(null);
+                  voice.clearVoiceError();
+                }
+                voice.toggleRecording();
+              },
+              cancelRecording: cancel,
+              discardRetainedTake: async () => {
+                cancel();
+              },
+            };
+        return (
+          <div
+            key={target}
+            data-voice-target={target}
+            className="absolute origin-top-left"
+            style={{
+              left: rect.x,
+              top: rect.y,
+              width: 32,
+              height: 108,
+              transform: `scale(${rect.width / 32}, ${rect.height / 108})`,
+            }}
+            onPointerDownCapture={() => {
+              const slot = eligible().find((item) => item.target === target);
+              gesture.current = slot
+                ? {
+                    target,
+                    rect: JSON.stringify(slot.rect),
+                    sequence: currentLayout.current?.sequence ?? -1,
+                  }
+                : null;
+            }}
+            onPointerCancel={() => {
+              gesture.current = null;
+            }}
+            onClickCapture={(event) => {
+              const slot = eligible().find((item) => item.target === target);
+              const pending = gesture.current;
+              gesture.current = null;
+              if (
+                !slot ||
+                (claim.current && claim.current.target !== target) ||
+                (event.detail > 0 &&
+                  (!pending ||
+                    pending.target !== target ||
+                    pending.rect !== JSON.stringify(slot.rect)))
+              ) {
+                event.preventDefault();
+                event.stopPropagation();
+              }
+            }}
+          >
+            <ChatVoiceView voice={view} />
+          </div>
+        );
+      })}
     </div>
   );
 }

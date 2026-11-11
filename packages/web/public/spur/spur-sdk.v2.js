@@ -34,6 +34,8 @@
     chatFocus: "chat-focus",
     chatUnregister: "chat-unregister",
     chatTranscript: "chat-transcript",
+    chatLayout: "chat-layout",
+    chatVoiceState: "chat-voice-state",
   };
   const PROTOCOL_VERSION = 2;
   const HELLO_INTERVAL_MS = 200;
@@ -279,6 +281,11 @@
             if (chat) chat.insertTranscript(data.text);
           }
           return;
+        case MSG.chatVoiceState: {
+          const chat = chats.get(data.target);
+          if (chat) chat.voiceState(data);
+          return;
+        }
         case MSG.action:
           setAction(data.action);
           return;
@@ -365,6 +372,9 @@
       kind: "port",
       chatTarget: function (type, target) {
         post({ type: type, target: target });
+      },
+      chatLayout: function (snapshot) {
+        post(Object.assign({ type: MSG.chatLayout }, snapshot));
       },
       connect: connect,
       connected: function () {
@@ -682,11 +692,15 @@
     ".spur-chat-status{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--spur-text-tertiary)}",
     ".spur-chat-status[data-tone=error]{color:var(--spur-status-error)}",
     ".spur-chat-form{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px}",
-    ".spur-chat-form textarea{width:100%;min-width:0;resize:vertical;font:inherit;color:var(--spur-text-primary);background:var(--spur-input-bg);border:1px solid var(--spur-input-border);padding:6px 8px;border-radius:0}",
+    ".spur-chat-field{position:relative;width:100%;min-width:0}",
+    ".spur-chat-form textarea{box-sizing:border-box;display:block;width:100%;min-width:0;min-height:144px;resize:vertical;font:inherit;color:var(--spur-text-primary);background:var(--spur-input-bg);border:1px solid var(--spur-input-border);padding:6px 96px 56px 8px;border-radius:0}",
     ".spur-chat-form textarea:focus-visible{outline:2px solid var(--spur-accent);outline-offset:-2px}",
     ".spur-chat-form textarea[aria-invalid=true]{border-color:var(--spur-status-error)}",
     ".spur-chat-form textarea:disabled{opacity:.55}",
-    ".spur-chat-voice{flex:1;min-width:0;width:0;height:36px;border:0;background:var(--spur-bg-surface)}",
+    ".spur-chat-rail{position:absolute;right:8px;bottom:8px;width:32px;height:108px;pointer-events:none}",
+    ".spur-chat-voice{display:block;width:32px;height:108px;border:0;background:transparent;pointer-events:auto}",
+    ".spur-chat-feedback{width:100%;overflow-wrap:anywhere;color:var(--spur-status-error)}",
+    ".spur-chat-feedback:empty{display:none}",
   ].join("\n");
 
   function installStyles() {
@@ -1660,6 +1674,195 @@
     },
   );
 
+  // One invalidation scheduler for every opaque-frame chat. No idle rAF loop.
+  let layoutCleanup = null;
+  let layoutResume = null;
+  let layoutSequence = 0;
+  function watchChatLayout() {
+    if (transport.kind !== "port") return;
+    if (!chats.size) {
+      if (layoutCleanup) layoutCleanup();
+      layoutCleanup = null;
+      if (layoutResume) window.removeEventListener("pageshow", layoutResume);
+      layoutResume = null;
+      return;
+    }
+    if (layoutCleanup) {
+      layoutCleanup.invalidate();
+      return;
+    }
+    let frame = 0;
+    let flush = 0;
+    let heartbeat = 0;
+    let previous = "";
+    let sentAt = -Infinity;
+    let times = [];
+    let closed = false;
+    function validStyle(node) {
+      const style = window.getComputedStyle(node);
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.visibility === "collapse" ||
+        (style.clipPath && style.clipPath !== "none") ||
+        (style.maskImage && style.maskImage !== "none") ||
+        (style.perspective && style.perspective !== "none") ||
+        (style.rotate && style.rotate !== "none" && style.rotate !== "0deg") ||
+        (style.scale &&
+          style.scale !== "none" &&
+          style.scale.split(/\s+/).some((value) => !(Number(value) > 0)))
+      )
+        return false;
+      if (
+        node.getAnimations &&
+        node.getAnimations().some((animation) => animation.playState === "running")
+      )
+        return false;
+      if (style.transform && style.transform !== "none") {
+        const match = /^matrix\(([^)]+)\)$/.exec(style.transform);
+        if (!match) return false;
+        const values = match[1].split(",").map(Number);
+        if (
+          values.length !== 6 ||
+          !values.every(Number.isFinite) ||
+          values[0] <= 0 ||
+          values[3] <= 0 ||
+          values[1] !== 0 ||
+          values[2] !== 0
+        )
+          return false;
+      }
+      return true;
+    }
+    function slotRect(chat, viewport) {
+      const rail = chat._rail;
+      if (!rail || !chat.isConnected || chat._input.disabled) return null;
+      const box = rail.getBoundingClientRect();
+      if (
+        box.width < 8 ||
+        box.width > 128 ||
+        box.height < 27 ||
+        box.height > 432 ||
+        box.left < 0 ||
+        box.top < 0 ||
+        box.right > viewport.width ||
+        box.bottom > viewport.height
+      )
+        return null;
+      for (let node = rail; node; node = node.parentElement) {
+        if (!validStyle(node)) return null;
+        const style = window.getComputedStyle(node);
+        const clip = node.getBoundingClientRect();
+        const sx = node.offsetWidth ? clip.width / node.offsetWidth : 1;
+        const sy = node.offsetHeight ? clip.height / node.offsetHeight : 1;
+        const left = clip.left + node.clientLeft * sx;
+        const top = clip.top + node.clientTop * sy;
+        if (
+          /(hidden|clip|scroll|auto)/.test(style.overflowX || style.overflow) &&
+          (box.left < left || box.right > left + node.clientWidth * sx)
+        )
+          return null;
+        if (
+          /(hidden|clip|scroll|auto)/.test(style.overflowY || style.overflow) &&
+          (box.top < top || box.bottom > top + node.clientHeight * sy)
+        )
+          return null;
+      }
+      return { x: box.left, y: box.top, width: box.width, height: box.height };
+    }
+    function measure(force) {
+      if (closed || !chats.size) return;
+      const now = Date.now();
+      times = times.filter((time) => now - time < 10000);
+      const wait = Math.max(
+        250 - (now - sentAt),
+        times.length >= 40 ? 10000 - (now - times[0]) : 0,
+      );
+      if (wait > 0) {
+        if (!flush)
+          flush = window.setTimeout(() => {
+            flush = 0;
+            measure(force);
+          }, wait);
+        return;
+      }
+      const viewport = { width: window.innerWidth, height: window.innerHeight };
+      const slots = Array.from(chats.values())
+        .slice(0, 16)
+        .map((chat) => ({ target: chat._chatId, rect: slotRect(chat, viewport) }));
+      const value = JSON.stringify({ viewport: viewport, slots: slots });
+      if (force || value !== previous) {
+        transport.chatLayout({ sequence: layoutSequence++, viewport: viewport, slots: slots });
+        previous = value;
+        sentAt = now;
+        times.push(now);
+      }
+    }
+    function invalidate() {
+      if (!frame && !closed)
+        frame = window.requestAnimationFrame(() => {
+          frame = 0;
+          measure(false);
+        });
+    }
+    const resize = new ResizeObserver(invalidate);
+    resize.observe(document.documentElement);
+    chats.forEach((chat) => resize.observe(chat._rail.parentElement));
+    const mutations = new MutationObserver(invalidate);
+    mutations.observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["style", "class", "hidden", "disabled"],
+    });
+    const events = [
+      "scroll",
+      "resize",
+      "transitionrun",
+      "transitionend",
+      "transitioncancel",
+      "animationstart",
+      "animationend",
+      "animationcancel",
+    ];
+    events.forEach((name) => window.addEventListener(name, invalidate, true));
+    window.visualViewport?.addEventListener("scroll", invalidate);
+    window.visualViewport?.addEventListener("resize", invalidate);
+    function beat() {
+      measure(true);
+      heartbeat = window.setTimeout(beat, 500);
+    }
+    function resume() {
+      layoutResume = null;
+      watchChatLayout();
+    }
+    function suspend() {
+      if (layoutCleanup) layoutCleanup();
+      layoutCleanup = null;
+      layoutResume = resume;
+      window.addEventListener("pageshow", resume, { once: true });
+    }
+    window.addEventListener("pagehide", suspend);
+    heartbeat = window.setTimeout(beat, 500);
+    layoutCleanup = () => {
+      closed = true;
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(flush);
+      window.clearTimeout(heartbeat);
+      resize.disconnect();
+      mutations.disconnect();
+      events.forEach((name) => window.removeEventListener(name, invalidate, true));
+      window.visualViewport?.removeEventListener("scroll", invalidate);
+      window.visualViewport?.removeEventListener("resize", invalidate);
+      window.removeEventListener("pagehide", suspend);
+    };
+    layoutCleanup.invalidate = () => {
+      chats.forEach((chat) => resize.observe(chat._rail.parentElement));
+      invalidate();
+    };
+    invalidate();
+  }
+
   // Chat with the store's agent. Messages render through textContent only.
   define(
     "spur-chat",
@@ -1685,13 +1888,22 @@
           input.setAttribute("aria-label", "Message");
           const send = el("button", "spur-btn", "Send");
           send.type = "button";
-          form.appendChild(input);
+          const field = el("div", "spur-chat-field");
+          const rail = el("div", "spur-chat-rail");
+          const feedback = el("div", "spur-chat-feedback");
+          feedback.setAttribute("aria-live", "polite");
+          field.appendChild(input);
+          field.appendChild(rail);
+          form.appendChild(field);
+          form.appendChild(feedback);
           form.appendChild(send);
           this.appendChild(status);
           this.appendChild(log);
           this.appendChild(form);
           this._input = input;
           this._form = form;
+          this._rail = rail;
+          this._feedback = feedback;
           this._status = status;
           const render = (message) => {
             const node = el("div", "spur-chat-msg");
@@ -1750,13 +1962,39 @@
         this._offAgent = sdk.on("agent", this._renderStatus);
         if (transport.kind === "port") {
           sdk.ready().then(() => {
-            if (this.isConnected) transport.chatTarget(MSG.chatRegister, this._chatId);
+            if (this.isConnected) {
+              transport.chatTarget(MSG.chatRegister, this._chatId);
+              watchChatLayout();
+            }
           });
         } else if (!this.hasAttribute("data-floating-chat")) this.setVoiceActive(true);
       }
       _voiceError(message) {
         this._status.textContent = message;
         this._status.setAttribute("data-tone", "error");
+      }
+      voiceState(data) {
+        if (
+          typeof data.starting !== "boolean" ||
+          typeof data.unavailable !== "boolean" ||
+          !(data.error === null || (typeof data.error === "string" && data.error.length <= 2000))
+        )
+          return;
+        const key = JSON.stringify([data.starting, data.unavailable, data.error]);
+        if (key === this._voiceStateKey) return;
+        this._voiceStateKey = key;
+        this._feedback.replaceChildren();
+        this._feedback.setAttribute("role", data.error ? "alert" : "status");
+        if (data.starting) {
+          const spinner = el("span");
+          spinner.innerHTML = SPINNER;
+          spinner.setAttribute("role", "status");
+          spinner.setAttribute("aria-label", "Starting microphone");
+          this._feedback.appendChild(spinner);
+        }
+        if (data.unavailable)
+          this._feedback.appendChild(document.createTextNode("Voice unavailable"));
+        if (data.error) this._feedback.appendChild(el("span", "", data.error));
       }
       insertTranscript(text) {
         if (!this.isConnected || typeof text !== "string" || this._input.disabled) return;
@@ -1779,6 +2017,8 @@
           if (this._voiceListener) window.removeEventListener("message", this._voiceListener);
           this._voiceFrame = null;
           this._voiceListener = null;
+          this._feedback.replaceChildren();
+          this._voiceStateKey = null;
           return;
         }
         if (this._voiceFrame) return;
@@ -1811,6 +2051,7 @@
               { type: "spur:voice-connect", page: page, chat: chat, nonce: nonce },
               origin,
             );
+          if (data.type === "spur:voice-state") this.voiceState(data);
           if (
             data.type === "spur:voice-transcript" &&
             typeof data.text === "string" &&
@@ -1825,11 +2066,12 @@
             frame.style.height = Math.min(120, Math.max(36, data.height)) + "px";
         };
         window.addEventListener("message", this._voiceListener);
-        this._form.insertBefore(frame, this._form.lastChild);
+        this._rail.appendChild(frame);
       }
       disconnectedCallback() {
         this.setVoiceActive(false);
         chats.delete(this._chatId);
+        watchChatLayout();
         if (this._offMessage) this._offMessage();
         if (this._offAgent) this._offAgent();
         this._offMessage = null;
@@ -1881,9 +2123,9 @@
     root.appendChild(styles);
     const panel = el("section", "panel");
     panel.hidden = true;
-    panel.setAttribute("aria-label", "Page agent chat");
+    panel.setAttribute("aria-label", "Agent chat");
     const header = el("div", "head");
-    header.appendChild(el("span", "", "Page agent"));
+    header.appendChild(el("span", "", "Agent chat"));
     const close = el("button", "spur-btn", "×");
     close.type = "button";
     close.setAttribute("aria-label", "Close agent chat");

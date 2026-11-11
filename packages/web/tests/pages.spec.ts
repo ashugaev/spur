@@ -39,7 +39,7 @@ for (const width of [1280, 390]) {
 }
 
 for (const width of [1280, 390]) {
-  test(`creates a Page and opens one editable robot chat at ${width}px`, async ({ page }) => {
+  test(`creates a Page and opens one editable agent chat at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 844 });
     await mockSessions(page, []);
     await page.addInitScript(() => {
@@ -101,7 +101,7 @@ for (const width of [1280, 390]) {
     expect(creates).toBe(1);
     await expect(page).toHaveURL(/\/p\/new\/$/);
     const draft = page.getByRole("textbox", { name: "Message", exact: true });
-    const panelBounds = await page.getByRole("region", { name: "Page agent chat" }).boundingBox();
+    const panelBounds = await page.getByRole("region", { name: "Agent chat" }).boundingBox();
     expect(panelBounds).not.toBeNull();
     const inset = width < 640 ? 16 : 24;
     expect(Math.abs(width - panelBounds!.x - panelBounds!.width - inset)).toBeLessThan(1);
@@ -114,8 +114,17 @@ for (const width of [1280, 390]) {
     expect(font.size).toBe("12px");
     await draft.fill("Build a reading list\nwith tags");
     const voice = page.frameLocator('iframe[title="Voice input"]');
+    const field = await draft.boundingBox();
+    const rail = await page.locator('iframe[title="Voice input"]').boundingBox();
+    expect(field!.height).toBeGreaterThanOrEqual(144);
+    expect(rail!.width).toBe(32);
+    expect(rail!.height).toBe(108);
+    expect(rail!.x).toBeGreaterThan(field!.x);
+    expect(rail!.x + rail!.width).toBeLessThan(field!.x + field!.width);
+    expect(rail!.y + rail!.height).toBeLessThan(field!.y + field!.height);
+    await expect(draft).toHaveCSS("padding-right", "96px");
     await voice.getByRole("button", { name: "Start voice recording" }).click();
-    await expect(voice.getByRole("alert")).toContainText("Microphone access is blocked");
+    await expect(page.getByRole("alert")).toContainText("Microphone access is blocked");
     const sendBounds = await page.getByRole("button", { name: "Send", exact: true }).boundingBox();
     expect(sendBounds!.height).toBeLessThanOrEqual(36);
     await expect(draft).toHaveValue("Build a reading list\nwith tags");

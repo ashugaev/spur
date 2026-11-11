@@ -3,8 +3,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PageVoiceHost } from "@/components/PageVoiceHost";
 
 vi.mock("@/components/ChatVoiceControls", () => ({
-  ChatVoiceControls: ({ onTranscribed }: { onTranscribed: (text: string) => void }) => (
-    <button onClick={() => onTranscribed("voice")}>Dictate</button>
+  ChatVoiceControls: ({
+    onTranscribed,
+    onState,
+  }: {
+    onTranscribed: (text: string) => void;
+    onState: (state: { starting: boolean; unavailable: boolean; error: string | null }) => void;
+  }) => (
+    <>
+      <button onClick={() => onState({ starting: true, unavailable: false, error: null })}>
+        Start
+      </button>
+      <button onClick={() => onTranscribed("voice")}>Dictate</button>
+    </>
   ),
 }));
 afterEach(() => {
@@ -19,7 +30,7 @@ describe("trusted Page voice frame", () => {
     vi.stubGlobal("parent", parent);
     const observe = vi.fn();
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
-      height: 32,
+      height: 108,
     } as DOMRect);
     vi.stubGlobal(
       "ResizeObserver",
@@ -58,7 +69,12 @@ describe("trusted Page voice frame", () => {
       screen.getByRole("button", { name: "Dictate" }).parentElement,
     );
     expect(parent.postMessage).toHaveBeenCalledWith(
-      { ...data, type: "spur:voice-size", height: 32 },
+      { ...data, type: "spur:voice-size", height: 108 },
+      window.location.origin,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    expect(parent.postMessage).toHaveBeenCalledWith(
+      { ...data, type: "spur:voice-state", starting: true, unavailable: false, error: null },
       window.location.origin,
     );
     fireEvent.click(screen.getByRole("button", { name: "Dictate" }));

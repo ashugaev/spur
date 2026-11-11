@@ -211,7 +211,7 @@ export function blankTemplate(title: string): string {
 <svg aria-hidden="true" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 2h9l5 5v15H5zM14 2v6h5M8 12h8M8 16h6"/></svg>
 <h1>${safe}</h1>
 <p>Your page starts here.</p>
-<p>Open the robot chat and tell your agent what to build.</p>
+<p>Open the agent chat and tell your agent what to build.</p>
 </body>
 </html>
 `;

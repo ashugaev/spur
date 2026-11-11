@@ -31,6 +31,30 @@ afterEach(() => {
 });
 
 describe("trusted chat voice routing", () => {
+  it("binds snapshots to the connected port, replaces omitted slots and purges on unregister", async () => {
+    const h = harness();
+    const port = await ready(h);
+    port.emit({ type: "chat-register", target: "one" });
+    const snapshot = {
+      type: "chat-layout",
+      sequence: 0,
+      viewport: { width: 400, height: 300 },
+      slots: [{ target: "one", rect: { x: 10, y: 10, width: 32, height: 108 } }],
+    };
+    port.emit(snapshot);
+    expect(h.host.getState().voiceLayout?.slots).toHaveLength(1);
+    port.emit({ ...snapshot, sequence: 1, slots: [] });
+    expect(h.host.getState().voiceLayout?.slots).toEqual([]);
+    port.emit(snapshot);
+    expect(h.host.getState().voiceLayout?.sequence).toBe(1);
+    port.emit({ ...snapshot, sequence: 2 });
+    port.emit({ type: "chat-unregister", target: "one" });
+    expect(h.host.getState().voiceLayout?.slots).toEqual([]);
+    const late = port.onmessage;
+    h.host.dispose();
+    late?.({ data: { ...snapshot, sequence: 3 } });
+    expect(h.host.getState().voiceLayout).toBeNull();
+  });
   it("registers bounded targets and rejects stale mounts and unknown destinations", async () => {
     const h = harness();
     const port = await ready(h);

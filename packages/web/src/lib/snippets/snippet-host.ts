@@ -8,6 +8,8 @@ import type { SnippetManifest } from "./snippet-manifest";
 import {
   actionStatusFromDoc,
   isRecord,
+  parseChatLayout,
+  type ChatLayout,
   isTerminalSnippetStatus,
   ownerStoreOf,
   SNIPPET_BUDGET_LIMIT,
@@ -236,6 +238,7 @@ export interface SnippetHostState {
   height: number | null;
   fullscreen: boolean;
   voiceTarget: string | null;
+  voiceLayout: ChatLayout | null;
 }
 
 export interface SnippetSessionUpdate {
@@ -275,6 +278,11 @@ export interface SnippetHost {
   reload(trusted: boolean): void;
   setFullscreen(open: boolean): void;
   insertVoiceText(target: string, mountKey: string, text: string): void;
+  voiceState(
+    target: string,
+    mountKey: string,
+    state: { starting: boolean; unavailable: boolean; error: string | null },
+  ): void;
   dispose(): void;
 }
 
@@ -395,6 +403,7 @@ export function createSnippetHost(
     height: null,
     fullscreen: false,
     voiceTarget: null,
+    voiceLayout: null,
   };
 
   function set(patch: Partial<SnippetHostState>): void {
@@ -557,7 +566,7 @@ export function createSnippetHost(
 
   function closePort(): void {
     chatTargets.clear();
-    set({ voiceTarget: null });
+    set({ voiceTarget: null, voiceLayout: null });
     if (port) {
       port.onmessage = null;
       port.close();
@@ -999,6 +1008,11 @@ export function createSnippetHost(
     if (snippetByteLength(data) > SNIPPET_MAX_PORT_MESSAGE_BYTES) return;
     if (!isRecord(data) || typeof data.type !== "string") return;
     switch (data.type) {
+      case SNIPPET_TO_HOST.chatLayout: {
+        const layout = parseChatLayout(data, chatTargets, state.voiceLayout?.sequence ?? -1, now);
+        if (layout) set({ voiceLayout: layout });
+        return;
+      }
       case SNIPPET_TO_HOST.chatRegister:
       case SNIPPET_TO_HOST.chatFocus:
       case SNIPPET_TO_HOST.chatUnregister: {
@@ -1010,6 +1024,13 @@ export function createSnippetHost(
           set({ voiceTarget: data.target });
         } else if (data.type === SNIPPET_TO_HOST.chatUnregister) {
           chatTargets.delete(data.target);
+          if (state.voiceLayout)
+            set({
+              voiceLayout: {
+                ...state.voiceLayout,
+                slots: state.voiceLayout.slots.filter((slot) => slot.target !== data.target),
+              },
+            });
           if (state.voiceTarget === data.target)
             set({ voiceTarget: chatTargets.values().next().value ?? null });
         }
@@ -1073,7 +1094,16 @@ export function createSnippetHost(
         handshaking = false;
         const channel = deps.createChannel();
         port = channel.hostPort;
-        port.onmessage = (event) => onPortMessage(event.data);
+        const connectedPort = port;
+        port.onmessage = (event) => {
+          if (
+            !disposed &&
+            port === connectedPort &&
+            mount === mountCount &&
+            state.phase === "connected"
+          )
+            onPortMessage(event.data);
+        };
         set({ phase: "connected" });
         deps.postToFrame({ type: SNIPPET_WINDOW_MSG.connect, context: buildContext(saved) }, [
           channel.framePort,
@@ -1255,6 +1285,15 @@ export function createSnippetHost(
       )
         return;
       postToSnippet({ type: SNIPPET_TO_FRAME.chatTranscript, target, text });
+    },
+    voiceState(target, mountKey, voice) {
+      if (
+        !disposed &&
+        state.phase === "connected" &&
+        state.mountKey === mountKey &&
+        chatTargets.has(target)
+      )
+        postToSnippet({ type: SNIPPET_TO_FRAME.chatVoiceState, target, ...voice });
     },
     dispose() {
       staleConfirm();

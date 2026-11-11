@@ -81,6 +81,7 @@ export const SNIPPET_TO_HOST = {
   chatRegister: "chat-register",
   chatFocus: "chat-focus",
   chatUnregister: "chat-unregister",
+  chatLayout: "chat-layout",
 } as const;
 export const SNIPPET_TO_FRAME = {
   invokeResult: "invoke-result",
@@ -92,7 +93,89 @@ export const SNIPPET_TO_FRAME = {
   dbReset: "db-reset",
   agentEvent: "agent-event",
   chatTranscript: "chat-transcript",
+  chatVoiceState: "chat-voice-state",
 } as const;
+
+export interface VoiceRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+export interface ChatLayout {
+  sequence: number;
+  viewport: { width: number; height: number };
+  slots: Array<{ target: string; rect: VoiceRect | null }>;
+  receivedAt: number;
+}
+
+export function parseChatLayout(
+  data: Record<string, unknown>,
+  targets: ReadonlySet<string>,
+  previous: number,
+  now: number,
+): ChatLayout | null {
+  if (
+    !Number.isSafeInteger(data.sequence) ||
+    (data.sequence as number) < 0 ||
+    (data.sequence as number) <= previous ||
+    !isRecord(data.viewport) ||
+    !Array.isArray(data.slots) ||
+    data.slots.length > 16
+  )
+    return null;
+  const { width, height } = data.viewport;
+  if (
+    typeof width !== "number" ||
+    typeof height !== "number" ||
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    width <= 0 ||
+    height <= 0 ||
+    width > 32768 ||
+    height > 32768
+  )
+    return null;
+  const slots: ChatLayout["slots"] = [];
+  const seen = new Set<string>();
+  for (const slot of data.slots) {
+    if (
+      !isRecord(slot) ||
+      typeof slot.target !== "string" ||
+      !targets.has(slot.target) ||
+      seen.has(slot.target)
+    )
+      return null;
+    seen.add(slot.target);
+    if (slot.rect === null) {
+      slots.push({ target: slot.target, rect: null });
+      continue;
+    }
+    if (!isRecord(slot.rect)) return null;
+    const { x, y, width: w, height: h } = slot.rect;
+    if (
+      typeof x !== "number" ||
+      typeof y !== "number" ||
+      typeof w !== "number" ||
+      typeof h !== "number" ||
+      ![x, y, w, h].every(Number.isFinite)
+    )
+      return null;
+    const rect =
+      x >= 0 &&
+      y >= 0 &&
+      w >= 8 &&
+      w <= 128 &&
+      h >= 27 &&
+      h <= 432 &&
+      x + w <= width &&
+      y + h <= height
+        ? { x, y, width: w, height: h }
+        : null;
+    slots.push({ target: slot.target, rect });
+  }
+  return { sequence: data.sequence as number, viewport: { width, height }, slots, receivedAt: now };
+}
 
 export const SNIPPET_THEME_TOKENS = [
   "bg-base",
