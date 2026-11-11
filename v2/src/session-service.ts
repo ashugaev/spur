@@ -13361,6 +13361,7 @@ export class SessionService {
     let prAlertBirthConfirmed = false;
     let launchedRecord: SessionRecord | undefined;
     let authRegistration: AuthRegistration | undefined;
+    let authorizationRollbackWarning: string | undefined;
     let launchCandidate: SessionRecord | undefined;
     let resolvedModel: string | undefined;
     let launchSelection: AgentLaunchSelection;
@@ -14031,6 +14032,23 @@ export class SessionService {
 
       return await this.enrich(updatedRecord);
     } catch (error) {
+      if (authRegistration && sessionId && agent && !placeholderState.written) {
+        authorizationRollbackWarning =
+          "Saved authorization retained: process exit or revocation could not be confirmed";
+        try {
+          const processes = await findForeignAgentProcessesForSession({
+            sessionId,
+            processMatchers: sessionProcessMatchers({ agent, launchCommand: "" }),
+            excludePanePids: [],
+          });
+          if (processes.status === "ok" && processes.pids.length === 0) {
+            await this.authProxy.revokeSession(sessionId);
+            authorizationRollbackWarning = undefined;
+          }
+        } catch {
+          // Preserve the registration when cleanup cannot confirm ownership or revoke it.
+        }
+      }
       if (error instanceof SpawnAdmissionCancelledError) throw error;
       const failureReceipt = options?.receiptToken
         ? this.foregroundSpawnReceipts.get(options.receiptToken)
@@ -14124,6 +14142,13 @@ export class SessionService {
           const erroredRecord: SessionRecord = {
             id: sessionId,
             project: request.project,
+            ...(authRegistration
+              ? {
+                  auth:
+                    readSession(this.config.dataDir, sessionId)?.auth ??
+                    publicAuthSession(authRegistration),
+                }
+              : {}),
             ...(options?.prAlertOwnerTransfer
               ? { prAlertTransfer: options.prAlertOwnerTransfer }
               : {}),
@@ -14233,6 +14258,7 @@ export class SessionService {
         details: {
           stage,
           requestedAgent: request.agent ?? null,
+          ...(authorizationRollbackWarning ? { authorizationRollbackWarning } : {}),
         },
       });
       throw error;
@@ -23412,7 +23438,10 @@ export class SessionService {
             session.claudeAccountId !== accountId
           )
             continue;
-          if (!session || !isTerminalSessionStatus(session.status)) {
+          if (
+            !session ||
+            (!isTerminalSessionStatus(session.status) && session.status !== "errored")
+          ) {
             throw new AuthorizationError(
               `Cannot remove account ${accountId}: in use by a running session`,
             );

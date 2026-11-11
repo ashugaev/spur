@@ -19981,6 +19981,9 @@ describe("SessionService", () => {
       seedAccount();
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession({ status: "completed", claudeAccountId: "acc-1" }));
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      findForeignAgentProcessesForSessionMock.mockResolvedValue({ status: "ok", pids: [] });
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
