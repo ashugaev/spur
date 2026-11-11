@@ -65,6 +65,7 @@ fi
 
 start_step "Step 1: Navigate to repository"
 cd "$REPO_ROOT" || fail_step "Repository not found"
+node --test tests/integration/source-pack.test.mjs
 end_step "Step 1: Repository accessible"
 
 # Step 2: Install repo dependencies for the optional web smoke
@@ -77,7 +78,7 @@ end_step "Step 2: Repo dependencies installed"
 # Step 3: Pack the published CLI boundary
 start_step "Step 3: Pack Spur tarball"
 PACK_LOG="/tmp/spur-pack-output.log"
-npm pack --json ./v2 > "$PACK_LOG" || {
+PATH="/opt/spur-build-go/bin:$PATH" npm pack --json ./v2 > "$PACK_LOG" || {
     pack_exit=$?
     cat "$PACK_LOG"
     exit "$pack_exit"
