@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  type FocusEvent,
   type KeyboardEvent,
   type MouseEvent,
   type MutableRefObject,
@@ -89,6 +90,7 @@ function PrCard({
       }}
       id={id}
       role="tooltip"
+      tabIndex={-1}
       data-pr-card
       onClick={(event) => event.stopPropagation()}
       className="absolute right-0 top-full z-50 flex w-max min-w-[9rem] max-w-[16rem] flex-col gap-px border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-1.5 py-1 text-[11px] leading-4 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
@@ -182,6 +184,12 @@ export function PrHoverCardTrigger({
     event.preventDefault();
     popover.toggle();
   };
+  // A tap on the (portaled) card moves focus into it; that is not leaving the popover.
+  const onBlur = (event: FocusEvent<HTMLSpanElement>) => {
+    const next = event.relatedTarget;
+    if (next instanceof Node && cardRef.current?.contains(next)) return;
+    popover.onBlur(event);
+  };
   const onKeyDown = (event: KeyboardEvent) => {
     if (event.key === "Escape") popover.dismiss();
   };
@@ -197,7 +205,7 @@ export function PrHoverCardTrigger({
       onMouseEnter={popover.onMouseEnter}
       onMouseLeave={popover.onMouseLeave}
       onFocus={popover.onMouseEnter}
-      onBlur={popover.onBlur}
+      onBlur={onBlur}
       onKeyDown={onKeyDown}
       onClick={onClick}
     >

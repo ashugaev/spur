@@ -346,6 +346,18 @@ describe("SessionLinkBadge", () => {
       expect(document.querySelector("[data-pr-card]")).toBeNull();
     });
 
+    it("keeps the card open when focus moves from the trigger into the card, closes when it leaves", () => {
+      const { container } = renderBadge();
+      const trigger = container.querySelector("[data-pr-reviewers]")?.parentElement as HTMLElement;
+      open(trigger);
+      const card = document.querySelector("[data-pr-card]") as HTMLElement;
+      expect(card).toHaveAttribute("tabindex", "-1");
+      fireEvent.blur(trigger, { relatedTarget: card });
+      expect(document.querySelector("[data-pr-card]")).not.toBeNull();
+      fireEvent.blur(trigger, { relatedTarget: document.body });
+      expect(document.querySelector("[data-pr-card]")).toBeNull();
+    });
+
     it("pins the card on a touch tap without navigating", () => {
       vi.stubGlobal("matchMedia", (query: string) => ({
         matches: query === "(hover: none) and (pointer: coarse)",
