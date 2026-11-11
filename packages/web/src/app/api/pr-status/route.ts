@@ -260,7 +260,7 @@ async function handleGitHubStatus(url: string) {
       return NextResponse.json(recordGitHubPrAbsent(cacheKey));
     }
 
-    return NextResponse.json(recordGitHubPrNode(cacheKey, pr, gqlError));
+    return NextResponse.json(await recordGitHubPrNode(cacheKey, pr, gqlError));
   } catch (error) {
     const message = error instanceof Error ? error.message : "GitHub API request failed";
     return NextResponse.json(recordGitHubPrError(cacheKey, message));

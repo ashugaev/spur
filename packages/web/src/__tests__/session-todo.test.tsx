@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionTodo } from "@/components/SessionTodo.js";
 import type { SpurTodoProjection } from "@/lib/types.js";
@@ -46,9 +46,36 @@ const projection: SpurTodoProjection = {
   finishOverrides: [],
 };
 
-afterEach(() => vi.restoreAllMocks());
+function setVisibility(state: "visible" | "hidden") {
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+  document.dispatchEvent(new Event("visibilitychange"));
+}
+
+afterEach(() => {
+  setVisibility("visible");
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe("SessionTodo", () => {
+  it("sends no todo fetch while the tab is hidden and one on visible", async () => {
+    vi.useFakeTimers();
+    setVisibility("hidden");
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => new Response(JSON.stringify(projection), { status: 200 }));
+    render(<SessionTodo sessionId="api-1" />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(0);
+    await act(async () => {
+      setVisibility("visible");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("shows compact human action and expands immutable audit detail", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify(projection), { status: 200 }),

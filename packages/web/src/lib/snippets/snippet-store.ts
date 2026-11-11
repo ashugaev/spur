@@ -1,19 +1,15 @@
-// Browser persistence for snippet records and the unconfirmed-send budget.
-// Fail closed: a throw, quota error or invalid record on a G3/G4 key is
-// reported as `ok: false`; nothing is ever served from memory.
+// Browser persistence for the snippet interaction gates: one record per snippet
+// (instance, last mounted revision, revision of the last unconfirmed send) and the
+// per-session unconfirmed-send budget. App state and actions live in the store
+// (`_state`, `_actions`), never here. Fail closed: a throw, quota error or invalid
+// record is reported as `ok: false`; nothing is ever served from memory.
 
-import {
-  isRecord,
-  SNIPPET_MAX_RECORD_BYTES,
-  SNIPPET_RECORD_TTL_MS,
-  snippetByteLength,
-  type SnippetActionRecord,
-  type SnippetActionStatus,
-  type SnippetConfirmReason,
-} from "./snippet-protocol";
+import { isRecord, SNIPPET_RECORD_TTL_MS } from "./snippet-protocol";
 import type { JsonValue } from "./snippet-schema";
 
-export const SNIPPET_RECORD_PREFIX = "spur:snippet:v1:";
+export const SNIPPET_RECORD_PREFIX = "spur:snippet:v2:";
+// Pre-store records (state and action in localStorage); pruned on sight.
+export const SNIPPET_V1_RECORD_PREFIX = "spur:snippet:v1:";
 export const SNIPPET_BUDGET_PREFIX = "spur:snippet-budget:v1:";
 
 export interface SnippetControlValue {
@@ -25,8 +21,6 @@ export interface SnippetRecord {
   instanceId: string;
   lastRevision: number;
   unconfirmedRevision: number | null;
-  state: { app: JsonValue | null; controls: SnippetControlValue[] };
-  action: SnippetActionRecord | null;
   updatedAt: number;
 }
 
@@ -36,7 +30,6 @@ export interface SnippetBudget {
 }
 
 export type StoreRead<T> = { ok: true; value: T } | { ok: false };
-export type StoreWrite = { ok: true; shrunk: boolean } | { ok: false };
 
 export interface SnippetStorage {
   getItem(key: string): string | null;
@@ -46,64 +39,8 @@ export interface SnippetStorage {
   readonly length: number;
 }
 
-const ACTION_STATUSES: readonly SnippetActionStatus[] = [
-  "awaiting_confirm",
-  "submitting",
-  "accepted",
-  "queued",
-  "processing",
-  "completed",
-  "replaced",
-  "error",
-  "delivery_unknown",
-  "timeout",
-];
-const CONFIRM_REASONS: readonly SnippetConfirmReason[] = [
-  "declared",
-  "no_focus",
-  "repeat_in_revision",
-  "budget",
-  "storage_unavailable",
-];
-
 function isInt(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0;
-}
-
-function parseAction(value: unknown): SnippetActionRecord | null {
-  if (!isRecord(value)) return null;
-  const { requestId, actionId, status, prompt, instanceId, baseRevision, dispatchedAt } = value;
-  if (typeof requestId !== "string" || typeof actionId !== "string") return null;
-  if (typeof prompt !== "string" || typeof instanceId !== "string") return null;
-  if (typeof status !== "string" || !ACTION_STATUSES.includes(status as SnippetActionStatus))
-    return null;
-  if (!isInt(baseRevision) || !isInt(dispatchedAt)) return null;
-  const action: SnippetActionRecord = {
-    requestId,
-    actionId,
-    status: status as SnippetActionStatus,
-    prompt,
-    instanceId,
-    baseRevision,
-    dispatchedAt,
-  };
-  if (value.acceptedAt !== undefined) {
-    if (!isInt(value.acceptedAt)) return null;
-    action.acceptedAt = value.acceptedAt;
-  }
-  if (value.retryOf !== undefined) {
-    if (typeof value.retryOf !== "string") return null;
-    action.retryOf = value.retryOf;
-  }
-  if (value.httpStatus !== undefined) {
-    if (!isInt(value.httpStatus)) return null;
-    action.httpStatus = value.httpStatus;
-  }
-  if (value.confirmReason !== undefined) {
-    if (!CONFIRM_REASONS.includes(value.confirmReason as SnippetConfirmReason)) return null;
-    action.confirmReason = value.confirmReason as SnippetConfirmReason;
-  }
-  return action;
 }
 
 export function parseControls(value: unknown): SnippetControlValue[] | null {
@@ -123,26 +60,11 @@ function parseRecord(raw: string): SnippetRecord | null {
   } catch {
     return null;
   }
-  if (!isRecord(value) || !isRecord(value.state)) return null;
+  if (!isRecord(value)) return null;
   const { instanceId, lastRevision, unconfirmedRevision, updatedAt } = value;
-  const { app, controls } = value.state;
   if (typeof instanceId !== "string" || !isInt(lastRevision) || !isInt(updatedAt)) return null;
   if (unconfirmedRevision !== null && !isInt(unconfirmedRevision)) return null;
-  const parsedControls = parseControls(controls);
-  if (!parsedControls) return null;
-  let action: SnippetActionRecord | null = null;
-  if (value.action !== null) {
-    action = parseAction(value.action);
-    if (!action) return null;
-  }
-  return {
-    instanceId,
-    lastRevision,
-    unconfirmedRevision,
-    state: { app: (app ?? null) as JsonValue | null, controls: parsedControls },
-    action,
-    updatedAt,
-  };
+  return { instanceId, lastRevision, unconfirmedRevision, updatedAt };
 }
 
 function parseBudget(raw: string): SnippetBudget | null {
@@ -201,20 +123,13 @@ export function readSnippetRecord(
   return readParsed(storage, recordKey(sessionId, snippetId), parseRecord);
 }
 
-// Oversize or quota failure: rewrite without app state and controls, keeping
-// the G3 fields (instanceId, lastRevision, unconfirmedRevision) and the action.
 export function writeSnippetRecord(
   storage: SnippetStorage,
   sessionId: string,
   snippetId: string,
   record: SnippetRecord,
-): StoreWrite {
-  const key = recordKey(sessionId, snippetId);
-  if (snippetByteLength(record) <= SNIPPET_MAX_RECORD_BYTES && writeJson(storage, key, record)) {
-    return { ok: true, shrunk: false };
-  }
-  const shrunk: SnippetRecord = { ...record, state: { app: null, controls: [] } };
-  return writeJson(storage, key, shrunk) ? { ok: true, shrunk: true } : { ok: false };
+): boolean {
+  return writeJson(storage, recordKey(sessionId, snippetId), record);
 }
 
 export function readSnippetBudget(
@@ -235,13 +150,19 @@ export function writeSnippetBudget(
   return writeJson(storage, budgetKey(sessionId), { unconfirmed, updatedAt: nowMs });
 }
 
-// Only `spur:snippet:v1:` records older than 7 days. Budget keys are never pruned.
+// Every `spur:snippet:v1:` key, and `spur:snippet:v2:` records older than 7 days.
+// Budget keys are never pruned.
 export function pruneSnippetRecords(storage: SnippetStorage, nowMs: number): void {
   try {
     const stale: string[] = [];
     for (let index = 0; index < storage.length; index += 1) {
       const key = storage.key(index);
-      if (key === null || !key.startsWith(SNIPPET_RECORD_PREFIX)) continue;
+      if (key === null) continue;
+      if (key.startsWith(SNIPPET_V1_RECORD_PREFIX)) {
+        stale.push(key);
+        continue;
+      }
+      if (!key.startsWith(SNIPPET_RECORD_PREFIX)) continue;
       const raw = storage.getItem(key);
       const record = raw === null ? null : parseRecord(raw);
       if (record && nowMs - record.updatedAt > SNIPPET_RECORD_TTL_MS) stale.push(key);

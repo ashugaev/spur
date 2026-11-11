@@ -1,5 +1,6 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { GitHubApp } from "../../src/github-app.js";
+import { plan, capability, defect } from "./review-feedback.fixture.js";
 import {
   consentMarker,
   consentBody,
@@ -7,6 +8,9 @@ import {
   isStateBody,
   isConsentBody,
   publishConsentState,
+  publishLaneState,
+  parseFeedback,
+  feedbackSummary,
   readStateBody,
   stateBody,
   stateMarker,
@@ -27,10 +31,128 @@ const state: LaneState = {
   evidenceDigest: "c".repeat(64),
   reviewId: null,
   assessment: null,
+  feedback: plan,
 };
 test("state marker survives readback with actual session footer", () => {
   expect(readStateBody(stateBody(state))).toEqual(state);
   expect(stateBody(state)).toContain("Written by Spur · review-a");
+});
+test.each([
+  ["PENDING", plan],
+  ["BLOCKED", capability],
+  ["CHANGES_REQUESTED", defect],
+] as const)(
+  "%s publishes readable required feedback outside hidden envelope",
+  (status, feedback) => {
+    const value = {
+      ...state,
+      status,
+      feedback,
+      reviewId: 1,
+      assessment: {
+        status: "N/A" as const,
+        manifest: {
+          version: 1 as const,
+          repository: "owner/repo",
+          baseBranch: "main",
+          surfaces: [],
+        },
+        dispositions: [],
+      },
+    };
+    const body = stateBody(value);
+    const visible = body.split("\n\n<!--")[0] ?? "";
+    for (const label of [
+      "Reason:",
+      "Check:",
+      "Observed:",
+      "Expected:",
+      "Evidence:",
+      "Next action:",
+      "Actor:",
+    ])
+      expect(visible).toContain(label);
+    if (status === "BLOCKED")
+      expect(visible).toContain(
+        `Unproven: ${capability.kind === "capability" ? capability.unproven : ""}`,
+      );
+    expect(readStateBody(body)).toEqual(value);
+  },
+);
+test("new bare statuses fail before authentication; historical bare state remains readable", async () => {
+  const { feedback: _feedback, ...bare } = state;
+  expect(readStateBody(`${stateMarker}${JSON.stringify(bare)}`)).toEqual(bare);
+  const app = new GitHubApp({ appId: 1, keyPath: "unused" }, "owner/repo");
+  const auth = vi.spyOn(app, "authenticate");
+  for (const status of ["PENDING", "BLOCKED", "CHANGES_REQUESTED"] as const)
+    await expect(publishLaneState(app, { ...bare, status })).rejects.toThrow();
+  expect(auth).not.toHaveBeenCalled();
+});
+test("feedback rejects blanks, misclassification and safely displays delimiter injection", () => {
+  for (const field of ["reason", "check", "observed", "expected", "evidence", "action", "actor"])
+    expect(() => stateBody({ ...state, feedback: { ...plan, [field]: " \n\t" } })).toThrow();
+  for (const control of ["\u0000", "\u001f", " ", "\u007f"]) {
+    expect(() => stateBody({ ...state, feedback: { ...plan, reason: control } })).toThrow();
+    const feedback = { ...plan, reason: `left${control}right` };
+    const body = stateBody({ ...state, feedback });
+    expect(body.split("\n\n<!--")[0]).toContain("Reason: left right");
+    expect(readStateBody(body).feedback).toEqual(feedback);
+  }
+  expect(() => stateBody({ ...state, status: "BLOCKED", feedback: defect })).toThrow();
+  const malicious = {
+    ...plan,
+    reason: "<!-- hidden -->\n[hide](url) ![image](url) `code` *text* <span>",
+  };
+  const body = stateBody({ ...state, feedback: malicious });
+  expect(body.split("\n\n<!--")[0]).not.toMatch(/<!--|<span>|\[hide\]|`code`|\*text\*/);
+  expect(readStateBody(body).feedback).toEqual(malicious);
+});
+test.each([0, 10, 13, 32, 127])(
+  "feedback rejects blank ASCII %i and normalizes it in visible text",
+  (code) => {
+    const character = String.fromCharCode(code);
+    expect(() => stateBody({ ...state, feedback: { ...plan, reason: character } })).toThrow(
+      "invalid-review-feedback",
+    );
+    const feedback = { ...plan, reason: `before${character}${character}after` };
+    const body = stateBody({ ...state, feedback });
+    expect(body.split("\n\n<!--")[0]).toContain("Reason: before after;");
+    expect(readStateBody(body).feedback).toEqual(feedback);
+  },
+);
+test("feedback preserves non-ASCII controls outside the normalized range", () => {
+  const feedback = { ...plan, reason: "before\u0085after" };
+  const body = stateBody({ ...state, feedback });
+  expect(body.split("\n\n<!--")[0]).toContain(`Reason: ${feedback.reason};`);
+  expect(readStateBody(body).feedback).toEqual(feedback);
+});
+test("feedback rejects the entire ASCII control-only range and retains other text", () => {
+  const codes = [...Array.from({ length: 33 }, (_, index) => index), 127];
+  for (const code of codes) {
+    const value = String.fromCharCode(code).repeat(3);
+    for (const field of ["reason", "check", "observed", "expected", "evidence", "action", "actor"])
+      expect(() => parseFeedback({ ...plan, [field]: value }, "PENDING")).toThrow(
+        "invalid-review-feedback",
+      );
+    expect(() => parseFeedback({ ...capability, unproven: value }, "BLOCKED")).toThrow(
+      "invalid-review-feedback",
+    );
+  }
+  for (let code = 33; code < 127; code++) {
+    const reason = `x${String.fromCharCode(code)}y`;
+    expect(parseFeedback({ ...plan, reason }, "PENDING").reason).toBe(reason);
+  }
+  expect(parseFeedback({ ...plan, reason: "  x\u0085y\u00a0z\u2003w  " }, "PENDING").reason).toBe(
+    "x\u0085y\u00a0z\u2003w",
+  );
+});
+test("feedback summaries collapse runs across the exact ASCII range without Unicode normalization", () => {
+  const controls = String.fromCharCode(...Array.from({ length: 33 }, (_, index) => index), 127);
+  const feedback = parseFeedback(
+    { ...plan, reason: `x${controls}y${controls}z`, check: "x\u0085y\u00a0z\u2003w" },
+    "PENDING",
+  );
+  expect(feedbackSummary(feedback)).toContain("Reason: x y z; Check: x\u0085y\u00a0z\u2003w;");
 });
 test("malformed reserved records and evidence-free approvals fail", () => {
   expect(() => readStateBody("Spur review state v1\n{broken}")).toThrow();
@@ -177,7 +299,7 @@ test.each([
 test("new/legacy lane envelopes preserve fields and hide delimiter/Unicode payload safely", () => {
   const value = { ...state, attempt: "close --> open <!-- <>& Ж" };
   const body = stateBody(value);
-  expect(body).toMatch(/^Code review: pending\.\n\n<!-- Spur review state v1\n/);
+  expect(body).toMatch(/^Code review: pending — Reason:/);
   expect(readStateBody(body)).toEqual(value);
   expect(readStateBody(`${stateMarker}${JSON.stringify(value)}`)).toEqual(value);
   expect(body.match(/-->/g)).toHaveLength(1);

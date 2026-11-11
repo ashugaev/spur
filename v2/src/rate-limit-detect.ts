@@ -206,6 +206,8 @@ const RESET_BANNERS: readonly string[] = [
   "hit your weekly limit",
   "hit your opus limit",
 ];
+const INDIVIDUAL_SPEND_RESET_PREFIX =
+  "you've hit your individual spend limit · run /usage-credits to ask your admin for a higher limit · your weekly limit ";
 
 // The truncation window a minute-precision banner clock can hide: the true reset can
 // land up to 60s after the rendered minute.
@@ -215,8 +217,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // Parses a claude limit banner's trailing "resets [Mon D, ]HH[:MM](am|pm) (UTC)"
 // clause into an absolute epoch-ms instant, anchored to the record's own
 // timestamp (never the caller's clock — see claude-jsonl-state.ts's
-// extractRecordTimestampMs). Scope-gated to RESET_BANNERS: any other banner
-// returns `undefined` and keeps the time-blind, stuck-but-safe behavior.
+// extractRecordTimestampMs). Scope-gated to RESET_BANNERS and the observed
+// dated individual-spend form; other banners keep the time-blind behavior.
 // Forward-only: the returned instant is always strictly after `anchorMs`. The
 // banner's clock is minute-truncated, so the true reset can land up to 60s after
 // the rendered minute; the common case (the rendered minute is still ahead of
@@ -231,11 +233,18 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // fallback expiry.
 export function parseRateLimitResetAtMs(text: string, anchorMs: number): number | undefined {
   const lower = text.toLowerCase();
-  if (!RESET_BANNERS.some((banner) => lower.includes(banner))) {
-    return undefined;
-  }
   const match = RATE_LIMIT_RESET_RE.exec(text);
   if (!match) {
+    return undefined;
+  }
+  const individualSpendReset =
+    lower.startsWith(INDIVIDUAL_SPEND_RESET_PREFIX) &&
+    match.index === INDIVIDUAL_SPEND_RESET_PREFIX.length &&
+    match.index + match[0].length === text.length &&
+    match[1] !== undefined &&
+    match[2] !== undefined &&
+    Number.isFinite(anchorMs);
+  if (!RESET_BANNERS.some((banner) => lower.includes(banner)) && !individualSpendReset) {
     return undefined;
   }
   const monthRaw = match[1];
@@ -509,8 +518,17 @@ export function detectCodexMcpPermissionDialog(paneText: string): boolean {
 // banner — a ■-prefixed banner or a line-leading status banner — rejecting
 // diff/quote gutters and quoted code tokens. This keeps an agent whose pane
 // merely contains rate-limit vocabulary from being misclassified rate_limited.
-export function scanTmuxRateLimit(paneText: string): RateLimitDetection | null {
-  for (const line of paneText.split("\n")) {
+export function scanTmuxRateLimit(
+  paneText: string,
+  options?: { tailLines?: number },
+): RateLimitDetection | null {
+  const allLines = paneText.split("\n");
+  let end = allLines.length;
+  while (end > 0 && allLines[end - 1]?.trim() === "") end -= 1;
+  const lines = options?.tailLines
+    ? allLines.slice(Math.max(0, end - options.tailLines), end)
+    : allLines;
+  for (const line of lines) {
     const content = line.replace(/^\s+/, "");
     if (content.length === 0) {
       continue;

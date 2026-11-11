@@ -48,7 +48,9 @@ import {
   hasTerminalSignal,
 } from "../review-providers/github.js";
 import { reviewSignalChanged } from "../review-providers/shared.js";
-import { resolveWorkspaceState } from "../workspace-store.js";
+import { readPrAlertOwnership, resolveWorkspaceState } from "../workspace-store.js";
+import { workspaceIdOf } from "../session-desk.js";
+import { allowsPrAlertIdentity, isPrAlertEvent } from "../pr-alert-owner.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
 export {
@@ -782,13 +784,35 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           if (collected.mergeableUnknown && !next.has("merge_conflict") && heldConflict) {
             next.set("merge_conflict", heldConflict);
           }
+          const alertReady = allowsPrAlertIdentity(deps.dataDir, session, collected.data);
+          const alertOwner = readPrAlertOwnership(deps.dataDir, workspaceIdOf(session));
+          const rollbackId =
+            alertReady && alertOwner.state === "owned" && alertOwner.sessionId === session.id
+              ? alertOwner.ownerRollbackId
+              : undefined;
+          const priorSnapshot = snapshots.get(session.id);
+          const recheckRollback =
+            rollbackId !== undefined && rollbackId !== priorSnapshot?.ownerRollbackId;
+          const observedRollbackId = rollbackId ?? priorSnapshot?.ownerRollbackId;
+          if (!alertReady) {
+            next.delete("ci_failed");
+            next.delete("merge_conflict");
+          }
+          const firstCi = next.get("ci_failed");
+          if (
+            firstCi &&
+            !firstCi.ciRun &&
+            !previous?.has("ci_failed") &&
+            readPrAlertOwnership(deps.dataDir, workspaceIdOf(session)).state === "owned"
+          ) {
+            next.delete("ci_failed");
+          }
           const changed = [...next.values()].filter((signal) =>
             reviewSignalChanged(previous?.get(signal.key), signal),
           );
 
           // Built once, handed to both the in-memory map and the on-disk write so
           // the two copies cannot desync.
-          const priorSnapshot = snapshots.get(session.id);
           const priorClearId =
             priorSnapshot?.prNumber === collected.data.prNumber
               ? priorSnapshot.mergeConflictClearId
@@ -801,6 +825,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             prNumber: collected.data.prNumber,
             signals: next,
             ...(mergeConflictClearId !== undefined ? { mergeConflictClearId } : {}),
+            ...(observedRollbackId !== undefined ? { ownerRollbackId: observedRollbackId } : {}),
           };
           if (mergeConflictClearId !== undefined)
             collected.data.mergeConflictClearId = mergeConflictClearId;
@@ -825,6 +850,14 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             lifecycleBaselined.add(session.id);
           }
           const candidates = previous ? changed : emitInitial ? [...next.values()] : [];
+          if (recheckRollback) {
+            for (const key of ["merge_conflict", "ci_failed"]) {
+              const active = next.get(key);
+              if (key === "ci_failed" && !active?.ciRun) continue;
+              if (active && !candidates.some((candidate) => candidate.kind === active.kind))
+                candidates.push(active);
+            }
+          }
           // A conflict or CI failure present at the first observation (no snapshot,
           // rebind, dropped snapshot) pings even when the source does not emit initial
           // state. Auto-ping dedupe bounds replays after restart.
@@ -861,7 +894,15 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             );
           }
           if (toEmit.length > 0) {
-            emitSignalsByKind(deps, collected.data, toEmit);
+            emitSignalsByKind(
+              deps,
+              collected.data,
+              toEmit.filter(
+                (signal) =>
+                  !isPrAlertEvent(`github:${signal.kind}`) ||
+                  allowsPrAlertIdentity(deps.dataDir, session, collected.data),
+              ),
+            );
           }
         } catch (error) {
           const message = extractGithubErrorText(error);

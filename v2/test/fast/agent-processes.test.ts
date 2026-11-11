@@ -66,6 +66,17 @@ const readProcessEnvValueMock = vi.fn(async (pid: number, key: string) => {
   if (!proc) return { status: "unreadable" as const };
   return { status: "ok" as const, value: proc.env?.[key] };
 });
+const readProcessEnvValuesMock = vi.fn(async (pid: number, keys: readonly string[]) => {
+  if (!envReadable) return { status: "unreadable" as const };
+  const proc = fakeTable.find((entry) => entry.pid === pid);
+  if (!proc) return { status: "unreadable" as const };
+  const values: Record<string, string> = {};
+  for (const key of keys) {
+    const value = proc.env?.[key];
+    if (value !== undefined) values[key] = value;
+  }
+  return { status: "ok" as const, values };
+});
 const canReadProcessEnvMock = vi.fn(async () => envReadable);
 const snapshotProcessLivenessMock = vi.fn(async () => {
   if (snapshotUnavailable) {
@@ -87,6 +98,7 @@ vi.mock("../../src/process-tree.js", async (importOriginal) => {
     listProcesses: listProcessesMock,
     snapshotProcesses: snapshotProcessesMock,
     readProcessEnvValue: readProcessEnvValueMock,
+    readProcessEnvValues: readProcessEnvValuesMock,
     readProcessIdentity: readProcessIdentityMock,
     listSessionMemberPids: listSessionMemberPidsMock,
     readProcessStat: readProcessStatMock,
@@ -123,6 +135,7 @@ const {
   findForeignAgentProcessesForSession,
   scanUnownedAgentProcesses,
   terminateAgentProcesses,
+  terminateDetachedSessionProcesses,
 } = await import("../../src/agent-processes.js");
 
 function session(
@@ -160,6 +173,7 @@ beforeEach(() => {
   readProcessStatMock.mockClear();
   readProcessCwdMock.mockClear();
   readProcessEnvValueMock.mockClear();
+  readProcessEnvValuesMock.mockClear();
   canReadProcessEnvMock.mockClear();
   snapshotProcessLivenessMock.mockClear();
   signalPidMock.mockClear();
@@ -462,9 +476,8 @@ describe("capturePaneAgentProcesses", () => {
       identities.set(101, "baseline");
       listSessionMemberPidsMock.mockResolvedValueOnce([100, 101, 901, 901, process.pid]);
       expect(await captureAndTerminate()).toEqual([101, 901]);
-      expect(readProcessEnvValueMock.mock.calls).toEqual([
-        [901, "SPUR_SESSION"],
-        [901, "SPUR_AGENT_LAUNCH_ID"],
+      expect(readProcessEnvValuesMock.mock.calls).toEqual([
+        [901, ["SPUR_SESSION", "SPUR_AGENT_LAUNCH_ID", "SPUR_SESSION_TOOL_DIR"]],
       ]);
       expect(signalPidMock.mock.calls).toEqual([
         [901, "SIGHUP"],
@@ -493,21 +506,12 @@ describe("capturePaneAgentProcesses", () => {
       },
     );
 
-    it.each(["SPUR_SESSION", "SPUR_AGENT_LAUNCH_ID"])(
-      "rejects an unreadable %s through termination",
-      async (unreadableKey) => {
-        ownedOrphan();
-        const readMarker = async (_pid: number, key: string) =>
-          key === unreadableKey
-            ? ({ status: "unreadable" } as const)
-            : ({ status: "ok", value: key === "SPUR_SESSION" ? "api-1" : "launch-1" } as const);
-        readProcessEnvValueMock
-          .mockImplementationOnce(readMarker)
-          .mockImplementationOnce(readMarker);
-        expect(await captureAndTerminate()).toEqual([]);
-        expect(signalPidMock).not.toHaveBeenCalled();
-      },
-    );
+    it("rejects an unreadable environ through termination", async () => {
+      ownedOrphan();
+      readProcessEnvValuesMock.mockResolvedValueOnce({ status: "unreadable" });
+      expect(await captureAndTerminate()).toEqual([]);
+      expect(signalPidMock).not.toHaveBeenCalled();
+    });
 
     it.each([undefined, ""])(
       "keeps baseline capture without expected launch token %s",
@@ -515,32 +519,25 @@ describe("capturePaneAgentProcesses", () => {
         ownedOrphan();
         fakeTable.push(row(101, 100, "codex", 100));
         expect(await captureAndTerminate({ ...pane(), agentLaunchId })).toEqual([101]);
-        expect(readProcessEnvValueMock).not.toHaveBeenCalled();
+        expect(readProcessEnvValuesMock).not.toHaveBeenCalled();
         expect(signalPidMock).not.toHaveBeenCalledWith(901, expect.anything());
       },
     );
 
-    it.each([
-      ["SPUR_SESSION", "identity"],
-      ["SPUR_AGENT_LAUNCH_ID", "identity"],
-      ["SPUR_SESSION", "sid"],
-      ["SPUR_AGENT_LAUNCH_ID", "sid"],
-      ["SPUR_SESSION", "unreadable stat"],
-      ["SPUR_AGENT_LAUNCH_ID", "unreadable stat"],
-    ])("rejects %s read changing %s before signaling", async (mutationKey, mutation) => {
-      const helper = ownedOrphan();
-      const readMarker = async (_pid: number, key: string) => {
-        if (key === mutationKey) {
+    it.each(["identity", "sid", "unreadable stat"])(
+      "rejects marker read changing %s before signaling",
+      async (mutation) => {
+        const helper = ownedOrphan();
+        readProcessEnvValuesMock.mockImplementationOnce(async () => {
           if (mutation === "identity") identities.set(901, "replacement");
           else if (mutation === "sid") helper.sid = 200;
           else identities.delete(901);
-        }
-        return { status: "ok", value: helper.env?.[key] } as const;
-      };
-      readProcessEnvValueMock.mockImplementationOnce(readMarker).mockImplementationOnce(readMarker);
-      expect(await captureAndTerminate()).toEqual([]);
-      expect(signalPidMock).not.toHaveBeenCalled();
-    });
+          return { status: "ok", values: { ...helper.env } } as const;
+        });
+        expect(await captureAndTerminate()).toEqual([]);
+        expect(signalPidMock).not.toHaveBeenCalled();
+      },
+    );
 
     it("drops an attested helper whose generation changes after capture", async () => {
       ownedOrphan();
@@ -644,6 +641,92 @@ describe("terminateAgentProcesses", () => {
 });
 
 describe("captureAgentProcessesForLaunch", () => {
+  describe("durable spawn capture completeness", () => {
+    it("does not prove absence with empty matchers", async () => {
+      expect(
+        await captureAgentProcessesForLaunch({
+          sessionId: "api-1",
+          agentLaunchId: "launch-a",
+          processMatchers: [],
+          recovery: true,
+        }),
+      ).toEqual({ status: "ok", processes: [], complete: false });
+    });
+
+    it("requires readable environment and generation for each relevant live candidate", async () => {
+      fakeTable = [{ pid: 30, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "claude" }];
+      identities.set(30, "start-30");
+      readProcessEnvValuesMock.mockResolvedValueOnce({ status: "unreadable" });
+      expect(
+        await captureAgentProcessesForLaunch({
+          sessionId: "api-1",
+          agentLaunchId: "launch-a",
+          processMatchers: ["claude"],
+          recovery: true,
+        }),
+      ).toEqual({ status: "ok", processes: [], complete: false });
+    });
+
+    it("proves absence only with complete nonmatching candidate evidence", async () => {
+      fakeTable = [
+        {
+          pid: 30,
+          ppid: 1,
+          rssKb: 1,
+          elapsedSeconds: 1,
+          args: "claude",
+          env: { SPUR_SESSION: "other" },
+        },
+      ];
+      identities.set(30, "start-30");
+      expect(
+        await captureAgentProcessesForLaunch({
+          sessionId: "api-1",
+          agentLaunchId: "launch-a",
+          processMatchers: ["claude"],
+          recovery: true,
+        }),
+      ).toEqual({ status: "ok", processes: [], complete: true });
+      identities.delete(30);
+      expect(
+        await captureAgentProcessesForLaunch({
+          sessionId: "api-1",
+          agentLaunchId: "launch-a",
+          processMatchers: ["claude"],
+          recovery: true,
+        }),
+      ).toEqual({ status: "ok", processes: [], complete: false });
+    });
+
+    it("accepts an unreadable candidate only after a fresh snapshot proves it gone", async () => {
+      identities.set(30, "start-30");
+      snapshotProcessesMock.mockResolvedValueOnce({
+        status: "ok",
+        processes: [{ pid: 30, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "claude" }],
+      });
+      expect(
+        await captureAgentProcessesForLaunch({
+          sessionId: "api-1",
+          agentLaunchId: "launch-a",
+          processMatchers: ["claude"],
+          recovery: true,
+        }),
+      ).toEqual({ status: "ok", processes: [], complete: true });
+    });
+
+    it("does not turn an unavailable process snapshot into absence", async () => {
+      processSnapshotUnavailable = true;
+      expect(
+        await captureAgentProcessesForLaunch({
+          sessionId: "api-1",
+          agentLaunchId: "launch-a",
+          processMatchers: ["claude"],
+          recovery: true,
+        }),
+      ).toEqual({ status: "unavailable" });
+    });
+  });
+
   it("captures only the exact session launch and preserves pid identity", async () => {
     identities.set(30, "start-30");
     fakeTable = [
@@ -1304,5 +1387,136 @@ describe("scanUnownedAgentProcesses / checkAgentProcessOwnership", () => {
     const check = await checkAgentProcessOwnership("/data");
     expect(check.ok).toBe(false);
     expect(resolveRegisteredDataDirsMock.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+});
+
+describe("terminateDetachedSessionProcesses", () => {
+  const TOOL_DIR = "/data/session-tools/api-1";
+  const markers = (launch: string, toolDir = TOOL_DIR, session = "api-1") => ({
+    SPUR_SESSION: session,
+    SPUR_SESSION_TOOL_DIR: toolDir,
+    SPUR_AGENT_LAUNCH_ID: launch,
+  });
+  const proc = (pid: number, ppid: number, env: Record<string, string>): FakeProc => ({
+    pid,
+    ppid,
+    rssKb: 1,
+    elapsedSeconds: 1,
+    args: `detached-${pid}`,
+    env,
+    sid: pid,
+  });
+  const setTable = (rows: FakeProc[]) => {
+    fakeTable = rows;
+    identities = new Map(rows.map((row) => [row.pid, `start-${row.pid}`]));
+  };
+  const sweep = (tmuxServerPid: number | null = 4844) =>
+    terminateDetachedSessionProcesses(
+      { sessionId: "api-1", sessionToolDir: TOOL_DIR, tmuxServerPid },
+      { hupGraceMs: 0, termGraceMs: 0, killGraceMs: 0 },
+    );
+  const signalled = () => signalPidMock.mock.calls.map(([pid]) => pid).sort((a, b) => a - b);
+
+  it("signals a subreaper-adopted daemon and its child, any launch generation", async () => {
+    setTable([
+      proc(5001, 1201, markers("L1")),
+      proc(5002, 5001, markers("L1")),
+      proc(5003, 1201, markers("L0")),
+    ]);
+    expect(await sweep()).toEqual({ status: "clear" });
+    expect(signalled()).toEqual([5001, 5002, 5003]);
+  });
+
+  it.each([
+    ["sidecar with empty launch id", markers("")],
+    ["other instance tool dir", markers("L1", "/other/session-tools/api-1")],
+    ["other session id", markers("L1", TOOL_DIR, "api-2")],
+    ["no markers", {}],
+  ])("does not signal %s", async (_label, env) => {
+    setTable([proc(5001, 1201, env), proc(5002, 1201, markers("L1"))]);
+    await sweep();
+    expect(signalled()).toEqual([5002]);
+  });
+
+  it("does not signal a row whose identity changes between reads", async () => {
+    setTable([proc(5001, 1201, markers("L1")), proc(5002, 1201, markers("L1"))]);
+    // The sweep's second identity read of 5001 sees a different token. The
+    // termination re-check uses its own reader, so only the sweep's after-read
+    // can reject the row.
+    let reads5001 = 0;
+    readProcessIdentityMock.mockImplementation(async (pid: number) =>
+      pid === 5001 && ++reads5001 === 2 ? "replacement" : (identities.get(pid) ?? null),
+    );
+    try {
+      await terminateDetachedSessionProcesses(
+        { sessionId: "api-1", sessionToolDir: TOOL_DIR, tmuxServerPid: 4844 },
+        {
+          hupGraceMs: 0,
+          termGraceMs: 0,
+          killGraceMs: 0,
+          readIdentity: async (pid) => identities.get(pid) ?? null,
+        },
+      );
+    } finally {
+      readProcessIdentityMock.mockImplementation(
+        async (pid: number) => identities.get(pid) ?? null,
+      );
+    }
+    expect(signalled()).toEqual([5002]);
+  });
+
+  it("returns unavailable without signalling when env is unreadable", async () => {
+    setTable([proc(5001, 1201, markers("L1"))]);
+    envReadable = false;
+    expect(await sweep()).toEqual({ status: "unavailable" });
+    expect(signalPidMock).not.toHaveBeenCalled();
+  });
+
+  it("returns unavailable without signalling when the process table is unavailable", async () => {
+    setTable([proc(5001, 1201, markers("L1"))]);
+    processSnapshotUnavailable = true;
+    expect(await sweep()).toEqual({ status: "unavailable" });
+    expect(signalPidMock).not.toHaveBeenCalled();
+  });
+
+  it("returns unavailable when this process carries the session id", async () => {
+    setTable([proc(5001, 1201, markers("L1"))]);
+    vi.stubEnv("SPUR_SESSION", "api-1");
+    try {
+      expect(await sweep()).toEqual({ status: "unavailable" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(signalPidMock).not.toHaveBeenCalled();
+  });
+
+  it("never signals this process or its ancestors", async () => {
+    setTable([
+      proc(7001, 1, markers("L1")),
+      proc(7002, 7001, markers("L1")),
+      proc(process.pid, 7002, markers("L1")),
+      proc(5001, 1201, markers("L1")),
+    ]);
+    await sweep();
+    expect(signalled()).toEqual([5001]);
+  });
+
+  it("never signals the tmux server, even carrying all markers", async () => {
+    setTable([proc(4844, 1201, markers("L1")), proc(5001, 1201, markers("L1"))]);
+    await sweep(4844);
+    expect(signalled()).toEqual([5001]);
+  });
+
+  it("signals every marked row when no tmux server exists", async () => {
+    setTable([proc(4844, 1201, markers("L1")), proc(5001, 1201, markers("L1"))]);
+    await sweep(null);
+    expect(signalled()).toEqual([4844, 5001]);
+  });
+
+  it("reads each candidate environ once", async () => {
+    setTable([proc(5001, 1201, markers("L1")), proc(5002, 1201, {}), proc(5003, 5001, {})]);
+    await sweep();
+    expect(readProcessEnvValuesMock.mock.calls.map(([pid]) => pid)).toEqual([5001, 5002, 5003]);
+    expect(readProcessEnvValueMock).not.toHaveBeenCalled();
   });
 });

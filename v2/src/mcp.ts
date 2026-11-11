@@ -4,6 +4,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { describeDaemonOperations } from "./daemon-contracts.js";
 import { McpGateway } from "./mcp-gateway.js";
+import { daemonOperationIdSchema } from "./mcp-daemon-control.js";
 import { getBuildId } from "./build-identity.js";
 import { readMcpTunnelStatus } from "./mcp-tunnel.js";
 import { getVersion } from "./version.js";
@@ -11,8 +12,8 @@ import { encodeMcpResult, MCP_RESULT_BYTES } from "./mcp-results.js";
 
 const id = z.string().min(1).max(1024);
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
-const params = z.record(z.string());
-const query = z.record(z.union([z.string(), z.number().finite(), z.boolean()]));
+const params = z.record(z.string(), z.string());
+const query = z.record(z.string(), z.union([z.string(), z.number().finite(), z.boolean()]));
 
 export function mcpResult(data: Record<string, unknown>): CallToolResult {
   const output = encodeMcpResult(data);
@@ -39,10 +40,13 @@ export function createMcpWrapper(gateway: McpGateway): McpServer {
     description: string,
     shape: S,
     write: boolean,
-    run: (input: z.output<z.ZodObject<S>>, signal: AbortSignal) => Promise<Record<string, unknown>>,
+    run: (
+      input: z.output<z.ZodObject<S, z.core.$strict>>,
+      signal: AbortSignal,
+    ) => Promise<Record<string, unknown>>,
     annotations?: { idempotentHint: boolean; openWorldHint: boolean },
   ) {
-    server.registerTool(
+    server.registerTool<z.ZodType, z.ZodObject<S, z.core.$strict>>(
       name,
       {
         description,
@@ -160,7 +164,7 @@ export function createMcpWrapper(gateway: McpGateway): McpServer {
   register(
     "restart_daemon",
     "Restart the backend daemon, preserving session agents. Supply a new UUID operationId once; retries reuse that ID. Returns durable accepted receipt, not completion. Resolve with get_daemon_restart after reconnect; never replay unknown effects with a new ID.",
-    { operationId: z.string().uuid() },
+    { operationId: daemonOperationIdSchema },
     true,
     ({ operationId }, signal) => gateway.restartDaemon(operationId, signal),
     { idempotentHint: true, openWorldHint: false },
@@ -168,7 +172,7 @@ export function createMcpWrapper(gateway: McpGateway): McpServer {
   register(
     "get_daemon_restart",
     "Read the durable daemon.restart operator receipt during outage or after MCP reconnect. completed requires a different ready daemon generation; accepted/unknown never authorize another restart.",
-    { operationId: z.string().uuid() },
+    { operationId: daemonOperationIdSchema },
     false,
     ({ operationId }, signal) => gateway.getDaemonRestart(operationId, signal),
   );
@@ -298,7 +302,11 @@ export function createMcpWrapper(gateway: McpGateway): McpServer {
     {
       sessionId: id,
       message: z.string(),
-      attachments: z.array(z.object({ name: z.string(), data: z.string() })).optional(),
+      attachments: z
+        .array(
+          z.object({ name: z.string(), data: z.string() }).meta({ additionalProperties: false }),
+        )
+        .optional(),
       queue: z.boolean().optional(),
       interrupt: z.boolean().optional(),
     },

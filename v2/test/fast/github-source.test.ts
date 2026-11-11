@@ -33,9 +33,11 @@ const isGitWorktreeMock = vi.fn();
 const readBranchPushUrlMock = vi.fn().mockResolvedValue("git@github.com:acme/api.git");
 const hasRecentSessionUserActionMock = vi.fn();
 const resolveWorkspaceStateMock = vi.fn();
+const readPrAlertOwnershipMock = vi.fn();
 
 vi.mock("../../src/workspace-store.js", () => ({
   resolveWorkspaceState: resolveWorkspaceStateMock,
+  readPrAlertOwnership: readPrAlertOwnershipMock,
 }));
 vi.mock("../../src/gh.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ghModule>()),
@@ -293,6 +295,7 @@ describe("github source", () => {
     // dead-worktree tests override this per case.
     isGitWorktreeMock.mockResolvedValue(true);
     hasRecentSessionUserActionMock.mockReturnValue(false);
+    readPrAlertOwnershipMock.mockReturnValue({ state: "unclaimed" });
     // Default: the workspace binding is the record's own pr (no stale copy).
     resolveWorkspaceStateMock.mockImplementation((_dataDir: string, record: SessionRecord) =>
       record.pr ? { pr: record.pr } : {},
@@ -1313,6 +1316,188 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it.each(["other-owner", "retired", "invalid"] as const)(
+    "explicit PR alert owner suppresses nonowner conflict but preserves comments: %s",
+    async (state) => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      readPrAlertOwnershipMock.mockReturnValue(
+        state === "other-owner"
+          ? { state: "owned", sessionId: "api-helper" }
+          : state === "retired"
+            ? { state, successorSessionId: "api-next", successorWorkspaceId: "api-next" }
+            : { state },
+      );
+      const emit = vi.fn();
+      mockLifecyclePoll(
+        prView({ mergeable: "CONFLICTING" }),
+        JSON.stringify([
+          { id: 999, state: "COMMENTED", body: "Actionable review", user: { login: "reviewer" } },
+        ]),
+      );
+      const handle = await startLifecycle(emit);
+      expect(emit.mock.calls.filter(([name]) => name === "github:merge_conflict")).toHaveLength(0);
+      expect(emit.mock.calls.filter(([name]) => name === "github:comment")).toHaveLength(1);
+      const snapshot = writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+      expect(snapshot.signals.has("merge_conflict")).toBe(false);
+      handle.stop();
+    },
+  );
+
+  it("explicit PR alert owner emits its own conflict through native source", async () => {
+    const owner = makeSession();
+    listSessionsMock.mockReturnValue([owner]);
+    readPrAlertOwnershipMock.mockReturnValue({ state: "owned", sessionId: owner.id });
+    mockLifecyclePoll(prView({ mergeable: "CONFLICTING" }));
+    const emit = vi.fn();
+    const handle = await startLifecycle(emit);
+    expect(emit.mock.calls.filter(([name]) => name === "github:merge_conflict")).toHaveLength(1);
+    expect(emit.mock.calls.find(([name]) => name === "github:merge_conflict")?.[1]).toMatchObject({
+      sessionId: owner.id,
+    });
+    const { createSendBatchParser } = await import("../../src/send-batches.js");
+    const { allowsPrAlertBatch } = await import("../../src/pr-alert-owner.js");
+    const parse = createSendBatchParser("github", "api", "pr-watch");
+    const batch = parse(emit.mock.calls.find(([name]) => name === "github:merge_conflict")?.[1]);
+    expect(batch).not.toBeNull();
+    if (!batch) throw new Error("Missing native source batch");
+    expect(allowsPrAlertBatch("/tmp/spur-data", owner, batch.serialize())).toBe(true);
+    handle.stop();
+  });
+
+  it.each(["owner", "binding"] as const)(
+    "explicit PR alert owner changes %s across collection await without stale conflict emission",
+    async (change) => {
+      const owner = makeSession();
+      listSessionsMock.mockReturnValue([owner]);
+      readPrAlertOwnershipMock.mockReturnValue({ state: "owned", sessionId: owner.id });
+      let release = () => {};
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      ghMock
+        .mockImplementationOnce(async () => {
+          await barrier;
+          return prView({ mergeable: "CONFLICTING" });
+        })
+        .mockResolvedValueOnce("[]")
+        .mockResolvedValueOnce("[]")
+        .mockResolvedValueOnce("[]")
+        .mockResolvedValueOnce("[]");
+      const emit = vi.fn();
+      const started = startLifecycle(emit);
+      await vi.waitFor(() => expect(ghMock).toHaveBeenCalled());
+      if (change === "owner")
+        readPrAlertOwnershipMock.mockReturnValue({
+          state: "retired",
+          successorSessionId: "api-next",
+          successorWorkspaceId: "api-next",
+        });
+      else
+        resolveWorkspaceStateMock.mockReturnValue({
+          pr: { number: 43, repo: "acme/api", url: "https://github.com/acme/api/pull/43" },
+        });
+      release();
+      const handle = await started;
+      expect(emit.mock.calls.filter(([name]) => name === "github:merge_conflict")).toHaveLength(0);
+      const snapshot = writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+      expect(snapshot.signals.has("merge_conflict")).toBe(false);
+      handle.stop();
+    },
+  );
+
+  it.each([true, false])(
+    "explicit PR alert owner defers unchanged initial signals until binding (CI head=%s)",
+    async (head) => {
+      const owner = makeUnboundSession();
+      listSessionsMock.mockReturnValue([owner]);
+      readPrAlertOwnershipMock.mockReturnValue({ state: "owned", sessionId: owner.id });
+      resolveWorkspaceStateMock.mockReturnValue({});
+      const view = prView({
+        mergeable: "CONFLICTING",
+        ...(head ? { headRefOid: "head-initial" } : {}),
+        statusCheckRollup: [{ name: "test", conclusion: "FAILURE", status: "COMPLETED" }],
+      });
+      mockLifecyclePoll(view);
+      const first = vi.fn();
+      let handle = await startLifecycle(first);
+      expect(
+        first.mock.calls.some(
+          ([name]) => name === "github:ci_failed" || name === "github:merge_conflict",
+        ),
+      ).toBe(false);
+      const held = writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+      expect(held.signals.has("ci_failed")).toBe(false);
+      expect(held.signals.has("merge_conflict")).toBe(false);
+      handle.stop();
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([[owner.id, held]]));
+      resolveWorkspaceStateMock.mockReturnValue({ pr: makeSession().pr });
+      mockLifecyclePoll(view);
+      const bound = vi.fn();
+      handle = await startLifecycle(bound);
+      expect(bound.mock.calls.filter(([name]) => name === "github:merge_conflict")).toHaveLength(1);
+      expect(bound.mock.calls.filter(([name]) => name === "github:ci_failed")).toHaveLength(
+        head ? 1 : 0,
+      );
+      handle.stop();
+    },
+  );
+
+  it("explicit PR alert owner rechecks unchanged active signals once after an actual owner return", async () => {
+    const owner = makeSession({ status: "stopped", stopReason: "stale_timeout" });
+    listSessionsMock.mockReturnValue([owner]);
+    readPrAlertOwnershipMock.mockReturnValue({ state: "owned", sessionId: owner.id });
+    const view = prView({
+      mergeable: "CONFLICTING",
+      headRefOid: "same-head",
+      statusCheckRollup: [{ name: "test", conclusion: "FAILURE", status: "COMPLETED" }],
+    });
+    mockLifecyclePoll(view);
+    let handle = await startLifecycle(vi.fn());
+    handle.stop();
+    const baseline = writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+    expect(baseline.signals.has("ci_failed")).toBe(true);
+    expect(baseline.signals.has("merge_conflict")).toBe(true);
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([[owner.id, baseline]]));
+    readPrAlertOwnershipMock.mockReturnValue({
+      state: "owned",
+      sessionId: owner.id,
+      ownerRollbackId: "api-failed",
+    });
+    resolveWorkspaceStateMock.mockReturnValue({});
+    mockLifecyclePoll(view);
+    handle = await startLifecycle(vi.fn());
+    handle.stop();
+    const held = writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+    expect(held.ownerRollbackId).toBeUndefined();
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([[owner.id, held]]));
+    resolveWorkspaceStateMock.mockReturnValue({ pr: owner.pr });
+    mockLifecyclePoll(view);
+    const returned = vi.fn();
+    handle = await startLifecycle(returned);
+    handle.stop();
+    const replay = returned.mock.calls.filter(
+      ([name]) => name === "github:ci_failed" || name === "github:merge_conflict",
+    );
+    expect(replay.map(([name]) => name).sort()).toEqual([
+      "github:ci_failed",
+      "github:merge_conflict",
+    ]);
+    const observed = writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+    expect(observed.ownerRollbackId).toBe("api-failed");
+    expect(observed.signals).toEqual(baseline.signals);
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([[owner.id, observed]]));
+    mockLifecyclePoll(view);
+    const restarted = vi.fn();
+    handle = await startLifecycle(restarted);
+    handle.stop();
+    expect(
+      restarted.mock.calls.some(
+        ([name]) => name === "github:ci_failed" || name === "github:merge_conflict",
+      ),
+    ).toBe(false);
+  });
+
   describe("merge conflict detection", () => {
     const conflictSignal = (extra: Partial<ReviewSignal> = {}): ReviewSignal => ({
       key: "merge_conflict",
@@ -2213,7 +2398,7 @@ describe("github source", () => {
     handle.stop();
   });
 
-  it("does not echo the viewer's review body while delivering another review", async () => {
+  it("suppresses its session review while delivering another session on the same login", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
     mockLifecyclePoll(
@@ -2222,14 +2407,14 @@ describe("github source", () => {
         {
           id: 610,
           state: "CHANGES_REQUESTED",
-          body: "my own review",
-          user: { login: "review-bot" },
+          body: "my own review\n[AI-generated, session: api-a1b2]",
+          user: { login: "different-login" },
         },
         {
           id: 611,
           state: "CHANGES_REQUESTED",
-          body: "fix this",
-          user: { login: "other-reviewer" },
+          body: "fix this\n[AI-generated, session: other-session]",
+          user: { login: "review-bot" },
         },
       ]),
     );
@@ -2244,7 +2429,7 @@ describe("github source", () => {
     handle.stop();
   });
 
-  it("does not echo the viewer's inline or issue comments", async () => {
+  it("suppresses its session inline and issue comments while delivering the shared account", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
     ghMock
@@ -2252,14 +2437,26 @@ describe("github source", () => {
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce(
         JSON.stringify([
-          { id: 620, body: "my reply", user: { login: "REVIEW-BOT" } },
-          { id: 621, body: "please fix", user: { login: "other-reviewer" } },
+          {
+            id: 620,
+            body: "my reply\nWritten by Spur · api-a1b2",
+            user: { login: "different-login" },
+          },
+          {
+            id: 621,
+            body: "please fix\nWritten by Spur · other-session",
+            user: { login: "review-bot" },
+          },
         ]),
       )
       .mockResolvedValueOnce(
         JSON.stringify([
-          { id: 622, body: "my note", user: { login: "review-bot" } },
-          { id: 623, body: "please check", user: { login: "other-reviewer" } },
+          {
+            id: 622,
+            body: "my note\n[AI-generated, session: api-a1b2]",
+            user: { login: "different-login" },
+          },
+          { id: 623, body: "please check", user: { login: "review-bot" } },
         ]),
       )
       .mockResolvedValueOnce("[]");
@@ -2361,7 +2558,7 @@ describe("github source", () => {
   it.each([
     { headRefName: "someone-elses-branch", author: "someone-else", ownsPr: false },
     { headRefName: "feature/native-pr-binding", author: "someone-else", ownsPr: true },
-    { headRefName: "someone-elses-branch", author: "review-bot", ownsPr: true },
+    { headRefName: "someone-elses-branch", author: "review-bot", ownsPr: false },
   ])(
     "scopes fix instructions to an owned PR ($headRefName, $author)",
     async ({ headRefName, author, ownsPr }) => {
@@ -2408,16 +2605,17 @@ describe("github source", () => {
   );
 
   it.each([
-    { reviewer: "review-bot", actionable: false },
-    { reviewer: "other-reviewer", actionable: true },
+    { reviewer: "different-login", body: "[AI-generated, session: api-a1b2]", actionable: false },
+    { reviewer: "review-bot", body: "Written by Spur · other-session", actionable: true },
+    { reviewer: "review-bot", body: "unsigned human feedback", actionable: true },
   ])(
-    "does not turn the viewer's change request into a fix alert ($reviewer)",
-    async ({ reviewer, actionable }) => {
+    "attributes a current change request by session marker ($reviewer, $body)",
+    async ({ reviewer, body, actionable }) => {
       readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
       listSessionsMock.mockReturnValue([makeSession()]);
       mockLifecyclePoll(
         prView({ reviewDecision: "CHANGES_REQUESTED" }),
-        JSON.stringify([{ id: 630, state: "CHANGES_REQUESTED", user: { login: reviewer } }]),
+        JSON.stringify([{ id: 630, state: "CHANGES_REQUESTED", body, user: { login: reviewer } }]),
       );
       const emit = vi.fn();
 
@@ -2457,7 +2655,12 @@ describe("github source", () => {
         latestOpinionatedReviews: {
           nodes: [
             { state: "APPROVED", author: { login: "other-reviewer" } },
-            { state: "CHANGES_REQUESTED", author: { login: "review-bot" } },
+            {
+              databaseId: 642,
+              state: "CHANGES_REQUESTED",
+              body: "Written by Spur · api-a1b2",
+              author: { login: "review-bot" },
+            },
           ],
           pageInfo: { hasPreviousPage: false },
         },
@@ -2505,7 +2708,14 @@ describe("github source", () => {
       prView({
         reviewDecision: "CHANGES_REQUESTED",
         latestOpinionatedReviews: {
-          nodes: [{ state: "CHANGES_REQUESTED", author: { login: "review-bot" } }],
+          nodes: [
+            {
+              databaseId: 660,
+              state: "CHANGES_REQUESTED",
+              body: "Written by Spur · api-a1b2",
+              author: { login: "review-bot" },
+            },
+          ],
           pageInfo: { hasPreviousPage: true },
         },
       }),

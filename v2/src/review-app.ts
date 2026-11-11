@@ -15,7 +15,12 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { Command } from "commander";
 import { digest, parseAssessment, type InterfaceAssessment } from "./review-interface.js";
-import { publishLaneState } from "./review-state.js";
+import {
+  feedbackSummary,
+  parseFeedback,
+  publishLaneState,
+  type ReviewFeedback,
+} from "./review-state.js";
 import {
   GitHubApp,
   ReviewAppError,
@@ -48,6 +53,7 @@ interface Attempt {
   B: string;
   contractDigest: string;
   receipt: string;
+  feedback?: ReviewFeedback;
 }
 interface Request extends Attempt {
   assessment: InterfaceAssessment;
@@ -76,6 +82,18 @@ export function parseAttempt(value: unknown): Attempt {
     B: hash(data.B, 40),
     contractDigest: hash(data.contractDigest, 64),
     receipt: string(data.receipt),
+    ...(data.feedback === undefined
+      ? {}
+      : {
+          feedback: parseFeedback(
+            data.feedback,
+            object(data.feedback).kind === "plan"
+              ? "PENDING"
+              : object(data.feedback).kind === "capability"
+                ? "BLOCKED"
+                : "CHANGES_REQUESTED",
+          ),
+        }),
   };
 }
 
@@ -138,6 +156,11 @@ export function parseRequest(value: unknown): Request {
   }
   if (data.verdict === "APPROVED" && rows.some((row) => row.status !== "passed"))
     throw new ReviewAppError("failed-scenarios");
+  if (data.verdict === "CHANGES_REQUESTED") {
+    parseFeedback(data.feedback, "CHANGES_REQUESTED");
+    if (!rows.some((row) => row.status === "failed"))
+      throw new ReviewAppError("missing-failed-evidence");
+  }
   return {
     ...attempt,
     assessment: parseAssessment(data.assessment),
@@ -156,6 +179,161 @@ function recognizeLegacy(raw: Buffer, request: Attempt): { session: string; atte
     throw new ReviewAppError("legacy-receipt-invalid");
   }
   const legacy = object(value);
+  if (
+    legacy.repository !== request.repo ||
+    legacy.pr !== request.pr ||
+    legacy.lane !== request.lane ||
+    legacy.status !== "BLOCKED" ||
+    legacy.reviewId !== null ||
+    !Array.isArray(legacy.evidence)
+  )
+    throw new ReviewAppError("legacy-receipt-invalid");
+  const session = identifier(legacy.session);
+  const attempts = [identifier(legacy.attempt)];
+  hash(legacy.H, 40);
+  hash(legacy.B, 40);
+  hash(legacy.contractDigest, 64);
+  if (legacy.localVerdict === "APPROVED" || legacy.localConclusion === "APPROVED") {
+    const text = (value: unknown) => typeof value === "string" && value.length > 0;
+    const time = (value: unknown) => text(value) && Number.isFinite(Date.parse(String(value)));
+    const exact = (value: Record<string, unknown>, keys: string[]) =>
+      Object.keys(value).length === keys.length &&
+      Object.keys(value).every((key) => keys.includes(key));
+    const common = [
+      "repository",
+      "pr",
+      "lane",
+      "session",
+      "attempt",
+      "H",
+      "B",
+      "contractDigest",
+      "status",
+      "evidence",
+      "reviewId",
+    ];
+    const lineage = [
+      ...common,
+      "localVerdict",
+      "prior",
+      "requestNote",
+      "publication",
+      "notification",
+      "head",
+      "base",
+      "delta",
+    ];
+    const reason = [...common, "localVerdict", "reason", "updatedAt"];
+    if (exact(legacy, lineage) || exact(legacy, reason)) {
+      if (legacy.localVerdict !== "APPROVED" || !legacy.evidence.length)
+        throw new ReviewAppError("legacy-receipt-invalid");
+      if (exact(legacy, lineage)) {
+        const prior = object(legacy.prior);
+        const publication = object(legacy.publication);
+        const delta = object(legacy.delta);
+        if (
+          !exact(prior, ["attempt", "H", "B", "localVerdict", "status"]) ||
+          prior.localVerdict !== "APPROVED" ||
+          prior.status !== "BLOCKED" ||
+          !exact(publication, ["attempted", "result", "appStatus", "prerequisite"]) ||
+          publication.attempted !== null ||
+          ![publication.result, publication.appStatus, publication.prerequisite].every(text) ||
+          !exact(delta, ["from", "commits", "kind", "conflicts", "checks"]) ||
+          ![delta.from, delta.kind, delta.conflicts, delta.checks].every(text) ||
+          !Array.isArray(delta.commits) ||
+          !delta.commits.length ||
+          !delta.commits.every(text) ||
+          !text(legacy.requestNote) ||
+          !text(legacy.notification) ||
+          !legacy.evidence.every((value) => {
+            const row = object(value);
+            return (
+              exact(row, ["id", "requirement", "action", "result", "status"]) &&
+              Object.values(row).every(text) &&
+              ["PASS", "NOTE", "RETAINED"].includes(String(row.status))
+            );
+          })
+        )
+          throw new ReviewAppError("legacy-receipt-invalid");
+        hash(legacy.head, 40);
+        hash(legacy.base, 40);
+        hash(prior.H, 40);
+        hash(prior.B, 40);
+        attempts.push(identifier(prior.attempt));
+      } else if (
+        !text(legacy.reason) ||
+        !time(legacy.updatedAt) ||
+        !legacy.evidence.every((value) => {
+          const row = object(value);
+          const common = ["id", "requirement", "variant", "action", "result"];
+          return (
+            Object.values(row).every(text) &&
+            (exact(row, [...common, "artifact", "retainedFrom", "rationale"]) ||
+              exact(row, [...common, "artifact"]) ||
+              (exact(row, [...common, "status"]) && row.status === "PASS"))
+          );
+        })
+      )
+        throw new ReviewAppError("legacy-receipt-invalid");
+      return {
+        session,
+        attempts: [...new Set(attempts)],
+      };
+    }
+    const diagnostic = [
+      ...common,
+      "localVerdict",
+      "publication",
+      "notification",
+      "lastDeltaCheck",
+      "deltaNote",
+      "updatedAt",
+    ];
+    const conclusion = [
+      ...common,
+      "localConclusion",
+      "publicationBlockReason",
+      "ownerNotification",
+      "updatedAt",
+    ];
+    if (
+      (!exact(legacy, diagnostic) && !exact(legacy, conclusion)) ||
+      !time(legacy.updatedAt) ||
+      !legacy.evidence.length
+    )
+      throw new ReviewAppError("legacy-receipt-invalid");
+    if (exact(legacy, diagnostic)) {
+      if (
+        legacy.localVerdict !== "APPROVED" ||
+        !text(legacy.publication) ||
+        !legacy.evidence.every(text) ||
+        !text(legacy.notification) ||
+        !time(legacy.lastDeltaCheck) ||
+        !text(legacy.deltaNote)
+      )
+        throw new ReviewAppError("legacy-receipt-invalid");
+    } else if (
+      legacy.localConclusion !== "APPROVED" ||
+      !text(legacy.publicationBlockReason) ||
+      !text(legacy.ownerNotification) ||
+      !legacy.evidence.every((value) => {
+        const row = object(value);
+        const keys = ["id", "boundary", "action", "expected", "status", "artifact"];
+        return (
+          Object.keys(row).length === keys.length &&
+          Object.keys(row).every((key) => keys.includes(key)) &&
+          [row.id, row.boundary, row.action, row.expected].every(text) &&
+          row.status === "PASS" &&
+          (row.artifact === null || text(row.artifact))
+        );
+      })
+    )
+      throw new ReviewAppError("legacy-receipt-invalid");
+    return {
+      session,
+      attempts,
+    };
+  }
   const keys = new Set([
     "repository",
     "pr",
@@ -196,27 +374,17 @@ function recognizeLegacy(raw: Buffer, request: Attempt): { session: string; atte
   ]);
   if (
     Object.keys(legacy).some((key) => !keys.has(key)) ||
-    legacy.repository !== request.repo ||
-    legacy.pr !== request.pr ||
-    legacy.lane !== request.lane ||
-    legacy.status !== "BLOCKED" ||
     legacy.localVerdict !== "FAIL" ||
-    legacy.publicationVerdict !== "BLOCKED" ||
-    legacy.reviewId !== null ||
-    !Array.isArray(legacy.evidence)
+    legacy.publicationVerdict !== "BLOCKED"
   )
     throw new ReviewAppError("legacy-receipt-invalid");
-  hash(legacy.H, 40);
-  hash(legacy.B, 40);
-  hash(legacy.contractDigest, 64);
   if (legacy.wakeReconciliation !== undefined) {
     const wake = object(legacy.wakeReconciliation);
     if (wake.newAttempt !== undefined && typeof wake.newAttempt !== "boolean")
       throw new ReviewAppError("legacy-receipt-invalid");
   }
-  const attempts = [identifier(legacy.attempt)];
   if (legacy.previousAttempt !== undefined) attempts.push(identifier(legacy.previousAttempt));
-  return { session: identifier(legacy.session), attempts: [...new Set(attempts)] };
+  return { session, attempts: [...new Set(attempts)] };
 }
 
 async function syncDirectory(path: string): Promise<void> {
@@ -244,18 +412,25 @@ async function readLegacyArchive(path: string): Promise<Buffer> {
   }
 }
 
+async function checkLegacyArchive(path: string, raw: Buffer): Promise<boolean> {
+  try {
+    if (!(await readLegacyArchive(path)).equals(raw))
+      throw new ReviewAppError("legacy-archive-invalid");
+    return true;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT")
+      return false;
+    throw new ReviewAppError("legacy-archive-invalid");
+  }
+}
+
 async function archiveLegacy(canonical: string, sha256: string, raw: Buffer): Promise<void> {
   const archive = legacyArchive(canonical, sha256);
   let stage: string | undefined;
   try {
-    try {
-      if (!(await readLegacyArchive(archive)).equals(raw))
-        throw new ReviewAppError("legacy-archive-invalid");
+    if (await checkLegacyArchive(archive, raw)) {
       await syncDirectory(dirname(canonical));
       return;
-    } catch (error) {
-      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT")
-        throw error;
     }
     stage = await mkdtemp(join(dirname(canonical), ".review-"));
     const temp = join(stage, "legacy.json");
@@ -266,7 +441,7 @@ async function archiveLegacy(canonical: string, sha256: string, raw: Buffer): Pr
       if (!error || typeof error !== "object" || !("code" in error) || error.code !== "EEXIST")
         throw error;
     }
-    if (!(await readLegacyArchive(archive)).equals(raw))
+    if (!(await checkLegacyArchive(archive, raw)))
       throw new ReviewAppError("legacy-archive-invalid");
     await syncDirectory(dirname(canonical));
   } catch {
@@ -309,7 +484,13 @@ async function validateLegacyRecovery(
     JSON.stringify(recovery.attempts) !== JSON.stringify(legacy.attempts)
   )
     throw new ReviewAppError("receipt-state-invalid");
-  return { version: 1, digest: sha256, attempts: legacy.attempts, session, publication: "unknown" };
+  return {
+    version: 1,
+    digest: sha256,
+    attempts: legacy.attempts,
+    session,
+    publication: "unknown",
+  };
 }
 
 function client(config: Config, repo: string, lane: Lane, transport?: typeof fetch): GitHubApp {
@@ -382,6 +563,13 @@ async function transitionReview(
 ) {
   if (session !== request.session) throw new ReviewAppError("session-mismatch");
   if (action === "recover") hash(legacySha256, 64);
+  request =
+    action === "publish"
+      ? parseRequest(request)
+      : {
+          ...parseAttempt(request),
+          feedback: parseFeedback(request.feedback, action === "block" ? "BLOCKED" : "PENDING"),
+        };
   const app = client(config, request.repo, request.lane, transport);
   const path = `/repos/${request.repo}/pulls/${request.pr}`;
   const expand = (path: string) =>
@@ -448,19 +636,37 @@ async function transitionReview(
     mutationStarted: false,
     supersededAttempts: [] as string[],
     legacyRecovery: undefined as LegacyRecovery | undefined,
+    feedback: action === "publish" ? undefined : request.feedback,
+    localFeedback:
+      action === "publish" && "verdict" in request && request.verdict === "CHANGES_REQUESTED"
+        ? request.feedback
+        : undefined,
+    preparedFeedback: action === "prepare" || action === "recover" ? request.feedback : undefined,
+    feedbackPublication: { status: "unconfirmed" } as
+      | { status: "unconfirmed" | "confirmed" | "failed"; error?: string }
+      | null
+      | undefined,
   };
   let ownsAttempt = false;
+  let recoverySnapshot: Buffer | undefined;
+  const checkSnapshot = async (expected: Buffer) => {
+    if (!(await readFile(canonical)).equals(expected))
+      throw new ReviewAppError("receipt-state-invalid");
+  };
   const save = async () => {
     let stage: string | undefined;
     try {
       stage = await mkdtemp(join(dirname(canonical), ".review-"));
       const temp = join(stage, "receipt.json");
-      await writeFile(temp, JSON.stringify(receipt, null, 2), {
+      const raw = Buffer.from(JSON.stringify(receipt, null, 2));
+      await writeFile(temp, raw, {
         mode: 0o600,
         flag: "wx",
         flush: true,
       });
+      if (recoverySnapshot) await checkSnapshot(recoverySnapshot);
       await rename(temp, canonical);
+      if (recoverySnapshot) recoverySnapshot = raw;
       if (action === "recover") {
         ownsAttempt = true;
         await syncDirectory(dirname(canonical));
@@ -474,21 +680,40 @@ async function transitionReview(
         });
     }
   };
-  const announce = async () => {
-    await publishLaneState(app, {
-      version: 1,
-      repo: request.repo,
-      pr: request.pr,
-      lane: request.lane,
-      session: request.session,
-      attempt: request.attempt,
-      H: request.H,
-      B: request.B,
-      status: receipt.status as "PENDING" | "BLOCKED" | "APPROVED" | "CHANGES_REQUESTED",
-      evidenceDigest: digest({ rows: receipt.evidence, coverage: receipt.coverage }),
-      reviewId: receipt.reviewId,
-      assessment: "assessment" in request ? request.assessment : null,
-    });
+  const announce = async (persist = true) => {
+    receipt.feedbackPublication = { status: "unconfirmed" };
+    const feedback = receipt.status === "APPROVED" ? undefined : receipt.feedback;
+    try {
+      await publishLaneState(app, {
+        version: 1,
+        repo: request.repo,
+        pr: request.pr,
+        lane: request.lane,
+        session: request.session,
+        attempt: request.attempt,
+        H: request.H,
+        B: request.B,
+        status: receipt.status as "PENDING" | "BLOCKED" | "APPROVED" | "CHANGES_REQUESTED",
+        evidenceDigest: digest(
+          receipt.status === "PENDING"
+            ? { rows: [], coverage: null }
+            : { rows: receipt.evidence, coverage: receipt.coverage },
+        ),
+        reviewId: receipt.reviewId,
+        assessment:
+          receipt.status !== "PENDING" && "assessment" in request ? request.assessment : null,
+        ...(feedback === undefined ? {} : { feedback }),
+      });
+      receipt.feedbackPublication = { status: "confirmed" };
+    } catch (error) {
+      receipt.feedbackPublication = {
+        status: "failed",
+        error: error instanceof ReviewAppError ? error.category : "internal",
+      };
+      if (persist) await save();
+      throw error;
+    }
+    if (persist) await save();
   };
   const fresh = async (actor: string) => {
     const pr = object(await app.request(path));
@@ -500,10 +725,19 @@ async function transitionReview(
       throw new ReviewAppError("revision-changed");
     if (object(pr.user).login === actor) throw new ReviewAppError("self-author");
   };
+  const recoveryPreflight = async () => {
+    const access = await app.authenticate();
+    await fresh(access.actor);
+    if ((await app.history(`${path}/reviews`)).length !== 0)
+      throw new ReviewAppError("legacy-publication-conflict");
+    await fresh(access.actor);
+  };
   try {
     let previous: unknown;
+    let previousRaw: Buffer | undefined;
     try {
       const raw = await readFile(canonical);
+      previousRaw = raw;
       if (
         action === "recover" &&
         legacySha256 !== undefined &&
@@ -512,6 +746,10 @@ async function transitionReview(
         const legacy = recognizeLegacy(raw, request);
         if (legacy.attempts.includes(request.attempt))
           throw new ReviewAppError("attempt-superseded");
+        await checkLegacyArchive(legacyArchive(canonical, legacySha256), raw);
+        await recoveryPreflight();
+        await checkSnapshot(raw);
+        recoverySnapshot = raw;
         await archiveLegacy(canonical, legacySha256, raw);
         receipt.supersededAttempts = legacy.attempts;
         receipt.legacyRecovery = {
@@ -611,6 +849,21 @@ async function transitionReview(
         );
       }
       receipt.supersededAttempts = prior.supersededAttempts;
+      const priorFeedback =
+        prior.feedback === undefined
+          ? undefined
+          : parseFeedback(
+              prior.feedback,
+              prior.status as "PENDING" | "BLOCKED" | "APPROVED" | "CHANGES_REQUESTED",
+            );
+      const preparedFeedback =
+        prior.preparedFeedback === undefined
+          ? undefined
+          : parseFeedback(prior.preparedFeedback, "PENDING");
+      const localFeedback =
+        prior.localFeedback === undefined
+          ? undefined
+          : parseFeedback(prior.localFeedback, "CHANGES_REQUESTED");
       if (receipt.supersededAttempts.includes(request.attempt))
         throw new ReviewAppError("attempt-superseded");
       if (action === "recover") {
@@ -632,8 +885,19 @@ async function transitionReview(
           receipt.legacyRecovery?.digest !== legacySha256
         )
           throw new ReviewAppError("receipt-state-invalid");
-        await announce();
-        return prior;
+        if (preparedFeedback && digest(preparedFeedback) !== digest(request.feedback))
+          throw new ReviewAppError("attempt-conflict");
+        if (!previousRaw) throw new ReviewAppError("receipt-state-invalid");
+        await recoveryPreflight();
+        await checkSnapshot(previousRaw);
+        await announce(false);
+        await checkSnapshot(previousRaw);
+        return {
+          ...prior,
+          status: prior.status,
+          reason: prior.reason,
+          feedbackPublication: receipt.feedbackPublication,
+        };
       }
       if (prior.attempt === request.attempt) {
         if (
@@ -644,7 +908,12 @@ async function transitionReview(
           prior.appId !== receipt.appId
         )
           throw new ReviewAppError("attempt-conflict");
-        if (action === "prepare") throw new ReviewAppError("attempt-already-active");
+        if (action === "prepare") {
+          if (preparedFeedback && digest(preparedFeedback) !== digest(request.feedback))
+            throw new ReviewAppError("attempt-conflict");
+          if (prior.status !== "PENDING" || prior.inputDigest !== null)
+            return { ...receipt, ...prior };
+        }
         if (action === "publish" && prior.reviewBlocked)
           throw new ReviewAppError("attempt-blocked");
         if (
@@ -653,7 +922,23 @@ async function transitionReview(
           prior.inputDigest !== receipt.inputDigest
         )
           throw new ReviewAppError("attempt-conflict");
-        if (action === "block") receipt.inputDigest = prior.inputDigest;
+        if (action === "block") {
+          if (
+            prior.reason === "review-blocked" &&
+            priorFeedback &&
+            digest(priorFeedback) !== digest(request.feedback)
+          )
+            throw new ReviewAppError("attempt-conflict");
+          receipt.inputDigest = prior.inputDigest;
+          receipt.localVerdict = prior.localVerdict;
+          receipt.evidence = prior.evidence as Row[];
+          receipt.coverage = prior.coverage as Request["coverage"];
+          receipt.localFeedback =
+            localFeedback ?? (priorFeedback?.kind === "defect" ? priorFeedback : undefined);
+        }
+        receipt.preparedFeedback =
+          preparedFeedback ?? (action === "prepare" ? request.feedback : undefined);
+        if (action === "publish") receipt.feedback = receipt.preparedFeedback;
         receipt.mutationStarted = prior.mutationStarted;
         receipt.reviewId = prior.reviewId === null ? null : integer(prior.reviewId);
       } else {
@@ -669,13 +954,17 @@ async function transitionReview(
       receipt.reviewBlocked = true;
     }
     await save();
-    await announce();
+    if (action !== "publish" || !receipt.mutationStarted) await announce();
     if (action !== "publish") return receipt;
     if (!("body" in request)) throw new ReviewAppError("invalid-request");
     const access = await app.authenticate();
     await fresh(access.actor);
     const marker = `Spur review attempt: ${request.attempt}`;
-    const body = `${request.body}\n\n${marker}\nLane: ${request.lane}\nH: ${request.H}\nB: ${request.B}\nContractDigest: ${request.contractDigest}\nStatus: ${request.verdict}\nScenario evidence: ${JSON.stringify(request.rows)}\nCoverage: ${JSON.stringify(request.coverage)}\n\nWritten by Spur · ${request.session}`;
+    const explanation =
+      request.verdict === "CHANGES_REQUESTED"
+        ? `\n\n${feedbackSummary(parseFeedback(request.feedback, "CHANGES_REQUESTED"))}`
+        : "";
+    const body = `${request.body}${explanation}\n\n${marker}\nLane: ${request.lane}\nH: ${request.H}\nB: ${request.B}\nContractDigest: ${request.contractDigest}\nStatus: ${request.verdict}\nScenario evidence: ${JSON.stringify(request.rows)}\nCoverage: ${JSON.stringify(request.coverage)}\n\nWritten by Spur · ${request.session}`;
     const state = request.verdict === "APPROVED" ? "APPROVED" : "CHANGES_REQUESTED";
     const matching = (value: unknown) => {
       const review = object(value);
@@ -686,8 +975,6 @@ async function transitionReview(
         review.state === state
       );
     };
-    receipt.status = "BLOCKED";
-    await save();
     // Reconcile before mutation too: rerunning a completed attempt must not duplicate its review.
     const history = await app.history(`${path}/reviews`);
     const effective = (rows: unknown[]) => effectiveNativeReview(rows, { login: access.actor });
@@ -755,19 +1042,33 @@ async function transitionReview(
       throw new ReviewAppError("native-verdict-superseded");
     await fresh(access.actor);
     receipt.status = request.verdict;
+    receipt.feedback = request.verdict === "CHANGES_REQUESTED" ? request.feedback : undefined;
     await announce();
-    await save();
     return receipt;
   } catch (error) {
     if (!ownsAttempt) throw error;
     receipt.status = "BLOCKED";
     receipt.reason = error instanceof ReviewAppError ? error.category : "internal";
+    receipt.feedback = {
+      kind: "capability",
+      constraint: "publication",
+      reason: `Review operation unconfirmed: ${receipt.reason}`,
+      check: `review-app ${action}`,
+      observed: `Operation failed with ${receipt.reason}`,
+      expected: "Authenticated publication and exact readback for the pinned revision",
+      evidence: `Attempt ${request.attempt}; native review ${receipt.reviewId ?? "unconfirmed"}; local verdict ${receipt.localVerdict ?? "not reached"}`,
+      unproven:
+        "This failure does not establish a technical code defect or revoke an existing native review",
+      action:
+        "Restore review publication capability, verify the current revision and reconcile this attempt",
+      actor: "Reviewer and repository operator",
+    };
     if (action !== "publish") receipt.reviewBlocked = true;
     await save();
     try {
       await announce();
     } catch {
-      /* Unconfirmed external state blocks continuation; cannot revoke an unseen old vote. */
+      /* announce retained the explicit failed publication outcome. */
     }
     return receipt;
   } finally {
@@ -792,7 +1093,8 @@ export function registerReviewApp(program: Command): void {
         process.stdout.write(`${JSON.stringify(result)}\n`);
         if (
           (action === "prepare" && result.status !== "PENDING") ||
-          (action === "block" && result.reason !== "review-blocked")
+          (action === "block" && result.reason !== "review-blocked") ||
+          result.feedbackPublication?.status !== "confirmed"
         )
           process.exitCode = 1;
       });
@@ -812,7 +1114,8 @@ export function registerReviewApp(program: Command): void {
         options.legacySha256,
       );
       process.stdout.write(`${JSON.stringify(result)}\n`);
-      if (result.status !== "PENDING") process.exitCode = 1;
+      if (result.status !== "PENDING" || result.feedbackPublication?.status !== "confirmed")
+        process.exitCode = 1;
     });
   command
     .command("status")

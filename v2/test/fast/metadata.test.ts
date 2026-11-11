@@ -13,11 +13,18 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   archiveSessions,
+  listTelegramTopicSessionIds,
+  readArchivedSession,
+  readTelegramTopicGcClock,
+  writeTelegramTopicGcClock,
+  readTelegramTopicGcFailures,
+  writeTelegramTopicGcFailures,
   deletePendingSendBatch,
   deletePendingSendBatchConditional,
   deleteTelegramSourceStateForSession,
   deleteWorkItemLifecycle,
   hasPendingTelegramSend,
+  pendingTriggerSendWorkIds,
   listSessions,
   clearGitHubPollDisabledSession,
   listGitHubPollDisabledEntries,
@@ -62,6 +69,7 @@ import {
 } from "../../src/metadata.js";
 import { appendEventLog, readEventLog } from "../../src/event-log.js";
 import type {
+  DurableSpawnIntent,
   PersistedPendingBatch,
   PersistedSpawnWork,
   SessionRecord,
@@ -130,6 +138,22 @@ async function newDataDir(): Promise<string> {
 }
 
 describe("work-item registry", () => {
+  it("round-trips PR alert rollback source observation IDs and rejects malformed IDs", async () => {
+    const dataDir = await newDataDir();
+    const snapshot = { prNumber: 42, signals: new Map(), ownerRollbackId: "api-failed" };
+    writeReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1", snapshot);
+    expect(readReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1")).toEqual(
+      snapshot,
+    );
+    writeReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1", {
+      ...snapshot,
+      ownerRollbackId: "",
+    });
+    expect(() => readReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1")).toThrow(
+      "Invalid PR alert rollback identifier",
+    );
+  });
+
   it("round-trips confirmed conflict clear IDs and rejects malformed IDs", async () => {
     const dataDir = await newDataDir();
     const snapshot = {
@@ -1117,6 +1141,256 @@ describe("pending send batches", () => {
     recordPendingSendBatch(dataDir, record);
     deletePendingSendBatch(dataDir, "does-not-exist");
     expect(readPendingSendBatches(dataDir).size).toBe(1);
+  });
+});
+
+describe("durable spawn metadata", () => {
+  function acceptedSession(): SessionRecord & { spawnIntent: DurableSpawnIntent } {
+    const at = "2026-10-14T10:00:00.000Z";
+    return {
+      id: "api-1",
+      project: "api",
+      workspaceId: "api-1",
+      agent: "claude",
+      model: "opus",
+      reasoningEffort: "high",
+      claudeAccountId: "account-1",
+      prompt: "review changes",
+      branch: "feature/review",
+      worktree: true,
+      worktreePath: "/tmp/worktrees/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "",
+      status: "spawning",
+      createdAt: at,
+      updatedAt: at,
+      startupAttachmentIds: ["input/context.txt"],
+      queuedMessages: { messages: ["check tests"], awaitingPrompt: false },
+      spawnReceipt: { version: 1, acceptedAt: at },
+      spawnIntent: {
+        version: 1,
+        phase: "queued",
+        request: {
+          project: "api",
+          prompt: "review changes",
+          originalTaskPrompt: "original task",
+          steps: ["review changes", "report findings"],
+          agent: "claude",
+          model: "opus",
+          reasoningEffort: "high",
+          mode: "manager",
+          planMode: true,
+          restrictWrites: true,
+          allowedTriggers: ["review"],
+          branch: "feature/review",
+          overrides: { worktree: true, defaultBranch: "main" },
+          reuseWorkspaceSessionId: "api-anchor",
+          bareSpawnMessage: true,
+          preflightBatchId: "preflight-1",
+          slots: { links: [{ label: "tracker", url: "https://example.com/issue/1" }] },
+          selfDestruct: { enabled: true, conditions: "review complete" },
+          bootstrap: false,
+          claudeAccountId: "account-1",
+          subscriptions: [{ targetSessionId: "api-anchor", states: ["stopped"], message: "done" }],
+        },
+        mode: { name: "manager", skill: "manager" },
+        defaultBranch: "main",
+        preflightBatchId: "preflight-1",
+        startupAttachments: [{ id: "input/context.txt", name: "context.txt" }],
+        launchSelection: {
+          model: "opus",
+          reasoningEffort: "high",
+          reasoningVariantNames: ["high"],
+        },
+        submission: { state: "pending" },
+        telegramOrigin: { projectId: "api", sourceId: "tg", chatId: -123, messageThreadId: 7 },
+      },
+    };
+  }
+
+  it.each(["queued", "workspace_ready", "launching", "submitted"] as const)(
+    "round-trips the %s checkpoint and replay behavior",
+    async (phase) => {
+      const dataDir = await newDataDir();
+      const session = acceptedSession();
+      session.spawnIntent.phase = phase;
+      if (phase === "launching" || phase === "submitted") {
+        session.agentLaunchId = "launch-1";
+        session.agentSessionId = "provider-1";
+        session.spawnIntent.pane = { pid: 1234, starttime: 5678 };
+        session.spawnIntent.submission = {
+          state: phase === "submitted" ? "confirmed" : "uncertain",
+          uncertainAt: session.createdAt,
+          message: "review changes",
+          ackBaseline: { agent: "claude", file: "/tmp/transcript.jsonl", size: 42 },
+        };
+      }
+      writeSession(dataDir, session);
+      expect(readSession(dataDir, session.id)).toMatchObject(session);
+      expect(listSessions(dataDir)[0]?.spawnIntent).toEqual(session.spawnIntent);
+    },
+  );
+
+  it.each(["owner", "suppressed"] as const)(
+    "round-trips explicit PR alert intent and internal %s provenance",
+    async (kind) => {
+      const dataDir = await newDataDir();
+      const session = acceptedSession();
+      session.spawnIntent.request.prAlertOwner = true;
+      session.prAlertTransfer = {
+        kind,
+        predecessorWorkspaceId: "api-old",
+        predecessorSessionId: "api-old",
+      };
+      writeSession(dataDir, session);
+      expect(readSession(dataDir, session.id)?.spawnIntent?.request.prAlertOwner).toBe(true);
+      expect(readSession(dataDir, session.id)?.prAlertTransfer).toEqual(session.prAlertTransfer);
+      expect(listSessions(dataDir)[0]?.prAlertTransfer).toEqual(session.prAlertTransfer);
+    },
+  );
+
+  it("rejects malformed PR alert transfer provenance before write", async () => {
+    const dataDir = await newDataDir();
+    const session = acceptedSession();
+    session.prAlertTransfer = {
+      kind: "owner",
+      predecessorWorkspaceId: "",
+      predecessorSessionId: "api-old",
+    };
+    expect(() => writeSession(dataDir, session)).toThrow("Invalid PR alert transfer");
+  });
+
+  it.each([null, "invalid", { kind: "helper" }])(
+    "rejects raw malformed PR alert provenance without rewriting it: %j",
+    async (prAlertTransfer) => {
+      const dataDir = await newDataDir();
+      const session = acceptedSession();
+      writeSession(dataDir, session);
+      const path = join(dataDir, "sessions", "api", "api-1.json");
+      const bytes = JSON.stringify({ ...session, prAlertTransfer });
+      writeFileSync(path, bytes);
+      expect(() => readSession(dataDir, session.id)).toThrow("Invalid PR alert transfer");
+      expect(readFileSync(path, "utf8")).toBe(bytes);
+    },
+  );
+
+  it("round-trips a durable Cursor correlated baseline before its transcript exists", async () => {
+    const dataDir = await newDataDir();
+    const session = acceptedSession();
+    session.agent = "cursor";
+    session.spawnIntent.request.agent = "cursor";
+    session.spawnIntent.submission.ackBaseline = {
+      agent: "cursor",
+      file: null,
+      size: 0,
+      deliveryId: "12345678-1234-4123-8123-123456789abc",
+    };
+    writeSession(dataDir, session);
+    expect(readSession(dataDir, session.id)?.spawnIntent).toEqual(session.spawnIntent);
+    expect(listSessions(dataDir)[0]?.spawnIntent).toEqual(session.spawnIntent);
+  });
+
+  it.each([
+    { label: "version", patch: { version: 2 } },
+    { label: "phase", patch: { phase: "unknown" } },
+    {
+      label: "attachment traversal",
+      patch: { startupAttachments: [{ id: "../other/file", name: "file" }] },
+    },
+    {
+      label: "attachment data",
+      patch: { startupAttachments: [{ id: "file", name: "file", data: "secret" }] },
+    },
+    { label: "submission state", patch: { submission: { state: "unknown" } } },
+    { label: "uncertainty time", patch: { submission: { state: "uncertain" } } },
+    {
+      label: "ack baseline",
+      patch: {
+        submission: { state: "pending", ackBaseline: { agent: "codex", offsets: { file: "bad" } } },
+      },
+    },
+    {
+      label: "negative baseline",
+      patch: {
+        submission: { state: "pending", ackBaseline: { agent: "claude", file: "file", size: -1 } },
+      },
+    },
+    {
+      label: "uncorrelated Cursor baseline",
+      patch: {
+        submission: { state: "pending", ackBaseline: { agent: "cursor", file: null, size: 0 } },
+      },
+    },
+    { label: "pane identity", patch: { pane: { pid: 1234, starttime: "bad" } } },
+    { label: "mode", patch: { mode: { name: "manager" } } },
+    { label: "credentials", patch: { credentials: "secret" } },
+    {
+      label: "inline attachment",
+      patch: { request: { project: "api", attachments: [{ name: "file", data: "secret" }] } },
+    },
+    { label: "config path", patch: { request: { project: "api", configPath: "/tmp/config" } } },
+    { label: "project mismatch", patch: { request: { project: "other" } } },
+    {
+      label: "subscription",
+      patch: {
+        request: {
+          project: "api",
+          subscriptions: [{ targetSessionId: "api-2", states: ["unknown"] }],
+        },
+      },
+    },
+  ])("rejects corrupt $label instead of stripping durable intent", async ({ patch }) => {
+    const dataDir = await newDataDir();
+    const session = acceptedSession();
+    writeSession(dataDir, session);
+    const path = join(dataDir, "sessions", "api", "api-1.json");
+    writeFileSync(
+      path,
+      JSON.stringify({ ...session, spawnIntent: { ...session.spawnIntent, ...patch } }),
+    );
+    expect(() => readSession(dataDir, session.id)).toThrow("Invalid durable spawn metadata");
+    expect(() => listSessions(dataDir)).toThrow("Invalid durable spawn metadata");
+  });
+
+  it.each([
+    { label: "missing receipt", patch: { spawnReceipt: undefined } },
+    {
+      label: "receipt version",
+      patch: { spawnReceipt: { version: 2, acceptedAt: "2026-10-14T10:00:00.000Z" } },
+    },
+    { label: "receipt time", patch: { spawnReceipt: { version: 1, acceptedAt: "invalid" } } },
+    { label: "terminal intent", patch: { status: "killed" } },
+  ])("rejects $label at the write boundary", async ({ patch }) => {
+    const dataDir = await newDataDir();
+    const session = acceptedSession();
+    expect(() => writeSession(dataDir, { ...session, ...patch } as SessionRecord)).toThrow(
+      "Invalid durable spawn metadata",
+    );
+    expect(readSession(dataDir, session.id)).toBeNull();
+  });
+
+  it("keeps legacy records compatible without fabricating durable state", async () => {
+    const dataDir = await newDataDir();
+    const { spawnIntent: _intent, spawnReceipt: _receipt, ...legacy } = acceptedSession();
+    writeSession(dataDir, legacy);
+    expect(readSession(dataDir, legacy.id)).toMatchObject(legacy);
+    expect(readSession(dataDir, legacy.id)).not.toHaveProperty("spawnIntent");
+    expect(readSession(dataDir, legacy.id)).not.toHaveProperty("spawnReceipt");
+  });
+
+  it("preserves the accepted receipt after retirement and archival", async () => {
+    const dataDir = await newDataDir();
+    const { spawnIntent: _intent, ...accepted } = acceptedSession();
+    const terminal: SessionRecord = { ...accepted, status: "killed" };
+    writeSession(dataDir, terminal);
+    expect(readSession(dataDir, terminal.id)?.spawnReceipt).toEqual(terminal.spawnReceipt);
+    archiveSessions(dataDir, [terminal]);
+    expect(listSessions(dataDir)).toEqual([]);
+    const archived = JSON.parse(
+      readFileSync(join(dataDir, "sessions-archive", "api", "api-1.json"), "utf-8"),
+    );
+    expect(archived).toMatchObject({ status: "killed", spawnReceipt: terminal.spawnReceipt });
+    expect(archived).not.toHaveProperty("spawnIntent");
   });
 });
 
@@ -2978,5 +3252,112 @@ describe("hasPendingTelegramSend", () => {
     expect(hasPendingTelegramSend(dataDir, "api-1", { unclaimedOnly: true })).toBe(false);
     recordPendingSendBatch(dataDir, telegramRecord("api:chat:api-1", "api-1"));
     expect(hasPendingTelegramSend(dataDir, "api-1", { unclaimedOnly: true })).toBe(true);
+  });
+});
+
+describe("telegram topic gc state", () => {
+  it("lists binding owners and reply-target-only sessions", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramBindings(dataDir, "api", "tg", [
+      { sessionId: "api-1", chatId: -1001, messageThreadId: 22 },
+    ]);
+    writeTelegramReplyTarget(dataDir, {
+      sessionId: "api-2",
+      projectId: "api",
+      sourceId: "tg",
+      chatId: -1001,
+      messageThreadId: 23,
+    });
+    writeTelegramReplyTarget(dataDir, {
+      sessionId: "a/b",
+      projectId: "api",
+      sourceId: "tg",
+      chatId: -1001,
+      messageThreadId: 24,
+    });
+
+    expect([...listTelegramTopicSessionIds(dataDir, ["api", "absent"])].sort()).toEqual([
+      "a/b",
+      "api-1",
+      "api-2",
+    ]);
+    expect(listTelegramTopicSessionIds(await newDataDir(), ["api"]).size).toBe(0);
+  });
+
+  it("reads an archived record and returns null when none exists", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    archiveSessions(dataDir, [{ id: "api-1", project: "api" }]);
+
+    expect(readArchivedSession(dataDir, "api-1")?.id).toBe("api-1");
+    expect(readArchivedSession(dataDir, "api-2")).toBeNull();
+  });
+
+  it("throws on an invalid archived record", async () => {
+    const dataDir = await newDataDir();
+    await mkdir(join(dataDir, "sessions-archive", "api"), { recursive: true });
+    await writeFile(join(dataDir, "sessions-archive", "api", "api-1.json"), "{not json");
+
+    expect(() => readArchivedSession(dataDir, "api-1")).toThrow();
+  });
+
+  it("round-trips the sweep clock and treats an invalid file as absent", async () => {
+    const dataDir = await newDataDir();
+    expect(readTelegramTopicGcClock(dataDir)).toBeNull();
+    writeTelegramTopicGcClock(dataDir, 1234);
+    expect(readTelegramTopicGcClock(dataDir)).toBe(1234);
+    await writeFile(join(dataDir, "source-state", "telegram-topic-gc.json"), "{nope");
+    expect(readTelegramTopicGcClock(dataDir)).toBeNull();
+  });
+
+  it("round-trips GC failure counts and ignores invalid entries", async () => {
+    const dataDir = await newDataDir();
+    expect(readTelegramTopicGcFailures(dataDir)).toEqual({});
+    writeTelegramTopicGcFailures(dataDir, { "api-1": 2 });
+    expect(readTelegramTopicGcFailures(dataDir)).toEqual({ "api-1": 2 });
+    await writeFile(
+      join(dataDir, "source-state", "telegram-topic-gc-failures.json"),
+      JSON.stringify({ "api-1": "x", "api-2": 1.5, "api-3": 1 }),
+    );
+    expect(readTelegramTopicGcFailures(dataDir)).toEqual({ "api-3": 1 });
+  });
+});
+
+describe("pendingTriggerSendWorkIds", () => {
+  const claim = {
+    controllerId: "c",
+    routeLeaseId: "l",
+    claimId: "id",
+    claimedAt: "2026-01-01T00:00:00.000Z",
+  };
+
+  it("lists this session's non-telegram batches, claimed or not, keyed by workId or queueKey", async () => {
+    const dataDir = await newDataDir();
+    expect(pendingTriggerSendWorkIds(dataDir, "api-1")).toEqual([]);
+
+    recordPendingSendBatch(dataDir, reviewPendingBatch({ queueKey: "api:ci:api-1", workId: "w1" }));
+    recordPendingSendBatch(
+      dataDir,
+      servicePendingBatch({ queueKey: "api:notify:api-1", workId: "w2", claim }),
+    );
+    recordPendingSendBatch(dataDir, reviewPendingBatch({ queueKey: "api:legacy:api-1" }));
+    recordPendingSendBatch(
+      dataDir,
+      telegramPendingBatch({ queueKey: "api:chat:api-1", workId: "tg" }),
+    );
+    recordPendingSendBatch(
+      dataDir,
+      servicePendingBatch({
+        queueKey: "api:notify:api-2",
+        workId: "other",
+        batch: { kind: "service", sessionId: "api-2", serviceId: "web", ruleIds: ["crash"] },
+      }),
+    );
+
+    expect(pendingTriggerSendWorkIds(dataDir, "api-1").sort()).toEqual([
+      "api:legacy:api-1",
+      "w1",
+      "w2",
+    ]);
   });
 });

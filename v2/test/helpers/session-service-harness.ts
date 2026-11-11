@@ -92,6 +92,7 @@ const waitForOpenCodeLaunchMessageMock: Mock = vi.fn();
 const withOpenCodeLaunchIdentityLockMock: Mock = vi.fn();
 const readOpenCodeStateMock: Mock = vi.fn();
 const readOpenCodeStructuredStateMock: Mock = vi.fn();
+const openCodeHeartbeatExpiredMock: Mock = vi.fn();
 const resolveCursorLaunchModelMock = vi.fn(
   async (model: string | undefined): Promise<string | undefined> => model,
 );
@@ -131,6 +132,7 @@ const deleteServiceSourceStatesForSessionMock: Mock = vi.fn();
 const deleteTelegramSourceStateForSessionMock: Mock = vi.fn();
 const deleteTelegramReplyTargetMock: Mock = vi.fn();
 const hasPendingTelegramSendMock: Mock = vi.fn();
+const pendingTriggerSendWorkIdsMock: Mock = vi.fn();
 const listActiveServiceProblemsMock: Mock = vi.fn();
 const listServiceInstancesMock: Mock = vi.fn();
 const listServiceInstancesForSessionMock: Mock = vi.fn();
@@ -231,7 +233,9 @@ const probeTmuxProcessMatchMock = vi.fn<
 >();
 const killTmuxSessionMock: Mock = vi.fn();
 const captureAgentProcessesForLaunchMock = vi.fn(() =>
-  Promise.resolve<{ status: "ok"; processes: AgentProcessRef[] } | { status: "unavailable" }>({
+  Promise.resolve<
+    { status: "ok"; processes: AgentProcessRef[]; complete?: boolean } | { status: "unavailable" }
+  >({
     status: "ok",
     processes: [],
   }),
@@ -246,6 +250,16 @@ const capturePaneAgentProcessesMock = vi.fn<typeof capturePaneAgentProcesses>(
 const terminateAgentProcessesMock = vi.fn<
   (processes: readonly AgentProcessRef[]) => Promise<AgentTerminationOutcome>
 >(() => Promise.resolve({ status: "clear" }));
+const terminateDetachedSessionProcessesMock = vi.fn<
+  (input: {
+    sessionId: string;
+    sessionToolDir: string;
+    tmuxServerPid: number | null;
+  }) => Promise<AgentTerminationOutcome | { status: "unavailable" }>
+>(() => Promise.resolve({ status: "clear" }));
+const readTmuxServerPidMock = vi.fn<() => Promise<runtimeTmuxModule.TmuxServerPid>>(() =>
+  Promise.resolve({ status: "running", pid: 4844 }),
+);
 // "unavailable" is the safe default: it is what a real host without a
 // readable process environment (e.g. macOS, or a CI sandbox without procfs)
 // returns, and matches the P2 guard's own never-blocks-on-what-it-cannot-see
@@ -311,6 +325,7 @@ const hasUncommittedChangesMock: Mock = vi.fn();
 const isGitWorktreeMock: Mock = vi.fn();
 const hasUnpushedCommitsMock: Mock = vi.fn();
 const readCurrentBranchMock: Mock = vi.fn();
+const readBranchDestinationMock: Mock = vi.fn();
 const readRemoteUrlsMock: Mock = vi.fn();
 const removeWorktreeMock: Mock = vi.fn();
 const pruneRepoWorktreesMock: Mock = vi.fn();
@@ -482,6 +497,7 @@ const readCodexUserConfigMock: Mock = vi.fn();
 const captureCodexRolloutBaselineMock: Mock = vi.fn();
 const findLatestCodexSessionFileMock: Mock = vi.fn();
 const readCodexRolloutStateMock: Mock = vi.fn();
+const codexRateLimitPermissionMock: Mock = vi.fn();
 const scanCodexRolloutForMessageMock: Mock = vi.fn();
 const ghMock: Mock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
@@ -495,6 +511,12 @@ const consentPolicyMock: Mock = vi.fn();
 const consentRepositoryMock: Mock = vi.fn();
 const readTelegramBindingsMock: Mock = vi.fn();
 const readTelegramReplyTargetMock: Mock = vi.fn();
+const readArchivedSessionMock: Mock = vi.fn();
+const listTelegramTopicSessionIdsMock: Mock = vi.fn();
+const readTelegramTopicGcClockMock: Mock = vi.fn();
+const writeTelegramTopicGcClockMock: Mock = vi.fn();
+const readTelegramTopicGcFailuresMock: Mock = vi.fn();
+const writeTelegramTopicGcFailuresMock: Mock = vi.fn();
 const sendTelegramReplyMock: Mock = vi.fn();
 const sendTelegramChatActionMock: Mock = vi.fn();
 const editTelegramTopicMock: Mock = vi.fn();
@@ -639,6 +661,7 @@ vi.mock("../../src/agents/opencode.js", async (importOriginal) => {
     withOpenCodeLaunchIdentityLock: withOpenCodeLaunchIdentityLockMock,
     readOpenCodeState: readOpenCodeStateMock,
     readOpenCodeStructuredState: readOpenCodeStructuredStateMock,
+    openCodeHeartbeatExpired: openCodeHeartbeatExpiredMock,
   };
 });
 
@@ -797,6 +820,7 @@ vi.mock("../../src/metadata.js", () => ({
   deleteTelegramSourceStateForSession: deleteTelegramSourceStateForSessionMock,
   deleteTelegramReplyTarget: deleteTelegramReplyTargetMock,
   hasPendingTelegramSend: hasPendingTelegramSendMock,
+  pendingTriggerSendWorkIds: pendingTriggerSendWorkIdsMock,
   listActiveServiceProblems: listActiveServiceProblemsMock,
   listServiceInstances: listServiceInstancesMock,
   listServiceInstancesForSession: listServiceInstancesForSessionMock,
@@ -806,6 +830,12 @@ vi.mock("../../src/metadata.js", () => ({
   readSession: readSessionMock,
   readTelegramBindings: readTelegramBindingsMock,
   readTelegramReplyTarget: readTelegramReplyTargetMock,
+  readArchivedSession: readArchivedSessionMock,
+  listTelegramTopicSessionIds: listTelegramTopicSessionIdsMock,
+  readTelegramTopicGcClock: readTelegramTopicGcClockMock,
+  writeTelegramTopicGcClock: writeTelegramTopicGcClockMock,
+  readTelegramTopicGcFailures: readTelegramTopicGcFailuresMock,
+  writeTelegramTopicGcFailures: writeTelegramTopicGcFailuresMock,
   recordTelegramMessages: recordTelegramMessagesMock,
   requestGitHubMergeConflictRestoreReplay: requestGitHubMergeConflictRestoreReplayMock,
   writeTelegramBindings: writeTelegramBindingsMock,
@@ -851,6 +881,13 @@ vi.mock("../../src/agents/codex.js", async (importOriginal) => ({
   readCodexRolloutState: readCodexRolloutStateMock,
   readCodexConversationTail: readCodexConversationTailMock,
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
+}));
+vi.mock("../../src/agents/codex-rate-limits.js", () => ({
+  CodexRateLimitPoller: class {
+    permission = codexRateLimitPermissionMock;
+    prune = vi.fn();
+    dispose = vi.fn();
+  },
 }));
 
 vi.mock("../../src/agents/models.js", () => ({
@@ -940,6 +977,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
     getFleetSessionRssBytes: getFleetSessionRssBytesMock,
     isProcessRunningInTmux: isProcessRunningInTmuxMock,
     probeTmuxProcessMatch: probeTmuxProcessMatchMock,
+    readTmuxServerPid: readTmuxServerPidMock,
     killTmuxSession: killTmuxSessionMock,
     killTmuxSessionTree: killTmuxSessionTreeMock,
     setTmuxSocketName: setTmuxSocketNameMock,
@@ -958,6 +996,7 @@ vi.mock("../../src/agent-processes.js", () => ({
   captureAgentProcessesForLaunch: captureAgentProcessesForLaunchMock,
   capturePaneAgentProcesses: capturePaneAgentProcessesMock,
   terminateAgentProcesses: terminateAgentProcessesMock,
+  terminateDetachedSessionProcesses: terminateDetachedSessionProcessesMock,
   findForeignAgentProcessesForSession: findForeignAgentProcessesForSessionMock,
 }));
 
@@ -1060,6 +1099,7 @@ vi.mock("../../src/workspace.js", () => ({
   isGitWorktree: isGitWorktreeMock,
   pruneRepoWorktrees: pruneRepoWorktreesMock,
   readCurrentBranch: readCurrentBranchMock,
+  readBranchDestination: readBranchDestinationMock,
   readRemoteUrls: readRemoteUrlsMock,
   removeWorktree: removeWorktreeMock,
   resolveRepoPathFromWorktree: resolveRepoPathFromWorktreeMock,
@@ -1409,6 +1449,7 @@ type SessionServiceInternals = {
     runtimeAlive: boolean;
     paneUsable: boolean;
     processAlive: boolean;
+    tmuxActivityAt?: Date | null;
     probeUnresponsive: boolean;
     diagnostic?: string;
   }>;
@@ -1540,6 +1581,7 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   readOpenCodeStructuredStateMock.mockReset().mockImplementation(async (...args: unknown[]) => ({
     state: await readOpenCodeStateMock(...args),
   }));
+  openCodeHeartbeatExpiredMock.mockReset().mockResolvedValue(false);
   agentProcessMatchersMock
     .mockReset()
     .mockImplementation((agent: string, launchCommand: string) => {
@@ -1660,11 +1702,18 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
       : new Map();
   });
   readTelegramReplyTargetMock.mockReset().mockReturnValue(null);
+  readArchivedSessionMock.mockReset().mockReturnValue(null);
+  listTelegramTopicSessionIdsMock.mockReset().mockReturnValue(new Set());
+  readTelegramTopicGcClockMock.mockReset().mockReturnValue(null);
+  writeTelegramTopicGcClockMock.mockReset();
+  readTelegramTopicGcFailuresMock.mockReset().mockReturnValue({});
+  writeTelegramTopicGcFailuresMock.mockReset();
   sendTelegramReplyMock.mockReset().mockResolvedValue({ messageIds: [] });
   recordTelegramMessagesMock.mockReset();
   sendTelegramChatActionMock.mockReset().mockResolvedValue({});
   deleteTelegramReplyTargetMock.mockReset();
   hasPendingTelegramSendMock.mockReset().mockReturnValue(false);
+  pendingTriggerSendWorkIdsMock.mockReset().mockReturnValue([]);
   editTelegramTopicMock.mockReset().mockResolvedValue(true);
   closeTelegramTopicMock.mockReset().mockResolvedValue(undefined);
   writeTelegramBindingsMock.mockReset();
@@ -1808,6 +1857,8 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   captureAgentProcessesForLaunchMock.mockReset().mockResolvedValue({ status: "ok", processes: [] });
   capturePaneAgentProcessesMock.mockReset().mockResolvedValue({ status: "ok", processes: [] });
   terminateAgentProcessesMock.mockReset().mockResolvedValue({ status: "clear" });
+  terminateDetachedSessionProcessesMock.mockReset().mockResolvedValue({ status: "clear" });
+  readTmuxServerPidMock.mockReset().mockResolvedValue({ status: "running", pid: 4844 });
   findForeignAgentProcessesForSessionMock.mockReset().mockResolvedValue({ status: "unavailable" });
   killTmuxSessionTreeMock.mockReset().mockResolvedValue(true);
   sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
@@ -1837,6 +1888,13 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   hasUnpushedCommitsMock.mockReset().mockResolvedValue(false);
   isGitWorktreeMock.mockReset().mockResolvedValue(true);
   readCurrentBranchMock.mockReset().mockResolvedValue("main");
+  readBranchDestinationMock
+    .mockReset()
+    .mockImplementation(async (_path: string, branch: string) => ({
+      status: "known",
+      push: { url: "git@github.com:acme/api.git", branch },
+      upstream: null,
+    }));
   readRemoteUrlsMock
     .mockReset()
     .mockResolvedValue(new Map([["origin", "git@github.com:acme/api.git"]]));
@@ -1862,6 +1920,7 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
   findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
   readCodexRolloutStateMock.mockReset().mockResolvedValue({ rollout: null, rateLimit: null });
+  codexRateLimitPermissionMock.mockReset().mockReturnValue(null);
   // Default: a well-formed batched-lookup response that says "no PR for this
   // branch". An unparseable answer is no longer read as "no PR" — it is a
   // failed lookup, which blocks teardown on purpose.
@@ -2072,6 +2131,7 @@ export {
   withOpenCodeLaunchIdentityLockMock,
   readOpenCodeStateMock,
   readOpenCodeStructuredStateMock,
+  openCodeHeartbeatExpiredMock,
   resolveCursorLaunchModelMock,
   validateOpenCodeModelMock,
   resolveAgentReasoningEffortMock,
@@ -2099,6 +2159,7 @@ export {
   deleteTelegramSourceStateForSessionMock,
   deleteTelegramReplyTargetMock,
   hasPendingTelegramSendMock,
+  pendingTriggerSendWorkIdsMock,
   listServiceInstancesForSessionMock,
   readServiceInstanceMock,
   writeServiceInstanceMock,
@@ -2139,6 +2200,8 @@ export {
   captureAgentProcessesForLaunchMock,
   capturePaneAgentProcessesMock,
   terminateAgentProcessesMock,
+  terminateDetachedSessionProcessesMock,
+  readTmuxServerPidMock,
   findForeignAgentProcessesForSessionMock,
   killTmuxSessionTreeMock,
   sendMessageToTmuxMock,
@@ -2158,6 +2221,7 @@ export {
   isGitWorktreeMock,
   hasUnpushedCommitsMock,
   readCurrentBranchMock,
+  readBranchDestinationMock,
   removeWorktreeMock,
   pruneRepoWorktreesMock,
   resolveRepoPathFromWorktreeMock,
@@ -2217,6 +2281,7 @@ export {
   sendDesktopNotificationMock,
   captureCodexRolloutBaselineMock,
   readCodexRolloutStateMock,
+  codexRateLimitPermissionMock,
   scanCodexRolloutForMessageMock,
   ghMock,
   TEST_ARTIFACTS_ROOT,
@@ -2229,6 +2294,12 @@ export {
   consentRepositoryMock,
   readTelegramBindingsMock,
   readTelegramReplyTargetMock,
+  readArchivedSessionMock,
+  listTelegramTopicSessionIdsMock,
+  readTelegramTopicGcClockMock,
+  writeTelegramTopicGcClockMock,
+  readTelegramTopicGcFailuresMock,
+  writeTelegramTopicGcFailuresMock,
   sendTelegramReplyMock,
   sendTelegramChatActionMock,
   editTelegramTopicMock,

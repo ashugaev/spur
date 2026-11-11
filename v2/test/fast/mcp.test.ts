@@ -28,6 +28,87 @@ async function setup() {
       client.callTool({ name, arguments: args }),
   };
 }
+it("registers strict record schemas and forwards typed path/query values through the SDK", async () => {
+  const { fixture, client, call } = await setup();
+  const tools = (await client.listTools()).tools;
+  expect(tools).toHaveLength(17);
+  const request = tools.find((tool) => tool.name === "daemon_request");
+  expect(request?.inputSchema).toMatchObject({
+    type: "object",
+    required: ["operationId"],
+    additionalProperties: false,
+    properties: {
+      pathParams: { type: "object", additionalProperties: { type: "string" } },
+      query: {
+        type: "object",
+        additionalProperties: { type: ["string", "number", "boolean"] },
+      },
+    },
+  });
+  expect(request?.outputSchema).toBeUndefined();
+  expect(tools.find((tool) => tool.name === "send_message")?.inputSchema).toMatchObject({
+    properties: { attachments: { items: { additionalProperties: false } } },
+  });
+  expect(
+    (
+      await call("daemon_request", {
+        operationId: "get_session",
+        pathParams: { sessionId: session.id },
+      })
+    ).structuredContent,
+  ).toMatchObject({ ok: true, status: 200, body: { id: session.id } });
+  const query = { view: "dashboard", limit: 2, includeCompleted: false };
+  expect(
+    (await call("daemon_request", { operationId: "list_sessions", query })).isError,
+  ).toBeUndefined();
+  const expectedQuery = new URLSearchParams({
+    view: "dashboard",
+    limit: "2",
+    includeCompleted: "false",
+  });
+  expect(fixture.calls.at(-1)?.path).toBe(`/sessions?${expectedQuery}`);
+  for (const optional of [{}, { pathParams: {}, query: {} }]) {
+    expect(
+      (await call("daemon_request", { operationId: "list_projects", ...optional })).isError,
+    ).toBeUndefined();
+    expect(fixture.calls.at(-1)?.path).toBe("/projects");
+  }
+});
+it("rejects invalid SDK arguments before daemon access and retains gateway error messages", async () => {
+  const { fixture, call } = await setup();
+  for (const args of [
+    {},
+    { operationId: 1 },
+    { operationId: "get_session", pathParams: { sessionId: 1 } },
+    { operationId: "list_sessions", query: { view: {} } },
+    { operationId: "list_sessions", query: { view: null } },
+    { operationId: "list_sessions", query: { limit: Infinity } },
+    { operationId: "list_projects", extra: true },
+  ]) {
+    const before = fixture.calls.length;
+    const result = await call("daemon_request", args);
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([
+      expect.objectContaining({ type: "text", text: expect.stringContaining("Invalid arguments") }),
+    ]);
+    expect(fixture.calls).toHaveLength(before);
+  }
+  for (const [args, message] of [
+    [{ operationId: "unknown" }, "Unknown daemon operation; use describe_operations"],
+    [{ operationId: "get_session", pathParams: { sessionId: ".." } }, "Invalid path segment"],
+    [
+      { operationId: "list_projects", body: null, bodyHandle: "upload" },
+      "Use body or bodyHandle, not both",
+    ],
+  ] as const) {
+    const before = fixture.calls.length;
+    expect((await call("daemon_request", args)).structuredContent).toMatchObject({
+      ok: false,
+      message,
+    });
+    expect(fixture.calls).toHaveLength(before);
+  }
+});
 it("exposes all projects, raw conversation and complete operator requests without inherited identity", async () => {
   const { fixture, call, client } = await setup();
   expect((await client.listTools()).tools).toHaveLength(17);
@@ -59,7 +140,7 @@ it("exposes all projects, raw conversation and complete operator requests withou
     message: "followup",
     queue: true,
     interrupt: false,
-    attachments: [{ name: "x", data: "eA==" }],
+    attachments: [{ name: "x", data: "eA==", extra: true }],
   });
   expect(fixture.calls.at(-1)?.body).toEqual({
     message: "followup",
@@ -83,6 +164,28 @@ it("preserves daemon status/message and never follows redirects or replays mutat
     expect(
       (await call("spawn_session", { project: "test", prompt: "x" })).structuredContent,
     ).toMatchObject({ ok: false, status, body: { error: `daemon ${status}` } });
+    expect(fixture.calls.slice(before).filter((request) => request.method === "POST")).toHaveLength(
+      1,
+    );
+  }
+});
+it("forwards accepted queued spawn identity and durable receipt without treating it as launched", async () => {
+  const { fixture, call } = await setup();
+  const accepted = {
+    id: "test-queued",
+    status: "spawning",
+    spawnReceipt: { version: 1, acceptedAt: "2026-10-19T09:00:00.000Z" },
+    spawnIntent: { version: 1, phase: "queued" },
+  };
+  fixture.state.override = (path) =>
+    path === "/sessions" || path === "/sessions/background"
+      ? { status: 201, value: accepted }
+      : undefined;
+  for (const background of [true, false]) {
+    const before = fixture.calls.length;
+    const result = await call("spawn_session", { project: "test", prompt: "queued", background });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({ ok: true, status: 201, body: accepted });
     expect(fixture.calls.slice(before).filter((request) => request.method === "POST")).toHaveLength(
       1,
     );
@@ -150,6 +253,70 @@ it("discovers and invokes scoped Cron editor operations with nullable overrides 
         .structuredContent,
     ).toMatchObject({ ok: false, status, body: error });
     expect(fixture.calls.filter((request) => request.method === "PATCH")).toHaveLength(before + 1);
+  }
+});
+it("discovers and forwards Page source bind/detach through the existing SDK gateway", async () => {
+  const { fixture, call } = await setup();
+  expect(
+    (await call("describe_operations", { operationId: "update_page_source" })).structuredContent,
+  ).toMatchObject({
+    total: 1,
+    operations: [
+      {
+        operationId: "update_page_source",
+        method: "PATCH",
+        path: "/pages/{pageId}/source",
+        body: { fields: [{ name: "path", type: "string|null", required: true }] },
+      },
+    ],
+  });
+  const pageId = "page space/segment";
+  const path = `/pages/${encodeURIComponent(pageId)}/source`;
+  for (const body of [{ path: "/path/to/site" }, { path: null }]) {
+    const summary = {
+      id: "films",
+      url: "/p/films/",
+      ...(body.path === null ? {} : { source: body, sync: { state: "error" } }),
+    };
+    fixture.state.override = (url) => (url === path ? { status: 200, value: summary } : undefined);
+    expect(
+      (
+        await call("daemon_request", {
+          operationId: "update_page_source",
+          pathParams: { pageId },
+          body,
+        })
+      ).structuredContent,
+    ).toMatchObject({ ok: true, status: 200, body: summary });
+    expect(fixture.calls.at(-1)).toMatchObject({ method: "PATCH", path, body });
+  }
+  for (const pathParams of [{}, { pageId: "" }, { pageId: ".." }, { pageId: "bad\n" }]) {
+    const before = fixture.calls.length;
+    expect(
+      (
+        await call("daemon_request", {
+          operationId: "update_page_source",
+          pathParams,
+          body: { path: null },
+        })
+      ).structuredContent,
+    ).toMatchObject({ ok: false });
+    expect(fixture.calls).toHaveLength(before);
+  }
+  for (const status of [400, 404]) {
+    const error = { error: status === 400 ? "Invalid source path" : "Page not found" };
+    fixture.state.override = (url) => (url === path ? { status, value: error } : undefined);
+    const body = { path: status === 400 ? 3 : null };
+    expect(
+      (
+        await call("daemon_request", {
+          operationId: "update_page_source",
+          pathParams: { pageId },
+          body,
+        })
+      ).structuredContent,
+    ).toMatchObject({ ok: false, status, body: error });
+    expect(fixture.calls.at(-1)).toMatchObject({ method: "PATCH", path, body });
   }
 });
 it("forwards every catalog example to a fixed method/template preserving fields", async () => {

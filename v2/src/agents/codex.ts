@@ -34,7 +34,7 @@ const MAX_SESSION_SCAN_DEPTH = 4;
 const SESSION_INDEX_TTL_MS = 30_000;
 const CODEX_HOOKS_FILE = "hooks.json";
 const CODEX_HOOK_COMMAND = "$SPUR_AGENT_STATE_COMMAND";
-const CODEX_HOME_DIR = "codex-home";
+export const CODEX_HOME_DIR = "codex-home";
 const CODEX_RESTRICT_WRITES_MATCHER = "apply_patch";
 const CODEX_RESTRICT_WRITES_DENY_COMMAND =
   "echo 'restrictWrites: file edits are disabled for this session' >&2; exit 2";
@@ -1200,6 +1200,7 @@ export interface CodexRolloutStateRecord {
 export interface CodexRolloutReadResult {
   rollout: CodexRolloutStateRecord | null;
   rateLimit: RateLimitDetection | null;
+  rateLimitObservedAtMs?: number;
   /** Timestamp of the newest parseable rollout line of any kind. */
   lastProgressMs?: number;
   threadId?: string;
@@ -1232,6 +1233,9 @@ interface CodexRolloutFold {
   // can reach the result, so the tail stays one turn long.
   stateTail: CodexRolloutStateLine[];
   rateLimit: RateLimitDetection | null;
+  rateLimitObservedAtMs?: number;
+  quotaDigest: Hash;
+  hardLimitTurnId?: string;
   lastProgressMs?: number;
   model?: string;
   token: {
@@ -1605,6 +1609,7 @@ function newCodexRolloutFold(): CodexRolloutFold {
     matchedCallIds: new Set(),
     stateTail: [],
     rateLimit: null,
+    quotaDigest: createHash("sha256"),
     token: { overflowed: false },
   };
 }
@@ -1614,6 +1619,7 @@ function cloneCodexRolloutFold(fold: CodexRolloutFold): CodexRolloutFold {
     ...fold,
     matchedCallIds: new Set(fold.matchedCallIds),
     stateTail: fold.stateTail.slice(),
+    quotaDigest: fold.quotaDigest.copy(),
     token: { ...fold.token },
   };
 }
@@ -1637,7 +1643,17 @@ function foldCodexSessionMeta(fold: CodexRolloutFold, parsed: Record<string, unk
   };
 }
 
-function foldCodexRolloutLine(fold: CodexRolloutFold, parsed: Record<string, unknown>): void {
+function observeCodexRateLimit(fold: CodexRolloutFold, rawLine: string): void {
+  fold.quotaDigest.update(`${Buffer.byteLength(rawLine, "utf8")}:`);
+  fold.quotaDigest.update(rawLine, "utf8");
+  fold.rateLimitObservedAtMs = Math.max(Date.now(), fold.rateLimitObservedAtMs ?? -Infinity);
+}
+
+function foldCodexRolloutLine(
+  fold: CodexRolloutFold,
+  parsed: Record<string, unknown>,
+  rawLine: string,
+): void {
   foldCodexSessionMeta(fold, parsed);
   const matchedCallId = readMatchedToolCallId(parsed);
   if (matchedCallId) fold.matchedCallIds.add(matchedCallId);
@@ -1646,8 +1662,30 @@ function foldCodexRolloutLine(fold: CodexRolloutFold, parsed: Record<string, unk
     if (state.reason !== "thread_settings_applied" && !state.callId) fold.stateTail = [state];
     else fold.stateTail.push(state);
   }
+  if (state?.reason === "task_started") {
+    if (fold.hardLimitTurnId !== undefined && state.turnId !== fold.hardLimitTurnId) {
+      delete fold.hardLimitTurnId;
+      fold.rateLimit = { limited: false, reason: "" };
+      observeCodexRateLimit(fold, rawLine);
+    }
+  } else if (state?.reason === "task_complete") {
+    const payload = parsed["payload"];
+    const error = isRecord(payload) ? payload["error"] : undefined;
+    if (isRecord(error) && error["codex_error_info"] === "usage_limit_exceeded") {
+      fold.hardLimitTurnId = state.turnId ?? "";
+      fold.rateLimit = { limited: true, reason: "codex usage_limit_exceeded" };
+      observeCodexRateLimit(fold, rawLine);
+    } else if (error === null || error === undefined) {
+      delete fold.hardLimitTurnId;
+      fold.rateLimit = { limited: false, reason: "" };
+      observeCodexRateLimit(fold, rawLine);
+    }
+  }
   const detection = detectCodexRateLimit(extractCodexRateLimitsLine(parsed));
-  if (detection) fold.rateLimit = detection;
+  if (detection && fold.hardLimitTurnId === undefined) {
+    fold.rateLimit = detection;
+    observeCodexRateLimit(fold, rawLine);
+  }
   const model = extractCodexTurnContextModel(parsed);
   if (model !== undefined) fold.model = model;
   if (typeof parsed["timestamp"] === "string") {
@@ -1680,6 +1718,9 @@ function finalizeCodexRolloutFold(
   return {
     rollout,
     rateLimit: fold.rateLimit,
+    ...(fold.rateLimitObservedAtMs !== undefined
+      ? { rateLimitObservedAtMs: fold.rateLimitObservedAtMs }
+      : {}),
     ...(fold.lastProgressMs !== undefined ? { lastProgressMs: fold.lastProgressMs } : {}),
     ...(meta ? { threadId: meta.threadId } : {}),
     ...(meta?.isSubagent ? { isSubagent: true } : {}),
@@ -1727,7 +1768,7 @@ interface CodexLineFolder<F> {
   start: () => F;
   // Copy of a cached fold to append to; the cached one is never mutated.
   resume: (fold: F) => F;
-  line: (fold: F, parsed: Record<string, unknown>) => void;
+  line: (fold: F, parsed: Record<string, unknown>, rawLine: string) => void;
 }
 
 // One gate slot covers prefix verification and the scan, so concurrent opens
@@ -1774,7 +1815,7 @@ async function foldCodexJsonlFile<F>(
         } catch {
           return false;
         }
-        if (isRecord(parsed)) folder.line(fold, parsed);
+        if (isRecord(parsed)) folder.line(fold, parsed, line);
         return true;
       },
       fingerprint?.size,
@@ -1811,6 +1852,20 @@ async function readCodexRolloutFile(
     line: foldCodexRolloutLine,
   });
   if (!read) return null;
+  if (cached?.fold.rateLimitObservedAtMs !== undefined) {
+    const oldThreadId = cached.fold.meta?.threadId;
+    const newThreadId = read.fold.meta?.threadId;
+    const sameIdentity =
+      oldThreadId && newThreadId
+        ? oldThreadId === newThreadId
+        : !oldThreadId && !newThreadId && fingerprint && cached.ino === fingerprint.ino;
+    if (
+      sameIdentity &&
+      cached.fold.quotaDigest.copy().digest("hex") === read.fold.quotaDigest.copy().digest("hex")
+    ) {
+      read.fold.rateLimitObservedAtMs = cached.fold.rateLimitObservedAtMs;
+    }
+  }
   const result = finalizeCodexRolloutFold(read.fold, filePath);
   const candidate =
     !result.rollout && !result.rateLimit && !result.model && !result.tokenUsage
@@ -1947,6 +2002,9 @@ async function readCodexRolloutStateSnapshot(
   return {
     rollout: null,
     rateLimit: newestByMtime?.result.rateLimit ?? null,
+    ...(newestByMtime?.result.rateLimitObservedAtMs !== undefined
+      ? { rateLimitObservedAtMs: newestByMtime.result.rateLimitObservedAtMs }
+      : {}),
     ...(model ? { model } : {}),
     ...(newestTokenUsage ? { tokenUsage: newestTokenUsage } : {}),
     ...(tokenUsages.length > 0 ? { tokenUsages } : {}),

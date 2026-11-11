@@ -39,20 +39,7 @@ jobs:
       - name: Bundle web into v2
         run: bash scripts/bundle-web.sh
       - name: Verify packed tarball contents
-        run: |
-          cd v2
-          tgz="$(npm pack --pack-destination "$RUNNER_TEMP" 2>/dev/null | tail -1)"
-          tgz="$RUNNER_TEMP/$tgz"
-          bash "$GITHUB_WORKSPACE/scripts/verify-package-tarball.sh" "$tgz"
-          arch="$(node -p process.arch)"
-          tar -tzf "$tgz" | grep -q "package/web/node_modules/node-pty/prebuilds/linux-$arch/pty.node" || {
-            echo "packed tarball is missing node-pty/prebuilds/linux-$arch/pty.node"
-            exit 1
-          }
-          tar -tvzf "$tgz" | grep " package/skills/spur/SKILL.md$" | grep -q "^-" || {
-            echo "packed tarball has package/skills/spur/SKILL.md as a non-regular file"
-            exit 1
-          }
+        run: bash scripts/pack-release.sh "$RUNNER_TEMP"
       - name: Verify bundled web boots
         run: node scripts/verify-bundled-web.mjs v2/web/dist-server/web-server.js
       - name: Build v2

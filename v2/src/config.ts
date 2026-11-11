@@ -75,6 +75,7 @@ import { SLOT_LABEL_RE } from "./session-slots.js";
 import { assertBranchNameMatches, compileBranchNamingRegex } from "./branch-name.js";
 import { normalizeSelfDestructConfig } from "./self-destruct.js";
 import { SHEPHERD_PROJECT_ID } from "./shepherd.js";
+import { assertProjectIdentityNotReserved } from "./page-identity.js";
 import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
 
 export const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
@@ -1977,6 +1978,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   if (!VALID_ID_RE.test(sessionPrefix)) {
     throw new Error(`projects.${projectId}.sessionPrefix must match ${VALID_ID_RE.source}`);
   }
+  assertProjectIdentityNotReserved(projectId, sessionPrefix);
 
   return {
     ...(name !== undefined ? { name } : {}),

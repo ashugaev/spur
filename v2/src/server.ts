@@ -1,5 +1,6 @@
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { homedir } from "node:os";
 import { basename } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { URL } from "node:url";
@@ -19,6 +20,7 @@ import {
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { AutoPingError, AutoPingService, redactAutoPingHandles } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
+import { PrAlertOwnerRequestError } from "./pr-alert-owner.js";
 import { projectConversationPage } from "./conversation-page.js";
 import { readCronJobs, UnknownCronProjectError } from "./cron-jobs.js";
 import {
@@ -60,10 +62,24 @@ import type { SourceWorkbench, SourceWorkSessionItem } from "./event-sources/typ
 import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { readSession } from "./metadata.js";
+import { ACTIONS_COLLECTION, StoreError, StoreService, type StoreQuery } from "./stores.js";
+import { SseHub, acceptsEventStream } from "./sse.js";
+import { StoreAgent, parseAgentMessage } from "./store-agent.js";
+import { StoreActions } from "./store-actions.js";
+import {
+  PageEvents,
+  assertPagePrefixFree,
+  listPages,
+  removePageDir,
+  resolvePageFile,
+  type CreatePageRequest,
+} from "./pages.js";
+import { PageSourceSync } from "./page-source.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import { captureTmuxPane } from "./runtime-tmux.js";
 import { getReleases } from "./releases-cache.js";
+import { buildUsageReport } from "./usage-report.js";
 import {
   AgentExitedBeforeSendError,
   GithubPrCheckUnavailableError,
@@ -371,6 +387,7 @@ const DEFAULT_LOGGER: ServiceLogger = {
   warn: writeStderr,
 };
 const SHUTDOWN_GRACE_MS = 5_000;
+const AGENT_STATUS_SAMPLE_MS = 5_000;
 
 // Total budget for a shutdown, measured from the signal to the last teardown step.
 // Every await inside shutdown() is bounded by what is left of it, so no single step
@@ -432,6 +449,35 @@ async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): 
   } catch {
     throw new InvalidJsonBodyError("Invalid JSON in request body");
   }
+}
+
+interface StoreWriteRequest {
+  data?: unknown;
+  expectedRev?: unknown;
+}
+
+function parseQueryInteger(value: string, name: string): number {
+  if (!/^\d+$/.test(value)) {
+    throw new StoreError(400, `${name} must be a non-negative integer`);
+  }
+  return Number.parseInt(value, 10);
+}
+
+function parseExpectedRev(value: unknown): { expectedRev?: number } {
+  if (value === undefined) return {};
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new StoreError(400, "expectedRev must be a non-negative integer");
+  }
+  return { expectedRev: value };
+}
+
+function parseStoreListQuery(params: URLSearchParams): StoreQuery {
+  const limit = params.get("limit");
+  const startAfter = params.get("startAfter");
+  return {
+    ...(limit === null ? {} : { limit: parseQueryInteger(limit, "limit") }),
+    ...(startAfter === null ? {} : { startAfter }),
+  };
 }
 
 const lifecycleErrors = new WeakMap<ServerResponse, SessionLifecycleSnapshot>();
@@ -672,6 +718,7 @@ export function parseRestoreSessionRequest(raw: unknown): RestoreSessionRequest 
   const operationId = parseLifecycleOperationId(raw["operationId"]);
   return {
     ...(operationId ? { operationId } : {}),
+    ...(raw["restart"] === true ? { restart: true } : {}),
     ...(raw["force"] === true ? { force: true } : {}),
     ...(raw["overrideTokenBudget"] === true ? { overrideTokenBudget: true } : {}),
   };
@@ -885,6 +932,42 @@ export async function startServer(
     },
   });
   let ready = false;
+  const stores = new StoreService({
+    get dataDir() {
+      return service.config.dataDir;
+    },
+    readSession: (sessionId) => readSession(service.config.dataDir, sessionId),
+  });
+  const sseHub = new SseHub();
+  const pageSources = new PageSourceSync(() => service.config.dataDir);
+  const pageEvents = new PageEvents({
+    dataDir: () => service.config.dataDir,
+    stores,
+    hub: sseHub,
+    beforeRead: (storeId) => storeActions.expire(storeId),
+  });
+  const storeAgent = new StoreAgent({
+    stores,
+    sessions: service,
+    dataDir: () => service.config.dataDir,
+    readSession: (sessionId) => readSession(service.config.dataDir, sessionId),
+    projectPrefixes: () => service.listProjects().map((project) => project.prefix),
+    onStatus: (pageId, status) => pageEvents.broadcast(pageId, "agent", status),
+  });
+  const storeActions = new StoreActions({
+    stores,
+    deliver: (storeId, message, userGesture) =>
+      storeAgent.ensureAndDeliver(storeId, message, userGesture),
+  });
+  // A pending action older than 15 minutes is never read back as pending.
+  const expireBeforeActionsRead = async (storeId: string, collection: string): Promise<void> => {
+    if (collection === ACTIONS_COLLECTION) await storeActions.expire(storeId);
+  };
+  // No session-state push hook exists: sample page agent status while a page tab is open.
+  const agentStatusSampler = setInterval(() => {
+    void storeAgent.sample(pageEvents.openPageIds());
+  }, AGENT_STATUS_SAMPLE_MS);
+  agentStatusSampler.unref();
   const switchStatePath = deploySwitchStatePath(service.config.dataDir);
   const switchLedgerPath = updateLedgerPath(service.config.dataDir);
   // Re-applied on every config (re)load, not just boot, so disk-limit changes take
@@ -1116,6 +1199,24 @@ export async function startServer(
 
       if (method === "GET" && path === "/headroom") {
         sendJson(response, 200, await service.getHeadroom());
+        return;
+      }
+
+      if (method === "GET" && path === "/usage") {
+        const nowMs = Date.now();
+        const todayStart = new Date(nowMs);
+        todayStart.setHours(0, 0, 0, 0);
+        sendJson(
+          response,
+          200,
+          await buildUsageReport({
+            fetch: globalThis.fetch,
+            homeDir: homedir(),
+            dataDir: service.config.dataDir,
+            nowMs,
+            todayStartMs: todayStart.getTime(),
+          }),
+        );
         return;
       }
 
@@ -2066,7 +2167,11 @@ export async function startServer(
 
       if (method === "POST" && path === "/sessions") {
         const body = await readJsonBody<SpawnSessionRequest>(request, 15_000_000);
-        sendJson(response, 201, await service.spawn(mergeSpawnStateSubscriptions(body)));
+        sendJson(
+          response,
+          201,
+          await service.spawn(mergeSpawnStateSubscriptions(body), { acceptQueued: true }),
+        );
         return;
       }
 
@@ -2443,6 +2548,280 @@ export async function startServer(
         return;
       }
 
+      const storeCollectionMatch = path.match(/^\/stores\/([^/]+)\/docs\/([^/]+)$/);
+      if (method === "GET" && storeCollectionMatch?.[1] && storeCollectionMatch[2]) {
+        const storeId = decodeURIComponent(storeCollectionMatch[1]);
+        const collection = decodeURIComponent(storeCollectionMatch[2]);
+        await expireBeforeActionsRead(storeId, collection);
+        const docs = await stores.query(storeId, collection, parseStoreListQuery(url.searchParams));
+        sendJson(response, 200, { docs });
+        return;
+      }
+      if (method === "POST" && storeCollectionMatch?.[1] && storeCollectionMatch[2]) {
+        const body = await readJsonBody<StoreWriteRequest>(request);
+        sendJson(
+          response,
+          201,
+          await stores.add(
+            decodeURIComponent(storeCollectionMatch[1]),
+            decodeURIComponent(storeCollectionMatch[2]),
+            body.data,
+          ),
+        );
+        return;
+      }
+
+      const storeDocMatch = path.match(/^\/stores\/([^/]+)\/docs\/([^/]+)\/([^/]+)$/);
+      if (method === "GET" && storeDocMatch?.[1] && storeDocMatch[2] && storeDocMatch[3]) {
+        const storeId = decodeURIComponent(storeDocMatch[1]);
+        const collection = decodeURIComponent(storeDocMatch[2]);
+        await expireBeforeActionsRead(storeId, collection);
+        sendJson(
+          response,
+          200,
+          await stores.get(storeId, collection, decodeURIComponent(storeDocMatch[3])),
+        );
+        return;
+      }
+      if (method === "POST" && storeDocMatch?.[1] && storeDocMatch[2] && storeDocMatch[3]) {
+        const body = await readJsonBody<StoreWriteRequest>(request);
+        sendJson(
+          response,
+          200,
+          await stores.set(
+            decodeURIComponent(storeDocMatch[1]),
+            decodeURIComponent(storeDocMatch[2]),
+            decodeURIComponent(storeDocMatch[3]),
+            body.data,
+            parseExpectedRev(body.expectedRev),
+          ),
+        );
+        return;
+      }
+      if (method === "PATCH" && storeDocMatch?.[1] && storeDocMatch[2] && storeDocMatch[3]) {
+        const body = await readJsonBody<StoreWriteRequest>(request);
+        sendJson(
+          response,
+          200,
+          await stores.update(
+            decodeURIComponent(storeDocMatch[1]),
+            decodeURIComponent(storeDocMatch[2]),
+            decodeURIComponent(storeDocMatch[3]),
+            body.data,
+            parseExpectedRev(body.expectedRev),
+          ),
+        );
+        return;
+      }
+      if (method === "DELETE" && storeDocMatch?.[1] && storeDocMatch[2] && storeDocMatch[3]) {
+        const expectedRev = url.searchParams.get("expectedRev");
+        await stores.delete(
+          decodeURIComponent(storeDocMatch[1]),
+          decodeURIComponent(storeDocMatch[2]),
+          decodeURIComponent(storeDocMatch[3]),
+          parseExpectedRev(
+            expectedRev === null ? undefined : parseQueryInteger(expectedRev, "expectedRev"),
+          ),
+        );
+        sendJson(response, 200, { deleted: true });
+        return;
+      }
+
+      const storeQueryMatch = path.match(/^\/stores\/([^/]+)\/query\/([^/]+)$/);
+      if (method === "POST" && storeQueryMatch?.[1] && storeQueryMatch[2]) {
+        const body = await readJsonBody<StoreQuery>(request);
+        const storeId = decodeURIComponent(storeQueryMatch[1]);
+        const collection = decodeURIComponent(storeQueryMatch[2]);
+        await expireBeforeActionsRead(storeId, collection);
+        const docs = await stores.query(storeId, collection, body);
+        sendJson(response, 200, { docs });
+        return;
+      }
+
+      const storeChangesId = path.match(/^\/stores\/([^/]+)\/changes$/)?.[1];
+      if (method === "GET" && storeChangesId) {
+        const since = url.searchParams.get("since");
+        const limit = url.searchParams.get("limit");
+        const storeId = decodeURIComponent(storeChangesId);
+        await storeActions.expire(storeId);
+        sendJson(
+          response,
+          200,
+          await stores.changes(
+            storeId,
+            since === null ? 0 : parseQueryInteger(since, "since"),
+            limit === null ? undefined : parseQueryInteger(limit, "limit"),
+          ),
+        );
+        return;
+      }
+
+      const storeActionsId = path.match(/^\/stores\/([^/]+)\/actions$/)?.[1];
+      if (method === "POST" && storeActionsId) {
+        const body = await readJsonBody<unknown>(request);
+        sendJson(
+          response,
+          200,
+          await storeActions.invoke(decodeURIComponent(storeActionsId), body),
+        );
+        return;
+      }
+
+      const storeActionCompleteMatch = path.match(
+        /^\/stores\/([^/]+)\/actions\/([^/]+)\/complete$/,
+      );
+      if (method === "POST" && storeActionCompleteMatch?.[1] && storeActionCompleteMatch[2]) {
+        const body = await readJsonBody<unknown>(request);
+        sendJson(
+          response,
+          200,
+          await storeActions.complete(
+            decodeURIComponent(storeActionCompleteMatch[1]),
+            decodeURIComponent(storeActionCompleteMatch[2]),
+            body,
+          ),
+        );
+        return;
+      }
+
+      if (method === "GET" && path === "/pages") {
+        sendJson(response, 200, {
+          pages: listPages(service.config.dataDir).map((page) => pageSources.summarize(page)),
+        });
+        return;
+      }
+      if (method === "POST" && path === "/pages") {
+        const body = await readJsonBody<CreatePageRequest>(request);
+        if (typeof body.id === "string") {
+          assertPagePrefixFree(
+            body.id,
+            service.listProjects().map((project) => project.prefix),
+          );
+        }
+        sendJson(response, 201, await pageSources.create(body));
+        return;
+      }
+
+      const sourcePageId = path.match(/^\/pages\/([^/]+)\/source$/)?.[1];
+      if (method === "PATCH" && sourcePageId) {
+        const body: unknown = await readJsonBody(request);
+        if (typeof body !== "object" || body === null || Array.isArray(body)) {
+          throw new StoreError(400, "source requires path: an absolute path or null");
+        }
+        const sourcePath = (body as { path?: unknown }).path;
+        if (sourcePath !== null && typeof sourcePath !== "string") {
+          throw new StoreError(400, "source requires path: an absolute path or null");
+        }
+        sendJson(
+          response,
+          200,
+          await pageSources.bind(decodeURIComponent(sourcePageId), sourcePath),
+        );
+        return;
+      }
+
+      const pageId = path.match(/^\/pages\/([^/]+)$/)?.[1];
+      if (method === "DELETE" && pageId) {
+        const id = decodeURIComponent(pageId);
+        await pageSources.remove(id, (dataDir) =>
+          storeAgent.deletePage(id, () => {
+            pageEvents.closePage(id);
+            removePageDir(dataDir, id);
+          }),
+        );
+        sendJson(response, 200, { deleted: true, id });
+        return;
+      }
+
+      const pageFileMatch = path.match(/^\/pages\/([^/]+)\/files\/(.+)$/);
+      if (method === "GET" && pageFileMatch?.[1] && pageFileMatch[2]) {
+        let file: ReturnType<typeof resolvePageFile>;
+        try {
+          file = resolvePageFile(
+            service.config.dataDir,
+            decodeURIComponent(pageFileMatch[1]),
+            pageFileMatch[2]
+              .split("/")
+              .map((segment) => decodeURIComponent(segment))
+              .join("/"),
+          );
+        } catch (error) {
+          if (error instanceof URIError) throw new StoreError(404, "Page file not found");
+          throw error;
+        }
+        response.writeHead(200, {
+          "content-type": file.contentType,
+          "content-length": String(file.size),
+          "cache-control": "no-store",
+        });
+        const stream = createReadStream(file.path);
+        stream.on("error", () => response.destroy());
+        stream.pipe(response);
+        return;
+      }
+
+      const pageEventsId = path.match(/^\/pages\/([^/]+)\/events$/)?.[1];
+      if (method === "GET" && pageEventsId) {
+        if (!acceptsEventStream(request)) {
+          sendError(response, 406, "This route serves text/event-stream only");
+          return;
+        }
+        // A reconnecting EventSource repeats the original URL; its Last-Event-ID wins.
+        const since = request.headers["last-event-id"] ?? url.searchParams.get("since");
+        const eventsPageId = decodeURIComponent(pageEventsId);
+        await pageEvents.open(
+          eventsPageId,
+          typeof since === "string" ? parseQueryInteger(since, "since") : null,
+          request,
+          response,
+        );
+        void storeAgent
+          .status(`page:${eventsPageId}`)
+          .then((status) => pageEvents.broadcast(eventsPageId, "agent", status))
+          .catch(() => undefined);
+        return;
+      }
+
+      const storeAgentSendId = path.match(/^\/stores\/([^/]+)\/agent\/send$/)?.[1];
+      if (method === "POST" && storeAgentSendId) {
+        const body = await readJsonBody<{ message?: unknown; userGesture?: unknown }>(request);
+        sendJson(
+          response,
+          200,
+          await storeAgent.deliverChat(
+            decodeURIComponent(storeAgentSendId),
+            parseAgentMessage(body.message),
+            body.userGesture === true,
+          ),
+        );
+        return;
+      }
+
+      const storeAgentMessagesId = path.match(/^\/stores\/([^/]+)\/agent\/messages$/)?.[1];
+      if (method === "GET" && storeAgentMessagesId) {
+        const from = url.searchParams.get("from");
+        const limit = url.searchParams.get("limit");
+        const pageSize = limit === null ? 50 : parseQueryInteger(limit, "limit");
+        if (pageSize < 1 || pageSize > 100) {
+          throw new StoreError(400, "limit must be an integer from 1 to 100");
+        }
+        sendJson(
+          response,
+          200,
+          await storeAgent.messages(decodeURIComponent(storeAgentMessagesId), {
+            ...(from === null ? {} : { from: parseQueryInteger(from, "from") }),
+            limit: pageSize,
+          }),
+        );
+        return;
+      }
+
+      const storeAgentStatusId = path.match(/^\/stores\/([^/]+)\/agent\/status$/)?.[1];
+      if (method === "GET" && storeAgentStatusId) {
+        sendJson(response, 200, await storeAgent.status(decodeURIComponent(storeAgentStatusId)));
+        return;
+      }
+
       logEvent("http.route.not_found", {
         level: "warn",
         method,
@@ -2515,7 +2894,8 @@ export async function startServer(
         error instanceof SessionEndedError ||
         error instanceof ForeignAgentProcessError ||
         error instanceof LaunchPromptPendingError ||
-        error instanceof SidecarProbeUnresponsiveError
+        error instanceof SidecarProbeUnresponsiveError ||
+        error instanceof StoreError
       ) {
         failRequest(response, error.statusCode, message, { method, path });
         return;
@@ -2525,7 +2905,8 @@ export async function startServer(
         error instanceof OpenPrActionRequiredError ||
         error instanceof GithubPrCheckUnavailableError ||
         error instanceof SessionNotRestorableError ||
-        error instanceof SpawnBatchConflictError
+        error instanceof SpawnBatchConflictError ||
+        error instanceof PrAlertOwnerRequestError
       ) {
         failRequest(response, error.statusCode, message, {
           method,
@@ -2621,6 +3002,10 @@ export async function startServer(
   });
 
   const closeServer = async (): Promise<void> => {
+    // Open event streams never end on their own; end them so close() does not wait out the grace.
+    clearInterval(agentStatusSampler);
+    await pageSources.stop();
+    sseHub.closeAll();
     await new Promise<void>((resolve) => {
       // server.closeAllConnections() destroys every tracked socket, including
       // in-flight requests, so a stuck handler can't block shutdown past the grace period.
@@ -2651,6 +3036,8 @@ export async function startServer(
     await closeServer();
     throw error;
   }
+
+  pageSources.start();
 
   let driftedSessions: { id: string; project: string }[] = [];
   try {

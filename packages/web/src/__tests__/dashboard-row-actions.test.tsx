@@ -76,6 +76,34 @@ describe("Dashboard row actions", () => {
     window.history.replaceState(null, "", "/");
   });
 
+  it("sends one restart request, blocks repeats, and recovers Restore after failure", async () => {
+    let rows = [running];
+    let finish!: (response: Response) => void;
+    const requests: unknown[] = [];
+    mount(async (url, init) => {
+      if (url === "/api/sessions") return list(rows);
+      if (url.endsWith("/restore")) {
+        requests.push(JSON.parse(String(init?.body)));
+        return new Promise<Response>((resolve) => {
+          finish = resolve;
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    await choose("Restart session");
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0]).toEqual({ restart: true, operationId: expect.any(String) });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(await trigger()).toBeDisabled();
+    rows = [{ ...running, status: "stopped", state: "stopped", runtimeAlive: false }];
+    finish(json({ error: "restart failed" }, 500));
+    expect(await screen.findByText("restart failed")).toBeInTheDocument();
+    await waitFor(async () => expect(await trigger()).toBeEnabled());
+    fireEvent.click(await trigger());
+    expect(screen.getByRole("menuitem", { name: "Restore" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Restart session" })).not.toBeInTheDocument();
+  });
+
   it("holds an accepted pause through stale reads until a read confirms it", async () => {
     let rows = [running];
     let paused = false;

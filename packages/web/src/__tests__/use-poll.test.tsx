@@ -1,13 +1,19 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { usePoll, type PollLoad } from "@/hooks/usePoll.js";
+import type { PollOutcome } from "@/lib/poller.js";
 
 function deferred() {
   let resolve: () => void = () => {};
-  const promise = new Promise<void>((done) => {
-    resolve = done;
+  const promise = new Promise<PollOutcome>((done) => {
+    resolve = () => done("ok");
   });
   return { promise, resolve };
+}
+
+function setVisibility(state: "visible" | "hidden") {
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+  document.dispatchEvent(new Event("visibilitychange"));
 }
 
 describe("usePoll", () => {
@@ -16,6 +22,7 @@ describe("usePoll", () => {
   });
 
   afterEach(() => {
+    setVisibility("visible");
     vi.useRealTimers();
   });
 
@@ -34,8 +41,13 @@ describe("usePoll", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(load).toHaveBeenCalledTimes(1);
+    // The 10s run spaces the next start by its duration, capped at 8x the 1s base.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(7_999);
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
     });
     expect(load).toHaveBeenCalledTimes(2);
   });
@@ -64,7 +76,7 @@ describe("usePoll", () => {
     const signals: AbortSignal[] = [];
     const load = vi.fn<PollLoad>((signal) => {
       signals.push(signal);
-      return signals.length === 1 ? new Promise<void>(() => {}) : Promise.resolve();
+      return signals.length === 1 ? new Promise<PollOutcome>(() => {}) : Promise.resolve("ok");
     });
     const { result } = renderHook(() => usePoll(load, 1_000));
     expect(load).toHaveBeenCalledTimes(1);
@@ -91,7 +103,7 @@ describe("usePoll", () => {
     const signals: AbortSignal[] = [];
     const load = vi.fn<PollLoad>((signal) => {
       signals.push(signal);
-      return new Promise<void>(() => {});
+      return new Promise<PollOutcome>(() => {});
     });
     const { unmount } = renderHook(() => usePoll(load, 1_000));
     unmount();
@@ -100,5 +112,36 @@ describe("usePoll", () => {
       await vi.advanceTimersByTimeAsync(10_000);
     });
     expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts no run while the document is hidden and runs once on visible", async () => {
+    setVisibility("hidden");
+    const load = vi.fn<PollLoad>(async () => "ok");
+    renderHook(() => usePoll(load, 1_000));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(load).toHaveBeenCalledTimes(0);
+    await act(async () => {
+      setVisibility("visible");
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("backs off after a failed run", async () => {
+    const load = vi.fn<PollLoad>(async () => "failed");
+    renderHook(() => usePoll(load, 1_000));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_999);
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(load).toHaveBeenCalledTimes(2);
   });
 });

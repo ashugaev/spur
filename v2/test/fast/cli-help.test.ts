@@ -35,6 +35,7 @@ describe("spur help", () => {
     expect(help).toContain("reopen [options] <sessionId>");
     expect(help).toContain("session-memory <sessionId>");
     expect(help).toContain("memory <set|get|list|rm>");
+    expect(help).toContain("usage [options]");
     expect(help).toContain("service");
     expect(help).toContain("source");
     expect(help).toContain("subscribe [options] [targetSessionId]");
@@ -325,6 +326,38 @@ describe("spur help", () => {
     expect(help).toContain("--scope <scope>");
     expect(help).toContain("--file <path>");
     expect(help).toContain("--session <id>");
+  });
+
+  it("documents the db command store, ops and flags", () => {
+    const db = buildProgram().commands.find((command) => command.name() === "db");
+    if (!db) throw new Error("Expected db command to be registered");
+    expect(db.aliases()).toEqual([]);
+    const help = db.helpInformation();
+    expect(help).toContain("db <store> <get|list|query|add|set|update|rm> <collection>");
+    expect(help).toContain("<store> <done|fail> <action-id>");
+    expect(help).toContain("--result <json>");
+    expect(help).toContain("--error <text>");
+    expect(help).toContain("page:<id> or session:<sid>");
+    expect(help).toContain("--rev <number>");
+    expect(help).toContain("--limit <number>");
+    expect(help).toContain("--start-after <docId>");
+  });
+
+  it("documents the page command actions and create flags", () => {
+    const page = buildProgram().commands.find((command) => command.name() === "page");
+    if (!page) throw new Error("Expected page command to be registered");
+    const help = page.helpInformation();
+    expect(help).toContain("page <create|list|source|path|rm> [id] [source-path]");
+    for (const flag of [
+      "--title <title>",
+      "--runtime <agent>",
+      "--model <model>",
+      "--template <name>",
+      "--source <path>",
+      "--detach",
+    ])
+      expect(help).toContain(flag);
+    expect(help).toMatch(/parent folder[\s\S]*including siblings/);
   });
 });
 

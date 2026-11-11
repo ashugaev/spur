@@ -1298,6 +1298,14 @@ describe("detectCodexMcpPermissionDialog", () => {
 });
 
 describe("scanTmuxRateLimit", () => {
+  it("limits Codex banner fallback to the recent pane tail", () => {
+    const banner = "■ Your workspace is out of credits. Ask your owner.";
+    const pane = `${banner}\n${Array.from({ length: 21 }, (_, index) => `work ${index}`).join("\n")}\n\n`;
+    expect(scanTmuxRateLimit(pane, { tailLines: 20 })).toBeNull();
+    expect(scanTmuxRateLimit(banner, { tailLines: 20 })?.limited).toBe(true);
+    expect(scanTmuxRateLimit(pane)?.limited).toBe(true);
+  });
+
   // Real captured tmux panes/scrollbacks. The two REAL codex panes render a
   // genuine banner and must classify limited; the two agent-work panes only
   // contain rate-limit vocabulary in prose/diffs and must not.
@@ -1587,6 +1595,57 @@ describe("parseRateLimitResetAtMs", () => {
     expect(
       parseRateLimitResetAtMs("You've hit your usage limit · resets 7pm (UTC)", 0),
     ).toBeUndefined();
+  });
+});
+
+describe("dated individual spend reset", () => {
+  const prefix =
+    "You've hit your individual spend limit · run /usage-credits to ask your admin for a higher limit · your weekly limit ";
+  const anchor = Date.parse("2026-11-08T19:32:49.242Z");
+
+  it("parses the observed dated UTC reset without changing expiry boundaries", () => {
+    const reset = Date.parse("2026-11-11T08:00:00.000Z");
+    const resetAtMs = parseRateLimitResetAtMs(`${prefix}resets Nov 11, 8am (UTC)`, anchor);
+    expect(resetAtMs).toBe(reset);
+    if (resetAtMs === undefined) throw new Error("Expected dated reset");
+    const detection = { limited: true, reason: "claude rate_limit", resetAtMs };
+    expect(rateLimitExpired(detection, reset - 1)).toBe(false);
+    expect(rateLimitExpired(detection, reset)).toBe(true);
+    expect(rateLimitExpired(detection, reset + 1)).toBe(true);
+  });
+
+  it("uses the existing dated year rollover", () => {
+    expect(
+      parseRateLimitResetAtMs(
+        `${prefix}resets Jan 2, 8am (UTC)`,
+        Date.parse("2026-12-30T19:32:49.242Z"),
+      ),
+    ).toBe(Date.parse("2027-01-02T08:00:00.000Z"));
+  });
+
+  it.each([
+    "resets 8am (UTC)",
+    "resets Nov 11, 8am",
+    "resets Nov 11, 8am (PST)",
+    "resets Foo 11, 8am (UTC)",
+    "resets Feb 31, 8am (UTC)",
+    "resets Nov 11, 0am (UTC)",
+    "resets Nov 11, 8:99am (UTC)",
+    "resets Nov 11, 8am (UTC) extra",
+  ])("keeps an unconfirmed individual-spend clause blocked: %s", (clause) => {
+    expect(parseRateLimitResetAtMs(prefix + clause, anchor)).toBeUndefined();
+  });
+
+  it.each([
+    "You've hit your individual spend limit · resets Nov 11, 8am (UTC)",
+    `${prefix.replace("weekly", "monthly")}resets Nov 11, 8am (UTC)`,
+    prefix.replace(" · your weekly limit ", ""),
+  ])("rejects an unconfirmed individual-spend prefix: %s", (text) => {
+    expect(parseRateLimitResetAtMs(text, anchor)).toBeUndefined();
+  });
+
+  it.each([NaN, Infinity, -Infinity])("rejects a nonfinite own anchor: %s", (timestamp) => {
+    expect(parseRateLimitResetAtMs(`${prefix}resets Nov 11, 8am (UTC)`, timestamp)).toBeUndefined();
   });
 });
 

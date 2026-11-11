@@ -17,6 +17,7 @@ import {
   mockGitHubStatus,
   mockGitLabStatus,
   mockPrState,
+  mockPrStatusFor,
   mockPrStatusBatch,
   mockSessions,
   type ProjectInfo,
@@ -1411,26 +1412,59 @@ test.describe("D2b: PR-ready filter", () => {
     await expect(page.getByText("Unresolved threads session")).toBeVisible();
   });
 
-  test("issues zero /api/pr-status/batch requests while the filter is off", async ({ page }) => {
+  test("batch carries only mounted row URLs while the filter is off", async ({ page }) => {
+    const mountedUrl = "https://github.com/test/repo/pull/601";
+    const doneUrl = "https://github.com/test/repo/pull/602";
     const idle = prSession("Idle PR session", "pr-ready-idle-1", 601);
-    await mockSessions(page, [idle]);
-    const batch = await mockPrStatusBatch(page, {
-      "https://github.com/test/repo/pull/601": {
-        state: "open",
-        reviewDecision: null,
-        ciStatus: null,
-        canMerge: true,
-        mergeConflict: false,
-        totalThreads: 0,
-        unresolvedThreads: 0,
-      },
+    const done = makeCompletedSession({
+      id: "pr-ready-done-1",
+      slots: { title: "Done PR session", links: [{ label: "github-pr", url: doneUrl }] },
+    });
+    await mockSessions(page, [idle, done]);
+
+    const batchBodies: string[][] = [];
+    let singleGets = 0;
+    await page.route(/\/api\/pr-status(\?|\/batch$)/, (route) => {
+      const request = route.request();
+      if (request.method() !== "POST") {
+        singleGets += 1;
+        void route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+        return;
+      }
+      const payload = request.postDataJSON() as { urls: string[] };
+      batchBodies.push(payload.urls);
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          results: Object.fromEntries(
+            payload.urls.map((url) => [
+              url,
+              {
+                state: "open",
+                reviewDecision: null,
+                ciStatus: null,
+                canMerge: true,
+                mergeConflict: false,
+                totalThreads: 0,
+                unresolvedThreads: 0,
+              },
+            ]),
+          ),
+        }),
+      });
     });
 
     await page.goto("/");
     await expect(page.getByText("Idle PR session")).toBeVisible();
+    await expect.poll(() => batchBodies.length).toBeGreaterThan(0);
     await page.waitForTimeout(500);
 
-    expect(batch.count()).toBe(0);
+    for (const urls of batchBodies) {
+      expect(urls).toContain(mountedUrl);
+      expect(urls).not.toContain(doneUrl);
+    }
+    expect(singleGets).toBe(0);
   });
 });
 
@@ -1806,7 +1840,7 @@ test.describe("D4b: Merged/closed-PR done button", () => {
       state: "needs_input",
     });
     await mockSessions(page, [session]);
-    // Mock pr-status to return merged state (called as /api/pr-status?url=...)
+    // Mock pr-status to return merged state (single GET or batch POST)
     await mockPrState(page, "merged");
 
     await page.goto("/");
@@ -1825,7 +1859,7 @@ test.describe("D4b: Merged/closed-PR done button", () => {
       state: "needs_input",
     });
     await mockSessions(page, [session]);
-    // Mock pr-status to return closed state (called as /api/pr-status?url=...)
+    // Mock pr-status to return closed state (single GET or batch POST)
     await mockPrState(page, "closed");
 
     await page.goto("/");
@@ -1850,20 +1884,14 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     });
     let rows = [session];
     await mockSessions(page, () => rows);
-    await page.route(/\/api\/pr-status\?/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "merged",
-          reviewDecision: null,
-          ciStatus: "success",
-          canMerge: false,
-          totalThreads: 0,
-          unresolvedThreads: 0,
-        }),
-      });
-    });
+    await mockPrStatusFor(page, () => ({
+      state: "merged",
+      reviewDecision: null,
+      ciStatus: "success",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    }));
 
     let releaseComplete: () => void = () => undefined;
     let completeRequestSeen = false;
@@ -1915,20 +1943,14 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await page.route(`/api/sessions/${session.id}`, async (route) => {
       await route.fulfill({ json: current });
     });
-    await page.route(/\/api\/pr-status\?/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "merged",
-          reviewDecision: null,
-          ciStatus: "success",
-          canMerge: false,
-          totalThreads: 0,
-          unresolvedThreads: 0,
-        }),
-      });
-    });
+    await mockPrStatusFor(page, () => ({
+      state: "merged",
+      reviewDecision: null,
+      ciStatus: "success",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    }));
 
     let completeAttempts = 0;
     const completeBodies: unknown[] = [];
@@ -2014,20 +2036,14 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     });
     let rows = [session, subagent];
     await mockSessions(page, () => rows);
-    await page.route(/\/api\/pr-status\?/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "merged",
-          reviewDecision: null,
-          ciStatus: "success",
-          canMerge: false,
-          totalThreads: 0,
-          unresolvedThreads: 0,
-        }),
-      });
-    });
+    await mockPrStatusFor(page, () => ({
+      state: "merged",
+      reviewDecision: null,
+      ciStatus: "success",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    }));
 
     let completeBody: unknown = null;
     await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
@@ -2074,20 +2090,14 @@ test.describe("D4b: Merged/closed-PR done button", () => {
       state: "needs_input",
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status\?/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "open",
-          reviewDecision: null,
-          ciStatus: "success",
-          canMerge: true,
-          totalThreads: 0,
-          unresolvedThreads: 0,
-        }),
-      });
-    });
+    await mockPrStatusFor(page, () => ({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "success",
+      canMerge: true,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    }));
     await page.route("/api/pr-status/merge", async (route) => {
       await route.fulfill({
         status: 200,
@@ -2140,20 +2150,14 @@ test.describe("D5: Tracker and PR links", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status\?/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "open",
-          reviewDecision: "approved",
-          ciStatus: "success",
-          canMerge: true,
-          totalThreads: 0,
-          unresolvedThreads: 0,
-        }),
-      });
-    });
+    await mockPrStatusFor(page, () => ({
+      state: "open",
+      reviewDecision: "approved",
+      ciStatus: "success",
+      canMerge: true,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    }));
     await page.goto("/");
 
     const prLink = page.locator(`a[href='${prUrl}']`).first();
@@ -2170,18 +2174,12 @@ test.describe("D5: Tracker and PR links", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status\?/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "open",
-          ciStatus: null,
-          totalThreads: 0,
-          unresolvedThreads: 0,
-        }),
-      });
-    });
+    await mockPrStatusFor(page, () => ({
+      state: "open",
+      ciStatus: null,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    }));
     await page.goto("/");
 
     const prLink = page.locator("a[href*='gitlab.com']").first();
@@ -2199,18 +2197,12 @@ test.describe("D5: Tracker and PR links", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status\?/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: null,
-          ciStatus: null,
-          totalThreads: 0,
-          unresolvedThreads: 0,
-        }),
-      });
-    });
+    await mockPrStatusFor(page, () => ({
+      state: null,
+      ciStatus: null,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    }));
     await page.goto("/");
 
     await expect(
@@ -2224,19 +2216,13 @@ test.describe("D5: Tracker and PR links", () => {
   }) => {
     const session = makeSessionWithPR({ id: "pr-row-soft-error-1" });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status\?/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: null,
-          ciStatus: null,
-          totalThreads: 0,
-          unresolvedThreads: 0,
-          error: "GitHub API 503",
-        }),
-      });
-    });
+    await mockPrStatusFor(page, () => ({
+      state: null,
+      ciStatus: null,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      error: "GitHub API 503",
+    }));
     await page.goto("/");
 
     await expect(page.getByRole("button", { name: "GitHub connection healthy" })).toBeVisible();
@@ -2254,22 +2240,16 @@ test.describe("D5: Tracker and PR links", () => {
       },
     });
     await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "open",
-          reviewDecision: null,
-          ciStatus: "success",
-          canMerge: false,
-          mergeConflict: false,
-          totalThreads: 0,
-          unresolvedThreads: 0,
-          error: "Minor field error",
-        }),
-      });
-    });
+    await mockPrStatusFor(page, () => ({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "success",
+      canMerge: false,
+      mergeConflict: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      error: "Minor field error",
+    }));
     await page.goto("/");
 
     const prLink = page.locator(`a[href='${prUrl}']`).first();

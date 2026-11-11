@@ -21,10 +21,10 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "f78a9b3394cb98286fdff572158745c9804cf00f77df48a3dba1527419f9210f",
-  "types.ts": "107adafc49c533009d550e2de862b93797fa80b7db94be70134d0f9fd6209238",
+  "server.ts": "8b58f26030ee1854f0aa3f776c60003de1b382d947519d69f962116028b0f1f2",
+  "types.ts": "885ac1273e20334b58874b5db117ac32cf76e75c3eeb2ef6376b5fd8f686ace9",
   "cron-job-editor.ts": "33fc7b2993819693ef511d9312f9eb8f4260feb2f263421aec2d4e5ac613ec06",
-  "session-service.ts": "5c58a25c34abdffdcca13bf56b41621e49ffb5ac8df558caba43ee7cb5d54705",
+  "session-service.ts": "e6e5bc44186a590903e53d2fba2a385d355c2a0393cc8320d7a8ee7d196ddae2",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "1d06c2d904fa46b95ef8bed971c5767fad76663482f22822f9a541b345f161ff",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -45,9 +45,9 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(83);
+    expect(routes).toHaveLength(103);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(83);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(103);
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("spawn_background_session")?.path).toBe("/sessions/background");
     expect(getDaemonOperation("missing")).toBeUndefined();
@@ -87,6 +87,61 @@ describe("daemon MCP operation contracts", () => {
     expect(parserMutation).not.toBe(server);
     expect(contractFingerprint(parserMutation)).not.toBe(contractFingerprint(server));
     expect(contractFingerprint(`// comment\n${server}`)).toBe(contractFingerprint(server));
+  });
+
+  it("describes accepted spawn identities without changing the 201 response contract", () => {
+    const foreground = getDaemonOperation("spawn_session");
+    const background = getDaemonOperation("spawn_background_session");
+    expect(foreground?.responses[0]).toMatchObject({ status: 201 });
+    expect(foreground?.responses[0]?.description).toContain("spawning identity before launch");
+    expect(foreground?.responses[0]?.description).toContain("Healthy foreground");
+    expect(background?.responses[0]).toMatchObject({ status: 201 });
+    expect(background?.responses[0]?.description).toContain("across daemon restart");
+    expect(background?.responses[0]?.description).toContain("ownership remains held");
+  });
+
+  it("describes source binding, Page summary DTOs and protected static files", async () => {
+    const update = getDaemonOperation("update_page_source");
+    expect(update).toMatchObject({
+      method: "PATCH",
+      path: "/pages/{pageId}/source",
+      pathParams: ["pageId"],
+      pathParameters: [{ name: "pageId", required: true }],
+      body: { type: "object", fields: [{ name: "path", type: "string|null", required: true }] },
+    });
+    expect(update?.responses.map((entry) => entry.status)).toEqual(
+      expect.arrayContaining([200, 400, 404]),
+    );
+    expect(update?.examples).toEqual(
+      expect.arrayContaining([
+        { pathParams: { pageId: "example-pageId" }, body: { path: "/path/to/site" } },
+        { pathParams: { pageId: "example-pageId" }, body: { path: null } },
+      ]),
+    );
+    const create = getDaemonOperation("create_page");
+    expect(create?.body?.fields).toContainEqual(
+      expect.objectContaining({ name: "source", type: "{path:string}", required: false }),
+    );
+    const pages = await source("pages.ts");
+    expect(create?.body?.fields.map((entry) => entry.name).sort()).toEqual(
+      interfaceFields(pages, "CreatePageRequest")
+        .map((entry) => entry.name)
+        .sort(),
+    );
+    for (const id of ["list_pages", "create_page", "update_page_source"]) {
+      const response = getDaemonOperation(id)?.responses[0]?.description;
+      for (const field of [
+        ...interfaceFields(pages, "PageConfig"),
+        ...interfaceFields(pages, "PageSyncStatus"),
+      ]) {
+        expect(response, `${id}: ${field.name}`).toContain(field.name);
+      }
+      for (const name of ["id", "path", "url", "sync", "pending", "syncing", "synced", "error"])
+        expect(response).toContain(name);
+    }
+    for (const name of ["dot paths", "data.sqlite*", "page.yaml", "_spur"]) {
+      expect(getDaemonOperation("get_page_file")?.summary).toContain(name);
+    }
   });
 
   it("fails closed on unfamiliar dispatch/matcher syntax", async () => {
@@ -220,6 +275,29 @@ describe("daemon MCP operation contracts", () => {
     );
   });
 
+  it("states allowedTriggers omit and empty-array semantics in the spawn contracts", () => {
+    for (const operationId of ["spawn_session", "spawn_background_session"]) {
+      const description = getDaemonOperation(operationId)?.body?.fields.find(
+        ({ name }) => name === "allowedTriggers",
+      )?.description;
+      expect(description, operationId).toContain("Omit to allow all");
+      expect(description, operationId).toContain("[] blocks every send trigger");
+    }
+  });
+
+  it("exposes optional explicit PR alert ownership only on native spawn contracts", () => {
+    for (const operationId of ["spawn_session", "spawn_background_session"]) {
+      expect(
+        getDaemonOperation(operationId)?.body?.fields.find(({ name }) => name === "prAlertOwner"),
+      ).toMatchObject({ name: "prAlertOwner", type: "boolean", required: false });
+    }
+    expect(
+      getDaemonOperation("respawn_session")?.body?.fields.some(
+        ({ name }) => name === "prAlertOwner",
+      ),
+    ).toBe(false);
+  });
+
   it("provides examples, path/query/body metadata, errors and source references for every operation", () => {
     for (const entry of DAEMON_OPERATIONS) {
       expect(entry.summary.length, entry.operationId).toBeGreaterThan(12);
@@ -254,7 +332,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(83);
+      expect(page.total).toBe(103);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",
@@ -325,6 +403,60 @@ describe("catalog examples at the real daemon router", () => {
     };
     return { server, request, configPath };
   }
+
+  it("binds and detaches source through catalog requests and rejects malformed bodies without mutation", async () => {
+    const { server, request } = await fixture();
+    const pageId = "mcp-page";
+    const params = { pageId };
+    const path = join(server.config.dataDir, "missing-site");
+    try {
+      expect((await request("create_page", { id: pageId })).status).toBe(201);
+      const bound = await request("update_page_source", { path }, params);
+      expect(bound.status).toBe(200);
+      expect(await bound.json()).toMatchObject({
+        id: pageId,
+        url: `/p/${pageId}/`,
+        source: { path },
+        sync: { state: "error" },
+      });
+      for (const body of [
+        [],
+        null,
+        {},
+        { path: 1 },
+        { path: "relative" },
+        { path: `${path}\u0000` },
+      ]) {
+        expect((await request("update_page_source", body, params)).status).toBe(400);
+        expect(await (await request("list_pages")).json()).toMatchObject({
+          pages: [{ id: pageId, source: { path }, sync: { state: "error" } }],
+        });
+      }
+      expect((await request("update_page_source", { path }, { pageId: "missing" })).status).toBe(
+        404,
+      );
+      const detached = await request("update_page_source", { path: null }, params);
+      expect(detached.status).toBe(200);
+      const detachedPage: unknown = await detached.json();
+      expect(detachedPage).toMatchObject({ id: pageId, url: `/p/${pageId}/` });
+      expect(detachedPage).not.toHaveProperty("source");
+      expect(detachedPage).not.toHaveProperty("sync");
+      const created = await request("create_page", { id: "sourced", source: { path } });
+      expect(created.status).toBe(201);
+      expect(await created.json()).toMatchObject({
+        id: "sourced",
+        source: { path },
+        sync: { state: "error" },
+      });
+      for (const file of ["page.yaml", ".source-sync.json", "data.sqlite"]) {
+        expect((await request("get_page_file", undefined, { pageId, path: file })).status).toBe(
+          404,
+        );
+      }
+    } finally {
+      await server.stop();
+    }
+  });
 
   it("executes scoped Cron draft/save catalog requests without changing loaded settings or sessions", async () => {
     const { server, request, configPath } = await fixture(true);
