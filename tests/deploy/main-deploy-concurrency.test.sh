@@ -83,6 +83,7 @@ EOF
   export PATH="$sudo_dir:$stub_dir:$PATH"
   export HOME="$work/home"
   export MAIN_DEPLOY_SERVICE_HOME="$HOME"
+  unset SPUR_CONFIG
   mkdir -p "$HOME"
   # Do NOT preset MAIN_DEPLOY_REEXECED: let the script acquire the deploy lock
   # and re-exec from $deploy_root exactly as in prod, so the test exercises the
@@ -1058,6 +1059,8 @@ test_selected_daemon_port() {
   local work
   work="$(mktemp -d)"
   trap 'rm -rf "$work"' RETURN
+  export SPUR_CONFIG="$work/caller-config.yaml"
+  printf 'server:\n  port: 43218\n' >"$SPUR_CONFIG"
   setup_env "$work"
   export MAIN_DEPLOY_SERVICE_HOME="$work/service-home"
   local head
