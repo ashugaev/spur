@@ -95,8 +95,9 @@ async function runningPrompt(port: number): Promise<{ status: number; prompt?: s
   const response = await fetch(`http://127.0.0.1:${port}/projects/cron?project=demo`);
   if (response.status !== 200) return { status: response.status };
   const body = (await response.json()) as CronJobsResponse;
-  const trigger = body.projects[0]!.sources[0]!.triggers[0]!;
-  return { status: 200, prompt: trigger.action.blocks[0]!.prompt };
+  const { action } = body.projects[0]!.sources[0]!.triggers[0]!;
+  if (action.kind !== "spawn") throw new Error(`expected spawn action, got ${action.kind}`);
+  return { status: 200, prompt: action.blocks[0]!.prompt };
 }
 
 describe("PATCH /projects/cron/edit reload failure", () => {
