@@ -1,5 +1,11 @@
-import { test, expect, makeSessionWithPR, mockSessions, mockPrStatusBatch } from "./fixtures.js";
-import type { Page } from "./fixtures.js";
+import {
+  test,
+  expect,
+  makeSessionWithPR,
+  mockSessions,
+  mockPrStatusBatch,
+  type Page,
+} from "./fixtures.js";
 import type { PrCheck, PrInfo } from "../src/lib/pr-status-shape.js";
 
 const prUrl = "https://github.com/test/repo/pull/42";
