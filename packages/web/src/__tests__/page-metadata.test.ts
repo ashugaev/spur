@@ -53,13 +53,11 @@ describe("Page install identity", () => {
     vi.stubEnv("SPUR_DAEMON_URL", "http://isolated.test");
     vi.stubGlobal(
       "fetch",
-      vi
-        .fn()
-        .mockResolvedValue(
-          new Response(new Uint8Array(1024 * 1024 + 1), {
-            headers: { "content-type": "image/png" },
-          }),
-        ),
+      vi.fn().mockResolvedValue(
+        new Response(new Uint8Array(1024 * 1024 + 1), {
+          headers: { "content-type": "image/png" },
+        }),
+      ),
     );
     await expect(renderPageIcon({ ...page, icon: "icon.png" }, 32)).rejects.toThrow(
       "exceeds 1 MiB",
