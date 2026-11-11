@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChatVoiceControls } from "@/components/ChatVoiceControls";
 import { PAGE_ID_RE } from "@/lib/store-proxy";
 
@@ -11,6 +11,7 @@ interface VoiceIdentity {
 }
 export function PageVoiceHost() {
   const [identity, setIdentity] = useState<VoiceIdentity | null>(null);
+  const controlsRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const query = new URLSearchParams(window.location.search);
     const page = query.get("page") ?? "";
@@ -46,26 +47,33 @@ export function PageVoiceHost() {
     return () => window.removeEventListener("message", receive);
   }, []);
   useEffect(() => {
-    if (!identity) return;
+    const controls = controlsRef.current;
+    if (!identity || !controls) return;
     const reportSize = () =>
       window.parent.postMessage(
-        { type: "spur:voice-size", ...identity, height: document.body.scrollHeight },
+        {
+          type: "spur:voice-size",
+          ...identity,
+          height: Math.ceil(controls.getBoundingClientRect().height),
+        },
         window.location.origin,
       );
     const observer = new ResizeObserver(reportSize);
-    observer.observe(document.body);
+    observer.observe(controls);
     reportSize();
     return () => observer.disconnect();
   }, [identity]);
   return identity ? (
-    <ChatVoiceControls
-      contextKey={`page-chat:${identity.page}:${identity.chat}`}
-      onTranscribed={(text) => {
-        window.parent.postMessage(
-          { type: "spur:voice-transcript", ...identity, text },
-          window.location.origin,
-        );
-      }}
-    />
+    <div ref={controlsRef}>
+      <ChatVoiceControls
+        contextKey={`page-chat:${identity.page}:${identity.chat}`}
+        onTranscribed={(text) => {
+          window.parent.postMessage(
+            { type: "spur:voice-transcript", ...identity, text },
+            window.location.origin,
+          );
+        }}
+      />
+    </div>
   ) : null;
 }

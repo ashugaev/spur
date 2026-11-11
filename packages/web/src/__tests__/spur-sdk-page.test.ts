@@ -7,6 +7,15 @@ import { flush, pageRig, sdkSource } from "./fixtures/spur-sdk-rig";
 // Page transport stays at the Page root, including nested documents.
 
 describe("page transport", () => {
+  it("keeps isolated host typography after its reset and responsive inset outside that reset", async () => {
+    const r = await pageRig();
+    const host = r.doc.querySelector("[data-spur-page-widget]") as HTMLElement;
+    expect(host.style.getPropertyPriority("all")).toBe("important");
+    expect(host.style.fontSize).toBe("12px");
+    expect(host.style.fontFamily).toContain("monospace");
+    expect(host.style.getPropertyPriority("font")).toBe("important");
+    expect(host.style.inset).toContain("var(--spur-widget-inset)");
+  });
   it("uses one root widget/connection on nested HTML and consumes create-open once", async () => {
     const r = await pageRig("<p>App</p>", "/p/films/nested/index.html?chat=open&keep=1");
     r.win.eval(sdkSource);

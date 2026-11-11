@@ -87,10 +87,23 @@ for (const width of [1280, 390]) {
     expect(creates).toBe(1);
     await expect(page).toHaveURL(/\/p\/new\/$/);
     const draft = page.getByRole("textbox", { name: "Message", exact: true });
+    const panelBounds = await page.getByRole("region", { name: "Page agent chat" }).boundingBox();
+    expect(panelBounds).not.toBeNull();
+    const inset = width < 640 ? 16 : 24;
+    expect(Math.abs(width - panelBounds!.x - panelBounds!.width - inset)).toBeLessThan(1);
+    if (width < 640) expect(Math.abs(panelBounds!.x - inset)).toBeLessThan(1);
+    const font = await draft.evaluate((node) => ({
+      family: getComputedStyle(node).fontFamily,
+      size: getComputedStyle(node).fontSize,
+    }));
+    expect(font.family).toContain("monospace");
+    expect(font.size).toBe("12px");
     await draft.fill("Build a reading list\nwith tags");
     const voice = page.frameLocator('iframe[title="Voice input"]');
     await voice.getByRole("button", { name: "Start voice recording" }).click();
     await expect(voice.getByRole("alert")).toContainText("Microphone access is blocked");
+    const sendBounds = await page.getByRole("button", { name: "Send", exact: true }).boundingBox();
+    expect(sendBounds!.height).toBeLessThanOrEqual(36);
     await expect(draft).toHaveValue("Build a reading list\nwith tags");
     await page.getByRole("button", { name: "Close agent chat", exact: true }).first().click();
     await page.getByRole("button", { name: "Open agent chat", exact: true }).click();

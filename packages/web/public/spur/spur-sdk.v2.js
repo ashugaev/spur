@@ -681,7 +681,7 @@
     ".spur-chat-tag{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--spur-text-tertiary);margin-right:8px}",
     ".spur-chat-status{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--spur-text-tertiary)}",
     ".spur-chat-status[data-tone=error]{color:var(--spur-status-error)}",
-    ".spur-chat-form{display:flex;flex-wrap:wrap;gap:6px}",
+    ".spur-chat-form{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px}",
     ".spur-chat-form textarea{width:100%;min-width:0;resize:vertical;font:inherit;color:var(--spur-text-primary);background:var(--spur-input-bg);border:1px solid var(--spur-input-border);padding:6px 8px;border-radius:0}",
     ".spur-chat-form textarea:focus-visible{outline:2px solid var(--spur-accent);outline-offset:-2px}",
     ".spur-chat-form textarea[aria-invalid=true]{border-color:var(--spur-status-error)}",
@@ -1872,12 +1872,12 @@
     const host = document.createElement("div");
     host.setAttribute("data-spur-page-widget", "");
     host.style.cssText =
-      "all:initial!important;position:fixed!important;inset:auto 24px 24px auto!important;z-index:2147483646!important;max-width:calc(100vw - 32px)!important";
+      "all:initial!important;font:12px ui-monospace,monospace!important;color:var(--spur-text-primary)!important;position:fixed!important;inset:auto var(--spur-widget-inset) var(--spur-widget-inset) auto!important;z-index:2147483646!important;max-width:calc(100vw - 32px)!important";
     const root = host.attachShadow({ mode: "open" });
     const styles = document.createElement("style");
     styles.textContent =
       STYLE +
-      "\n:host{font:12px ui-monospace,monospace;color:var(--spur-text-primary)}[hidden]{display:none!important}.panel{width:360px;max-width:calc(100vw - 32px);max-height:calc(100dvh - 100px);overflow:auto;background:var(--spur-bg-surface);border:1px solid var(--spur-border-default);margin-bottom:8px}.head{display:flex;align-items:center;justify-content:space-between;padding:8px;border-bottom:1px solid var(--spur-border-subtle);font-weight:700;text-transform:uppercase}.panel spur-chat{border:0}.toggle{width:48px;height:48px;margin-left:auto;display:flex;align-items:center;justify-content:center;background:var(--spur-bg-surface);padding:0}.toggle svg{width:22px;height:22px}.panel .spur-chat-msg{overflow-wrap:anywhere}.panel .spur-chat-log{max-height:min(320px,40dvh)}@media(max-width:639px){.toggle{width:44px;height:44px}:host{transform:translate(8px,8px)}}";
+      "\n:host{--spur-widget-inset:24px}[hidden]{display:none!important}.panel{width:360px;max-width:calc(100vw - 32px);max-height:calc(100dvh - 100px);overflow:auto;background:var(--spur-bg-surface);border:1px solid var(--spur-border-default);margin-bottom:8px}.head{display:flex;align-items:center;justify-content:space-between;padding:8px;border-bottom:1px solid var(--spur-border-subtle);font-weight:700;text-transform:uppercase}.panel spur-chat{border:0}.toggle{width:48px;height:48px;margin-left:auto;display:flex;align-items:center;justify-content:center;background:var(--spur-bg-surface);padding:0}.toggle svg{width:22px;height:22px}.panel .spur-chat-msg{overflow-wrap:anywhere}.panel .spur-chat-log{max-height:min(320px,40dvh)}@media(max-width:639px){.toggle{width:44px;height:44px}:host{--spur-widget-inset:16px}}";
     root.appendChild(styles);
     const panel = el("section", "panel");
     panel.hidden = true;
