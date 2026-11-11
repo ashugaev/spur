@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import type * as FsPromises from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -45,7 +46,7 @@ const sourceGate = vi.hoisted(() => ({
   reached: () => {},
 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const actual = await importOriginal<typeof FsPromises>();
   const lstat = (async (...args: Parameters<typeof actual.lstat>) => {
     if (sourceGate.path !== undefined && String(args[0]) === sourceGate.path) {
       sourceGate.reached();
