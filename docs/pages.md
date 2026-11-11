@@ -19,9 +19,33 @@ spur db page:films add items '{"title":"Dune"}'
 
 ## Files
 
-- `page.yaml`: `title` (1..120 chars), `icon` (optional), `agent.runtime` (`claude` default, `codex`, `cursor`, `opencode`), `agent.model` (optional).
-- Any static file; no build step. Dot paths and `data.sqlite*` are never served. Responses are `no-store`.
+- `page.yaml`: [configuration reference](configuration.md).
+- Any static file; no build step. Dot paths, `data.sqlite*`, `page.yaml` and `_spur` paths are protected at every depth. Responses are `no-store`; `_spur` serves the native SDK/API.
 - Load the SDK with `<script src="./_spur/sdk.js"></script>`. API: [spur-sdk.md](spur-sdk.md).
+
+## Publish from sources
+
+Create with `spur page create films --source ./site`; bind an existing Page with `spur page source films ./site`.
+
+- Folder source: publish its nonreserved contents; requires `index.html`.
+- HTML source: publish its parent folder, including siblings; use a curated folder to limit publication.
+- Selected `.html`/`.htm`: keep its name and publish as `index.html`, replacing a sibling entry.
+- Paths refer to the daemon host; CLI resolves relative paths to absolute paths before submission.
+- Initial sync attempt finishes before the command returns; the daemon checks sources every 2 seconds without open tabs, agents or site servers.
+- Edits, additions and imported-file deletions preserve Page ID, URL, native SQL and protected paths.
+- Import replaces matching static files; unrelated publication files remain.
+- `spur page list`: source path, sync state and errors; `--json` adds resolved root and last successful sync time when available.
+- States: `pending`, `syncing`, `synced`, `error`; unchanged checks retain success time.
+- Missing/unreadable source, missing entry, prohibited links or invalid sync metadata report errors.
+- Validation failures retain publication; restored sources retry automatically.
+- Write failures can leave partial static updates until retry; SQL remains intact.
+- Reject symlinks, special files and source roots overlapping Page storage.
+- Exclude protected paths before traversal; local dependencies must stay inside source root without links.
+- `spur page source films --detach`: stop updates, retain publication/SQL.
+- Rebind: remove obsolete imported files after successful import.
+- No source: retain manual editing behavior.
+
+Do not edit hidden source-sync state in the publication directory. Edit source files while bound; source updates replace matching publication files.
 
 ## Live events
 

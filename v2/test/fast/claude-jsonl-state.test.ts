@@ -1016,6 +1016,37 @@ describe("parseJsonlRecord rate_limit reset detection", () => {
 
 // ── hasTrailingClaudeServerError ──────────────────────────────────────
 
+describe("individual spend native record reset", () => {
+  it.each([
+    ["2026-11-08T19:32:49.242Z", "rate_limit", Date.parse("2026-11-11T08:00:00.000Z")],
+    [undefined, "rate_limit", undefined],
+    ["invalid", "rate_limit", undefined],
+    ["2026-11-08T19:32:49.242Z", undefined, undefined],
+  ])("requires the error record's own timestamp: %s / %s", (timestamp, error, reset) => {
+    const record = parseJsonlRecord(
+      JSON.stringify({
+        type: "assistant",
+        timestamp,
+        error,
+        message: {
+          role: "assistant",
+          model: "<synthetic>",
+          stop_reason: "stop_sequence",
+          content: [
+            {
+              type: "text",
+              text: "You've hit your individual spend limit · run /usage-credits to ask your admin for a higher limit · your weekly limit resets Nov 11, 8am (UTC)",
+            },
+          ],
+        },
+      }),
+      Date.parse("2026-11-12T00:00:00.000Z"),
+    );
+    expect(record?.rateLimited).toBe(error === "rate_limit" ? true : undefined);
+    expect(record?.rateLimitResetAtMs).toBe(reset);
+  });
+});
+
 describe("hasTrailingClaudeServerError", () => {
   it("returns true for a trailing server_error record", () => {
     const records = [rec({ type: "assistant", serverError: true })];

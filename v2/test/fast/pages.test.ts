@@ -8,6 +8,7 @@ import {
   readPageConfig,
   removePageDir,
   resolvePageFile,
+  setPageSource,
   watchPageDir,
 } from "../../src/pages.js";
 import { StoreError, pageDirPath } from "../../src/stores.js";
@@ -35,6 +36,18 @@ function statusOf(run: () => unknown): number | undefined {
 }
 
 describe("page ids and page.yaml", () => {
+  it("validates source before creation and changes only its binding", async () => {
+    const dir = await dataDir();
+    expect(statusOf(() => createPage(dir, { id: "bad", source: { path: "relative" } }))).toBe(400);
+    expect(listPages(dir)).toEqual([]);
+    const page = createPage(dir, { id: "site", source: { path: join(dir, "missing") } });
+    const config = join(page.path, "page.yaml");
+    await writeFile(config, `${await readFile(config, "utf8")}custom: keep\n`);
+    expect(setPageSource(dir, "site", join(dir, "new")).source?.path).toBe(join(dir, "new"));
+    expect(await readFile(config, "utf8")).toContain("custom: keep");
+    expect(setPageSource(dir, "site", null).source).toBeUndefined();
+    expect(statusOf(() => resolvePageFile(dir, "site", "page.yaml"))).toBe(404);
+  });
   it("creates page.yaml and index.html, lists pages and rejects duplicates", async () => {
     const dir = await dataDir();
     const page = createPage(dir, {

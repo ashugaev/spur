@@ -21,7 +21,7 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "b5953ceed55a81b265e6721ce5aa2e5f80148268a7b450d51b04a06e6030d06a",
+  "server.ts": "e4563fbfea2bda0a846d8c0cd1b643d12203364148559fded585af428b10bf19",
   "types.ts": "04b5d658b38b28bbb347ac477985a4615cecaec07a3b55e18d341f406bf3faa4",
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
   "session-service.ts": "03152c793dc9785951c82a3ecc2c2b9d9495a3dc7c3bbecd37676b5d04a361b1",
@@ -45,9 +45,9 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(102);
+    expect(routes).toHaveLength(103);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(102);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(103);
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("spawn_background_session")?.path).toBe("/sessions/background");
     expect(getDaemonOperation("missing")).toBeUndefined();
@@ -98,6 +98,50 @@ describe("daemon MCP operation contracts", () => {
     expect(background?.responses[0]).toMatchObject({ status: 201 });
     expect(background?.responses[0]?.description).toContain("across daemon restart");
     expect(background?.responses[0]?.description).toContain("ownership remains held");
+  });
+
+  it("describes source binding, Page summary DTOs and protected static files", async () => {
+    const update = getDaemonOperation("update_page_source");
+    expect(update).toMatchObject({
+      method: "PATCH",
+      path: "/pages/{pageId}/source",
+      pathParams: ["pageId"],
+      pathParameters: [{ name: "pageId", required: true }],
+      body: { type: "object", fields: [{ name: "path", type: "string|null", required: true }] },
+    });
+    expect(update?.responses.map((entry) => entry.status)).toEqual(
+      expect.arrayContaining([200, 400, 404]),
+    );
+    expect(update?.examples).toEqual(
+      expect.arrayContaining([
+        { pathParams: { pageId: "example-pageId" }, body: { path: "/path/to/site" } },
+        { pathParams: { pageId: "example-pageId" }, body: { path: null } },
+      ]),
+    );
+    const create = getDaemonOperation("create_page");
+    expect(create?.body?.fields).toContainEqual(
+      expect.objectContaining({ name: "source", type: "{path:string}", required: false }),
+    );
+    const pages = await source("pages.ts");
+    expect(create?.body?.fields.map((entry) => entry.name).sort()).toEqual(
+      interfaceFields(pages, "CreatePageRequest")
+        .map((entry) => entry.name)
+        .sort(),
+    );
+    for (const id of ["list_pages", "create_page", "update_page_source"]) {
+      const response = getDaemonOperation(id)?.responses[0]?.description;
+      for (const field of [
+        ...interfaceFields(pages, "PageConfig"),
+        ...interfaceFields(pages, "PageSyncStatus"),
+      ]) {
+        expect(response, `${id}: ${field.name}`).toContain(field.name);
+      }
+      for (const name of ["id", "path", "url", "sync", "pending", "syncing", "synced", "error"])
+        expect(response).toContain(name);
+    }
+    for (const name of ["dot paths", "data.sqlite*", "page.yaml", "_spur"]) {
+      expect(getDaemonOperation("get_page_file")?.summary).toContain(name);
+    }
   });
 
   it("fails closed on unfamiliar dispatch/matcher syntax", async () => {
@@ -289,7 +333,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(102);
+      expect(page.total).toBe(103);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",
@@ -360,6 +404,60 @@ describe("catalog examples at the real daemon router", () => {
     };
     return { server, request, configPath };
   }
+
+  it("binds and detaches source through catalog requests and rejects malformed bodies without mutation", async () => {
+    const { server, request } = await fixture();
+    const pageId = "mcp-page";
+    const params = { pageId };
+    const path = join(server.config.dataDir, "missing-site");
+    try {
+      expect((await request("create_page", { id: pageId })).status).toBe(201);
+      const bound = await request("update_page_source", { path }, params);
+      expect(bound.status).toBe(200);
+      expect(await bound.json()).toMatchObject({
+        id: pageId,
+        url: `/p/${pageId}/`,
+        source: { path },
+        sync: { state: "error" },
+      });
+      for (const body of [
+        [],
+        null,
+        {},
+        { path: 1 },
+        { path: "relative" },
+        { path: `${path}\u0000` },
+      ]) {
+        expect((await request("update_page_source", body, params)).status).toBe(400);
+        expect(await (await request("list_pages")).json()).toMatchObject({
+          pages: [{ id: pageId, source: { path }, sync: { state: "error" } }],
+        });
+      }
+      expect((await request("update_page_source", { path }, { pageId: "missing" })).status).toBe(
+        404,
+      );
+      const detached = await request("update_page_source", { path: null }, params);
+      expect(detached.status).toBe(200);
+      const detachedPage: unknown = await detached.json();
+      expect(detachedPage).toMatchObject({ id: pageId, url: `/p/${pageId}/` });
+      expect(detachedPage).not.toHaveProperty("source");
+      expect(detachedPage).not.toHaveProperty("sync");
+      const created = await request("create_page", { id: "sourced", source: { path } });
+      expect(created.status).toBe(201);
+      expect(await created.json()).toMatchObject({
+        id: "sourced",
+        source: { path },
+        sync: { state: "error" },
+      });
+      for (const file of ["page.yaml", ".source-sync.json", "data.sqlite"]) {
+        expect((await request("get_page_file", undefined, { pageId, path: file })).status).toBe(
+          404,
+        );
+      }
+    } finally {
+      await server.stop();
+    }
+  });
 
   it("executes scoped Cron draft/save catalog requests and applies loaded settings without changing sessions", async () => {
     const { server, request, configPath } = await fixture(true);

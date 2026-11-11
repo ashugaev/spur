@@ -6,6 +6,7 @@ Instance selection: `--config` > `SPUR_CONFIG` > private `~/.spur/installed-inst
 Project config: nearest `spur.yaml`/`spur.yml`, `projects:` only; merge/per-session resolution: `v2/src/config.ts`; voice: [voice.md](voice.md).
 
 Spur ToDo is always on, no config field. See [todo](commands.md#todo).
+Page `page.yaml`: `title` (1..120 printable chars), optional `icon`, `agent.runtime` (`claude` default, `codex`, `cursor`, `opencode`), optional `agent.model` and `source.path` (absolute printable daemon-local HTML/folder path); [Pages](pages.md); `v2/src/pages.ts`.
 OpenCode worker heartbeat expiry: session state `error`; `v2/src/agents/opencode.ts`, `v2/src/session-service.ts`.
 `mcp.port` (instance-only, `1..65535`, loopback, default first port from `4311` distinct from daemon/UI): `v2/src/config.ts`, `v2/src/ports.ts`; [MCP](mcp.md).
 `SPUR_MCP_TUNNEL_PROFILE`, `CONTROL_PLANE_API_KEY`, `SPUR_MCP_TUNNEL_ENV_FILE`: `v2/src/mcp-tunnel.ts`; [tunnel setup](mcp.md#connect-openai-products).
