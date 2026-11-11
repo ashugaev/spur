@@ -69,6 +69,7 @@ import {
   capturePaneAgentProcesses,
   findForeignAgentProcessesForSession,
   terminateAgentProcesses,
+  terminateDetachedSessionProcesses,
 } from "./agent-processes.js";
 import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
 import {
@@ -318,6 +319,7 @@ import {
   killTmuxSession,
   killTmuxSessionTree,
   listTmuxSessionNames,
+  readTmuxServerPid,
   refreshTmuxFleetSnapshot,
   sendSubmitKeyToTmux,
   sendMenuSelectionKeys,
@@ -354,6 +356,7 @@ import {
   normalizeSlotUrl,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
+  slotToolDir,
   type AppliedSlotsUpdate,
   withSessionSlotInstructions,
 } from "./session-slots.js";
@@ -14033,6 +14036,7 @@ export class SessionService {
             },
             { failOnSurvivors: false },
           );
+          await this.terminateDetachedSessionProcesses({ id: sessionId });
           // Non-mcp project sidecars are desk-shared: a sibling can already be
           // attached to this still-spawning anchor (or, for a failing sibling,
           // the anchor/another sibling can still be live), so this session's
@@ -14229,6 +14233,9 @@ export class SessionService {
       },
       { failOnSurvivors: false },
     );
+    if (finalFailure) {
+      await this.terminateDetachedSessionProcesses({ id: prepared.sessionId });
+    }
     // See the same guard in prepareBackgroundSpawn's catch block: non-mcp
     // project sidecars are desk-shared and must not die under a live sibling.
     const deskAlive = this.hasRunningWorkspaceMembers(prepared.placeholder);
@@ -20565,6 +20572,43 @@ export class SessionService {
     }
   }
 
+  // Terminal teardown only: reaps processes of this session that left the pane
+  // (setsid daemons adopted by a subreaper), which pane capture cannot reach.
+  // Runs after the pane kill so a last-session tmux server exit reads as
+  // "absent". Never throws; survivors and unreadable inputs are logged only.
+  private async terminateDetachedSessionProcesses(session: Pick<SessionRecord, "id">) {
+    const tmuxServer = await readTmuxServerPid();
+    if (tmuxServer.status === "unavailable") {
+      this.logEvent("session.agent_process.capture_unavailable", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Session ${session.id}: tmux server pid unreadable; skipped detached process sweep`,
+        details: { reason: "detached_session", cause: "tmux_server_pid_unreadable" },
+      });
+      return;
+    }
+    const outcome = await terminateDetachedSessionProcesses({
+      sessionId: session.id,
+      sessionToolDir: slotToolDir(this.config.dataDir, session.id),
+      tmuxServerPid: tmuxServer.status === "running" ? tmuxServer.pid : null,
+    });
+    if (outcome.status === "unavailable") {
+      this.logEvent("session.agent_process.capture_unavailable", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Session ${session.id}: could not read the process table; skipped detached process sweep`,
+        details: { reason: "detached_session" },
+      });
+    } else if (outcome.status === "survivors") {
+      this.logEvent("session.agent_process.survivors", {
+        level: "error",
+        sessionId: session.id,
+        message: `Session ${session.id}: detached process(es) ${outcome.pids.join(", ")} survived SIGKILL`,
+        details: { pids: outcome.pids, reason: "detached_session" },
+      });
+    }
+  }
+
   // P2 launch guard: refuses to launch a replacement pane over a live
   // foreign agent process still carrying this session's id (a prior
   // instance whose pane P1 could not see, e.g. its tmux pane is already
@@ -20858,6 +20902,7 @@ export class SessionService {
       delete record.startupAttachmentIds;
     }
     writeSession(this.config.dataDir, record);
+    if (targetStatus === "completed") await this.terminateDetachedSessionProcesses(record);
     if (targetStatus === "completed") await this.cleanupTerminalTelegram(record);
     if (targetStatus === "completed" && this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
@@ -20942,6 +20987,7 @@ export class SessionService {
         if (waiter.sessionId === sessionId) this.cancelSpawnAdmission(waiter, "killed");
       }
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
+      await this.terminateDetachedSessionProcesses(session);
       await this.cleanupSessionServices(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
     } catch (error) {
@@ -23531,6 +23577,7 @@ export class SessionService {
     // fleet ends up with two live agents on the same original session id.
     if (session.status === "completed") {
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
+      await this.terminateDetachedSessionProcesses(session);
     }
     // Unlike handoff, respawn needs no replacingSessionId exclusion: the
     // status guard above requires completed/killed/errored, none of which

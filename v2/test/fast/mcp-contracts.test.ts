@@ -24,7 +24,7 @@ const reviewedFingerprints = {
   "server.ts": "e4563fbfea2bda0a846d8c0cd1b643d12203364148559fded585af428b10bf19",
   "types.ts": "04b5d658b38b28bbb347ac477985a4615cecaec07a3b55e18d341f406bf3faa4",
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
-  "session-service.ts": "03152c793dc9785951c82a3ecc2c2b9d9495a3dc7c3bbecd37676b5d04a361b1",
+  "session-service.ts": "42b3458584246cea9730cee53795e593119294cf6d1cbb8952d0d00a86cebac9",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "1d06c2d904fa46b95ef8bed971c5767fad76663482f22822f9a541b345f161ff",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",

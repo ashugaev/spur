@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import type * as childProcessModule from "node:child_process";
+import type * as fsPromisesModule from "node:fs/promises";
 import type * as processTreeModule from "../../src/process-tree.js";
 import {
   canReadProcessTree,
@@ -13,6 +15,8 @@ import {
   listProcesses,
   listSessionMemberPids,
   parseElapsedSeconds,
+  readProcessEnvValue,
+  readProcessEnvValues,
   readProcessIdentity,
   readProcessStat,
   snapshotProcesses,
@@ -20,6 +24,14 @@ import {
   type ProcessSnapshotEntry,
   type PpidReader,
 } from "../../src/process-tree.js";
+
+// Wraps the real readFile so existing /proc reads still work; tests override it
+// per call with mockImplementationOnce.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof fsPromisesModule>();
+  return { ...actual, readFile: vi.fn(actual.readFile) };
+});
+const readFileMock = vi.mocked(readFile);
 
 // tree: 100(root) -> 200 -> 300; 400 is unrelated (parent 1)
 const tree: Record<number, number> = { 200: 100, 300: 200, 400: 1 };
@@ -392,5 +404,32 @@ describe("killProcessTree", () => {
       [300, "SIGKILL"],
       [100, "SIGKILL"],
     ]);
+  });
+});
+
+describe("readProcessEnvValues", () => {
+  it("reads environ once for several keys and omits absent keys", async () => {
+    readFileMock.mockClear();
+    readFileMock.mockResolvedValueOnce("A=1\0B=two=2\0C=3\0");
+    const read = await readProcessEnvValues(4242, ["A", "B", "MISSING"]);
+    expect(read).toEqual({ status: "ok", values: { A: "1", B: "two=2" } });
+    expect(readFileMock).toHaveBeenCalledTimes(1);
+    expect(readFileMock).toHaveBeenCalledWith("/proc/4242/environ", "utf8");
+  });
+
+  it("reports unreadable when the read fails", async () => {
+    readFileMock.mockRejectedValueOnce(new Error("EACCES"));
+    expect(await readProcessEnvValues(4242, ["A"])).toEqual({ status: "unreadable" });
+  });
+
+  it("readProcessEnvValue wraps it with one read", async () => {
+    readFileMock.mockClear();
+    readFileMock.mockResolvedValueOnce("A=1\0");
+    expect(await readProcessEnvValue(1, "A")).toEqual({ status: "ok", value: "1" });
+    readFileMock.mockResolvedValueOnce("A=1\0");
+    expect(await readProcessEnvValue(1, "Z")).toEqual({ status: "ok", value: undefined });
+    readFileMock.mockRejectedValueOnce(new Error("ENOENT"));
+    expect(await readProcessEnvValue(1, "A")).toEqual({ status: "unreadable" });
+    expect(readFileMock).toHaveBeenCalledTimes(3);
   });
 });
