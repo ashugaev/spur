@@ -1404,6 +1404,7 @@ type SessionServiceInternals = {
   waitForQueuedMessage(sessionId: string): Promise<string>;
   queuedDeliveryAckedAt: Map<string, number>;
   withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
+  withSessionLifecycleLocks<T>(sessionIds: readonly string[], task: () => Promise<T>): Promise<T>;
   enrichDashboard(session: SessionRecord): Promise<{ id: string; model?: string }>;
   classifySessionRecord(
     session: SessionRecord,
