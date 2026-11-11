@@ -1,9 +1,10 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import type * as SpurDaemon from "@/lib/spur-daemon";
 
 vi.mock("@/lib/spur-daemon", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/spur-daemon")>()),
+  ...(await importOriginal<typeof SpurDaemon>()),
   spurRequest: vi.fn(),
   spurRequestJson: vi.fn(),
 }));

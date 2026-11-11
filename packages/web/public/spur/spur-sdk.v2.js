@@ -1770,7 +1770,7 @@
         }
         input.value = next;
         input.setSelectionRange(start + text.length, start + text.length);
-        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new window.Event("input", { bubbles: true }));
       }
       setVoiceActive(active) {
         if (transport.kind !== "page" || !this._form) return;
@@ -1790,7 +1790,8 @@
         frame.className = "spur-chat-voice";
         frame.title = "Voice input";
         frame.allow = "microphone";
-        frame.src = "/page-voice?" + new URLSearchParams({ page: page, chat: chat, nonce: nonce });
+        frame.src =
+          "/page-voice?" + new window.URLSearchParams({ page: page, chat: chat, nonce: nonce });
         this._voiceFrame = frame;
         this._voiceListener = (event) => {
           const data = event.data;
@@ -1928,7 +1929,7 @@
       if (event.persisted && open) chat.setVoiceActive(true);
     });
     document.body.appendChild(host);
-    const url = new URL(window.location.href);
+    const url = new window.URL(window.location.href);
     if (url.searchParams.get("chat") === "open") {
       url.searchParams.delete("chat");
       window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);

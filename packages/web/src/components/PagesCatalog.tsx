@@ -3,6 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { BrandGlyph } from "@/components/BrandGlyph";
+import { BusyContent } from "@/components/BusyContent";
 import { DataRow } from "@/components/DataRow";
 import { Zone } from "@/components/Zone";
 import { createPage, fetchPages, PagesRequestError } from "@/lib/pages-client";
@@ -54,11 +55,13 @@ export function PagesCatalog({ projectId }: { projectId?: string }) {
         <div className="mb-4 flex flex-wrap items-center gap-3">
           <button
             type="button"
+            aria-label="Create Page"
+            aria-busy={creating}
             disabled={creating}
             onClick={() => void create()}
             className="border border-[var(--color-border-default)] bg-[var(--color-text-primary)] px-3 py-2 font-bold uppercase text-[var(--color-bg-base)] disabled:opacity-50"
           >
-            {creating ? "Creating…" : "Create Page"}
+            <BusyContent busy={creating}>Create Page</BusyContent>
           </button>
           {createError ? (
             <p role="alert" className="text-[var(--color-status-error)]">
@@ -116,7 +119,6 @@ export function PagesCatalog({ projectId }: { projectId?: string }) {
                   className="inline-flex min-w-0 max-w-full items-center gap-2 text-[var(--color-text-primary)] hover:text-[var(--color-accent)]"
                 >
                   {/* Generated metadata endpoint also supplies the default icon. */}
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={`${page.url}_spur/icon-32.png`}
                     alt=""

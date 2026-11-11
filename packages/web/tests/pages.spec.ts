@@ -56,9 +56,14 @@ for (const width of [1280, 390]) {
     );
     let creates = 0;
     let sends = 0;
-    await page.route("**/api/pages", (route) => {
+    let releaseCreate!: () => void;
+    const pendingCreate = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    await page.route("**/api/pages", async (route) => {
       if (route.request().method() === "POST") {
         creates++;
+        await pendingCreate;
         return route.fulfill({
           status: 201,
           json: { id: "new", title: "New page", url: "/p/new/" },
@@ -81,7 +86,16 @@ for (const width of [1280, 390]) {
       });
     });
     await page.goto("/pages");
-    await page.getByRole("button", { name: "Create Page" }).click();
+    await page.evaluate(() => document.fonts.ready);
+    const create = page.getByRole("button", { name: "Create Page", exact: true });
+    const createWidth = (await create.boundingBox())!.width;
+    await create.click();
+    await expect(create).toBeDisabled();
+    await expect(create).toHaveAttribute("aria-busy", "true");
+    await expect(create.locator(".voice-spinner")).toBeVisible();
+    expect((await create.boundingBox())!.width).toBe(createWidth);
+    expect(creates).toBe(1);
+    releaseCreate();
     await expect(page.getByRole("heading", { name: "New page" })).toBeVisible();
     await expect(page.getByRole("textbox", { name: "Message", exact: true })).toBeVisible();
     expect(creates).toBe(1);

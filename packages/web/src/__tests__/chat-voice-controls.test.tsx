@@ -30,6 +30,16 @@ function controls(overrides: Partial<UseVoiceInput> = {}): UseVoiceInput {
 }
 beforeEach(() => vi.mocked(useVoiceInput).mockReset());
 describe("shared insert-only chat voice controls", () => {
+  it("announces microphone startup with a spinner and disables recording until ready", () => {
+    vi.mocked(useVoiceInput).mockReturnValue(controls({ voiceBusy: "starting" }));
+    render(<ChatVoiceControls contextKey="page-chat:one" onTranscribed={vi.fn()} />);
+    const status = screen.getByRole("status", { name: "Starting microphone" });
+    expect(status.querySelector(".voice-spinner")).toBeInTheDocument();
+    expect(status).toHaveTextContent("");
+    expect(screen.getByRole("button", { name: "Start voice recording" })).toBeDisabled();
+    expect(screen.queryByText("Starting…")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
   it("starts the existing recorder from host controls and inserts directly", () => {
     const voice = controls();
     vi.mocked(useVoiceInput).mockReturnValue(voice);

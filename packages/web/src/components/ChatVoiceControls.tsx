@@ -1,7 +1,7 @@
 "use client";
 
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceControls } from "@/components/VoiceInput";
+import { VoiceControls, VoiceStatusHint } from "@/components/VoiceInput";
 
 export function ChatVoiceControls({
   contextKey,
@@ -31,7 +31,7 @@ export function ChatVoiceControls({
       {!voice.canUseVoice ? (
         <span className="text-[var(--color-text-tertiary)]">Voice unavailable</span>
       ) : null}
-      {voice.voiceBusy === "starting" ? <span role="status">Starting…</span> : null}
+      {voice.voiceBusy === "starting" ? <VoiceStatusHint voice={voice} /> : null}
       {voice.voiceError ? (
         <span role="alert" className="text-[var(--color-status-error)]">
           {voice.voiceError}
