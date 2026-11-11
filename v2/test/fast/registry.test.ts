@@ -758,6 +758,41 @@ describe("registry.ConfigRegistryScanner", () => {
     expect(result.config.projects["created"]).toBeDefined();
   });
 
+  it("invalidatePath forces a re-read when the file stamp is unchanged", async () => {
+    const rootDir = await createTempDir("spur-scanner-invalidate-");
+    tempDirs.push(rootDir);
+    const fixture = await setupScannerFixture(rootDir);
+    const scanner = new ConfigRegistryScanner({
+      stat: (path) => ({
+        mtimeMs: 1,
+        size: statSync(path).isFile() ? 1 : 0,
+        isFile: statSync(path).isFile(),
+      }),
+      realpath: (path) => realpathSync(path),
+    });
+    const options = {
+      bootstrapConfigPath: fixture.basePath,
+      configPaths: [fixture.basePath],
+      protectedPaths: [fixture.basePath],
+    };
+    expect(scanner.scan(options).config.projects["rewritten"]).toBeUndefined();
+    await writeFile(
+      fixture.basePath,
+      configYaml({
+        port: 4310,
+        dataDir: fixture.dataDir,
+        worktreeDir: fixture.worktreeDir,
+        projectId: "rewritten",
+        projectPath: join(rootDir, "repo-rewritten"),
+        sessionPrefix: "rewritten",
+      }),
+      "utf8",
+    );
+    expect(scanner.scan(options).config.projects["rewritten"]).toBeUndefined();
+    scanner.invalidatePath(fixture.basePath);
+    expect(scanner.scan(options).config.projects["rewritten"]).toBeDefined();
+  });
+
   it("reconsiders an unchanged duplicate when the earlier owner is removed or reordered", async () => {
     const rootDir = await createTempDir("spur-scanner-duplicate-order-");
     tempDirs.push(rootDir);

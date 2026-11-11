@@ -21,10 +21,10 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "f59b352c82dd047bff618e199153d95760ea8e81cc6e0429ba34a376c806c4dd",
-  "types.ts": "08e32db98b6ae1b00fe1ba41171cb23ea46693cca9036242b45d0c5ee59b1ded",
-  "cron-job-editor.ts": "33fc7b2993819693ef511d9312f9eb8f4260feb2f263421aec2d4e5ac613ec06",
-  "session-service.ts": "9348b42d1977588b5df37c1f0aa79688b8f4edbf9de86c512b9c1cfb999f056d",
+  "server.ts": "1d48ff4874a00aec5a32c894669366d7296e065c792e2f0ea9835ff90f345f35",
+  "types.ts": "e2059c38b1c14d037d0968106974a2e0ea7cea8ef5bc0363f29554ea5b01c65e",
+  "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
+  "session-service.ts": "1f11876aea299427235c3f2529b5e0d5937f56393477ff2a5b550f49a12ee6e4",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "1d06c2d904fa46b95ef8bed971c5767fad76663482f22822f9a541b345f161ff",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -201,7 +201,7 @@ describe("daemon MCP operation contracts", () => {
     }
   });
 
-  it("describes the scoped Cron disk draft and nullable save-only contract", async () => {
+  it("describes the scoped Cron disk draft and save-and-reload contract", async () => {
     for (const operationId of ["get_cron_job_draft", "save_cron_job_draft"]) {
       const operation = getDaemonOperation(operationId);
       expect(operation?.path).toBe("/projects/cron/edit");
@@ -227,8 +227,9 @@ describe("daemon MCP operation contracts", () => {
       expect(definitions).toMatch(new RegExp(`${key}: [^;]+\\|null;`));
     }
     expect(save?.responses.find(({ status }) => status === 200)?.description).toContain(
-      'activation:"pending"',
+      'activation:"applied"|"failed"',
     );
+    expect(save?.sources).toContain("v2/src/server.ts");
   });
 
   it("states allowedTriggers omit and empty-array semantics in the spawn contracts", () => {
@@ -347,7 +348,7 @@ describe("catalog examples at the real daemon router", () => {
     return { server, request, configPath };
   }
 
-  it("executes scoped Cron draft/save catalog requests without changing loaded settings or sessions", async () => {
+  it("executes scoped Cron draft/save catalog requests and applies loaded settings without changing sessions", async () => {
     const { server, request, configPath } = await fixture(true);
     const query = { project: "test", source: "nightly", trigger: "audit" };
     try {
@@ -367,7 +368,7 @@ describe("catalog examples at the real daemon router", () => {
       expect(save.status).toBe(200);
       expect(await save.json()).toMatchObject({
         saved: true,
-        activation: "pending",
+        activation: "applied",
         blocks: body.blocks,
       });
       const reopened = (await (
@@ -387,7 +388,10 @@ describe("catalog examples at the real daemon router", () => {
           )
         ).status,
       ).toBe(422);
-      expect(server.config.projects["test"]).toEqual(loadedBefore);
+      expect(server.config.projects["test"]).not.toEqual(loadedBefore);
+      expect(server.config.projects["test"]?.sources["nightly"]).toMatchObject({
+        schedule: "0 1 1 1 *",
+      });
       expect(await (await request("list_sessions")).json()).toEqual(sessionsBefore);
     } finally {
       await server.stop();

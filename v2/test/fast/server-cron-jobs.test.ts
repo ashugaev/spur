@@ -1,15 +1,21 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { SessionService } from "../../src/session-service.js";
 import { startServer } from "../../src/server.js";
+import type { SessionView } from "../../src/types.js";
 import type { CronJobEditDraft, CronJobsResponse } from "../../src/types.js";
 import { cleanupTrackedTempDirs, createTempDir, findFreePort } from "../helpers/common.js";
 
-afterEach(cleanupTrackedTempDirs);
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await cleanupTrackedTempDirs();
+});
 
-async function bootServer(): Promise<{
+async function bootServer(options: { runOnStart?: boolean; prompt?: string } = {}): Promise<{
   port: number;
   configPath: string;
+  dataDir: string;
   stop: () => Promise<void>;
 }> {
   const root = await createTempDir("spur-cron-jobs-server-");
@@ -32,7 +38,7 @@ async function bootServer(): Promise<{
       "  demo:",
       `    path: ${repoDir}`,
       "    sources:",
-      "      nightly: {type: cron, schedule: '0 3 * * *', runOnStart: false}",
+      `      nightly: {type: cron, schedule: '0 3 * * *', runOnStart: ${options.runOnStart === true}}`,
       "      hook:",
       "        type: webhook",
       "        host: 127.0.0.1",
@@ -44,7 +50,7 @@ async function bootServer(): Promise<{
       "        source: nightly",
       "        event: cron:tick",
       "        spawn:",
-      "          prompt: audit sessions",
+      `          prompt: ${options.prompt ?? "audit sessions"}`,
       "          overrides: {worktree: true}",
       "  plain:",
       `    path: ${repoDir}`,
@@ -79,7 +85,7 @@ async function bootServer(): Promise<{
     "utf8",
   );
   const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
-  return { port, configPath, stop: () => server.stop() };
+  return { port, configPath, dataDir, stop: () => server.stop() };
 }
 
 describe("GET /projects/cron", () => {
@@ -197,7 +203,7 @@ describe("GET /projects/cron", () => {
 });
 
 describe("GET/PATCH /projects/cron/edit", () => {
-  it("saves only YAML, keeps runtime values, rejects stale revisions and validates narrow payloads", async () => {
+  it("saves YAML, applies runtime values, rejects stale revisions and validates narrow payloads", async () => {
     const { port, configPath, stop } = await bootServer();
     const url = `http://127.0.0.1:${port}/projects/cron/edit?project=demo&source=nightly&trigger=audit`;
     const patch = (body: unknown) =>
@@ -219,15 +225,15 @@ describe("GET/PATCH /projects/cron/edit", () => {
       };
       const saved = await patch(body);
       expect(saved.status).toBe(200);
-      expect(await saved.json()).toMatchObject({ saved: true, activation: "pending" });
+      expect(await saved.json()).toMatchObject({ saved: true, activation: "applied" });
       expect(await readFile(configPath, "utf8")).toContain("new disk prompt");
       const running = (await (
         await fetch(`http://127.0.0.1:${port}/projects/cron`)
       ).json()) as CronJobsResponse;
-      expect(running.projects[0]!.owner).toMatchObject({ state: "loaded", changed: true });
+      expect(running.projects[0]!.owner).toMatchObject({ state: "loaded", changed: false });
       expect(running.projects[0]!.sources[0]).toMatchObject({
-        schedule: "0 3 * * *",
-        triggers: [{ action: { blocks: [{ prompt: "audit sessions" }] } }],
+        schedule: "0 4 * * *",
+        triggers: [{ action: { blocks: [{ prompt: "new disk prompt" }] } }],
       });
       expect((await patch(body)).status).toBe(409);
       const latest = (await (await fetch(url)).json()) as CronJobEditDraft;
@@ -247,6 +253,98 @@ describe("GET/PATCH /projects/cron/edit", () => {
         400,
       );
       expect((await fetch(url.replace("trigger=audit", "trigger=removed"))).status).toBe(404);
+    } finally {
+      await stop();
+    }
+  });
+
+  const spawnSpy = () =>
+    vi
+      .spyOn(SessionService.prototype, "spawn")
+      .mockImplementation(
+        async () => ({ id: "demo-1", status: "running" }) as unknown as SessionView,
+      );
+  const spawnedPrompts = (spy: ReturnType<typeof spawnSpy>): unknown[] =>
+    spy.mock.calls.map(([request]) => request.prompt);
+  const editUrl = (port: number) =>
+    `http://127.0.0.1:${port}/projects/cron/edit?project=demo&source=nightly&trigger=audit`;
+  const edit = async (port: number, prompt: string): Promise<Response> => {
+    const draft = (await (await fetch(editUrl(port))).json()) as CronJobEditDraft;
+    return fetch(editUrl(port), {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        revision: draft.revision,
+        schedule: draft.schedule,
+        blocks: [{ ...draft.blocks[0], prompt }],
+      }),
+    });
+  };
+
+  it("fires the next tick with the same-size edited prompt and survives restart", async () => {
+    const spy = spawnSpy();
+    const { port, configPath, stop } = await bootServer({ runOnStart: true, prompt: "/mail" });
+    try {
+      await vi.waitFor(() => expect(spawnedPrompts(spy)).toEqual(["/mail"]));
+      const saved = await edit(port, "$mail");
+      expect(saved.status).toBe(200);
+      expect(await saved.json()).toMatchObject({ activation: "applied" });
+      await vi.waitFor(() => expect(spawnedPrompts(spy)).toEqual(["/mail", "$mail"]));
+      // Same values again: no-op reload, no source restart, no extra tick.
+      const noop = await edit(port, "$mail");
+      expect(await noop.json()).toMatchObject({ activation: "applied" });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(spawnedPrompts(spy)).toEqual(["/mail", "$mail"]);
+    } finally {
+      await stop();
+    }
+    spy.mockClear();
+    const restarted = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+    try {
+      await vi.waitFor(() => expect(spawnedPrompts(spy)).toEqual(["$mail"]));
+    } finally {
+      await restarted.stop();
+    }
+  });
+
+  it("re-fires one runOnStart tick per save and uses each edit", async () => {
+    const spy = spawnSpy();
+    const { port, stop } = await bootServer({ runOnStart: true, prompt: "first" });
+    try {
+      await vi.waitFor(() => expect(spawnedPrompts(spy)).toEqual(["first"]));
+      expect((await edit(port, "second")).status).toBe(200);
+      await vi.waitFor(() => expect(spawnedPrompts(spy)).toEqual(["first", "second"]));
+      expect((await edit(port, "third")).status).toBe(200);
+      await vi.waitFor(() => expect(spawnedPrompts(spy)).toEqual(["first", "second", "third"]));
+    } finally {
+      await stop();
+    }
+  });
+
+  it("resolves the owner against the registry current after a queued connect", async () => {
+    const { port, configPath, stop } = await bootServer();
+    const root = await createTempDir("spur-cron-connect-race-");
+    const otherPath = join(root, "spur.yaml");
+    await writeFile(otherPath, "projects: {}\n", "utf8");
+    try {
+      const connect = fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: otherPath }),
+      });
+      const saved = await edit(port, "after connect");
+      expect(saved.status).toBe(200);
+      expect((await connect).status).toBe(200);
+      expect(await readFile(configPath, "utf8")).toContain("after connect");
+      const running = (await (
+        await fetch(`http://127.0.0.1:${port}/projects/cron`)
+      ).json()) as CronJobsResponse;
+      expect(running.projects[0]!.sources[0]).toMatchObject({
+        triggers: [{ action: { blocks: [{ prompt: "after connect" }] } }],
+      });
     } finally {
       await stop();
     }
