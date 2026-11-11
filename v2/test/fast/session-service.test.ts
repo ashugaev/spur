@@ -25544,14 +25544,17 @@ describe("SessionService", () => {
       durableConfig();
       setRecoveryMemory(7_000_000_000);
       const sessions = createSessionStore(sessionRecord({ id: "watched-1", status: "completed" }));
-      testAccounts = [
-        {
-          id: "selected",
-          configDir: "/abs/selected",
-          createdAt: "2026-03-18T09:00:00.000Z",
-          authenticated: true,
+      authAccountsReadMock.mockReturnValue({
+        schema: 1,
+        accounts: [{ id: "selected", provider: "claude", createdAt: "2026-03-18T09:00:00.000Z" }],
+        pools: {
+          claude: { defaultAccountId: "selected", defaultGeneration: 0, autoRotate: false },
         },
-      ];
+      });
+      authProxyGetStateMock.mockResolvedValue({
+        accounts: [{ id: "selected", provider: "claude", status: "ready" }],
+        sessions: [],
+      });
       const { SessionService } = await loadSessionServiceModule();
       const first = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const accepted = await first.spawnInBackground({
@@ -25570,12 +25573,21 @@ describe("SessionService", () => {
       expect(persisted).toMatchObject({
         spawnReceipt: { version: 1 },
         spawnIntent: { version: 1, phase: "queued" },
-        claudeAccountId: "selected",
+        auth: {
+          sessionId: accepted.id,
+          provider: "claude",
+          mode: "pinned",
+          accountId: "selected",
+          effectiveAccountId: "selected",
+          generation: 1,
+        },
         model: "sonnet",
         reasoningEffort: "high",
         queuedMessages: { messages: ["follow up"] },
       });
-      expect(JSON.stringify(persisted?.spawnIntent)).not.toContain("/abs/selected");
+      expect(persisted).not.toHaveProperty("claudeAccountId");
+      expect(JSON.stringify(persisted)).not.toContain("fixture-routing-key");
+      expect(JSON.stringify(persisted)).not.toContain("http://127.0.0.1:9999");
       expect(JSON.stringify(persisted?.spawnIntent)).not.toContain(
         Buffer.from("durable evidence").toString("base64"),
       );
@@ -25605,6 +25617,7 @@ describe("SessionService", () => {
       await first.settleBackgroundSpawns();
       expect(sessions.get(accepted.id)).toMatchObject({
         status: "spawning",
+        auth: persisted?.auth,
         spawnIntent: persisted?.spawnIntent,
         queuedMessages: { messages: ["follow up"] },
         startupAttachmentIds: [attachmentId],
@@ -25623,6 +25636,7 @@ describe("SessionService", () => {
       expect(sessions.get(accepted.id)?.error).toBeUndefined();
       await vi.waitFor(() => expect(sessions.get(accepted.id)?.status).toBe("running"));
       expect(sessions.get(accepted.id)?.spawnIntent).toBeUndefined();
+      expect(sessions.get(accepted.id)?.auth).toEqual(persisted?.auth);
       expect(sessions.get(accepted.id)?.spawnReceipt).toEqual(persisted?.spawnReceipt);
       expect(sessions.get(accepted.id)?.stateSubscriptions).toEqual([
         expect.objectContaining({ targetSessionId: "watched-1", message: "ping" }),
@@ -25630,11 +25644,23 @@ describe("SessionService", () => {
       expect(buildAgentLaunchPlanMock.mock.calls.at(-1)?.[2]).toMatchObject({
         model: "sonnet",
         reasoningEffort: "high",
+        claudeConfigDir: `/tmp/spur-tools/${accepted.id}/managed-claude-home`,
       });
-      expect(seedSessionHomeMock).toHaveBeenCalledWith(
-        `${TEST_DATA_DIR}/session-tools/${accepted.id}/claude-home`,
-        testAccounts[0],
+      expect(authProxyRegisterSessionMock).toHaveBeenCalledTimes(2);
+      expect(
+        authProxyRegisterSessionMock.mock.calls.every(
+          ([input]) =>
+            input.sessionId === accepted.id &&
+            input.provider === "claude" &&
+            input.accountId === "selected",
+        ),
+      ).toBe(true);
+      expect(createTmuxSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({ ANTHROPIC_AUTH_TOKEN: "fixture-routing-key" }),
+        }),
       );
+      expect(seedSessionHomeMock).not.toHaveBeenCalled();
       await vi.waitFor(() =>
         expect(
           sendMessageToTmuxMock.mock.calls.filter(([, text]) => text === "follow up"),
@@ -67595,7 +67621,6 @@ describe("SessionService", () => {
       stateHistory: Map<string, SessionStateTransition[]>;
       prCheckTrackers: Map<string, unknown>;
       usageMenuConfirmedAt: Map<string, number>;
-      claudeRotationEpisode: Map<string, unknown>;
       wakeSuppressionNotified: Set<string>;
       attentionStates: Map<string, string>;
       lastSuccessfulTodoNudgeAt: Map<string, number>;
@@ -67748,7 +67773,6 @@ describe("SessionService", () => {
           found: false,
         });
         internals.usageMenuConfirmedAt.set(id, Date.now());
-        internals.claudeRotationEpisode.set(id, { episode: "e1", count: 1 });
         internals.wakeSuppressionNotified.add(id);
         internals.lastSuccessfulTodoNudgeAt.set(id, Date.now());
         internals.todoNudgeDisabled.set(id, { kind: "ledger_corrupt", reason: "seed" });
@@ -67782,7 +67806,6 @@ describe("SessionService", () => {
         ["cursorJsonlReaders", internals.cursorJsonlReaders],
         ["prCheckTrackers", internals.prCheckTrackers],
         ["usageMenuConfirmedAt", internals.usageMenuConfirmedAt],
-        ["claudeRotationEpisode", internals.claudeRotationEpisode],
         ["lastSuccessfulTodoNudgeAt", internals.lastSuccessfulTodoNudgeAt],
         ["todoNudgeDisabled", internals.todoNudgeDisabled],
         ["todoNudgeBackoff", internals.todoNudgeBackoff],
@@ -67811,7 +67834,6 @@ describe("SessionService", () => {
         ["cursorJsonlReaders", internals.cursorJsonlReaders],
         ["prCheckTrackers", internals.prCheckTrackers],
         ["usageMenuConfirmedAt", internals.usageMenuConfirmedAt],
-        ["claudeRotationEpisode", internals.claudeRotationEpisode],
         ["lastSuccessfulTodoNudgeAt", internals.lastSuccessfulTodoNudgeAt],
         ["todoNudgeDisabled", internals.todoNudgeDisabled],
         ["todoNudgeBackoff", internals.todoNudgeBackoff],
