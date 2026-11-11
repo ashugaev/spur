@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionService } from "../../src/session-service.js";
@@ -324,27 +325,68 @@ describe("GET/PATCH /projects/cron/edit", () => {
     }
   });
 
-  it("resolves the owner against the registry current after a queued connect", async () => {
-    const { port, configPath, stop } = await bootServer();
-    const root = await createTempDir("spur-cron-connect-race-");
+  it("resolves the owner after a disconnect lands mid-request and leaves the file untouched", async () => {
+    const { port, stop } = await bootServer();
+    const root = await createTempDir("spur-cron-disconnect-race-");
+    const repoDir = join(root, "repo");
+    await mkdir(repoDir, { recursive: true });
     const otherPath = join(root, "spur.yaml");
-    await writeFile(otherPath, "projects: {}\n", "utf8");
-    try {
-      const connect = fetch(`http://127.0.0.1:${port}/projects/connect`, {
+    await writeFile(
+      otherPath,
+      [
+        "projects:",
+        "  other:",
+        `    path: ${repoDir}`,
+        "    sources:",
+        "      nightly: {type: cron, schedule: '0 3 * * *', runOnStart: false}",
+        "    triggers:",
+        "      audit:",
+        "        source: nightly",
+        "        event: cron:tick",
+        "        spawn:",
+        "          prompt: other prompt",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const post = (path: string) =>
+      fetch(`http://127.0.0.1:${port}${path}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ configPath: otherPath }),
       });
-      const saved = await edit(port, "after connect");
-      expect(saved.status).toBe(200);
-      expect((await connect).status).toBe(200);
-      expect(await readFile(configPath, "utf8")).toContain("after connect");
-      const running = (await (
-        await fetch(`http://127.0.0.1:${port}/projects/cron`)
-      ).json()) as CronJobsResponse;
-      expect(running.projects[0]!.sources[0]).toMatchObject({
-        triggers: [{ action: { blocks: [{ prompt: "after connect" }] } }],
+    try {
+      expect((await post("/projects/connect")).status).toBe(200);
+      const url = `http://127.0.0.1:${port}/projects/cron/edit?project=other&source=nightly&trigger=audit`;
+      const draft = (await (await fetch(url)).json()) as CronJobEditDraft;
+      const before = await readFile(otherPath, "utf8");
+      // Headers first, body after the disconnect: the request passes the ready check
+      // against the connected registry but must resolve its owner after the disconnect.
+      const patched = new Promise<number | undefined>((resolve, reject) => {
+        const request = httpRequest(
+          url,
+          { method: "PATCH", headers: { "content-type": "application/json" } },
+          (response) => {
+            response.resume();
+            resolve(response.statusCode);
+          },
+        );
+        request.on("error", reject);
+        request.flushHeaders();
+        void (async () => {
+          await new Promise((wait) => setTimeout(wait, 100));
+          expect((await post("/projects/disconnect")).status).toBe(200);
+          request.end(
+            JSON.stringify({
+              revision: draft.revision,
+              schedule: draft.schedule,
+              blocks: [{ ...draft.blocks[0], prompt: "too late" }],
+            }),
+          );
+        })().catch(reject);
       });
+      expect(await patched).toBe(404);
+      expect(await readFile(otherPath, "utf8")).toBe(before);
     } finally {
       await stop();
     }

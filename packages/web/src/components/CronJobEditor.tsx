@@ -33,10 +33,19 @@ type EditorState =
       activation: CronJobEditResult["activation"] | null;
     };
 
-const ACTIVATION_FEEDBACK: Record<CronJobEditResult["activation"], string> = {
-  applied: "Saved and applied.",
-  failed: "Saved to YAML. Not applied: reload failed. Restart the daemon to apply.",
-};
+const ACTIVATION_FEEDBACK: Record<CronJobEditResult["activation"], { text: string; tone: string }> =
+  {
+    applied: {
+      text: "Saved and applied.",
+      tone: "border-[var(--color-status-ready)] text-[var(--color-status-ready)]",
+    },
+    failed: {
+      text: "Saved to YAML. Not applied: reload failed. Restart the daemon to apply.",
+      tone: "border-[var(--color-status-error)] text-[var(--color-status-error)]",
+    },
+  };
+const ERROR_TONE = "border-[var(--color-status-error)] text-[var(--color-status-error)]";
+const CONFLICT_TONE = "border-[var(--color-status-attention)] text-[var(--color-status-attention)]";
 
 const BUTTON_CLASS =
   "border border-[var(--color-border-default)] px-2 py-1.5 font-bold uppercase text-[var(--color-text-primary)] outline-none transition hover:border-[var(--color-accent)] focus-visible:border-[var(--color-accent)] disabled:opacity-50";
@@ -68,7 +77,7 @@ export function CronJobEditor({
     JSON.stringify(state.values) !== JSON.stringify(editableValues(state.original));
   const feedback =
     state.status === "ready"
-      ? (state.error ?? (state.activation ? ACTIVATION_FEEDBACK[state.activation] : null))
+      ? (state.error ?? (state.activation ? ACTIVATION_FEEDBACK[state.activation].text : null))
       : null;
 
   useEffect(() => {
@@ -243,9 +252,9 @@ export function CronJobEditor({
           </p>
           {feedback ? (
             <div
-              className={`flex flex-col gap-2 border p-2 ${state.conflict || state.activation ? "border-[var(--color-status-attention)] text-[var(--color-status-attention)]" : "border-[var(--color-status-error)] text-[var(--color-status-error)]"}`}
+              className={`flex flex-col gap-2 border p-2 ${state.conflict ? CONFLICT_TONE : state.error || !state.activation ? ERROR_TONE : ACTIVATION_FEEDBACK[state.activation].tone}`}
               ref={feedbackRef}
-              role={state.error ? "alert" : "status"}
+              role={state.error || state.activation === "failed" ? "alert" : "status"}
               tabIndex={-1}
             >
               <span>{feedback}</span>

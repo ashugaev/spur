@@ -439,6 +439,8 @@ describe("CronJob editor", () => {
       ),
     ).toBeVisible();
     expect(screen.getByLabelText("Block 1 prompt")).toHaveValue("Kept prompt");
+    expect(screen.getByRole("alert")).toHaveTextContent("Not applied: reload failed");
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveFocus());
   });
 
   it("states that saving applies from the next scheduled run", async () => {
