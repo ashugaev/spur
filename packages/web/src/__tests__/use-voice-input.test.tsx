@@ -438,6 +438,37 @@ describe("useVoiceInput", () => {
     await waitFor(() => expect(onTranscribed).toHaveBeenCalledExactlyOnceWith("new draft"));
   });
 
+  it("drops a delayed local send callback when switching chat context", async () => {
+    const stopped: Array<() => void> = [];
+    class DelayedStopRecorder extends MockMediaRecorder {
+      override stop() {
+        this.state = "inactive";
+        stopped.push(() => {
+          this.emit("dataavailable", new Blob(["voice-audio"], { type: this.mimeType }));
+          this.emit("stop");
+        });
+      }
+    }
+    vi.stubGlobal("MediaRecorder", DelayedStopRecorder as unknown as typeof MediaRecorder);
+    buildFetch([{ text: "new draft" }]);
+    const oldSend = vi.fn();
+    const onTranscribed = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ id }) => useVoiceInput({ contextKey: `page-chat:${id}`, onTranscribed }),
+      { initialProps: { id: "one" } },
+    );
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+    await act(async () => result.current.toggleRecording());
+    act(() => result.current.stopAndSend(oldSend));
+    rerender({ id: "two" });
+    await act(async () => result.current.toggleRecording());
+    act(() => stopped[0]?.());
+    act(() => result.current.toggleRecording());
+    await act(async () => stopped[1]?.());
+    await waitFor(() => expect(onTranscribed).toHaveBeenCalledExactlyOnceWith("new draft"));
+    expect(oldSend).not.toHaveBeenCalled();
+  });
+
   it("stopAndSend invokes callback with transcript and skips modal", async () => {
     buildFetch([{ text: "hello world" }]);
     const send = vi.fn();
