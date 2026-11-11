@@ -332,11 +332,10 @@ describe("page transport", () => {
 
     const input = r.doc.querySelector(".spur-chat-form textarea") as HTMLTextAreaElement;
     input.value = "suggest films";
-    const form = r.doc.querySelector(".spur-chat-form") as HTMLFormElement;
-    form.dispatchEvent(new r.win.Event("submit", { bubbles: true, cancelable: true }));
+    (r.doc.querySelector(".spur-chat-form button") as HTMLButtonElement).click();
     await flush();
     const send = r.requests.find((request) => request.url === "/p/films/_spur/agent/send");
-    // A synthetic submit is untrusted: no user gesture.
+    // A synthetic click is untrusted: no user gesture.
     expect(send?.body).toEqual({ message: "suggest films", userGesture: false });
     r.advance(2000);
     await flush();
@@ -366,10 +365,10 @@ describe("page transport", () => {
     await flush();
     const input = r.doc.querySelector(".spur-chat-form textarea") as HTMLTextAreaElement;
     const status = r.doc.querySelector(".spur-chat-status") as Element;
-    const form = r.doc.querySelector(".spur-chat-form") as HTMLFormElement;
+    const send = r.doc.querySelector(".spur-chat-form button") as HTMLButtonElement;
     expect(r.doc.querySelector(".spur-chat-log")?.childNodes).toHaveLength(0);
     input.value = "hello";
-    form.dispatchEvent(new r.win.Event("submit", { bubbles: true, cancelable: true }));
+    send.click();
     await flush();
     expect(input.disabled).toBe(true);
     expect(status.textContent).toBe("Sending…");

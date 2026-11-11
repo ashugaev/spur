@@ -54,6 +54,7 @@ class Rig {
   queued: string[] = [];
   messages: Array<{ role: "user" | "assistant"; text: string; timestampMs: number }> = [];
   posts: Post[] = [];
+  chatSends: Array<{ message: string; userGesture: boolean }> = [];
   sendStatus = 200;
   sessionState: "working" | "waiting" = "working";
   // In-memory owner store: `_actions` docs, `_state` docs and the change log.
@@ -214,6 +215,7 @@ function storeResponse(rig: Rig, method: string, url: URL, raw: string) {
     return json(200, { sessionId: SESSION_ID, messages: [], nextFrom: 0 });
   }
   if (method === "POST" && head === "agent" && collection === "send") {
+    rig.chatSends.push(JSON.parse(raw) as { message: string; userGesture: boolean });
     return json(200, { sessionId: SESSION_ID });
   }
   return json(404, { error: "not found" });
@@ -280,7 +282,7 @@ async function open(page: Page, rig: Rig): Promise<void> {
   await page.goto(`/sessions/${SESSION_ID}`);
 }
 
-test("chat microphone is host-owned and permission denial preserves the editable snippet draft", async ({
+test("host-owned chat voice preserves the draft on denial and explicit Send works in the sandbox", async ({
   page,
 }) => {
   const rig = new Rig();
@@ -307,6 +309,10 @@ test("chat microphone is host-owned and permission denial preserves the editable
     page.getByRole("alert").filter({ hasText: "Microphone access is blocked" }),
   ).toBeVisible();
   await expect(draft).toHaveValue("Keep this draft");
+  await expect(iframeLocator(page, "Text variants")).toHaveAttribute("sandbox", "allow-scripts");
+  await frame.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(draft).toHaveValue("");
+  expect(rig.chatSends).toEqual([{ message: "Keep this draft", userGesture: true }]);
 });
 
 function frameOf(page: Page, title: string) {

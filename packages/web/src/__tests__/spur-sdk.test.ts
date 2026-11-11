@@ -26,6 +26,28 @@ const FORM = `
 `;
 
 describe("handshake", () => {
+  it("sends an editable chat draft by button click without native form submission", async () => {
+    const r = await portRig("<spur-chat></spur-chat>");
+    const chat = r.doc.querySelector("spur-chat")!;
+    const input = chat.querySelector("textarea")!;
+    const button = chat.querySelector("button")!;
+    expect(chat.querySelector("form")).toBeNull();
+    expect(button.type).toBe("button");
+    input.value = "dictated draft\nwith edits";
+    button.click();
+    expect(r.ofType("agent").filter((message) => message.op === "send")).toEqual([
+      {
+        type: "agent",
+        op: "send",
+        message: "dictated draft\nwith edits",
+        userGesture: false,
+        callId: expect.any(String),
+      },
+    ]);
+    r.reply("agent", { ok: true, status: 200, body: { sessionId: "sp-ab12" } });
+    await flush();
+    expect(input.value).toBe("");
+  });
   it("registers shared chats and inserts host voice into the selected editable draft without sending", async () => {
     const r = await portRig("<spur-chat></spur-chat>");
     const target = r.ofType("chat-register")[0]?.target;

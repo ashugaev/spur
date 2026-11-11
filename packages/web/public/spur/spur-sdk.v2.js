@@ -1677,14 +1677,14 @@
           const log = el("div", "spur-chat-log");
           log.setAttribute("role", "log");
           log.setAttribute("aria-live", "polite");
-          const form = el("form", "spur-chat-form");
+          const form = el("div", "spur-chat-form");
           const input = document.createElement("textarea");
           input.rows = 3;
           input.maxLength = 20000;
           input.placeholder = this.getAttribute("placeholder") || "Message the agent...";
           input.setAttribute("aria-label", "Message");
           const send = el("button", "spur-btn", "Send");
-          send.type = "submit";
+          send.type = "button";
           form.appendChild(input);
           form.appendChild(send);
           this.appendChild(status);
@@ -1715,8 +1715,7 @@
           input.addEventListener("input", function () {
             input.removeAttribute("aria-invalid");
           });
-          form.addEventListener("submit", (submitEvent) => {
-            submitEvent.preventDefault();
+          send.addEventListener("click", (clickEvent) => {
             const text = input.value.trim();
             if (!text) return;
             if (text.length > 20000) {
@@ -1727,7 +1726,7 @@
             input.disabled = true;
             status.removeAttribute("data-tone");
             status.textContent = "Sending…";
-            sendMessage(text, submitEvent.isTrusted).then(function (result) {
+            sendMessage(text, clickEvent.isTrusted).then(function (result) {
               send.disabled = false;
               input.disabled = false;
               input.focus();
