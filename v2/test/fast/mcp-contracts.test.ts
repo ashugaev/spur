@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -14,6 +15,7 @@ import {
 } from "../helpers/daemon-contract-coverage.js";
 import { createTempDir, findFreePort } from "../helpers/common.js";
 import { writeSession } from "../../src/metadata.js";
+import { PageSourceSync } from "../../src/page-source.js";
 import { startServer } from "../../src/server.js";
 import type { CronJobEditDraft } from "../../src/types.js";
 
@@ -36,7 +38,28 @@ const reviewedFingerprints = {
   "review-interface-consent.ts": "03fc56319c45e14e4685e169387ee96677487abf12aaea0ad8a313090cda7d3d",
 };
 
-afterEach(() => vi.restoreAllMocks());
+// Holds PageSourceSync.attempt on the bound source's lstat, after it publishes "syncing".
+const sourceGate = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  held: Promise.resolve(),
+  reached: () => {},
+}));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const lstat = (async (...args: Parameters<typeof actual.lstat>) => {
+    if (sourceGate.path !== undefined && String(args[0]) === sourceGate.path) {
+      sourceGate.reached();
+      await sourceGate.held;
+    }
+    return actual.lstat(...args);
+  }) as typeof actual.lstat;
+  return { ...actual, lstat, default: { ...actual, lstat } };
+});
+
+afterEach(() => {
+  sourceGate.path = undefined;
+  vi.restoreAllMocks();
+});
 
 describe("daemon MCP operation contracts", () => {
   it("covers every concrete imperative dispatch branch with no duplicates", async () => {
@@ -405,10 +428,23 @@ describe("catalog examples at the real daemon router", () => {
   }
 
   it("binds and detaches source through catalog requests and rejects malformed bodies without mutation", async () => {
+    // Test owns the page-source cadence: start() is inert, checks fire via sync.reconcile().
+    const start = vi.spyOn(PageSourceSync.prototype, "start").mockImplementation(() => undefined);
     const { server, request } = await fixture();
+    expect(start).toHaveBeenCalledTimes(1);
+    const sync = start.mock.contexts[0] as PageSourceSync;
     const pageId = "mcp-page";
     const params = { pageId };
     const path = join(server.config.dataDir, "missing-site");
+    const pageDir = join(server.config.dataDir, "pages", pageId);
+    const persisted = async () => ({
+      config: createHash("sha256")
+        .update(await readFile(join(pageDir, "page.yaml")))
+        .digest("hex"),
+      entries: (await readdir(pageDir)).sort(),
+    });
+    const malformed = [[], null, {}, { path: 1 }, { path: "relative" }, { path: `${path}\u0000` }];
+    let release = () => {};
     try {
       expect((await request("create_page", { id: pageId })).status).toBe(201);
       const bound = await request("update_page_source", { path }, params);
@@ -419,19 +455,40 @@ describe("catalog examples at the real daemon router", () => {
         source: { path },
         sync: { state: "error" },
       });
-      for (const body of [
-        [],
-        null,
-        {},
-        { path: 1 },
-        { path: "relative" },
-        { path: `${path}\u0000` },
-      ]) {
+      const before = await persisted();
+      for (const body of malformed) {
         expect((await request("update_page_source", body, params)).status).toBe(400);
+        expect(await persisted()).toEqual(before);
         expect(await (await request("list_pages")).json()).toMatchObject({
           pages: [{ id: pageId, source: { path }, sync: { state: "error" } }],
         });
       }
+      // Background check held mid-flight: list_pages reports "syncing"; a 400 neither resets
+      // that status nor persists anything.
+      sourceGate.held = new Promise<void>((resolve) => (release = resolve));
+      const reached = new Promise<void>((resolve) => (sourceGate.reached = resolve));
+      sourceGate.path = path;
+      void sync.reconcile();
+      await reached;
+      expect(await (await request("list_pages")).json()).toMatchObject({
+        pages: [{ id: pageId, source: { path }, sync: { state: "syncing" } }],
+      });
+      for (const body of malformed.slice(0, 4)) {
+        expect((await request("update_page_source", body, params)).status).toBe(400);
+        expect(await persisted()).toEqual(before);
+        expect(await (await request("list_pages")).json()).toMatchObject({
+          pages: [{ id: pageId, source: { path }, sync: { state: "syncing" } }],
+        });
+      }
+      // A relative path may queue behind the held check; either way it is rejected.
+      const relative = request("update_page_source", { path: "relative" }, params);
+      release();
+      expect((await relative).status).toBe(400);
+      sourceGate.path = undefined;
+      expect(await persisted()).toEqual(before);
+      expect(await (await request("list_pages")).json()).toMatchObject({
+        pages: [{ id: pageId, source: { path }, sync: { state: "error" } }],
+      });
       expect((await request("update_page_source", { path }, { pageId: "missing" })).status).toBe(
         404,
       );
@@ -454,6 +511,8 @@ describe("catalog examples at the real daemon router", () => {
         );
       }
     } finally {
+      sourceGate.path = undefined;
+      release();
       await server.stop();
     }
   });
