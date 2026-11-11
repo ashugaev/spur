@@ -12,7 +12,12 @@ import {
   type CronJobEditIdentity,
 } from "@/lib/cron-jobs";
 import { PROVIDER_REASONING_EFFORTS } from "@/lib/reasoning-effort";
-import type { CronJobEditBlock, CronJobEditDraft, CronJobEditUpdate } from "@/lib/types";
+import type {
+  CronJobEditBlock,
+  CronJobEditDraft,
+  CronJobEditResult,
+  CronJobEditUpdate,
+} from "@/lib/types";
 
 type EditorState =
   | { status: "loading" }
@@ -25,8 +30,13 @@ type EditorState =
       errorField?: string;
       conflict: boolean;
       saving: boolean;
-      saved: boolean;
+      activation: CronJobEditResult["activation"] | null;
     };
+
+const ACTIVATION_FEEDBACK: Record<CronJobEditResult["activation"], string> = {
+  applied: "Saved and applied.",
+  failed: "Saved to YAML. Not applied: reload failed. Restart the daemon to apply.",
+};
 
 const BUTTON_CLASS =
   "border border-[var(--color-border-default)] px-2 py-1.5 font-bold uppercase text-[var(--color-text-primary)] outline-none transition hover:border-[var(--color-accent)] focus-visible:border-[var(--color-accent)] disabled:opacity-50";
@@ -58,7 +68,7 @@ export function CronJobEditor({
     JSON.stringify(state.values) !== JSON.stringify(editableValues(state.original));
   const feedback =
     state.status === "ready"
-      ? (state.error ?? (state.saved ? "Saved to YAML. Pending activation." : null))
+      ? (state.error ?? (state.activation ? ACTIVATION_FEEDBACK[state.activation] : null))
       : null;
 
   useEffect(() => {
@@ -74,7 +84,7 @@ export function CronJobEditor({
           error: null,
           conflict: false,
           saving: false,
-          saved: false,
+          activation: null,
         });
       },
       (error: unknown) => {
@@ -117,7 +127,7 @@ export function CronJobEditor({
             values,
             error: current.conflict ? current.error : null,
             errorField: undefined,
-            saved: false,
+            activation: null,
           }
         : current,
     );
@@ -146,7 +156,7 @@ export function CronJobEditor({
         error: null,
         conflict: false,
         saving: false,
-        saved: true,
+        activation: draft.activation,
       });
       onSaved();
     } catch (error) {
@@ -233,7 +243,7 @@ export function CronJobEditor({
           </p>
           {feedback ? (
             <div
-              className={`flex flex-col gap-2 border p-2 ${state.conflict || state.saved ? "border-[var(--color-status-attention)] text-[var(--color-status-attention)]" : "border-[var(--color-status-error)] text-[var(--color-status-error)]"}`}
+              className={`flex flex-col gap-2 border p-2 ${state.conflict || state.activation ? "border-[var(--color-status-attention)] text-[var(--color-status-attention)]" : "border-[var(--color-status-error)] text-[var(--color-status-error)]"}`}
               ref={feedbackRef}
               role={state.error ? "alert" : "status"}
               tabIndex={-1}
@@ -358,8 +368,7 @@ export function CronJobEditor({
             ))}
           </fieldset>
           <p className="text-[var(--color-text-secondary)]">
-            Saves YAML only. Running jobs keep their loaded settings until config is reloaded or the
-            daemon restarts.
+            Saving applies the change from the next scheduled run.
           </p>
           <div className="flex justify-end gap-2">
             <button

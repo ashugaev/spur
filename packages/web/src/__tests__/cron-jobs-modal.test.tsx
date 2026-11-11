@@ -274,7 +274,7 @@ function stubEditor(patch?: (body: CronJobEditUpdate) => Response | Promise<Resp
         const body = (await new Response(init.body).json()) as CronJobEditUpdate;
         return patch
           ? patch(body)
-          : jsonResponse({ ...DRAFT, ...body, saved: true, activation: "pending" });
+          : jsonResponse({ ...DRAFT, ...body, saved: true, activation: "applied" });
       }
       return jsonResponse(DRAFT);
     }
@@ -293,7 +293,7 @@ async function openEditor() {
 describe("CronJob editor", () => {
   it("reads disk values during drift and saves every block with raw/default values intact", async () => {
     const patch = vi.fn((body: CronJobEditUpdate) =>
-      jsonResponse({ ...DRAFT, ...body, saved: true, activation: "pending" }),
+      jsonResponse({ ...DRAFT, ...body, saved: true, activation: "applied" }),
     );
     stubEditor(patch);
     renderModal();
@@ -309,7 +309,7 @@ describe("CronJob editor", () => {
       target: { value: "Changed second block" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save YAML" }));
-    expect(await screen.findByText("Saved to YAML. Pending activation.")).toBeVisible();
+    expect(await screen.findByText("Saved and applied.")).toBeVisible();
     expect(screen.getByRole("button", { name: "Save YAML" })).not.toHaveAttribute("aria-busy");
     await waitFor(() => expect(screen.getByRole("status")).toHaveFocus());
     expect(patch).toHaveBeenCalledWith({
@@ -421,10 +421,33 @@ describe("CronJob editor", () => {
         ...DRAFT,
         blocks: [{ ...DRAFT.blocks[0], prompt: "Saving prompt" }, DRAFT.blocks[1]],
         saved: true,
-        activation: "pending",
+        activation: "applied",
       }),
     );
-    expect(await screen.findByText("Saved to YAML. Pending activation.")).toBeVisible();
+    expect(await screen.findByText("Saved and applied.")).toBeVisible();
+  });
+
+  it("shows the reload failure and keeps draft values when activation failed", async () => {
+    stubEditor((body) => jsonResponse({ ...DRAFT, ...body, saved: true, activation: "failed" }));
+    renderModal();
+    await openEditor();
+    fireEvent.change(screen.getByLabelText("Block 1 prompt"), { target: { value: "Kept prompt" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save YAML" }));
+    expect(
+      await screen.findByText(
+        "Saved to YAML. Not applied: reload failed. Restart the daemon to apply.",
+      ),
+    ).toBeVisible();
+    expect(screen.getByLabelText("Block 1 prompt")).toHaveValue("Kept prompt");
+  });
+
+  it("states that saving applies from the next scheduled run", async () => {
+    stubEditor();
+    renderModal();
+    await openEditor();
+    expect(
+      screen.getByText("Saving applies the change from the next scheduled run."),
+    ).toBeVisible();
   });
 
   it("shows loading, actionable load errors and read-only source rows", async () => {
