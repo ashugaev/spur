@@ -19622,29 +19622,54 @@ describe("SessionService", () => {
       },
     );
 
-    it("keeps explicit Auto instead of reviving the legacy account alias", async () => {
-      seedManagedAccounts("claude");
-      createSessionStore();
-      mockClaudeJsonlState("waiting");
-      authProxyRegisterSessionMock.mockResolvedValue({
-        ...registration("claude"),
-        mode: "auto",
-        accountId: null,
-      });
-      const service = await createDisposedSessionService();
-      await service.spawn({
-        project: "api",
-        prompt: "hello",
-        authAccountId: null,
-        claudeAccountId: "backup",
-      });
-      expect(authProxyRegisterSessionMock).toHaveBeenCalledWith({
-        sessionId: "api-1",
-        provider: "claude",
-        accountId: null,
-      });
-      service.dispose();
-    });
+    it.each(["spawn", "spawnInBackground"] as const)(
+      "%s keeps explicit Auto instead of reviving the legacy account alias",
+      async (method) => {
+        seedManagedAccounts("claude");
+        createSessionStore();
+        mockClaudeJsonlState("waiting");
+        authProxyRegisterSessionMock.mockResolvedValue({
+          ...registration("claude"),
+          mode: "auto",
+          accountId: null,
+        });
+        const service = await createDisposedSessionService();
+        await service[method]({
+          project: "api",
+          prompt: "hello",
+          authAccountId: null,
+          claudeAccountId: "backup",
+        });
+        expect(authProxyRegisterSessionMock).toHaveBeenCalledWith({
+          sessionId: "api-1",
+          provider: "claude",
+          accountId: null,
+        });
+        service.dispose();
+      },
+    );
+
+    it.each(["spawn", "spawnInBackground"] as const)(
+      "%s resolves the legacy alias through managed readiness without native credentials",
+      async (method) => {
+        seedManagedAccounts("claude");
+        const sessions = createSessionStore();
+        mockClaudeJsonlState("waiting");
+        authProxyRegisterSessionMock.mockResolvedValue(registration("claude", "backup"));
+        const service = await createDisposedSessionService();
+        await service[method]({ project: "api", prompt: "hello", claudeAccountId: "backup" });
+        await vi.waitFor(() => expect(createTmuxSessionMock).toHaveBeenCalled());
+        expect(authProxyRegisterSessionMock).toHaveBeenCalledWith({
+          sessionId: "api-1",
+          provider: "claude",
+          accountId: "backup",
+        });
+        expect(sessions.get("api-1")?.auth).toMatchObject({ mode: "pinned", accountId: "backup" });
+        expect(sessions.get("api-1")).not.toHaveProperty("claudeAccountId");
+        expect(seedSessionHomeMock).not.toHaveBeenCalled();
+        service.dispose();
+      },
+    );
 
     it("rejects a wrong-provider profile before native launch", async () => {
       seedManagedAccounts("codex");
@@ -19670,7 +19695,10 @@ describe("SessionService", () => {
       authProxyRegisterSessionMock.mockResolvedValue(registration("claude", "backup"));
       const service = await createDisposedSessionService();
       await service.spawnInBackground({ project: "api", prompt: "hello", authAccountId: "backup" });
-      await vi.waitFor(() => expect(createTmuxSessionMock).toHaveBeenCalled());
+      await vi.waitFor(() => {
+        expect(sessions.get("api-1")?.error).toBeUndefined();
+        expect(createTmuxSessionMock).toHaveBeenCalled();
+      });
       expect(sessions.get("api-1")?.auth).toMatchObject({ mode: "pinned", accountId: "backup" });
       expect(authProxyRegisterSessionMock).toHaveBeenCalledWith({
         sessionId: "api-1",

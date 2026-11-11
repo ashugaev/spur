@@ -387,6 +387,18 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     mockReadFile.mockResolvedValue("");
   });
 
+  it("removes host credential links for managed authorization while retaining hooks", async () => {
+    await ensureCodexHooksConfig("/session/tool", [], { managedAuth: true });
+    expect(rm).toHaveBeenCalledWith("/session/tool/codex-home/auth.json", { force: true });
+    expect(rm).toHaveBeenCalledWith("/session/tool/codex-home/.credentials.json", { force: true });
+    expect(symlink).not.toHaveBeenCalled();
+    expect(mockWriteFile).toHaveBeenCalledWith(
+      "/session/tool/codex-home/hooks.json",
+      expect.stringContaining("UserPromptSubmit"),
+      "utf8",
+    );
+  });
+
   it("creates hooks document with all event groups when hooks.json is empty", async () => {
     mockReadFile.mockImplementation(async (filePath: unknown) => {
       if (typeof filePath === "string" && filePath.endsWith("hooks.json")) {

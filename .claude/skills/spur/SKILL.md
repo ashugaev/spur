@@ -56,6 +56,7 @@ DOCS
   GitHub PR feedback attribution, ownership and custom markers: docs/configuration.md#field-reference
   Native PR alert ownership: docs/configuration.md#pr-alert-ownership.
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
+  Saved provider accounts and launch authorization: docs/claude-accounts.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
   Full-access MCP: Pages source binding, backend controls/logs, cached attached PR status; setup: docs/mcp.md
   Interactive session snippets: docs/snippets.md; SDK and components: docs/spur-sdk.md

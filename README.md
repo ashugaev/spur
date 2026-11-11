@@ -31,7 +31,7 @@ By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/ins
 - [docs/configuration.md](docs/configuration.md) — config layers, fields, sources/triggers, events
 - [docs/dashboard-search.md](docs/dashboard-search.md) — dashboard search fields and desk behavior
 - [docs/web-terminal.md](docs/web-terminal.md) — recent web links in terminal output
-- [docs/claude-accounts.md](docs/claude-accounts.md) — claude account rotation and per-session credential switch
+- [docs/claude-accounts.md](docs/claude-accounts.md) — Claude/Codex authorization profiles and rotation
 - [docs/snippets.md](docs/snippets.md) — interactive session snippets: manifest, actions, sandbox
 - [docs/spur-sdk.md](docs/spur-sdk.md) — `window.spur` for pages and snippets: db, state, agent, components
 - [docs/stores.md](docs/stores.md) — page and session document stores, queries, `spur db`

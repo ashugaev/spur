@@ -21,10 +21,10 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "8b58f26030ee1854f0aa3f776c60003de1b382d947519d69f962116028b0f1f2",
-  "types.ts": "885ac1273e20334b58874b5db117ac32cf76e75c3eeb2ef6376b5fd8f686ace9",
+  "server.ts": "dc5269581a92e3cd95d11076d83e9544960b04597094936cc19e2b4dfe91bea4",
+  "types.ts": "95f62f58e58664ef8f4b1838ed51b85e365798cd67d8e24aeed43307c457b627",
   "cron-job-editor.ts": "33fc7b2993819693ef511d9312f9eb8f4260feb2f263421aec2d4e5ac613ec06",
-  "session-service.ts": "e6e5bc44186a590903e53d2fba2a385d355c2a0393cc8320d7a8ee7d196ddae2",
+  "session-service.ts": "4cb2f01f9fe7b33ad3d53826cc1652f72cded5afa77f5fae19bace3560e8b013",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "1d06c2d904fa46b95ef8bed971c5767fad76663482f22822f9a541b345f161ff",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -45,9 +45,9 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(103);
+    expect(routes).toHaveLength(111);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(103);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(111);
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("spawn_background_session")?.path).toBe("/sessions/background");
     expect(getDaemonOperation("missing")).toBeUndefined();
@@ -332,7 +332,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(103);
+      expect(page.total).toBe(111);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",

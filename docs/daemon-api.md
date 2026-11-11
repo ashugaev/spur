@@ -1,7 +1,6 @@
 # Daemon HTTP API
 
 > Scope: route names only, one method + full path per line, every line `git grep`-able verbatim. Payload/status-code contracts: `v2/src/server.ts`. CLI usage: [commands.md](commands.md). Default `127.0.0.1:4310`.
-
 - `GET /info` — `lifecycleInstanceId`, runtime `buildId`: process/build identity; `v2/src/session-lifecycle.ts`, `v2/src/build-identity.ts`.
 - `GET /headroom`
 - `GET /usage` — quota windows per Claude account and Codex, per-source error entries, token totals today/7d/30d; provider request timeout 5s; MCP `get_usage`; `v2/src/usage-report.ts`.
@@ -18,6 +17,14 @@
 - `POST /claude-accounts/remove`
 - `POST /claude-accounts/:id/finish-login`
 - `GET /claude-accounts/:id/login-status`
+- `GET /auth-accounts` — provider profiles and pool preferences; `v2/src/server.ts`.
+- `POST /auth-accounts` — create Claude/Codex profile; `v2/src/server.ts`.
+- `PATCH /auth-accounts/:id` — rename profile; `v2/src/server.ts`.
+- `DELETE /auth-accounts/:id` — remove unused profile; `v2/src/server.ts`.
+- `POST /auth-accounts/:id/login` — start OAuth; `v2/src/server.ts`.
+- `POST /auth-accounts/:id/login-input` — submit code or cancel; `v2/src/server.ts`.
+- `GET /auth-accounts/:id/login-status` — durable OAuth readiness; `v2/src/server.ts`.
+- `PATCH /auth-pools/:provider` — default account and quota rotation; `v2/src/server.ts`.
 - `GET /projects`
 - `GET /projects/cron?project=<id>` — cron sources, bound triggers, owner-file drift, last tick/action from the live event log; `project` optional; `404` unknown project; `v2/src/cron-jobs.ts`.
 - `GET /projects/cron/edit` — disk draft for a Cron spawn trigger; MCP `get_cron_job_draft`; `v2/src/cron-job-editor.ts`.
@@ -33,9 +40,7 @@
 - `GET /projects/:id/branches/exists?name=<branch>`
 - `POST /projects/:id/preflight-batches`
 - `POST /projects/:id/preflight` — same `409` as `POST /sessions/background` when `preflightBatchId` is already claimed.
-
 ## Session routes
-
 - `GET /sessions` — array body, `sidecars[].url` ready endpoint, `sidecars[].ports[].listening` host TCP listener true|false|null; `v2/src/types.ts`; producing `x-spur-lifecycle-instance-id` header, per-row `lifecycle`; `v2/src/session-lifecycle.ts`; never `503` on lifecycle churn, a still-moving row carries its last build and that build's receipt.
 - `POST /sessions` — `201` accepted spawning identity under [admission pressure](configuration.md#admission-control); optional `allowedTriggers` (omitted = all sends, `[]` = none; carried by respawn/handoff), `reasoningEffort`, `prAlertOwner` (default `false`, [exclusive PR alerts](configuration.md#pr-alert-ownership)); `400 pr_alert_owner_invalid`, `409 pr_alert_owner_conflict` body `{ code, error }`; `v2/src/session-service.ts`, `v2/src/pr-alert-owner.ts`.
 - `POST /sessions/background` — `201` accepted spawning identity before [resource recovery](configuration.md#admission-control); same `allowedTriggers` and `prAlertOwner` contract as `POST /sessions`; `409 spawn_in_progress|spawn_committed|spawn_failed` body `{ code, sessionId, error }` for claimed `preflightBatchId`; `v2/src/session-service.ts`.
@@ -64,7 +69,7 @@
 - `POST /sessions/:id/reopen` — restore request fields and single reopen receipt; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/handoff` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
 - `POST /sessions/:id/respawn` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
-- `POST /sessions/:id/switch-auth` — 404 unless `authRotation.switchAuth: true`
+- `POST /sessions/:id/switch-auth` — next-request managed account or Auto; `v2/src/server.ts`.
 - `GET /sessions/:id/todo`
 - `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo)
 - `GET /sessions/:id/auto-ping-suppressions` — `?all=1` adds `history`. See [auto-ping](commands.md#auto-ping)
@@ -91,11 +96,8 @@
 - `GET /sessions/:id/shared-memory/:scope/:key`
 - `POST /sessions/:id/shared-memory/:scope/:key`
 - `DELETE /sessions/:id/shared-memory/:scope/:key`
-
 ## Store routes
-
 `:store` = `page:<id>` or `session:<sid>`, `:` accepted as `%3A`; [stores.md](stores.md); `v2/src/stores.ts`, `v2/src/store-agent.ts`, `v2/src/store-actions.ts`.
-
 - `GET /stores/:store/docs/:collection`
 - `POST /stores/:store/docs/:collection`
 - `GET /stores/:store/docs/:collection/:docId`
@@ -109,9 +111,7 @@
 - `GET /stores/:store/agent/status`
 - `POST /stores/:store/actions`
 - `POST /stores/:store/actions/:actionId/complete` — CLI and agents only; the web proxy refuses it.
-
 ## Page routes
-
 - `GET /pages` — [pages.md](pages.md); `v2/src/pages.ts`.
 - `POST /pages`
 - `PATCH /pages/:id/source` — MCP `update_page_source`; `v2/src/server.ts`, `v2/src/daemon-contracts.ts`.

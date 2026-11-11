@@ -49,7 +49,7 @@ Read-only host/config/daemon health check; `--scaffold` writes local `spur.yaml`
 
 ## spawn
 
-`spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--model <id>] [--reasoning-effort <level>] [--mode <name>] [--plan] [--restrict-writes] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <text>]] [--json]`
+`spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--auth-account <id>] [--model <id>] [--reasoning-effort <level>] [--mode <name>] [--plan] [--restrict-writes] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <text>]] [--json]`
 
 Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `projects.<id>.tokenBudget`. `--subscribe-state`/`--subscribe-message` require `--subscribe-to`. [Modes](configuration.md#modes); [resource queue](configuration.md#admission-control).
 
@@ -101,6 +101,8 @@ Telegram `/complete`, `/kill`: finish bound forum-topic session, delete owned to
 
 ## service, memory, agent-issue, comment-seen, subscribe
 
+`spur auth accounts [--agent claude|codex] [--json]` — discover saved authorization IDs; `v2/src/cli.ts`.
+`spur auth login <accountId> [--json]` — OAuth sign-in; JSON starts without waiting; `v2/src/cli.ts`.
 `spur service run <id> --port <n> -- <command>` / `status <id>` — session-bound tmux sidecar wrapper. `<id>` must match a `sources.<name>` entry with `type: service` and `service: <id>` ([configuration.md](configuration.md#field-reference)), else `Unknown service`. One-shot commands (tests, lint, type-check) run directly, no service. `spur service logs [sessionId] [name] [--sidecar] [--limit <n>] [--json]` — retained pane and archived rows, default runtime scope and global 200-row limit; route 404/502 errors exit nonzero; `v2/src/cli.ts`. `spur memory set|get|list|rm [key] [body] --scope task|project|global [--session <id>] [--file <path>] [--json]` — one `.md` file per key. `spur session-memory <sessionId> list|get|set|resolve [key] [body] [--json]` — [daemon-api.md#session-routes](daemon-api.md#session-routes).
 `spur agent-issue log <text...>` / `list [--project <id>] [--session <id>] [--limit <n>] [--json]` — friction operating Spur itself, never a repo code defect. `spur comment-seen record <id...>` — marks GitHub review-comment ids seen, needs `SPUR_PROJECT`.
 `spur subscribe <targetSessionId> --state <state>... [--message <text>] [--session <id>] | --list | --remove <subscriptionId>`. States: `working|waiting|needs_input|rate_limited|stale|stopped|error|killed`.
@@ -121,11 +123,9 @@ Slot links: omit exact normalized matches of sidecar name and configured reserve
 Stop/restart reap the sidecar's whole tmux pane process tree, not just the direct child. Only that tree — anything the command detached from it survives, including docker containers and a compose project. A sidecar that starts detached resources owns tearing them down. `spur sidecar sweep` reports unclaimed process trees (pid, rss, age, worktree), each with its descendant tree's pid list and, when reaped, any survivor pids left after the confirmation window; a trailing line totals the would-free RSS across every reported tree. Nothing dies without `--reap`.
 `sidecar sweep` rows carry a `kind`: `worktree-tree` (the original unclaimed-process-tree sweep, reapable when Spur provenance is proven) or `orphan-daemon` (a reparented Spur daemon whose own `cli.js` no longer exists on disk — printed `[report-only]` with its `--config` path, `port`, and `liveness`; never signaled by `--reap`, no matter what). A `serving` row still keeps loading and answering from memory — it prints `[report-only, SERVING on <port>]` and a `daemon stop` pointer instead of the verify-before-killing note. A `liveness: "unknown"` row (the row's own port listener probe itself could not run — neither `lsof` nor `ss` produced a usable result — or its instance config didn't resolve) prints `[report-only, liveness unknown — verify manually before killing]` and never shares the plain not-serving row's "genuinely dead" fix text. A probe that DID run and found zero listeners on the port is `not-serving`, not `unknown` — the probe answered, it just found nobody there.
 `sidecar stop` prints the real outcome, never a claimed stop that did not happen, per `sidecarStop.outcome` — causes and the ambiguous-port exclusion rule are in [daemon-api.md#session-routes](daemon-api.md#session-routes): `reaped` (exit `0`), `partial` — names the survivor pids and points at `spur sidecar sweep` (exit `1`), `nothing-to-stop` (exit `0`). `partial`'s survivors can include a detached daemon still holding the sidecar's reserved port, not just a surviving pane process — `stop` always probes the recorded port even when the pane is already gone. `partial` with zero named survivors means the recorded port could not be confirmed clear by this stop, never reported as `reaped` — the message names the port instead of "0 process(es) survived".
-
 ### Built-in MCP sidecars
 
 `playwright`, off by default: `sidecars: { playwright: { autoStart: true } }`. Rejects every other key, including `dependsOn`.
-
 ### Suppressing a host MCP server
 
 `projects.<id>.mcp.exclude: [name, ...]` drops named MCP servers from claude/codex sessions.

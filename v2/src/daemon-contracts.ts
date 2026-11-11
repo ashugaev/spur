@@ -148,6 +148,7 @@ const spawn = body("SpawnSessionRequest", [
   field("selfDestruct", "{enabled:boolean,conditions?:string}", "Automatic cleanup conditions."),
   field("bootstrap", "boolean", "Bootstrap session workspace."),
   field("claudeAccountId", "string", "Claude account ID used for launch."),
+  field("authAccountId", "string|null", "Saved provider account; omitted/null uses Auto."),
   field(
     "subscriptions",
     '{targetSessionId:string,states:("working"|"waiting"|"needs_input"|"rate_limited"|"stale"|"stopped"|"error"|"killed")[],message?:string}[]',
@@ -474,6 +475,81 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     { response: "RuntimeInfo" },
   ),
   operation("get_headroom", "GET", "/headroom", "Host/session admission capacity."),
+  operation(
+    "list_auth_accounts",
+    "GET",
+    "/auth-accounts",
+    "Saved provider authorization accounts and pools.",
+    {
+      query: [field("agent", '"claude"|"codex"', "Optional provider filter.")],
+    },
+  ),
+  operation(
+    "add_auth_account",
+    "POST",
+    "/auth-accounts",
+    "Create a saved provider authorization account.",
+    {
+      body: body("AddAuthAccountRequest", [
+        field("provider", '"claude"|"codex"', "Provider.", true),
+        field("label", "string", "Display label."),
+      ]),
+      examples: [{ body: { provider: "codex", label: "Work" } }],
+    },
+  ),
+  operation(
+    "rename_auth_account",
+    "PATCH",
+    "/auth-accounts/{accountId}",
+    "Rename an authorization account.",
+    {
+      body: body("RenameAuthAccountRequest", [field("label", "string", "Display label.", true)]),
+      examples: [{ body: { label: "Work" } }],
+    },
+  ),
+  operation(
+    "remove_auth_account",
+    "DELETE",
+    "/auth-accounts/{accountId}",
+    "Remove an unused authorization account.",
+  ),
+  operation(
+    "login_auth_account",
+    "POST",
+    "/auth-accounts/{accountId}/login",
+    "Start provider OAuth sign-in.",
+  ),
+  operation(
+    "get_auth_account_login",
+    "GET",
+    "/auth-accounts/{accountId}/login-status",
+    "Read OAuth readiness and sign-in instructions.",
+  ),
+  operation(
+    "submit_auth_account_login",
+    "POST",
+    "/auth-accounts/{accountId}/login-input",
+    "Submit a sign-in code or cancel login.",
+    {
+      body: body("AuthAccountLoginInput", [
+        field("input", "string", "Authorization code; excludes cancel."),
+        field("cancel", "boolean", "Cancel active login; excludes input."),
+      ]),
+      examples: [{ body: { input: "authorization-code" } }, { body: { cancel: true } }],
+    },
+  ),
+  operation(
+    "update_auth_pool",
+    "PATCH",
+    "/auth-pools/{provider}",
+    "Update provider-wide default and quota rotation.",
+    {
+      body: body("UpdateAuthPoolRequest", [
+        field("defaultAccountId", "string|null", "Ready default account."),
+        field("autoRotate", "boolean", "Rotate Auto sessions on quota."),
+      ]),
+    },
+  ),
   operation(
     "get_usage",
     "GET",
@@ -1256,13 +1332,12 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "switch_session_auth",
     "POST",
     "/sessions/{sessionId}/switch-auth",
-    "Switch Claude account for session. Returns 404 unless authRotation.switchAuth is true.",
+    "Select managed authorization for the next request without restarting the agent.",
     {
       body: body("SwitchAuthRequest", [
-        field("accountId", "string", "Nonblank account ID.", true),
-        field("force", "boolean", "Force account switch.", false, false),
+        field("accountId", "string|null", "Saved account ID or null for Auto.", true),
       ]),
-      examples: [{ body: { accountId: "example-account", force: false } }],
+      examples: [{ body: { accountId: "example-account" } }],
     },
   ),
   operation(

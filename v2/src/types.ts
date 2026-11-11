@@ -1,5 +1,6 @@
 import type { HostMemory } from "./host-memory.js";
 import type { CursorPersistedSubmitBaseline } from "./agents/cursor-submit-ack.js";
+import type { AuthSession } from "./auth-proxy.js";
 
 export type AgentName = "claude" | "codex" | "cursor" | "opencode";
 export const SPUR_DAEMON_API_VERSION = 3;
@@ -1053,7 +1054,7 @@ export interface AppConfig {
     autoRotateOnRateLimit: boolean;
     cooldownMinutes: number;
     maxRotationsPerEpisode: number;
-    // Manual "Switch auth" surface: daemon route plus SessionView.claudeAccounts.
+    // Legacy Claude session-menu visibility; managed selection is always available.
     switchAuth: boolean;
   };
   diskRetention: {
@@ -1222,6 +1223,7 @@ export interface SessionRecord {
   closeoutOwner?: boolean;
   prAlertTransfer?: PrAlertTransfer;
   claudeAccountId?: string;
+  auth?: AuthSession;
   allowedTriggers?: string[];
   agentSessionId?: string;
   /** Cursor transcript position before the latest restore; excludes earlier activity from state. */
@@ -1443,6 +1445,7 @@ export interface SessionView extends Omit<
   deskGroupMembers?: SessionDeskMember[];
   claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
   activeClaudeAccountId?: string;
+  authError?: string;
   queuedMessages?: SessionQueuedMessagesView;
   tokenUsageView?: SessionTokenUsageView;
   preflightTokenUsageView?: PreflightTokenUsageView;
@@ -1586,9 +1589,9 @@ export interface SpawnSessionRequest {
   slots?: { links?: SessionLink[] };
   selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
-  // Claude account whose CLAUDE_CONFIG_DIR the launch binds to. Carried across
-  // respawn so a rotated session relaunches onto its current account instead of
-  // falling back to the (still-rate-limited) default.
+  /** Saved provider account; omitted or null selects the managed Auto pool. */
+  authAccountId?: string | null;
+  /** Compatibility alias for a Claude profile. */
   claudeAccountId?: string;
   subscriptions?: SubscribeSessionStatesRequest[];
 }
