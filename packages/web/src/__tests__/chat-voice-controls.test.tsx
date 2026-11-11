@@ -45,12 +45,14 @@ describe("shared insert-only chat voice controls", () => {
     expect(rail.querySelector('[class*="absolute"]')).toBeNull();
     expect(buttons.every((button) => button.className.includes("h-8"))).toBe(true);
   });
-  it("announces microphone startup with a spinner and disables recording until ready", () => {
+  it("reports microphone startup to the SDK and disables recording until ready", () => {
     vi.mocked(useVoiceInput).mockReturnValue(controls({ voiceBusy: "starting" }));
-    render(<ChatVoiceControls contextKey="page-chat:one" onTranscribed={vi.fn()} />);
-    const status = screen.getByRole("status", { name: "Starting microphone" });
-    expect(status.querySelector(".voice-spinner")).toBeInTheDocument();
-    expect(status).toHaveTextContent("");
+    const onState = vi.fn();
+    render(
+      <ChatVoiceControls contextKey="page-chat:one" onTranscribed={vi.fn()} onState={onState} />,
+    );
+    expect(onState).toHaveBeenCalledWith({ starting: true, unavailable: false, error: null });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Start voice recording" })).toBeDisabled();
     expect(screen.queryByText("Starting…")).not.toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -59,12 +61,10 @@ describe("shared insert-only chat voice controls", () => {
     const voice = controls();
     vi.mocked(useVoiceInput).mockReturnValue(voice);
     const insert = vi.fn();
-    const begin = vi.fn();
     render(
-      <ChatVoiceControls contextKey="page-chat:one" onTranscribed={insert} onTakeStart={begin} />,
+      <ChatVoiceControls contextKey="page-chat:one" onTranscribed={insert} onState={vi.fn()} />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
-    expect(begin).toHaveBeenCalledOnce();
     expect(voice.toggleRecording).toHaveBeenCalledOnce();
     vi.mocked(useVoiceInput).mock.calls[0]?.[0].onTranscribed?.("dictated");
     expect(insert).toHaveBeenCalledWith("dictated");
@@ -74,22 +74,33 @@ describe("shared insert-only chat voice controls", () => {
   it("shows cancellation/error and reuses failed-take recovery", () => {
     const voice = controls({ recording: true, voiceError: "Permission denied" });
     vi.mocked(useVoiceInput).mockReturnValue(voice);
+    const onState = vi.fn();
     const { rerender } = render(
-      <ChatVoiceControls contextKey="snippet-chat:one" onTranscribed={vi.fn()} />,
+      <ChatVoiceControls contextKey="snippet-chat:one" onTranscribed={vi.fn()} onState={onState} />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Cancel voice recording" }));
     expect(voice.cancelRecording).toHaveBeenCalledOnce();
-    expect(screen.getByRole("alert")).toHaveTextContent("Permission denied");
+    expect(onState).toHaveBeenCalledWith({
+      starting: false,
+      unavailable: false,
+      error: "Permission denied",
+    });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     vi.mocked(useVoiceInput).mockReturnValue(controls({ hasRetainedTake: true }));
-    rerender(<ChatVoiceControls contextKey="snippet-chat:one" onTranscribed={vi.fn()} />);
+    rerender(
+      <ChatVoiceControls contextKey="snippet-chat:one" onTranscribed={vi.fn()} onState={onState} />,
+    );
     expect(
       screen.getByRole("button", { name: "Retry failed voice recording" }),
     ).toBeInTheDocument();
   });
   it("reports unavailable voice without a send action", () => {
     vi.mocked(useVoiceInput).mockReturnValue(controls({ canUseVoice: false }));
-    render(<ChatVoiceControls contextKey="page-chat:one" onTranscribed={vi.fn()} />);
-    expect(screen.getByText("Voice unavailable")).toBeInTheDocument();
+    const onState = vi.fn();
+    render(
+      <ChatVoiceControls contextKey="page-chat:one" onTranscribed={vi.fn()} onState={onState} />,
+    );
+    expect(onState).toHaveBeenCalledWith({ starting: false, unavailable: true, error: null });
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 });

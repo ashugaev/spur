@@ -883,7 +883,7 @@ function SnippetVoice({
     voice.canUseVoice,
     voice.voiceError,
   ]);
-  const gesture = useRef<{ target: string; rect: string; sequence: number } | null>(null);
+  const gesture = useRef<{ target: string; rect: string } | null>(null);
   return (
     <div
       className="pointer-events-none absolute inset-0 overflow-hidden"
@@ -933,7 +933,6 @@ function SnippetVoice({
                 ? {
                     target,
                     rect: JSON.stringify(slot.rect),
-                    sequence: currentLayout.current?.sequence ?? -1,
                   }
                 : null;
             }}
