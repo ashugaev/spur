@@ -40,11 +40,6 @@ import {
   type AuthProxyState,
 } from "./auth-proxy.js";
 import { managedAuthLaunch, publicAuthSession } from "./auth-launch.js";
-import {
-  codexArgsSelectProvider,
-  codexUsesCustomProvider,
-  readCodexUserConfig,
-} from "./agents/codex.js";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setImmediate as yieldToEventLoop, setTimeout as sleep } from "node:timers/promises";
 import {
@@ -139,10 +134,13 @@ import {
 import { extractGithubErrorText, isGitHubRateLimitError, runGhPollCycle } from "./gh.js";
 import {
   CODEX_HOME_DIR,
+  codexArgsSelectProvider,
   codexHookHomePath,
+  codexUsesCustomProvider,
   findLatestCodexSessionFile,
   readCodexConversationTail,
   readCodexRolloutState,
+  readCodexUserConfig,
   type CodexConversationReaderState,
   type CodexRolloutReaderState,
   type CodexRolloutStateRecord,
@@ -6990,13 +6988,13 @@ export class SessionService {
       return undefined;
     }
     const state = this.authAccounts.read();
-    if (!state.pools[agent] && accountId == null) return undefined;
+    if (!state.pools[agent] && (accountId === null || accountId === undefined)) return undefined;
     if (
       agent === "codex" &&
       (codexArgsSelectProvider(project.codexArgs ?? []) ||
         codexUsesCustomProvider(await readCodexUserConfig()))
     ) {
-      if (accountId != null) {
+      if (accountId !== null && accountId !== undefined) {
         throw new AuthorizationError(
           "Saved authorization conflicts with the explicit Codex provider",
           400,
@@ -7004,7 +7002,7 @@ export class SessionService {
       }
       return undefined;
     }
-    if (accountId != null) {
+    if (accountId !== null && accountId !== undefined) {
       const account = state.accounts.find((entry) => entry.id === accountId);
       if (!account || account.provider !== agent) {
         throw new AuthorizationError(`Unknown ${agent} authorization account: ${accountId}`, 400);
@@ -23391,7 +23389,7 @@ export class SessionService {
     provider: AuthProvider,
     update: { defaultAccountId?: string | null; autoRotate?: boolean },
   ) {
-    if (update.defaultAccountId != null) {
+    if (update.defaultAccountId !== null && update.defaultAccountId !== undefined) {
       const { accounts } = await this.listAuthorizationAccounts(provider);
       if (
         !accounts.some((account) => account.id === update.defaultAccountId && account.authenticated)

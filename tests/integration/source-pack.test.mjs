@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { URL } from "node:url";
 
 test("source packing has a private Go bootstrap that does not leak into npm installation", async () => {
   const dockerfile = await readFile(new URL("./Dockerfile", import.meta.url), "utf8");
