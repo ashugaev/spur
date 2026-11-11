@@ -303,13 +303,20 @@ test("host-owned chat voice preserves the draft on denial and explicit Send work
   const frame = frameOf(page, "Text variants");
   const draft = frame.getByRole("textbox", { name: "Message", exact: true });
   await draft.fill("Keep this draft");
+  await draft.scrollIntoViewIfNeeded();
   await expect(frame.getByRole("button", { name: "Start voice recording" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Start voice recording", exact: true }).click();
+  const targets = page.locator('[data-snippet-panel="candidate-picker"] [data-voice-target]');
+  await expect(targets).toHaveCount(1);
+  const microphone = targets.getByRole("button", { name: "Start voice recording", exact: true });
+  await expect(microphone).toHaveCount(1);
+  await expect(microphone).toBeVisible();
+  await microphone.click();
   await expect(
     frame.getByRole("alert").filter({ hasText: "Microphone access is blocked" }),
   ).toBeVisible();
   await expect(draft).toHaveValue("Keep this draft");
   await expect(iframeLocator(page, "Text variants")).toHaveAttribute("sandbox", "allow-scripts");
+  expect(rig.chatSends).toEqual([]);
   await frame.getByRole("button", { name: "Send", exact: true }).click();
   await expect(draft).toHaveValue("");
   expect(rig.chatSends).toEqual([{ message: "Keep this draft", userGesture: true }]);
