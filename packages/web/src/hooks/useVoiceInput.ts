@@ -491,6 +491,8 @@ export function useVoiceInput(options: {
     let cancelled = false;
     generationRef.current += 1;
     stopRetainedPlayback();
+    setRecording(false);
+    setVoiceBusy(null);
     setHasRetainedTake(false);
     retainedTakeRef.current = null;
 
@@ -501,7 +503,6 @@ export function useVoiceInput(options: {
     if (activeSession) {
       pendingSendCallbackRef.current = null;
       realtimeFinalizedRef.current = "";
-      setRecording(false);
       void Promise.resolve(activeSession.stop()).catch(() => {
         // Ignore teardown failures; the session is being discarded.
       });
