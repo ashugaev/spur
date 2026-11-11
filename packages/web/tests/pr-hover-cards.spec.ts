@@ -50,7 +50,7 @@ test.describe("PR hover cards", () => {
     await mockPr(page, infoWith(fiveChecks));
     await page.goto("/");
     const badge = page.locator(`a[href='${prUrl}']`).first();
-    await badge.getByLabel("CI failing").hover();
+    await badge.getByRole("group").first().hover();
     const rows = page.locator("[data-pr-card] [data-pr-card-row]");
     await expect(rows).toHaveText(["test", "Spur Approval Gate", "e2e", "lint", "typecheck"]);
     await expect(page.locator("[data-pr-card-more]")).toHaveCount(0);
@@ -63,13 +63,13 @@ test.describe("PR hover cards", () => {
     }));
     await mockPr(page, infoWith(checks));
     await page.goto("/");
-    await page.locator(`a[href='${prUrl}']`).first().getByLabel("CI failing").hover();
+    await page.locator(`a[href='${prUrl}']`).first().getByRole("group").first().hover();
     await expect(page.locator("[data-pr-card] [data-pr-card-row]")).toHaveCount(8);
     await expect(page.locator("[data-pr-card-more]")).toHaveText("+5 more");
   });
 
   for (const [label, locate] of [
-    ["CI", (page: Page) => page.locator(`a[href='${prUrl}']`).first().getByLabel("CI failing")],
+    ["CI", (page: Page) => page.locator(`a[href='${prUrl}']`).first().getByRole("group").first()],
     [
       "reviewer",
       (page: Page) => page.locator(`a[href='${prUrl}']`).first().locator("[data-pr-reviewers]"),
@@ -151,8 +151,13 @@ test.describe("PR hover cards on touch", () => {
     context.on("page", () => {
       opened += 1;
     });
-    await page.locator(`a[href='${prUrl}']`).first().getByLabel("CI failing").tap();
+    await page.locator(`a[href='${prUrl}']`).first().getByRole("group").first().tap();
     await expect(page.locator("[data-pr-card]")).toBeVisible();
+    expect(page.url()).toBe(url);
+    expect(opened).toBe(0);
+    // Tap inside the card neither navigates nor re-pins through the portal.
+    await page.locator("[data-pr-card]").tap();
+    await page.waitForTimeout(300);
     expect(page.url()).toBe(url);
     expect(opened).toBe(0);
     await page.locator("body").tap({ position: { x: 5, y: 400 } });

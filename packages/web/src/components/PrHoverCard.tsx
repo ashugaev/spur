@@ -1,6 +1,13 @@
 "use client";
 
-import { type MouseEvent, type ReactNode } from "react";
+import {
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactNode,
+  useEffect,
+  useId,
+  useRef,
+} from "react";
 import { createPortal } from "react-dom";
 import { isTouchPointer, useFooterPopover } from "@/lib/footer-popover";
 import type { PrCheck, PrCheckState, PrReviewers } from "@/lib/pr-status-shape";
@@ -61,12 +68,15 @@ export function checkCardRows(checks: PrCheck[] | null | undefined): PrCardRow[]
   );
 }
 
-function PrCard({ rows, limit }: { rows: PrCardRow[]; limit: number }) {
+function PrCard({ id, rows, limit }: { id: string; rows: PrCardRow[]; limit: number }) {
   const shown = rows.slice(0, limit);
   const hidden = rows.length - shown.length;
   return (
     <div
+      id={id}
+      role="tooltip"
       data-pr-card
+      onClick={(event) => event.stopPropagation()}
       className="absolute right-0 top-full z-50 flex w-max min-w-[9rem] max-w-[16rem] flex-col gap-px border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-1.5 py-1 text-[11px] leading-4 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
     >
       {shown.map((row) => (
@@ -94,7 +104,13 @@ function PrCard({ rows, limit }: { rows: PrCardRow[]; limit: number }) {
   );
 }
 
+export type PrCardId = "ci" | "reviewers";
+
 interface PrHoverCardTriggerProps {
+  cardId: PrCardId;
+  // One card at a time: the badge owns which card is active.
+  activeCard: PrCardId | null;
+  onActiveCardChange(id: PrCardId | null): void;
   slot: HTMLElement | null;
   rows: PrCardRow[];
   limit?: number;
@@ -106,6 +122,9 @@ interface PrHoverCardTriggerProps {
 // React child of the trigger (pointer transit keeps it open) without being a
 // DOM descendant of the link (clicks inside never navigate).
 export function PrHoverCardTrigger({
+  cardId,
+  activeCard,
+  onActiveCardChange,
   slot,
   rows,
   limit = DEFAULT_ROW_LIMIT,
@@ -113,6 +132,26 @@ export function PrHoverCardTrigger({
   children,
 }: PrHoverCardTriggerProps) {
   const popover = useFooterPopover<HTMLSpanElement>({ closeDelayMs: CLOSE_GRACE_MS });
+  const domId = useId();
+  const { open } = popover;
+  // The hook's dismiss changes identity every render; keep the effect keyed on activeCard only.
+  const dismissRef = useRef(popover.dismiss);
+  dismissRef.current = popover.dismiss;
+  const openRef = useRef(open);
+  openRef.current = open;
+  const activeRef = useRef(activeCard);
+  activeRef.current = activeCard;
+  // Opening claims the badge's active slot; closing releases it if still held.
+  useEffect(() => {
+    if (open) onActiveCardChange(cardId);
+    else if (activeRef.current === cardId) onActiveCardChange(null);
+  }, [open, cardId, onActiveCardChange]);
+  // Another card claimed the slot: close this one at once.
+  useEffect(() => {
+    if (openRef.current && activeCard !== null && activeCard !== cardId) {
+      dismissRef.current();
+    }
+  }, [activeCard, cardId]);
   if (rows.length === 0) {
     return (
       <span className="inline-flex items-center gap-1" title={fallbackTitle}>
@@ -125,16 +164,29 @@ export function PrHoverCardTrigger({
     event.preventDefault();
     popover.toggle();
   };
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Escape") popover.dismiss();
+  };
+  const showCard = open && slot !== null && (activeCard === null || activeCard === cardId);
   return (
     <span
       ref={popover.containerRef}
-      className={`inline-flex items-center gap-1 ${popover.open ? "bg-[var(--color-hover-overlay)]" : ""}`}
+      role="group"
+      tabIndex={0}
+      aria-label={fallbackTitle}
+      aria-describedby={showCard ? domId : undefined}
+      className={`inline-flex items-center gap-1 px-0.5 ${open ? "bg-[var(--color-hover-overlay)]" : ""}`}
       onMouseEnter={popover.onMouseEnter}
       onMouseLeave={popover.onMouseLeave}
+      onFocus={popover.onMouseEnter}
+      onBlur={popover.onBlur}
+      onKeyDown={onKeyDown}
       onClick={onClick}
     >
       {children}
-      {popover.open && slot ? createPortal(<PrCard rows={rows} limit={limit} />, slot) : null}
+      {showCard && slot
+        ? createPortal(<PrCard id={domId} rows={rows} limit={limit} />, slot)
+        : null}
     </span>
   );
 }

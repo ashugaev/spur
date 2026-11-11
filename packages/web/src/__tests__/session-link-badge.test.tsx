@@ -14,6 +14,13 @@ vi.mock("@/lib/link-icons.js", async () => {
   };
 });
 
+// The reviewer trigger group and the person icon share the summary label.
+function personByLabel(label: RegExp): HTMLElement {
+  const person = screen.getAllByLabelText(label).find((el) => el.hasAttribute("data-pr-reviewers"));
+  if (!person) throw new Error(`no reviewer icon labelled ${label}`);
+  return person;
+}
+
 describe("SessionLinkBadge", () => {
   const info: PrInfo = {
     state: "open",
@@ -67,7 +74,7 @@ describe("SessionLinkBadge", () => {
       "CI passing\nGitHub requires review",
     );
     expect(screen.getByLabelText("CI passing")).toBeInTheDocument();
-    const person = screen.getByLabelText(/Approvals: 1/);
+    const person = personByLabel(/Approvals: 1/);
     expect(person).toHaveTextContent("1");
     expect(person).toHaveClass("text-[var(--color-status-attention)]");
     expect(person).toHaveAttribute(
@@ -117,6 +124,22 @@ describe("SessionLinkBadge", () => {
       expect(container.querySelectorAll("[data-pr-reviewers]")).toHaveLength(1);
     },
   );
+
+  it("keeps the badge requirement-driven: raw changes_requested without reviewers stays hidden", () => {
+    const { container } = render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/103" }}
+        prInfo={{
+          ...info,
+          reviewDecision: "changes_requested",
+          reviewers: null,
+          reviewRequirement: "none",
+        }}
+      />,
+    );
+    expect(container.querySelector("[data-pr-reviewers]")).toBeNull();
+    expect(screen.getByLabelText("Changes requested")).toBeInTheDocument();
+  });
 
   it("shows the reviewer badge when GitHub requires review and reviewers are unknown", () => {
     const { container } = render(
@@ -199,7 +222,7 @@ describe("SessionLinkBadge", () => {
 
     it("orders check rows failed, pending, passed with no totals", () => {
       const { container } = renderBadge();
-      open(container.querySelector("[aria-label='CI failing']")?.parentElement as HTMLElement);
+      open(container.querySelector("[role='group']") as HTMLElement);
       expect(rows()).toEqual([
         { text: "test", tone: "error" },
         { text: "gate", tone: "error" },
@@ -216,7 +239,7 @@ describe("SessionLinkBadge", () => {
         state: "passed" as const,
       }));
       const { container } = renderBadge({ ...cardInfo, checks });
-      open(container.querySelector("[aria-label='CI failing']")?.parentElement as HTMLElement);
+      open(container.querySelector("[role='group']") as HTMLElement);
       expect(rows()).toHaveLength(8);
       expect(document.querySelector("[data-pr-card-more]")).toHaveTextContent("+5 more");
     });
@@ -256,6 +279,69 @@ describe("SessionLinkBadge", () => {
       expect(fireEvent.click(trigger)).toBe(true);
     });
 
+    it("opens on focus, links the tooltip, and closes on Escape or blur", () => {
+      const { container } = renderBadge();
+      const trigger = container.querySelector("[data-pr-reviewers]")?.parentElement as HTMLElement;
+      expect(trigger).toHaveAttribute("tabindex", "0");
+      expect(trigger).toHaveAttribute("aria-label", expect.stringContaining("Approvals: 2"));
+      fireEvent.focus(trigger);
+      act(() => {
+        vi.advanceTimersByTime(100);
+      });
+      const card = document.querySelector("[data-pr-card]");
+      expect(card).toHaveAttribute("role", "tooltip");
+      expect(trigger).toHaveAttribute("aria-describedby", card?.id);
+      fireEvent.keyDown(trigger, { key: "Escape" });
+      expect(document.querySelector("[data-pr-card]")).toBeNull();
+      fireEvent.focus(trigger);
+      act(() => {
+        vi.advanceTimersByTime(100);
+      });
+      expect(document.querySelector("[data-pr-card]")).not.toBeNull();
+      fireEvent.blur(trigger);
+      expect(document.querySelector("[data-pr-card]")).toBeNull();
+    });
+
+    it("shows only one card at a time", () => {
+      const { container } = renderBadge();
+      const [ci, reviewers] = container.querySelectorAll<HTMLElement>("[role='group']");
+      open(ci as HTMLElement);
+      expect(document.querySelectorAll("[data-pr-card]")).toHaveLength(1);
+      expect(rows()[0]?.text).toBe("test");
+      open(reviewers as HTMLElement);
+      expect(document.querySelectorAll("[data-pr-card]")).toHaveLength(1);
+      expect(rows()[0]?.text).toBe("@yuri");
+      open(ci as HTMLElement);
+      expect(document.querySelectorAll("[data-pr-card]")).toHaveLength(1);
+      expect(rows()[0]?.text).toBe("test");
+    });
+
+    it("keeps merge conflict and review facts reachable beside the check card", () => {
+      renderBadge({
+        ...cardInfo,
+        mergeConflict: true,
+        reviewDecision: "review_required",
+        reviewRequirement: "unavailable",
+      });
+      expect(screen.getByTitle("Merge conflict")).toBeInTheDocument();
+      expect(screen.getByTitle(/GitHub requires review/)).toHaveAttribute(
+        "title",
+        "GitHub requires review\nNative review policy unavailable",
+      );
+    });
+
+    it("ignores a tap inside the card", () => {
+      vi.stubGlobal("matchMedia", (query: string) => ({
+        matches: query === "(hover: none) and (pointer: coarse)",
+      }));
+      const { container } = renderBadge();
+      const trigger = container.querySelector("[data-pr-reviewers]")?.parentElement as HTMLElement;
+      fireEvent.click(trigger);
+      const card = document.querySelector("[data-pr-card]") as HTMLElement;
+      expect(fireEvent.click(card)).toBe(true);
+      expect(document.querySelector("[data-pr-card]")).not.toBeNull();
+    });
+
     it("pins the card on a touch tap without navigating", () => {
       vi.stubGlobal("matchMedia", (query: string) => ({
         matches: query === "(hover: none) and (pointer: coarse)",
@@ -284,9 +370,12 @@ describe("SessionLinkBadge", () => {
     expect(screen.getByLabelText("CI failing")).toBeInTheDocument();
     expect(screen.getByTitle(/CI failing/)).toHaveAttribute(
       "title",
-      "CI failing\nChanges requested\nMerge conflict",
+      "CI failing\nChanges requested",
     );
-    expect(screen.getByLabelText(/Approvals: 2/)).toHaveTextContent("2");
+    expect(screen.getByTitle("Merge conflict")).toContainElement(
+      screen.getByLabelText("Merge conflict"),
+    );
+    expect(personByLabel(/Approvals: 2/)).toHaveTextContent("2");
   });
 
   it("uses fetched reviewer data and omits GitHub metadata on GitLab links", () => {
@@ -294,7 +383,7 @@ describe("SessionLinkBadge", () => {
     const { rerender } = render(
       <SessionLinkBadge link={{ label: "pr", url: "https://github.com/org/repo/pull/105" }} />,
     );
-    expect(screen.getByLabelText(/Approvals: 2/)).toBeInTheDocument();
+    expect(personByLabel(/Approvals: 2/)).toBeInTheDocument();
     rerender(
       <SessionLinkBadge
         link={{ label: "gitlab-pr", url: "https://gitlab.example/org/repo/-/merge_requests/105" }}
@@ -312,7 +401,7 @@ describe("SessionLinkBadge", () => {
         prInfo={{ ...info, reviewers: { approved: ["alice", "bob"], changesRequested: [] } }}
       />,
     );
-    expect(screen.getByLabelText(/Approvals: 2/)).toHaveClass("text-[var(--color-status-ready)]");
+    expect(personByLabel(/Approvals: 2/)).toHaveClass("text-[var(--color-status-ready)]");
   });
 
   it("gives aggregate changes_requested red priority when reviewer history is unavailable", () => {

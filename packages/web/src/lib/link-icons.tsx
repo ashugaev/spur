@@ -715,6 +715,7 @@ export function ReviewersBadge({ info }: { info: PrInfo }) {
   return (
     <span
       data-pr-reviewers
+      role="img"
       aria-label={reviewersSummary(info)}
       className={`inline-flex items-center gap-0.5 text-[10px] font-bold ${color}`}
     >
