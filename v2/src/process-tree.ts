@@ -342,20 +342,31 @@ export type ProcessEnvRead = { status: "ok"; value: string | undefined } | { sta
 // Linux /proc/<pid>/environ only: a NUL-separated KEY=VALUE blob. There is no
 // portable equivalent (macOS does not expose another process' environment to
 // an unprivileged reader), so this is deliberately Linux-only.
-export async function readProcessEnvValue(pid: number, key: string): Promise<ProcessEnvRead> {
+// One readFile for any number of keys; absent keys are omitted from `values`.
+export async function readProcessEnvValues<K extends string>(
+  pid: number,
+  keys: readonly K[],
+): Promise<{ status: "ok"; values: Partial<Record<K, string>> } | { status: "unreadable" }> {
   let content: string;
   try {
     content = await readFile(`/proc/${pid}/environ`, "utf8");
   } catch {
     return { status: "unreadable" };
   }
-  const prefix = `${key}=`;
+  const values: Partial<Record<K, string>> = {};
   for (const entry of content.split("\0")) {
-    if (entry.startsWith(prefix)) {
-      return { status: "ok", value: entry.slice(prefix.length) };
+    for (const key of keys) {
+      if (values[key] === undefined && entry.startsWith(`${key}=`)) {
+        values[key] = entry.slice(key.length + 1);
+      }
     }
   }
-  return { status: "ok", value: undefined };
+  return { status: "ok", values };
+}
+
+export async function readProcessEnvValue(pid: number, key: string): Promise<ProcessEnvRead> {
+  const read = await readProcessEnvValues(pid, [key]);
+  return read.status === "ok" ? { status: "ok", value: read.values[key] } : read;
 }
 
 // Platform capability probe: can this process read process environments at

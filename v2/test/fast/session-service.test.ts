@@ -102,6 +102,8 @@ import {
   captureAgentProcessesForLaunchMock,
   capturePaneAgentProcessesMock,
   terminateAgentProcessesMock,
+  terminateDetachedSessionProcessesMock,
+  readTmuxServerPidMock,
   findForeignAgentProcessesForSessionMock,
   killTmuxSessionTreeMock,
   sendMessageToTmuxMock,
@@ -251,7 +253,8 @@ import type * as sessionSlotsModule from "../../src/session-slots.js";
 import type * as metadataModule from "../../src/metadata.js";
 import type { InterfaceConsent } from "../../src/review-interface-consent.js";
 import type { TelegramPhoto } from "../../src/telegram-source-state.js";
-import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
+import { detectClaudeRateLimit, detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
+import { classifyClaudeJsonlState, parseJsonlRecord } from "../../src/claude-jsonl-state.js";
 import type * as claudeModule from "../../src/agents/claude.js";
 import type * as codexModule from "../../src/agents/codex.js";
 import type * as agentIndexModule from "../../src/agents/index.js";
@@ -65646,6 +65649,75 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it.each([
+      { name: "before reset", now: "2026-11-11T07:59:59.999Z", blocked: true },
+      { name: "at reset", now: "2026-11-11T08:00:00.000Z", blocked: false },
+      { name: "after reset", now: "2026-11-11T08:47:17.778Z", blocked: false },
+      { name: "future reset", now: "2026-11-10T08:47:17.778Z", blocked: true },
+      { name: "missing own timestamp", timestamp: null, blocked: true },
+      { name: "invalid own timestamp", timestamp: "invalid", blocked: true },
+      { name: "non-UTC reset", clause: "resets Nov 11, 8am (PST)", blocked: true },
+      { name: "unconfirmed time-only reset", clause: "resets 8am (UTC)", blocked: true },
+    ])("uses parsed individual spend evidence for ordinary send: $name", async (scenario) => {
+      vi.setSystemTime(new Date(scenario.now ?? "2026-11-11T08:47:17.778Z"));
+      const timestamp =
+        scenario.timestamp === null
+          ? undefined
+          : (scenario.timestamp ?? "2026-11-08T19:32:49.242Z");
+      const record = parseJsonlRecord(
+        JSON.stringify({
+          type: "assistant",
+          error: "rate_limit",
+          timestamp,
+          message: {
+            role: "assistant",
+            model: "<synthetic>",
+            stop_reason: "stop_sequence",
+            content: [
+              {
+                type: "text",
+                text: `You've hit your individual spend limit · run /usage-credits to ask your admin for a higher limit · your weekly limit ${scenario.clause ?? "resets Nov 11, 8am (UTC)"}`,
+              },
+            ],
+          },
+        }),
+        Date.now(),
+      );
+      if (!record) throw new Error("Expected native assistant record");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ rateLimitedAt: "2026-11-08T19:32:49.242Z" }));
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: classifyClaudeJsonlState([record], Date.now()),
+        reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [record] },
+        rateLimit: detectClaudeRateLimit([record]),
+      });
+      captureTmuxPaneMock.mockResolvedValue("Ready for input");
+      const { SessionService, SessionRateLimitedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-11-08T19:00:00.000Z");
+      try {
+        const view = await service.get("api-1");
+        sendMessageToTmuxMock.mockClear();
+        if (scenario.blocked) {
+          expect(view.state).toBe("rate_limited");
+          await expect(
+            service.send("api-1", { message: "hello", queue: false }),
+          ).rejects.toBeInstanceOf(SessionRateLimitedError);
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        } else {
+          await service.send("api-1", { message: "hello", queue: false });
+          expect(view.state).toBe("waiting");
+          expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(sendMessageToTmuxMock).toHaveBeenCalledExactlyOnceWith("api-1", "hello", {
+            agent: "claude",
+          });
+        }
+      } finally {
+        service.dispose();
+      }
+    });
+
     it("delivers send() normally once live state leaves rate_limited", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
@@ -79103,6 +79175,273 @@ describe("SessionService", () => {
       expect(gcNotices()).toHaveLength(0);
       expect(state.get("api-1")).toMatchObject({ binding: true, target: true });
       service.dispose();
+    });
+  });
+
+  describe("terminal detached process sweep", () => {
+    const toolDir = (id: string) => join(TEST_DATA_DIR, "session-tools", id);
+    const runningRecord = (id = "api-1") =>
+      sessionRecord({ id, worktree: true, worktreePath: `/tmp/spur-worktrees/api/${id}` });
+    const sweepEvents = (event: string) =>
+      logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === event);
+
+    it("complete sweeps once with the session tool dir and tmux server pid, between pane kill and worktree removal", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningRecord());
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValueOnce(true).mockReturnValue(false);
+      const service = await createDisposedSessionService();
+      try {
+        await service.complete("api-1");
+        expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledExactlyOnceWith({
+          sessionId: "api-1",
+          sessionToolDir: toolDir("api-1"),
+          tmuxServerPid: 4844,
+        });
+        const [sweepOrder] = terminateDetachedSessionProcessesMock.mock.invocationCallOrder;
+        expect(killTmuxSessionMock.mock.invocationCallOrder[0]).toBeLessThan(sweepOrder ?? 0);
+        expect(sweepOrder).toBeLessThan(removeWorktreeMock.mock.invocationCallOrder[0] ?? 0);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("pause does not sweep", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningRecord());
+      const service = await createDisposedSessionService();
+      try {
+        await service.pause("api-1");
+        expect(sessions.get("api-1")?.status).toBe("stopped");
+        expect(terminateDetachedSessionProcessesMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("kill sweeps", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningRecord());
+      const service = await createDisposedSessionService();
+      try {
+        await service.kill("api-1");
+        expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ sessionId: "api-1", sessionToolDir: toolDir("api-1") }),
+        );
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("handoff completion of the source sweeps the source id", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningRecord());
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      try {
+        await service.handoff(
+          "api-1",
+          { agent: "cursor" },
+          { todoActor: { kind: "human", origin: "ui" } },
+        );
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ sessionId: "api-1" }),
+        );
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("restore does not sweep", async () => {
+      mockClaudeJsonlState("waiting");
+      const record = runningSession();
+      createSessionStore(record);
+      const service = await createDisposedSessionService();
+      try {
+        await service.pause(record.id);
+        expect((await service.restore(record.id)).lifecycle.operation?.phase).toBe("succeeded");
+        expect(terminateDetachedSessionProcessesMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("sweep survivors do not fail complete and are logged with reason detached_session", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningRecord());
+      terminateDetachedSessionProcessesMock.mockResolvedValue({ status: "survivors", pids: [77] });
+      const service = await createDisposedSessionService();
+      try {
+        await service.complete("api-1");
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        expect(sweepEvents("session.agent_process.survivors")).toEqual([
+          [
+            TEST_DATA_DIR,
+            expect.objectContaining({
+              level: "error",
+              details: { pids: [77], reason: "detached_session" },
+            }),
+          ],
+        ]);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("unreadable tmux server pid skips the sweep and logs capture_unavailable", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningRecord());
+      readTmuxServerPidMock.mockResolvedValue({ status: "unavailable" });
+      const service = await createDisposedSessionService();
+      try {
+        await service.complete("api-1");
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        expect(terminateDetachedSessionProcessesMock).not.toHaveBeenCalled();
+        expect(sweepEvents("session.agent_process.capture_unavailable")).toEqual([
+          [
+            TEST_DATA_DIR,
+            expect.objectContaining({
+              level: "warn",
+              details: { reason: "detached_session", cause: "tmux_server_pid_unreadable" },
+            }),
+          ],
+        ]);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("absent tmux server sweeps with no tmux exclusion and logs nothing", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningRecord());
+      readTmuxServerPidMock.mockResolvedValue({ status: "absent" });
+      const service = await createDisposedSessionService();
+      try {
+        await service.complete("api-1");
+        expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ sessionId: "api-1", tmuxServerPid: null }),
+        );
+        expect(sweepEvents("session.agent_process.capture_unavailable")).toEqual([]);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("spawn failure cleanup sweeps the failed session id once", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      workspaceExistsMock.mockReturnValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+      createTmuxSessionMock.mockRejectedValueOnce(new Error("tmux boom"));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      try {
+        await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow();
+        expect(sessions.get("api-1")?.status).toBe("errored");
+        expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ sessionId: "api-1", sessionToolDir: toolDir("api-1") }),
+        );
+      } finally {
+        service.dispose();
+      }
+    });
+
+    describe("background spawn retries", () => {
+      const setupBackground = async (failures: number) => {
+        mockClaudeJsonlState("waiting");
+        createSessionStore();
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+        captureAgentProcessesForLaunchMock.mockResolvedValue({
+          status: "ok",
+          processes: [],
+          complete: true,
+        });
+        for (let i = 0; i < failures; i++) {
+          createTmuxSessionMock.mockRejectedValueOnce(new Error(`tmux boom ${i + 1}`));
+        }
+        createTmuxSessionMock.mockImplementation(async () => {
+          tmuxSessionExistsMock.mockResolvedValue(true);
+        });
+        const { SessionService } = await loadSessionServiceModule();
+        return new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      };
+
+      it("non-final failed attempts do not sweep", async () => {
+        const service = await setupBackground(2);
+        try {
+          await service.spawnInBackground({ project: "api", prompt: "hello" });
+          await vi.waitFor(() => {
+            expect(createTmuxSessionMock).toHaveBeenCalledTimes(3);
+            expect(
+              writeSessionMock.mock.calls.some(([, session]) => session.status === "running"),
+            ).toBe(true);
+          });
+          expect(killTmuxSessionMock).toHaveBeenCalledTimes(2);
+          expect(terminateDetachedSessionProcessesMock).not.toHaveBeenCalled();
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("the final failed attempt sweeps once", async () => {
+        const service = await setupBackground(3);
+        try {
+          await service.spawnInBackground({ project: "api", prompt: "hello" });
+          await vi.waitFor(() => {
+            expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledTimes(1);
+          });
+          expect(createTmuxSessionMock).toHaveBeenCalledTimes(3);
+          expect(killTmuxSessionMock).toHaveBeenCalledTimes(3);
+          expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledWith(
+            expect.objectContaining({ sessionId: "api-1" }),
+          );
+        } finally {
+          service.dispose();
+        }
+      });
+    });
+
+    it("respawn of a completed session sweeps it before spawning the replacement", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1", status: "completed" }));
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      workspaceExistsMock.mockReturnValue(true);
+      mockClaudeJsonlState("waiting");
+      const service = await createDisposedSessionService();
+      try {
+        await service.respawn("api-1");
+        await service.settleBackgroundSpawns();
+        expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ sessionId: "api-1", sessionToolDir: toolDir("api-1") }),
+        );
+        const [sweepOrder] = terminateDetachedSessionProcessesMock.mock.invocationCallOrder;
+        expect(createTmuxSessionMock).toHaveBeenCalled();
+        expect(sweepOrder).toBeLessThan(createTmuxSessionMock.mock.invocationCallOrder[0] ?? 0);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("send-path relaunch tears down the pane without sweeping", async () => {
+      readSessionMock.mockImplementation((_dataDir: string, sessionId: string) =>
+        runningSession({ id: sessionId }),
+      );
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      terminateAgentProcessesMock.mockResolvedValueOnce({ status: "survivors", pids: [999] });
+      const service = await createDisposedSessionService();
+      try {
+        await expect(service.send("api-1", { message: "resume work" })).rejects.toThrow(/999/);
+        expect(terminateAgentProcessesMock).toHaveBeenCalled();
+        expect(terminateDetachedSessionProcessesMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
     });
   });
 });

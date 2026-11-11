@@ -11,8 +11,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { extname, join, relative, sep } from "node:path";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { extname, isAbsolute, join, relative, sep } from "node:path";
+import { parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
 import { type SseHub, type SseStream } from "./sse.js";
 import { PAGE_ID_RE, StoreError, type StoreService, pageDirPath, pagesRoot } from "./stores.js";
 import { RESERVED_PAGE_PROJECT_PREFIX, RESERVED_PAGE_SESSION_PREFIX } from "./page-identity.js";
@@ -54,12 +54,21 @@ export interface PageConfig {
   title: string;
   icon?: string;
   agent: { runtime: AgentName; model?: string };
+  source?: { path: string };
+}
+
+export interface PageSyncStatus {
+  state: "pending" | "syncing" | "synced" | "error";
+  root?: string;
+  lastSyncedAt?: string;
+  error?: string;
 }
 
 export interface PageSummary extends PageConfig {
   id: string;
   path: string;
   url: string;
+  sync?: PageSyncStatus;
 }
 
 export interface CreatePageRequest {
@@ -68,6 +77,20 @@ export interface CreatePageRequest {
   runtime?: unknown;
   model?: unknown;
   template?: unknown;
+  source?: unknown;
+}
+
+export function parsePageSource(value: unknown): { path: string } | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new StoreError(400, "source must contain an absolute path");
+  }
+  const path = (value as { path?: unknown }).path;
+  // eslint-disable-next-line no-control-regex
+  if (typeof path !== "string" || !isAbsolute(path) || /[\u0000-\u001f\u007f]/.test(path)) {
+    throw new StoreError(400, "source.path must be an absolute path without control characters");
+  }
+  return { path };
 }
 
 export function assertPageId(pageId: string): void {
@@ -112,7 +135,7 @@ function parseIcon(value: unknown): string | undefined {
     value.length > 240 ||
     !/\.png$/i.test(value) ||
     !value.split("/").every((segment) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segment)) ||
-    value.split("/").some((segment) => /^data\.sqlite/.test(segment))
+    isReservedPagePath(value)
   ) {
     throw new StoreError(400, "icon must be a local PNG path inside the page");
   }
@@ -138,14 +161,16 @@ export function readPageConfig(dataDir: string, pageId: string): PageConfig {
   ) as Record<string, unknown>;
   const model = parseModel(agent["model"]);
   const icon = parseIcon(config["icon"]);
+  const source = parsePageSource(config["source"]);
   return {
     title: assertTitle(config["title"]),
     ...(icon ? { icon } : {}),
     agent: { runtime: parseRuntime(agent["runtime"]), ...(model ? { model } : {}) },
+    ...(source ? { source } : {}),
   };
 }
 
-function summarize(dataDir: string, pageId: string, config: PageConfig): PageSummary {
+export function summarizePage(dataDir: string, pageId: string, config: PageConfig): PageSummary {
   return { id: pageId, ...config, path: pageDirPath(dataDir, pageId), url: `/p/${pageId}/` };
 }
 
@@ -156,7 +181,7 @@ export function listPages(dataDir: string): PageSummary[] {
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (!entry.isDirectory() || !PAGE_ID_RE.test(entry.name)) continue;
     try {
-      pages.push(summarize(dataDir, entry.name, readPageConfig(dataDir, entry.name)));
+      pages.push(summarizePage(dataDir, entry.name, readPageConfig(dataDir, entry.name)));
     } catch {
       // A page with an unreadable page.yaml stays on disk and off the list.
     }
@@ -199,6 +224,7 @@ export function createPage(dataDir: string, request: CreatePageRequest): PageSum
   const title = assertTitle(request.title ?? pageId);
   const runtime = parseRuntime(request.runtime);
   const model = parseModel(request.model);
+  const source = parsePageSource(request.source);
   const template = request.template ?? "blank";
   if (!PAGE_TEMPLATES.includes(template as PageTemplate)) {
     throw new StoreError(400, `template must be one of ${PAGE_TEMPLATES.join(", ")}`);
@@ -213,10 +239,25 @@ export function createPage(dataDir: string, request: CreatePageRequest): PageSum
     }
     throw error;
   }
-  const config: PageConfig = { title, agent: { runtime, ...(model ? { model } : {}) } };
+  const config: PageConfig = {
+    title,
+    agent: { runtime, ...(model ? { model } : {}) },
+    ...(source ? { source } : {}),
+  };
   writeFileSync(join(dir, PAGE_CONFIG_FILE), stringifyYaml(config), "utf8");
   writeFileSync(join(dir, "index.html"), blankTemplate(title), "utf8");
-  return summarize(dataDir, pageId, config);
+  return summarizePage(dataDir, pageId, config);
+}
+
+export function setPageSource(dataDir: string, pageId: string, path: string | null): PageSummary {
+  readPageConfig(dataDir, pageId);
+  const source = path === null ? undefined : parsePageSource({ path });
+  const configPath = join(pageDirPath(dataDir, pageId), PAGE_CONFIG_FILE);
+  const document = parseDocument(readFileSync(configPath, "utf8"));
+  if (source) document.set("source", source);
+  else document.delete("source");
+  writeFileSync(configPath, document.toString(), "utf8");
+  return summarizePage(dataDir, pageId, readPageConfig(dataDir, pageId));
 }
 
 export function pageProjectId(pageId: string): string {
@@ -288,12 +329,15 @@ export function removePageDir(dataDir: string, pageId: string): void {
   rmSync(dir, { recursive: true, force: true });
 }
 
-function isHiddenPagePath(relativePath: string): boolean {
+export function isReservedPagePath(relativePath: string): boolean {
   const segments = relativePath.split(/[\\/]/);
-  const name = segments.at(-1) ?? "";
-  return (
-    segments.some((segment) => segment === "" || segment.startsWith(".")) ||
-    /^data\.sqlite/.test(name)
+  return segments.some(
+    (segment) =>
+      segment === "" ||
+      segment.startsWith(".") ||
+      segment === PAGE_CONFIG_FILE ||
+      segment === "_spur" ||
+      segment.startsWith("data.sqlite"),
   );
 }
 
@@ -305,7 +349,7 @@ export function resolvePageFile(
 ): { path: string; contentType: string; size: number } {
   assertPageId(pageId);
   const notFound = new StoreError(404, `Page file not found: ${pageId}/${relativePath}`);
-  if (isHiddenPagePath(relativePath)) throw notFound;
+  if (isReservedPagePath(relativePath)) throw notFound;
   const dir = pageDirPath(dataDir, pageId);
   let root: string;
   let real: string;
@@ -320,7 +364,7 @@ export function resolvePageFile(
     inside === "" ||
     inside.startsWith(`..${sep}`) ||
     inside === ".." ||
-    isHiddenPagePath(inside)
+    isReservedPagePath(inside)
   ) {
     throw notFound;
   }
@@ -346,7 +390,7 @@ export function watchPageDir(
     watcher = watch(pageDirPath(dataDir, pageId), { recursive: true }, (_event, filename) => {
       if (!filename) return;
       const changed = filename.toString();
-      if (isHiddenPagePath(changed)) return;
+      if (changed !== PAGE_CONFIG_FILE && isReservedPagePath(changed)) return;
       pending = changed.split(sep).join("/");
       clearTimeout(timer);
       timer = setTimeout(() => {

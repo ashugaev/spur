@@ -201,7 +201,7 @@ Other event names (see source file for trigger conditions): `trigger.spawn.suppr
 
 ## Page metadata
 
-`page.yaml` `title` (1..120 printable chars), `icon` (optional local PNG, 1 MiB, square 1..4096px), `agent.runtime` (default `claude`), `agent.model` (optional): `v2/src/pages.ts`, `packages/web/src/lib/page-metadata.ts`; [pages.md](pages.md).
+`page.yaml` `title` (1..120 printable chars), `icon` (optional local PNG, 1 MiB, square 1..4096px), `agent.runtime` (`claude` default, `codex`, `cursor`, `opencode`), optional `agent.model` and `source.path` (absolute printable daemon-local HTML/folder path): `v2/src/pages.ts`, `packages/web/src/lib/page-metadata.ts`; [pages.md](pages.md).
 
 ## Auto update
 

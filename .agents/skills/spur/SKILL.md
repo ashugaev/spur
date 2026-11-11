@@ -57,9 +57,9 @@ DOCS
   Native PR alert ownership: docs/configuration.md#pr-alert-ownership.
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
-  Full-access daemon MCP, backend controls, logs and cached attached PR status; connection/setup: docs/mcp.md
+  Full-access MCP: Pages source binding, backend controls/logs, cached attached PR status; setup: docs/mcp.md
   Interactive session snippets: docs/snippets.md; SDK and components: docs/spur-sdk.md
-  Pages, agent chat, home-screen identity: docs/pages.md; document stores: docs/stores.md
+  Pages, source sync, agent chat, home-screen identity: docs/pages.md; stores: docs/stores.md
 
 EDITING THIS FILE
 

@@ -45,7 +45,7 @@ Check installation, linger and logs in [npm install](install-from-npm.md) or [so
 - `read_daemon_logs`: bounded live daemon event journal.
 - `get_session_pr_status`: existing extracted status for an attached PR, cache only.
 
-The catalog covers every daemon route: session lifecycle, queues, questions, logs, artifacts, services, subscriptions, source replies, ToDo, memory, projects, models, accounts, sidecars, shepherd and deployments.
+The catalog covers every daemon route: session lifecycle, queues, questions, logs, artifacts, services, subscriptions, source replies, ToDo, memory, [Pages/source binding](daemon-api.md#page-routes), projects, models, accounts, sidecars, shepherd and deployments.
 No project filter or read-only mode: connected callers can change/delete projects and sessions, run commands, switch versions and invoke every daemon operation.
 Grant access only to callers trusted as the host's operator.
 Agent execution has the daemon user's filesystem and shell rights.

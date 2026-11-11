@@ -255,6 +255,70 @@ it("discovers and invokes scoped Cron editor operations with nullable overrides 
     expect(fixture.calls.filter((request) => request.method === "PATCH")).toHaveLength(before + 1);
   }
 });
+it("discovers and forwards Page source bind/detach through the existing SDK gateway", async () => {
+  const { fixture, call } = await setup();
+  expect(
+    (await call("describe_operations", { operationId: "update_page_source" })).structuredContent,
+  ).toMatchObject({
+    total: 1,
+    operations: [
+      {
+        operationId: "update_page_source",
+        method: "PATCH",
+        path: "/pages/{pageId}/source",
+        body: { fields: [{ name: "path", type: "string|null", required: true }] },
+      },
+    ],
+  });
+  const pageId = "page space/segment";
+  const path = `/pages/${encodeURIComponent(pageId)}/source`;
+  for (const body of [{ path: "/path/to/site" }, { path: null }]) {
+    const summary = {
+      id: "films",
+      url: "/p/films/",
+      ...(body.path === null ? {} : { source: body, sync: { state: "error" } }),
+    };
+    fixture.state.override = (url) => (url === path ? { status: 200, value: summary } : undefined);
+    expect(
+      (
+        await call("daemon_request", {
+          operationId: "update_page_source",
+          pathParams: { pageId },
+          body,
+        })
+      ).structuredContent,
+    ).toMatchObject({ ok: true, status: 200, body: summary });
+    expect(fixture.calls.at(-1)).toMatchObject({ method: "PATCH", path, body });
+  }
+  for (const pathParams of [{}, { pageId: "" }, { pageId: ".." }, { pageId: "bad\n" }]) {
+    const before = fixture.calls.length;
+    expect(
+      (
+        await call("daemon_request", {
+          operationId: "update_page_source",
+          pathParams,
+          body: { path: null },
+        })
+      ).structuredContent,
+    ).toMatchObject({ ok: false });
+    expect(fixture.calls).toHaveLength(before);
+  }
+  for (const status of [400, 404]) {
+    const error = { error: status === 400 ? "Invalid source path" : "Page not found" };
+    fixture.state.override = (url) => (url === path ? { status, value: error } : undefined);
+    const body = { path: status === 400 ? 3 : null };
+    expect(
+      (
+        await call("daemon_request", {
+          operationId: "update_page_source",
+          pathParams: { pageId },
+          body,
+        })
+      ).structuredContent,
+    ).toMatchObject({ ok: false, status, body: error });
+    expect(fixture.calls.at(-1)).toMatchObject({ method: "PATCH", path, body });
+  }
+});
 it("forwards every catalog example to a fixed method/template preserving fields", async () => {
   const fixture = await mcpFixture();
   cleanups.push(fixture.close);

@@ -69,12 +69,12 @@ import { StoreActions } from "./store-actions.js";
 import {
   PageEvents,
   assertPagePrefixFree,
-  createPage,
   listPages,
   removePageDir,
   resolvePageFile,
   type CreatePageRequest,
 } from "./pages.js";
+import { PageSourceSync } from "./page-source.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import { captureTmuxPane } from "./runtime-tmux.js";
@@ -939,6 +939,7 @@ export async function startServer(
     readSession: (sessionId) => readSession(service.config.dataDir, sessionId),
   });
   const sseHub = new SseHub();
+  const pageSources = new PageSourceSync(() => service.config.dataDir);
   const pageEvents = new PageEvents({
     dataDir: () => service.config.dataDir,
     stores,
@@ -2684,7 +2685,9 @@ export async function startServer(
       }
 
       if (method === "GET" && path === "/pages") {
-        sendJson(response, 200, { pages: listPages(service.config.dataDir) });
+        sendJson(response, 200, {
+          pages: listPages(service.config.dataDir).map((page) => pageSources.summarize(page)),
+        });
         return;
       }
       if (method === "POST" && path === "/pages") {
@@ -2695,17 +2698,37 @@ export async function startServer(
             service.listProjects().map((project) => project.prefix),
           );
         }
-        sendJson(response, 201, createPage(service.config.dataDir, body));
+        sendJson(response, 201, await pageSources.create(body));
+        return;
+      }
+
+      const sourcePageId = path.match(/^\/pages\/([^/]+)\/source$/)?.[1];
+      if (method === "PATCH" && sourcePageId) {
+        const body: unknown = await readJsonBody(request);
+        if (typeof body !== "object" || body === null || Array.isArray(body)) {
+          throw new StoreError(400, "source requires path: an absolute path or null");
+        }
+        const sourcePath = (body as { path?: unknown }).path;
+        if (sourcePath !== null && typeof sourcePath !== "string") {
+          throw new StoreError(400, "source requires path: an absolute path or null");
+        }
+        sendJson(
+          response,
+          200,
+          await pageSources.bind(decodeURIComponent(sourcePageId), sourcePath),
+        );
         return;
       }
 
       const pageId = path.match(/^\/pages\/([^/]+)$/)?.[1];
       if (method === "DELETE" && pageId) {
         const id = decodeURIComponent(pageId);
-        await storeAgent.deletePage(id, () => {
-          pageEvents.closePage(id);
-          removePageDir(service.config.dataDir, id);
-        });
+        await pageSources.remove(id, (dataDir) =>
+          storeAgent.deletePage(id, () => {
+            pageEvents.closePage(id);
+            removePageDir(dataDir, id);
+          }),
+        );
         sendJson(response, 200, { deleted: true, id });
         return;
       }
@@ -2981,6 +3004,7 @@ export async function startServer(
   const closeServer = async (): Promise<void> => {
     // Open event streams never end on their own; end them so close() does not wait out the grace.
     clearInterval(agentStatusSampler);
+    await pageSources.stop();
     sseHub.closeAll();
     await new Promise<void>((resolve) => {
       // server.closeAllConnections() destroys every tracked socket, including
@@ -3012,6 +3036,8 @@ export async function startServer(
     await closeServer();
     throw error;
   }
+
+  pageSources.start();
 
   let driftedSessions: { id: string; project: string }[] = [];
   try {
