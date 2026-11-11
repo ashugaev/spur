@@ -59,6 +59,23 @@ describe("managed authorization HTTP boundary", () => {
     expect(input).toHaveBeenCalledWith("work", null);
   });
 
+  it.each([{}, { autoRotate: false }, { defaultAccountId: null }])(
+    "preserves omitted pool fields and explicit values %j",
+    async (update) => {
+      const change = vi
+        .spyOn(SessionService.prototype, "updateAuthorizationPool")
+        .mockResolvedValue({ defaultAccountId: null, defaultGeneration: 0, autoRotate: false });
+      const base = await fixture();
+      const response = await fetch(`${base}/auth-pools/codex`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(update),
+      });
+      expect(response.status).toBe(200);
+      expect(change).toHaveBeenCalledExactlyOnceWith("codex", update);
+    },
+  );
+
   it("accepts Auto account selection without the legacy Claude-menu gate", async () => {
     const change = vi
       .spyOn(SessionService.prototype, "switchAuth")

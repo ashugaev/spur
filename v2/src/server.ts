@@ -1417,7 +1417,12 @@ export async function startServer(
           .safeParse(await readJsonBody(request));
         if (!body.success) throw new AuthorizationError("Invalid authorization pool update", 400);
         sendJson(response, 200, {
-          pool: await service.updateAuthorizationPool(provider.data, body.data),
+          pool: await service.updateAuthorizationPool(provider.data, {
+            ...(body.data.defaultAccountId !== undefined
+              ? { defaultAccountId: body.data.defaultAccountId }
+              : {}),
+            ...(body.data.autoRotate !== undefined ? { autoRotate: body.data.autoRotate } : {}),
+          }),
         });
         return;
       }
