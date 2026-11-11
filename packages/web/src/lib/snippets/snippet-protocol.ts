@@ -78,6 +78,9 @@ export const SNIPPET_TO_HOST = {
   fullscreen: "fullscreen",
   resize: "resize",
   escape: "escape",
+  chatRegister: "chat-register",
+  chatFocus: "chat-focus",
+  chatUnregister: "chat-unregister",
 } as const;
 export const SNIPPET_TO_FRAME = {
   invokeResult: "invoke-result",
@@ -88,6 +91,7 @@ export const SNIPPET_TO_FRAME = {
   dbChange: "db-change",
   dbReset: "db-reset",
   agentEvent: "agent-event",
+  chatTranscript: "chat-transcript",
 } as const;
 
 export const SNIPPET_THEME_TOKENS = [

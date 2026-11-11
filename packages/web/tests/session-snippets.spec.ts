@@ -280,6 +280,35 @@ async function open(page: Page, rig: Rig): Promise<void> {
   await page.goto(`/sessions/${SESSION_ID}`);
 }
 
+test("chat microphone is host-owned and permission denial preserves the editable snippet draft", async ({
+  page,
+}) => {
+  const rig = new Rig();
+  rig.publish("candidate-picker", fixtureHtml("candidate-picker", {}) + "<spur-chat></spur-chat>");
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: () =>
+          Promise.reject(new DOMException("Permission denied", "NotAllowedError")),
+      },
+    });
+  });
+  await page.route("**/api/runtime/voice", (route) =>
+    route.fulfill({ json: { available: true, language: "auto" } }),
+  );
+  await open(page, rig);
+  const frame = frameOf(page, "Text variants");
+  const draft = frame.getByRole("textbox", { name: "Message", exact: true });
+  await draft.fill("Keep this draft");
+  await expect(frame.getByRole("button", { name: "Start voice recording" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Start voice recording", exact: true }).click();
+  await expect(
+    page.getByRole("alert").filter({ hasText: "Microphone access is blocked" }),
+  ).toBeVisible();
+  await expect(draft).toHaveValue("Keep this draft");
+});
+
 function frameOf(page: Page, title: string) {
   return page.frameLocator(`iframe[title="${title}"]`);
 }

@@ -26,6 +26,21 @@ const FORM = `
 `;
 
 describe("handshake", () => {
+  it("registers shared chats and inserts host voice into the selected editable draft without sending", async () => {
+    const r = await portRig("<spur-chat></spur-chat>");
+    const target = r.ofType("chat-register")[0]?.target;
+    expect(target).toEqual(expect.any(String));
+    const input = r.doc.querySelector("spur-chat textarea") as HTMLTextAreaElement;
+    input.value = "before ";
+    input.setSelectionRange(7, 7);
+    r.fromHost({ type: "chat-transcript", target: "unknown", text: "wrong" });
+    expect(input.value).toBe("before ");
+    r.fromHost({ type: "chat-transcript", target, text: "voice" });
+    expect(input.value).toBe("before voice");
+    expect(r.ofType("agent").filter((message) => message.op === "send")).toHaveLength(0);
+    r.doc.querySelector("spur-chat")?.remove();
+    expect(r.ofType("chat-unregister")).toContainEqual({ type: "chat-unregister", target });
+  });
   it("says hello with protocol 2 at most 25 times and stops on connect", async () => {
     const r = await portRig("", { booted: false });
     expect(r.hellos[0]).toEqual({ type: "spur:hello", protocolVersion: 2, nonce: "n0nce" });

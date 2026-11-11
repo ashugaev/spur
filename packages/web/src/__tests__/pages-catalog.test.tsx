@@ -37,8 +37,7 @@ describe("Pages catalogue", () => {
       "/?project=project%20one",
     );
     expect(screen.getAllByRole("link")).toHaveLength(2);
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
-    expect(screen.queryByText(/Ready|Create Page|Open/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create Page" })).toBeInTheDocument();
   });
   it("shows loading before a compact empty state and defaults Agents to /", async () => {
     let resolve!: (response: Response) => void;
@@ -75,5 +74,27 @@ describe("Pages catalogue", () => {
     catalog();
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not load pages.");
     expect(screen.getAllByRole("link")).toHaveLength(1);
+  });
+  it("prevents duplicate creates and preserves catalogue on failure", async () => {
+    let fail!: (reason: Error) => void;
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('{"pages":[{"id":"old","title":"Old","url":"/p/old/"}]}'))
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            fail = reject;
+          }),
+      );
+    vi.stubGlobal("fetch", fetch);
+    catalog();
+    await screen.findByRole("link", { name: "Old" });
+    fireEvent.click(screen.getByRole("button", { name: "Create Page" }));
+    fireEvent.click(screen.getByRole("button", { name: "Creating…" }));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    fail(new Error("offline"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not create page");
+    expect(screen.getByRole("link", { name: "Old" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create Page" })).toBeEnabled();
   });
 });

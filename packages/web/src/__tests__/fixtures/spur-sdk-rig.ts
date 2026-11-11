@@ -242,9 +242,9 @@ export interface PageRig extends Clock {
   click(selector: string): void;
 }
 
-export async function pageRig(body = ""): Promise<PageRig> {
+export async function pageRig(body = "", path = "/p/films/"): Promise<PageRig> {
   const navigation = { count: 0 };
-  const win = await makeWindow(body, "http://host/p/films/", () => {
+  const win = await makeWindow(body, `http://host${path}`, () => {
     navigation.count += 1;
   });
   const clock = installClock(win);

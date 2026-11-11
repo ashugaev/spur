@@ -2,9 +2,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
-vi.mock("@/lib/spur-daemon", () => ({ spurRequest: vi.fn() }));
+vi.mock("@/lib/spur-daemon", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/spur-daemon")>()),
+  spurRequest: vi.fn(),
+  spurRequestJson: vi.fn(),
+}));
 
-import { spurRequest } from "@/lib/spur-daemon";
+import { spurRequest, spurRequestJson } from "@/lib/spur-daemon";
 import { GET as pageGet, POST as pagePost } from "@/app/p/[id]/[[...path]]/route";
 import {
   DELETE as storeDelete,
@@ -33,6 +37,9 @@ function post(url: string, headers: Record<string, string>, body: unknown = { da
 
 beforeEach(() => {
   spurRequestMock.mockReset();
+  vi.mocked(spurRequestJson).mockResolvedValue({
+    pages: [{ id: "films", title: "Films & notes", url: "/p/films/" }],
+  });
   spurRequestMock.mockImplementation(
     async () =>
       new Response(JSON.stringify({ ok: true }), {
@@ -43,6 +50,40 @@ beforeEach(() => {
 });
 
 describe("page route", () => {
+  it("augments only successful HTML, drops its old length and serves GET-only install metadata", async () => {
+    spurRequestMock.mockResolvedValueOnce(
+      new Response("<p>App</p>", {
+        headers: { "content-type": "text/html", "content-length": "10" },
+      }),
+    );
+    const html = await pageGet(new NextRequest("http://host/p/films/"), pageContext("films"));
+    expect(await html.text()).toContain("<title>Films &amp; notes</title>");
+    expect(html.headers.has("content-length")).toBe(false);
+    const manifest = await pageGet(
+      new NextRequest("http://host/p/films/_spur/manifest.webmanifest"),
+      pageContext("films", ["_spur", "manifest.webmanifest"]),
+    );
+    expect(await manifest.json()).toMatchObject({ name: "Films & notes", id: "/p/films/" });
+    expect(
+      (
+        await pagePost(
+          post("http://host/p/films/_spur/manifest.webmanifest", {}),
+          pageContext("films", ["_spur", "manifest.webmanifest"]),
+        )
+      ).status,
+    ).toBe(404);
+    spurRequestMock.mockResolvedValueOnce(
+      new Response("asset", { headers: { "content-type": "text/javascript" } }),
+    );
+    expect(
+      await (
+        await pageGet(
+          new NextRequest("http://host/p/films/app.js"),
+          pageContext("films", ["app.js"]),
+        )
+      ).text(),
+    ).toBe("asset");
+  });
   it("redirects /p/<id> to /p/<id>/ with 308", async () => {
     const response = await pageGet(
       new NextRequest("http://host:3000/p/films"),

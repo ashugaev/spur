@@ -53,9 +53,8 @@ describe("page ids and page.yaml", () => {
       agent: { runtime: "codex", model: "gpt-5" },
     });
     const html = await readFile(join(pageDirPath(dir, "films"), "index.html"), "utf8");
-    expect(html).toContain("./_spur/sdk.js");
-    expect(html).toContain("<spur-chat>");
-    expect(html).toContain("textContent");
+    expect(html).toContain("Your page starts here.");
+    expect(html).not.toContain("<spur-chat>");
     expect(html).toContain("Films &#60;&#38;&#62;");
     expect(html).not.toContain("innerHTML");
     expect(statusOf(() => createPage(dir, { id: "films" }))).toBe(409);
@@ -89,6 +88,34 @@ describe("page ids and page.yaml", () => {
 
   it("escapes the title in the blank template", () => {
     expect(blankTemplate(`"><script>x</script>`)).not.toContain("<script>x</script>");
+  });
+
+  it("accepts local PNG metadata and rejects external, hidden and store paths", async () => {
+    const dir = await dataDir();
+    createPage(dir, { id: "icon" });
+    const config = join(pageDirPath(dir, "icon"), "page.yaml");
+    await writeFile(config, "title: Renamed\nicon: assets/icon.png\nagent:\n  runtime: codex\n");
+    expect(readPageConfig(dir, "icon")).toMatchObject({
+      title: "Renamed",
+      icon: "assets/icon.png",
+    });
+    for (const icon of [
+      "../x.png",
+      "/x.png",
+      "https://test/x.png",
+      ".x.png",
+      "a//x.png",
+      "a\\x.png",
+      "a.png?x",
+      "icon.svg",
+      "data.sqlite.png",
+    ]) {
+      await writeFile(config, `title: Icon\nicon: '${icon}'\n`);
+      expect(
+        statusOf(() => readPageConfig(dir, "icon")),
+        icon,
+      ).toBe(400);
+    }
   });
 });
 

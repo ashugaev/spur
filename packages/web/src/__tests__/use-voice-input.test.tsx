@@ -331,6 +331,27 @@ describe("useVoiceInput", () => {
     vi.unstubAllGlobals();
   });
 
+  it("stops a pending microphone grant after chat teardown without inserting", async () => {
+    buildFetch([{ text: "late" }]);
+    let grant!: (stream: MediaStream) => void;
+    const stop = vi.fn();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockReturnValueOnce(
+      new Promise((resolve) => {
+        grant = resolve;
+      }),
+    );
+    const onTranscribed = vi.fn();
+    const { result, unmount } = renderHook(() =>
+      useVoiceInput({ contextKey: "page-chat:one", onTranscribed }),
+    );
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+    act(() => result.current.toggleRecording());
+    unmount();
+    await act(async () => grant({ getTracks: () => [{ stop }] } as unknown as MediaStream));
+    expect(stop).toHaveBeenCalledOnce();
+    expect(onTranscribed).not.toHaveBeenCalled();
+  });
+
   it("stopAndSend invokes callback with transcript and skips modal", async () => {
     buildFetch([{ text: "hello world" }]);
     const send = vi.fn();

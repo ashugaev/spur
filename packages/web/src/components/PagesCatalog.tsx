@@ -1,14 +1,32 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
+import { useRef, useState } from "react";
 import { BrandGlyph } from "@/components/BrandGlyph";
 import { DataRow } from "@/components/DataRow";
 import { Zone } from "@/components/Zone";
-import { fetchPages, PagesRequestError } from "@/lib/pages-client";
+import { createPage, fetchPages, PagesRequestError } from "@/lib/pages-client";
 import { buildDashboardPath } from "@/lib/project-routes";
 
 export function PagesCatalog({ projectId }: { projectId?: string }) {
   const pages = useQuery({ queryKey: ["pages"], queryFn: fetchPages, retry: false });
+  const creatingRef = useRef(false);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState(false);
+  async function create() {
+    if (creatingRef.current) return;
+    creatingRef.current = true;
+    setCreating(true);
+    setCreateError(false);
+    try {
+      const page = await createPage();
+      window.location.assign(`${page.url}?chat=open`);
+    } catch {
+      setCreateError(true);
+      creatingRef.current = false;
+      setCreating(false);
+    }
+  }
   return (
     <div className="flex min-h-dvh flex-col">
       <header className="border-b border-[var(--color-border-default)] bg-[var(--color-bg-base)]">
@@ -33,6 +51,21 @@ export function PagesCatalog({ projectId }: { projectId?: string }) {
         </div>
       </header>
       <main className="mx-auto w-full max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            disabled={creating}
+            onClick={() => void create()}
+            className="border border-[var(--color-border-default)] bg-[var(--color-text-primary)] px-3 py-2 font-bold uppercase text-[var(--color-bg-base)] disabled:opacity-50"
+          >
+            {creating ? "Creating…" : "Create Page"}
+          </button>
+          {createError ? (
+            <p role="alert" className="text-[var(--color-status-error)]">
+              Could not create page. Try again.
+            </p>
+          ) : null}
+        </div>
         <Zone label="Pages" color="var(--color-accent)" count={pages.data?.length ?? 0}>
           {pages.isPending ? (
             <div role="status" aria-label="Loading pages" className="space-y-px">
@@ -82,6 +115,15 @@ export function PagesCatalog({ projectId }: { projectId?: string }) {
                   title={page.title}
                   className="inline-flex min-w-0 max-w-full items-center gap-2 text-[var(--color-text-primary)] hover:text-[var(--color-accent)]"
                 >
+                  {/* Generated metadata endpoint also supplies the default icon. */}
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={`${page.url}_spur/icon-32.png`}
+                    alt=""
+                    width="16"
+                    height="16"
+                    className="h-4 w-4 shrink-0"
+                  />
                   <span className="truncate">{page.title}</span>
                   <svg
                     aria-hidden="true"

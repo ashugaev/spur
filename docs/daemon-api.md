@@ -112,7 +112,7 @@
 
 ## Page routes
 
-- `GET /pages` — [pages.md](pages.md); `v2/src/pages.ts`.
+- `GET /pages` — title/icon catalogue; [pages.md](pages.md); `v2/src/pages.ts`.
 - `POST /pages`
 - `DELETE /pages/:id`
 - `GET /pages/:id/files/:path`

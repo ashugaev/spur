@@ -26,7 +26,9 @@ type VoiceInputContextKey =
   | `terminal:${string}`
   | `desk-spawn:${string}`
   | `respawn:${string}`
-  | `handoff:${string}`;
+  | `handoff:${string}`
+  | `page-chat:${string}`
+  | `snippet-chat:${string}`;
 type RetainedVoiceTakeMode = "insert" | "modal" | "send";
 
 interface RetainedVoiceTake {
@@ -325,6 +327,7 @@ export function useVoiceInput(options: {
   const [voiceModalOpen, setVoiceModalOpen] = useState(false);
   const voiceModalOpenRef = useRef(false);
   const dismissedRef = useRef(false);
+  const generationRef = useRef(0);
 
   useEffect(() => {
     voiceModalOpenRef.current = voiceModalOpen;
@@ -423,20 +426,23 @@ export function useVoiceInput(options: {
       mode: RetainedVoiceTakeMode,
       onSend?: (value: string) => void | Promise<void>,
     ) => {
+      const generation = generationRef.current;
       setVoiceError(null);
       setVoiceBusy("transcribing");
       try {
         const text = await transcribeRecording(audio);
+        if (generation !== generationRef.current) return;
         await applyTranscription(text, mode, onSend);
         await discardRetainedTake();
       } catch (error) {
+        if (generation !== generationRef.current) return;
         await setRetainedTake({
           blob: audio,
           mode,
         });
         setVoiceError(error instanceof Error ? error.message : TRANSCRIBE_ERROR);
       } finally {
-        setVoiceBusy(null);
+        if (generation === generationRef.current) setVoiceBusy(null);
       }
     },
     [applyTranscription, discardRetainedTake, setRetainedTake],
@@ -454,8 +460,9 @@ export function useVoiceInput(options: {
         if (!cancelled) setVoiceStatus({ available: false, language: "", reason: "unavailable" });
       }
     })();
-    return () => {
+    const disposeCapture = () => {
       cancelled = true;
+      generationRef.current += 1;
       if (mediaRecorderRef.current?.state === "recording") {
         mediaRecorderRef.current.stop();
       }
@@ -473,10 +480,16 @@ export function useVoiceInput(options: {
       pendingSendCallbackRef.current = null;
       stopRetainedPlayback();
     };
+    window.addEventListener("pagehide", disposeCapture);
+    return () => {
+      window.removeEventListener("pagehide", disposeCapture);
+      disposeCapture();
+    };
   }, [stopRetainedPlayback]);
 
   useEffect(() => {
     let cancelled = false;
+    generationRef.current += 1;
     stopRetainedPlayback();
     setHasRetainedTake(false);
     retainedTakeRef.current = null;
@@ -514,6 +527,11 @@ export function useVoiceInput(options: {
 
     return () => {
       cancelled = true;
+      generationRef.current += 1;
+      if (mediaRecorderRef.current?.state === "recording") mediaRecorderRef.current.stop();
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+      mediaRecorderRef.current = null;
+      mediaStreamRef.current = null;
     };
   }, [options.contextKey, stopRetainedPlayback]);
 
@@ -537,6 +555,7 @@ export function useVoiceInput(options: {
   }, [stopRealtimeSession]);
 
   const startRealtimeRecording = useCallback(() => {
+    const generation = ++generationRef.current;
     setVoiceError(null);
     setVoiceBusy("starting");
     realtimeFinalizedRef.current = "";
@@ -554,12 +573,14 @@ export function useVoiceInput(options: {
           throw new Error(await readApiErrorMessage(response, TRANSCRIBE_ERROR));
         }
         const token = (await response.json()) as RealtimeTokenResponse;
+        if (generation !== generationRef.current) return;
 
         const session = await startRealtimeTranscription({
           token: token.value,
           model: token.model,
           language: token.language,
           onPartial: (text) => {
+            if (generation !== generationRef.current) return;
             // Only the modal flow renders the live draft. In insert/send mode the
             // final transcript is applied directly via onFinal, so partials must not
             // pop the modal open or leave stale draft text behind.
@@ -575,6 +596,7 @@ export function useVoiceInput(options: {
             setVoiceDraft(finalized ? `${finalized} ${text}` : text);
           },
           onFinal: (text) => {
+            if (generation !== generationRef.current) return;
             const pendingSend = pendingSendCallbackRef.current;
             const mode = resolveTakeMode(pendingSend, Boolean(onTranscribedRef.current));
             // Modal mode streams partials into the draft already, so replace
@@ -595,6 +617,7 @@ export function useVoiceInput(options: {
             void applyTranscription(text, mode, pendingSend ?? undefined);
           },
           onError: (err) => {
+            if (generation !== generationRef.current) return;
             pendingSendCallbackRef.current = null;
             stopRealtimeSession();
             setRecording(false);
@@ -602,15 +625,21 @@ export function useVoiceInput(options: {
             setVoiceError(err.message);
           },
         });
+        if (generation !== generationRef.current) {
+          await session.stop();
+          return;
+        }
         realtimeSessionRef.current = session;
         setRecording(true);
       } catch (err) {
+        if (generation !== generationRef.current) return;
         pendingSendCallbackRef.current = null;
         stopRealtimeSession();
         setRecording(false);
         setVoiceError(readRecordingStartError(err));
       } finally {
-        setVoiceBusy((current) => (current === "starting" ? null : current));
+        if (generation === generationRef.current)
+          setVoiceBusy((current) => (current === "starting" ? null : current));
       }
     })();
   }, [applyTranscription, stopRealtimeSession]);
@@ -635,6 +664,8 @@ export function useVoiceInput(options: {
 
     setVoiceError(null);
     setVoiceBusy("starting");
+    const generation = ++generationRef.current;
+    dismissedRef.current = false;
 
     void (async () => {
       try {
@@ -645,15 +676,21 @@ export function useVoiceInput(options: {
           throw new Error(MICROPHONE_HTTPS_ERROR);
         }
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (generation !== generationRef.current) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
         const recorder = new MediaRecorder(stream);
         mediaStreamRef.current = stream;
         mediaRecorderRef.current = recorder;
         mediaChunksRef.current = [];
 
         recorder.addEventListener("dataavailable", (event) => {
+          if (generation !== generationRef.current) return;
           if (event.data.size > 0) mediaChunksRef.current.push(event.data);
         });
         recorder.addEventListener("error", (event) => {
+          if (generation !== generationRef.current) return;
           const recorderError =
             ("error" in (event ?? {}) && (event as { error?: DOMException }).error?.message) ||
             "Voice recording failed before transcription";
@@ -665,6 +702,7 @@ export function useVoiceInput(options: {
         });
 
         recorder.addEventListener("stop", () => {
+          if (generation !== generationRef.current) return;
           const chunks = [...mediaChunksRef.current];
           const wasDismissed = dismissedRef.current;
           const pendingSend = pendingSendCallbackRef.current;
@@ -691,11 +729,13 @@ export function useVoiceInput(options: {
         recorder.start();
         setRecording(true);
       } catch (err) {
+        if (generation !== generationRef.current) return;
         pendingSendCallbackRef.current = null;
         stopStream();
         setVoiceError(readRecordingStartError(err));
       } finally {
-        setVoiceBusy((current) => (current === "starting" ? null : current));
+        if (generation === generationRef.current)
+          setVoiceBusy((current) => (current === "starting" ? null : current));
       }
     })();
   }, [
@@ -768,6 +808,7 @@ export function useVoiceInput(options: {
   );
 
   const cancelRecording = useCallback(() => {
+    generationRef.current += 1;
     if (mediaRecorderRef.current?.state === "recording") {
       dismissedRef.current = true;
       mediaRecorderRef.current.stop();

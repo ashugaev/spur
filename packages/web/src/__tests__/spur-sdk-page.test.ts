@@ -2,15 +2,88 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { flush, pageRig } from "./fixtures/spur-sdk-rig";
+import { flush, pageRig, sdkSource } from "./fixtures/spur-sdk-rig";
 
-// Page transport (/p/<id>/): fetch to ./_spur/*, one EventSource on ./_spur/events.
+// Page transport stays at the Page root, including nested documents.
 
 describe("page transport", () => {
-  it("opens exactly one EventSource on ./_spur/events and loads _state/page", async () => {
+  it("uses one root widget/connection on nested HTML and consumes create-open once", async () => {
+    const r = await pageRig("<p>App</p>", "/p/films/nested/index.html?chat=open&keep=1");
+    r.win.eval(sdkSource);
+    await flush();
+    expect(r.sources).toHaveLength(1);
+    expect(r.sources[0]?.url).toBe("/p/films/_spur/events");
+    expect(r.doc.querySelectorAll("[data-spur-page-widget]")).toHaveLength(1);
+    expect(r.win.location.search).toBe("?keep=1");
+    const root = r.doc.querySelector("[data-spur-page-widget]")?.shadowRoot;
+    const input = root?.querySelector("textarea") as HTMLTextAreaElement;
+    const close = root?.querySelector('[aria-label="Close agent chat"]') as HTMLButtonElement;
+    input.value = "keep draft";
+    close.click();
+    expect(root?.querySelector("iframe")).toBeNull();
+    (root?.querySelector('[aria-label="Open agent chat"]') as HTMLButtonElement).click();
+    expect(input.value).toBe("keep draft");
+    expect(root?.querySelector("iframe")).not.toBeNull();
+  });
+  it("accepts only its live voice frame and nonce, inserts at selection, never sends", async () => {
+    const r = await pageRig("", "/p/films/?chat=open");
+    const root = r.doc.querySelector("[data-spur-page-widget]")?.shadowRoot;
+    const input = root?.querySelector("textarea") as HTMLTextAreaElement;
+    const frame = root?.querySelector("iframe") as HTMLIFrameElement;
+    const query = new URL(frame.src).searchParams;
+    const data = {
+      type: "spur:voice-transcript",
+      page: "films",
+      chat: query.get("chat"),
+      nonce: query.get("nonce"),
+      text: "voice",
+    };
+    input.value = "A  Z";
+    input.setSelectionRange(2, 2);
+    r.win.dispatchEvent(
+      new r.win.MessageEvent("message", {
+        origin: "https://foreign.test",
+        source: frame.contentWindow,
+        data,
+      }),
+    );
+    expect(input.value).toBe("A  Z");
+    r.win.dispatchEvent(
+      new r.win.MessageEvent("message", {
+        origin: "http://host",
+        source: frame.contentWindow,
+        data: { ...data, nonce: "wrong" },
+      }),
+    );
+    expect(input.value).toBe("A  Z");
+    r.win.dispatchEvent(
+      new r.win.MessageEvent("message", {
+        origin: "http://host",
+        source: frame.contentWindow,
+        data,
+      }),
+    );
+    expect(input.value).toBe("A voice Z");
+    expect(r.requests.filter((entry) => entry.url.endsWith("agent/send"))).toHaveLength(0);
+    input.value = "x".repeat(20000);
+    input.setSelectionRange(20000, 20000);
+    r.win.dispatchEvent(
+      new r.win.MessageEvent("message", {
+        origin: "http://host",
+        source: frame.contentWindow,
+        data,
+      }),
+    );
+    expect(root?.querySelector(".spur-chat-status")?.textContent).toContain("exceeds");
+    expect(input.value).toHaveLength(20000);
+  });
+  it("opens exactly one root EventSource and loads _state/page", async () => {
     const r = await pageRig("");
-    expect(r.sources.map((source) => source.url)).toEqual(["./_spur/events"]);
-    expect(r.requests[0]).toMatchObject({ method: "GET", url: "./_spur/db/docs/_state/page" });
+    expect(r.sources.map((source) => source.url)).toEqual(["/p/films/_spur/events"]);
+    expect(r.requests[0]).toMatchObject({
+      method: "GET",
+      url: "/p/films/_spur/db/docs/_state/page",
+    });
     r.win.spur.db.collection("a").onSnapshot(() => undefined);
     r.win.spur.db.collection("b").onSnapshot(() => undefined);
     await flush();
@@ -25,7 +98,7 @@ describe("page transport", () => {
     expect(root.style.getPropertyValue("--spur-accent")).toBe("AccentColor");
     expect(root.style.getPropertyValue("--spur-status-error")).toBe("");
     const link = r.doc.querySelector("link[data-spur-sdk-palette]");
-    expect(link?.getAttribute("href")).toBe("./_spur/theme.css");
+    expect(link?.getAttribute("href")).toBe("/p/films/_spur/theme.css");
   });
 
   it("palette stylesheet defines the fixed tones as light-dark pairs", () => {
@@ -50,7 +123,7 @@ describe("page transport", () => {
     const r = await pageRig("");
     let docs = [{ id: "a" }];
     r.respond((method, url) =>
-      method === "POST" && url === "./_spur/db/query/items" ? [200, { docs }] : undefined,
+      method === "POST" && url === "/p/films/_spur/db/query/items" ? [200, { docs }] : undefined,
     );
     const seen: unknown[] = [];
     r.win.spur.db.collection("items").onSnapshot((next) => seen.push(next));
@@ -73,7 +146,7 @@ describe("page transport", () => {
       const r = await pageRig("");
       let docs = [{ id: "a" }];
       r.respond((method, url) =>
-        method === "POST" && url === "./_spur/db/query/items" ? [200, { docs }] : undefined,
+        method === "POST" && url === "/p/films/_spur/db/query/items" ? [200, { docs }] : undefined,
       );
       const seen: unknown[] = [];
       r.win.spur.db.collection("items").onSnapshot((next) => seen.push(next));
@@ -95,10 +168,10 @@ describe("page transport", () => {
     const r = await pageRig("");
     let completed = false;
     r.respond((method, url, body) => {
-      if (method === "POST" && url === "./_spur/actions") {
+      if (method === "POST" && url === "/p/films/_spur/actions") {
         return [200, { id: (body as { id: string }).id, data: { status: "pending" } }];
       }
-      if (method === "GET" && url.startsWith("./_spur/db/docs/_actions/")) {
+      if (method === "GET" && url.startsWith("/p/films/_spur/db/docs/_actions/")) {
         return [
           200,
           {
@@ -136,11 +209,11 @@ describe("page transport", () => {
     const r = await pageRig("");
     let status = "pending";
     r.respond((method, url, body) => {
-      if (method === "POST" && url === "./_spur/actions") {
+      if (method === "POST" && url === "/p/films/_spur/actions") {
         const id = (body as { id: string }).id;
         return [200, { id, rev: 1, data: { action: "pick", status: "pending" } }];
       }
-      if (method === "GET" && url.startsWith("./_spur/db/docs/_actions/")) {
+      if (method === "GET" && url.startsWith("/p/films/_spur/db/docs/_actions/")) {
         const id = decodeURIComponent(url.split("/").at(-1) ?? "");
         return [
           200,
@@ -155,7 +228,7 @@ describe("page transport", () => {
     });
     const pending = r.win.spur.agent.invoke("pick", { film: "Dune" });
     await flush();
-    const post = r.requests.find((request) => request.url === "./_spur/actions");
+    const post = r.requests.find((request) => request.url === "/p/films/_spur/actions");
     expect(post?.body).toMatchObject({
       action: "pick",
       payload: { film: "Dune" },
@@ -173,7 +246,7 @@ describe("page transport", () => {
   it("keeps a completed action completed when the invoke POST response arrives late", async () => {
     const r = await pageRig("<spur-button action='pick'>Pick</spur-button>");
     r.respond((method, url) =>
-      method === "GET" && url.startsWith("./_spur/db/docs/_actions/")
+      method === "GET" && url.startsWith("/p/films/_spur/db/docs/_actions/")
         ? [
             200,
             {
@@ -191,7 +264,7 @@ describe("page transport", () => {
     });
     r.win.fetch = (async (url: string, init?: { method?: string }) => {
       const response = await realFetch(url, init as never);
-      if (init?.method === "POST" && url === "./_spur/actions") {
+      if (init?.method === "POST" && url === "/p/films/_spur/actions") {
         await gate;
         const id = (JSON.parse((init as { body: string }).body) as { id: string }).id;
         return new Response(
@@ -203,7 +276,7 @@ describe("page transport", () => {
     }) as unknown as typeof r.win.fetch;
     const first = r.win.spur.agent.invoke("pick", {});
     await flush();
-    const post = r.requests.find((request) => request.url === "./_spur/actions");
+    const post = r.requests.find((request) => request.url === "/p/films/_spur/actions");
     const id = (post?.body as { id: string }).id;
     r.sources[0]?.emit("change", { seq: 3, collection: "_actions", id, op: "set", rev: 2 }, "3");
     await expect(first).resolves.toEqual({ ok: true, id, result: { ok: 1 } });
@@ -219,7 +292,7 @@ describe("page transport", () => {
   it("chat sends, polls messages and renders text inertly", async () => {
     const r = await pageRig("<spur-chat></spur-chat>");
     r.respond((method, url) => {
-      if (method === "GET" && url.startsWith("./_spur/agent/messages")) {
+      if (method === "GET" && url.startsWith("/p/films/_spur/agent/messages")) {
         return [
           200,
           {
@@ -233,7 +306,7 @@ describe("page transport", () => {
           },
         ];
       }
-      if (method === "POST" && url === "./_spur/agent/send")
+      if (method === "POST" && url === "/p/films/_spur/agent/send")
         return [200, { sessionId: "pg-films-ab12" }];
       return undefined;
     });
@@ -248,25 +321,26 @@ describe("page transport", () => {
     expect(r.win.pwned).toBeUndefined();
     expect(r.doc.querySelector(".spur-chat-status")?.textContent).toBe("Agent idle");
 
-    const input = r.doc.querySelector(".spur-chat-form input") as HTMLInputElement;
+    const input = r.doc.querySelector(".spur-chat-form textarea") as HTMLTextAreaElement;
     input.value = "suggest films";
     const form = r.doc.querySelector(".spur-chat-form") as HTMLFormElement;
     form.dispatchEvent(new r.win.Event("submit", { bubbles: true, cancelable: true }));
     await flush();
-    const send = r.requests.find((request) => request.url === "./_spur/agent/send");
+    const send = r.requests.find((request) => request.url === "/p/films/_spur/agent/send");
     // A synthetic submit is untrusted: no user gesture.
     expect(send?.body).toEqual({ message: "suggest films", userGesture: false });
     r.advance(2000);
     await flush();
     expect(
-      r.requests.filter((request) => request.url.startsWith("./_spur/agent/messages")).at(-1)?.url,
-    ).toBe("./_spur/agent/messages?from=2");
+      r.requests.filter((request) => request.url.startsWith("/p/films/_spur/agent/messages")).at(-1)
+        ?.url,
+    ).toBe("/p/films/_spur/agent/messages?from=2");
   });
 
   it("chat disables the input while sending and flags a failed send until the next input or status", async () => {
     const r = await pageRig("<spur-chat></spur-chat>");
     r.respond((method, url) =>
-      method === "POST" && url === "./_spur/agent/send"
+      method === "POST" && url === "/p/films/_spur/agent/send"
         ? [503, { error: "Agent is down" }]
         : undefined,
     );
@@ -277,11 +351,11 @@ describe("page transport", () => {
       release = resolve;
     });
     r.win.fetch = (async (url: string, init?: RequestInit) => {
-      if (url === "./_spur/agent/send") await gate;
+      if (url === "/p/films/_spur/agent/send") await gate;
       return realFetch(url, init);
     }) as typeof r.win.fetch;
     await flush();
-    const input = r.doc.querySelector(".spur-chat-form input") as HTMLInputElement;
+    const input = r.doc.querySelector(".spur-chat-form textarea") as HTMLTextAreaElement;
     const status = r.doc.querySelector(".spur-chat-status") as Element;
     const form = r.doc.querySelector(".spur-chat-form") as HTMLFormElement;
     expect(r.doc.querySelector(".spur-chat-log")?.childNodes).toHaveLength(0);
@@ -306,7 +380,7 @@ describe("page transport", () => {
   it("renders an action message as a tagged label line and spaces the status off the log", async () => {
     const r = await pageRig("<style>spur-chat{display:block}</style><spur-chat></spur-chat>");
     r.respond((method, url) =>
-      method === "GET" && url.startsWith("./_spur/agent/messages")
+      method === "GET" && url.startsWith("/p/films/_spur/agent/messages")
         ? [
             200,
             {
@@ -338,7 +412,7 @@ describe("page transport", () => {
     const r = await pageRig("");
     let sessionId = "pg-films-aaaa";
     r.respond((method, url) => {
-      if (method !== "GET" || !url.startsWith("./_spur/agent/messages")) return undefined;
+      if (method !== "GET" || !url.startsWith("/p/films/_spur/agent/messages")) return undefined;
       const from = Number(new URL(url, "http://host/").searchParams.get("from") ?? "0");
       const messages = [0, 1]
         .filter((index) => index >= from)
@@ -362,8 +436,9 @@ describe("page transport", () => {
     r.advance(2000);
     await flush();
     expect(
-      r.requests.filter((request) => request.url.startsWith("./_spur/agent/messages")).at(-1)?.url,
-    ).toBe("./_spur/agent/messages?from=2");
+      r.requests.filter((request) => request.url.startsWith("/p/films/_spur/agent/messages")).at(-1)
+        ?.url,
+    ).toBe("/p/films/_spur/agent/messages?from=2");
   });
 
   it("drops a malformed stream frame and keeps handling the next one", async () => {
@@ -383,12 +458,13 @@ describe("page transport", () => {
     r.advance(500);
     await flush();
     const writes = r.requests.filter(
-      (request) => request.method === "POST" && request.url === "./_spur/db/docs/_state/page",
+      (request) =>
+        request.method === "POST" && request.url === "/p/films/_spur/db/docs/_state/page",
     );
     expect(writes).toEqual([
       {
         method: "POST",
-        url: "./_spur/db/docs/_state/page",
+        url: "/p/films/_spur/db/docs/_state/page",
         body: { data: { app: { tab: 2 }, controls: [] } },
       },
     ]);

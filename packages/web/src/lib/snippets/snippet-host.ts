@@ -235,6 +235,7 @@ export interface SnippetHostState {
   confirm: PendingConfirm | null;
   height: number | null;
   fullscreen: boolean;
+  voiceTarget: string | null;
 }
 
 export interface SnippetSessionUpdate {
@@ -273,6 +274,7 @@ export interface SnippetHost {
   retry(trusted: boolean): void;
   reload(trusted: boolean): void;
   setFullscreen(open: boolean): void;
+  insertVoiceText(target: string, mountKey: string, text: string): void;
   dispose(): void;
 }
 
@@ -354,6 +356,7 @@ export function createSnippetHost(
   // Handled at hello (error card); this only keeps an early rejection from going unhandled.
   stateDocId.catch(() => undefined);
   const listeners = new Set<() => void>();
+  const chatTargets = new Set<string>();
   let disposed = false;
   let mountCount = 0;
   let port: SnippetPort | null = null;
@@ -391,6 +394,7 @@ export function createSnippetHost(
     confirm: null,
     height: null,
     fullscreen: false,
+    voiceTarget: null,
   };
 
   function set(patch: Partial<SnippetHostState>): void {
@@ -552,6 +556,8 @@ export function createSnippetHost(
   }
 
   function closePort(): void {
+    chatTargets.clear();
+    set({ voiceTarget: null });
     if (port) {
       port.onmessage = null;
       port.close();
@@ -993,6 +999,22 @@ export function createSnippetHost(
     if (snippetByteLength(data) > SNIPPET_MAX_PORT_MESSAGE_BYTES) return;
     if (!isRecord(data) || typeof data.type !== "string") return;
     switch (data.type) {
+      case SNIPPET_TO_HOST.chatRegister:
+      case SNIPPET_TO_HOST.chatFocus:
+      case SNIPPET_TO_HOST.chatUnregister: {
+        if (typeof data.target !== "string" || !/^[A-Za-z0-9-]{1,64}$/.test(data.target)) return;
+        if (data.type === SNIPPET_TO_HOST.chatRegister && chatTargets.size < 16) {
+          chatTargets.add(data.target);
+          if (!state.voiceTarget) set({ voiceTarget: data.target });
+        } else if (data.type === SNIPPET_TO_HOST.chatFocus && chatTargets.has(data.target)) {
+          set({ voiceTarget: data.target });
+        } else if (data.type === SNIPPET_TO_HOST.chatUnregister) {
+          chatTargets.delete(data.target);
+          if (state.voiceTarget === data.target)
+            set({ voiceTarget: chatTargets.values().next().value ?? null });
+        }
+        return;
+      }
       case SNIPPET_TO_HOST.invoke:
         handleInvoke(data);
         return;
@@ -1221,6 +1243,19 @@ export function createSnippetHost(
     retry,
     reload,
     setFullscreen,
+    insertVoiceText(target, mountKey, text) {
+      if (
+        disposed ||
+        state.phase !== "connected" ||
+        state.conflict ||
+        !canSend ||
+        state.mountKey !== mountKey ||
+        !chatTargets.has(target) ||
+        text.length > 20_000
+      )
+        return;
+      postToSnippet({ type: SNIPPET_TO_FRAME.chatTranscript, target, text });
+    },
     dispose() {
       staleConfirm();
       failInvokeCall();

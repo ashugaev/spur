@@ -14,6 +14,7 @@ import { CloseIcon } from "@/components/icons/CloseIcon";
 import { SendIcon } from "@/components/icons/SendIcon";
 import { Spinner } from "@/components/icons/Spinner";
 import { LoadingBar } from "@/components/LoadingBar";
+import { ChatVoiceControls } from "@/components/ChatVoiceControls";
 import { formatRelativeTime } from "@/lib/format";
 import { useTheme } from "@/lib/theme-context";
 import {
@@ -667,6 +668,17 @@ export function SnippetPanel({
         ) : (
           <FramePlaceholder />
         )}
+        {state.phase === "connected" &&
+        !state.conflict &&
+        state.availability.canInvoke &&
+        state.voiceTarget ? (
+          <SnippetVoice
+            host={host}
+            sessionId={sessionId}
+            mountKey={state.mountKey}
+            target={state.voiceTarget}
+          />
+        ) : null}
         {state.confirm ? (
           <ConfirmStrip
             confirm={state.confirm}
@@ -677,5 +689,31 @@ export function SnippetPanel({
         <StatusLine action={state.action} onRetry={(trusted) => host.retry(trusted)} />
       </dialog>
     </section>
+  );
+}
+
+function SnippetVoice({
+  host,
+  sessionId,
+  mountKey,
+  target,
+}: {
+  host: SnippetHost;
+  sessionId: string;
+  mountKey: string;
+  target: string;
+}) {
+  const locked = useRef(target);
+  return (
+    <div className="border-t border-[var(--color-border-subtle)] px-2 py-1.5">
+      <ChatVoiceControls
+        key={mountKey}
+        contextKey={`snippet-chat:${sessionId}:${mountKey}`}
+        onTakeStart={() => {
+          locked.current = target;
+        }}
+        onTranscribed={(text) => host.insertVoiceText(locked.current, mountKey, text)}
+      />
+    </div>
   );
 }

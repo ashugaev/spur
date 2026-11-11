@@ -8,6 +8,8 @@
  * textContent only. */
 (function () {
   "use strict";
+  if (window.__SPUR_SDK_BOOTED__) return;
+  window.__SPUR_SDK_BOOTED__ = true;
 
   const MSG = {
     hello: "spur:hello",
@@ -28,6 +30,10 @@
     dbChange: "db-change",
     dbReset: "db-reset",
     agentEvent: "agent-event",
+    chatRegister: "chat-register",
+    chatFocus: "chat-focus",
+    chatUnregister: "chat-unregister",
+    chatTranscript: "chat-transcript",
   };
   const PROTOCOL_VERSION = 2;
   const HELLO_INTERVAL_MS = 200;
@@ -96,7 +102,10 @@
     "input-border": "GrayText",
     "text-inverse": "AccentColorText",
   };
-  const PAGE_PALETTE_HREF = "./_spur/theme.css";
+  const pageMatch = /^\/p\/([a-z0-9][a-z0-9-]{0,39})(?:\/|$)/.exec(window.location.pathname);
+  const pageRoot = pageMatch ? "/p/" + pageMatch[1] + "/" : null;
+  const PAGE_PALETTE_HREF = pageRoot + "_spur/theme.css";
+  const chats = new Map();
   const FIELD_TAGS = "spur-choice-list, spur-text-input, spur-textarea";
   const BOUND_SELECTOR =
     "[data-spur-action], spur-button, spur-choice-list, spur-choice, spur-text-input, spur-textarea";
@@ -260,6 +269,16 @@
         if (data.type !== MSG.fullscreen) return;
       }
       switch (data.type) {
+        case MSG.chatTranscript:
+          if (
+            typeof data.target === "string" &&
+            typeof data.text === "string" &&
+            data.text.length <= 20000
+          ) {
+            const chat = chats.get(data.target);
+            if (chat) chat.insertTranscript(data.text);
+          }
+          return;
         case MSG.action:
           setAction(data.action);
           return;
@@ -344,6 +363,9 @@
 
     return {
       kind: "port",
+      chatTarget: function (type, target) {
+        post({ type: type, target: target });
+      },
       connect: connect,
       connected: function () {
         return port !== null;
@@ -389,7 +411,8 @@
   }
 
   function createPageTransport() {
-    const base = "./_spur/";
+    if (!pageRoot) throw new Error("Page SDK requires a /p/<id>/ URL");
+    const base = pageRoot + "_spur/";
     let source = null;
     const waiters = new Map();
 
@@ -658,16 +681,24 @@
     ".spur-chat-tag{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--spur-text-tertiary);margin-right:8px}",
     ".spur-chat-status{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--spur-text-tertiary)}",
     ".spur-chat-status[data-tone=error]{color:var(--spur-status-error)}",
-    ".spur-chat-form{display:flex;gap:6px}",
-    ".spur-chat-form input{flex:1;font:inherit;color:var(--spur-text-primary);background:var(--spur-input-bg);border:1px solid var(--spur-input-border);padding:6px 8px;border-radius:0}",
-    ".spur-chat-form input[aria-invalid=true]{border-color:var(--spur-status-error)}",
-    ".spur-chat-form input:disabled{opacity:.55}",
+    ".spur-chat-form{display:flex;flex-wrap:wrap;gap:6px}",
+    ".spur-chat-form textarea{width:100%;min-width:0;resize:vertical;font:inherit;color:var(--spur-text-primary);background:var(--spur-input-bg);border:1px solid var(--spur-input-border);padding:6px 8px;border-radius:0}",
+    ".spur-chat-form textarea:focus-visible{outline:2px solid var(--spur-accent);outline-offset:-2px}",
+    ".spur-chat-form textarea[aria-invalid=true]{border-color:var(--spur-status-error)}",
+    ".spur-chat-form textarea:disabled{opacity:.55}",
+    ".spur-chat-voice{flex:1;min-width:0;width:0;height:36px;border:0;background:var(--spur-bg-surface)}",
   ].join("\n");
 
   function installStyles() {
     const style = document.createElement("style");
     style.setAttribute("data-spur-sdk", "");
-    style.textContent = STYLE;
+    style.textContent = boot
+      ? STYLE
+      : STYLE.split("\n")
+          .filter(function (line) {
+            return !/^(html|body|\*)/.test(line);
+          })
+          .join("\n");
     const head = document.head || document.documentElement;
     head.insertBefore(style, head.firstChild);
   }
@@ -1635,15 +1666,20 @@
     class extends HTMLElement {
       connectedCallback() {
         whenParsed(() => {
-          if (this._ready) return;
+          if (!this.isConnected) return;
+          if (this._ready) {
+            this._attach();
+            return;
+          }
           this._ready = true;
+          this._chatId = randomId();
           const status = el("div", "spur-chat-status", AGENT_LABELS[agentStatus.state] || "");
           const log = el("div", "spur-chat-log");
           log.setAttribute("role", "log");
           log.setAttribute("aria-live", "polite");
           const form = el("form", "spur-chat-form");
-          const input = document.createElement("input");
-          input.type = "text";
+          const input = document.createElement("textarea");
+          input.rows = 3;
           input.maxLength = 20000;
           input.placeholder = this.getAttribute("placeholder") || "Message the agent...";
           input.setAttribute("aria-label", "Message");
@@ -1654,6 +1690,9 @@
           this.appendChild(status);
           this.appendChild(log);
           this.appendChild(form);
+          this._input = input;
+          this._form = form;
+          this._status = status;
           const render = (message) => {
             const node = el("div", "spur-chat-msg");
             if (message.kind === "action") node.appendChild(el("span", "spur-chat-tag", "Action"));
@@ -1663,11 +1702,15 @@
             log.appendChild(node);
             log.scrollTop = log.scrollHeight;
           };
-          messagePoll.messages.forEach(render);
-          sdk.agent.onMessage(render);
-          sdk.on("agent", function (next) {
+          this._renderMessage = render;
+          this._renderStatus = function (next) {
             status.textContent = AGENT_LABELS[next.state] || next.state;
             status.removeAttribute("data-tone");
+          };
+          messagePoll.messages.forEach(render);
+          this._attach();
+          input.addEventListener("focus", () => {
+            if (transport.kind === "port") transport.chatTarget(MSG.chatFocus, this._chatId);
           });
           input.addEventListener("input", function () {
             input.removeAttribute("aria-invalid");
@@ -1676,6 +1719,10 @@
             submitEvent.preventDefault();
             const text = input.value.trim();
             if (!text) return;
+            if (text.length > 20000) {
+              this._voiceError("Message exceeds 20,000 characters");
+              return;
+            }
             send.disabled = true;
             input.disabled = true;
             status.removeAttribute("data-tone");
@@ -1696,6 +1743,99 @@
             });
           });
         });
+      }
+      _attach() {
+        if (this._offMessage) return;
+        chats.set(this._chatId, this);
+        this._offMessage = sdk.agent.onMessage(this._renderMessage);
+        this._offAgent = sdk.on("agent", this._renderStatus);
+        if (transport.kind === "port") {
+          sdk.ready().then(() => {
+            if (this.isConnected) transport.chatTarget(MSG.chatRegister, this._chatId);
+          });
+        } else if (!this.hasAttribute("data-floating-chat")) this.setVoiceActive(true);
+      }
+      _voiceError(message) {
+        this._status.textContent = message;
+        this._status.setAttribute("data-tone", "error");
+      }
+      insertTranscript(text) {
+        if (!this.isConnected || typeof text !== "string" || this._input.disabled) return;
+        const input = this._input;
+        const start = input.selectionStart ?? input.value.length;
+        const end = input.selectionEnd ?? start;
+        const next = input.value.slice(0, start) + text + input.value.slice(end);
+        if (next.length > 20000) {
+          this._voiceError("Dictation exceeds 20,000 characters");
+          return;
+        }
+        input.value = next;
+        input.setSelectionRange(start + text.length, start + text.length);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      setVoiceActive(active) {
+        if (transport.kind !== "page" || !this._form) return;
+        if (!active) {
+          if (this._voiceFrame) this._voiceFrame.remove();
+          if (this._voiceListener) window.removeEventListener("message", this._voiceListener);
+          this._voiceFrame = null;
+          this._voiceListener = null;
+          return;
+        }
+        if (this._voiceFrame) return;
+        const frame = document.createElement("iframe");
+        const nonce = randomId();
+        const page = pageMatch[1];
+        const chat = this._chatId;
+        const origin = window.location.origin;
+        frame.className = "spur-chat-voice";
+        frame.title = "Voice input";
+        frame.allow = "microphone";
+        frame.src = "/page-voice?" + new URLSearchParams({ page: page, chat: chat, nonce: nonce });
+        this._voiceFrame = frame;
+        this._voiceListener = (event) => {
+          const data = event.data;
+          if (
+            this._voiceFrame !== frame ||
+            !this.isConnected ||
+            event.origin !== origin ||
+            event.source !== frame.contentWindow ||
+            !data ||
+            data.page !== page ||
+            data.chat !== chat ||
+            data.nonce !== nonce
+          )
+            return;
+          if (data.type === "spur:voice-ready")
+            frame.contentWindow.postMessage(
+              { type: "spur:voice-connect", page: page, chat: chat, nonce: nonce },
+              origin,
+            );
+          if (
+            data.type === "spur:voice-transcript" &&
+            typeof data.text === "string" &&
+            data.text.length <= 20000
+          )
+            this.insertTranscript(data.text);
+          if (
+            data.type === "spur:voice-size" &&
+            typeof data.height === "number" &&
+            Number.isFinite(data.height)
+          )
+            frame.style.height = Math.min(120, Math.max(36, data.height)) + "px";
+        };
+        window.addEventListener("message", this._voiceListener);
+        this._form.insertBefore(frame, this._form.lastChild);
+      }
+      disconnectedCallback() {
+        this.setVoiceActive(false);
+        chats.delete(this._chatId);
+        if (this._offMessage) this._offMessage();
+        if (this._offAgent) this._offAgent();
+        this._offMessage = null;
+        this._offAgent = null;
+        if (transport.kind === "port" && this._chatId)
+          transport.chatTarget(MSG.chatUnregister, this._chatId);
       }
     },
   );
@@ -1726,4 +1866,76 @@
       false,
     );
   });
+
+  function installPageWidget() {
+    if (boot || !pageRoot || document.querySelector("[data-spur-page-widget]")) return;
+    const host = document.createElement("div");
+    host.setAttribute("data-spur-page-widget", "");
+    host.style.cssText =
+      "all:initial!important;position:fixed!important;inset:auto 24px 24px auto!important;z-index:2147483646!important;max-width:calc(100vw - 32px)!important";
+    const root = host.attachShadow({ mode: "open" });
+    const styles = document.createElement("style");
+    styles.textContent =
+      STYLE +
+      "\n:host{font:12px ui-monospace,monospace;color:var(--spur-text-primary)}[hidden]{display:none!important}.panel{width:360px;max-width:calc(100vw - 32px);max-height:calc(100dvh - 100px);overflow:auto;background:var(--spur-bg-surface);border:1px solid var(--spur-border-default);margin-bottom:8px}.head{display:flex;align-items:center;justify-content:space-between;padding:8px;border-bottom:1px solid var(--spur-border-subtle);font-weight:700;text-transform:uppercase}.panel spur-chat{border:0}.toggle{width:48px;height:48px;margin-left:auto;display:flex;align-items:center;justify-content:center;background:var(--spur-bg-surface);padding:0}.toggle svg{width:22px;height:22px}.panel .spur-chat-msg{overflow-wrap:anywhere}.panel .spur-chat-log{max-height:min(320px,40dvh)}@media(max-width:639px){.toggle{width:44px;height:44px}:host{transform:translate(8px,8px)}}";
+    root.appendChild(styles);
+    const panel = el("section", "panel");
+    panel.hidden = true;
+    panel.setAttribute("aria-label", "Page agent chat");
+    const header = el("div", "head");
+    header.appendChild(el("span", "", "Page agent"));
+    const close = el("button", "spur-btn", "×");
+    close.type = "button";
+    close.setAttribute("aria-label", "Close agent chat");
+    header.appendChild(close);
+    panel.appendChild(header);
+    const chat = document.createElement("spur-chat");
+    chat.setAttribute("data-floating-chat", "");
+    panel.appendChild(chat);
+    root.appendChild(panel);
+    const toggle = el("button", "spur-btn toggle");
+    toggle.type = "button";
+    toggle.setAttribute("aria-label", "Open agent chat");
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.innerHTML =
+      '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 3v3M9 3h6M4 9h16v12H4zM1 12v6M23 12v6M8 17h8M8 12h1M15 12h1"/></svg>';
+    root.appendChild(toggle);
+    let open = false;
+    function setOpen(next) {
+      open = next;
+      panel.hidden = !open;
+      toggle.setAttribute("aria-expanded", String(open));
+      toggle.setAttribute("aria-label", open ? "Close agent chat" : "Open agent chat");
+      chat.setVoiceActive(open);
+      if (open && chat._input) chat._input.focus();
+      if (!open) toggle.focus();
+    }
+    toggle.addEventListener("click", function () {
+      setOpen(!open);
+    });
+    close.addEventListener("click", function () {
+      setOpen(false);
+    });
+    root.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && open) {
+        event.preventDefault();
+        setOpen(false);
+      }
+    });
+    window.addEventListener(
+      "pagehide",
+      function () {
+        chat.setVoiceActive(false);
+      },
+      { once: true },
+    );
+    document.body.appendChild(host);
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("chat") === "open") {
+      url.searchParams.delete("chat");
+      window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+      setOpen(true);
+    }
+  }
+  whenParsed(installPageWidget);
 })();
