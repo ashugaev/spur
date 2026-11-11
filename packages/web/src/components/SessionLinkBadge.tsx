@@ -1,6 +1,7 @@
 "use client";
 
-import type { CSSProperties } from "react";
+import { type CSSProperties, useState } from "react";
+import { checkCardRows, PrHoverCardTrigger, reviewerCardRows } from "@/components/PrHoverCard";
 import {
   CiStatusDot,
   extractLinkId,
@@ -16,6 +17,8 @@ import {
   ReviewCommentsBadge,
   ReviewDecisionDot,
   ReviewersBadge,
+  reviewersBadgeVisible,
+  reviewersSummary,
   usePrInfo,
 } from "@/lib/link-icons";
 import type { SpurSessionLink } from "@/lib/types";
@@ -58,6 +61,7 @@ export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBa
   const reviewProvider = isPr ? reviewProviderFromUrl(link.url) : null;
   const fetchedPrInfo = useSessionLinkPrInfo(providedPrInfo ? undefined : link);
   const prInfo = providedPrInfo ?? fetchedPrInfo;
+  const [slot, setSlot] = useState<HTMLSpanElement | null>(null);
   const indicator = prStatusIndicator(prInfo);
   const hasStatus =
     indicator.kind === "review" || indicator.status !== null || prInfo.mergeConflict;
@@ -73,38 +77,53 @@ export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBa
   ].join(" ");
 
   return (
-    <a className={classes} href={link.url} rel="noreferrer" target="_blank">
-      {isPr ? (
-        reviewProvider === "gitlab" ? (
-          <GitlabIcon />
-        ) : (
-          <GithubIcon />
-        )
-      ) : isTrackerLinkLabel(link.label) ? (
-        <JiraIcon />
-      ) : null}
-      <span className="text-[10px]" style={labelStyle}>
-        {extractLinkId(link)}
-      </span>
-      {isPr ? (
-        <>
-          {hasStatus ? (
-            <span
-              className="inline-flex items-center gap-1"
-              title={statusTitle(prInfo, reviewProvider === "github")}
-            >
-              {indicator.kind === "review" ? (
-                <ReviewDecisionDot decision={indicator.decision} showTitle={false} />
-              ) : (
-                <CiStatusDot status={indicator.status} />
-              )}
-              {prInfo.mergeConflict ? <MergeConflictBadge /> : null}
-            </span>
-          ) : null}
-          {reviewProvider === "github" ? <ReviewersBadge info={prInfo} /> : null}
-          <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
-        </>
-      ) : null}
-    </a>
+    <span className="relative inline-flex">
+      <a className={classes} href={link.url} rel="noreferrer" target="_blank">
+        {isPr ? (
+          reviewProvider === "gitlab" ? (
+            <GitlabIcon />
+          ) : (
+            <GithubIcon />
+          )
+        ) : isTrackerLinkLabel(link.label) ? (
+          <JiraIcon />
+        ) : null}
+        <span className="text-[10px]" style={labelStyle}>
+          {extractLinkId(link)}
+        </span>
+        {isPr ? (
+          <>
+            {hasStatus ? (
+              <PrHoverCardTrigger
+                slot={slot}
+                rows={checkCardRows(prInfo.checks)}
+                fallbackTitle={statusTitle(prInfo, reviewProvider === "github")}
+              >
+                {indicator.kind === "review" ? (
+                  <ReviewDecisionDot decision={indicator.decision} showTitle={false} />
+                ) : (
+                  <CiStatusDot status={indicator.status} />
+                )}
+                {prInfo.mergeConflict ? <MergeConflictBadge /> : null}
+              </PrHoverCardTrigger>
+            ) : null}
+            {reviewProvider === "github" && reviewersBadgeVisible(prInfo) ? (
+              <PrHoverCardTrigger
+                slot={slot}
+                rows={reviewerCardRows(prInfo.reviewers)}
+                fallbackTitle={reviewersSummary(prInfo)}
+              >
+                <ReviewersBadge info={prInfo} />
+              </PrHoverCardTrigger>
+            ) : null}
+            <ReviewCommentsBadge
+              total={prInfo.totalThreads}
+              unresolved={prInfo.unresolvedThreads}
+            />
+          </>
+        ) : null}
+      </a>
+      <span ref={setSlot} />
+    </span>
   );
 }

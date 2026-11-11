@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge.js";
 import type * as LinkIconsModule from "@/lib/link-icons.js";
 import type { PrInfo } from "@/lib/pr-status-shape.js";
@@ -39,9 +39,11 @@ describe("SessionLinkBadge", () => {
     expect(people[0]).toHaveTextContent("2");
     expect(people[0]).toHaveClass("text-[var(--color-status-error)]");
     expect(people[0]).toHaveAttribute(
-      "title",
+      "aria-label",
       "Changes requested\nApprovals: 2 · @alice, @bob\nChanges requested: 1 · @carol",
     );
+    expect(people[0]).not.toHaveAttribute("title");
+    expect(people[0]?.closest("[title]")).toBeNull();
     expect(screen.getByLabelText("Approved")).toBeInTheDocument();
     expect(
       container.querySelector("[data-pr-review-decision='approved'] svg")?.querySelectorAll("path"),
@@ -69,24 +71,203 @@ describe("SessionLinkBadge", () => {
     expect(person).toHaveTextContent("1");
     expect(person).toHaveClass("text-[var(--color-status-attention)]");
     expect(person).toHaveAttribute(
-      "title",
+      "aria-label",
       "Review required\nApprovals: 1 · @alice\nChanges requested: 0",
     );
   });
 
-  it.each(["none", "unavailable", undefined] as const)(
-    "hides optional or unavailable review requirements even with raw changes requests (%s)",
-    (reviewRequirement) => {
+  const emptyReviewers = [null, { approved: [], changesRequested: [], pending: [] }] as const;
+  const populatedReviewers = [
+    { approved: ["alice"], changesRequested: [] },
+    { approved: [], changesRequested: ["carol"] },
+    { approved: [], changesRequested: [], pending: [{ name: "core", team: true }] },
+  ] as const;
+  const optionalRequirements = ["none", "unavailable", undefined] as const;
+
+  it.each(optionalRequirements.flatMap((r) => emptyReviewers.map((rv) => [r, rv] as const)))(
+    "hides the reviewer badge without reviews or requests (%s, %j)",
+    (reviewRequirement, reviewers) => {
       const { container } = render(
         <SessionLinkBadge
           link={{ label: "pr", url: "https://github.com/org/repo/pull/103" }}
-          prInfo={{ ...info, reviewRequirement, reviewDecision: "changes_requested" }}
+          prInfo={{ ...info, reviewRequirement, reviewers: reviewers ? { ...reviewers } : null }}
         />,
       );
       expect(container.querySelector("[data-pr-reviewers]")).toBeNull();
-      expect(screen.getByLabelText("Changes requested")).toBeInTheDocument();
     },
   );
+
+  it.each(optionalRequirements.flatMap((r) => populatedReviewers.map((rv) => [r, rv] as const)))(
+    "shows the reviewer badge for any review or request (%s, %j)",
+    (reviewRequirement, reviewers) => {
+      const { container } = render(
+        <SessionLinkBadge
+          link={{ label: "pr", url: "https://github.com/org/repo/pull/103" }}
+          prInfo={{
+            ...info,
+            reviewRequirement,
+            reviewDecision: null,
+            reviewers: {
+              ...reviewers,
+              pending: "pending" in reviewers ? [...reviewers.pending] : [],
+            },
+          }}
+        />,
+      );
+      expect(container.querySelectorAll("[data-pr-reviewers]")).toHaveLength(1);
+    },
+  );
+
+  it("shows the reviewer badge when GitHub requires review and reviewers are unknown", () => {
+    const { container } = render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/103" }}
+        prInfo={{ ...info, reviewers: null, reviewRequirement: "required" }}
+      />,
+    );
+    expect(container.querySelector("[data-pr-reviewers]")).not.toBeNull();
+  });
+
+  describe("hover cards", () => {
+    const cardInfo: PrInfo = {
+      ...info,
+      ciStatus: "failure",
+      reviewDecision: null,
+      reviewRequirement: "none",
+      reviewers: {
+        approved: ["xena", "alice"],
+        changesRequested: ["yuri", "alice"],
+        pending: [
+          { name: "core", team: true },
+          { name: "zed", team: false },
+        ],
+      },
+      checks: [
+        { name: "lint", state: "passed" },
+        { name: "e2e", state: "pending" },
+        { name: "test", state: "failed" },
+        { name: "gate", state: "failed" },
+      ],
+    };
+
+    function renderBadge(prInfo: PrInfo = cardInfo) {
+      return render(
+        <SessionLinkBadge
+          link={{ label: "pr", url: "https://github.com/org/repo/pull/200" }}
+          prInfo={prInfo}
+        />,
+      );
+    }
+
+    function open(trigger: HTMLElement) {
+      fireEvent.mouseEnter(trigger);
+      act(() => {
+        vi.advanceTimersByTime(100);
+      });
+    }
+
+    function rows() {
+      return [...document.querySelectorAll("[data-pr-card-row]")].map((row) => ({
+        text: row.textContent,
+        tone: row.querySelector("[data-pr-card-dot]")?.getAttribute("data-pr-card-dot"),
+      }));
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    it("orders reviewer rows changes requested, pending, approved without duplicates", () => {
+      const { container } = renderBadge();
+      const trigger = container.querySelector("[data-pr-reviewers]")?.parentElement as HTMLElement;
+      expect(trigger).not.toHaveAttribute("title");
+      open(trigger);
+      expect(rows()).toEqual([
+        { text: "@yuri", tone: "error" },
+        { text: "@alice", tone: "error" },
+        { text: "coreteam", tone: "attention" },
+        { text: "@zed", tone: "attention" },
+        { text: "@xena", tone: "ready" },
+      ]);
+      expect(document.querySelector("[data-pr-card]")?.closest("a")).toBeNull();
+    });
+
+    it("orders check rows failed, pending, passed with no totals", () => {
+      const { container } = renderBadge();
+      open(container.querySelector("[aria-label='CI failing']")?.parentElement as HTMLElement);
+      expect(rows()).toEqual([
+        { text: "test", tone: "error" },
+        { text: "gate", tone: "error" },
+        { text: "e2e", tone: "attention" },
+        { text: "lint", tone: "ready" },
+      ]);
+      expect(document.querySelector("[data-pr-card-more]")).toBeNull();
+      expect(document.querySelector("[data-pr-card]")?.closest("a")).toBeNull();
+    });
+
+    it("caps checks at 8 rows with a +N more line", () => {
+      const checks = Array.from({ length: 13 }, (_, i) => ({
+        name: `check-${i}`,
+        state: "passed" as const,
+      }));
+      const { container } = renderBadge({ ...cardInfo, checks });
+      open(container.querySelector("[aria-label='CI failing']")?.parentElement as HTMLElement);
+      expect(rows()).toHaveLength(8);
+      expect(document.querySelector("[data-pr-card-more]")).toHaveTextContent("+5 more");
+    });
+
+    it("keeps the native title when no check rows exist", () => {
+      const { container } = renderBadge({ ...cardInfo, checks: null });
+      const status = container.querySelector("[aria-label='CI failing']")?.parentElement;
+      expect(status).toHaveAttribute("title", "CI failing");
+      open(status as HTMLElement);
+      expect(document.querySelector("[data-pr-card]")).toBeNull();
+    });
+
+    it("keeps the card open when the pointer leaves and re-enters within the grace", () => {
+      const { container } = renderBadge();
+      const trigger = container.querySelector("[data-pr-reviewers]")?.parentElement as HTMLElement;
+      open(trigger);
+      fireEvent.mouseLeave(trigger);
+      act(() => {
+        vi.advanceTimersByTime(100);
+      });
+      expect(document.querySelector("[data-pr-card]")).not.toBeNull();
+      fireEvent.mouseEnter(trigger);
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(document.querySelector("[data-pr-card]")).not.toBeNull();
+      fireEvent.mouseLeave(trigger);
+      act(() => {
+        vi.advanceTimersByTime(150);
+      });
+      expect(document.querySelector("[data-pr-card]")).toBeNull();
+    });
+
+    it("does not prevent the desktop click so the badge link opens the PR", () => {
+      const { container } = renderBadge();
+      const trigger = container.querySelector("[data-pr-reviewers]")?.parentElement as HTMLElement;
+      expect(fireEvent.click(trigger)).toBe(true);
+    });
+
+    it("pins the card on a touch tap without navigating", () => {
+      vi.stubGlobal("matchMedia", (query: string) => ({
+        matches: query === "(hover: none) and (pointer: coarse)",
+      }));
+      const { container } = renderBadge();
+      const trigger = container.querySelector("[data-pr-reviewers]")?.parentElement as HTMLElement;
+      expect(fireEvent.click(trigger)).toBe(false);
+      expect(document.querySelector("[data-pr-card]")).not.toBeNull();
+      fireEvent.pointerDown(document.body);
+      expect(document.querySelector("[data-pr-card]")).toBeNull();
+    });
+  });
 
   it("keeps people metadata independent from failing CI and explains the conflict", () => {
     render(
@@ -144,7 +325,10 @@ describe("SessionLinkBadge", () => {
     const person = container.querySelector("[data-pr-reviewers]");
     expect(person).toHaveClass("text-[var(--color-status-error)]");
     expect(person).toHaveTextContent("");
-    expect(person).toHaveAttribute("title", "Changes requested\nReview history unavailable");
+    expect(person?.parentElement).toHaveAttribute(
+      "title",
+      "Changes requested\nReview history unavailable",
+    );
   });
 
   it.each([
