@@ -79260,5 +79260,118 @@ describe("SessionService", () => {
         service.dispose();
       }
     });
+
+    it("spawn failure cleanup sweeps the failed session id once", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      workspaceExistsMock.mockReturnValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+      createTmuxSessionMock.mockRejectedValueOnce(new Error("tmux boom"));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      try {
+        await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow();
+        expect(sessions.get("api-1")?.status).toBe("errored");
+        expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ sessionId: "api-1", sessionToolDir: toolDir("api-1") }),
+        );
+      } finally {
+        service.dispose();
+      }
+    });
+
+    describe("background spawn retries", () => {
+      const setupBackground = async (failures: number) => {
+        mockClaudeJsonlState("waiting");
+        createSessionStore();
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+        captureAgentProcessesForLaunchMock.mockResolvedValue({
+          status: "ok",
+          processes: [],
+          complete: true,
+        });
+        for (let i = 0; i < failures; i++) {
+          createTmuxSessionMock.mockRejectedValueOnce(new Error(`tmux boom ${i + 1}`));
+        }
+        createTmuxSessionMock.mockImplementation(async () => {
+          tmuxSessionExistsMock.mockResolvedValue(true);
+        });
+        const { SessionService } = await loadSessionServiceModule();
+        return new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      };
+
+      it("non-final failed attempts do not sweep", async () => {
+        const service = await setupBackground(2);
+        try {
+          await service.spawnInBackground({ project: "api", prompt: "hello" });
+          await vi.waitFor(() => {
+            expect(createTmuxSessionMock).toHaveBeenCalledTimes(3);
+            expect(
+              writeSessionMock.mock.calls.some(([, session]) => session.status === "running"),
+            ).toBe(true);
+          });
+          expect(killTmuxSessionMock).toHaveBeenCalledTimes(2);
+          expect(terminateDetachedSessionProcessesMock).not.toHaveBeenCalled();
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("the final failed attempt sweeps once", async () => {
+        const service = await setupBackground(3);
+        try {
+          await service.spawnInBackground({ project: "api", prompt: "hello" });
+          await vi.waitFor(() => {
+            expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledTimes(1);
+          });
+          expect(createTmuxSessionMock).toHaveBeenCalledTimes(3);
+          expect(killTmuxSessionMock).toHaveBeenCalledTimes(3);
+          expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledWith(
+            expect.objectContaining({ sessionId: "api-1" }),
+          );
+        } finally {
+          service.dispose();
+        }
+      });
+    });
+
+    it("respawn of a completed session sweeps it before spawning the replacement", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1", status: "completed" }));
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      workspaceExistsMock.mockReturnValue(true);
+      mockClaudeJsonlState("waiting");
+      const service = await createDisposedSessionService();
+      try {
+        await service.respawn("api-1");
+        await service.settleBackgroundSpawns();
+        expect(terminateDetachedSessionProcessesMock).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ sessionId: "api-1", sessionToolDir: toolDir("api-1") }),
+        );
+        const [sweepOrder] = terminateDetachedSessionProcessesMock.mock.invocationCallOrder;
+        expect(createTmuxSessionMock).toHaveBeenCalled();
+        expect(sweepOrder).toBeLessThan(createTmuxSessionMock.mock.invocationCallOrder[0] ?? 0);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("send-path relaunch tears down the pane without sweeping", async () => {
+      readSessionMock.mockImplementation((_dataDir: string, sessionId: string) =>
+        runningSession({ id: sessionId }),
+      );
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      terminateAgentProcessesMock.mockResolvedValueOnce({ status: "survivors", pids: [999] });
+      const service = await createDisposedSessionService();
+      try {
+        await expect(service.send("api-1", { message: "resume work" })).rejects.toThrow(/999/);
+        expect(terminateAgentProcessesMock).toHaveBeenCalled();
+        expect(terminateDetachedSessionProcessesMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    });
   });
 });
