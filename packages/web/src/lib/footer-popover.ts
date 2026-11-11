@@ -21,9 +21,15 @@ export function isTouchPointer(): boolean {
 
 // closeDelayMs > 0 keeps the popover open for that long after mouseleave so a
 // pointer crossing a gap between trigger and card does not close it.
+// popoverRef: the popover node when it is rendered outside containerRef (a
+// portal); a touch tap on it counts as inside.
 export function useFooterPopover<T extends HTMLElement = HTMLDivElement>({
   closeDelayMs = 0,
-}: { closeDelayMs?: number } = {}): FooterPopover<T> {
+  popoverRef,
+}: {
+  closeDelayMs?: number;
+  popoverRef?: React.MutableRefObject<HTMLElement | null>;
+} = {}): FooterPopover<T> {
   const [hovered, setHovered] = useState(false);
   const [pinned, setPinned] = useState(false);
   const [dismissed, setDismissed] = useState(false);
@@ -67,6 +73,7 @@ export function useFooterPopover<T extends HTMLElement = HTMLDivElement>({
       const target = event.target;
       if (!(target instanceof Node)) return;
       if (containerRef.current?.contains(target)) return;
+      if (popoverRef?.current?.contains(target)) return;
       close();
     };
 

@@ -155,9 +155,10 @@ test.describe("PR hover cards on touch", () => {
     await expect(page.locator("[data-pr-card]")).toBeVisible();
     expect(page.url()).toBe(url);
     expect(opened).toBe(0);
-    // Tap inside the card neither navigates nor re-pins through the portal.
+    // Tap inside the card keeps it pinned and never navigates.
     await page.locator("[data-pr-card]").tap();
     await page.waitForTimeout(300);
+    await expect(page.locator("[data-pr-card]")).toBeVisible();
     expect(page.url()).toBe(url);
     expect(opened).toBe(0);
     await page.locator("body").tap({ position: { x: 5, y: 400 } });

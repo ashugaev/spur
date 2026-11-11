@@ -338,8 +338,12 @@ describe("SessionLinkBadge", () => {
       const trigger = container.querySelector("[data-pr-reviewers]")?.parentElement as HTMLElement;
       fireEvent.click(trigger);
       const card = document.querySelector("[data-pr-card]") as HTMLElement;
+      fireEvent.pointerDown(card);
+      fireEvent.pointerUp(card);
       expect(fireEvent.click(card)).toBe(true);
       expect(document.querySelector("[data-pr-card]")).not.toBeNull();
+      fireEvent.pointerDown(document.body);
+      expect(document.querySelector("[data-pr-card]")).toBeNull();
     });
 
     it("pins the card on a touch tap without navigating", () => {

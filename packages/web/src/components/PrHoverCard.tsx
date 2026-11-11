@@ -3,6 +3,7 @@
 import {
   type KeyboardEvent,
   type MouseEvent,
+  type MutableRefObject,
   type ReactNode,
   useEffect,
   useId,
@@ -68,11 +69,24 @@ export function checkCardRows(checks: PrCheck[] | null | undefined): PrCardRow[]
   );
 }
 
-function PrCard({ id, rows, limit }: { id: string; rows: PrCardRow[]; limit: number }) {
+function PrCard({
+  id,
+  cardRef,
+  rows,
+  limit,
+}: {
+  id: string;
+  cardRef: MutableRefObject<HTMLElement | null>;
+  rows: PrCardRow[];
+  limit: number;
+}) {
   const shown = rows.slice(0, limit);
   const hidden = rows.length - shown.length;
   return (
     <div
+      ref={(node) => {
+        cardRef.current = node;
+      }}
       id={id}
       role="tooltip"
       data-pr-card
@@ -131,7 +145,11 @@ export function PrHoverCardTrigger({
   fallbackTitle,
   children,
 }: PrHoverCardTriggerProps) {
-  const popover = useFooterPopover<HTMLSpanElement>({ closeDelayMs: CLOSE_GRACE_MS });
+  const cardRef = useRef<HTMLElement | null>(null);
+  const popover = useFooterPopover<HTMLSpanElement>({
+    closeDelayMs: CLOSE_GRACE_MS,
+    popoverRef: cardRef,
+  });
   const domId = useId();
   const { open } = popover;
   // The hook's dismiss changes identity every render; keep the effect keyed on activeCard only.
@@ -185,7 +203,7 @@ export function PrHoverCardTrigger({
     >
       {children}
       {showCard && slot
-        ? createPortal(<PrCard id={domId} rows={rows} limit={limit} />, slot)
+        ? createPortal(<PrCard id={domId} cardRef={cardRef} rows={rows} limit={limit} />, slot)
         : null}
     </span>
   );
