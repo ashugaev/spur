@@ -17938,8 +17938,16 @@ export class SessionService {
       const readySession = readSession(this.config.dataDir, sessionId);
       if (!readySession) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       assertSendableStatus(readySession);
+      // Classification can persist live occupancy before the queue append.
+      const transferWakeAdmission = (prepared: SessionRecord) => {
+        if (!this.isLiveSessionRecord(prepared)) return;
+        if (wakeClaim) this.releaseScheduledWakeAdmission(wakeClaim);
+        this.releaseAdmissionReservation(wakeAdmissionReservation);
+      };
       const sendState = agentBusyQueuedSendAwaitsPrompt(readySession.agent)
-        ? this.queuedDeliveryState(await this.classifySessionRecord(readySession))
+        ? this.queuedDeliveryState(
+            await this.classifySessionRecord(readySession, undefined, transferWakeAdmission),
+          )
         : "waiting";
       const latest = readSession(this.config.dataDir, sessionId);
       if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -17954,11 +17962,7 @@ export class SessionService {
           submitPending(latest),
         wakeClaim,
       );
-      // Transfer admission to the persisted live row before yielding to delivery.
-      if (this.isLiveSessionRecord(queued)) {
-        if (wakeClaim) this.releaseScheduledWakeAdmission(wakeClaim);
-        this.releaseAdmissionReservation(wakeAdmissionReservation);
-      }
+      transferWakeAdmission(queued);
       return queued;
     });
     const attempt =
@@ -26334,6 +26338,7 @@ export class SessionService {
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
     workspaceMissing: boolean,
+    observePromotion?: (session: SessionRecord) => void,
   ): SessionRecord {
     // Shepherd is not exempt: its own terminal exits are "completed" (self
     // destruct) or "killed", and it is never stale-parked, so a stopped or
@@ -26376,6 +26381,7 @@ export class SessionService {
     };
     delete updated.stopReason;
     writeSession(this.config.dataDir, updated);
+    observePromotion?.(updated);
     this.stateCache.delete(session.id);
     this.logEvent("session.reconcile.running", {
       level: "warn",
@@ -26905,6 +26911,7 @@ export class SessionService {
       effectiveSession,
       runtime,
       workspace.missing,
+      observePreparation,
     );
     if (!runtimeOwnerChanged) {
       effectiveSession = this.reconcileStaleErroredSession(

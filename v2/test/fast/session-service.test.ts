@@ -65711,6 +65711,54 @@ describe("SessionService", () => {
         },
       );
 
+      it.each(["interval", "daily"] as const)(
+        "counts a promoted Cursor %s wake once during preappend token usage I/O",
+        async (kind) => {
+          capAt(2);
+          trackRuntimes(["api-1"]);
+          mockCursorJsonlState("waiting");
+          reserveNextSessionIdMock.mockResolvedValue("api-2");
+          const sessions = createSessionStore({
+            ...warmingWakeRecord("stopped", kind),
+            agent: "cursor",
+            stopReason: "runtime_lost",
+          });
+          const service = await createDisposedSessionService();
+          const internals = service as unknown as {
+            admissionReservations: Map<symbol, string>;
+            countLiveSessions(): { total: number };
+          };
+          let releaseUsage!: () => void;
+          const usage = new Promise<undefined>((resolve) => {
+            releaseUsage = () => resolve(undefined);
+          });
+          let signalUsage!: () => void;
+          const usageStarted = new Promise<void>((resolve) => {
+            signalUsage = resolve;
+          });
+          readCursorTokenUsageMock.mockImplementationOnce(() => {
+            signalUsage();
+            return usage;
+          });
+          const pendingWake = tick(service);
+          try {
+            await usageStarted;
+            expect(sessions.get("api-1")?.status).toBe("running");
+            expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+            expect(internals.countLiveSessions().total).toBe(1);
+            expect(internals.admissionReservations.size).toBe(0);
+            const spawned = await service.spawn({ project: "api", prompt: "remaining slot" });
+            expect(spawned.id).toBe("api-2");
+            expect(internals.countLiveSessions().total).toBe(2);
+            expect(internals.admissionReservations.size).toBe(0);
+          } finally {
+            releaseUsage();
+            await pendingWake;
+            service.dispose();
+          }
+        },
+      );
+
       const warmingWakeCases = [
         ...ordinaryWakeCases,
         ["parked", "scheduled"],
