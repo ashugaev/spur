@@ -606,7 +606,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "save_cron_job_draft",
     "PATCH",
     "/projects/cron/edit",
-    "Save validated Cron spawn settings to YAML without applying runtime changes.",
+    "Save validated Cron spawn settings to YAML and reload daemon automation.",
     {
       query: cronJobIdentity,
       body: cronJobUpdate,
@@ -627,7 +627,8 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
           },
         },
       ],
-      response: 'CronJobEditResult; saved:true, activation:"pending"; no runtime reload.',
+      response:
+        'CronJobEditResult; saved:true, activation:"applied"|"failed"; reloads automation, restarts all sources.',
       source: "v2/src/cron-job-editor.ts",
       extraResponses: cronJobValidation,
     },

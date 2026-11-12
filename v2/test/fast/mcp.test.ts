@@ -227,7 +227,7 @@ it("discovers and invokes scoped Cron editor operations with nullable overrides 
     url === path
       ? {
           status: 200,
-          value: method === "PATCH" ? { ...draft, saved: true, activation: "pending" } : draft,
+          value: method === "PATCH" ? { ...draft, saved: true, activation: "applied" } : draft,
         }
       : undefined;
   expect(
@@ -238,7 +238,7 @@ it("discovers and invokes scoped Cron editor operations with nullable overrides 
   expect(
     (await call("daemon_request", { operationId: "save_cron_job_draft", query, body }))
       .structuredContent,
-  ).toMatchObject({ ok: true, status: 200, body: { saved: true, activation: "pending", blocks } });
+  ).toMatchObject({ ok: true, status: 200, body: { saved: true, activation: "applied", blocks } });
   expect(fixture.calls.at(-1)).toMatchObject({ method: "PATCH", path, body });
   for (const status of [409, 422]) {
     const error = {

@@ -1078,7 +1078,7 @@ export async function startServer(
   const reloadAutomation = async (
     preview: ReturnType<SessionService["previewConfigConnect"]>,
     requestConfigPath: string,
-    action: "connect" | "disconnect",
+    action: "connect" | "disconnect" | "reload",
   ): Promise<void> => {
     // SessionService emits registry warnings while building the preview, so
     // diagnostics still land when no reload is needed.
@@ -1127,7 +1127,9 @@ export async function startServer(
           message:
             action === "connect"
               ? `Connected daemon project registry from ${requestConfigPath}`
-              : `Disconnected daemon project registry from ${requestConfigPath}`,
+              : action === "reload"
+                ? `Reloaded daemon project registry after cron edit of ${requestConfigPath}`
+                : `Disconnected daemon project registry from ${requestConfigPath}`,
           details: {
             configPaths: preview.registryPaths,
             projectCount: Object.keys(preview.config.projects).length,
@@ -1453,26 +1455,46 @@ export async function startServer(
       if ((method === "GET" || method === "PATCH") && path === "/projects/cron/edit") {
         try {
           const identity = cronJobIdentity(url.searchParams);
-          const context = {
+          const editorContext = () => ({
             running: service.config,
             bootstrapConfigPath: service.bootstrapConfigPath,
             registryPaths: service.getRegistryPaths(),
-          };
-          let body: unknown;
-          if (method === "PATCH") {
-            try {
-              body = await readJsonBody<unknown>(request);
-            } catch {
-              throw new CronJobEditError(400, "invalid_body", "Invalid editor JSON body.");
-            }
+          });
+          if (method === "GET") {
+            sendJson(response, 200, readCronJobDraft(editorContext(), identity));
+            return;
           }
-          sendJson(
-            response,
-            200,
-            method === "GET"
-              ? readCronJobDraft(context, identity)
-              : saveCronJobDraft(context, identity, body),
-          );
+          let body: unknown;
+          try {
+            body = await readJsonBody<unknown>(request);
+          } catch {
+            throw new CronJobEditError(400, "invalid_body", "Invalid editor JSON body.");
+          }
+          // Save and reload share the gate so a queued connect/disconnect cannot
+          // interleave between the YAML write and the reload.
+          const result = await withReloadGate(async () => {
+            const saved = saveCronJobDraft(editorContext(), identity, body);
+            try {
+              await reloadAutomation(
+                service.previewConfigReload(saved.ownerPath),
+                saved.ownerPath,
+                "reload",
+              );
+              return { ...saved, activation: "applied" as const };
+            } catch (error) {
+              // sources === null: rollback failed, onRollbackFailed already logged.
+              if (sources !== null) {
+                logEvent("daemon.reload.failed", {
+                  level: "error",
+                  message: `Cron edit reload failed; previous config restored: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                });
+              }
+              return { ...saved, activation: "failed" as const };
+            }
+          });
+          sendJson(response, 200, result);
         } catch (error) {
           if (!(error instanceof CronJobEditError)) throw error;
           sendJson(response, error.status, {

@@ -6225,6 +6225,18 @@ export class SessionService {
     );
   }
 
+  // Re-reads the registry after a config file changed in place. Invalidates the
+  // scanner cache first: a same-size rewrite within one mtime tick keeps the stamp.
+  previewConfigReload(changedPath: string): {
+    config: AppConfig;
+    registryPaths: string[];
+    changed: boolean;
+    unconfiguredToRemove: string[];
+  } {
+    this.registryScanner.invalidatePath(changedPath);
+    return this.previewRegistryPaths(this.registryPaths);
+  }
+
   previewConfigDisconnect(configPath: string): {
     config: AppConfig;
     registryPaths: string[];
