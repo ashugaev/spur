@@ -1152,31 +1152,36 @@ export async function probeTmuxProcessMatch(
       }
     }
     const ppidByPid = new Map(rows.map((row) => [row.pid, row.ppid]));
+    let hasBackgroundAgent = false;
     for (const row of rows) {
-      if (!ttySet.has(row.tty)) {
+      if (!ttySet.has(row.tty) || !processRes.some((processRe) => processRe.test(row.args))) {
         continue;
       }
-      // A name match counts only in the tty's foreground group: a pane
-      // whose agent wrapper died leaves the shell in the foreground, and an
-      // orphaned agent binary still on the tty in the background must not
-      // read alive, or a send lands in the shell. Unresolvable foreground
-      // group (no pane-pid row, unparseable tpgid): name match alone.
-      const fgPgid = fgPgidByTty.get(row.tty);
-      if (fgPgid !== undefined && fgPgid > 0 && row.pgid !== fgPgid) {
-        continue;
-      }
-      // And only under the pane's own shell. When the wrapper dies, the
+      // Require the pane's own shell. When the wrapper dies, the
       // orphaned binary keeps the job's process group, and the tty's
       // foreground group stays that job until the shell takes the terminal
-      // back: it passed the check above while the pane already showed the
-      // shell, and a send typed into it. Reparented to init or a subreaper,
-      // it no longer descends from the pane pid.
+      // back. Reparented to init or a subreaper, it no longer descends from
+      // the pane pid and must not keep the session live or uncertain.
       if (panePids.size > 0 && !descendsFromPane(row.pid, panePids, ppidByPid)) {
         continue;
       }
-      if (processRes.some((processRe) => processRe.test(row.args))) {
-        return { alive: true, matchedByName: true, unresponsive };
+      // An owned agent may hand the foreground to a child temporarily.
+      // It is neither confirmed exited nor ready for input. Keep scanning
+      // for a foreground named match on this session's other ttys.
+      const fgPgid = fgPgidByTty.get(row.tty);
+      if (fgPgid !== undefined && fgPgid > 0 && row.pgid !== fgPgid) {
+        hasBackgroundAgent = true;
+        continue;
       }
+      return { alive: true, matchedByName: true, unresponsive };
+    }
+    if (hasBackgroundAgent) {
+      return {
+        alive: false,
+        matchedByName: false,
+        unresponsive,
+        diagnostic: "Agent process is outside the pane's foreground process group.",
+      };
     }
     // Pane-child fallback (issue #806, hardened against #857 P1): a
     // SPUR_*_BIN wrapper that exec's a binary whose filename is not one of

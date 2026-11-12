@@ -63,13 +63,15 @@ export async function flush(times = 3): Promise<void> {
 interface Clock {
   advance(ms: number): void;
   frame(): void;
+  pendingFrames(): number;
 }
 
 function installClock(win: Win): Clock {
   let now = 0;
   let nextId = 1;
   const timers: Array<{ id: number; at: number; fn: () => void }> = [];
-  let frames: Array<() => void> = [];
+  let frames: Array<{ id: number; fn: () => void }> = [];
+  win.Date.now = () => now;
   win.setTimeout = ((fn: () => void, delay = 0) => {
     const id = nextId++;
     timers.push({ id, at: now + delay, fn });
@@ -79,8 +81,14 @@ function installClock(win: Win): Clock {
     const index = timers.findIndex((timer) => timer.id === id);
     if (index >= 0) timers.splice(index, 1);
   }) as unknown as typeof win.clearTimeout;
-  win.requestAnimationFrame = ((fn: () => void) =>
-    frames.push(fn)) as unknown as typeof win.requestAnimationFrame;
+  win.requestAnimationFrame = ((fn: () => void) => {
+    const id = nextId++;
+    frames.push({ id, fn });
+    return id;
+  }) as unknown as typeof win.requestAnimationFrame;
+  win.cancelAnimationFrame = ((id: number) => {
+    frames = frames.filter((frame) => frame.id !== id);
+  }) as typeof win.cancelAnimationFrame;
   return {
     advance(ms) {
       const end = now + ms;
@@ -96,8 +104,9 @@ function installClock(win: Win): Clock {
     frame() {
       const queued = frames;
       frames = [];
-      for (const fn of queued) fn();
+      for (const { fn } of queued) fn();
     },
+    pendingFrames: () => frames.length,
   };
 }
 
@@ -121,6 +130,7 @@ async function makeWindow(body: string, url: string, onNavigate?: () => void): P
   }
   win.ResizeObserver = class {
     observe(): void {}
+    disconnect(): void {}
   };
   win.Range.prototype.getBoundingClientRect = () =>
     ({ top: 10, left: 5, height: 10, width: 20 }) as DOMRect;
@@ -242,9 +252,9 @@ export interface PageRig extends Clock {
   click(selector: string): void;
 }
 
-export async function pageRig(body = ""): Promise<PageRig> {
+export async function pageRig(body = "", path = "/p/films/"): Promise<PageRig> {
   const navigation = { count: 0 };
-  const win = await makeWindow(body, "http://host/p/films/", () => {
+  const win = await makeWindow(body, `http://host${path}`, () => {
     navigation.count += 1;
   });
   const clock = installClock(win);

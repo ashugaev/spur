@@ -13,6 +13,8 @@ import type { ITheme } from "xterm";
 
 /** Mirrors `--color-bg-base`. Used by Next.js manifest / viewport / icon routes. */
 export const BG_BASE_HEX = "#0d0d0e";
+/** Mirrors --color-text-primary. Page icon artwork. */
+export const PAGE_ICON_FG_HEX = "#e1e1e1";
 
 /**
  * Brand spark glyph path, a 24-unit viewBox path. Shared between the header

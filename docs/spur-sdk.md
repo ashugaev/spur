@@ -2,7 +2,7 @@
 
 > Scope: `window.spur` API and components, same for pages and snippets. Pages: [pages.md](pages.md). Snippets: [snippets.md](snippets.md). Stores and actions: [stores.md](stores.md). Source: `packages/web/public/spur/spur-sdk.v2.js`.
 
-One SDK file, two transports. Page: `<script src="./_spur/sdk.js"></script>`, fetch plus one event stream. Snippet: host inlines it, every call crosses the host port. Same API either way.
+One SDK file, two transports. Page: injected into served HTML, fetch plus one event stream at the Page root. Snippet: host inlines it, every call crosses the host port. Same API either way.
 
 ## Stores
 
@@ -24,7 +24,7 @@ One SDK file, two transports. Page: `<script src="./_spur/sdk.js"></script>`, fe
 - `action`: current `{id, action, payload, status, error?, result?}` or `null`. Status: `awaiting_confirm`, `submitting`, `queued`, `processing`, `completed`, `error`, `timeout`.
 - `requestFullscreen(): Promise<boolean>` (snippet: false until it had focus), `exitFullscreen()`.
 - `selection(sourceId?)`: current selection in a `spur-selectable-text`.
-- Theme: `--spur-<token>` custom properties on `:root`, font `--spur-font`. Snippet: host tokens, `theme` event on change. Page: `./_spur/theme.css` supplies `light-dark()` pairs for `--spur-text-tertiary` and `--spur-status-{error,ready,working,attention}`; page CSS overrides them.
+- Theme: `--spur-<token>` custom properties on `:root`, font `--spur-font`. Snippet: host tokens, `theme` event on change. Page: `/p/<id>/_spur/theme.css` supplies `light-dark()` pairs for `--spur-text-tertiary` and `--spur-status-{error,ready,working,attention}`; page CSS overrides them.
 
 ## Invoke
 
@@ -46,7 +46,8 @@ Writes an `_actions` doc in the agent store; the owner gets one `[spur-action v1
 - `<spur-button action form payload variant="primary|secondary|danger" type="submit">`: static `payload` JSON merged under form fields; inside a toolbar adds the selection under `field`.
 - `[data-spur-action="<id>"][data-spur-payload='<json>']`: any element invokes on click.
 - `<spur-status>`: action status, Retry, rejection text. Without one, a rejection renders one `<spur-error data-spur-fallback>` at the end of `body`.
-- `<spur-chat placeholder>`: message log, agent status, input; sends through `agent.send`. Text renders as plain text.
+- `<spur-chat placeholder>`: message log, agent status, multiline draft (20,000 chars); SEND uses `agent.send`. Text renders as plain text.
+- Chat voice inserts into the editable draft; SEND stays explicit. Microphones sit inside eligible Page/snippet inputs; snippet capture stays in the trusted parent. Recording/transcription failures preserve text; failed audio can be retried or discarded. Voice providers: [voice.md](voice.md).
 - `<spur-loader aria-label>`, `<spur-empty>`, `<spur-error>`.
 - Fields with an `id` persist their value through `state`.
 - While an action is in flight, or actions are blocked, every library control and `[data-spur-action]` element is disabled.

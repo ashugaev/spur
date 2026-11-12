@@ -51,6 +51,42 @@ describe("pr-status-shape", () => {
     }
   });
 
+  it("validates optional pending requests and checks", () => {
+    const base = { approved: [], changesRequested: [] };
+    expect(
+      isPrInfoShape(makePrInfo({ reviewers: { ...base, pending: [{ name: "a", team: true }] } })),
+    ).toBe(true);
+    for (const pending of [[{ name: "", team: false }], [{ name: "a", team: "no" }], "x"]) {
+      expect(isPrInfoShape({ ...makePrInfo(), reviewers: { ...base, pending } })).toBe(false);
+    }
+    for (const checks of [undefined, null, [], [{ name: "a", state: "passed" }]]) {
+      expect(isPrInfoShape({ ...makePrInfo(), checks })).toBe(true);
+    }
+    for (const checks of [[{ name: "a", state: "ok" }], [{ name: "", state: "passed" }], "x"]) {
+      expect(isPrInfoShape({ ...makePrInfo(), checks })).toBe(false);
+    }
+  });
+
+  it("detects pending and check changes, treating legacy undefined as empty", () => {
+    const base = { approved: [], changesRequested: [] };
+    const a = makePrInfo({ reviewers: base });
+    expect(
+      prInfosEqual(a, { ...a, reviewers: { ...base, pending: [{ name: "x", team: false }] } }),
+    ).toBe(false);
+    expect(
+      prInfosEqual(
+        { ...a, reviewers: { ...base, pending: [{ name: "x", team: false }] } },
+        { ...a, reviewers: { ...base, pending: [{ name: "x", team: true }] } },
+      ),
+    ).toBe(false);
+    expect(prInfosEqual(a, { ...a, reviewers: { ...base, pending: [] } })).toBe(true);
+    const withCheck = (state: "passed" | "failed") =>
+      makePrInfo({ checks: [{ name: "t", state }] });
+    expect(prInfosEqual(withCheck("passed"), withCheck("failed"))).toBe(false);
+    expect(prInfosEqual(makePrInfo(), makePrInfo({ checks: [] }))).toBe(true);
+    expect(prInfosEqual(makePrInfo({ checks: [] }), withCheck("passed"))).toBe(false);
+  });
+
   it("notifies consumers when reviewer names or decisions change without changing readiness", () => {
     const first = makePrInfo({ reviewers: { approved: ["alice"], changesRequested: [] } });
     expect(

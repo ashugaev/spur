@@ -23,11 +23,14 @@ describe("visible wait text lint rule", () => {
     await lint("export function Warm() { return null; }", "packages/web/src/probe.tsx");
   }, 20000);
 
-  it("allows the CronJob editor's motion-only loading and saving states", async () => {
-    const path = resolve(process.cwd(), "src/components/CronJobEditor.tsx");
-    const [result] = await eslint.lintText(await readFile(path, "utf8"), { filePath: path });
-    expect(result?.messages).toEqual([]);
-  });
+  it.each(["CronJobEditor", "PagesCatalog", "ChatVoiceControls"])(
+    "allows %s motion-only pending states",
+    async (component) => {
+      const path = resolve(process.cwd(), `src/components/${component}.tsx`);
+      const [result] = await eslint.lintText(await readFile(path, "utf8"), { filePath: path });
+      expect(result?.messages).toEqual([]);
+    },
+  );
 
   it.each([
     "Loading",

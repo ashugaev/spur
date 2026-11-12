@@ -29,7 +29,7 @@
 - `GET /projects`
 - `GET /projects/cron?project=<id>` — cron sources, bound triggers, owner-file drift, last tick/action from the live event log; `project` optional; `404` unknown project; `v2/src/cron-jobs.ts`.
 - `GET /projects/cron/edit` — disk draft for a Cron spawn trigger; MCP `get_cron_job_draft`; `v2/src/cron-job-editor.ts`.
-- `PATCH /projects/cron/edit` — save validated YAML with revision conflict detection; MCP `save_cron_job_draft`; `v2/src/cron-job-editor.ts`.
+- `PATCH /projects/cron/edit` — save validated YAML with revision conflict detection, then reload automation; `activation` applied|failed; MCP `save_cron_job_draft`; `v2/src/cron-job-editor.ts`.
 - `POST /projects`
 - `PATCH /projects/:id`
 - `DELETE /projects/:id`
@@ -120,7 +120,7 @@
 
 ## Page routes
 
-- `GET /pages` — [pages.md](pages.md); `v2/src/pages.ts`.
+- `GET /pages` — title/icon catalogue; [pages.md](pages.md); `v2/src/pages.ts`.
 - `POST /pages`
 - `PATCH /pages/:id/source` — MCP `update_page_source`; `v2/src/server.ts`, `v2/src/daemon-contracts.ts`.
 - `DELETE /pages/:id`
