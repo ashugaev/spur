@@ -1479,10 +1479,12 @@ test.each([
           "completed",
         ]);
         expect(
-          writes.filter((write) => write.status === "completed").map((write) => ({
-            conclusion: write.conclusion,
-            summary: write.output?.summary,
-          })),
+          writes
+            .filter((write) => write.status === "completed")
+            .map((write) => ({
+              conclusion: write.conclusion,
+              summary: write.output?.summary,
+            })),
         ).toEqual(
           (wasDraft ? [true, false] : [false, true]).map((draft) => ({
             conclusion: draft ? "failure" : "success",
