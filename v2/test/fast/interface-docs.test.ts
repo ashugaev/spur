@@ -91,7 +91,7 @@ describe("published interface contracts", () => {
       "GET /pages/:id/events",
     ])
       expect(daemonApi).toContain(`\`${route}\``);
-    for (const name of ["page.yaml", "/p/<id>/", "./_spur/sdk.js", "reload", "spur-page-<id>"])
+    for (const name of ["page.yaml", "/p/<id>/", "spur-sdk.md", "reload", "spur-page-<id>"])
       expect(pages).toContain(name);
     for (const route of [
       "POST /stores/:store/agent/send",

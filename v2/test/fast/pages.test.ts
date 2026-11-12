@@ -40,12 +40,31 @@ describe("page ids and page.yaml", () => {
     const dir = await dataDir();
     expect(statusOf(() => createPage(dir, { id: "bad", source: { path: "relative" } }))).toBe(400);
     expect(listPages(dir)).toEqual([]);
-    const page = createPage(dir, { id: "site", source: { path: join(dir, "missing") } });
+    const page = createPage(dir, {
+      id: "site",
+      title: "Source page",
+      runtime: "codex",
+      model: "auto",
+      source: { path: join(dir, "missing") },
+    });
     const config = join(page.path, "page.yaml");
-    await writeFile(config, `${await readFile(config, "utf8")}custom: keep\n`);
-    expect(setPageSource(dir, "site", join(dir, "new")).source?.path).toBe(join(dir, "new"));
+    await writeFile(
+      config,
+      `${await readFile(config, "utf8")}icon: assets/icon.png\ncustom: keep\n`,
+    );
+    expect(setPageSource(dir, "site", join(dir, "new"))).toMatchObject({
+      title: "Source page",
+      icon: "assets/icon.png",
+      agent: { runtime: "codex", model: "auto" },
+      source: { path: join(dir, "new") },
+    });
     expect(await readFile(config, "utf8")).toContain("custom: keep");
-    expect(setPageSource(dir, "site", null).source).toBeUndefined();
+    expect(setPageSource(dir, "site", null)).toMatchObject({
+      title: "Source page",
+      icon: "assets/icon.png",
+      agent: { runtime: "codex", model: "auto" },
+    });
+    expect(readPageConfig(dir, "site").source).toBeUndefined();
     expect(statusOf(() => resolvePageFile(dir, "site", "page.yaml"))).toBe(404);
   });
   it("creates page.yaml and index.html, lists pages and rejects duplicates", async () => {
@@ -66,9 +85,10 @@ describe("page ids and page.yaml", () => {
       agent: { runtime: "codex", model: "gpt-5" },
     });
     const html = await readFile(join(pageDirPath(dir, "films"), "index.html"), "utf8");
-    expect(html).toContain("./_spur/sdk.js");
-    expect(html).toContain("<spur-chat>");
-    expect(html).toContain("textContent");
+    expect(html).toContain("Your page starts here.");
+    expect(html).toContain("Open the agent chat");
+    expect(html).not.toContain("robot chat");
+    expect(html).not.toContain("<spur-chat>");
     expect(html).toContain("Films &#60;&#38;&#62;");
     expect(html).not.toContain("innerHTML");
     expect(statusOf(() => createPage(dir, { id: "films" }))).toBe(409);
@@ -103,6 +123,36 @@ describe("page ids and page.yaml", () => {
   it("escapes the title in the blank template", () => {
     expect(blankTemplate(`"><script>x</script>`)).not.toContain("<script>x</script>");
   });
+
+  it("accepts local PNG metadata and rejects external, hidden and store paths", async () => {
+    const dir = await dataDir();
+    createPage(dir, { id: "icon" });
+    const config = join(pageDirPath(dir, "icon"), "page.yaml");
+    await writeFile(config, "title: Renamed\nicon: assets/icon.png\nagent:\n  runtime: codex\n");
+    expect(readPageConfig(dir, "icon")).toMatchObject({
+      title: "Renamed",
+      icon: "assets/icon.png",
+    });
+    for (const icon of [
+      "../x.png",
+      "/x.png",
+      "https://test/x.png",
+      ".x.png",
+      "a//x.png",
+      "a\\x.png",
+      "a.png?x",
+      "icon.svg",
+      "data.sqlite.png",
+      "_spur/icon.png",
+      "nested/page.yaml/icon.png",
+    ]) {
+      await writeFile(config, `title: Icon\nicon: '${icon}'\n`);
+      expect(
+        statusOf(() => readPageConfig(dir, "icon")),
+        icon,
+      ).toBe(400);
+    }
+  });
 });
 
 describe("page files", () => {
@@ -116,6 +166,10 @@ describe("page files", () => {
     await writeFile(join(pageDir, "blob.bin"), "1", "utf8");
     await writeFile(join(pageDir, ".env"), "SECRET=1", "utf8");
     await writeFile(join(pageDir, ".git", "config"), "x", "utf8");
+    await mkdir(join(pageDir, "_spur"), { recursive: true });
+    await writeFile(join(pageDir, "_spur", "icon.png"), "private", "utf8");
+    await symlink(join(pageDir, "_spur", "icon.png"), join(pageDir, "icon.png"));
+    await symlink(join(pageDir, "page.yaml"), join(pageDir, "config.png"));
     for (const name of ["data.sqlite", "data.sqlite-wal", "data.sqlite-shm"]) {
       await writeFile(join(pageDir, name), "x", "utf8");
     }
@@ -143,6 +197,10 @@ describe("page files", () => {
       "js",
       "missing.html",
       "js//app.js",
+      "icon.png",
+      "config.png",
+      "_spur/icon.png",
+      "page.yaml",
     ]) {
       expect(
         statusOf(() => resolvePageFile(dir, "films", path)),
@@ -153,21 +211,29 @@ describe("page files", () => {
 });
 
 describe("page watcher", () => {
-  it("reports debounced reloads and ignores dot files and the store", async () => {
+  it("reloads root metadata and static files while ignoring reserved paths at every depth", async () => {
     const dir = await dataDir();
     createPage(dir, { id: "films" });
     const pageDir = pageDirPath(dir, "films");
+    await mkdir(join(pageDir, "nested"));
+    await mkdir(join(pageDir, "_spur"));
     const reloads: string[] = [];
     const stop = watchPageDir(dir, "films", (path) => reloads.push(path));
     try {
       await writeFile(join(pageDir, ".hidden"), "x", "utf8");
       await writeFile(join(pageDir, "data.sqlite"), "x", "utf8");
+      await writeFile(join(pageDir, "nested", "page.yaml"), "title: Private", "utf8");
+      await writeFile(join(pageDir, "nested", "data.sqlite-wal"), "x", "utf8");
+      await writeFile(join(pageDir, "_spur", "icon.png"), "x", "utf8");
       await new Promise((resolve) => setTimeout(resolve, 400));
       expect(reloads).toEqual([]);
       await writeFile(join(pageDir, "index.html"), "a", "utf8");
       await writeFile(join(pageDir, "index.html"), "b", "utf8");
       await new Promise((resolve) => setTimeout(resolve, 400));
       expect(reloads).toEqual(["index.html"]);
+      await writeFile(join(pageDir, "page.yaml"), "title: Renamed\nicon: icon.png\n", "utf8");
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(reloads).toEqual(["index.html", "page.yaml"]);
     } finally {
       stop();
     }

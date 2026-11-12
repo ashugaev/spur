@@ -4,6 +4,33 @@ export interface CatalogPage {
   id: string;
   title: string;
   url: string;
+  icon?: string;
+}
+
+export function parsePage(entry: unknown): CatalogPage {
+  if (
+    typeof entry !== "object" ||
+    entry === null ||
+    !("id" in entry) ||
+    typeof entry.id !== "string" ||
+    !PAGE_ID_RE.test(entry.id) ||
+    !("title" in entry) ||
+    typeof entry.title !== "string" ||
+    !entry.title.trim() ||
+    !("url" in entry) ||
+    entry.url !== `/p/${entry.id}/` ||
+    ("icon" in entry &&
+      (typeof entry.icon !== "string" ||
+        !/\.png$/i.test(entry.icon) ||
+        !entry.icon.split("/").every((segment) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segment))))
+  )
+    throw new Error("Invalid pages response");
+  return {
+    id: entry.id,
+    title: entry.title,
+    url: `/p/${entry.id}/`,
+    ...("icon" in entry ? { icon: entry.icon as string } : {}),
+  };
 }
 
 export function parsePages(value: unknown): CatalogPage[] {
@@ -15,23 +42,7 @@ export function parsePages(value: unknown): CatalogPage[] {
   ) {
     throw new Error("Invalid pages response");
   }
-  return value.pages.map((entry: unknown) => {
-    if (
-      typeof entry !== "object" ||
-      entry === null ||
-      !("id" in entry) ||
-      typeof entry.id !== "string" ||
-      !PAGE_ID_RE.test(entry.id) ||
-      !("title" in entry) ||
-      typeof entry.title !== "string" ||
-      !entry.title.trim() ||
-      !("url" in entry) ||
-      entry.url !== `/p/${entry.id}/`
-    ) {
-      throw new Error("Invalid pages response");
-    }
-    return { id: entry.id, title: entry.title, url: `/p/${entry.id}/` };
-  });
+  return value.pages.map(parsePage);
 }
 
 export class PagesRequestError extends Error {
@@ -51,4 +62,20 @@ export async function fetchPages(): Promise<CatalogPage[]> {
     throw new Error("Invalid pages response");
   }
   return parsePages(payload);
+}
+
+export async function createPage(): Promise<CatalogPage> {
+  const response = await fetch("/api/pages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!response.ok) throw new PagesRequestError(response.status);
+  let payload: unknown;
+  try {
+    payload = JSON.parse(await response.text()) as unknown;
+  } catch {
+    throw new Error("Invalid pages response");
+  }
+  return parsePage(payload);
 }

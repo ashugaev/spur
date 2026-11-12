@@ -6,6 +6,8 @@ A page is a static web app in `<dataDir>/pages/<id>/` with its own store `page:<
 
 Open the project menu → Pages for the catalogue. Titles open pages in a new tab; Agents returns to the dashboard with the selected project. The catalogue lists readable, valid page configurations; it does not check the entry document.
 
+CREATE PAGE opens a new placeholder with its agent chat. Creation errors preserve the catalogue; retry with the same button.
+
 ## Create
 
 ```sh
@@ -15,13 +17,19 @@ spur db page:films add items '{"title":"Dune"}'
 ```
 
 - Id `^[a-z0-9][a-z0-9-]{0,39}$`. A page exists while its dir exists.
-- Template `blank`: `index.html` listing collection `items`, plus `<spur-chat>`.
+- Template `blank`: document symbol, title and placeholder. No AI call during creation.
 
 ## Files
 
-- `page.yaml`: [configuration reference](configuration.md).
+- `page.yaml` fields: [configuration.md](configuration.md#page-metadata).
 - Any static file; no build step. Dot paths, `data.sqlite*`, `page.yaml` and `_spur` paths are protected at every depth. Responses are `no-store`; `_spur` serves the native SDK/API.
-- Load the SDK with `<script src="./_spur/sdk.js"></script>`. API: [spur-sdk.md](spur-sdk.md).
+- Served HTML includes the SDK and a bottom-right robot button. Open it for the page agent's chat; closing preserves the draft. API: [spur-sdk.md](spur-sdk.md).
+
+## Home screen
+
+- Each page supplies its own title, favicon, touch icon and standalone web manifest. Install through the browser's install or Add to Home Screen command.
+- Pages require a connection. No offline cache or queued offline messages.
+- Ask the page agent to change the title or icon. It edits `page.yaml` and creates a local square PNG; 512px recommended. Changes reload open tabs. Installed icon refresh depends on the browser and OS.
 
 ## Publish from sources
 

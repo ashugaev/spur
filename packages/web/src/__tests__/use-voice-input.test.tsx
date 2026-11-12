@@ -331,6 +331,244 @@ describe("useVoiceInput", () => {
     vi.unstubAllGlobals();
   });
 
+  it("stops a pending microphone grant after chat teardown without inserting", async () => {
+    buildFetch([{ text: "late" }]);
+    let grant!: (stream: MediaStream) => void;
+    const stop = vi.fn();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockReturnValueOnce(
+      new Promise((resolve) => {
+        grant = resolve;
+      }),
+    );
+    const onTranscribed = vi.fn();
+    const { result, unmount } = renderHook(() =>
+      useVoiceInput({ contextKey: "page-chat:one", onTranscribed }),
+    );
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+    act(() => result.current.toggleRecording());
+    unmount();
+    await act(async () => grant({ getTracks: () => [{ stop }] } as unknown as MediaStream));
+    expect(stop).toHaveBeenCalledOnce();
+    expect(onTranscribed).not.toHaveBeenCalled();
+  });
+
+  it("suspends recording on pagehide and allows explicit recording after retained-document pageshow", async () => {
+    buildFetch([{ text: "new draft" }]);
+    const stop = vi.fn();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValueOnce({
+      getTracks: () => [{ stop }],
+    } as unknown as MediaStream);
+    const onTranscribed = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput({ contextKey: "snippet-chat:retained", onTranscribed }),
+    );
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+    act(() => result.current.setVoiceDraft("keep this draft"));
+    await act(async () => result.current.toggleRecording());
+    expect(result.current.recording).toBe(true);
+    act(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    expect(stop).toHaveBeenCalledOnce();
+    expect(result.current.recording).toBe(false);
+    expect(result.current.voiceBusy).toBeNull();
+    act(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledOnce();
+    expect(result.current.voiceDraft).toBe("keep this draft");
+    expect(onTranscribed).not.toHaveBeenCalled();
+    await act(async () => result.current.toggleRecording());
+    expect(result.current.recording).toBe(true);
+    await act(async () => result.current.toggleRecording());
+    await waitFor(() => expect(onTranscribed).toHaveBeenCalledExactlyOnceWith("new draft"));
+  });
+
+  it("invalidates pending permission on pagehide and stops its late grant after retained restore", async () => {
+    buildFetch([{ text: "late" }]);
+    let grant!: (stream: MediaStream) => void;
+    const stop = vi.fn();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockReturnValueOnce(
+      new Promise((resolve) => {
+        grant = resolve;
+      }),
+    );
+    const onTranscribed = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput({ contextKey: "snippet-chat:pending-retained", onTranscribed }),
+    );
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+    act(() => result.current.toggleRecording());
+    expect(result.current.voiceBusy).toBe("starting");
+    act(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    expect(result.current.voiceBusy).toBeNull();
+    act(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await act(async () => grant({ getTracks: () => [{ stop }] } as unknown as MediaStream));
+    expect(stop).toHaveBeenCalledOnce();
+    expect(result.current.recording).toBe(false);
+    expect(onTranscribed).not.toHaveBeenCalled();
+    await act(async () => result.current.toggleRecording());
+    expect(result.current.recording).toBe(true);
+  });
+
+  it("keeps pending voice availability usable after retained-document suspension", async () => {
+    let finish!: (response: Response) => void;
+    vi.spyOn(global, "fetch").mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const { result } = renderHook(() =>
+      useVoiceInput({ contextKey: "snippet-chat:pending-status" }),
+    );
+    act(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    act(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await act(async () =>
+      finish(new Response(JSON.stringify({ available: true, language: "auto" }))),
+    );
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+  });
+
+  it("resets transcription on suspension and ignores its late result after retained restore", async () => {
+    let finish!: (response: Response) => void;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      if (String(input) === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: true, language: "auto" }));
+      return new Promise<Response>((resolve) => {
+        finish = resolve;
+      });
+    });
+    const onTranscribed = vi.fn();
+    const { result } = renderHook(() =>
+      useVoiceInput({ contextKey: "snippet-chat:transcribing-retained", onTranscribed }),
+    );
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+    await act(async () => result.current.toggleRecording());
+    act(() => result.current.toggleRecording());
+    expect(result.current.voiceBusy).toBe("transcribing");
+    act(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    expect(result.current.voiceBusy).toBeNull();
+    act(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await act(async () => finish(new Response(JSON.stringify({ text: "old draft" }))));
+    expect(onTranscribed).not.toHaveBeenCalled();
+    expect(result.current.recording).toBe(false);
+    expect(result.current.voiceBusy).toBeNull();
+  });
+
+  it("resets local recording on context change and can dictate in the new context", async () => {
+    buildFetch([{ text: "new draft" }]);
+    const stop = vi.fn();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValueOnce({
+      getTracks: () => [{ stop }],
+    } as unknown as MediaStream);
+    const onTranscribed = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ id }) => useVoiceInput({ contextKey: `page-chat:${id}`, onTranscribed }),
+      { initialProps: { id: "one" } },
+    );
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+    await act(async () => result.current.toggleRecording());
+    expect(result.current.recording).toBe(true);
+    rerender({ id: "two" });
+    expect(stop).toHaveBeenCalledOnce();
+    expect(result.current.recording).toBe(false);
+    expect(result.current.voiceBusy).toBeNull();
+    expect(onTranscribed).not.toHaveBeenCalled();
+    await act(async () => result.current.toggleRecording());
+    expect(result.current.recording).toBe(true);
+    await act(async () => result.current.toggleRecording());
+    await waitFor(() => expect(onTranscribed).toHaveBeenCalledWith("new draft"));
+  });
+
+  it("resets pending permission on context change and stops a late grant without changing the new recording", async () => {
+    buildFetch([{ text: "new draft" }]);
+    let grant!: (stream: MediaStream) => void;
+    const stop = vi.fn();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockReturnValueOnce(
+      new Promise((resolve) => {
+        grant = resolve;
+      }),
+    );
+    const onTranscribed = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ id }) => useVoiceInput({ contextKey: `page-chat:${id}`, onTranscribed }),
+      { initialProps: { id: "one" } },
+    );
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+    act(() => result.current.toggleRecording());
+    expect(result.current.voiceBusy).toBe("starting");
+    rerender({ id: "two" });
+    expect(result.current.voiceBusy).toBeNull();
+    expect(result.current.recording).toBe(false);
+    await act(async () => result.current.toggleRecording());
+    expect(result.current.recording).toBe(true);
+    await act(async () => grant({ getTracks: () => [{ stop }] } as unknown as MediaStream));
+    expect(stop).toHaveBeenCalledOnce();
+    expect(result.current.recording).toBe(true);
+    expect(onTranscribed).not.toHaveBeenCalled();
+  });
+
+  it("resets transcription on context change and ignores its late result", async () => {
+    let finish!: (response: Response) => void;
+    let transcriptions = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      if (String(input) === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: true, language: "auto" }));
+      transcriptions += 1;
+      if (transcriptions === 1)
+        return new Promise<Response>((resolve) => {
+          finish = resolve;
+        });
+      return new Response(JSON.stringify({ text: "new draft" }));
+    });
+    const onTranscribed = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ id }) => useVoiceInput({ contextKey: `page-chat:${id}`, onTranscribed }),
+      { initialProps: { id: "one" } },
+    );
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+    await act(async () => result.current.toggleRecording());
+    act(() => result.current.toggleRecording());
+    expect(result.current.voiceBusy).toBe("transcribing");
+    rerender({ id: "two" });
+    expect(result.current.voiceBusy).toBeNull();
+    expect(result.current.recording).toBe(false);
+    await act(async () => finish(new Response(JSON.stringify({ text: "old draft" }))));
+    expect(onTranscribed).not.toHaveBeenCalled();
+    expect(result.current.voiceBusy).toBeNull();
+    await act(async () => result.current.toggleRecording());
+    await act(async () => result.current.toggleRecording());
+    await waitFor(() => expect(onTranscribed).toHaveBeenCalledExactlyOnceWith("new draft"));
+  });
+
+  it("drops a delayed local send callback when switching chat context", async () => {
+    const stopped: Array<() => void> = [];
+    class DelayedStopRecorder extends MockMediaRecorder {
+      override stop() {
+        this.state = "inactive";
+        stopped.push(() => {
+          this.emit("dataavailable", new Blob(["voice-audio"], { type: this.mimeType }));
+          this.emit("stop");
+        });
+      }
+    }
+    vi.stubGlobal("MediaRecorder", DelayedStopRecorder as unknown as typeof MediaRecorder);
+    buildFetch([{ text: "new draft" }]);
+    const oldSend = vi.fn();
+    const onTranscribed = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ id }) => useVoiceInput({ contextKey: `page-chat:${id}`, onTranscribed }),
+      { initialProps: { id: "one" } },
+    );
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+    await act(async () => result.current.toggleRecording());
+    act(() => result.current.stopAndSend(oldSend));
+    rerender({ id: "two" });
+    await act(async () => result.current.toggleRecording());
+    act(() => stopped[0]?.());
+    act(() => result.current.toggleRecording());
+    await act(async () => stopped[1]?.());
+    await waitFor(() => expect(onTranscribed).toHaveBeenCalledExactlyOnceWith("new draft"));
+    expect(oldSend).not.toHaveBeenCalled();
+  });
+
   it("stopAndSend invokes callback with transcript and skips modal", async () => {
     buildFetch([{ text: "hello world" }]);
     const send = vi.fn();

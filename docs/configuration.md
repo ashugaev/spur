@@ -6,7 +6,6 @@ Instance selection: `--config` > `SPUR_CONFIG` > private `~/.spur/installed-inst
 Project config: nearest `spur.yaml`/`spur.yml`, `projects:` only; merge/per-session resolution: `v2/src/config.ts`; voice: [voice.md](voice.md).
 
 Spur ToDo is always on, no config field. See [todo](commands.md#todo).
-Page `page.yaml`: `title` (1..120 printable chars), optional `icon`, `agent.runtime` (`claude` default, `codex`, `cursor`, `opencode`), optional `agent.model` and `source.path` (absolute printable daemon-local HTML/folder path); [Pages](pages.md); `v2/src/pages.ts`.
 OpenCode worker heartbeat expiry: session state `error`; `v2/src/agents/opencode.ts`, `v2/src/session-service.ts`.
 `mcp.port` (instance-only, `1..65535`, loopback, default first port from `4311` distinct from daemon/UI): `v2/src/config.ts`, `v2/src/ports.ts`; [MCP](mcp.md).
 `SPUR_MCP_TUNNEL_PROFILE`, `CONTROL_PLANE_API_KEY`, `SPUR_MCP_TUNNEL_ENV_FILE`: `v2/src/mcp-tunnel.ts`; [tunnel setup](mcp.md#connect-openai-products).
@@ -199,6 +198,10 @@ Event names by source:
 - Webhook request: `POST <path>` with `Authorization: Bearer <secret>` and `Content-Type: application/json`; runtime behavior and limits: `v2/src/event-sources/webhook.ts`.
 
 Other event names (see source file for trigger conditions): `trigger.spawn.suppressed`, `source.poll.disabled`, `source.poll.enabled`, `source.poll_cycle.error`, `source.telegram.{callback_dropped,choice_rejected}`, `gh.poll_cycle`, `gh.usage`, `gh.poll_budget_paused`, `session.message.{sent,delivery_recovered,delivery_failed,requeued,submit_unconfirmed,queued_ahead,queue_removed,stalled}`, `session.spawn.{orphan_stopped,launch_unconfirmed,launch_submitted}`, `auto-ping.{muted,unmuted,migrated}`, `session.todo.{nudge_failed,nudge_disabled,nudge_exhausted}`, `session.{complete,pause,self_destruct,desk_complete,handoff}.{completed,failed}`, `session.wake.{failed,daily_failed,interval_failed,sent,daily_sent,interval_sent,interval_cancelled,daily_cancelled,suppressed}`, `session.wake.token_budget_blocked`, `session.token_budget.exhausted`, `session.token_budget.unenforced`, `session.token_budget.teardown_failed`, `session.attention_monitor.{failed,session_failed,slow}`, `session.runtime.{probe_unresponsive,pane_child_fallback}`, `session.agent_process.{pane_pid_unreadable,capture_unavailable,capture_blind,survivors}`, `session.{handoff,respawn}.startup_attachment_missing`, `session.server_error.reactivation_exhausted`, `session.sidecar.{start_noop,start_rejected,launch_reap_skipped,owner_missing}`, `session.list.enrich_failed`, `session.submit.{timeout,confirmed,released,failure_dismissed}`, `session.subscription.{delivery_failed,spawn_failed}`, `session.recover.context_unconfirmed`, `session.record.invalid`, `trigger.send.{failed,suppressed,suppressed_admission,suppressed_launch_pending}`, `host.disk.low`, `daemon.admission.startup`, `daemon.registry.{count,warning}`, `daemon.auto_update.{started,failed,retry,skipped,suppressed,paused,config_invalid,disarm_failed}`, `daemon.deploy_switch.{started,rejected}`, `cli.update.{started,rolled_back,abandoned}`.
+
+## Page metadata
+
+`page.yaml` `title` (1..120 printable chars), `icon` (optional local PNG, 1 MiB, square 1..4096px), `agent.runtime` (`claude` default, `codex`, `cursor`, `opencode`), optional `agent.model` and `source.path` (absolute printable daemon-local HTML/folder path): `v2/src/pages.ts`, `packages/web/src/lib/page-metadata.ts`; [pages.md](pages.md).
 
 ## Auto update
 

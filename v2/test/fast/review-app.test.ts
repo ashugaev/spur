@@ -798,11 +798,19 @@ test.skipIf(process.platform === "win32").each(["legacy", "pending"])(
       const transport = async () => { explicitNetwork++; throw new Error("unexpected explicit network"); };
       const { recoverReview } = await import(moduleUrl);
       const request = JSON.parse(attempt);
+      const config = JSON.parse(configuration);
       const before = await readFile(request.receipt);
       const original = await lstat(archive);
       let rejected = false;
-      try { await recoverReview(JSON.parse(configuration), request, request.session, sha256, transport); }
+      const started = performance.now();
+      const watchdog = setTimeout(() => {
+        console.error("FIFO recovery operation timed out");
+        process.exit(1);
+      }, 2000);
+      try { await recoverReview(config, request, request.session, sha256, transport); }
       catch (error) { rejected = error?.category === "legacy-archive-invalid"; }
+      finally { clearTimeout(watchdog); }
+      if (performance.now() - started >= 2000) throw new Error("FIFO recovery operation exceeded 2000ms");
       const after = await lstat(archive);
       let locked = true;
       try { await access(request.receipt + ".lock"); } catch { locked = false; }
@@ -830,7 +838,7 @@ test.skipIf(process.platform === "win32").each(["legacy", "pending"])(
           f.sha256,
           f.archive,
         ],
-        { timeout: 2_000, killSignal: "SIGKILL" },
+        { timeout: 15_000, killSignal: "SIGKILL" },
       );
       expect(result.stdout.trim()).toBe(
         JSON.stringify({
@@ -851,6 +859,7 @@ test.skipIf(process.platform === "win32").each(["legacy", "pending"])(
       await rm(f.archive, { force: true });
     }
   },
+  20_000,
 );
 
 test("lost readback retains known review ID and never repeats POST against empty history", async () => {

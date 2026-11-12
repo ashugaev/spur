@@ -112,7 +112,7 @@
 
 ## Page routes
 
-- `GET /pages` — [pages.md](pages.md); `v2/src/pages.ts`.
+- `GET /pages` — title/icon catalogue; [pages.md](pages.md); `v2/src/pages.ts`.
 - `POST /pages`
 - `PATCH /pages/:id/source` — MCP `update_page_source`; `v2/src/server.ts`, `v2/src/daemon-contracts.ts`.
 - `DELETE /pages/:id`
