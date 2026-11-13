@@ -254,7 +254,11 @@ import type * as metadataModule from "../../src/metadata.js";
 import type { InterfaceConsent } from "../../src/review-interface-consent.js";
 import type { TelegramPhoto } from "../../src/telegram-source-state.js";
 import { detectClaudeRateLimit, detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
-import { classifyClaudeJsonlState, parseJsonlRecord } from "../../src/claude-jsonl-state.js";
+import {
+  classifyClaudeJsonlState,
+  parseJsonlRecord,
+  type ClaudeJsonlReaderState,
+} from "../../src/claude-jsonl-state.js";
 import type * as claudeModule from "../../src/agents/claude.js";
 import type * as codexModule from "../../src/agents/codex.js";
 import type * as agentIndexModule from "../../src/agents/index.js";
@@ -65098,6 +65102,62 @@ describe("SessionService", () => {
       count = 2;
       expect((await service.get("api-1")).state).toBe("rate_limited");
       service.dispose();
+    });
+
+    it("re-arms a fresh Claude limit after clear and a growing same-inode rewrite", async () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "spur-claude-clear-grow-"));
+      const filePath = join(tempDir, "session.jsonl");
+      const usageLine = (id: string, inputTokens: number) => JSON.stringify({
+        type: "assistant", sessionId: "session-1",
+        message: {
+          id, role: "assistant", usage: { input_tokens: inputTokens, output_tokens: 1 },
+        },
+      });
+      const limitLine = (id: string) => JSON.stringify({
+        type: "assistant", error: "rate_limit",
+        message: { id, role: "assistant", content: [{ type: "text", text: id }] },
+      });
+      const oldContent = `${usageLine("old-usage", 7)}\n${limitLine("A")}\n${limitLine("B")}\n`;
+      const replacement = `${usageLine("new-usage", 2)}\n${limitLine("C")}\n${JSON.stringify({ type: "system", padding: "x".repeat(oldContent.length) })}\n`;
+      const { readClaudeJsonlState: actualRead } = await vi.importActual<
+        typeof import("../../src/claude-jsonl-state.js")
+      >("../../src/claude-jsonl-state.js");
+      const readResult: { value: Awaited<ReturnType<typeof actualRead>> } = { value: null };
+      const seed = { filePath, lastOffset: 0, lastMtimeMs: 0, tailRecords: [] };
+      readClaudeJsonlStateMock.mockImplementation(async (
+        path: string, reader?: ClaudeJsonlReaderState, sessionId?: string,
+      ) => {
+        readResult.value = await actualRead(path, reader ?? seed, sessionId);
+        return readResult.value;
+      });
+      try {
+        writeFileSync(filePath, oldContent);
+        const oldIno = statSync(filePath).ino;
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T10:00:00.000Z" }));
+        mockClaudeSessionStatus("waiting", "idle");
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        try {
+          expect((await service.clearRateLimit("api-1", true, "cli")).state).toBe("waiting");
+          const fenced = sessions.get("api-1")?.rateLimitClearFence?.sourceOrdinals ?? {};
+          expect(Object.values(fenced)).toEqual([1, 1]);
+          writeFileSync(filePath, replacement);
+          utimesSync(filePath, new Date(Date.now() + 2_000), new Date(Date.now() + 2_000));
+          expect(statSync(filePath).ino).toBe(oldIno);
+          expect((await service.get("api-1")).state).toBe("rate_limited");
+          expect(readResult.value?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1 });
+          expect(fenced[readResult.value?.rateLimit?.source?.key ?? ""]).toBeUndefined();
+          expect(readResult.value?.tokenUsage).toMatchObject({
+            generationId: "claude:session-1:new-usage", inputTokens: 2,
+          });
+          expect(Array.from(readResult.value?.reader.usageByMessage?.keys() ?? [])).toEqual(["new-usage"]);
+        } finally {
+          service.dispose();
+        }
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
     });
 
     it("captures all Codex root keys and fences a healed replay after a candidate switch", async () => {

@@ -1,6 +1,6 @@
 import { open, readFile, stat } from "node:fs/promises";
-import { createHash } from "node:crypto";
-import { scanJsonlLines } from "./jsonl-scan.js";
+import { createHash, type Hash } from "node:crypto";
+import { SCAN_CHUNK_BYTES, scanJsonlLines } from "./jsonl-scan.js";
 import type { SessionState, TranscriptEntry } from "./types.js";
 import type { ProviderTokenUsageSample } from "./token-usage.js";
 import { findLatestSessionFile, sessionFileForId } from "./agents/claude.js";
@@ -67,6 +67,8 @@ export interface ClaudeJsonlReaderState {
   filePath: string;
   lastOffset: number;
   lastMtimeMs: number;
+  /** Hash of every consumed byte before lastOffset. */
+  prefixHash?: string;
   tailRecords: ParsedRecord[];
   /** Occurrences of every semantic limit key, including records pruned from the tail. */
   rateLimitCounts?: Record<string, number>;
@@ -625,6 +627,7 @@ async function scanJsonlRecords(
   size: number,
   offset: number,
   timestampMs: number,
+  onConsumed: (bytes: Buffer) => void,
 ): Promise<{ records: ParsedRecord[]; consumedBytes: number } | null> {
   const records: ParsedRecord[] = [];
   const scan = await scanJsonlLines(
@@ -636,8 +639,30 @@ async function scanJsonlRecords(
       return record !== null;
     },
     size,
+    onConsumed,
   );
   return scan ? { records, consumedBytes: scan.consumedBytes } : null;
+}
+
+async function readClaudePrefixHash(filePath: string, endOffset: number): Promise<Hash | null> {
+  let fd: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    fd = await open(filePath, "r");
+    const hash = createHash("sha256");
+    let position = 0;
+    while (position < endOffset) {
+      const buffer = Buffer.alloc(Math.min(SCAN_CHUNK_BYTES, endOffset - position));
+      const { bytesRead } = await fd.read(buffer, 0, buffer.length, position);
+      if (bytesRead === 0) return null;
+      hash.update(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+    return hash;
+  } catch {
+    return null;
+  } finally {
+    await fd?.close();
+  }
 }
 
 export async function readClaudeJsonlState(
@@ -671,13 +696,20 @@ export async function readClaudeJsonlState(
     return null;
   }
 
-  const reuse =
+  const candidateReuse =
     reader !== undefined &&
     reader.filePath === filePath &&
     reader.fileIno === fileStat.ino &&
     fileStat.size >= reader.lastOffset &&
-    fileStat.mtimeMs >= reader.lastMtimeMs &&
-    (fileStat.size !== reader.lastOffset || fileStat.mtimeMs === reader.lastMtimeMs);
+    fileStat.mtimeMs >= reader.lastMtimeMs;
+  const verifiedPrefix = candidateReuse && fileStat.size > reader.lastOffset
+    ? await readClaudePrefixHash(filePath, reader.lastOffset)
+    : null;
+  const reuse = candidateReuse && (
+    fileStat.size === reader.lastOffset
+      ? fileStat.mtimeMs === reader.lastMtimeMs
+      : verifiedPrefix !== null && verifiedPrefix.copy().digest("hex") === reader.prefixHash
+  );
   const currentReader: ClaudeJsonlReaderState = reuse
     ? reader
     : {
@@ -768,7 +800,10 @@ export async function readClaudeJsonlState(
   const readOffset = unreadFrom;
   const nowMs = Date.now();
 
-  const chunk = await scanJsonlRecords(filePath, fileStat.size, readOffset, nowMs);
+  const prefixHasher = reuse && verifiedPrefix ? verifiedPrefix : createHash("sha256");
+  const chunk = await scanJsonlRecords(
+    filePath, fileStat.size, readOffset, nowMs, (bytes) => prefixHasher.update(bytes),
+  );
   if (!chunk) {
     // If we can't read, return null to fall back to other classification
     return null;
@@ -850,6 +885,7 @@ export async function readClaudeJsonlState(
     filePath,
     lastOffset: readOffset + chunk.consumedBytes,
     lastMtimeMs: fileStat.mtimeMs,
+    prefixHash: prefixHasher.digest("hex"),
     tailRecords: combined,
     rateLimitCounts,
     usageByMessage,

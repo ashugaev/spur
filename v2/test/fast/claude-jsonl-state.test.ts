@@ -1622,6 +1622,42 @@ describe("readClaudeJsonlState rate limit detection", () => {
       await rm(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("cold-resets a growing same-inode rewrite before reading a fresh limit", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "claude-growing-rewrite-"));
+    const filePath = join(tempDir, "session.jsonl");
+    const usageLine = (messageId: string, inputTokens: number) => JSON.stringify({
+      type: "assistant", sessionId: "session-1",
+      message: {
+        id: messageId, role: "assistant",
+        usage: { input_tokens: inputTokens, output_tokens: 1 },
+      },
+    });
+    const oldContent = `${usageLine("msg-old", 7)}\n${limitLine("limit A", "limit-a")}\n${limitLine("limit B", "limit-b")}\n`;
+    const replacementContent = `${usageLine("msg-new", 2)}\n${limitLine("limit C", "limit-c")}\n${JSON.stringify({ type: "system", padding: "x".repeat(oldContent.length) })}\n`;
+    expect(Buffer.byteLength(replacementContent)).toBeGreaterThan(Buffer.byteLength(oldContent));
+    try {
+      await writeFile(filePath, oldContent);
+      const old = await readClaudeJsonlState(tempDir, {
+        filePath, lastOffset: 0, lastMtimeMs: 0, tailRecords: [],
+      });
+      const oldIno = (await stat(filePath)).ino;
+      const oldCounts = old?.reader.rateLimitCounts ?? {};
+      expect(Object.values(oldCounts)).toEqual([1, 1]);
+      expect(old?.tokenUsage).toMatchObject({ generationId: "claude:session-1:msg-old", inputTokens: 7 });
+      await writeFile(filePath, replacementContent);
+      await utimes(filePath, new Date(Date.now() + 2_000), new Date(Date.now() + 2_000));
+      expect((await stat(filePath)).ino).toBe(oldIno);
+      const replacement = await readClaudeJsonlState(tempDir, old?.reader);
+      expect(replacement?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1 });
+      expect(oldCounts[replacement?.rateLimit?.source?.key ?? ""]).toBeUndefined();
+      expect(Object.values(replacement?.reader.rateLimitCounts ?? {})).toEqual([1]);
+      expect(replacement?.tokenUsage).toMatchObject({ generationId: "claude:session-1:msg-new", inputTokens: 2 });
+      expect(Array.from(replacement?.reader.usageByMessage?.keys() ?? [])).toEqual(["msg-new"]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("readClaudeTranscriptEntries", () => {
