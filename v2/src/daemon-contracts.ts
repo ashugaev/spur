@@ -139,7 +139,11 @@ const spawn = body("SpawnSessionRequest", [
     "Opt into exclusive native PR CI and conflict alerts; requires an allowed send route for each class.",
   ),
   overrides,
-  field("reuseWorkspaceSessionId", "string", "Reuse the named session workspace."),
+  field(
+    "reuseWorkspaceSessionId",
+    "string",
+    "Reuse the named session workspace. Takes closeout from a completed, killed, errored, budget-limited, token-budget-stopped or manually paused owner.",
+  ),
   field("originalTaskPrompt", "string", "Original task retained across task handoffs."),
   field("bareSpawnMessage", "boolean", "Use the supplied task without normal spawn wrapping."),
   field("configPath", "string", "Project configuration path."),

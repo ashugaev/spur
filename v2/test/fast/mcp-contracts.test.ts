@@ -24,10 +24,10 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "e4563fbfea2bda0a846d8c0cd1b643d12203364148559fded585af428b10bf19",
-  "types.ts": "04b5d658b38b28bbb347ac477985a4615cecaec07a3b55e18d341f406bf3faa4",
+  "server.ts": "6ca819e5bbc5ae3e7fc2251bd0de4ab8f010453bb80924d596651216d9596147",
+  "types.ts": "37d034c9e757e4db2157e1909503a40309301c1ef8497fb5e56536efea8c436b",
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
-  "session-service.ts": "42b3458584246cea9730cee53795e593119294cf6d1cbb8952d0d00a86cebac9",
+  "session-service.ts": "aea5a3acbc0f4d2fe2d3ee6cda54c79bf18cf0f8470d1aaeba40298ca3b009f5",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "1d06c2d904fa46b95ef8bed971c5767fad76663482f22822f9a541b345f161ff",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -266,6 +266,17 @@ describe("daemon MCP operation contracts", () => {
       expect(
         getDaemonOperation(id)?.body?.fields.find((entry) => entry.name === "attachments")?.type,
       ).toContain("name:string,data:string");
+    }
+  });
+
+  it("states reuseWorkspaceSessionId closeout take in the spawn contracts", () => {
+    for (const id of ["spawn_session", "spawn_background_session"]) {
+      expect(
+        getDaemonOperation(id)?.body?.fields.find(
+          (entry) => entry.name === "reuseWorkspaceSessionId",
+        )?.description,
+        id,
+      ).toContain("Takes closeout");
     }
   });
 
