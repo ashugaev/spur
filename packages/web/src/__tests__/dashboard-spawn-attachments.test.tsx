@@ -291,6 +291,24 @@ describe("Dashboard spawn photo preparation", () => {
     },
   );
 
+  it("drops a preview scheduled by an owner the batch rotated away from", async () => {
+    await mount();
+    const previews = () =>
+      vi.mocked(global.fetch).mock.calls.filter(([input]) => input === "/api/preflight");
+    fireEvent.change(screen.getByLabelText("Prompt..."), { target: { value: "Rotated owner" } });
+    spawnConflict = "spawn_committed";
+    fireEvent.click(submit());
+    await waitFor(() =>
+      expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent("demo-7"),
+    );
+    expect(previews()).toHaveLength(0);
+    expect(batchRequests).toBe(1);
+    // The preview timer scheduled before the rotation fires after it.
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 800)));
+    expect(previews()).toHaveLength(0);
+    expect(batchRequests).toBe(1);
+  });
+
   it("persists the allocated batch to the draft before the spawn request settles", async () => {
     await mount();
     fireEvent.change(screen.getByLabelText("Prompt..."), { target: { value: "Persist batch" } });
