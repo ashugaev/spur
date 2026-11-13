@@ -1,4 +1,13 @@
-import { appendFile, mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -846,11 +855,11 @@ describe("findLatestCursorTranscriptFile", () => {
     await mkdir(join(transcriptsDir, "rate-limit-chat"), { recursive: true });
     const filePath = join(transcriptsDir, "rate-limit-chat", "rate-limit-chat.jsonl");
     const limitLine = JSON.stringify({
-        type: "turn_ended",
-        status: "error",
-        error:
-          "Increase limits for faster responses You're out of usage. Switch to auto, Auto, or Composer 2.5, or ask your admin to increase your limit to continue.",
-      });
+      type: "turn_ended",
+      status: "error",
+      error:
+        "Increase limits for faster responses You're out of usage. Switch to auto, Auto, or Composer 2.5, or ask your admin to increase your limit to continue.",
+    });
     await writeFile(filePath, `${limitLine}\n`);
 
     const state = await readCursorJsonlState(worktreePath);

@@ -248,17 +248,27 @@ describe("readCodexRolloutState", () => {
     const old = await readCodexRolloutState(sessionsDir, reader);
     const oldKey = old.rateLimit?.source?.key;
     expect(old.rateLimit?.source?.ordinal).toBe(1);
-    await writeFile(filePath, `${JSON.stringify({
-      type: "session_meta", timestamp: "2026-06-28T08:00:00.000Z",
-      payload: { id: "heal-root", cwd: "/changed/by/heal" },
-    })}\n${JSON.stringify({
-      type: "event_msg", timestamp,
-      payload: { rate_limits: { rate_limit_reached_type: "primary" }, type: "token_count", ignored: 1 },
-    })}\n`);
+    await writeFile(
+      filePath,
+      `${JSON.stringify({
+        type: "session_meta",
+        timestamp: "2026-06-28T08:00:00.000Z",
+        payload: { id: "heal-root", cwd: "/changed/by/heal" },
+      })}\n${JSON.stringify({
+        type: "event_msg",
+        timestamp,
+        payload: {
+          rate_limits: { rate_limit_reached_type: "primary" },
+          type: "token_count",
+          ignored: 1,
+        },
+      })}\n`,
+    );
     const healed = await readCodexRolloutState(sessionsDir, reader);
     expect(healed.rateLimit?.source).toMatchObject({ key: oldKey, ordinal: 1 });
     const freshLimit = JSON.stringify({
-      timestamp, type: "event_msg",
+      timestamp,
+      type: "event_msg",
       payload: { type: "token_count", rate_limits: { rate_limit_reached_type: "weekly" } },
     });
     await writeFile(filePath, `${sessionMeta("heal-root")}\n${freshLimit}\n`);
@@ -267,7 +277,10 @@ describe("readCodexRolloutState", () => {
     expect(fresh.rateLimit?.source?.key).not.toBe(oldKey);
     await appendFile(filePath, `${freshLimit}\n`);
     const duplicate = await readCodexRolloutState(sessionsDir, reader);
-    expect(duplicate.rateLimit?.source).toMatchObject({ key: fresh.rateLimit?.source?.key, ordinal: 2 });
+    expect(duplicate.rateLimit?.source).toMatchObject({
+      key: fresh.rateLimit?.source?.key,
+      ordinal: 2,
+    });
   });
 
   it("dates an undated quota record after an earlier clean turn and cached API allow", async () => {
@@ -401,7 +414,9 @@ describe("readCodexRolloutState", () => {
       })}`,
       "utf8",
     );
-    expect((await readCodexRolloutState(sessionsDir, reader, "quota-root")).rateLimit).toMatchObject({
+    expect(
+      (await readCodexRolloutState(sessionsDir, reader, "quota-root")).rateLimit,
+    ).toMatchObject({
       limited: true,
       reason: "codex weekly",
     });
@@ -436,7 +451,9 @@ describe("readCodexRolloutState", () => {
         `${content}\n${tokenCount(true)}`,
         "utf8",
       );
-      expect((await readCodexRolloutState(sessionsDir, reader, "paid-root")).rateLimit).toMatchObject({
+      expect(
+        (await readCodexRolloutState(sessionsDir, reader, "paid-root")).rateLimit,
+      ).toMatchObject({
         limited: true,
         reason: "codex weekly",
       });
@@ -1456,7 +1473,11 @@ function normalizeResult(result: CodexRolloutReadResult): CodexRolloutReadResult
       }
     : null;
   return rest.rollout
-    ? { ...rest, rateLimit, rollout: { ...rest.rollout, filePath: basename(rest.rollout.filePath) } }
+    ? {
+        ...rest,
+        rateLimit,
+        rollout: { ...rest.rollout, filePath: basename(rest.rollout.filePath) },
+      }
     : { ...rest, rateLimit };
 }
 

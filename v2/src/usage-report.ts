@@ -450,7 +450,9 @@ async function claudeSource(
       },
       best.plan,
     );
-  return fresh ? (await fetchQuota()).result : cached(`claude:${account.id}`, deps.nowMs, fetchQuota);
+  return fresh
+    ? (await fetchQuota()).result
+    : cached(`claude:${account.id}`, deps.nowMs, fetchQuota);
 }
 
 async function codexSource(deps: UsageReportDeps, fresh = false): Promise<QuotaSourceResult> {
@@ -470,7 +472,8 @@ export async function readFreshSessionQuota(
   if (session.agent === "codex") return codexSource(deps, true);
   if (session.agent !== "claude") return null;
   const accountId = session.claudeAccountId ?? "default";
-  const account = claudeAccounts(deps.dataDir).find((item) => item.id === accountId) ??
+  const account =
+    claudeAccounts(deps.dataDir).find((item) => item.id === accountId) ??
     (accountId === "default"
       ? { id: "default", configDir: join(deps.homeDir, ".claude"), createdAt: "" }
       : null);

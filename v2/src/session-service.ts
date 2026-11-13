@@ -1135,7 +1135,10 @@ export class SessionRateLimitedError extends Error {
 
 export class RateLimitClearError extends Error {
   readonly statusCode = 409;
-  constructor(message: string, readonly resetAt: string | null = null) {
+  constructor(
+    message: string,
+    readonly resetAt: string | null = null,
+  ) {
     super(message);
   }
 }
@@ -6950,7 +6953,8 @@ export class SessionService {
   ): RateLimitDetection | null {
     const source = detection?.source;
     const fence = this.activeRateLimitClearFence(session);
-    return source && fence &&
+    return source &&
+      fence &&
       source.ordinal <= (fence.sourceOrdinals[source.key ?? source.filePath] ?? 0)
       ? null
       : detection;
@@ -7048,7 +7052,8 @@ export class SessionService {
         const resets = exhausted
           .map((window) => window.resetsAt)
           .filter((reset): reset is string => reset !== null && Number.isFinite(Date.parse(reset)));
-        const resetAt = resets.sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
+        const resetAt =
+          resets.sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
         throw new RateLimitClearError(
           `Quota exhausted for session ${sessionId}; reset ${resetAt ?? "unknown"}`,
           resetAt,
@@ -7069,7 +7074,9 @@ export class SessionService {
       )
         throw new RateLimitClearError(`Session/account changed; retry clear`);
       let release!: () => void;
-      const barrier = new Promise<void>((resolve) => { release = resolve; });
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve;
+      });
       this.rateLimitClearBarriers.set(sessionId, barrier);
       this.rateLimitClearRevisions.set(
         sessionId,
@@ -7082,7 +7089,9 @@ export class SessionService {
           throw new RateLimitClearError(`Session ${sessionId} changed during clear`);
         const sourceOrdinals = await this.captureRateLimitSourceOrdinals(latest);
         const paneText = await captureTmuxPane(latest.tmuxSession);
-        const paneLatched = paneText === null || paneText.trim() === "" ||
+        const paneLatched =
+          paneText === null ||
+          paneText.trim() === "" ||
           Boolean(scanTmuxRateLimit(paneText)) ||
           (latest.agent === "claude" && Boolean(detectClaudeUsageLimitMenu(paneText)));
         const { rateLimitedAt: _rateLimitedAt, ...base } = latest;
@@ -25194,7 +25203,9 @@ export class SessionService {
       hookState,
       rolloutState,
       rateLimit: rolloutRead.rateLimit,
-      ...(rolloutRead.rateLimitOrdinals ? { rateLimitOrdinals: rolloutRead.rateLimitOrdinals } : {}),
+      ...(rolloutRead.rateLimitOrdinals
+        ? { rateLimitOrdinals: rolloutRead.rateLimitOrdinals }
+        : {}),
       ...(rolloutRead.rateLimitObservedAtMs !== undefined
         ? { rateLimitObservedAtMs: rolloutRead.rateLimitObservedAtMs }
         : {}),
@@ -26392,15 +26403,17 @@ export class SessionService {
       }
     })();
     if (!options?.bypassClearBarrier) {
-      const inFlight = this.classificationsInFlight.get(session.id) ??
-        new Set<Promise<SessionStateResult>>();
+      const inFlight =
+        this.classificationsInFlight.get(session.id) ?? new Set<Promise<SessionStateResult>>();
       inFlight.add(run);
       this.classificationsInFlight.set(session.id, inFlight);
-      void run.finally(() => {
-        inFlight.delete(run);
-        if (inFlight.size === 0 && this.classificationsInFlight.get(session.id) === inFlight)
-          this.classificationsInFlight.delete(session.id);
-      }).catch(() => {});
+      void run
+        .finally(() => {
+          inFlight.delete(run);
+          if (inFlight.size === 0 && this.classificationsInFlight.get(session.id) === inFlight)
+            this.classificationsInFlight.delete(session.id);
+        })
+        .catch(() => {});
     }
     return run;
   }
@@ -26548,7 +26561,11 @@ export class SessionService {
 
   private async classifySessionRecordKnown(
     session: SessionRecord,
-    options?: { scanPane?: boolean; reconcileRuntime?: boolean; suppressMenuConfirmation?: boolean },
+    options?: {
+      scanPane?: boolean;
+      reconcileRuntime?: boolean;
+      suppressMenuConfirmation?: boolean;
+    },
     observePreparation?: (session: SessionRecord) => void,
   ): Promise<SessionStateResult> {
     const probeLifecycle = this.lifecycle.snapshot(session.id);
@@ -27117,11 +27134,7 @@ export class SessionService {
         } else {
           const rawMenuHit = detectClaudeUsageLimitMenu(paneText);
           const rawTmuxHit = scanTmuxRateLimit(paneText);
-          const paneFenced = this.paneRateLimitFenced(
-            session,
-            paneText,
-            rawTmuxHit ?? rawMenuHit,
-          );
+          const paneFenced = this.paneRateLimitFenced(session, paneText, rawTmuxHit ?? rawMenuHit);
           const menuHit = paneFenced ? null : rawMenuHit;
           if (!rateLimit?.limited) {
             const tmuxHit = paneFenced ? null : (rawTmuxHit ?? menuHit);
@@ -27129,7 +27142,11 @@ export class SessionService {
               rateLimit = tmuxHit;
             }
           }
-          if (!options?.suppressMenuConfirmation && menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
+          if (
+            !options?.suppressMenuConfirmation &&
+            menuHit?.limited &&
+            claudeUsageMenuOptionOneSelected(paneText)
+          ) {
             await this.confirmClaudeUsageLimitMenu(session);
           }
           // Re-confirmation: the detection is flagged but its parsed reset has
@@ -27328,7 +27345,11 @@ export class SessionService {
         // A failed fork takes no observation: it only ever promotes on a hit,
         // so this is a pure guard.
         const tmuxHit = paneText === null ? null : scanTmuxRateLimit(paneText);
-        if (paneText !== null && !this.paneRateLimitFenced(session, paneText, tmuxHit) && tmuxHit?.limited) {
+        if (
+          paneText !== null &&
+          !this.paneRateLimitFenced(session, paneText, tmuxHit) &&
+          tmuxHit?.limited
+        ) {
           rateLimit = tmuxHit;
         }
       }

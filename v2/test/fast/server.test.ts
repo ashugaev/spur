@@ -84,7 +84,10 @@ describe("startServer", () => {
       });
       expect(clear).toHaveBeenCalledWith("api-1", true, "cli");
       clear.mockRejectedValueOnce(
-        new RateLimitClearError("Quota exhausted; reset 2026-03-18T11:00:00Z", "2026-03-18T11:00:00Z"),
+        new RateLimitClearError(
+          "Quota exhausted; reset 2026-03-18T11:00:00Z",
+          "2026-03-18T11:00:00Z",
+        ),
       );
       const exhausted = await fetch(url, {
         method: "POST",

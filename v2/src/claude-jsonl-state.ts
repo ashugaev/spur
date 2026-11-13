@@ -504,10 +504,12 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
     const isRateLimit = parsed["error"] === "rate_limit";
     const limitFingerprint = isRateLimit
       ? createHash("sha256")
-          .update(JSON.stringify([
-            "rate_limit",
-            extractTextContent(message).trim().toLowerCase().replace(/\s+/g, " "),
-          ]))
+          .update(
+            JSON.stringify([
+              "rate_limit",
+              extractTextContent(message).trim().toLowerCase().replace(/\s+/g, " "),
+            ]),
+          )
           .digest("hex")
       : undefined;
     // Anchored to this record's OWN timestamp only. A record with no
@@ -702,14 +704,15 @@ export async function readClaudeJsonlState(
     reader.fileIno === fileStat.ino &&
     fileStat.size >= reader.lastOffset &&
     fileStat.mtimeMs >= reader.lastMtimeMs;
-  const verifiedPrefix = candidateReuse && fileStat.size > reader.lastOffset
-    ? await readClaudePrefixHash(filePath, reader.lastOffset)
-    : null;
-  const reuse = candidateReuse && (
-    fileStat.size === reader.lastOffset
+  const verifiedPrefix =
+    candidateReuse && fileStat.size > reader.lastOffset
+      ? await readClaudePrefixHash(filePath, reader.lastOffset)
+      : null;
+  const reuse =
+    candidateReuse &&
+    (fileStat.size === reader.lastOffset
       ? fileStat.mtimeMs === reader.lastMtimeMs
-      : verifiedPrefix !== null && verifiedPrefix.copy().digest("hex") === reader.prefixHash
-  );
+      : verifiedPrefix !== null && verifiedPrefix.copy().digest("hex") === reader.prefixHash);
   const currentReader: ClaudeJsonlReaderState = reuse
     ? reader
     : {
@@ -726,10 +729,13 @@ export async function readClaudeJsonlState(
   const detectLimit = (records: readonly ParsedRecord[]): RateLimitDetection | null => {
     const detection = detectClaudeRateLimit(records);
     if (!detection?.limited) return detection;
-    const active = [...records].reverse().find((record) =>
-      !CLAUDE_BOOKKEEPING_RECORD_TYPES.has(record.type) &&
-      !CLAUDE_SESSION_META_RECORD_TYPES.has(record.type),
-    );
+    const active = [...records]
+      .reverse()
+      .find(
+        (record) =>
+          !CLAUDE_BOOKKEEPING_RECORD_TYPES.has(record.type) &&
+          !CLAUDE_SESSION_META_RECORD_TYPES.has(record.type),
+      );
     if (!active?.limitFingerprint) throw new Error("Claude rate-limit record missing fingerprint");
     const key = claudeLimitKey(filePath, active);
     return { ...detection, source: { filePath, key, ordinal: rateLimitCounts[key] ?? 0 } };
@@ -801,8 +807,8 @@ export async function readClaudeJsonlState(
   const nowMs = Date.now();
 
   const prefixHasher = reuse && verifiedPrefix ? verifiedPrefix : createHash("sha256");
-  const chunk = await scanJsonlRecords(
-    filePath, fileStat.size, readOffset, nowMs, (bytes) => prefixHasher.update(bytes),
+  const chunk = await scanJsonlRecords(filePath, fileStat.size, readOffset, nowMs, (bytes) =>
+    prefixHasher.update(bytes),
   );
   if (!chunk) {
     // If we can't read, return null to fall back to other classification

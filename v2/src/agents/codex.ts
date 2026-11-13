@@ -1942,7 +1942,11 @@ async function readCodexRolloutFile(
     !result.rollout && !result.rateLimit && !result.model && !result.tokenUsage
       ? null
       : { result, mtimeMs: fingerprint?.mtimeMs ?? 0 };
-  return { candidate, fold: read.fold, ...(read.cursor ? { entry: { ...read.cursor, candidate } } : {}) };
+  return {
+    candidate,
+    fold: read.fold,
+    ...(read.cursor ? { entry: { ...read.cursor, candidate } } : {}),
+  };
 }
 
 export async function readCodexRolloutState(

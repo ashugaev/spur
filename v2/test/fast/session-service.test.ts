@@ -64686,7 +64686,9 @@ describe("SessionService", () => {
 
     function signal() {
       let resolve!: () => void;
-      const promise = new Promise<void>((done) => { resolve = done; });
+      const promise = new Promise<void>((done) => {
+        resolve = done;
+      });
       return { promise, resolve };
     }
 
@@ -64729,7 +64731,11 @@ describe("SessionService", () => {
 
       const result = await service.clearRateLimit("api-1", true, "cli");
 
-      expect(result).toMatchObject({ sessionId: "api-1", state: "waiting", deliveryScheduled: true });
+      expect(result).toMatchObject({
+        sessionId: "api-1",
+        state: "waiting",
+        deliveryScheduled: true,
+      });
       expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
       expect(sessions.get("api-1")?.rateLimitClearFence).toEqual({
         agentLaunchId: null,
@@ -64762,20 +64768,27 @@ describe("SessionService", () => {
 
     it("delivers a queued direct message after clear", async () => {
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession({
-        rateLimitedAt: "2026-03-18T10:00:00.000Z",
-        queuedMessages: { messages: ["continue queued work"], awaitingPrompt: false },
-      }));
+      sessions.set(
+        "api-1",
+        runningSession({
+          rateLimitedAt: "2026-03-18T10:00:00.000Z",
+          queuedMessages: { messages: ["continue queued work"], awaitingPrompt: false },
+        }),
+      );
       mockClaudeSessionStatus("waiting", "idle");
       readClaudeJsonlStateMock.mockResolvedValue(oldClaudeLimit());
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       expect((await service.clearRateLimit("api-1", true, "cli")).deliveryScheduled).toBe(true);
-      await vi.waitFor(() => expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
-        "api-1", "continue queued work", { agent: "claude" },
-      ));
-      await vi.waitFor(() => expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]));
+      await vi.waitFor(() =>
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "continue queued work", {
+          agent: "claude",
+        }),
+      );
+      await vi.waitFor(() =>
+        expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]),
+      );
       service.dispose();
     });
 
@@ -64798,7 +64811,9 @@ describe("SessionService", () => {
       await entered.promise;
       const observing = sessionServiceInternals(service).classifySessionRecord(stale);
       let settled = false;
-      void observing.then(() => { settled = true; });
+      void observing.then(() => {
+        settled = true;
+      });
       await Promise.resolve();
       expect(settled).toBe(false);
       release.resolve();
@@ -64810,29 +64825,39 @@ describe("SessionService", () => {
 
     it("keeps a limit appended after the fence capture and does not arm queued delivery", async () => {
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession({
-        rateLimitedAt: "2026-03-18T10:00:00.000Z",
-        queuedMessages: { messages: ["do not send"], awaitingPrompt: false },
-      }));
+      sessions.set(
+        "api-1",
+        runningSession({
+          rateLimitedAt: "2026-03-18T10:00:00.000Z",
+          queuedMessages: { messages: ["do not send"], awaitingPrompt: false },
+        }),
+      );
       mockClaudeSessionStatus("waiting", "idle");
-      readClaudeJsonlStateMock.mockImplementation(async () => sessions.get("api-1")?.rateLimitClearFence
-        ? {
-            ...oldClaudeLimit(),
-            reader: { ...oldClaudeLimit().reader, rateLimitCounts: {
-              [CLAUDE_OLD_KEY]: 1, [CLAUDE_NEW_KEY]: 1,
-            } },
-            rateLimit: {
-              limited: true,
-              reason: "new claude rate_limit",
-              source: { filePath: "test.jsonl", key: CLAUDE_NEW_KEY, ordinal: 1 },
-            },
-          }
-        : oldClaudeLimit());
+      readClaudeJsonlStateMock.mockImplementation(async () =>
+        sessions.get("api-1")?.rateLimitClearFence
+          ? {
+              ...oldClaudeLimit(),
+              reader: {
+                ...oldClaudeLimit().reader,
+                rateLimitCounts: {
+                  [CLAUDE_OLD_KEY]: 1,
+                  [CLAUDE_NEW_KEY]: 1,
+                },
+              },
+              rateLimit: {
+                limited: true,
+                reason: "new claude rate_limit",
+                source: { filePath: "test.jsonl", key: CLAUDE_NEW_KEY, ordinal: 1 },
+              },
+            }
+          : oldClaudeLimit(),
+      );
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       expect(await service.clearRateLimit("api-1", true, "cli")).toMatchObject({
-        state: "rate_limited", deliveryScheduled: false,
+        state: "rate_limited",
+        deliveryScheduled: false,
       });
       expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["do not send"]);
       expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
@@ -64844,12 +64869,14 @@ describe("SessionService", () => {
       const stale = runningSession({ rateLimitedAt: "2026-03-18T10:00:00.000Z" });
       mockClaudeSessionStatus("waiting", "idle");
       readClaudeJsonlStateMock.mockResolvedValue(oldClaudeLimit());
-      captureTmuxPaneMock.mockResolvedValue([
-        "What do you want to do?",
-        "> 1. Stop and wait for limit to reset",
-        "  2. Ask your admin for more usage",
-        "Enter to confirm · Esc to cancel",
-      ].join("\n"));
+      captureTmuxPaneMock.mockResolvedValue(
+        [
+          "What do you want to do?",
+          "> 1. Stop and wait for limit to reset",
+          "  2. Ask your admin for more usage",
+          "Enter to confirm · Esc to cancel",
+        ].join("\n"),
+      );
       const entered = signal();
       const release = signal();
       sendSubmitKeyToTmuxMock.mockImplementationOnce(async () => {
@@ -64918,14 +64945,25 @@ describe("SessionService", () => {
           fetchedAt: "2026-03-18T10:05:00.000Z",
           status: "ok",
           plan: null,
-          windows: [{ label: "5h", usedPercent: 100, remainingPercent: 0, resetsAt: "2026-03-18T11:00:00.000Z" }],
+          windows: [
+            {
+              label: "5h",
+              usedPercent: 100,
+              remainingPercent: 0,
+              resetsAt: "2026-03-18T11:00:00.000Z",
+            },
+          ],
         });
 
       await expect(service.clearRateLimit("api-1", false, "cli")).rejects.toThrow(
         "reset 2026-03-18T11:00:00.000Z",
       );
       expect(sessions.get("api-1")).toEqual(limited);
-      expect(logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.rate_limit.cleared")).toBe(false);
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.rate_limit.cleared",
+        ),
+      ).toBe(false);
       service.dispose();
     });
 
@@ -64940,7 +64978,9 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       let finishQuota!: (value: unknown) => void;
-      const quota = new Promise<unknown>((resolve) => { finishQuota = resolve; });
+      const quota = new Promise<unknown>((resolve) => {
+        finishQuota = resolve;
+      });
       (service as unknown as { freshQuotaForClear: () => Promise<unknown> }).freshQuotaForClear =
         () => quota;
 
@@ -64992,18 +65032,25 @@ describe("SessionService", () => {
         serverError: false,
       });
       expect((await service.get("api-1")).state).toBe("rate_limited");
-      expect(logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.rate_limit.cleared")).toBe(false);
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.rate_limit.cleared",
+        ),
+      ).toBe(false);
       service.dispose();
     });
 
     it("re-arms a Cursor limit after submit rewrites a trailing limit at the same ordinal", async () => {
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession({
-        agent: "cursor",
-        agentSessionId: "chat-1",
-        launchCommand: "cursor-agent",
-        rateLimitedAt: "2026-03-18T10:00:00.000Z",
-      }));
+      sessions.set(
+        "api-1",
+        runningSession({
+          agent: "cursor",
+          agentSessionId: "chat-1",
+          launchCommand: "cursor-agent",
+          rateLimitedAt: "2026-03-18T10:00:00.000Z",
+        }),
+      );
       const filePath = "cursor-chat.jsonl";
       const oldKey = JSON.stringify([filePath, "old-event"]);
       const newKey = JSON.stringify([filePath, "new-event"]);
@@ -65048,10 +65095,12 @@ describe("SessionService", () => {
       readClaudeJsonlStateMock.mockImplementation(async () => ({
         state: "waiting",
         reader: {
-          filePath, lastOffset: 1, lastMtimeMs: 1, tailRecords: [],
-          rateLimitCounts: key === bKey && count === 1
-            ? { [aKey]: 1, [bKey]: 1 }
-            : { [key]: count },
+          filePath,
+          lastOffset: 1,
+          lastMtimeMs: 1,
+          tailRecords: [],
+          rateLimitCounts:
+            key === bKey && count === 1 ? { [aKey]: 1, [bKey]: 1 } : { [key]: count },
         },
         rateLimit: {
           limited: true,
@@ -65065,7 +65114,8 @@ describe("SessionService", () => {
 
       expect((await service.clearRateLimit("api-1", true, "cli")).state).toBe("waiting");
       expect(sessions.get("api-1")?.rateLimitClearFence?.sourceOrdinals).toEqual({
-        [aKey]: 1, [bKey]: 1,
+        [aKey]: 1,
+        [bKey]: 1,
       });
       service.dispose();
       const restarted = new SessionService("/tmp/spur.yaml", "2026-03-18T10:01:00.000Z");
@@ -65087,11 +65137,16 @@ describe("SessionService", () => {
       readClaudeJsonlStateMock.mockImplementation(async () => ({
         state: "waiting",
         reader: {
-          filePath, lastOffset: count, lastMtimeMs: count, tailRecords: [],
+          filePath,
+          lastOffset: count,
+          lastMtimeMs: count,
+          tailRecords: [],
           rateLimitCounts: { [key]: count },
         },
         rateLimit: {
-          limited: true, reason: "claude rate_limit", source: { filePath, key, ordinal: count },
+          limited: true,
+          reason: "claude rate_limit",
+          source: { filePath, key, ordinal: count },
         },
         serverError: false,
       }));
@@ -65107,16 +65162,22 @@ describe("SessionService", () => {
     it("re-arms a fresh Claude limit after clear and a growing same-inode rewrite", async () => {
       const tempDir = mkdtempSync(join(tmpdir(), "spur-claude-clear-grow-"));
       const filePath = join(tempDir, "session.jsonl");
-      const usageLine = (id: string, inputTokens: number) => JSON.stringify({
-        type: "assistant", sessionId: "session-1",
-        message: {
-          id, role: "assistant", usage: { input_tokens: inputTokens, output_tokens: 1 },
-        },
-      });
-      const limitLine = (id: string) => JSON.stringify({
-        type: "assistant", error: "rate_limit",
-        message: { id, role: "assistant", content: [{ type: "text", text: id }] },
-      });
+      const usageLine = (id: string, inputTokens: number) =>
+        JSON.stringify({
+          type: "assistant",
+          sessionId: "session-1",
+          message: {
+            id,
+            role: "assistant",
+            usage: { input_tokens: inputTokens, output_tokens: 1 },
+          },
+        });
+      const limitLine = (id: string) =>
+        JSON.stringify({
+          type: "assistant",
+          error: "rate_limit",
+          message: { id, role: "assistant", content: [{ type: "text", text: id }] },
+        });
       const oldContent = `${usageLine("old-usage", 7)}\n${limitLine("A")}\n${limitLine("B")}\n`;
       const replacement = `${usageLine("new-usage", 2)}\n${limitLine("C")}\n${JSON.stringify({ type: "system", padding: "x".repeat(oldContent.length) })}\n`;
       const { readClaudeJsonlState: actualRead } = await vi.importActual<
@@ -65124,12 +65185,12 @@ describe("SessionService", () => {
       >("../../src/claude-jsonl-state.js");
       const readResult: { value: Awaited<ReturnType<typeof actualRead>> } = { value: null };
       const seed = { filePath, lastOffset: 0, lastMtimeMs: 0, tailRecords: [] };
-      readClaudeJsonlStateMock.mockImplementation(async (
-        path: string, reader?: ClaudeJsonlReaderState, sessionId?: string,
-      ) => {
-        readResult.value = await actualRead(path, reader ?? seed, sessionId);
-        return readResult.value;
-      });
+      readClaudeJsonlStateMock.mockImplementation(
+        async (path: string, reader?: ClaudeJsonlReaderState, sessionId?: string) => {
+          readResult.value = await actualRead(path, reader ?? seed, sessionId);
+          return readResult.value;
+        },
+      );
       try {
         writeFileSync(filePath, oldContent);
         const oldIno = statSync(filePath).ino;
@@ -65149,9 +65210,12 @@ describe("SessionService", () => {
           expect(readResult.value?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1 });
           expect(fenced[readResult.value?.rateLimit?.source?.key ?? ""]).toBeUndefined();
           expect(readResult.value?.tokenUsage).toMatchObject({
-            generationId: "claude:session-1:new-usage", inputTokens: 2,
+            generationId: "claude:session-1:new-usage",
+            inputTokens: 2,
           });
-          expect(Array.from(readResult.value?.reader.usageByMessage?.keys() ?? [])).toEqual(["new-usage"]);
+          expect(Array.from(readResult.value?.reader.usageByMessage?.keys() ?? [])).toEqual([
+            "new-usage",
+          ]);
         } finally {
           service.dispose();
         }
@@ -65162,9 +65226,14 @@ describe("SessionService", () => {
 
     it("captures all Codex root keys and fences a healed replay after a candidate switch", async () => {
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession({
-        agent: "codex", launchCommand: "codex", rateLimitedAt: "2026-03-18T10:00:00.000Z",
-      }));
+      sessions.set(
+        "api-1",
+        runningSession({
+          agent: "codex",
+          launchCommand: "codex",
+          rateLimitedAt: "2026-03-18T10:00:00.000Z",
+        }),
+      );
       const rootA = "2026/03/18/a.jsonl";
       const rootB = "2026/03/18/b.jsonl";
       const aKey = JSON.stringify([rootA, "old-a"]);

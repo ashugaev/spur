@@ -604,9 +604,7 @@ export async function readCursorJsonlState(
           turnEnded: false,
         };
   const prefixHash =
-    currentReader === reader && verifiedPrefix !== null
-      ? verifiedPrefix
-      : createHash("sha256");
+    currentReader === reader && verifiedPrefix !== null ? verifiedPrefix : createHash("sha256");
   const rateLimitOrdinal =
     currentReader.rateLimitOrdinal ?? cursorRateLimitCount(currentReader.tailRecords);
   const detectLimit = (

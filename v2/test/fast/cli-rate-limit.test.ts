@@ -82,7 +82,9 @@ describe("spur rate-limit clear", () => {
   });
 
   it("retains the daemon's exhausted-window reset message", async () => {
-    postJsonMock.mockRejectedValueOnce(new Error("Quota exhausted; resets at 2026-11-14T00:00:00Z"));
+    postJsonMock.mockRejectedValueOnce(
+      new Error("Quota exhausted; resets at 2026-11-14T00:00:00Z"),
+    );
     await expect(run(["rate-limit", "clear", "api-1", "--json"])).rejects.toThrow(
       "resets at 2026-11-14T00:00:00Z",
     );
