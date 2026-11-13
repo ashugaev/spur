@@ -14920,8 +14920,10 @@ export class SessionService {
     let agent: SessionRecord["agent"] | undefined;
     let worktree = false;
     let createdAt: string | undefined;
-    let closeoutTakenFrom: string[] | null = null;
-    const placeholderState = { written: false };
+    const placeholderState: { written: boolean; closeoutTakenFrom: string[] | null } = {
+      written: false,
+      closeoutTakenFrom: null,
+    };
     let preparationSucceeded = false;
     let ownedClaimBatchId: string | undefined;
     let prAlertReservation: string | undefined;
@@ -15108,7 +15110,7 @@ export class SessionService {
         !restrictWrites && worktree,
         (takenFrom) => {
           placeholderState.written = true;
-          closeoutTakenFrom = takenFrom;
+          placeholderState.closeoutTakenFrom = takenFrom;
         },
       );
       ownedClaimBatchId = undefined;
@@ -15161,7 +15163,9 @@ export class SessionService {
         sessionId,
         ...(resolvedBranch ? { resolvedBranch } : {}),
         ...(reuseCtx ? { reuseWorkspacePath: reuseCtx.workspacePath } : {}),
-        ...(closeoutTakenFrom ? { closeoutTakenFrom } : {}),
+        ...(placeholderState.closeoutTakenFrom
+          ? { closeoutTakenFrom: placeholderState.closeoutTakenFrom }
+          : {}),
         placeholder,
         startupAttachments,
         preflightBatchId,
@@ -15226,7 +15230,8 @@ export class SessionService {
             this.config.dataDir,
             this.settlePrAlertTransferLocked(failedRecord, "rollback"),
           );
-          if (closeoutTakenFrom) this.returnTakenCloseout(failedRecord.id, closeoutTakenFrom);
+          if (placeholderState.closeoutTakenFrom)
+            this.returnTakenCloseout(failedRecord.id, placeholderState.closeoutTakenFrom);
         });
       }
       this.logEvent("session.spawn.failed", {
