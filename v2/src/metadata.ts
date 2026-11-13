@@ -1495,6 +1495,26 @@ function validateDurableSpawnFields(session: SessionRecord): void {
   }
 }
 
+function normalizeRateLimitClearFence(value: unknown): SessionRecord["rateLimitClearFence"] {
+  if (
+    !isRecord(value) ||
+    (value["agentLaunchId"] !== null && typeof value["agentLaunchId"] !== "string") ||
+    typeof value["paneLatched"] !== "boolean" ||
+    !isRecord(value["sourceOrdinals"])
+  )
+    return undefined;
+  const sourceOrdinals: Record<string, number> = {};
+  for (const [path, ordinal] of Object.entries(value["sourceOrdinals"])) {
+    if (!path || !Number.isSafeInteger(ordinal) || (ordinal as number) < 0) return undefined;
+    sourceOrdinals[path] = ordinal as number;
+  }
+  return {
+    agentLaunchId: value["agentLaunchId"] as string | null,
+    paneLatched: value["paneLatched"],
+    sourceOrdinals,
+  };
+}
+
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   validateDurableSpawnFields(session);
   const normalizedSession = normalizeSessionPrBinding(session);
@@ -1520,6 +1540,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   }
   const tokenUsage = normalizeTokenUsage(normalizedSession.tokenUsage);
   const preflightTokenUsage = normalizePreflightTokenUsage(normalizedSession.preflightTokenUsage);
+  const rateLimitClearFence = normalizeRateLimitClearFence(normalizedSession.rateLimitClearFence);
   // Records written before the rename carry the hold as launchUnconfirmedAt;
   // read it once here so an existing hold survives, and write only the new name.
   const legacyUnconfirmed = (normalizedSession as { launchUnconfirmedAt?: unknown })
@@ -1668,6 +1689,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.intervalWake ? { intervalWake: normalizedSession.intervalWake } : {}),
     ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
     ...(normalizedSession.rateLimitedAt ? { rateLimitedAt: normalizedSession.rateLimitedAt } : {}),
+    ...(rateLimitClearFence ? { rateLimitClearFence } : {}),
     ...(normalizedSession.serverErrorAt ? { serverErrorAt: normalizedSession.serverErrorAt } : {}),
     ...(typeof normalizedSession.serverErrorReactivationAttempts === "number" &&
     Number.isInteger(normalizedSession.serverErrorReactivationAttempts) &&

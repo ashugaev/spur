@@ -59,6 +59,7 @@ interface TriggerLogger {
 
 export interface TriggerGroupController {
   stop(): Promise<void>;
+  nudgeSession(sessionId: string): void;
 }
 
 interface StartConfiguredTriggersDeps {
@@ -2254,6 +2255,13 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   }
 
   return {
+    nudgeSession(sessionId: string): void {
+      if (stopped) return;
+      for (const [queueKey, batch] of pendingBatches) {
+        if (batch.batch.sessionId === sessionId)
+          enqueue(queueKey, () => flushPending(queueKey, batch));
+      }
+    },
     async stop(): Promise<void> {
       stopped = true;
       for (const [queueKey, batch] of pendingBatches) {

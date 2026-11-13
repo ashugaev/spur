@@ -26,6 +26,7 @@ INTERFACES
   Telegram: bot DM for commands/spawn; agent communication in assigned forum topics; completion deletes owned topics. Source identity: `docs/commands.md#source`; attachments/binding: `docs/configuration.md#telegram-binding`; sends: `docs/commands.md#source-reply`.
   Native Telegram calls to sandbox Shepherd: docs/telegram-calls.md.
   Provider quota windows and session token totals: `spur usage`; docs/commands.md#usage.
+  Manual rate-limit clear: docs/commands.md#usage; docs/daemon-api.md#session-routes.
   Mute unwanted auto-pings with `spur auto-ping mute <handle>`, handle from the ping footer. `--for <dur>` and `--forever` need `--reason`. Modes and resume: `docs/commands.md#auto-ping`; API: `docs/daemon-api.md`.
 
 SAFETY

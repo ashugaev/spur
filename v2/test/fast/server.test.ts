@@ -20,6 +20,7 @@ import {
   LaunchPromptPendingError,
   OpenPrActionRequiredError,
   QueueDeliveryInFlightError,
+  RateLimitClearError,
   SessionEndedError,
   SessionNotReopenableError,
   SessionNotRestorableError,
@@ -40,6 +41,60 @@ import {
 import { findFreePort, startOnFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
+  it("refuses agent rate-limit clear before mutation and accepts headerless force", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-rate-limit-clear-server-"));
+    const port = await findFreePort();
+    const configPath = join(root, "config.yaml");
+    await writeFile(
+      configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`,
+    );
+    const clear = vi.spyOn(SessionService.prototype, "clearRateLimit").mockResolvedValue({
+      sessionId: "api-1",
+      state: "waiting",
+      deliveryScheduled: false,
+    });
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const url = `http://127.0.0.1:${port}/sessions/api-1/rate-limit/clear`;
+      const denied = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-spur-caller-session": "agent-1" },
+        body: JSON.stringify({ force: true }),
+      });
+      expect(denied.status).toBe(403);
+      expect(clear).not.toHaveBeenCalled();
+      const accepted = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-spur-origin": "cli" },
+        body: JSON.stringify({ force: true }),
+      });
+      expect(accepted.status).toBe(200);
+      expect(await accepted.json()).toEqual({
+        sessionId: "api-1",
+        state: "waiting",
+        deliveryScheduled: false,
+      });
+      expect(clear).toHaveBeenCalledWith("api-1", true, "cli");
+      clear.mockRejectedValueOnce(
+        new RateLimitClearError("Quota exhausted; reset 2026-03-18T11:00:00Z", "2026-03-18T11:00:00Z"),
+      );
+      const exhausted = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(exhausted.status).toBe(409);
+      expect(await exhausted.json()).toEqual({
+        error: "Quota exhausted; reset 2026-03-18T11:00:00Z",
+        resetAt: "2026-03-18T11:00:00Z",
+      });
+    } finally {
+      await server.stop();
+      clear.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   it.each([
     { method: "spawn", path: "/sessions", kind: "invalid", status: 400 },
     { method: "spawnInBackground", path: "/sessions/background", kind: "conflict", status: 409 },

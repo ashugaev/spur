@@ -1423,6 +1423,23 @@ describe("session workspaceId normalization", () => {
     expect(readSession(dataDir, "api-2")?.workspaceId).toBe("api-1");
   });
 
+  it("persists a rate-limit clear fence and drops malformed provenance", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = { ...legacyBase, id: "api-2", tmuxSession: "api-2" };
+    const fence = {
+      agentLaunchId: "launch-1",
+      sourceOrdinals: { "/transcript.jsonl": 2 },
+      paneLatched: true,
+    };
+    writeSession(dataDir, { ...record, rateLimitClearFence: fence });
+    expect(readSession(dataDir, record.id)?.rateLimitClearFence).toEqual(fence);
+    writeSession(dataDir, {
+      ...record,
+      rateLimitClearFence: { ...fence, sourceOrdinals: { "/transcript.jsonl": -1 } },
+    });
+    expect(readSession(dataDir, record.id)?.rateLimitClearFence).toBeUndefined();
+  });
+
   it("persists the restore idle baseline and accepts legacy records without one", async () => {
     const dataDir = await newDataDir();
     const record: SessionRecord = { ...legacyBase, id: "api-1", tmuxSession: "api-1" };

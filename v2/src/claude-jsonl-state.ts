@@ -65,6 +65,8 @@ export interface ClaudeJsonlReaderState {
   lastOffset: number;
   lastMtimeMs: number;
   tailRecords: ParsedRecord[];
+  /** Number of rate-limit records in the scanned prefix, including pruned tail records. */
+  rateLimitOrdinal?: number;
   usageByMessage?: Map<string, ClaudeMessageTokenUsage>;
   generationId?: string;
   fileIno?: number;
@@ -663,6 +665,14 @@ export async function readClaudeJsonlState(
         fileIno: fileStat.ino,
       };
   const usageByMessage = currentReader.usageByMessage ?? new Map();
+  let rateLimitOrdinal =
+    currentReader.rateLimitOrdinal ?? currentReader.tailRecords.filter((record) => record.rateLimited).length;
+  const detectLimit = (records: readonly ParsedRecord[]): RateLimitDetection | null => {
+    const detection = detectClaudeRateLimit(records);
+    return detection?.limited
+      ? { ...detection, source: { filePath, ordinal: rateLimitOrdinal } }
+      : detection;
+  };
 
   const usageSample = (): ProviderTokenUsageSample | undefined => {
     let inputTokens = 0;
@@ -717,7 +727,7 @@ export async function readClaudeJsonlState(
     return {
       state: classifyClaudeJsonlState(currentReader.tailRecords, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
-      rateLimit: detectClaudeRateLimit(currentReader.tailRecords),
+      rateLimit: detectLimit(currentReader.tailRecords),
       serverError: hasTrailingClaudeServerError(currentReader.tailRecords),
       ...(cachedLiveModel ? { liveModel: cachedLiveModel } : {}),
       ...(tokenUsage ? { tokenUsage } : {}),
@@ -738,6 +748,7 @@ export async function readClaudeJsonlState(
   const newRecords: ParsedRecord[] = [];
   for (const record of chunk.records) {
     newRecords.push(record);
+    if (record.rateLimited) rateLimitOrdinal += 1;
     if (record.messageId && record.sessionId && (record.tokenUsage || record.advisorTokenUsages)) {
       const generationId = `claude:${record.sessionId}:${record.messageId}`;
       if (!currentReader.generationId) currentReader.generationId = generationId;
@@ -808,6 +819,7 @@ export async function readClaudeJsonlState(
     lastOffset: readOffset + chunk.consumedBytes,
     lastMtimeMs: fileStat.mtimeMs,
     tailRecords: combined,
+    rateLimitOrdinal,
     usageByMessage,
     ...(currentReader.generationId ? { generationId: currentReader.generationId } : {}),
     fileIno: fileStat.ino,
@@ -822,7 +834,7 @@ export async function readClaudeJsonlState(
   return {
     state: classifyClaudeJsonlState(combined, nowMs, fileStat.mtimeMs),
     reader: nextReader,
-    rateLimit: detectClaudeRateLimit(combined),
+    rateLimit: detectLimit(combined),
     serverError: hasTrailingClaudeServerError(combined),
     ...(liveModel ? { liveModel } : {}),
     ...(tokenUsage ? { tokenUsage } : {}),

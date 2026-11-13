@@ -25,7 +25,7 @@ import {
   SessionLifecycleError,
   SessionLifecycleRegister,
 } from "./session-lifecycle.js";
-import { userInfo } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setImmediate as yieldToEventLoop, setTimeout as sleep } from "node:timers/promises";
 import {
@@ -147,6 +147,7 @@ import {
   type RateLimitDetection,
 } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
+import { readFreshSessionQuota, type QuotaSourceResult } from "./usage-report.js";
 import {
   ACTIVITY_WINDOW_MS,
   CONVERSATION_PAGE_ENTRIES,
@@ -552,6 +553,7 @@ import {
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
+  type RateLimitClearResult,
   type PrAlertTransfer,
   type DurableSpawnIntent,
   type CursorRestoreBoundary,
@@ -1129,6 +1131,13 @@ export class SpawnBatchConflictError extends Error {
 
 export class SessionRateLimitedError extends Error {
   readonly statusCode = 409;
+}
+
+export class RateLimitClearError extends Error {
+  readonly statusCode = 409;
+  constructor(message: string, readonly resetAt: string | null = null) {
+    super(message);
+  }
 }
 
 // Message-only (like SessionRateLimitedError): the candidate session ids to
@@ -3987,6 +3996,9 @@ export class SessionService {
   // classes acquire pane-write before lifecycle; lifecycle-only helpers use
   // the Locked suffix and never acquire the pane lock.
   private readonly sessionLifecycleLocks = new Map<string, Promise<void>>();
+  private readonly rateLimitClearBarriers = new Map<string, Promise<void>>();
+  private readonly classificationsInFlight = new Map<string, Set<Promise<SessionStateResult>>>();
+  private readonly rateLimitClearRevisions = new Map<string, number>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly conversationReaders = new Map<string, ClaudeConversationReaderState>();
@@ -6927,6 +6939,200 @@ export class SessionService {
     return session.rateLimitedAt !== undefined;
   }
 
+  private activeRateLimitClearFence(session: SessionRecord): SessionRecord["rateLimitClearFence"] {
+    const fence = session.rateLimitClearFence;
+    return fence?.agentLaunchId === (session.agentLaunchId ?? null) ? fence : undefined;
+  }
+
+  private fencedStructuredRateLimit(
+    session: SessionRecord,
+    detection: RateLimitDetection | null,
+  ): RateLimitDetection | null {
+    const source = detection?.source;
+    const fence = this.activeRateLimitClearFence(session);
+    return source && fence && source.ordinal <= (fence.sourceOrdinals[source.filePath] ?? 0)
+      ? null
+      : detection;
+  }
+
+  private paneRateLimitFenced(
+    session: SessionRecord,
+    paneText: string,
+    detection: RateLimitDetection | null,
+  ): boolean {
+    if (!this.activeRateLimitClearFence(session)?.paneLatched) return false;
+    if (detection?.limited || paneText.trim() === "") return true;
+    const current = readSession(this.config.dataDir, session.id);
+    if (current?.rateLimitClearFence?.agentLaunchId === (session.agentLaunchId ?? null)) {
+      writeSession(this.config.dataDir, {
+        ...current,
+        rateLimitClearFence: { ...current.rateLimitClearFence, paneLatched: false },
+      });
+    }
+    return false;
+  }
+
+  private async captureRateLimitSourceOrdinals(
+    session: SessionRecord,
+  ): Promise<Record<string, number>> {
+    if (session.agent === "codex") {
+      const ordinals = (await this.classifyCodexState(session)).rateLimitOrdinals;
+      if (!ordinals || Object.keys(ordinals).length === 0)
+        throw new RateLimitClearError(`Rate-limit source unavailable for ${session.id}`);
+      return ordinals;
+    }
+    if (session.agent === "claude") {
+      const result = await readClaudeJsonlState(
+        session.worktreePath,
+        this.claudeJsonlReaders.get(session.id),
+        session.agentSessionId,
+      );
+      if (!result) throw new RateLimitClearError(`Rate-limit source unavailable for ${session.id}`);
+      this.claudeJsonlReaders.set(session.id, result.reader);
+      return {
+        [result.reader.filePath]: Math.max(
+          result.reader.rateLimitOrdinal ?? 0,
+          result.rateLimit?.source?.ordinal ?? 0,
+        ),
+      };
+    }
+    if (session.agent !== "cursor") return {};
+    const cursorChatId = await this.cursorTranscriptId(session);
+    const result = cursorChatId
+      ? await readCursorJsonlState(
+          session.worktreePath,
+          this.cursorJsonlReaders.get(session.id),
+          cursorChatId,
+          session.cursorRestoreBoundary ? { after: session.cursorRestoreBoundary } : {},
+        )
+      : null;
+    if (!result) throw new RateLimitClearError(`Rate-limit source unavailable for ${session.id}`);
+    this.cursorJsonlReaders.set(session.id, result.reader);
+    return {
+      [result.reader.filePath]: Math.max(
+        result.reader.rateLimitOrdinal ?? 0,
+        result.rateLimit?.source?.ordinal ?? 0,
+      ),
+    };
+  }
+
+  private async freshQuotaForClear(session: SessionRecord): Promise<QuotaSourceResult | null> {
+    const nowMs = Date.now();
+    const todayStart = new Date(nowMs);
+    todayStart.setHours(0, 0, 0, 0);
+    return readFreshSessionQuota(
+      {
+        fetch: globalThis.fetch,
+        homeDir: homedir(),
+        dataDir: this.config.dataDir,
+        nowMs,
+        todayStartMs: todayStart.getTime(),
+      },
+      session,
+    );
+  }
+
+  async clearRateLimit(
+    sessionId: string,
+    force: boolean,
+    actor: string,
+  ): Promise<RateLimitClearResult> {
+    const initial = readSession(this.config.dataDir, sessionId);
+    if (!initial) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    if (initial.status !== "running" || !this.isLiveStateRateLimited(initial))
+      throw new RateLimitClearError(`Session ${sessionId} is not live and rate limited`);
+    if (!force) {
+      const quota = await this.freshQuotaForClear(initial);
+      if (!quota || quota.status !== "ok" || quota.windows.length === 0)
+        throw new RateLimitClearError(`Quota unavailable for session ${sessionId}; use --force`);
+      const exhausted = quota.windows.filter((window) => window.usedPercent >= 100);
+      if (exhausted.length > 0) {
+        const resets = exhausted
+          .map((window) => window.resetsAt)
+          .filter((reset): reset is string => reset !== null && Number.isFinite(Date.parse(reset)));
+        const resetAt = resets.sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
+        throw new RateLimitClearError(
+          `Quota exhausted for session ${sessionId}; reset ${resetAt ?? "unknown"}`,
+          resetAt,
+        );
+      }
+    }
+    return this.withSessionLifecycleLock(sessionId, async () => {
+      const current = readSession(this.config.dataDir, sessionId);
+      if (!current) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      if (
+        current.status !== "running" ||
+        !this.isLiveStateRateLimited(current) ||
+        current.agent !== initial.agent ||
+        current.agentLaunchId !== initial.agentLaunchId ||
+        current.agentSessionId !== initial.agentSessionId ||
+        (current.agent === "claude" &&
+          (current.claudeAccountId ?? "default") !== (initial.claudeAccountId ?? "default"))
+      )
+        throw new RateLimitClearError(`Session/account changed; retry clear`);
+      let release!: () => void;
+      const barrier = new Promise<void>((resolve) => { release = resolve; });
+      this.rateLimitClearBarriers.set(sessionId, barrier);
+      this.rateLimitClearRevisions.set(
+        sessionId,
+        (this.rateLimitClearRevisions.get(sessionId) ?? 0) + 1,
+      );
+      try {
+        await Promise.allSettled([...(this.classificationsInFlight.get(sessionId) ?? [])]);
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (!latest || latest.status !== "running")
+          throw new RateLimitClearError(`Session ${sessionId} changed during clear`);
+        const sourceOrdinals = await this.captureRateLimitSourceOrdinals(latest);
+        const paneText = await captureTmuxPane(latest.tmuxSession);
+        const paneLatched = paneText === null || paneText.trim() === "" ||
+          Boolean(scanTmuxRateLimit(paneText)) ||
+          (latest.agent === "claude" && Boolean(detectClaudeUsageLimitMenu(paneText)));
+        const { rateLimitedAt: _rateLimitedAt, ...base } = latest;
+        const cleared: SessionRecord = {
+          ...base,
+          rateLimitClearFence: {
+            agentLaunchId: latest.agentLaunchId ?? null,
+            sourceOrdinals,
+            paneLatched,
+          },
+          updatedAt: nowIso(),
+        };
+        writeSession(this.config.dataDir, cleared);
+        this.claudeRateLimitReconfirmOverrides.delete(sessionId);
+        this.codexPaneLimitObservedAt.delete(sessionId);
+        this.lastClassifiedLogStates.delete(sessionId);
+        this.stateCache.delete(sessionId);
+        const classified = await this.classifySessionRecord(cleared, {
+          bypassClearBarrier: true,
+          suppressMenuConfirmation: true,
+          reconcileRuntime: false,
+        });
+        const state = this.stabilizeState(sessionId, classified.state);
+        await this.updateStateHistory(
+          cleared,
+          state,
+          classified.source,
+          classified.historySourcePath ?? null,
+          classified.serverError,
+          classified.serverErrorEvidence,
+        );
+        const deliveryScheduled = state !== "rate_limited";
+        if (deliveryScheduled) this.ensureDeliveryRunner(sessionId);
+        this.logEvent("session.rate_limit.cleared", {
+          level: "info",
+          sessionId,
+          projectId: latest.project,
+          message: `Rate limit cleared for ${sessionId}`,
+          details: { actor, force },
+        });
+        return { sessionId, state, deliveryScheduled };
+      } finally {
+        this.rateLimitClearBarriers.delete(sessionId);
+        release();
+      }
+    });
+  }
+
   private async confirmClaudeUsageLimitMenu(
     session: Pick<SessionRecord, "id" | "project" | "tmuxSession">,
   ): Promise<void> {
@@ -7764,6 +7970,9 @@ export class SessionService {
   // runDashboardCacheTick owns their pruning.
   private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
     this.codexRateLimitPoller.prune(liveIds);
+    for (const sessionId of this.rateLimitClearRevisions.keys()) {
+      if (!liveIds.has(sessionId)) this.rateLimitClearRevisions.delete(sessionId);
+    }
     for (const sessionId of this.scheduledWakeClaims.keys()) {
       if (!liveIds.has(sessionId)) this.scheduledWakeClaims.delete(sessionId);
     }
@@ -18424,8 +18633,9 @@ export class SessionService {
               const native = await this.classifyCodexState(current);
               const paneText = await captureTmuxPane(current.tmuxSession, 200, { fresh: true });
               if (paneText === null) throw new Error(uncertainInput);
+              const nativeLimit = this.fencedStructuredRateLimit(current, native.rateLimit);
               const permission =
-                native.state === "waiting" && native.rateLimit?.limited
+                native.state === "waiting" && nativeLimit?.limited
                   ? this.codexRateLimitPoller.permission(
                       sessionId,
                       codexHookHomePath(join(this.config.dataDir, "session-tools", sessionId)),
@@ -18433,12 +18643,12 @@ export class SessionService {
                     )
                   : null;
               if (
-                (permission !== true && rateLimitActive(native.rateLimit, Date.now())) ||
+                (permission !== true && rateLimitActive(nativeLimit, Date.now())) ||
                 rateLimitActive(
                   this.codexPaneRateLimit(
                     sessionId,
                     paneText,
-                    permission === true ? { limited: false, reason: "" } : native.rateLimit,
+                    permission === true ? { limited: false, reason: "" } : nativeLimit,
                     native.activityMs,
                   ),
                   Date.now(),
@@ -24910,6 +25120,7 @@ export class SessionService {
     rolloutState: CodexRolloutStateRecord | null;
     rateLimit: RateLimitDetection | null;
     rateLimitObservedAtMs?: number;
+    rateLimitOrdinals?: Record<string, number>;
     activityMs: number;
     threadId?: string;
     model?: string;
@@ -24985,6 +25196,7 @@ export class SessionService {
       hookState,
       rolloutState,
       rateLimit: rolloutRead.rateLimit,
+      ...(rolloutRead.rateLimitOrdinals ? { rateLimitOrdinals: rolloutRead.rateLimitOrdinals } : {}),
       ...(rolloutRead.rateLimitObservedAtMs !== undefined
         ? { rateLimitObservedAtMs: rolloutRead.rateLimitObservedAtMs }
         : {}),
@@ -25003,6 +25215,8 @@ export class SessionService {
     activityMs: number,
   ): RateLimitDetection | null {
     const hit = scanTmuxRateLimit(paneText, { tailLines: CODEX_RATE_LIMIT_PANE_TAIL_LINES });
+    const session = readSession(this.config.dataDir, sessionId);
+    if (session && this.paneRateLimitFenced(session, paneText, hit)) return null;
     if (!hit) {
       this.codexPaneLimitObservedAt.delete(sessionId);
       return null;
@@ -26144,25 +26358,53 @@ export class SessionService {
 
   private async classifySessionRecord(
     session: SessionRecord,
-    options?: { scanPane?: boolean; reconcileRuntime?: boolean },
+    options?: {
+      scanPane?: boolean;
+      reconcileRuntime?: boolean;
+      bypassClearBarrier?: boolean;
+      suppressMenuConfirmation?: boolean;
+    },
     observePreparation?: (session: SessionRecord) => void,
   ): Promise<SessionStateResult> {
-    const probeRevision = this.lifecycle.snapshot(session.id).revision;
-    let observation = session;
-    try {
-      return await this.classifySessionRecordKnown(session, options, (prepared) => {
-        observation = prepared;
-        observePreparation?.(prepared);
-      });
-    } catch (error) {
-      if (
-        error instanceof SessionResourceNotFoundError &&
-        !readSession(this.config.dataDir, session.id)
-      ) {
-        throw error;
+    if (!options?.bypassClearBarrier) {
+      const barrier = this.rateLimitClearBarriers.get(session.id);
+      if (barrier) {
+        await barrier;
+        const current = readSession(this.config.dataDir, session.id);
+        if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+        session = current;
       }
-      return this.classificationErrorResult(observation, error, "other", probeRevision);
     }
+    const run = (async (): Promise<SessionStateResult> => {
+      const probeRevision = this.lifecycle.snapshot(session.id).revision;
+      let observation = session;
+      try {
+        return await this.classifySessionRecordKnown(session, options, (prepared) => {
+          observation = prepared;
+          observePreparation?.(prepared);
+        });
+      } catch (error) {
+        if (
+          error instanceof SessionResourceNotFoundError &&
+          !readSession(this.config.dataDir, session.id)
+        ) {
+          throw error;
+        }
+        return this.classificationErrorResult(observation, error, "other", probeRevision);
+      }
+    })();
+    if (!options?.bypassClearBarrier) {
+      const inFlight = this.classificationsInFlight.get(session.id) ??
+        new Set<Promise<SessionStateResult>>();
+      inFlight.add(run);
+      this.classificationsInFlight.set(session.id, inFlight);
+      void run.finally(() => {
+        inFlight.delete(run);
+        if (inFlight.size === 0 && this.classificationsInFlight.get(session.id) === inFlight)
+          this.classificationsInFlight.delete(session.id);
+      }).catch(() => {});
+    }
+    return run;
   }
 
   private classificationErrorResult(
@@ -26308,7 +26550,7 @@ export class SessionService {
 
   private async classifySessionRecordKnown(
     session: SessionRecord,
-    options?: { scanPane?: boolean; reconcileRuntime?: boolean },
+    options?: { scanPane?: boolean; reconcileRuntime?: boolean; suppressMenuConfirmation?: boolean },
     observePreparation?: (session: SessionRecord) => void,
   ): Promise<SessionStateResult> {
     const probeLifecycle = this.lifecycle.snapshot(session.id);
@@ -26634,7 +26876,7 @@ export class SessionService {
     } else if (codexProbeRecovery) {
       state = codexProbeRecovery.state;
       stateSource = codexProbeRecovery.source;
-      rateLimit = codexProbeRecovery.rateLimit;
+      rateLimit = this.fencedStructuredRateLimit(session, codexProbeRecovery.rateLimit);
       agentActivityAt = activityAtFromMs(codexProbeRecovery.activityMs);
       liveModel = codexProbeRecovery.model;
       tokenUsage = codexProbeRecovery.tokenUsage;
@@ -26670,7 +26912,7 @@ export class SessionService {
         );
         if (jsonlResult) {
           this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
-          rateLimit = jsonlResult.rateLimit;
+          rateLimit = this.fencedStructuredRateLimit(session, jsonlResult.rateLimit);
           hasServerErrorRecord = jsonlResult.serverError;
           hasAuthenticationFailure = hasTrailingClaudeAuthenticationFailure(
             jsonlResult.reader.tailRecords,
@@ -26747,7 +26989,7 @@ export class SessionService {
         const codexState = await this.classifyCodexState(session);
         state = codexState.state;
         stateSource = codexState.source;
-        rateLimit = codexState.rateLimit;
+        rateLimit = this.fencedStructuredRateLimit(session, codexState.rateLimit);
         codexLimitObservedAtMs = codexState.rateLimitObservedAtMs ?? 0;
         if (codexState.state === "waiting" && rateLimit?.limited) {
           codexPermission = this.codexRateLimitPoller.permission(
@@ -26785,7 +27027,7 @@ export class SessionService {
           : null;
         if (jsonlResult) {
           this.cursorJsonlReaders.set(session.id, jsonlResult.reader);
-          rateLimit = jsonlResult.rateLimit;
+          rateLimit = this.fencedStructuredRateLimit(session, jsonlResult.rateLimit);
           state = jsonlResult.state;
           stateSource = "jsonl";
           historySourcePath = jsonlResult.reader.filePath;
@@ -26875,14 +27117,21 @@ export class SessionService {
             this.claudeCompactingOverrides.delete(session.id);
           }
         } else {
-          const menuHit = detectClaudeUsageLimitMenu(paneText);
+          const rawMenuHit = detectClaudeUsageLimitMenu(paneText);
+          const rawTmuxHit = scanTmuxRateLimit(paneText);
+          const paneFenced = this.paneRateLimitFenced(
+            session,
+            paneText,
+            rawTmuxHit ?? rawMenuHit,
+          );
+          const menuHit = paneFenced ? null : rawMenuHit;
           if (!rateLimit?.limited) {
-            const tmuxHit = scanTmuxRateLimit(paneText) ?? menuHit;
+            const tmuxHit = paneFenced ? null : (rawTmuxHit ?? menuHit);
             if (tmuxHit?.limited) {
               rateLimit = tmuxHit;
             }
           }
-          if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
+          if (!options?.suppressMenuConfirmation && menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
             await this.confirmClaudeUsageLimitMenu(session);
           }
           // Re-confirmation: the detection is flagged but its parsed reset has
@@ -27046,7 +27295,7 @@ export class SessionService {
         } else {
           if (!rateLimit?.limited) {
             const tmuxHit = scanTmuxRateLimit(paneText);
-            if (tmuxHit?.limited) {
+            if (!this.paneRateLimitFenced(session, paneText, tmuxHit) && tmuxHit?.limited) {
               rateLimit = tmuxHit;
             }
           }
@@ -27081,7 +27330,7 @@ export class SessionService {
         // A failed fork takes no observation: it only ever promotes on a hit,
         // so this is a pure guard.
         const tmuxHit = paneText === null ? null : scanTmuxRateLimit(paneText);
-        if (tmuxHit?.limited) {
+        if (paneText !== null && !this.paneRateLimitFenced(session, paneText, tmuxHit) && tmuxHit?.limited) {
           rateLimit = tmuxHit;
         }
       }
@@ -27191,6 +27440,7 @@ export class SessionService {
   ): Promise<
     { view: Omit<DashboardSessionView, "lifecycle">; source: SessionRecord | null } | undefined
   > {
+    const clearRevision = this.rateLimitClearRevisions.get(session.id) ?? 0;
     // The 2s dashboard-cache tick skips the per-session capture-pane scan (the
     // last un-batched fork): jsonl/hook-sourced rate limits still show up
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
@@ -27207,6 +27457,10 @@ export class SessionService {
     const runningSidecarNames = sidecars.filter((view) => view.alive).map((view) => view.name);
 
     const hasServiceIssues = await this.hasServiceIssues(session);
+    if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
+      const current = readSession(this.config.dataDir, session.id);
+      return current ? this.assembleDashboard(current) : undefined;
+    }
     const persistedSession = session;
     session = this.withReportingError(session);
     const source = isDeepStrictEqual(session, persistedSession) ? session : null;
@@ -27247,6 +27501,10 @@ export class SessionService {
       classified.serverError,
       classified.serverErrorEvidence,
     );
+    if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
+      const current = readSession(this.config.dataDir, session.id);
+      return current ? this.assembleDashboard(current) : undefined;
+    }
     this.guardSidecarViews(session.id, sidecars);
     return {
       source,
@@ -27569,6 +27827,7 @@ export class SessionService {
     source: SessionRecord | null;
     detectionOnlyError: boolean;
   }> {
+    const clearRevision = this.rateLimitClearRevisions.get(session.id) ?? 0;
     const hasIndependentError = (record: SessionRecord): boolean =>
       record.status === "errored" ||
       Boolean(record.serverErrorAt) ||
@@ -27603,6 +27862,11 @@ export class SessionService {
     // workspace file yet.
     const anchorRecord = this.deskAnchorRecord(session);
     const sidecars = await this.sidecarViews(session, project);
+    if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
+      const current = readSession(this.config.dataDir, session.id);
+      if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+      return this.enrichWithClassified(current, claudeAccounts, sessionBatch);
+    }
     const persistedSession = session;
     session = this.withReportingError(session);
     const source = isDeepStrictEqual(session, persistedSession) ? session : null;
@@ -27617,6 +27881,11 @@ export class SessionService {
       classified.serverError,
       classified.serverErrorEvidence,
     );
+    if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
+      const current = readSession(this.config.dataDir, session.id);
+      if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+      return this.enrichWithClassified(current, claudeAccounts, sessionBatch);
+    }
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
     const workspaceState = resolveWorkspaceState(this.config.dataDir, anchorRecord);

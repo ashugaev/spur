@@ -3,6 +3,8 @@ export interface RateLimitDetection {
   reason: string;
   /** Epoch ms the limit resets at, when the source text carries a parseable reset instant. */
   resetAtMs?: number;
+  /** Stable position among rate-limit events in one structured source file. */
+  source?: { filePath: string; ordinal: number };
 }
 
 const NOT_LIMITED: RateLimitDetection = { limited: false, reason: "" };

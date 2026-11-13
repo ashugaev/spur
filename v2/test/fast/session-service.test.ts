@@ -64687,6 +64687,155 @@ describe("SessionService", () => {
       });
     }
 
+    it("force clears old structured and pane evidence without re-blocking", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T10:00:00.000Z" }));
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "waiting",
+        reader: {
+          filePath: "test.jsonl",
+          lastOffset: 1,
+          lastMtimeMs: 1,
+          tailRecords: [],
+          rateLimitOrdinal: 1,
+        },
+        rateLimit: {
+          limited: true,
+          reason: "claude rate_limit",
+          source: { filePath: "test.jsonl", ordinal: 1 },
+        },
+        serverError: false,
+      });
+      captureTmuxPaneMock.mockResolvedValue("⚠ Usage limit reached");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.clearRateLimit("api-1", true, "cli");
+
+      expect(result).toMatchObject({ sessionId: "api-1", state: "waiting", deliveryScheduled: true });
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      expect(sessions.get("api-1")?.rateLimitClearFence).toEqual({
+        agentLaunchId: null,
+        sourceOrdinals: { "test.jsonl": 1 },
+        paneLatched: true,
+      });
+      service.dispose();
+
+      const restarted = new SessionService("/tmp/spur.yaml", "2026-03-18T10:06:00.000Z");
+      expect((await restarted.get("api-1")).state).toBe("waiting");
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "waiting",
+        reader: {
+          filePath: "test.jsonl",
+          lastOffset: 2,
+          lastMtimeMs: 2,
+          tailRecords: [],
+          rateLimitOrdinal: 2,
+        },
+        rateLimit: {
+          limited: true,
+          reason: "new claude rate_limit",
+          source: { filePath: "test.jsonl", ordinal: 2 },
+        },
+        serverError: false,
+      });
+      expect((await restarted.get("api-1")).state).toBe("rate_limited");
+      restarted.dispose();
+    });
+
+    it("refuses an exhausted quota with reset time and no session mutation", async () => {
+      const sessions = createSessionStore();
+      const limited = runningSession({ rateLimitedAt: "2026-03-18T10:00:00.000Z" });
+      sessions.set("api-1", limited);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      (service as unknown as { freshQuotaForClear: () => Promise<unknown> }).freshQuotaForClear =
+        async () => ({
+          provider: "claude",
+          source: "default",
+          label: "default",
+          fetchedAt: "2026-03-18T10:05:00.000Z",
+          status: "ok",
+          plan: null,
+          windows: [{ label: "5h", usedPercent: 100, remainingPercent: 0, resetsAt: "2026-03-18T11:00:00.000Z" }],
+        });
+
+      await expect(service.clearRateLimit("api-1", false, "cli")).rejects.toThrow(
+        "reset 2026-03-18T11:00:00.000Z",
+      );
+      expect(sessions.get("api-1")).toEqual(limited);
+      expect(logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.rate_limit.cleared")).toBe(false);
+      service.dispose();
+    });
+
+    it("rejects an in-place Claude account switch during quota lookup", async () => {
+      const sessions = createSessionStore();
+      const limited = runningSession({
+        agentLaunchId: "launch-1",
+        claudeAccountId: "account-a",
+        rateLimitedAt: "2026-03-18T10:00:00.000Z",
+      });
+      sessions.set("api-1", limited);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      let finishQuota!: (value: unknown) => void;
+      const quota = new Promise<unknown>((resolve) => { finishQuota = resolve; });
+      (service as unknown as { freshQuotaForClear: () => Promise<unknown> }).freshQuotaForClear =
+        () => quota;
+
+      const clearing = service.clearRateLimit("api-1", false, "cli");
+      const switched = { ...limited, claudeAccountId: "account-b" };
+      sessions.set("api-1", switched);
+      finishQuota({
+        provider: "claude",
+        source: "account-a",
+        label: "account-a",
+        fetchedAt: "2026-03-18T10:05:00.000Z",
+        status: "ok",
+        plan: null,
+        windows: [{ label: "5h", usedPercent: 10, remainingPercent: 90, resetsAt: null }],
+      });
+
+      await expect(clearing).rejects.toThrow("Session/account changed; retry clear");
+      expect(sessions.get("api-1")).toEqual(switched);
+      service.dispose();
+    });
+
+    it("refuses clear when the structured reader is unavailable before old evidence reappears", async () => {
+      const sessions = createSessionStore();
+      const limited = runningSession({ rateLimitedAt: "2026-03-18T10:00:00.000Z" });
+      sessions.set("api-1", limited);
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockResolvedValue(null);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.clearRateLimit("api-1", true, "cli")).rejects.toThrow(
+        "Rate-limit source unavailable",
+      );
+      expect(sessions.get("api-1")).toEqual(limited);
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "waiting",
+        reader: {
+          filePath: "test.jsonl",
+          lastOffset: 1,
+          lastMtimeMs: 1,
+          tailRecords: [],
+          rateLimitOrdinal: 1,
+        },
+        rateLimit: {
+          limited: true,
+          reason: "old claude rate_limit",
+          source: { filePath: "test.jsonl", ordinal: 1 },
+        },
+        serverError: false,
+      });
+      expect((await service.get("api-1")).state).toBe("rate_limited");
+      expect(logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.rate_limit.cleared")).toBe(false);
+      service.dispose();
+    });
+
     function reactivationQueued(store: ReturnType<typeof createSessionStore>): boolean {
       const messages = store.get("api-1")?.queuedMessages?.messages ?? [];
       return messages.some((message) => message.includes(REACTIVATION_MARKER));

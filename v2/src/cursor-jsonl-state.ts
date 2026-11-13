@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { createHash, type Hash } from "node:crypto";
 import { open, readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -18,10 +19,16 @@ export interface CursorParsedRecord {
 
 export interface CursorJsonlReaderState {
   filePath: string;
+  fileIno?: number;
+  /** SHA-256 of the stable scanned prefix, to reject same-inode rewrites. */
+  prefixHash?: string;
+  scanStartOffset?: number;
   /** End of the stable prefix: complete lines, trailing turn_ended excluded. */
   lastOffset: number;
   lastMtimeMs: number;
   tailRecords: CursorParsedRecord[];
+  /** Rate-limit records in the stable prefix; trailing records are counted on each read. */
+  rateLimitOrdinal?: number;
   /** Records parsed from the trailing turn_ended lines past lastOffset. */
   trailingRecords: CursorParsedRecord[];
   /** The installed cursor closes turns with turn_ended (this file or the host). */
@@ -452,6 +459,39 @@ function latestCursorTerminalError(records: readonly CursorParsedRecord[]): stri
   return null;
 }
 
+function cursorRateLimitCount(records: readonly CursorParsedRecord[]): number {
+  return records.filter(
+    (record) => record.terminalError && detectCursorRateLimit(record.text ?? null)?.limited,
+  ).length;
+}
+
+async function hashCursorPrefix(
+  filePath: string,
+  startOffset: number,
+  endOffset: number,
+): Promise<Hash | null> {
+  const hash = createHash("sha256");
+  if (endOffset === startOffset) return hash;
+  let fd: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    fd = await open(filePath, "r");
+    const buffer = Buffer.alloc(64 * 1024);
+    let offset = startOffset;
+    while (offset < endOffset) {
+      const length = Math.min(buffer.length, endOffset - offset);
+      const { bytesRead } = await fd.read(buffer, 0, length, offset);
+      if (bytesRead === 0) return null;
+      hash.update(buffer.subarray(0, bytesRead));
+      offset += bytesRead;
+    }
+    return hash;
+  } catch {
+    return null;
+  } finally {
+    await fd?.close().catch(() => undefined);
+  }
+}
+
 export function classifyCursorJsonlState(
   records: CursorParsedRecord[],
   nowMs: number,
@@ -512,7 +552,7 @@ export async function readCursorJsonlState(
     return null;
   }
 
-  let fileStat: { size: number; mtimeMs: number };
+  let fileStat: { size: number; mtimeMs: number; ino: number };
   try {
     fileStat = await stat(filePath);
   } catch {
@@ -530,20 +570,58 @@ export async function readCursorJsonlState(
     options?.after?.filePath === filePath && fileStat.size >= options.after.offset
       ? options.after.offset
       : 0;
-  const currentReader: CursorJsonlReaderState =
-    reader &&
+  const canReuse =
+    reader !== undefined &&
     reader.filePath === filePath &&
-    (boundaryOffset === 0 || reader.lastOffset > boundaryOffset || reader.tailRecords.length === 0)
+    (reader.fileIno === undefined || reader.fileIno === fileStat.ino) &&
+    fileStat.size >= reader.lastOffset &&
+    (fileStat.size !== reader.lastOffset || fileStat.mtimeMs === reader.lastMtimeMs) &&
+    (boundaryOffset === 0 || reader.lastOffset > boundaryOffset || reader.tailRecords.length === 0);
+  const verifyNeeded =
+    reader !== undefined &&
+    canReuse &&
+    (fileStat.mtimeMs !== reader.lastMtimeMs ||
+      fileStat.size !== reader.lastOffset ||
+      reader.tailRecords.length + reader.trailingRecords.length === 0);
+  const verifiedPrefix =
+    verifyNeeded && reader
+      ? await hashCursorPrefix(filePath, reader.scanStartOffset ?? 0, reader.lastOffset)
+      : null;
+  if (verifyNeeded && verifiedPrefix === null) return null;
+  const prefixMatches =
+    !canReuse ||
+    !reader ||
+    verifiedPrefix === null ||
+    reader.prefixHash === undefined ||
+    verifiedPrefix.copy().digest("hex") === reader.prefixHash;
+  const currentReader: CursorJsonlReaderState =
+    canReuse && prefixMatches && reader
       ? reader
       : {
           filePath,
+          fileIno: fileStat.ino,
+          scanStartOffset: boundaryOffset,
           lastOffset: boundaryOffset,
           lastMtimeMs: 0,
           tailRecords: [],
+          rateLimitOrdinal: 0,
           trailingRecords: [],
           usesTurnEnded: false,
           turnEnded: false,
         };
+  const prefixHash =
+    currentReader === reader && verifiedPrefix !== null
+      ? verifiedPrefix
+      : createHash("sha256");
+  const rateLimitOrdinal =
+    currentReader.rateLimitOrdinal ?? cursorRateLimitCount(currentReader.tailRecords);
+  const detectLimit = (
+    records: readonly CursorParsedRecord[],
+    ordinal: number,
+  ): RateLimitDetection | null => {
+    const detection = detectCursorRateLimit(latestCursorTerminalError(records));
+    return detection?.limited ? { ...detection, source: { filePath, ordinal } } : detection;
+  };
 
   if (
     fileStat.mtimeMs === currentReader.lastMtimeMs &&
@@ -554,7 +632,10 @@ export async function readCursorJsonlState(
     return {
       state: cursorReaderState(cached, currentReader, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
-      rateLimit: detectCursorRateLimit(latestCursorTerminalError(cached)),
+      rateLimit: detectLimit(
+        cached,
+        rateLimitOrdinal + cursorRateLimitCount(currentReader.trailingRecords),
+      ),
     };
   }
 
@@ -587,6 +668,7 @@ export async function readCursorJsonlState(
       await fd.read(buffer, 0, buffer.length, readOffset);
     }
     stableBytes = cursorStablePrefixBytes(buffer);
+    prefixHash.update(buffer.subarray(0, stableBytes));
     const completeBytes = buffer.lastIndexOf(NEWLINE) + 1;
     stableRecords = parseRecords(buffer.subarray(0, stableBytes));
     const trailing = buffer.subarray(stableBytes, completeBytes);
@@ -600,12 +682,17 @@ export async function readCursorJsonlState(
 
   const tailRecords = [...currentReader.tailRecords, ...stableRecords].slice(-TAIL_RECORD_LIMIT);
   const combined = [...tailRecords, ...trailingRecords].slice(-TAIL_RECORD_LIMIT);
+  const nextRateLimitOrdinal = rateLimitOrdinal + cursorRateLimitCount(stableRecords);
   if (turnEnded) learnHostCursorWritesTurnEnded();
   const nextReader: CursorJsonlReaderState = {
     filePath,
+    fileIno: fileStat.ino,
+    prefixHash: prefixHash.digest("hex"),
+    scanStartOffset: currentReader.scanStartOffset ?? 0,
     lastOffset: readOffset + stableBytes,
     lastMtimeMs: fileStat.mtimeMs,
     tailRecords,
+    rateLimitOrdinal: nextRateLimitOrdinal,
     trailingRecords,
     usesTurnEnded:
       currentReader.usesTurnEnded ||
@@ -627,7 +714,7 @@ export async function readCursorJsonlState(
   return {
     state: cursorReaderState(combined, nextReader, nowMs, fileStat.mtimeMs),
     reader: nextReader,
-    rateLimit: detectCursorRateLimit(latestCursorTerminalError(combined)),
+    rateLimit: detectLimit(combined, nextRateLimitOrdinal + cursorRateLimitCount(trailingRecords)),
   };
 }
 

@@ -1474,16 +1474,54 @@ describe("readClaudeJsonlState rate limit detection", () => {
         if (!result) {
           throw new Error("expected fixture result");
         }
-        expect(result.rateLimit).toEqual({
+        expect(result.rateLimit).toMatchObject({
           limited: true,
           reason: "claude rate_limit",
           resetAtMs: Date.parse("2026-07-12T19:00:00.000Z"),
         });
+        expect(result.rateLimit?.source).toEqual({ filePath: tempFile, ordinal: 1 });
       } finally {
         await rm(tempDir, { recursive: true, force: true });
       }
     },
   );
+
+  it("keeps the same source ordinal through cached reads and unrelated appends", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "claude-limit-ordinal-"));
+    const filePath = join(tempDir, "session.jsonl");
+    const limit = JSON.stringify({
+      type: "assistant",
+      error: "rate_limit",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "You've hit your session limit" }],
+      },
+    });
+    try {
+      await writeFile(filePath, `${limit}\n`);
+      const first = await readClaudeJsonlState(tempDir, {
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      expect(first?.rateLimit?.source).toEqual({ filePath, ordinal: 1 });
+      const cached = await readClaudeJsonlState(tempDir, first?.reader);
+      expect(cached?.rateLimit?.source).toEqual({ filePath, ordinal: 1 });
+      await appendFile(filePath, `${JSON.stringify({ type: "system" })}\n`);
+      const unrelated = await readClaudeJsonlState(tempDir, cached?.reader);
+      expect(unrelated?.rateLimit?.source).toEqual({ filePath, ordinal: 1 });
+      await appendFile(filePath, `${limit}\n`);
+      const fresh = await readClaudeJsonlState(tempDir, unrelated?.reader);
+      expect(fresh?.rateLimit?.source).toEqual({ filePath, ordinal: 2 });
+      await writeFile(filePath, `${limit}\n`);
+      await utimes(filePath, new Date(Date.now() + 2_000), new Date(Date.now() + 2_000));
+      const rewritten = await readClaudeJsonlState(tempDir, fresh?.reader);
+      expect(rewritten?.rateLimit?.source).toEqual({ filePath, ordinal: 1 });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("readClaudeTranscriptEntries", () => {

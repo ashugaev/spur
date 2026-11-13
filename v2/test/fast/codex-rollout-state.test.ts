@@ -185,6 +185,44 @@ async function makeMultiFileSessionsDir(fileSpecs: SessionFile[]): Promise<strin
 }
 
 describe("readCodexRolloutState", () => {
+  it("tracks limit ordinals across root files and keeps them stable on rewrite", async () => {
+    const limitLine = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "token_count", rate_limits: { rate_limit_reached_type: "primary" } },
+    });
+    const sessionsDir = await makeMultiFileSessionsDir([
+      {
+        filename: "first.jsonl",
+        content: `${sessionMeta("root-one")}\n${limitLine}\n`,
+        mtimeMs: 1_000,
+      },
+      {
+        filename: "second.jsonl",
+        content: `${sessionMeta("root-two")}\n${limitLine}\n`,
+        mtimeMs: 2_000,
+      },
+    ]);
+    const firstPath = rolloutPath(sessionsDir, "first.jsonl");
+    const secondPath = rolloutPath(sessionsDir, "second.jsonl");
+    const firstSource = join("2026", "04", "19", "first.jsonl");
+    const secondSource = join("2026", "04", "19", "second.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    const initial = await readCodexRolloutState(sessionsDir, reader);
+    expect(initial.rateLimitOrdinals).toEqual({ [firstSource]: 1, [secondSource]: 1 });
+    expect(initial.rateLimit?.source).toEqual({ filePath: secondSource, ordinal: 1 });
+    await writeFile(
+      firstPath,
+      `${sessionMeta("root-one")}\n${limitLine}\n${JSON.stringify({ type: "turn_context", payload: { model: "auto" } })}\n`,
+    );
+    const rewritten = await readCodexRolloutState(sessionsDir, reader);
+    expect(rewritten.rateLimitOrdinals).toEqual({ [firstSource]: 1, [secondSource]: 1 });
+    expect(rewritten.rateLimit?.source).toEqual({ filePath: firstSource, ordinal: 1 });
+    await appendFile(firstPath, `${limitLine}\n`);
+    const fresh = await readCodexRolloutState(sessionsDir, reader);
+    expect(fresh.rateLimitOrdinals).toEqual({ [firstSource]: 2, [secondSource]: 1 });
+    expect(fresh.rateLimit?.source).toEqual({ filePath: firstSource, ordinal: 2 });
+  });
+
   it("dates an undated quota record after an earlier clean turn and cached API allow", async () => {
     const cleanAt = new Date(Date.now() - 60_000).toISOString();
     const content = [
@@ -227,7 +265,7 @@ describe("readCodexRolloutState", () => {
     const sessionsDir = await makeSessionsDir(lines.join("\n"));
     const filePath = join(sessionsDir, "2026", "04", "19", "rollout-test.jsonl");
     const reader: CodexRolloutReaderState = { files: new Map() };
-    expect((await readCodexRolloutState(sessionsDir, reader)).rateLimit).toEqual({
+    expect((await readCodexRolloutState(sessionsDir, reader)).rateLimit).toMatchObject({
       limited: true,
       reason: "codex usage_limit_exceeded",
     });
@@ -293,7 +331,7 @@ describe("readCodexRolloutState", () => {
     const reader: CodexRolloutReaderState = { files: new Map() };
     const first = await readCodexRolloutState(sessionsDir, reader, "quota-root");
     expect(first.rollout?.reason).toBe("thread_settings_applied");
-    expect(first.rateLimit).toEqual({
+    expect(first.rateLimit).toMatchObject({
       limited: true,
       reason: "codex 5h window exhausted",
       resetAtMs: reset * 1000,
@@ -309,7 +347,7 @@ describe("readCodexRolloutState", () => {
       })}`,
       "utf8",
     );
-    expect((await readCodexRolloutState(sessionsDir, reader, "quota-root")).rateLimit).toEqual({
+    expect((await readCodexRolloutState(sessionsDir, reader, "quota-root")).rateLimit).toMatchObject({
       limited: true,
       reason: "codex weekly",
     });
@@ -344,7 +382,7 @@ describe("readCodexRolloutState", () => {
         `${content}\n${tokenCount(true)}`,
         "utf8",
       );
-      expect((await readCodexRolloutState(sessionsDir, reader, "paid-root")).rateLimit).toEqual({
+      expect((await readCodexRolloutState(sessionsDir, reader, "paid-root")).rateLimit).toMatchObject({
         limited: true,
         reason: "codex weekly",
       });
@@ -1039,7 +1077,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toEqual({ rollout: null, rateLimit: null, model: "gpt-5.5-codex" });
+    expect(result).toMatchObject({ rollout: null, rateLimit: null, model: "gpt-5.5-codex" });
   });
 
   it("keeps a sibling's rate limit when the newest file carries only a turn_context model", async () => {
@@ -1069,7 +1107,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary" });
+    expect(result.rateLimit).toMatchObject({ limited: true, reason: "codex primary" });
     expect(result.model).toBe("gpt-5.5-codex");
   });
 
@@ -1233,7 +1271,7 @@ describe("readCodexRolloutState", () => {
     expect(result.rollout).toMatchObject({
       turnId: "019e0000-0000-7000-9000-0000000curnt",
     });
-    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary" });
+    expect(result.rateLimit).toMatchObject({ limited: true, reason: "codex primary" });
   });
 
   it("returns the selected file's clean completion rather than a stale sibling's limit", async () => {
@@ -1303,7 +1341,7 @@ describe("readCodexRolloutState", () => {
     const result = await readCodexRolloutState(sessionsDir);
 
     expect(result.rollout).toBeNull();
-    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary" });
+    expect(result.rateLimit).toMatchObject({ limited: true, reason: "codex primary" });
   });
 
   it("breaks equal in-content timestamps by picking the newer-mtime file", async () => {
@@ -1353,11 +1391,19 @@ function normalizeResult(result: CodexRolloutReadResult): CodexRolloutReadResult
   const {
     lastProgressMs: _lastProgressMs,
     rateLimitObservedAtMs: _rateLimitObservedAtMs,
+    rateLimitOrdinals: _rateLimitOrdinals,
     ...rest
   } = result;
+  const rateLimit = rest.rateLimit
+    ? {
+        limited: rest.rateLimit.limited,
+        reason: rest.rateLimit.reason,
+        ...(rest.rateLimit.resetAtMs !== undefined ? { resetAtMs: rest.rateLimit.resetAtMs } : {}),
+      }
+    : null;
   return rest.rollout
-    ? { ...rest, rollout: { ...rest.rollout, filePath: basename(rest.rollout.filePath) } }
-    : rest;
+    ? { ...rest, rateLimit, rollout: { ...rest.rollout, filePath: basename(rest.rollout.filePath) } }
+    : { ...rest, rateLimit };
 }
 
 function eventLine(timestamp: string, type: string, payload: Record<string, unknown>): string {

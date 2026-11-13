@@ -1,7 +1,6 @@
 # Daemon HTTP API
 
 > Scope: route names only, one method + full path per line, every line `git grep`-able verbatim. Payload/status-code contracts: `v2/src/server.ts`. CLI usage: [commands.md](commands.md). Default `127.0.0.1:4310`.
-
 - `GET /info` — `lifecycleInstanceId`, runtime `buildId`: process/build identity; `v2/src/session-lifecycle.ts`, `v2/src/build-identity.ts`.
 - `GET /headroom`
 - `GET /usage` — quota windows per Claude account and Codex, per-source error entries, token totals today/7d/30d; provider request timeout 5s; MCP `get_usage`; `v2/src/usage-report.ts`.
@@ -57,6 +56,7 @@
 - `GET /sessions/:id/source-info` — read-only association and cached bot identity; `v2/src/server.ts`, `v2/src/session-service.ts`.
 - `POST /sessions/:id/opened`
 - `POST /sessions/:id/pause`
+- `POST /sessions/:id/rate-limit/clear` — limited live session, optional `force`; `v2/src/server.ts`.
 - `POST /sessions/:id/complete` — optional correlation `operationId`, group `completedIds`/outcomes, lifecycle 409/503; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/self-destruct`
 - `POST /sessions/:id/kill`
