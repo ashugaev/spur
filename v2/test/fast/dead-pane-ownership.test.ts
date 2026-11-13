@@ -53,6 +53,13 @@ vi.mock("../../src/process-tree.js", async (importOriginal) => ({
     status: "ok" as const,
     value: fakeTable.find((proc) => proc.pid === pid)?.env[key],
   })),
+  readProcessEnvValues: vi.fn(async (pid: number, keys: readonly string[]) => {
+    const env = fakeTable.find((proc) => proc.pid === pid)?.env ?? {};
+    return {
+      status: "ok" as const,
+      values: Object.fromEntries(keys.flatMap((key) => (key in env ? [[key, env[key]]] : []))),
+    };
+  }),
   snapshotProcessLiveness: vi.fn(async () => ({
     status: "ok" as const,
     alivePids: { has: (pid: number) => !signalled.includes(pid) } as ReadonlySet<number>,

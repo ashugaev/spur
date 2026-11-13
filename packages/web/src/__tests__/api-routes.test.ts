@@ -3799,6 +3799,177 @@ describe("Spur web API routes", () => {
       }
     });
 
+    it("stale error response keeps checks and reviewers.pending", async () => {
+      const url = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(
+        ghOk(
+          makePrGql({
+            reviews: { nodes: [], pageInfo: { hasPreviousPage: false } },
+            reviewRequests: {
+              nodes: [{ requestedReviewer: { __typename: "User", login: "zed" } }],
+              pageInfo: { hasNextPage: false },
+            },
+            commits: {
+              nodes: [
+                {
+                  commit: {
+                    statusCheckRollup: {
+                      state: "FAILURE",
+                      contexts: {
+                        nodes: [{ __typename: "StatusContext", context: "ci", state: "FAILURE" }],
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          }),
+        ),
+      );
+      await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`));
+      const realNow = Date.now;
+      try {
+        Date.now = () => realNow() + 200_000;
+        fetchMock.mockResolvedValueOnce(ghErr(503));
+        const errResp = await getPrStatus(
+          new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`),
+        );
+        expect(await errResp.json()).toMatchObject({
+          stale: true,
+          checks: [{ name: "ci", state: "failed" }],
+          reviewers: { pending: [{ name: "zed", team: false }] },
+        });
+      } finally {
+        Date.now = realNow;
+      }
+    });
+
+    it("selects reviewer identity and check contexts", async () => {
+      fetchMock.mockResolvedValueOnce(ghOk(makePrGql()));
+      await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`));
+      const body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string) as { query: string };
+      expect(body.query).toContain("requestedReviewer");
+      expect(body.query).toContain("EnterpriseTeam");
+      expect(body.query).toContain("contexts(first:100)");
+    });
+
+    describe("reviewer requests and checks normalization", () => {
+      const reviews = { nodes: [], pageInfo: { hasPreviousPage: false } };
+      const approvedReviews = {
+        nodes: [
+          {
+            state: "APPROVED",
+            submittedAt: "2026-11-07T06:42:56Z",
+            author: { login: "alice" },
+          },
+        ],
+        pageInfo: { hasPreviousPage: false },
+      };
+      function requests(...nodes: unknown[]) {
+        return { nodes, pageInfo: { hasNextPage: false } };
+      }
+      function rollup(...nodes: unknown[]) {
+        return {
+          nodes: [{ commit: { statusCheckRollup: { state: "FAILURE", contexts: { nodes } } } }],
+        };
+      }
+      async function fetchStatus(overrides: Record<string, unknown>) {
+        fetchMock.mockResolvedValueOnce(ghOk(makePrGql({ reviews, ...overrides })));
+        const response = await getPrStatus(
+          new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+        );
+        return (await response.json()) as {
+          ciStatus: string | null;
+          reviewers: { approved: string[]; pending?: unknown } | null;
+          checks: unknown;
+        };
+      }
+
+      it("normalizes users, bots, teams and skips null reviewers, sorted by name", async () => {
+        const payload = await fetchStatus({
+          reviewRequests: requests(
+            { requestedReviewer: { __typename: "Team", slug: "core" } },
+            { requestedReviewer: null },
+            { requestedReviewer: { __typename: "Bot", login: "bot" } },
+            { requestedReviewer: { __typename: "EnterpriseTeam", slug: "ent" } },
+            { requestedReviewer: { __typename: "User", login: "alice" } },
+          ),
+        });
+        expect(payload.reviewers?.pending).toEqual([
+          { name: "alice", team: false },
+          { name: "bot", team: false },
+          { name: "core", team: true },
+          { name: "ent", team: true },
+        ]);
+      });
+
+      it.each([
+        [{ requestedReviewer: { __typename: "Weird", login: "x" } }],
+        [{ requestedReviewer: { __typename: "User", login: "" } }],
+        [{ requestedReviewer: { __typename: "Team" } }],
+        [{}],
+      ])("omits pending but keeps approvals for malformed request %j", async (node) => {
+        const payload = await fetchStatus({
+          reviews: approvedReviews,
+          reviewRequests: requests(node),
+        });
+        expect(payload.reviewers?.pending).toBeUndefined();
+        expect(payload.reviewers?.approved).toEqual(["alice"]);
+      });
+
+      it.each([
+        [{ __typename: "CheckRun", name: "a", status: "IN_PROGRESS", conclusion: null }, "pending"],
+        [{ __typename: "CheckRun", name: "a", status: "COMPLETED", conclusion: null }, "pending"],
+        [
+          { __typename: "CheckRun", name: "a", status: "COMPLETED", conclusion: "SUCCESS" },
+          "passed",
+        ],
+        [
+          { __typename: "CheckRun", name: "a", status: "COMPLETED", conclusion: "NEUTRAL" },
+          "passed",
+        ],
+        [
+          { __typename: "CheckRun", name: "a", status: "COMPLETED", conclusion: "SKIPPED" },
+          "passed",
+        ],
+        [
+          { __typename: "CheckRun", name: "a", status: "COMPLETED", conclusion: "FAILURE" },
+          "failed",
+        ],
+        [
+          { __typename: "CheckRun", name: "a", status: "COMPLETED", conclusion: "TIMED_OUT" },
+          "failed",
+        ],
+        [
+          { __typename: "CheckRun", name: "a", status: "COMPLETED", conclusion: "CANCELLED" },
+          "failed",
+        ],
+        [{ __typename: "StatusContext", context: "a", state: "SUCCESS" }, "passed"],
+        [{ __typename: "StatusContext", context: "a", state: "ERROR" }, "failed"],
+        [{ __typename: "StatusContext", context: "a", state: "FAILURE" }, "failed"],
+        [{ __typename: "StatusContext", context: "a", state: "PENDING" }, "pending"],
+        [{ __typename: "StatusContext", context: "a", state: "EXPECTED" }, "pending"],
+      ])("maps check %j to %s", async (node, state) => {
+        const payload = await fetchStatus({ commits: rollup(node) });
+        expect(payload.checks).toEqual([{ name: "a", state }]);
+      });
+
+      it("yields an empty list when the rollup is null", async () => {
+        const payload = await fetchStatus({});
+        expect(payload.checks).toEqual([]);
+      });
+
+      it.each([
+        [{ __typename: "CheckRun", name: "a", status: "COMPLETED", conclusion: "WEIRD" }],
+        [{ __typename: "CheckRun", name: "", status: "COMPLETED", conclusion: "SUCCESS" }],
+        [{ __typename: "Other", name: "a" }],
+      ])("nulls checks but keeps ciStatus for malformed node %j", async (node) => {
+        const payload = await fetchStatus({ commits: rollup(node) });
+        expect(payload.checks).toBeNull();
+        expect(payload.ciStatus).toBe("failure");
+      });
+    });
+
     it("with no prior success, an error returns EMPTY_PR_STATUS with error and stale:false", async () => {
       const doReset = (globalThis as Record<string, unknown>)["__spurResetPrStatusCache"];
       if (typeof doReset === "function") (doReset as () => void)();
@@ -4121,6 +4292,53 @@ describe("Spur web API routes", () => {
       expect(query.query).toContain("submittedAt");
       expect(query.query).toContain("reviewDecision");
       expect(query.query).not.toContain("latestOpinionatedReviews");
+    });
+
+    it("returns pending reviewers and checks in batch results", async () => {
+      const url = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(
+        ghOk(
+          aliasedGql({
+            pr0: makePrNode({
+              reviews: { nodes: [], pageInfo: { hasPreviousPage: false } },
+              reviewRequests: {
+                nodes: [{ requestedReviewer: { __typename: "Team", slug: "core" } }],
+                pageInfo: { hasNextPage: false },
+              },
+              commits: {
+                nodes: [
+                  {
+                    commit: {
+                      statusCheckRollup: {
+                        state: "SUCCESS",
+                        contexts: {
+                          nodes: [
+                            {
+                              __typename: "CheckRun",
+                              name: "lint",
+                              status: "COMPLETED",
+                              conclusion: "SUCCESS",
+                            },
+                          ],
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            }),
+          }),
+        ),
+      );
+      const response = await postBatch([url]);
+      expect(await response.json()).toMatchObject({
+        results: {
+          [url]: {
+            reviewers: { pending: [{ name: "core", team: true }] },
+            checks: [{ name: "lint", state: "passed" }],
+          },
+        },
+      });
     });
 
     it("shares the authoritative positive REVIEW_REQUIRED decision in batch responses", async () => {

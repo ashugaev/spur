@@ -26,6 +26,88 @@ const FORM = `
 `;
 
 describe("handshake", () => {
+  it("does not reschedule geometry rAF for static inputs; coalesces dirty bursts and cleans heartbeat", async () => {
+    const r = await portRig("<spur-chat></spur-chat><spur-chat></spur-chat>");
+    r.frame();
+    expect(r.ofType("chat-layout")).toHaveLength(1);
+    expect(r.pendingFrames()).toBe(0);
+    r.frame();
+    expect(r.pendingFrames()).toBe(0);
+    for (let i = 0; i < 10; i++) r.win.dispatchEvent(new r.win.Event("scroll"));
+    expect(r.pendingFrames()).toBe(1);
+    r.frame();
+    expect(r.pendingFrames()).toBe(0);
+    r.advance(10000);
+    expect(r.ofType("chat-layout").length).toBeLessThanOrEqual(40);
+    expect(r.pendingFrames()).toBe(0);
+    expect(r.sent.length).toBeLessThan(100);
+    r.doc.querySelectorAll("spur-chat").forEach((chat) => chat.remove());
+    await flush();
+    const count = r.ofType("chat-layout").length;
+    r.advance(1000);
+    r.frame();
+    expect(r.ofType("chat-layout")).toHaveLength(count);
+  });
+  it("renders bounded target feedback as text below the field", async () => {
+    const r = await portRig("<spur-chat></spur-chat><spur-chat></spur-chat>");
+    const target = r.ofType("chat-register")[1]?.target;
+    r.fromHost({
+      type: "chat-voice-state",
+      target,
+      starting: false,
+      unavailable: false,
+      error: "<b>retry</b>",
+    });
+    const feedback = r.doc.querySelectorAll(".spur-chat-feedback");
+    expect(feedback[0]?.textContent).toBe("");
+    expect(feedback[1]?.textContent).toBe("<b>retry</b>");
+    expect(feedback[1]?.querySelector("b")).toBeNull();
+    r.fromHost({
+      type: "chat-voice-state",
+      target,
+      starting: true,
+      unavailable: false,
+      error: "x".repeat(2001),
+    });
+    expect(feedback[1]?.textContent).toBe("<b>retry</b>");
+  });
+  it("sends an editable chat draft by button click without native form submission", async () => {
+    const r = await portRig("<spur-chat></spur-chat>");
+    const chat = r.doc.querySelector("spur-chat")!;
+    const input = chat.querySelector("textarea")!;
+    const button = chat.querySelector("button")!;
+    expect(chat.querySelector("form")).toBeNull();
+    expect(button.type).toBe("button");
+    input.value = "dictated draft\nwith edits";
+    button.click();
+    expect(r.ofType("agent").filter((message) => message.op === "send")).toEqual([
+      {
+        type: "agent",
+        op: "send",
+        message: "dictated draft\nwith edits",
+        userGesture: false,
+        callId: expect.any(String),
+      },
+    ]);
+    r.reply("agent", { ok: true, status: 200, body: { sessionId: "sp-ab12" } });
+    await flush();
+    expect(input.value).toBe("");
+  });
+  it("registers shared chats and inserts host voice into the selected editable draft without sending", async () => {
+    const r = await portRig("<spur-chat></spur-chat>");
+    const target = r.ofType("chat-register")[0]?.target;
+    expect(target).toEqual(expect.any(String));
+    const input = r.doc.querySelector("spur-chat textarea") as HTMLTextAreaElement;
+    input.value = "before ";
+    input.setSelectionRange(7, 7);
+    r.fromHost({ type: "chat-transcript", target: "unknown", text: "wrong" });
+    expect(input.value).toBe("before ");
+    r.fromHost({ type: "chat-transcript", target, text: "voice" });
+    expect(input.value).toBe("before voice");
+    expect(r.ofType("agent").filter((message) => message.op === "send")).toHaveLength(0);
+    r.doc.querySelector("spur-chat")?.remove();
+    expect(r.ofType("chat-unregister")).toContainEqual({ type: "chat-unregister", target });
+  });
   it("says hello with protocol 2 at most 25 times and stops on connect", async () => {
     const r = await portRig("", { booted: false });
     expect(r.hellos[0]).toEqual({ type: "spur:hello", protocolVersion: 2, nonce: "n0nce" });

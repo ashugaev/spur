@@ -42,6 +42,7 @@ Root is an object schema. Every string needs `maxLength` 1..20000; every array n
 
 - Panel status from the doc: Queued, Agent working (session working), Done, Failed, No reply in 15 min (daemon expiry). Host Retry on Failed and timeout.
 - Host asks the user before an invoke when: the action declares `confirm`, the snippet never had focus, second action on the same revision, 10 unconfirmed sends in a row, or browser storage is unavailable. `spur.agent.send` and `<spur-chat>` pass the same gates except the per-revision one. The count resets only on the user's Send or Retry click.
+- Chat voice: [spur-sdk.md](spur-sdk.md). The host owns the microphone; snippets retain their sandbox and cannot start recording through a message. Dictation targets the chat focused when recording starts; replacing or closing the snippet cancels capture.
 - Reload while sending: the panel shows the latest action of this instance from the store; an unacknowledged send is lost.
 - Payload up to 48 KiB, port message up to 128 KiB. Unit: UTF-8 bytes of the JSON text.
 

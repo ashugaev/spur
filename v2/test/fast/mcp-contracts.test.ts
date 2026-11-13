@@ -1,4 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import type * as FsPromises from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -14,6 +16,7 @@ import {
 } from "../helpers/daemon-contract-coverage.js";
 import { createTempDir, findFreePort } from "../helpers/common.js";
 import { writeSession } from "../../src/metadata.js";
+import { PageSourceSync } from "../../src/page-source.js";
 import { startServer } from "../../src/server.js";
 import type { CronJobEditDraft } from "../../src/types.js";
 
@@ -21,10 +24,10 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "88d1bc40054b467ed7b7aeb950b1fa01560f9705b414d59c685a07700123db33",
-  "types.ts": "885ac1273e20334b58874b5db117ac32cf76e75c3eeb2ef6376b5fd8f686ace9",
-  "cron-job-editor.ts": "33fc7b2993819693ef511d9312f9eb8f4260feb2f263421aec2d4e5ac613ec06",
-  "session-service.ts": "2b40ad8aa603b41f4e0505735c7267efa9965b7c206e98772630da89819acf61",
+  "server.ts": "9f12556494befbb91167b69767f79ed40a96397cfc394d063a8cd4423102bf23",
+  "types.ts": "04b5d658b38b28bbb347ac477985a4615cecaec07a3b55e18d341f406bf3faa4",
+  "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
+  "session-service.ts": "f7ba9d91bba15b643ecf7130c519c2446c7d28fe9a3727795df268afa25126b2",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "1d06c2d904fa46b95ef8bed971c5767fad76663482f22822f9a541b345f161ff",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -36,7 +39,28 @@ const reviewedFingerprints = {
   "review-interface-consent.ts": "03fc56319c45e14e4685e169387ee96677487abf12aaea0ad8a313090cda7d3d",
 };
 
-afterEach(() => vi.restoreAllMocks());
+// Holds PageSourceSync.attempt on the bound source's lstat, after it publishes "syncing".
+const sourceGate = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  held: Promise.resolve(),
+  reached: () => {},
+}));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof FsPromises>();
+  const lstat = (async (...args: Parameters<typeof actual.lstat>) => {
+    if (sourceGate.path !== undefined && String(args[0]) === sourceGate.path) {
+      sourceGate.reached();
+      await sourceGate.held;
+    }
+    return actual.lstat(...args);
+  }) as typeof actual.lstat;
+  return { ...actual, lstat, default: { ...actual, lstat } };
+});
+
+afterEach(() => {
+  sourceGate.path = undefined;
+  vi.restoreAllMocks();
+});
 
 describe("daemon MCP operation contracts", () => {
   it("covers every concrete imperative dispatch branch with no duplicates", async () => {
@@ -45,9 +69,9 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(102);
+    expect(routes).toHaveLength(103);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(102);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(103);
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("spawn_background_session")?.path).toBe("/sessions/background");
     expect(getDaemonOperation("missing")).toBeUndefined();
@@ -98,6 +122,50 @@ describe("daemon MCP operation contracts", () => {
     expect(background?.responses[0]).toMatchObject({ status: 201 });
     expect(background?.responses[0]?.description).toContain("across daemon restart");
     expect(background?.responses[0]?.description).toContain("ownership remains held");
+  });
+
+  it("describes source binding, Page summary DTOs and protected static files", async () => {
+    const update = getDaemonOperation("update_page_source");
+    expect(update).toMatchObject({
+      method: "PATCH",
+      path: "/pages/{pageId}/source",
+      pathParams: ["pageId"],
+      pathParameters: [{ name: "pageId", required: true }],
+      body: { type: "object", fields: [{ name: "path", type: "string|null", required: true }] },
+    });
+    expect(update?.responses.map((entry) => entry.status)).toEqual(
+      expect.arrayContaining([200, 400, 404]),
+    );
+    expect(update?.examples).toEqual(
+      expect.arrayContaining([
+        { pathParams: { pageId: "example-pageId" }, body: { path: "/path/to/site" } },
+        { pathParams: { pageId: "example-pageId" }, body: { path: null } },
+      ]),
+    );
+    const create = getDaemonOperation("create_page");
+    expect(create?.body?.fields).toContainEqual(
+      expect.objectContaining({ name: "source", type: "{path:string}", required: false }),
+    );
+    const pages = await source("pages.ts");
+    expect(create?.body?.fields.map((entry) => entry.name).sort()).toEqual(
+      interfaceFields(pages, "CreatePageRequest")
+        .map((entry) => entry.name)
+        .sort(),
+    );
+    for (const id of ["list_pages", "create_page", "update_page_source"]) {
+      const response = getDaemonOperation(id)?.responses[0]?.description;
+      for (const field of [
+        ...interfaceFields(pages, "PageConfig"),
+        ...interfaceFields(pages, "PageSyncStatus"),
+      ]) {
+        expect(response, `${id}: ${field.name}`).toContain(field.name);
+      }
+      for (const name of ["id", "path", "url", "sync", "pending", "syncing", "synced", "error"])
+        expect(response).toContain(name);
+    }
+    for (const name of ["dot paths", "data.sqlite*", "page.yaml", "_spur"]) {
+      expect(getDaemonOperation("get_page_file")?.summary).toContain(name);
+    }
   });
 
   it("fails closed on unfamiliar dispatch/matcher syntax", async () => {
@@ -201,7 +269,7 @@ describe("daemon MCP operation contracts", () => {
     }
   });
 
-  it("describes the scoped Cron disk draft and nullable save-only contract", async () => {
+  it("describes the scoped Cron disk draft and save-and-reload contract", async () => {
     for (const operationId of ["get_cron_job_draft", "save_cron_job_draft"]) {
       const operation = getDaemonOperation(operationId);
       expect(operation?.path).toBe("/projects/cron/edit");
@@ -227,8 +295,9 @@ describe("daemon MCP operation contracts", () => {
       expect(definitions).toMatch(new RegExp(`${key}: [^;]+\\|null;`));
     }
     expect(save?.responses.find(({ status }) => status === 200)?.description).toContain(
-      'activation:"pending"',
+      'activation:"applied"|"failed"',
     );
+    expect(save?.sources).toContain("v2/src/server.ts");
   });
 
   it("states allowedTriggers omit and empty-array semantics in the spawn contracts", () => {
@@ -288,7 +357,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(102);
+      expect(page.total).toBe(103);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",
@@ -360,7 +429,97 @@ describe("catalog examples at the real daemon router", () => {
     return { server, request, configPath };
   }
 
-  it("executes scoped Cron draft/save catalog requests without changing loaded settings or sessions", async () => {
+  it("binds and detaches source through catalog requests and rejects malformed bodies without mutation", async () => {
+    // Test owns the page-source cadence: start() is inert, checks fire via sync.reconcile().
+    const start = vi.spyOn(PageSourceSync.prototype, "start").mockImplementation(() => undefined);
+    const { server, request } = await fixture();
+    expect(start).toHaveBeenCalledTimes(1);
+    const sync = start.mock.contexts[0] as PageSourceSync;
+    const pageId = "mcp-page";
+    const params = { pageId };
+    const path = join(server.config.dataDir, "missing-site");
+    const pageDir = join(server.config.dataDir, "pages", pageId);
+    const persisted = async () => ({
+      config: createHash("sha256")
+        .update(await readFile(join(pageDir, "page.yaml")))
+        .digest("hex"),
+      entries: (await readdir(pageDir)).sort(),
+    });
+    const malformed = [[], null, {}, { path: 1 }, { path: "relative" }, { path: `${path}\u0000` }];
+    let release = () => {};
+    try {
+      expect((await request("create_page", { id: pageId })).status).toBe(201);
+      const bound = await request("update_page_source", { path }, params);
+      expect(bound.status).toBe(200);
+      expect(await bound.json()).toMatchObject({
+        id: pageId,
+        url: `/p/${pageId}/`,
+        source: { path },
+        sync: { state: "error" },
+      });
+      const before = await persisted();
+      for (const body of malformed) {
+        expect((await request("update_page_source", body, params)).status).toBe(400);
+        expect(await persisted()).toEqual(before);
+        expect(await (await request("list_pages")).json()).toMatchObject({
+          pages: [{ id: pageId, source: { path }, sync: { state: "error" } }],
+        });
+      }
+      // Background check held mid-flight: list_pages reports "syncing"; a 400 neither resets
+      // that status nor persists anything.
+      sourceGate.held = new Promise<void>((resolve) => (release = resolve));
+      const reached = new Promise<void>((resolve) => (sourceGate.reached = resolve));
+      sourceGate.path = path;
+      void sync.reconcile();
+      await reached;
+      expect(await (await request("list_pages")).json()).toMatchObject({
+        pages: [{ id: pageId, source: { path }, sync: { state: "syncing" } }],
+      });
+      for (const body of malformed.slice(0, 4)) {
+        expect((await request("update_page_source", body, params)).status).toBe(400);
+        expect(await persisted()).toEqual(before);
+        expect(await (await request("list_pages")).json()).toMatchObject({
+          pages: [{ id: pageId, source: { path }, sync: { state: "syncing" } }],
+        });
+      }
+      // A relative path may queue behind the held check; either way it is rejected.
+      const relative = request("update_page_source", { path: "relative" }, params);
+      release();
+      expect((await relative).status).toBe(400);
+      sourceGate.path = undefined;
+      expect(await persisted()).toEqual(before);
+      expect(await (await request("list_pages")).json()).toMatchObject({
+        pages: [{ id: pageId, source: { path }, sync: { state: "error" } }],
+      });
+      expect((await request("update_page_source", { path }, { pageId: "missing" })).status).toBe(
+        404,
+      );
+      const detached = await request("update_page_source", { path: null }, params);
+      expect(detached.status).toBe(200);
+      const detachedPage: unknown = await detached.json();
+      expect(detachedPage).toMatchObject({ id: pageId, url: `/p/${pageId}/` });
+      expect(detachedPage).not.toHaveProperty("source");
+      expect(detachedPage).not.toHaveProperty("sync");
+      const created = await request("create_page", { id: "sourced", source: { path } });
+      expect(created.status).toBe(201);
+      expect(await created.json()).toMatchObject({
+        id: "sourced",
+        source: { path },
+        sync: { state: "error" },
+      });
+      for (const file of ["page.yaml", ".source-sync.json", "data.sqlite"]) {
+        expect((await request("get_page_file", undefined, { pageId, path: file })).status).toBe(
+          404,
+        );
+      }
+    } finally {
+      sourceGate.path = undefined;
+      release();
+      await server.stop();
+    }
+  });
+
+  it("executes scoped Cron draft/save catalog requests and applies loaded settings without changing sessions", async () => {
     const { server, request, configPath } = await fixture(true);
     const query = { project: "test", source: "nightly", trigger: "audit" };
     try {
@@ -380,7 +539,7 @@ describe("catalog examples at the real daemon router", () => {
       expect(save.status).toBe(200);
       expect(await save.json()).toMatchObject({
         saved: true,
-        activation: "pending",
+        activation: "applied",
         blocks: body.blocks,
       });
       const reopened = (await (
@@ -400,7 +559,10 @@ describe("catalog examples at the real daemon router", () => {
           )
         ).status,
       ).toBe(422);
-      expect(server.config.projects["test"]).toEqual(loadedBefore);
+      expect(server.config.projects["test"]).not.toEqual(loadedBefore);
+      expect(server.config.projects["test"]?.sources["nightly"]).toMatchObject({
+        schedule: "0 1 1 1 *",
+      });
       expect(await (await request("list_sessions")).json()).toEqual(sessionsBefore);
     } finally {
       await server.stop();

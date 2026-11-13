@@ -1,5 +1,7 @@
 import { expect, test, vi } from "vitest";
 import { pathToFileURL } from "node:url";
+import { readFile } from "node:fs/promises";
+import { parse } from "yaml";
 import type * as GateModule from "../../src/review-gate.js";
 import { plan, capability } from "./review-feedback.fixture.js";
 import {
@@ -10,7 +12,7 @@ import {
   type GateSnapshot,
   type GatePolicy,
 } from "../../src/review-gate.js";
-import { produceGates } from "../../src/review-gate-producer.js";
+import { produceGates, verifyWake } from "../../src/review-gate-producer.js";
 import {
   stateBody,
   readStateBody,
@@ -1117,6 +1119,8 @@ const nativeNegativeModes = [
 ] as const;
 test.each([
   "clean",
+  "ready_for_review",
+  "converted_to_draft",
   "causal-approved-churn",
   "causal-blocked-churn",
   "causal-foreign-head",
@@ -1177,6 +1181,7 @@ test.each([
       mode.startsWith("coupled-") || mode.startsWith("causal-")
         ? sameRepositoryFixture()
         : fixture();
+    if (mode === "ready_for_review") snapshot.pr.draft = true;
     if (mode.startsWith("coupled-") || mode === "causal-blocked-churn") snapshot.unresolved = 1;
     if (mode.startsWith("causal-foreign-head"))
       snapshot.runs.push({
@@ -1448,6 +1453,50 @@ test.each([
       });
     }
     try {
+      if (mode === "ready_for_review" || mode === "converted_to_draft") {
+        const wasDraft = snapshot.pr.draft;
+        await producer(api, policy);
+        const writer = object(
+          parse(
+            await readFile(
+              new URL("../../../.github/workflows/review-approval.yml", import.meta.url),
+              "utf8",
+            ),
+          ),
+        );
+        expect(object(object(writer.on).pull_request_target).types).toContain(mode);
+        snapshot.pr.draft = !wasDraft;
+        const target = await verifyWake(api, policy.repository, "pull_request_target", {
+          action: mode,
+          pull_request: { number: 5, draft: wasDraft },
+        });
+        expect(target).toEqual({ number: 5 });
+        await producer(api, policy, target);
+        expect(writes.map((write) => write.status)).toEqual([
+          "in_progress",
+          "completed",
+          "in_progress",
+          "completed",
+        ]);
+        expect(
+          writes
+            .filter((write) => write.status === "completed")
+            .map((write) => ({
+              conclusion: write.conclusion,
+              summary: write.output?.summary,
+            })),
+        ).toEqual(
+          (wasDraft ? [true, false] : [false, true]).map((draft) => ({
+            conclusion: draft ? "failure" : "success",
+            summary: draft ? "pr-not-ready" : "all-gates-pass",
+          })),
+        );
+        expect([...checks.values()].map((check) => [check.head_sha, check.external_id])).toEqual([
+          [H, `5:${H}:${B}`],
+          [H, `5:${H}:${B}`],
+        ]);
+        return;
+      }
       if (mode.startsWith("abort-")) {
         await expect(produceGates(api, policy)).rejects.toThrow("gate-reconciliation-timeout");
         expect(requestsAfterAbort).toBe(0);

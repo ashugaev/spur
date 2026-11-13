@@ -23,7 +23,7 @@ for (const width of [1280, 390]) {
     const title = page.getByRole("link", { name: "My films", exact: true });
     await expect(title).toHaveAttribute("target", "_blank");
     await expect(title).toHaveAttribute("rel", "noopener noreferrer");
-    await expect(page.getByRole("button", { name: /Create|Open/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Create Page" })).toBeVisible();
     const popupPromise = page.waitForEvent("popup");
     await title.click();
     const popup = await popupPromise;
@@ -35,6 +35,127 @@ for (const width of [1280, 390]) {
     await page.getByRole("link", { name: "Agents", exact: true }).click();
     await expect(page).toHaveURL(/\/\?project=films-project$/);
     await expect(page.getByRole("button", { name: "Project filter: Films Project" })).toBeVisible();
+  });
+}
+
+for (const width of [1280, 390]) {
+  test(`creates a Page and opens one editable agent chat at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await mockSessions(page, []);
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "mediaDevices", {
+        configurable: true,
+        value: {
+          getUserMedia: () =>
+            Promise.reject(new DOMException("Permission denied", "NotAllowedError")),
+        },
+      });
+    });
+    await page.route("**/api/runtime/voice", (route) =>
+      route.fulfill({ json: { available: true, language: "auto" } }),
+    );
+    let creates = 0;
+    let sends = 0;
+    let releaseCreate!: () => void;
+    const pendingCreate = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    await page.route("**/api/pages", async (route) => {
+      if (route.request().method() === "POST") {
+        creates++;
+        await pendingCreate;
+        return route.fulfill({
+          status: 201,
+          json: { id: "new", title: "New page", url: "/p/new/" },
+        });
+      }
+      return route.fulfill({ json: { pages: [] } });
+    });
+    await page.route("**/p/new/**", (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith("/_spur/events"))
+        return route.fulfill({ contentType: "text/event-stream", body: "" });
+      if (path.endsWith("/_spur/agent/send")) {
+        sends++;
+        return route.fulfill({ json: { sessionId: "pg-new-test" } });
+      }
+      if (path.includes("/_spur/")) return route.fulfill({ json: {} });
+      return route.fulfill({
+        contentType: "text/html",
+        body: '<!doctype html><title>New page</title><h1>New page</h1><p>Your page starts here.</p><script src="/spur/spur-sdk.v2.js"></script>',
+      });
+    });
+    await page.goto("/pages");
+    await page.evaluate(() => document.fonts.ready);
+    const create = page.getByRole("button", { name: "Create Page", exact: true });
+    const createWidth = (await create.boundingBox())!.width;
+    await create.click();
+    await expect(create).toBeDisabled();
+    await expect(create).toHaveAttribute("aria-busy", "true");
+    await expect(create.locator(".voice-spinner")).toBeVisible();
+    expect((await create.boundingBox())!.width).toBe(createWidth);
+    expect(creates).toBe(1);
+    releaseCreate();
+    await expect(page.getByRole("heading", { name: "New page" })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Message", exact: true })).toBeVisible();
+    expect(creates).toBe(1);
+    await expect(page).toHaveURL(/\/p\/new\/$/);
+    const draft = page.getByRole("textbox", { name: "Message", exact: true });
+    const panelBounds = await page.getByRole("region", { name: "Agent chat" }).boundingBox();
+    expect(panelBounds).not.toBeNull();
+    const inset = width < 640 ? 16 : 24;
+    expect(Math.abs(width - panelBounds!.x - panelBounds!.width - inset)).toBeLessThan(1);
+    if (width < 640) expect(Math.abs(panelBounds!.x - inset)).toBeLessThan(1);
+    const font = await draft.evaluate((node) => ({
+      family: getComputedStyle(node).fontFamily,
+      size: getComputedStyle(node).fontSize,
+    }));
+    expect(font.family).toContain("monospace");
+    expect(font.size).toBe("12px");
+    await draft.fill("Build a reading list\nwith tags");
+    const voice = page.frameLocator('iframe[title="Voice input"]');
+    const field = await draft.boundingBox();
+    const rail = await page.locator('iframe[title="Voice input"]').boundingBox();
+    expect(field!.height).toBeGreaterThanOrEqual(144);
+    expect(rail!.width).toBe(32);
+    expect(rail!.height).toBe(108);
+    expect(rail!.x).toBeGreaterThan(field!.x);
+    expect(rail!.x + rail!.width).toBeLessThan(field!.x + field!.width);
+    expect(rail!.y + rail!.height).toBeLessThan(field!.y + field!.height);
+    await expect(draft).toHaveCSS("padding-right", "96px");
+    await voice.getByRole("button", { name: "Start voice recording" }).click();
+    await expect(page.getByRole("alert")).toContainText("Microphone access is blocked");
+    const sendBounds = await page.getByRole("button", { name: "Send", exact: true }).boundingBox();
+    expect(sendBounds!.height).toBeLessThanOrEqual(36);
+    await expect(draft).toHaveValue("Build a reading list\nwith tags");
+    // Synthetic retained-document lifecycle; routed fixtures do not prove BFCache eligibility.
+    for (let cycle = 0; cycle < 2; cycle++) {
+      await page.evaluate(() =>
+        window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })),
+      );
+      await expect(page.locator('iframe[title="Voice input"]')).toHaveCount(0);
+      await page.evaluate(() =>
+        window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })),
+      );
+      await expect(voice.getByRole("button", { name: "Start voice recording" })).toBeVisible();
+      await expect(draft).toHaveValue("Build a reading list\nwith tags");
+      expect(sends).toBe(0);
+    }
+    await page.getByRole("button", { name: "Close agent chat", exact: true }).first().click();
+    await page.evaluate(() => {
+      window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+      window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+    });
+    await expect(page.locator('iframe[title="Voice input"]')).toHaveCount(0);
+    await page.getByRole("button", { name: "Open agent chat", exact: true }).click();
+    await expect(draft).toHaveValue("Build a reading list\nwith tags");
+    expect(sends).toBe(0);
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await expect(draft).toHaveValue("");
+    expect(sends).toBe(1);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
   });
 }
 

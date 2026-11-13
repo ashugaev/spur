@@ -290,7 +290,7 @@ export function saveCronJobDraft(
   context: CronJobEditorContext,
   identity: CronJobIdentity,
   value: unknown,
-): CronJobEditResult {
+): Omit<CronJobEditResult, "activation"> {
   const update = parseUpdate(value);
   validateSchedule(update.schedule);
   let tempPath: string | undefined;
@@ -303,7 +303,7 @@ export function saveCronJobDraft(
       update.schedule === draft.schedule &&
       JSON.stringify(update.blocks) === JSON.stringify(draft.blocks)
     ) {
-      return { ...draft, saved: true, activation: "pending" };
+      return { ...draft, saved: true };
     }
     current.sourceNode.set("schedule", update.schedule);
     update.blocks.forEach((block, index) => {
@@ -347,7 +347,6 @@ export function saveCronJobDraft(
       schedule: update.schedule,
       blocks: update.blocks,
       saved: true,
-      activation: "pending",
     };
   } catch (error) {
     return ioError(error);
