@@ -710,6 +710,34 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
   });
 
   it.each([
+    ["basic", '"""'],
+    ["literal", "'''"],
+  ])(
+    "ignores a notice table inside a multiline %s string before the real one",
+    async (_label, quote) => {
+      const instructions = `developer_instructions = ${quote}\nKeep this literal TOML example in the answer:\n[notice]\nhide_full_access_warning = true\n${quote}\n`;
+      const content = await writtenSessionConfig(
+        `${instructions}\n[notice]\nhide_rate_limit_model_nudge = false\n`,
+      );
+      expect(content).toBe(
+        `suppress_unstable_features_warning = true\n\n${instructions}\n[notice]\nhide_rate_limit_model_nudge = true\n`,
+      );
+      expect(content.match(/hide_rate_limit_model_nudge/g)).toHaveLength(1);
+    },
+  );
+
+  it("ignores a nudge key and table header inside a multiline string in the notice table", async () => {
+    const note =
+      'note = """\nescaped \\""" stays open\n[tui]\nhide_rate_limit_model_nudge = false\n"""';
+    const content = await writtenSessionConfig(
+      `[notice]\n${note}\nhide_rate_limit_model_nudge = false\n`,
+    );
+    expect(content).toBe(
+      `suppress_unstable_features_warning = true\n\n[notice]\n${note}\nhide_rate_limit_model_nudge = true\n`,
+    );
+  });
+
+  it.each([
     ["quoted dotted key", '"notice".hide_full_access_warning = true\n'],
     ["quoted inline table", '"notice" = { hide_full_access_warning = true }\n'],
   ])("leaves config unchanged when host defines notice as %s", async (_label, hostConfig) => {

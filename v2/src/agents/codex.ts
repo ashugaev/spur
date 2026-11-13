@@ -881,21 +881,65 @@ function withSuppressUnstableFeaturesWarning(configText: string): string {
   return trimmed ? `${line}\n\n${trimmed}\n` : `${line}\n`;
 }
 
+// Marks each line that starts inside a TOML multiline string ("""...""" or
+// '''...'''); such a line is string content, never a header or key.
+function tomlMultilineStringContinuations(lines: readonly string[]): boolean[] {
+  let open: '"""' | "'''" | null = null;
+  return lines.map((line) => {
+    const continuation = open !== null;
+    let i = 0;
+    while (i < line.length) {
+      if (open !== null) {
+        if (open === '"""' && line[i] === "\\") {
+          i += 2;
+        } else if (line.startsWith(open, i)) {
+          // Up to two extra quotes before the delimiter are string content.
+          i += 3;
+          for (let extra = 0; extra < 2 && line[i] === open[0]; extra++) i++;
+          open = null;
+        } else {
+          i++;
+        }
+        continue;
+      }
+      const char = line[i];
+      if (char === "#") break;
+      if (line.startsWith('"""', i) || line.startsWith("'''", i)) {
+        open = line.startsWith('"""', i) ? '"""' : "'''";
+        i += 3;
+      } else if (char === '"' || char === "'") {
+        i++;
+        while (i < line.length && line[i] !== char) i += char === '"' && line[i] === "\\" ? 2 : 1;
+        i++;
+      } else {
+        i++;
+      }
+    }
+    return continuation;
+  });
+}
+
 // Codex TUI rate-limit model-switch popup swallows pasted sends. Set
 // [notice] hide_rate_limit_model_nudge = true in the session config, inside
 // the host [notice] table when present. A top-level dotted or inline `notice`
 // key is left alone: a second [notice] table would make the config invalid.
 function withHiddenRateLimitModelNudge(configText: string): string {
   const notice = `(?:notice|"notice"|'notice')`;
+  const lines = configText.split(/\r?\n/);
+  const inString = tomlMultilineStringContinuations(lines);
+  const structural = (l: string, i: number) => !inString[i] && !l.trim().startsWith("#");
+  const firstTable = lines.findIndex((l, i) => structural(l, i) && l.trim().startsWith("["));
+  const topLevelNotice = new RegExp(`^\\s*${notice}\\s*[.=]`);
   if (
-    codexTopLevelLines(configText).some((line) => new RegExp(`^\\s*${notice}\\s*[.=]`).test(line))
+    lines.some(
+      (l, i) => (firstTable === -1 || i < firstTable) && structural(l, i) && topLevelNotice.test(l),
+    )
   ) {
     return configText;
   }
   const line = "hide_rate_limit_model_nudge = true";
-  const lines = configText.split(/\r?\n/);
   const headerPattern = new RegExp(`^\\s*\\[\\s*${notice}\\s*\\]\\s*(?:#.*)?$`);
-  const headerIndex = lines.findIndex((l) => headerPattern.test(l));
+  const headerIndex = lines.findIndex((l, i) => structural(l, i) && headerPattern.test(l));
   if (headerIndex === -1) {
     const trimmed = configText.trimEnd();
     const separator = trimmed ? "\n\n" : "";
@@ -903,6 +947,9 @@ function withHiddenRateLimitModelNudge(configText: string): string {
   }
   for (let i = headerIndex + 1; i < lines.length; i++) {
     const current = lines[i] ?? "";
+    if (inString[i]) {
+      continue;
+    }
     if (current.trim().startsWith("[")) {
       break;
     }
