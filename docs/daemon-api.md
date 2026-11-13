@@ -95,9 +95,7 @@
 
 ## Store routes
 
-`:store` = `page:<id>` or `session:<sid>`, `:` accepted as `%3A`; [stores.md](stores.md); `v2/src/stores.ts`, `v2/src/store-agent.ts`, `v2/src/store-actions.ts`.
-
-- `GET /stores/:store/docs/:collection`
+- `GET /stores/:store/docs/:collection` — `:store` = `page:<id>` or `session:<sid>`, `:` accepted as `%3A`; [stores.md](stores.md); `v2/src/stores.ts`, `v2/src/store-agent.ts`, `v2/src/store-actions.ts`.
 - `POST /stores/:store/docs/:collection`
 - `GET /stores/:store/docs/:collection/:docId`
 - `POST /stores/:store/docs/:collection/:docId`
