@@ -121,6 +121,7 @@ it("exposes all projects, raw conversation and complete operator requests withou
     project: "test",
     prompt: "task",
     agent: "codex",
+    authAccountId: "saved-work-account",
     model: "auto",
     reasoningEffort: "high",
     mode: "manager",

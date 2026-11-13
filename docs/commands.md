@@ -49,11 +49,9 @@ Read-only host/config/daemon health check; `--scaffold` writes local `spur.yaml`
 
 ## spawn
 
-`spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--model <id>] [--reasoning-effort <level>] [--mode <name>] [--plan] [--restrict-writes] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <text>]] [--json]`
+`spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--auth-account <id>] [--model <id>] [--reasoning-effort <level>] [--mode <name>] [--plan] [--restrict-writes] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <text>]] [--json]`
 
 Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `projects.<id>.tokenBudget`. `--subscribe-state`/`--subscribe-message` require `--subscribe-to`. [Modes](configuration.md#modes); [resource queue](configuration.md#admission-control).
-
-## shepherd, wake
 
 `spur shepherd [prompt...]` opens Spur's manager session. `spur wake <sessionId> [--in <duration> | --at <iso> | --every <duration> --until <cond> | --daily-at HH:MM[,HH:MM...] --until <cond> | --cancel] [message...]`. Events: [configuration.md#events](configuration.md#events).
 
@@ -101,6 +99,8 @@ Telegram `/complete`, `/kill`: finish bound forum-topic session, delete owned to
 
 ## service, memory, agent-issue, comment-seen, subscribe
 
+`spur auth accounts [--agent claude|codex] [--json]` — discover saved authorization IDs; `v2/src/cli.ts`.
+`spur auth login <accountId> [--json]` — OAuth sign-in; JSON starts without waiting; `v2/src/cli.ts`.
 `spur service run <id> --port <n> -- <command>` / `status <id>` — session-bound tmux sidecar wrapper. `<id>` must match a `sources.<name>` entry with `type: service` and `service: <id>` ([configuration.md](configuration.md#field-reference)), else `Unknown service`. One-shot commands (tests, lint, type-check) run directly, no service. `spur service logs [sessionId] [name] [--sidecar] [--limit <n>] [--json]` — retained pane and archived rows, default runtime scope and global 200-row limit; route 404/502 errors exit nonzero; `v2/src/cli.ts`. `spur memory set|get|list|rm [key] [body] --scope task|project|global [--session <id>] [--file <path>] [--json]` — one `.md` file per key. `spur session-memory <sessionId> list|get|set|resolve [key] [body] [--json]` — [daemon-api.md#session-routes](daemon-api.md#session-routes).
 `spur agent-issue log <text...>` / `list [--project <id>] [--session <id>] [--limit <n>] [--json]` — friction operating Spur itself, never a repo code defect. `spur comment-seen record <id...>` — marks GitHub review-comment ids seen, needs `SPUR_PROJECT`.
 `spur subscribe <targetSessionId> --state <state>... [--message <text>] [--session <id>] | --list | --remove <subscriptionId>`. States: `working|waiting|needs_input|rate_limited|stale|stopped|error|killed`.

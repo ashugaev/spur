@@ -2,13 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
 
 const postJsonMock = vi.fn();
+const getJsonMock = vi.fn();
 const listProjectsMock = vi.fn();
 const writeStdoutMock = vi.fn();
 
 vi.mock("../../src/client.js", () => ({
   connectProjectConfig: vi.fn(),
   disconnectProjectConfig: vi.fn(),
-  getJson: vi.fn(),
+  getJson: getJsonMock,
   listProjects: listProjectsMock,
   postJson: postJsonMock,
   postPreflight: vi.fn(),
@@ -54,12 +55,54 @@ describe("spawn", () => {
     postJsonMock
       .mockReset()
       .mockResolvedValue({ id: "api-1", agent: "claude", status: "spawning" });
+    getJsonMock.mockReset().mockResolvedValue({ accounts: [], pools: {} });
     listProjectsMock.mockReset().mockResolvedValue([{ id: "api" }]);
     writeStdoutMock.mockReset();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("pins the saved authorization profile requested by an agent", async () => {
+    await parseCli([
+      "spawn",
+      "api",
+      "ship it",
+      "--agent",
+      "codex",
+      "--auth-account",
+      "saved-work",
+      "--json",
+    ]);
+    expect(postJsonMock).toHaveBeenCalledWith(
+      "/tmp/dist/cli.js",
+      "/sessions",
+      expect.objectContaining({ agent: "codex", authAccountId: "saved-work" }),
+      "/tmp/spur.yaml",
+    );
+  });
+
+  it("discovers provider account IDs through the selected instance", async () => {
+    await parseCli(["auth", "accounts", "--agent", "codex", "--json"]);
+    expect(getJsonMock).toHaveBeenCalledWith(
+      "/tmp/dist/cli.js",
+      "/auth-accounts?agent=codex",
+      "/tmp/spur.yaml",
+    );
+    expect(postJsonMock).not.toHaveBeenCalled();
+  });
+
+  it("starts profile sign-in without waiting in JSON mode", async () => {
+    postJsonMock.mockResolvedValue({ accountId: "saved-work", status: "pending" });
+    await parseCli(["auth", "login", "saved-work", "--json"]);
+    expect(postJsonMock).toHaveBeenCalledExactlyOnceWith(
+      "/tmp/dist/cli.js",
+      "/auth-accounts/saved-work/login",
+      {},
+      "/tmp/spur.yaml",
+    );
+    expect(getJsonMock).not.toHaveBeenCalled();
   });
 
   it("posts the requested mode to the spawn endpoint", async () => {

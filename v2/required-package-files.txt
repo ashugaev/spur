@@ -19,3 +19,11 @@ dist/github-app.js
 web/dist-server/web-server.js
 spur.yaml.reference
 skills/spur/SKILL.md
+bin/auth-proxy/linux-amd64
+bin/auth-proxy/linux-arm64
+licenses/auth-proxy/linux-amd64/report.csv
+licenses/auth-proxy/linux-arm64/report.csv
+licenses/auth-proxy/go/LICENSE
+licenses/auth-proxy/go/PATENTS
+licenses/auth-proxy/linux-amd64/github.com/router-for-me/CLIProxyAPI/v8/LICENSE
+licenses/auth-proxy/linux-arm64/github.com/router-for-me/CLIProxyAPI/v8/LICENSE

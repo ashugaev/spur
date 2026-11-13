@@ -12,6 +12,7 @@ import { writeSession } from "../../src/metadata.js";
 import { sessionArtifactsDir } from "../../src/session-artifacts.js";
 import { startServer, type StartedServer } from "../../src/server.js";
 import { AgentModelError, AgentReasoningEffortError } from "../../src/agents/models.js";
+import { AuthProxy } from "../../src/auth-proxy.js";
 import { PrAlertOwnerRequestError } from "../../src/pr-alert-owner.js";
 import { TodoEmptyLedgerError, TodoOpenWorkError } from "../../src/todo.js";
 import {
@@ -812,10 +813,10 @@ describe("startServer", () => {
   });
 
   it.each([
-    { enabled: false, status: 404 },
+    { enabled: false, status: 400 },
     { enabled: true, status: 400 },
   ])(
-    "POST /sessions/:id/switch-auth gate with authRotation.switchAuth=$enabled returns $status",
+    "POST /sessions/:id/switch-auth validates accounts with legacy menu=$enabled",
     async ({ enabled, status }) => {
       const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
       const repoDir = join(root, "repo");
@@ -4086,6 +4087,9 @@ describe("startServer", () => {
       "utf8",
     );
 
+    const state = vi
+      .spyOn(AuthProxy.prototype, "getState")
+      .mockResolvedValue({ accounts: [], sessions: [] });
     const server = await startServer(configPath, {
       info: () => undefined,
       warn: () => undefined,
@@ -4116,9 +4120,10 @@ describe("startServer", () => {
       });
       expect(response.status).toBe(409);
       await expect(response.json()).resolves.toMatchObject({
-        error: expect.stringContaining("in use by 1 running session"),
+        error: expect.stringContaining("in use by a running session"),
       });
     } finally {
+      state.mockRestore();
       await server.stop();
     }
   });
@@ -4147,6 +4152,7 @@ describe("startServer", () => {
     );
 
     // Stub the login pane so the route mapping is tested without spawning tmux.
+    const configure = vi.spyOn(AuthProxy.prototype, "configure").mockResolvedValue();
     const startLoginSpy = vi
       .spyOn(SessionService.prototype, "startAccountLogin")
       .mockResolvedValue({ loginTmuxSession: "claude-login-test" });
@@ -4171,6 +4177,7 @@ describe("startServer", () => {
       expect(payload.account.id).toEqual(expect.any(String));
       expect(payload.account).not.toHaveProperty("configDir");
     } finally {
+      configure.mockRestore();
       startLoginSpy.mockRestore();
       await server.stop();
     }

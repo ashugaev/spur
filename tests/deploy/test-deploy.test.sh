@@ -159,6 +159,24 @@ else
   bad "c-slash: refusal marker line not found (got: $c_out)"
 fi
 
+# A missing toolchain must fail before builds or npm installation.
+cat >"$FAKE_BIN/go" <<'GO'
+#!/usr/bin/env bash
+echo "auth toolchain unavailable" >&2
+exit 1
+GO
+chmod +x "$FAKE_BIN/go"
+rm -f "$MARKER"
+if preflight_out="$(HOME="$FAKE_HOME" SPUR_TEST_DEPLOY_PREFIX="$WORK_DIR/preflight-prefix" PATH="$FAKE_BIN:$PATH" bash "$test_deploy_script" 2>&1)"; then
+  bad "preflight: test deploy accepted unavailable Go toolchain"
+elif [[ -e "$MARKER" ]]; then
+  bad "preflight: build/install ran before toolchain refusal"
+elif [[ "$preflight_out" == *"auth toolchain unavailable"* ]]; then
+  ok "preflight: toolchain failure precedes builds/install"
+else
+  bad "preflight: unexpected toolchain failure"
+fi
+
 echo ""
 echo "test-deploy.test.sh: pass=$pass fail=$fail"
 [[ "$fail" -eq 0 ]] || exit 1

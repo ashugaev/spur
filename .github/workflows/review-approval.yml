@@ -42,6 +42,10 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: companion/auth-proxy/go.mod
+          cache-dependency-path: companion/auth-proxy/go.sum
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: env -u SPUR_BUILD_RESTART pnpm --dir v2 build
       - run: node v2/dist/review-gate-producer.js

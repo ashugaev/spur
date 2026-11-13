@@ -11,6 +11,8 @@ import {
   RestoreOperationError,
 } from "./session-lifecycle.js";
 import { parseAgentName } from "./agents/index.js";
+import { z } from "zod";
+import { AuthorizationError, authProviderSchema } from "./auth-accounts.js";
 import { agentPaneChildFallbackEnabled } from "./agents/executable.js";
 import {
   AgentModelError,
@@ -877,8 +879,15 @@ function parseSpawnStateSubscriptions(raw: unknown): SubscribeSessionStatesReque
 }
 
 function mergeSpawnStateSubscriptions(body: SpawnSessionRequest): SpawnSessionRequest {
+  const account = z.string().trim().min(1).nullable().optional().safeParse(body.authAccountId);
+  if (!account.success)
+    throw new AuthorizationError("authAccountId must be a nonblank string or null", 400);
   const subscriptions = parseSpawnStateSubscriptions(body.subscriptions);
-  return { ...body, ...(subscriptions ? { subscriptions } : {}) };
+  return {
+    ...body,
+    ...(account.data !== undefined ? { authAccountId: account.data } : {}),
+    ...(subscriptions ? { subscriptions } : {}),
+  };
 }
 
 export async function startServer(
@@ -978,6 +987,7 @@ export async function startServer(
     setGhEventSink(cfg.dataDir);
   };
   applyLogConfigs(service.config);
+  await service.recoverManagedAuthorization();
   service.startBackgroundLoops();
   const bus = new EventBus();
   let triggers: TriggerGroupController | null = null;
@@ -1370,15 +1380,112 @@ export async function startServer(
         }
       }
 
+      if (method === "GET" && path === "/auth-accounts") {
+        const provider = authProviderSchema
+          .optional()
+          .safeParse(url.searchParams.get("agent") ?? undefined);
+        if (!provider.success) throw new AuthorizationError("agent must be claude or codex", 400);
+        sendJson(response, 200, await service.listAuthorizationAccounts(provider.data));
+        return;
+      }
+
+      if (method === "POST" && path === "/auth-accounts") {
+        const body = z
+          .object({ provider: authProviderSchema, label: z.string().optional() })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success)
+          throw new AuthorizationError(
+            "provider must be claude or codex; label must be a string",
+            400,
+          );
+        sendJson(response, 201, {
+          account: await service.addAuthorizationAccount(body.data.provider, body.data.label),
+        });
+        return;
+      }
+
+      const authPoolProvider = path.match(/^\/auth-pools\/([^/]+)$/)?.[1];
+      if (method === "PATCH" && authPoolProvider) {
+        const provider = authProviderSchema.safeParse(authPoolProvider);
+        if (!provider.success)
+          throw new AuthorizationError("provider must be claude or codex", 400);
+        const body = z
+          .object({
+            defaultAccountId: z.string().min(1).nullable().optional(),
+            autoRotate: z.boolean().optional(),
+          })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success) throw new AuthorizationError("Invalid authorization pool update", 400);
+        sendJson(response, 200, {
+          pool: await service.updateAuthorizationPool(provider.data, {
+            ...(body.data.defaultAccountId !== undefined
+              ? { defaultAccountId: body.data.defaultAccountId }
+              : {}),
+            ...(body.data.autoRotate !== undefined ? { autoRotate: body.data.autoRotate } : {}),
+          }),
+        });
+        return;
+      }
+
+      const managedAccountId = path.match(/^\/auth-accounts\/([^/]+)$/)?.[1];
+      if (method === "PATCH" && managedAccountId) {
+        const body = z
+          .object({ label: z.string() })
+          .strict()
+          .safeParse(await readJsonBody(request));
+        if (!body.success) throw new AuthorizationError("label must be a string", 400);
+        sendJson(response, 200, {
+          account: service.renameAuthorizationAccount(managedAccountId, body.data.label),
+        });
+        return;
+      }
+      if (method === "DELETE" && managedAccountId) {
+        await service.removeAuthorizationAccount(managedAccountId);
+        sendJson(response, 200, { removed: managedAccountId });
+        return;
+      }
+
+      const managedLoginId = path.match(/^\/auth-accounts\/([^/]+)\/login$/)?.[1];
+      if (method === "POST" && managedLoginId) {
+        sendJson(response, 200, await service.startAuthorizationLogin(managedLoginId));
+        return;
+      }
+      const managedLoginInputId = path.match(/^\/auth-accounts\/([^/]+)\/login-input$/)?.[1];
+      if (method === "POST" && managedLoginInputId) {
+        const body = z
+          .union([
+            z.object({ input: z.string().trim().min(1) }).strict(),
+            z.object({ cancel: z.literal(true) }).strict(),
+          ])
+          .safeParse(await readJsonBody(request));
+        if (!body.success) throw new AuthorizationError("Supply input or cancel:true", 400);
+        sendJson(
+          response,
+          200,
+          await service.authorizationLoginInput(
+            managedLoginInputId,
+            "input" in body.data ? body.data.input : null,
+          ),
+        );
+        return;
+      }
+      const managedLoginStatusId = path.match(/^\/auth-accounts\/([^/]+)\/login-status$/)?.[1];
+      if (method === "GET" && managedLoginStatusId) {
+        sendJson(response, 200, await service.authorizationLoginStatus(managedLoginStatusId));
+        return;
+      }
+
       if (method === "GET" && path === "/claude-accounts") {
-        sendJson(response, 200, { accounts: service.listClaudeAccounts() });
+        sendJson(response, 200, { accounts: await service.listClaudeAccounts() });
         return;
       }
 
       if (method === "POST" && path === "/claude-accounts/add") {
         const body = await readJsonBody<{ label?: unknown }>(request);
         const label = typeof body.label === "string" ? body.label.trim() : "";
-        const account = service.addClaudeAccount(label ? { label } : {});
+        const account = await service.addClaudeAccount(label ? { label } : {});
         const { loginTmuxSession } = await service.startAccountLogin(account.id);
         // Return the summary shape (no absolute configDir) to match GET /claude-accounts.
         sendJson(response, 201, {
@@ -1386,7 +1493,6 @@ export async function startServer(
             id: account.id,
             label: account.label,
             authenticated: false,
-            lastUsedAt: account.lastUsedAt,
           },
           loginTmuxSession,
         });
@@ -1401,7 +1507,7 @@ export async function startServer(
           return;
         }
         try {
-          service.removeClaudeAccount(id);
+          await service.removeClaudeAccount(id);
         } catch (error) {
           // In-use guard rejection is a client-correctable conflict, not a 500.
           const message = error instanceof Error ? error.message : String(error);
@@ -2490,20 +2596,16 @@ export async function startServer(
 
       const switchAuthSessionId = path.match(/^\/sessions\/([^/]+)\/switch-auth$/)?.[1];
       if (method === "POST" && switchAuthSessionId) {
-        if (!service.config.authRotation.switchAuth) {
-          sendError(response, 404, "switch-auth is disabled; set authRotation.switchAuth: true");
-          return;
-        }
         const body = await readJsonBody<{ accountId?: unknown; force?: unknown }>(request);
-        const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
-        if (!accountId) {
-          sendJson(response, 400, { error: "accountId must be a non-empty string" });
+        const account = z.string().trim().min(1).nullable().safeParse(body.accountId);
+        if (!account.success) {
+          sendJson(response, 400, { error: "accountId must be a non-empty string or null" });
           return;
         }
         sendJson(
           response,
           200,
-          await service.switchAuth(switchAuthSessionId, accountId, {
+          await service.switchAuth(switchAuthSessionId, account.data, {
             reason: "manual",
             force: body.force === true,
           }),
@@ -2895,6 +2997,7 @@ export async function startServer(
         return;
       }
       if (
+        error instanceof AuthorizationError ||
         error instanceof AgentReasoningEffortError ||
         error instanceof AgentModelError ||
         error instanceof SessionResourceNotFoundError ||

@@ -236,6 +236,7 @@ test("release workflow invokes the helper and preserves subsequent build/test/pu
   expect(steps.slice(index + 1)).toEqual([
     { name: "Build v2", env: { SPUR_DISABLE_AUTOSTART: "1" }, run: "pnpm --dir v2 build" },
     { name: "Test v2", run: "pnpm --dir v2 test" },
+    { name: "Test managed account proxy", run: "go -C companion/auth-proxy test -p 2 ./..." },
     {
       name: "Release",
       env: {

@@ -24,6 +24,10 @@ import { readFileSync, realpathSync } from "node:fs";
 import { readJson } from "./github-app.js";
 import { basename, join, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
+import { createInterface as createPromptInterface } from "node:readline/promises";
+import { setTimeout as sleep } from "node:timers/promises";
+import type { AuthLogin } from "./auth-proxy.js";
+import { authProviderSchema, type AuthAccountSummary } from "./auth-accounts.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, Option, type Help } from "commander";
@@ -3353,12 +3357,92 @@ export function createProgram(cliEntrypoint: string): Command {
       },
     );
 
+  const auth = program.command("auth").description("Manage saved provider authorization.");
+  auth
+    .command("accounts")
+    .description("List saved Claude and Codex authorization profiles.")
+    .option("--agent <name>", "claude or codex")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const provider =
+        options.agent !== undefined ? authProviderSchema.parse(options.agent) : undefined;
+      const result = await getJson<{ accounts: AuthAccountSummary[] }>(
+        cliEntrypoint,
+        `/auth-accounts${provider ? `?agent=${provider}` : ""}`,
+        configPath,
+      );
+      if (options.json) printJson(result);
+      else
+        for (const account of result.accounts) {
+          writeStdout(
+            `${account.id}\t${account.provider}\t${account.label ?? account.id}\t${account.status}`,
+          );
+        }
+    });
+  auth
+    .command("login")
+    .description("Sign in to a saved authorization profile.")
+    .argument("<accountId>")
+    .option("--json", "Start login and print its status without waiting")
+    .action(async (accountId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const path = `/auth-accounts/${encodeURIComponent(accountId)}`;
+      let status = await postJson<AuthLogin>(cliEntrypoint, `${path}/login`, {}, configPath);
+      if (options.json) {
+        printJson(status);
+        return;
+      }
+      const abort = new AbortController();
+      const interrupt = () => abort.abort();
+      process.once("SIGINT", interrupt);
+      const prompt = createPromptInterface({ input: process.stdin, output: process.stdout });
+      const displayed = new Set<string>();
+      let submittedPrompt: string | undefined;
+      try {
+        while (status.status !== "ready") {
+          if (status.status === "failed" || status.status === "sign-in-required") {
+            throw new Error(status.error ?? "Authorization sign-in did not complete");
+          }
+          for (const value of [status.url, status.userCode]) {
+            if (value && !displayed.has(value)) {
+              displayed.add(value);
+              writeStdout(value);
+            }
+          }
+          if (status.prompt && !status.userCode && submittedPrompt !== status.prompt) {
+            const input = await prompt.question(`${status.prompt} `, { signal: abort.signal });
+            submittedPrompt = status.prompt;
+            status = await postJson<AuthLogin>(
+              cliEntrypoint,
+              `${path}/login-input`,
+              { input },
+              configPath,
+            );
+          } else {
+            await sleep(1_000, undefined, { signal: abort.signal });
+            status = await getJson<AuthLogin>(cliEntrypoint, `${path}/login-status`, configPath);
+          }
+        }
+        writeStdout("Authorization ready");
+      } finally {
+        process.removeListener("SIGINT", interrupt);
+        prompt.close();
+        if (status.status !== "ready") {
+          await postJson(cliEntrypoint, `${path}/login-input`, { cancel: true }, configPath).catch(
+            () => {},
+          );
+        }
+      }
+    });
+
   program
     .command("spawn")
     .description("Start a session for a configured project.")
     .argument("<project>", "Configured project id")
     .argument("[prompt...]", "Optional task prompt")
     .option("--agent <name>", "Agent to start: claude, codex, cursor, or opencode")
+    .option("--auth-account <id>", "Pin a saved authorization account for this session")
     .addOption(reasoningEffortOption())
     .option(
       "--model <id>",
@@ -3454,6 +3538,9 @@ export function createProgram(cliEntrypoint: string): Command {
         prompt,
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
         agent: options.agent,
+        ...(options.authAccount !== undefined
+          ? { authAccountId: options.authAccount as string }
+          : {}),
         ...(options.model !== undefined ? { model: options.model as string } : {}),
         ...(options.reasoningEffort !== undefined
           ? { reasoningEffort: options.reasoningEffort as ProviderReasoningEffort }

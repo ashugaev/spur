@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { authSessionSchema } from "./auth-proxy.js";
 import { dirname, join, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isCursorDeliveryId } from "./agents/cursor-submit-ack.js";
@@ -1686,6 +1687,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.claudeAccountId
       ? { claudeAccountId: normalizedSession.claudeAccountId }
       : {}),
+    ...(normalizedSession.auth ? { auth: authSessionSchema.parse(normalizedSession.auth) } : {}),
     ...(stateSubscriptions ? { stateSubscriptions } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
     ...(normalizedSession.error &&

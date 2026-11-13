@@ -23,6 +23,8 @@ if [[ "$(realpath -m "$PREFIX")" = "$(realpath -m "$HOME/.local")" ]]; then
   exit 1
 fi
 
+bash "$REPO_ROOT/scripts/build-auth-proxy.sh" --check-toolchain
+
 pnpm --dir packages/web build
 
 bash "$REPO_ROOT/scripts/bundle-web.sh"

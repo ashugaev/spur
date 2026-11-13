@@ -1,29 +1,41 @@
-# Claude accounts
+# Provider accounts
 
-> Scope: Claude account rotation and per-session credential switch. Caveman, no overhead.
+> Scope: use saved Claude/Codex authorization profiles.
 
-Rotate multiple claude login accounts across the rate limit. Each account: isolated `CLAUDE_CONFIG_DIR` in a runtime store (`<dataDir>/claude-accounts.json` + `<dataDir>/claude-accounts/<id>/`), never declared in config.
+Keep profile IDs, labels and provider pool choices outside YAML.
+Discover profiles and sign in through [`spur auth`](commands.md#service-memory-agent-issue-comment-seen-subscribe).
+Create, rename, remove and select provider defaults through [account operations](daemon-api.md).
 
 ## Accounts UI
 
-StatusBar footer "Accounts" menu.
+Footer Accounts retains the Claude login terminal.
 
-- Add opens an interactive login terminal; run `/login` (OAuth). Spur auto-detects completion on `.credentials.json`.
-- Select sets the active account.
-- Remove drops an account.
+- Add opens managed OAuth sign-in; follow its URL/code prompt.
+- Readiness requires completed OAuth and durable registration.
+- Close cancels unfinished sign-in; remove rejects an account used by a live session.
 
-The default `~/.claude` login auto-adopts as account `default` when its `.credentials.json` exists.
+Legacy Claude labels/IDs remain; sign in again for managed routing.
+Host credentials and existing direct processes remain untouched.
 
 ## Per-session switch
 
-Off by default. Enable with [`authRotation.switchAuth: true`](configuration.md), instance config only.
+Select a profile with [`spawn --auth-account`](commands.md#spawn).
+An explicit profile stays pinned; omission uses Auto when a managed pool exists.
+An empty or unready managed pool rejects launch instead of using host authorization.
 
-Claude only. Credential swap in place, no kill or relaunch.
+Managed Claude/Codex sessions change account for the next request through
+[switch-auth](daemon-api.md#session-routes); current requests retain their account.
+Direct sessions enter managed routing on explicit restore/respawn.
 
-Ready = credentials present + onboarding complete. A session predating the session-home layout relaunches once, as migration. A switch mid-work forces through regardless. `projects/` in the session home symlinks to `~/.claude/projects`, so `--resume <uuid>` keeps history across a rotation.
+Managed routing preserves native session context and process identity during account changes.
+Codex uses Responses HTTP streaming; provider credentials stay with the local proxy.
 
 ## Auto-rotation
 
-Config toggle: [`authRotation.autoRotateOnRateLimit`](configuration.md), instance config only. Agent-agnostic policy; the account store itself is claude-only today.
+Each provider pool owns its default and Auto-rotation choice.
+Auto retains its account after success; quota triggers failover when enabled.
+Pinned sessions never fail over.
 
-On: a `rate_limited` claude session rotates to the next ready, non-cooldown account. Guarded by `authRotation.cooldownMinutes` and `authRotation.maxRotationsPerEpisode`. When every account is limited, falls through to the reactivation nudge ([`rateLimitReactivation`](configuration.md)).
+Cooldowns apply across sessions. Episode limits survive retries and restarts;
+successful generation or manual binding change resets the episode.
+Policy defaults and constraints: [configuration](configuration.md#field-reference).

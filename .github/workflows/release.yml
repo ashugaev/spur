@@ -29,6 +29,10 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: companion/auth-proxy/go.mod
+          cache-dependency-path: companion/auth-proxy/go.sum
       - run: pnpm install --frozen-lockfile
       - name: Build web
         run: pnpm --dir packages/web build
@@ -44,6 +48,8 @@ jobs:
         run: pnpm --dir v2 build
       - name: Test v2
         run: pnpm --dir v2 test
+      - name: Test managed account proxy
+        run: go -C companion/auth-proxy test -p 2 ./...
       - name: Release
         # Run from the repo root: .releaserc.json paths (prepareCmd, pkgRoot)
         # are root-relative.
