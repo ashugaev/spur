@@ -53,6 +53,7 @@ import { resolveWorktreePathCandidates } from "../../src/agents/worktree-path.js
 import { buildAgentResumePlan } from "../../src/agents/index.js";
 import {
   codexCommand,
+  codexArgsSelectProvider,
   buildCodexPlan,
   buildCodexResumePlan,
   buildCodexRestorePlan,
@@ -117,12 +118,48 @@ describe("codexHookHomePath", () => {
   });
 });
 
+const HIDE_NUDGE = "-c 'notice.hide_rate_limit_model_nudge=true'";
+const DEFAULT_FLAGS = `--enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust ${HIDE_NUDGE}`;
+
+describe("codex rate-limit model nudge override", () => {
+  it.each([false, true])(
+    "hides the nudge on launch and resume (restrictWrites=%s)",
+    (restrictWrites) => {
+      for (const command of [
+        buildCodexPlan("prompt", { restrictWrites }).launchCommand,
+        buildCodexPlan("prompt", { restrictWrites, startupImagePaths: ["/tmp/a.png"] })
+          .launchCommand,
+        buildCodexResumePlan("thread-1", "codex", { restrictWrites }).launchCommand,
+        buildAgentResumePlan("codex", "thread-1", "codex", { restrictWrites }).launchCommand,
+      ]) {
+        expect(command.match(/notice\.hide_rate_limit_model_nudge=true/g)).toHaveLength(1);
+        expect(command).toContain(HIDE_NUDGE);
+      }
+    },
+  );
+
+  it("places the override before user codexArgs so user config wins", () => {
+    const codexArgs = ["-c", "notice.hide_rate_limit_model_nudge=false"];
+    for (const command of [
+      buildCodexPlan("prompt", { codexArgs }).launchCommand,
+      buildCodexResumePlan("thread-1", "codex", { codexArgs }).launchCommand,
+    ]) {
+      expect(command.indexOf(HIDE_NUDGE)).toBeGreaterThan(-1);
+      expect(command.indexOf(HIDE_NUDGE)).toBeLessThan(
+        command.indexOf("'-c' 'notice.hide_rate_limit_model_nudge=false'"),
+      );
+    }
+  });
+
+  it("does not count as a provider selection", () => {
+    expect(codexArgsSelectProvider(["-c", "notice.hide_rate_limit_model_nudge=true"])).toBe(false);
+  });
+});
+
 describe("buildCodexPlan", () => {
   it("returns default plan with no options", () => {
     const plan = buildCodexPlan("do something");
-    expect(plan.launchCommand).toBe(
-      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
-    );
+    expect(plan.launchCommand).toBe(`codex ${DEFAULT_FLAGS}`);
     expect(plan.initialMessage).toBe("do something");
     expect(plan.readyMarkers).toEqual(["OpenAI Codex", "›"]);
   });
@@ -186,7 +223,7 @@ describe("buildCodexPlan", () => {
       startupImagePaths: ["/tmp/one.png", "/tmp/two.webp"],
     });
     expect(plan.launchCommand).toBe(
-      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --image '/tmp/one.png' --image '/tmp/two.webp' -- 'describe this'",
+      `codex ${DEFAULT_FLAGS} --image '/tmp/one.png' --image '/tmp/two.webp' -- 'describe this'`,
     );
     expect(plan.initialMessage).toBe("");
   });
@@ -195,7 +232,7 @@ describe("buildCodexPlan", () => {
     const prompt = "--describe, this\nimage's content";
     const plan = buildCodexPlan(prompt, { startupImagePaths: ["/tmp/one.png"] });
     expect(plan.launchCommand).toBe(
-      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --image '/tmp/one.png' -- '--describe, this\nimage'\\''s content'",
+      `codex ${DEFAULT_FLAGS} --image '/tmp/one.png' -- '--describe, this\nimage'\\''s content'`,
     );
     expect(plan.initialMessage).toBe("");
   });
@@ -204,25 +241,21 @@ describe("buildCodexPlan", () => {
     const prompt = "\n\nMode: manager. Load the manager skill.";
     const plan = buildCodexPlan(prompt, { startupImagePaths: ["/tmp/one.png"] });
     expect(plan.launchCommand).toBe(
-      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --image '/tmp/one.png' -- '\n\nMode: manager. Load the manager skill.'",
+      `codex ${DEFAULT_FLAGS} --image '/tmp/one.png' -- '\n\nMode: manager. Load the manager skill.'`,
     );
     expect(plan.initialMessage).toBe("");
   });
 
   it.each(["", " \n\t "])("leaves genuinely empty planner input %j image-only", (prompt) => {
     const plan = buildCodexPlan(prompt, { startupImagePaths: ["/tmp/one.png"] });
-    expect(plan.launchCommand).toBe(
-      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --image '/tmp/one.png'",
-    );
+    expect(plan.launchCommand).toBe(`codex ${DEFAULT_FLAGS} --image '/tmp/one.png'`);
     expect(plan.initialMessage).toBe("");
   });
 
   it("preserves tmux prompt delivery when startup image paths are empty", () => {
     const prompt = "--describe, this\nimage's content";
     const plan = buildCodexPlan(prompt, { startupImagePaths: [] });
-    expect(plan.launchCommand).toBe(
-      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
-    );
+    expect(plan.launchCommand).toBe(`codex ${DEFAULT_FLAGS}`);
     expect(plan.initialMessage).toBe(prompt);
   });
 
@@ -593,7 +626,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     );
     const content = writeCall?.[1] as string;
     expect(content).toBe(
-      'suppress_unstable_features_warning = true\n\n[tui.model_availability_nux]\n"codex-model-id" = 3\n\n[notice]\nhide_rate_limit_model_nudge = true\n',
+      'suppress_unstable_features_warning = true\n\n[tui.model_availability_nux]\n"codex-model-id" = 3\n',
     );
   });
 
@@ -614,135 +647,6 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     const content = writeCall?.[1] as string;
     const count = (content.match(/suppress_unstable_features_warning/g) ?? []).length;
     expect(count).toBe(1);
-  });
-
-  async function writtenSessionConfig(hostConfig: string): Promise<string> {
-    mockReadFile.mockImplementation(async (filePath: unknown) => {
-      if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
-        return hostConfig;
-      }
-      return "";
-    });
-    await ensureCodexHooksConfig("/session/tool");
-    const writeCalls = mockWriteFile.mock.calls.filter(
-      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
-    );
-    expect(writeCalls.map((c) => c[0])).toEqual(["/session/tool/codex-home/config.toml"]);
-    return writeCalls[0]?.[1] as string;
-  }
-
-  it("adds a notice table hiding the rate-limit model nudge when host has none", async () => {
-    const content = await writtenSessionConfig('[model]\nname = "test"\n');
-    expect(content).toBe(
-      'suppress_unstable_features_warning = true\n\n[model]\nname = "test"\n\n[notice]\nhide_rate_limit_model_nudge = true\n',
-    );
-  });
-
-  it("adds the key inside an existing notice table without a second header", async () => {
-    const content = await writtenSessionConfig("[notice]\nhide_full_access_warning = true\n");
-    expect(content).toBe(
-      "suppress_unstable_features_warning = true\n\n[notice]\nhide_rate_limit_model_nudge = true\nhide_full_access_warning = true\n",
-    );
-  });
-
-  it("overrides host hide_rate_limit_model_nudge = false to true, one occurrence", async () => {
-    const content = await writtenSessionConfig(
-      "[notice]\nhide_full_access_warning = true\nhide_rate_limit_model_nudge = false\n",
-    );
-    expect(content).toBe(
-      "suppress_unstable_features_warning = true\n\n[notice]\nhide_full_access_warning = true\nhide_rate_limit_model_nudge = true\n",
-    );
-  });
-
-  it("does not place the key in a table following notice", async () => {
-    const content = await writtenSessionConfig(
-      "[notice]\nhide_full_access_warning = true\n\n[tui]\nhide_rate_limit_model_nudge = false\n",
-    );
-    expect(content).toBe(
-      "suppress_unstable_features_warning = true\n\n[notice]\nhide_rate_limit_model_nudge = true\nhide_full_access_warning = true\n\n[tui]\nhide_rate_limit_model_nudge = false\n",
-    );
-  });
-
-  it.each([
-    ["dotted key", "notice.hide_full_access_warning = true\n"],
-    ["inline table", "notice = { hide_full_access_warning = true }\n"],
-  ])("leaves config unchanged when host defines notice as %s", async (_label, hostConfig) => {
-    const content = await writtenSessionConfig(hostConfig);
-    expect(content).toBe(`suppress_unstable_features_warning = true\n\n${hostConfig}`);
-  });
-
-  it.each([
-    ["trailing comment", "[notice]  # host notices"],
-    ["spaced name", "[ notice ]"],
-  ])("adds the key inside a notice table whose header has %s", async (_label, header) => {
-    const content = await writtenSessionConfig(`${header}\nhide_full_access_warning = true\n`);
-    expect(content).toBe(
-      `suppress_unstable_features_warning = true\n\n${header}\nhide_rate_limit_model_nudge = true\nhide_full_access_warning = true\n`,
-    );
-    expect(content.match(/notice\s*\]/g)).toHaveLength(1);
-  });
-
-  it("adds the key once inside a CRLF notice table whose header has a comment", async () => {
-    const content = await writtenSessionConfig(
-      "[notice] # c\r\nhide_full_access_warning = true\r\n",
-    );
-    expect(content).toBe(
-      "suppress_unstable_features_warning = true\n\n[notice] # c\nhide_rate_limit_model_nudge = true\nhide_full_access_warning = true\n",
-    );
-    expect(content.match(/notice\s*\]/g)).toHaveLength(1);
-    expect(content.match(/hide_rate_limit_model_nudge/g)).toHaveLength(1);
-  });
-
-  it("adds the key once inside a quoted notice table header", async () => {
-    const content = await writtenSessionConfig('["notice"]\nhide_full_access_warning = true\n');
-    expect(content).toBe(
-      'suppress_unstable_features_warning = true\n\n["notice"]\nhide_rate_limit_model_nudge = true\nhide_full_access_warning = true\n',
-    );
-    expect(content.match(/notice"?\s*\]/g)).toHaveLength(1);
-  });
-
-  it("overrides a quoted hide_rate_limit_model_nudge key to true, one occurrence", async () => {
-    const content = await writtenSessionConfig('[notice]\n"hide_rate_limit_model_nudge" = false\n');
-    expect(content).toBe(
-      "suppress_unstable_features_warning = true\n\n[notice]\nhide_rate_limit_model_nudge = true\n",
-    );
-    expect(content.match(/hide_rate_limit_model_nudge/g)).toHaveLength(1);
-  });
-
-  it.each([
-    ["basic", '"""'],
-    ["literal", "'''"],
-  ])(
-    "ignores a notice table inside a multiline %s string before the real one",
-    async (_label, quote) => {
-      const instructions = `developer_instructions = ${quote}\nKeep this literal TOML example in the answer:\n[notice]\nhide_full_access_warning = true\n${quote}\n`;
-      const content = await writtenSessionConfig(
-        `${instructions}\n[notice]\nhide_rate_limit_model_nudge = false\n`,
-      );
-      expect(content).toBe(
-        `suppress_unstable_features_warning = true\n\n${instructions}\n[notice]\nhide_rate_limit_model_nudge = true\n`,
-      );
-      expect(content.match(/hide_rate_limit_model_nudge/g)).toHaveLength(1);
-    },
-  );
-
-  it("ignores a nudge key and table header inside a multiline string in the notice table", async () => {
-    const note =
-      'note = """\nescaped \\""" stays open\n[tui]\nhide_rate_limit_model_nudge = false\n"""';
-    const content = await writtenSessionConfig(
-      `[notice]\n${note}\nhide_rate_limit_model_nudge = false\n`,
-    );
-    expect(content).toBe(
-      `suppress_unstable_features_warning = true\n\n[notice]\n${note}\nhide_rate_limit_model_nudge = true\n`,
-    );
-  });
-
-  it.each([
-    ["quoted dotted key", '"notice".hide_full_access_warning = true\n'],
-    ["quoted inline table", '"notice" = { hide_full_access_warning = true }\n'],
-  ])("leaves config unchanged when host defines notice as %s", async (_label, hostConfig) => {
-    const content = await writtenSessionConfig(hostConfig);
-    expect(content).toBe(`suppress_unstable_features_warning = true\n\n${hostConfig}`);
   });
 
   it("returns the codex dir path", async () => {

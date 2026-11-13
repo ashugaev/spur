@@ -660,11 +660,15 @@ function appendCodexModel(command: string, model: string | undefined): string {
   return `${command} --model ${shellEscape(model)}`;
 }
 
+// Codex TUI offers a model switch on rate limit; the blocking prompt stalls a Spur session.
+// Placed before user codexArgs so a user `-c notice.hide_rate_limit_model_nudge=...` wins.
+const CODEX_HIDE_RATE_LIMIT_MODEL_NUDGE = `-c ${shellEscape("notice.hide_rate_limit_model_nudge=true")}`;
+
 function codexLaunchFlags(restrictWrites?: boolean): string {
   if (restrictWrites) {
-    return "--enable hooks --sandbox read-only --ask-for-approval never --dangerously-bypass-hook-trust";
+    return `--enable hooks --sandbox read-only --ask-for-approval never --dangerously-bypass-hook-trust ${CODEX_HIDE_RATE_LIMIT_MODEL_NUDGE}`;
   }
-  return "--enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust";
+  return `--enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust ${CODEX_HIDE_RATE_LIMIT_MODEL_NUDGE}`;
 }
 
 export function buildCodexPlan(
@@ -881,89 +885,6 @@ function withSuppressUnstableFeaturesWarning(configText: string): string {
   return trimmed ? `${line}\n\n${trimmed}\n` : `${line}\n`;
 }
 
-// Marks each line that starts inside a TOML multiline string ("""...""" or
-// '''...'''); such a line is string content, never a header or key.
-function tomlMultilineStringContinuations(lines: readonly string[]): boolean[] {
-  let open: '"""' | "'''" | null = null;
-  return lines.map((line) => {
-    const continuation = open !== null;
-    let i = 0;
-    while (i < line.length) {
-      if (open !== null) {
-        if (open === '"""' && line[i] === "\\") {
-          i += 2;
-        } else if (line.startsWith(open, i)) {
-          // Up to two extra quotes before the delimiter are string content.
-          i += 3;
-          for (let extra = 0; extra < 2 && line[i] === open[0]; extra++) i++;
-          open = null;
-        } else {
-          i++;
-        }
-        continue;
-      }
-      const char = line[i];
-      if (char === "#") break;
-      if (line.startsWith('"""', i) || line.startsWith("'''", i)) {
-        open = line.startsWith('"""', i) ? '"""' : "'''";
-        i += 3;
-      } else if (char === '"' || char === "'") {
-        i++;
-        while (i < line.length && line[i] !== char) i += char === '"' && line[i] === "\\" ? 2 : 1;
-        i++;
-      } else {
-        i++;
-      }
-    }
-    return continuation;
-  });
-}
-
-// Codex TUI rate-limit model-switch popup swallows pasted sends. Set
-// [notice] hide_rate_limit_model_nudge = true in the session config, inside
-// the host [notice] table when present. A top-level dotted or inline `notice`
-// key is left alone: a second [notice] table would make the config invalid.
-function withHiddenRateLimitModelNudge(configText: string): string {
-  const notice = `(?:notice|"notice"|'notice')`;
-  const lines = configText.split(/\r?\n/);
-  const inString = tomlMultilineStringContinuations(lines);
-  const structural = (l: string, i: number) => !inString[i] && !l.trim().startsWith("#");
-  const firstTable = lines.findIndex((l, i) => structural(l, i) && l.trim().startsWith("["));
-  const topLevelNotice = new RegExp(`^\\s*${notice}\\s*[.=]`);
-  if (
-    lines.some(
-      (l, i) => (firstTable === -1 || i < firstTable) && structural(l, i) && topLevelNotice.test(l),
-    )
-  ) {
-    return configText;
-  }
-  const line = "hide_rate_limit_model_nudge = true";
-  const headerPattern = new RegExp(`^\\s*\\[\\s*${notice}\\s*\\]\\s*(?:#.*)?$`);
-  const headerIndex = lines.findIndex((l, i) => structural(l, i) && headerPattern.test(l));
-  if (headerIndex === -1) {
-    const trimmed = configText.trimEnd();
-    const separator = trimmed ? "\n\n" : "";
-    return `${trimmed}${separator}[notice]\n${line}\n`;
-  }
-  for (let i = headerIndex + 1; i < lines.length; i++) {
-    const current = lines[i] ?? "";
-    if (inString[i]) {
-      continue;
-    }
-    if (current.trim().startsWith("[")) {
-      break;
-    }
-    if (
-      /^\s*(?:hide_rate_limit_model_nudge|(["'])hide_rate_limit_model_nudge\1)\s*=/.test(current)
-    ) {
-      lines[i] = line;
-      return lines.join("\n");
-    }
-  }
-  lines.splice(headerIndex + 1, 0, line);
-  return lines.join("\n");
-}
-
 export async function linkCodexAuth(codexHome: string): Promise<void> {
   for (const filename of ["auth.json", ".credentials.json"]) {
     const source = join(homedir(), ".codex", filename);
@@ -1006,9 +927,7 @@ export async function ensureCodexHooksConfig(
     options?.mcpBindings ?? [],
     options?.mcpExclude ?? [],
   );
-  const finalConfig = withHiddenRateLimitModelNudge(
-    withSuppressUnstableFeaturesWarning(baseConfig),
-  );
+  const finalConfig = withSuppressUnstableFeaturesWarning(baseConfig);
   await writeFile(sessionConfigPath, finalConfig, "utf8");
   await linkCodexAuth(codexDir);
   if (options?.modelsCacheHome) {
