@@ -21098,6 +21098,11 @@ export class SessionService {
         }
       }
       this.cancelWaitingHandoff(sessionId);
+      const closeoutRecord = readSession(this.config.dataDir, sessionId);
+      const closeoutTakenFrom =
+        closeoutRecord && this.prAlertBirthUnlaunched(closeoutRecord)
+          ? closeoutRecord.spawnIntent?.closeoutTakenFrom
+          : undefined;
       if (session.prAlertTransfer && this.prAlertBirthUnlaunched(session)) {
         session = this.settlePrAlertTransferLocked(session, "rollback");
         writeSession(this.config.dataDir, session);
@@ -21114,6 +21119,10 @@ export class SessionService {
       await this.terminateDetachedSessionProcesses(session);
       await this.cleanupSessionServices(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
+      if (closeoutTakenFrom) {
+        this.returnTakenCloseout(sessionId, closeoutTakenFrom);
+        session.closeoutOwner = false;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.kill.failed", {

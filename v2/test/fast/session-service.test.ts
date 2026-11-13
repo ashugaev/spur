@@ -5962,6 +5962,99 @@ describe("SessionService", () => {
         return { service, SessionService, SessionStartingError };
       }
 
+      async function queueTakingSpawn(sessions: Map<string, SessionRecord>) {
+        reserveNextSessionIdMock.mockResolvedValue("api-3");
+        readHostMemoryMock.mockReturnValue({
+          totalBytes: 65_000_000 * 1024,
+          availableBytes: 1,
+          swapTotalBytes: 0,
+          swapFreeBytes: 0,
+        });
+        const service = await newService();
+        await service.spawnInBackground({
+          project: "api",
+          prompt: "continue the task",
+          reuseWorkspaceSessionId: "api-1",
+        });
+        expect(sessions.get("api-3")?.spawnIntent?.phase).toBe("queued");
+        expect(ownerIds(sessions)).toEqual(["api-3"]);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        return service;
+      }
+
+      it.each([false, true])(
+        "kill returns closeout from a queued taker (restarted: %s)",
+        async (restarted) => {
+          const sessions = seedWorkspace();
+          let service = await queueTakingSpawn(sessions);
+          try {
+            if (restarted) {
+              service.dispose();
+              await service.settleBackgroundSpawns();
+              const { SessionService } = await loadSessionServiceModule();
+              service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+                deferBackgroundLoops: true,
+              });
+            }
+
+            await service.kill("api-3", { force: true, skipPrCheck: true });
+            await service.settleBackgroundSpawns();
+
+            expect(sessions.get("api-3")?.status).toBe("killed");
+            expect(sessions.get("api-3")?.spawnIntent).toBeUndefined();
+            expect(ownerIds(sessions)).toEqual(["api-1"]);
+            expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          } finally {
+            service.dispose();
+            await service.settleBackgroundSpawns();
+          }
+        },
+      );
+
+      it("kill keeps closeout on a taker with uncertain launch ownership", async () => {
+        const sessions = seedWorkspace();
+        const { service } = await holdTakingSpawn(sessions);
+
+        await service.kill("api-3", { force: true, skipPrCheck: true });
+
+        expect(ownerIds(sessions)).toEqual(["api-3"]);
+        expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+        service.dispose();
+      });
+
+      it("kill keeps closeout when a queued taker starts during its precheck", async () => {
+        const sessions = seedWorkspace();
+        const service = await queueTakingSpawn(sessions);
+        let release: () => void = () => undefined;
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        isGitWorktreeMock.mockImplementationOnce(async () => {
+          await held;
+          return true;
+        });
+        const checks = isGitWorktreeMock.mock.calls.length;
+        const killing = service.kill("api-3", { force: true, skipPrCheck: true });
+        try {
+          await vi.waitFor(() => expect(isGitWorktreeMock).toHaveBeenCalledTimes(checks + 1));
+          const current = sessions.get("api-3")!;
+          sessions.set("api-3", {
+            ...current,
+            spawnIntent: { ...current.spawnIntent!, phase: "launching" },
+          });
+          lookupTmuxPanePidMock.mockResolvedValue({ status: "unavailable" } as never);
+          release();
+          await killing;
+
+          expect(ownerIds(sessions)).toEqual(["api-3"]);
+          expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+        } finally {
+          release();
+          service.dispose();
+          await service.settleBackgroundSpawns();
+        }
+      });
+
       it("handoff of the former owner refuses when a take lands while it waits on the workspace lock", async () => {
         const sessions = seedWorkspace();
         const realTimers =
