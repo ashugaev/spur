@@ -573,6 +573,10 @@ export class ConfigRegistryScanner {
     }
   }
 
+  invalidatePath(path: string): void {
+    this.invalidateCanonicalPath(this.canonicalizePath(path));
+  }
+
   private invalidateCanonicalPath(canonicalPath: string): void {
     this.loads.delete(canonicalPath);
     for (const [rawPath, cachedCanonicalPath] of this.canonicalPaths) {

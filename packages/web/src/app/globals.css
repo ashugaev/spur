@@ -381,14 +381,18 @@ textarea::placeholder {
   overflow: hidden;
 }
 
-.snippet-dialog:modal .snippet-frame {
+.snippet-dialog:modal .snippet-frame-region {
   flex: 1 1 0;
   min-height: 0;
   height: auto !important;
 }
 
+.snippet-dialog:modal .snippet-frame {
+  height: 100% !important;
+}
+
 /* Header, confirm strip and status line keep their height; only the iframe flexes. */
-.snippet-dialog:modal > :not(.snippet-frame) {
+.snippet-dialog:modal > :not(.snippet-frame-region) {
   flex: none;
 }
 

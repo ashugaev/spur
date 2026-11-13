@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { startServer } from "../../src/server.js";
@@ -57,6 +57,57 @@ async function boot() {
   };
   return { base, call, dataDir, stop };
 }
+
+describe("page source HTTP boundary", () => {
+  it("imports, updates without SSE, exposes errors/recovery and detaches without losing SQL", async () => {
+    const { dataDir, base, call } = await boot();
+    const source = join(dataDir, "source");
+    await mkdir(source, { recursive: true });
+    await writeFile(join(source, "entry.html"), '<link href="style.css">first');
+    await writeFile(join(source, "style.css"), "a{}");
+    expect(
+      (await call("POST", "/pages", { id: "invalid", source: { path: "relative" } })).status,
+    ).toBe(400);
+    const created = await call("POST", "/pages", {
+      id: "training",
+      source: { path: join(source, "entry.html") },
+    });
+    expect(created.status).toBe(201);
+    expect(JSON.parse(created.text)).toMatchObject({ id: "training", sync: { state: "synced" } });
+    expect((await fetch(`${base}/pages/training/files/index.html`)).status).toBe(200);
+    expect((await call("GET", "/pages/training/files/style.css")).text).toBe("a{}");
+    for (const path of ["page.yaml", ".source-sync.json", "data.sqlite"]) {
+      expect((await call("GET", `/pages/training/files/${path}`)).status).toBe(404);
+    }
+    await call("POST", "/stores/page%3Atraining/docs/items/one", { data: { keep: true } });
+    await writeFile(join(source, "entry.html"), "automatic");
+    await waitFor(
+      async () =>
+        (await readFile(join(pageDirPath(dataDir, "training"), "index.html"), "utf8")) ===
+        "automatic",
+      7000,
+    );
+    await rm(source, { recursive: true });
+    const error = await call("PATCH", "/pages/training/source", { path: source });
+    expect(JSON.parse(error.text).sync.state).toBe("error");
+    expect((await call("GET", "/pages/training/files/index.html")).text).toBe("automatic");
+    await mkdir(source);
+    await writeFile(join(source, "index.html"), "recovered");
+    await waitFor(
+      async () => JSON.parse((await call("GET", "/pages")).text).pages[0]?.sync.state === "synced",
+      7000,
+    );
+    expect((await call("GET", "/pages/training/files/index.html")).text).toBe("recovered");
+    expect((await call("GET", "/stores/page%3Atraining/docs/items/one")).text).toContain(
+      '"keep":true',
+    );
+    const detached = await call("PATCH", "/pages/training/source", { path: null });
+    expect(JSON.parse(detached.text).source).toBeUndefined();
+    expect((await call("PATCH", "/pages/training/source", {})).status).toBe(400);
+    expect((await call("PATCH", "/pages/missing/source", { path: source })).status).toBe(404);
+    expect((await call("DELETE", "/pages/training")).status).toBe(200);
+  });
+});
 
 interface SseEvent {
   event: string;
@@ -120,9 +171,9 @@ function openEvents(url: string, headers: Record<string, string> = {}) {
   };
 }
 
-async function waitFor(check: () => boolean, timeoutMs = 3000): Promise<void> {
+async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs = 3000): Promise<void> {
   const started = Date.now();
-  while (!check()) {
+  while (!(await check())) {
     if (Date.now() - started > timeoutMs) throw new Error("Timed out waiting");
     await new Promise((resolve) => setTimeout(resolve, 20));
   }

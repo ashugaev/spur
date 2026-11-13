@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   actionStatusFromDoc,
   isAllowedSnippetStore,
+  parseChatLayout,
   SNIPPET_CONFIRM_REASON_TEXT,
   SNIPPET_MAX_PAYLOAD_BYTES,
   SNIPPET_PROTOCOL_VERSION,
@@ -15,6 +16,36 @@ import {
   snippetStatusLabel,
   type SnippetActionStatus,
 } from "@/lib/snippets/snippet-protocol";
+
+describe("private chat placements", () => {
+  const targets = new Set(["one", "two"]);
+  const snapshot = () => ({
+    sequence: 0,
+    viewport: { width: 400, height: 300 },
+    slots: [{ target: "one", rect: { x: 300, y: 100, width: 32, height: 108 } }],
+  });
+  it("accepts registered bounded geometry and marks out-of-bounds slots unavailable", () => {
+    expect(parseChatLayout(snapshot(), targets, -1, 123)?.receivedAt).toBe(123);
+    const data = snapshot();
+    data.slots[0]!.rect.x = -1;
+    expect(parseChatLayout(data, targets, -1, 123)?.slots[0]?.rect).toBeNull();
+  });
+  it("rejects stale, duplicate, unknown, nonfinite and oversized layouts", () => {
+    const data = snapshot();
+    expect(parseChatLayout(data, targets, 0, 0)).toBeNull();
+    for (const bad of [
+      { ...data, sequence: -1 },
+      { ...data, sequence: 0.5 },
+      { ...data, viewport: { width: Infinity, height: 300 } },
+      { ...data, viewport: { width: 32769, height: 300 } },
+      { ...data, slots: [...data.slots, ...data.slots] },
+      { ...data, slots: [{ target: "unknown", rect: null }] },
+      { ...data, slots: [{ target: "one", rect: { x: NaN, y: 0, width: 32, height: 108 } }] },
+      { ...data, slots: Array.from({ length: 17 }, (_, i) => ({ target: String(i), rect: null })) },
+    ])
+      expect(parseChatLayout(bad, targets, -1, 0)).toBeNull();
+  });
+});
 import {
   buildSnippetSrcdoc,
   SNIPPET_CSP,

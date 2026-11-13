@@ -971,6 +971,13 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         timeoutMs: 15_000,
         accept: (value) => value.includes("initial stale runtime prompt"),
       });
+      // Finish independent PR discovery before the source's one-shot poll.
+      // A source snapshot does not bind the workspace PR.
+      const bound = await pollUntil(async () => readSession(context.dataDir, session.id), {
+        timeoutMs: 15_000,
+        accept: (value) => value?.pr?.number === 42,
+      });
+      expect(bound?.pr).toMatchObject({ number: 42, repo: "acme/api" });
 
       const config = loadProjectConfig(configPath, loadConfig(configPath));
       const bus = new EventBus();
@@ -1016,13 +1023,6 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           timeoutMs: 15_000,
           accept: Boolean,
         });
-        // A source snapshot does not bind the workspace PR. Finish discovery
-        // before held parking blocks the sweep's queued lookup flush.
-        const bound = await pollUntil(async () => readSession(context.dataDir, session.id), {
-          timeoutMs: 15_000,
-          accept: (value) => value?.pr?.number === 42,
-        });
-        expect(bound?.pr).toMatchObject({ number: 42, repo: "acme/api" });
         parkSpy.mockImplementationOnce(park);
         await pollUntil(async () => teardownStarted, {
           timeoutMs: 20_000,

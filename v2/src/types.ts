@@ -2074,7 +2074,7 @@ export interface CronJobEditDraft extends CronJobEditUpdate {
 
 export interface CronJobEditResult extends CronJobEditDraft {
   saved: true;
-  activation: "pending";
+  activation: "applied" | "failed";
 }
 
 export interface SessionLaunchOptions {

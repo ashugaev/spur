@@ -5,6 +5,8 @@ import { PAGE_ID_RE, isSafeSegment, resolveStoreProxyTarget } from "./store-prox
 // `page:<its id>`.
 
 export type PageProxyTarget =
+  | { kind: "manifest" }
+  | { kind: "icon"; size: 32 | 180 | 192 | 512 }
   | { kind: "file"; daemonPath: string }
   | { kind: "events"; daemonPath: string }
   | { kind: "store"; daemonPath: string; forcePageSource: boolean };
@@ -19,6 +21,16 @@ export function resolvePageProxyTarget(
   const [head, ...rest] = segments;
   if (head === "_spur") {
     const [kind, ...tail] = rest;
+    if (tail.length === 0 && method === "GET") {
+      if (kind === "manifest.webmanifest") return { kind: "manifest" };
+      const icons = {
+        "icon-32.png": 32,
+        "icon-180.png": 180,
+        "icon-192.png": 192,
+        "icon-512.png": 512,
+      } as const;
+      if (kind && kind in icons) return { kind: "icon", size: icons[kind as keyof typeof icons] };
+    }
     if (kind === "events" && tail.length === 0) {
       return method === "GET"
         ? { kind: "events", daemonPath: `/pages/${encodeURIComponent(pageId)}/events` }
