@@ -881,6 +881,36 @@ function withSuppressUnstableFeaturesWarning(configText: string): string {
   return trimmed ? `${line}\n\n${trimmed}\n` : `${line}\n`;
 }
 
+// Codex TUI rate-limit model-switch popup swallows pasted sends. Set
+// [notice] hide_rate_limit_model_nudge = true in the session config, inside
+// the host [notice] table when present. A top-level dotted or inline `notice`
+// key is left alone: a second [notice] table would make the config invalid.
+function withHiddenRateLimitModelNudge(configText: string): string {
+  if (codexTopLevelLines(configText).some((line) => /^\s*notice\s*[.=]/.test(line))) {
+    return configText;
+  }
+  const line = "hide_rate_limit_model_nudge = true";
+  const lines = configText.split("\n");
+  const headerIndex = lines.findIndex((l) => /^\s*\[\s*notice\s*\]\s*(?:#.*)?$/.test(l));
+  if (headerIndex === -1) {
+    const trimmed = configText.trimEnd();
+    const separator = trimmed ? "\n\n" : "";
+    return `${trimmed}${separator}[notice]\n${line}\n`;
+  }
+  for (let i = headerIndex + 1; i < lines.length; i++) {
+    const current = lines[i] ?? "";
+    if (current.trim().startsWith("[")) {
+      break;
+    }
+    if (/^\s*hide_rate_limit_model_nudge\s*=/.test(current)) {
+      lines[i] = line;
+      return lines.join("\n");
+    }
+  }
+  lines.splice(headerIndex + 1, 0, line);
+  return lines.join("\n");
+}
+
 export async function linkCodexAuth(codexHome: string): Promise<void> {
   for (const filename of ["auth.json", ".credentials.json"]) {
     const source = join(homedir(), ".codex", filename);
@@ -923,7 +953,9 @@ export async function ensureCodexHooksConfig(
     options?.mcpBindings ?? [],
     options?.mcpExclude ?? [],
   );
-  const finalConfig = withSuppressUnstableFeaturesWarning(baseConfig);
+  const finalConfig = withHiddenRateLimitModelNudge(
+    withSuppressUnstableFeaturesWarning(baseConfig),
+  );
   await writeFile(sessionConfigPath, finalConfig, "utf8");
   await linkCodexAuth(codexDir);
   if (options?.modelsCacheHome) {

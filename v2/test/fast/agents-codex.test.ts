@@ -593,7 +593,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     );
     const content = writeCall?.[1] as string;
     expect(content).toBe(
-      'suppress_unstable_features_warning = true\n\n[tui.model_availability_nux]\n"codex-model-id" = 3\n',
+      'suppress_unstable_features_warning = true\n\n[tui.model_availability_nux]\n"codex-model-id" = 3\n\n[notice]\nhide_rate_limit_model_nudge = true\n',
     );
   });
 
@@ -614,6 +614,72 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     const content = writeCall?.[1] as string;
     const count = (content.match(/suppress_unstable_features_warning/g) ?? []).length;
     expect(count).toBe(1);
+  });
+
+  async function writtenSessionConfig(hostConfig: string): Promise<string> {
+    mockReadFile.mockImplementation(async (filePath: unknown) => {
+      if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
+        return hostConfig;
+      }
+      return "";
+    });
+    await ensureCodexHooksConfig("/session/tool");
+    const writeCalls = mockWriteFile.mock.calls.filter(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    expect(writeCalls.map((c) => c[0])).toEqual(["/session/tool/codex-home/config.toml"]);
+    return writeCalls[0]?.[1] as string;
+  }
+
+  it("adds a notice table hiding the rate-limit model nudge when host has none", async () => {
+    const content = await writtenSessionConfig('[model]\nname = "test"\n');
+    expect(content).toBe(
+      'suppress_unstable_features_warning = true\n\n[model]\nname = "test"\n\n[notice]\nhide_rate_limit_model_nudge = true\n',
+    );
+  });
+
+  it("adds the key inside an existing notice table without a second header", async () => {
+    const content = await writtenSessionConfig("[notice]\nhide_full_access_warning = true\n");
+    expect(content).toBe(
+      "suppress_unstable_features_warning = true\n\n[notice]\nhide_rate_limit_model_nudge = true\nhide_full_access_warning = true\n",
+    );
+  });
+
+  it("overrides host hide_rate_limit_model_nudge = false to true, one occurrence", async () => {
+    const content = await writtenSessionConfig(
+      "[notice]\nhide_full_access_warning = true\nhide_rate_limit_model_nudge = false\n",
+    );
+    expect(content).toBe(
+      "suppress_unstable_features_warning = true\n\n[notice]\nhide_full_access_warning = true\nhide_rate_limit_model_nudge = true\n",
+    );
+  });
+
+  it("does not place the key in a table following notice", async () => {
+    const content = await writtenSessionConfig(
+      "[notice]\nhide_full_access_warning = true\n\n[tui]\nhide_rate_limit_model_nudge = false\n",
+    );
+    expect(content).toBe(
+      "suppress_unstable_features_warning = true\n\n[notice]\nhide_rate_limit_model_nudge = true\nhide_full_access_warning = true\n\n[tui]\nhide_rate_limit_model_nudge = false\n",
+    );
+  });
+
+  it.each([
+    ["dotted key", "notice.hide_full_access_warning = true\n"],
+    ["inline table", "notice = { hide_full_access_warning = true }\n"],
+  ])("leaves config unchanged when host defines notice as %s", async (_label, hostConfig) => {
+    const content = await writtenSessionConfig(hostConfig);
+    expect(content).toBe(`suppress_unstable_features_warning = true\n\n${hostConfig}`);
+  });
+
+  it.each([
+    ["trailing comment", "[notice]  # host notices"],
+    ["spaced name", "[ notice ]"],
+  ])("adds the key inside a notice table whose header has %s", async (_label, header) => {
+    const content = await writtenSessionConfig(`${header}\nhide_full_access_warning = true\n`);
+    expect(content).toBe(
+      `suppress_unstable_features_warning = true\n\n${header}\nhide_rate_limit_model_nudge = true\nhide_full_access_warning = true\n`,
+    );
+    expect(content.match(/notice\s*\]/g)).toHaveLength(1);
   });
 
   it("returns the codex dir path", async () => {
