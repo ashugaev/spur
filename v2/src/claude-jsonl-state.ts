@@ -502,14 +502,13 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
         : undefined;
     // Text fallback needs this record's own timestamp; a post-restart reader's
     // Date.now() would anchor a time-only banner to the wrong day.
-    const rateLimitResetAtMs =
-      isRateLimit
-        ? (structuredRateLimitResetAtMs(parsed["quotaLimits"]) ??
-          structuredRateLimitResetAtMs(rateLimitInfo) ??
-          (ownTimestampMs !== undefined
-            ? parseRateLimitResetAtMs(extractTextContent(message), ownTimestampMs)
-            : undefined))
-        : undefined;
+    const rateLimitResetAtMs = isRateLimit
+      ? (structuredRateLimitResetAtMs(parsed["quotaLimits"]) ??
+        structuredRateLimitResetAtMs(rateLimitInfo) ??
+        (ownTimestampMs !== undefined
+          ? parseRateLimitResetAtMs(extractTextContent(message), ownTimestampMs)
+          : undefined))
+      : undefined;
     const usage =
       typeof message["usage"] === "object" && message["usage"] !== null
         ? (message["usage"] as Record<string, unknown>)
