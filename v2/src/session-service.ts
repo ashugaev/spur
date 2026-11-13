@@ -1,6 +1,7 @@
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   statSync,
@@ -279,6 +280,7 @@ import {
   retireTelegramLegacyState,
   readServiceInstance,
   readSession,
+  archiveSessions,
   readInterfaceConsent,
   writeInterfaceConsent,
   recordTelegramMessages,
@@ -543,6 +545,7 @@ import {
   type TelegramReplyTarget,
   type TelegramSourceConfig,
   type TelegramSpawnOrigin,
+  type WorkItemTriggerOrigin,
   TELEGRAM_CHOICE_CALLBACK_PREFIX,
   TELEGRAM_MESSAGE_EVENT,
   type SharedMemoryEntryResponse,
@@ -620,6 +623,7 @@ import {
   branchRefsExist,
   branchStatus,
   createWorktree,
+  deleteLocalBranch,
   findWorktreePathForBranch,
   hasUncommittedChanges,
   hasUnpushedCommits,
@@ -3323,6 +3327,7 @@ interface SessionSpawnOptions {
   acceptQueued?: boolean;
   /** Set by source adapters, never from the HTTP body. */
   telegramOrigin?: TelegramSpawnOrigin;
+  triggerOrigin?: WorkItemTriggerOrigin;
   triggerBirthKey?: string;
 }
 
@@ -3373,6 +3378,7 @@ interface HandoffAdmission {
 interface BackgroundSpawnOptions {
   triggerBirthKey?: string;
   triggerBirthRequest?: SpawnSessionRequest;
+  triggerOrigin?: WorkItemTriggerOrigin;
   modeResolution?: "strict" | "carried";
   telegramOrigin?: TelegramSpawnOrigin;
   promptKind?: UserInputKind;
@@ -12169,6 +12175,52 @@ export class SessionService {
     return loadProjectSuggestions(agent, project.path);
   }
 
+  // Cleans up what a hard spawn failure of a work-item trigger block left
+  // behind before a replacement spawns: the session's own local branch (named
+  // after its id, never reused) and the errored record. Untagged or non-errored
+  // records are not touched ("skipped"). The record is archived whatever the
+  // delete does, unless a restore or relaunch took it over meanwhile
+  // ("declined"): its owner then still stands for the block.
+  async discardFailedSpawn(sessionId: string): Promise<"archived" | "skipped" | "declined"> {
+    // launchCommand stays empty until the agent launches: a launched session
+    // is not a never-started spawn leftover.
+    const discardable = (current: SessionRecord | null): current is SessionRecord =>
+      current !== null &&
+      current.status === "errored" &&
+      current.triggerOrigin !== undefined &&
+      !current.spawnIntent &&
+      current.launchCommand === "";
+    const record = readSession(this.config.dataDir, sessionId);
+    if (!discardable(record)) return "skipped";
+    if (record.branch === record.id) {
+      try {
+        await deleteLocalBranch(this.getProject(record.project).path, record.branch);
+      } catch (error) {
+        this.logEvent("trigger.spawn.discard_failed", {
+          level: "warn",
+          sessionId,
+          projectId: record.project,
+          message: `Could not delete branch ${record.branch}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        });
+      }
+    }
+    // Branch cleanup awaits: revalidate under the lock restore takes before
+    // the destructive archive.
+    return this.withSessionLifecycleLocks(this.lifecycleIdsFor(record), async () => {
+      const current = readSession(this.config.dataDir, sessionId);
+      if (
+        !discardable(current) ||
+        current.agentLaunchId !== record.agentLaunchId ||
+        this.lifecycle.snapshot(sessionId).operation?.phase === "pending"
+      )
+        return "declined";
+      archiveSessions(this.config.dataDir, [current]);
+      return "archived";
+    });
+  }
+
   async branchStatus(projectId: string, name: string): Promise<BranchExistsResponse> {
     const project = this.getProject(projectId);
     const normalized = normalizeBranchName(name);
@@ -13258,10 +13310,6 @@ export class SessionService {
   async spawn(request: SpawnSessionRequest, options?: SessionSpawnOptions): Promise<SessionView> {
     if (options?.triggerBirthKey) {
       const key = options.triggerBirthKey;
-      const existing = this.getTriggerBirth(request.project, key, request);
-      if (existing) {
-        return this.get(existing.id);
-      }
       const pending = this.triggerBirthsInFlight.get(key);
       if (pending) {
         if (!isDeepStrictEqual(pending.request, request)) {
@@ -13269,6 +13317,8 @@ export class SessionService {
         }
         return pending.result;
       }
+      const existing = this.findPersistedTriggerBirth(request.project, key, request);
+      if (existing) return this.get(existing.id);
       const original = structuredClone(request);
       // Defer execution until the identity is registered, before the first await.
       const result = Promise.resolve().then(() =>
@@ -13291,14 +13341,49 @@ export class SessionService {
     key: string,
     request?: SpawnSessionRequest,
   ): SessionRecord | undefined {
-    const existing = listSessions(this.config.dataDir).find(
+    const existing = this.findPersistedTriggerBirth(projectId, key, request);
+    if (!existing && this.triggerBirthsInFlight.has(key))
+      throw new Error("Trigger birth acceptance remains in flight");
+    return existing;
+  }
+
+  private findPersistedTriggerBirth(
+    projectId: string,
+    key: string,
+    request?: SpawnSessionRequest,
+  ): SessionRecord | undefined {
+    const candidates = listSessions(this.config.dataDir).filter(
       (session) => session.triggerBirthKey === key,
     );
+    if (candidates.length > 1) throw new Error("Trigger birth identity is ambiguous");
+    const existing = candidates[0];
     if (existing && existing.project !== projectId) {
       throw new Error("Trigger birth key already belongs to a different project");
     }
     if (existing && request && !isDeepStrictEqual(existing.triggerBirthRequest, request)) {
       throw new Error("Trigger birth key already belongs to a different spawn request");
+    }
+    for (const store of ["sessions", "sessions-archive"]) {
+      const root = join(this.config.dataDir, store);
+      if (!existsSync(root)) continue;
+      for (const project of readdirSync(root, { withFileTypes: true })) {
+        if (!project.isDirectory()) continue;
+        const directory = join(root, project.name);
+        for (const file of readdirSync(directory, { withFileTypes: true })) {
+          if (!file.isFile() || !file.name.endsWith(".json") || file.name.startsWith(".")) continue;
+          let raw: unknown;
+          try {
+            raw = JSON.parse(readFileSync(join(directory, file.name), "utf8")) as unknown;
+          } catch (error) {
+            throw new Error("Trigger birth inventory is unreadable", { cause: error });
+          }
+          if (!isRecord(raw) || typeof raw.id !== "string" || typeof raw.project !== "string")
+            throw new Error("Trigger birth inventory is incomplete");
+          if (raw.triggerBirthKey !== key) continue;
+          if (store === "sessions-archive" || raw.id !== existing?.id)
+            throw new Error("Trigger birth persisted binding remains uncertain");
+        }
+      }
     }
     return existing;
   }
@@ -13578,6 +13663,7 @@ export class SessionService {
         ...(request.slots?.links?.length
           ? { slots: { links: normalizeSlotLinks(request.slots.links) } }
           : {}),
+        ...(options?.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
@@ -14104,6 +14190,7 @@ export class SessionService {
             updatedAt: nowIso(),
             error: message,
             errorSource: "other",
+            ...(options?.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
           };
           const killed = this.spawnWasKilled(sessionId);
           const settledFailure = prAlertBirthConfirmed
@@ -14935,6 +15022,7 @@ export class SessionService {
         ...(options.triggerBirthKey && triggerBirthRequest
           ? { triggerBirthKey: options.triggerBirthKey, triggerBirthRequest }
           : {}),
+        ...(options.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
         ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
@@ -15093,6 +15181,7 @@ export class SessionService {
         const failedRecord: SessionRecord = {
           id: sessionId,
           project: request.project,
+          ...(options.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
           ...(options.prAlertOwnerTransfer
             ? { prAlertTransfer: options.prAlertOwnerTransfer }
             : {}),
@@ -27227,6 +27316,7 @@ export class SessionService {
       agentLaunchId: _agentLaunchId,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
+      triggerOrigin: _triggerOrigin,
       sidecarLaunches: _sidecarLaunches,
       branchSource: _branchSource,
       error: _error,
@@ -27638,6 +27728,7 @@ export class SessionService {
       agentLaunchId: _agentLaunchId,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
+      triggerOrigin: _triggerOrigin,
       sidecarLaunches: _sidecarLaunches,
       tokenUsage: _tokenUsage,
       preflightTokenUsage: _preflightTokenUsage,
