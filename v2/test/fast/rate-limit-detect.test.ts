@@ -1298,6 +1298,16 @@ describe("detectCodexMcpPermissionDialog", () => {
 });
 
 describe("scanTmuxRateLimit", () => {
+  it("matches a line-leading 5-hour limit banner but not quoted or gutter text", () => {
+    const banner = "You've hit your 5-hour limit · resets 2:20am (UTC)";
+    expect(scanTmuxRateLimit(banner)).toEqual({
+      limited: true,
+      reason: "tmux you've hit your 5-hour limit",
+    });
+    expect(scanTmuxRateLimit(`> ${banner}`)).toBeNull();
+    expect(scanTmuxRateLimit(`\"${banner}\"`)).toBeNull();
+  });
+
   it("limits Codex banner fallback to the recent pane tail", () => {
     const banner = "■ Your workspace is out of credits. Ask your owner.";
     const pane = `${banner}\n${Array.from({ length: 21 }, (_, index) => `work ${index}`).join("\n")}\n\n`;
@@ -1469,6 +1479,22 @@ describe("readCodexRolloutState rate limits", () => {
 });
 
 describe("parseRateLimitResetAtMs", () => {
+  it("parses the observed 5-hour banner and expires at its UTC reset", () => {
+    const resetAtMs = Date.parse("2026-11-13T02:20:00.000Z");
+    const parsed = parseRateLimitResetAtMs(
+      "You've hit your 5-hour limit · resets 2:20am (UTC)",
+      Date.parse("2026-11-13T01:28:46.000Z"),
+    );
+    expect(parsed).toBe(resetAtMs);
+    const detection = { limited: true, reason: "claude rate_limit", resetAtMs: parsed };
+    expect(rateLimitExpired(detection, resetAtMs - 1)).toBe(false);
+    expect(rateLimitExpired(detection, resetAtMs)).toBe(true);
+    expect(detectCursorRateLimit("You've hit your 5-hour limit")).toEqual({
+      limited: true,
+      reason: "cursor hit your 5-hour limit",
+    });
+  });
+
   it("parses the field-reported sample anchored same-day", () => {
     const anchorMs = Date.parse("2026-07-01T11:07:00.000Z");
     expect(

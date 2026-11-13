@@ -40,10 +40,9 @@ export interface ParsedRecord {
   /** True when the record is a synthetic `error: "rate_limit"` API error. */
   rateLimited?: boolean;
   /**
-   * Epoch ms the limit resets at, parsed from this record's own banner text
-   * and anchored to this record's own timestamp. Absent when the record
-   * carries no parseable "resets HH[:MM](am|pm) (UTC)" clause, or no
-   * parseable own timestamp — never inferred from the caller's clock.
+   * Epoch ms the limit resets at, from structured fields or this record's
+   * banner text. Text parsing requires this record's own timestamp; the
+   * caller's clock never supplies the anchor.
    */
   rateLimitResetAtMs?: number;
   /** True when the record is a synthetic `error: "server_error"` API error. */
@@ -301,6 +300,16 @@ function extractTimestampMs(
   return extractRecordTimestampMs(parsed, message) ?? fallbackTimestampMs;
 }
 
+function structuredRateLimitResetAtMs(limits: unknown): number | undefined {
+  if (typeof limits !== "object" || limits === null || Array.isArray(limits)) return undefined;
+  const resetSeconds = (limits as Record<string, unknown>)["resetsAt"];
+  if (typeof resetSeconds !== "number" || !Number.isFinite(resetSeconds) || resetSeconds <= 0) {
+    return undefined;
+  }
+  const resetAtMs = resetSeconds * 1000;
+  return Number.isFinite(new Date(resetAtMs).getTime()) ? resetAtMs : undefined;
+}
+
 function hasBlockType(blocks: unknown[], type: string): boolean {
   return blocks.some(
     (b) => typeof b === "object" && b !== null && (b as Record<string, unknown>)["type"] === type,
@@ -484,14 +493,22 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
     const blocks = contentBlocks(message);
     const toolUseHints = extractToolUseHints(blocks);
     const isRateLimit = parsed["error"] === "rate_limit";
-    // Anchored to this record's OWN timestamp only. A record with no
-    // parseable own timestamp (ownTimestampMs is undefined) is left without
-    // a resetAtMs rather than anchoring to `timestampMs`, which on the first
-    // post-restart read is the reader's Date.now(), not the record's real
-    // time.
+    const apiErrorParams = parsed["apiErrorParams"];
+    const rateLimitInfo =
+      typeof apiErrorParams === "object" &&
+      apiErrorParams !== null &&
+      !Array.isArray(apiErrorParams)
+        ? (apiErrorParams as Record<string, unknown>)["rate_limit_info"]
+        : undefined;
+    // Text fallback needs this record's own timestamp; a post-restart reader's
+    // Date.now() would anchor a time-only banner to the wrong day.
     const rateLimitResetAtMs =
-      isRateLimit && ownTimestampMs !== undefined
-        ? parseRateLimitResetAtMs(extractTextContent(message), ownTimestampMs)
+      isRateLimit
+        ? (structuredRateLimitResetAtMs(parsed["quotaLimits"]) ??
+          structuredRateLimitResetAtMs(rateLimitInfo) ??
+          (ownTimestampMs !== undefined
+            ? parseRateLimitResetAtMs(extractTextContent(message), ownTimestampMs)
+            : undefined))
         : undefined;
     const usage =
       typeof message["usage"] === "object" && message["usage"] !== null
