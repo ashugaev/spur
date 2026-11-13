@@ -248,6 +248,15 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.network_patch.stop()
         await bridge.check_dependencies()
 
+    async def test_dependency_guard_rejects_unpinned_ntgcalls(self):
+        installed_version = bridge.importlib.metadata.version
+        for version in ("3.0.3", "3.0.7"):
+            with self.subTest(version=version):
+                with patch.object(bridge.importlib.metadata, "version", side_effect=lambda package:
+                                  version if package == "ntgcalls" else installed_version(package)):
+                    with self.assertRaisesRegex(bridge.BridgeError, "^unsupported_dependency_ntgcalls$"):
+                        await bridge.check_dependencies()
+
 
 @unittest.skipUnless(importlib.util.find_spec("dotenv"), "install prototype requirements for input tests")
 class InputTests(unittest.TestCase):
