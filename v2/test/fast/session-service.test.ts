@@ -64678,6 +64678,31 @@ describe("SessionService", () => {
   describe("rate-limit reactivation", () => {
     const REACTIVATION_MARKER = "rate limited earlier and should be able to continue now";
 
+    function signal() {
+      let resolve!: () => void;
+      const promise = new Promise<void>((done) => { resolve = done; });
+      return { promise, resolve };
+    }
+
+    function oldClaudeLimit() {
+      return {
+        state: "waiting" as const,
+        reader: {
+          filePath: "test.jsonl",
+          lastOffset: 1,
+          lastMtimeMs: 1,
+          tailRecords: [],
+          rateLimitOrdinal: 1,
+        },
+        rateLimit: {
+          limited: true,
+          reason: "claude rate_limit",
+          source: { filePath: "test.jsonl", ordinal: 1 },
+        },
+        serverError: false,
+      };
+    }
+
     function mockRateLimited() {
       mockClaudeSessionStatus("waiting", "idle");
       readClaudeJsonlStateMock.mockResolvedValue({
@@ -64742,6 +64767,148 @@ describe("SessionService", () => {
       });
       expect((await restarted.get("api-1")).state).toBe("rate_limited");
       restarted.dispose();
+    });
+
+    it("delivers a queued direct message after clear", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({
+        rateLimitedAt: "2026-03-18T10:00:00.000Z",
+        queuedMessages: { messages: ["continue queued work"], awaitingPrompt: false },
+      }));
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockResolvedValue(oldClaudeLimit());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect((await service.clearRateLimit("api-1", true, "cli")).deliveryScheduled).toBe(true);
+      await vi.waitFor(() => expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1", "continue queued work", { agent: "claude" },
+      ));
+      await vi.waitFor(() => expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]));
+      service.dispose();
+    });
+
+    it("makes a classifier waiting at the clear barrier reread the persisted fence", async () => {
+      const sessions = createSessionStore();
+      const stale = runningSession({ rateLimitedAt: "2026-03-18T10:00:00.000Z" });
+      sessions.set("api-1", stale);
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockResolvedValue(oldClaudeLimit());
+      const entered = signal();
+      const release = signal();
+      captureTmuxPaneMock.mockImplementationOnce(async () => {
+        entered.resolve();
+        await release.promise;
+        return "⚠ Usage limit reached";
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const clearing = service.clearRateLimit("api-1", true, "cli");
+      await entered.promise;
+      const observing = sessionServiceInternals(service).classifySessionRecord(stale);
+      let settled = false;
+      void observing.then(() => { settled = true; });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      release.resolve();
+      await clearing;
+      expect((await observing).state).toBe("waiting");
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      service.dispose();
+    });
+
+    it("keeps a limit appended after the fence capture and does not arm queued delivery", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({
+        rateLimitedAt: "2026-03-18T10:00:00.000Z",
+        queuedMessages: { messages: ["do not send"], awaitingPrompt: false },
+      }));
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockImplementation(async () => sessions.get("api-1")?.rateLimitClearFence
+        ? {
+            ...oldClaudeLimit(),
+            reader: { ...oldClaudeLimit().reader, rateLimitOrdinal: 2 },
+            rateLimit: {
+              limited: true,
+              reason: "new claude rate_limit",
+              source: { filePath: "test.jsonl", ordinal: 2 },
+            },
+          }
+        : oldClaudeLimit());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect(await service.clearRateLimit("api-1", true, "cli")).toMatchObject({
+        state: "rate_limited", deliveryScheduled: false,
+      });
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["do not send"]);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("drains an in-flight menu confirmation before clearing and rejects its stale view", async () => {
+      const sessions = createSessionStore();
+      const stale = runningSession({ rateLimitedAt: "2026-03-18T10:00:00.000Z" });
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockResolvedValue(oldClaudeLimit());
+      captureTmuxPaneMock.mockResolvedValue([
+        "What do you want to do?",
+        "> 1. Stop and wait for limit to reset",
+        "  2. Ask your admin for more usage",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"));
+      const entered = signal();
+      const release = signal();
+      sendSubmitKeyToTmuxMock.mockImplementationOnce(async () => {
+        entered.resolve();
+        await release.promise;
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      sessions.set("api-1", stale);
+      const internals = service as unknown as {
+        enrichWithClassified(record: SessionRecord): Promise<{ view: { state: string } }>;
+        rateLimitClearBarriers: Map<string, Promise<void>>;
+      };
+      const oldView = internals.enrichWithClassified(stale);
+      await entered.promise;
+      const clearing = service.clearRateLimit("api-1", true, "cli");
+      await vi.waitFor(() => expect(internals.rateLimitClearBarriers.has("api-1")).toBe(true));
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeDefined();
+      release.resolve();
+      await clearing;
+      expect((await oldView).view.state).toBe("waiting");
+      expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      service.dispose();
+    });
+
+    it("rebuilds a dashboard view whose pre-clear classification finished before the barrier", async () => {
+      const sessions = createSessionStore();
+      const stale = runningSession({ rateLimitedAt: "2026-03-18T10:00:00.000Z" });
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockResolvedValue(oldClaudeLimit());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      sessions.set("api-1", stale);
+      const internals = service as unknown as {
+        assembleDashboard(record: SessionRecord): Promise<{ view: { state: string } } | undefined>;
+        hasServiceIssues(record: SessionRecord): Promise<boolean>;
+      };
+      const entered = signal();
+      const release = signal();
+      vi.spyOn(internals, "hasServiceIssues").mockImplementationOnce(async () => {
+        entered.resolve();
+        await release.promise;
+        return false;
+      });
+      const dashboard = internals.assembleDashboard(stale);
+      await entered.promise;
+      await service.clearRateLimit("api-1", true, "cli");
+      release.resolve();
+      expect((await dashboard)?.view.state).toBe("waiting");
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      service.dispose();
     });
 
     it("refuses an exhausted quota with reset time and no session mutation", async () => {
