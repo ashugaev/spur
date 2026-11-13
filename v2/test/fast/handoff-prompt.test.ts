@@ -2,7 +2,69 @@ import { describe, expect, it } from "vitest";
 import { extractBareUserTask, renderHandoffPrompt } from "../../src/handoff-prompt.js";
 import { withSelfDestructInstructions } from "../../src/self-destruct.js";
 import { withSharedMemoryInstructions } from "../../src/shared-memory.js";
-import { renderShepherdPrompt } from "../../src/shepherd.js";
+import { refreshShepherdPrompt, renderShepherdPrompt } from "../../src/shepherd.js";
+import { legacyShepherdPrompt, LEGACY_SHEPHERD_INITIAL_ACTION } from "../helpers/shepherd.js";
+
+describe("bounded INT Shepherd startup", () => {
+  it("keeps bounded INT guidance conditional and preserves operator payload", () => {
+    const task = "  Follow the bounded INT protocol.\nKeep this operator request exact.  ";
+    const prompt = renderShepherdPrompt(task);
+    expect(prompt).toContain("complete fresh relevant project registry census");
+    expect(prompt).toContain("Otherwise, run `spur list --json`");
+    expect(prompt).not.toContain("1. Run `spur list --json`");
+    expect(prompt.endsWith(`Operator request:\n${task.trim()}`)).toBe(true);
+    const generic = renderShepherdPrompt("Inspect an unrelated project");
+    expect(generic).toContain("Otherwise, run `spur list --json`");
+    const fleetTask = "Run whole-fleet diagnostics with spur list --json";
+    expect(renderShepherdPrompt(fleetTask)).toContain(
+      "explicit operator request for whole-fleet diagnostics",
+    );
+    expect(renderShepherdPrompt(fleetTask).endsWith(fleetTask)).toBe(true);
+  });
+
+  it("refreshes only the generated action and preserves adversarial operator text", () => {
+    const task =
+      "Quoted INT and int-review instructions:\n" +
+      LEGACY_SHEPHERD_INITIAL_ACTION +
+      "\n\nOperator request:\nThis marker belongs to the operator payload.";
+    const legacy = legacyShepherdPrompt(task);
+    const refreshed = refreshShepherdPrompt(legacy, {
+      project: "spur-shepherd",
+      originalTaskPrompt: `  ${task}\n`,
+    });
+    expect(refreshed).toBe(renderShepherdPrompt(task));
+    expect(refreshed.endsWith(task)).toBe(true);
+    expect(refreshed.split(LEGACY_SHEPHERD_INITIAL_ACTION)).toHaveLength(2);
+    expect(
+      refreshShepherdPrompt(refreshed, { project: "spur-shepherd", originalTaskPrompt: task }),
+    ).toBe(refreshed);
+  });
+
+  it.each([
+    ["non-Shepherd project", "int-review", "task", "legacy"],
+    ["missing canonical task", "spur-shepherd", undefined, "legacy"],
+    ["mismatched canonical task", "spur-shepherd", "different task", "legacy"],
+    ["bare task", "spur-shepherd", "task", "task"],
+    ["custom header mention", "spur-shepherd", "task", "custom"],
+    ["modified rules", "spur-shepherd", "task", "modified"],
+  ])("does not guess generated provenance for %s", (_name, project, task, shape) => {
+    const legacy = legacyShepherdPrompt("task");
+    const prompt =
+      shape === "legacy"
+        ? legacy
+        : shape === "custom"
+          ? `Custom instruction mentioning You are Spur Shepherd:\n${legacy}`
+          : shape === "modified"
+            ? legacy.replace("Rules:", "Custom rules:")
+            : "task";
+    expect(
+      refreshShepherdPrompt(prompt, {
+        project,
+        ...(task === undefined ? {} : { originalTaskPrompt: task }),
+      }),
+    ).toBe(prompt);
+  });
+});
 
 describe("extractBareUserTask", () => {
   it("extracts the task from a manager step wrapper", () => {

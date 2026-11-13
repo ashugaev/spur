@@ -413,6 +413,9 @@ const SHUTDOWN_FORCE_EXIT_MS = 60_000;
 // shutdown passes its own remaining budget instead.
 const TRIGGERS_STOP_TIMEOUT_MS = 180_000;
 
+// A slow source keeps its generation fenced; reject the reload instead of overlapping it.
+const SOURCES_RELOAD_DRAIN_TIMEOUT_MS = 30_000;
+
 // Bound the shutdown drain of in-flight background spawns so teardown never hangs
 // on a spawn that fails to settle.
 const BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS = 5_000;
@@ -982,6 +985,16 @@ export async function startServer(
   const bus = new EventBus();
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
+  type SourceDrainOutcome =
+    | { state: "pending" }
+    | { state: "fulfilled" }
+    | { state: "rejected"; error: unknown };
+  let sourceDrain: {
+    controller: Awaited<ReturnType<typeof startConfiguredSources>>;
+    promise: Promise<void>;
+    outcome: SourceDrainOutcome;
+    interrupted: boolean;
+  } | null = null;
   service.setTelegramBotIdentityReader(
     (projectId, sourceId) => sources?.telegramBotIdentity(projectId, sourceId) ?? null,
   );
@@ -1082,68 +1095,121 @@ export async function startServer(
   ): Promise<void> => {
     // SessionService emits registry warnings while building the preview, so
     // diagnostics still land when no reload is needed.
-    if (!preview.changed) {
+    if (!preview.changed && !sourceDrain) {
       return;
     }
 
-    ready = false;
     const previousConfig = service.config;
     const previousRegistryPaths = service.getRegistryPaths();
-
-    await sources?.stop();
-    sources = null;
-    backlogs?.stop();
-    backlogs = null;
-    runtimeLogs?.stop();
-    runtimeLogs = null;
-    if (triggers) {
-      // A blocked in-flight delivery must never deadlock the reload and leave the daemon
-      // permanently stuck on 503. On timeout the old controller is abandoned but its
-      // in-flight promise keeps draining in the background (see stopTriggersBounded), so a
-      // delivery is not dropped — it runs to completion concurrently with the new
-      // controller. stop() unsubscribes synchronously first, so the abandoned controller
-      // takes no new events; only its already-started deliveries race the new one.
-      await stopTriggersBounded(triggers, TRIGGERS_STOP_TIMEOUT_MS, (message) =>
-        logEvent("daemon.reload.stop_timeout", { level: "warn", message }),
-      );
-      triggers = null;
-    }
-
-    await applyReloadedConfig({
-      applyNext: () => {
-        service.applyConfig(preview.config, preview.registryPaths, {
-          unconfiguredToRemove: preview.unconfiguredToRemove,
-        });
-        applyLogConfigs(service.config);
-      },
-      startAutomation,
-      applyPrevious: () => {
-        service.applyConfig(previousConfig, previousRegistryPaths);
-        applyLogConfigs(service.config);
-      },
-      onReloaded: () =>
-        logEvent("daemon.registry.reloaded", {
-          level: "info",
-          message:
-            action === "connect"
-              ? `Connected daemon project registry from ${requestConfigPath}`
-              : action === "reload"
-                ? `Reloaded daemon project registry after cron edit of ${requestConfigPath}`
-                : `Disconnected daemon project registry from ${requestConfigPath}`,
-          details: {
-            configPaths: preview.registryPaths,
-            projectCount: Object.keys(preview.config.projects).length,
+    ready = false;
+    try {
+      if (!sourceDrain && sources) {
+        const controller = sources;
+        const promise = Promise.resolve().then(() => controller.stop());
+        const attempt = {
+          controller,
+          promise,
+          outcome: { state: "pending" } as SourceDrainOutcome,
+          interrupted: false,
+        };
+        sourceDrain = attempt;
+        void promise.then(
+          () => {
+            attempt.outcome = { state: "fulfilled" };
+            if (attempt.interrupted) {
+              logEvent("daemon.reload.source_drain", {
+                level: "info",
+                message:
+                  "Prior source drain completed; reconnect config to recover paused automation",
+                details: { state: "fulfilled", recoveryRequired: true },
+              });
+            }
           },
-        }),
-      onRollbackFailed: (message) =>
-        logEvent("daemon.reload.failed", {
-          level: "error",
-          message: `Reload rollback failed to restart automation; daemon is responsive but running no automation: ${message}`,
-        }),
-      setReady: (value) => {
-        ready = value;
-      },
-    });
+          (error: unknown) => {
+            attempt.outcome = { state: "rejected", error };
+          },
+        );
+      }
+      if (sourceDrain) {
+        try {
+          await withTimeout(
+            sourceDrain.promise,
+            SOURCES_RELOAD_DRAIN_TIMEOUT_MS,
+            "sources.stop drain timeout",
+          );
+        } catch (error) {
+          sourceDrain.interrupted = true;
+          const failed = sourceDrain.outcome.state === "rejected";
+          const message = failed
+            ? "Config reload interrupted: source drain failed; automation is paused or partially stopped. Diagnose the failed drain before recovery."
+            : "Config reload interrupted: source drain is still pending; automation is paused or partially stopped. Retry config connect after the prior drain completes.";
+          logEvent("daemon.reload.interrupted", {
+            level: "error",
+            message,
+            details: {
+              state: sourceDrain.outcome.state,
+              recoveryRequired: true,
+              cause: error instanceof Error ? error.message : String(error),
+            },
+          });
+          throw new Error(message, { cause: error });
+        }
+      }
+      sources = null;
+      backlogs?.stop();
+      backlogs = null;
+      runtimeLogs?.stop();
+      runtimeLogs = null;
+      if (triggers) {
+        await stopTriggersBounded(triggers, TRIGGERS_STOP_TIMEOUT_MS, (message) =>
+          logEvent("daemon.reload.stop_timeout", { level: "warn", message }),
+        );
+        triggers = null;
+      }
+
+      await applyReloadedConfig({
+        applyNext: () => {
+          if (preview.changed) {
+            service.applyConfig(preview.config, preview.registryPaths, {
+              unconfiguredToRemove: preview.unconfiguredToRemove,
+            });
+            applyLogConfigs(service.config);
+          }
+        },
+        startAutomation: async () => {
+          await startAutomation();
+          sourceDrain = null;
+        },
+        applyPrevious: () => {
+          service.applyConfig(previousConfig, previousRegistryPaths);
+          applyLogConfigs(service.config);
+        },
+        onReloaded: () =>
+          logEvent("daemon.registry.reloaded", {
+            level: "info",
+            message:
+              action === "connect"
+                ? `Connected daemon project registry from ${requestConfigPath}`
+                : action === "reload"
+                  ? `Reloaded daemon project registry after cron edit of ${requestConfigPath}`
+                  : `Disconnected daemon project registry from ${requestConfigPath}`,
+            details: {
+              configPaths: preview.registryPaths,
+              projectCount: Object.keys(preview.config.projects).length,
+            },
+          }),
+        onRollbackFailed: (message) =>
+          logEvent("daemon.reload.failed", {
+            level: "error",
+            message: `Reload rollback failed to restart automation; daemon is responsive but running no automation: ${message}`,
+          }),
+        setReady: (value) => {
+          ready = value;
+        },
+      });
+    } finally {
+      ready = true;
+    }
   };
   // Serialize reloads: preview + reload must be atomic. Handlers are dispatched
   // concurrently, so two overlapping reloads would both snapshot the same previous

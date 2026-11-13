@@ -25,6 +25,10 @@ import { readDaemonLogs } from "../../src/mcp-daemon-logs.js";
 import { findFreePort } from "../helpers/common.js";
 
 const hangingSourcesStop = vi.hoisted(() => ({ enabled: false }));
+const controlledSourcesStop = vi.hoisted(() => ({
+  starts: 0,
+  stop: undefined as (() => Promise<void>) | undefined,
+}));
 const hangingTriggersStop = vi.hoisted(() => ({ enabled: false }));
 // Delays sources.stop() by a real tick without hanging it, so a fire-and-forget
 // runGhPollCycle task in flight at shutdown gets a real chance to settle and write
@@ -49,6 +53,10 @@ vi.mock("../../src/event-sources/index.js", async (importOriginal) => {
     startConfiguredSources: async (deps: Parameters<typeof actual.startConfiguredSources>[0]) => {
       capturedSourceDeps.deps = deps;
       const controller = await actual.startConfiguredSources(deps);
+      controlledSourcesStop.starts++;
+      if (controlledSourcesStop.stop && controlledSourcesStop.starts === 1) {
+        return { ...controller, stop: controlledSourcesStop.stop };
+      }
       if (hangingSourcesStop.enabled) {
         return { stop: () => new Promise<void>(() => undefined) };
       }
@@ -90,13 +98,18 @@ vi.mock("../../src/triggers.js", async (importOriginal) => {
   };
 });
 
-async function writeDaemonConfig(): Promise<{ configPath: string; dataDir: string }> {
+async function writeDaemonConfig(): Promise<{
+  configPath: string;
+  dataDir: string;
+  port: number;
+}> {
   const root = await mkdtemp(join(tmpdir(), "spur-shutdown-test-"));
   const repoDir = join(root, "repo");
   const dataDir = join(root, "data");
   const worktreeDir = join(root, "worktrees");
   const port = await findFreePort();
   await mkdir(repoDir, { recursive: true });
+  await mkdir(dataDir, { recursive: true });
   const configPath = join(root, "spur.yaml");
   await writeFile(
     configPath,
@@ -112,8 +125,125 @@ async function writeDaemonConfig(): Promise<{ configPath: string; dataDir: strin
     ].join("\n"),
     "utf8",
   );
-  return { configPath, dataDir };
+  return { configPath, dataDir, port };
 }
+
+describe("startServer reload source drain", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    controlledSourcesStop.starts = 0;
+    controlledSourcesStop.stop = undefined;
+    throwingRuntimeLogsStop.enabled = false;
+  });
+
+  it("rejects a blocked reload and recovers unchanged config only after the original drain", async () => {
+    const { configPath, dataDir, port } = await writeDaemonConfig();
+    const extraConfigPath = join(dataDir, "extra.yaml");
+    await writeFile(extraConfigPath, `projects:\n  extra:\n    path: ${dataDir}\n`);
+    let resolveDrain: (() => void) | undefined;
+    const drained = new Promise<void>((resolve) => {
+      resolveDrain = resolve;
+    });
+    const stop = vi.fn(() => {
+      return drained;
+    });
+    controlledSourcesStop.starts = 0;
+    controlledSourcesStop.stop = stop;
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    const connect = (path: string) =>
+      fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: path }),
+      });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const pending = connect(extraConfigPath);
+      await vi.waitFor(() => expect(stop).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(30_001);
+      let firstResponse: Response | undefined;
+      void pending.then((response) => {
+        firstResponse = response;
+      });
+      await vi.waitFor(() => expect(firstResponse).toBeDefined(), { timeout: 100 });
+      expect(firstResponse?.status).toBe(500);
+      expect(await firstResponse?.json()).toMatchObject({ error: expect.stringMatching(/drain/i) });
+      expect((await fetch(`http://127.0.0.1:${port}/info`)).status).toBe(200);
+      expect(server.config.projects["extra"]).toBeUndefined();
+      expect(controlledSourcesStop.starts).toBe(1);
+
+      const retryPending = connect(configPath);
+      await vi.waitFor(async () => {
+        expect((await fetch(`http://127.0.0.1:${port}/info`)).status).toBe(503);
+      });
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect((await retryPending).status).toBe(500);
+      expect(stop).toHaveBeenCalledOnce();
+      resolveDrain?.();
+      await drained;
+      expect(controlledSourcesStop.starts).toBe(1);
+      expect((await connect(configPath)).status).toBe(200);
+      expect(controlledSourcesStop.starts).toBe(2);
+      expect((await connect(configPath)).status).toBe(200);
+      expect(controlledSourcesStop.starts).toBe(2);
+      expect(
+        readEventLog(dataDir).some((entry) => entry.event === "daemon.reload.interrupted"),
+      ).toBe(true);
+    } finally {
+      resolveDrain?.();
+      vi.useRealTimers();
+      await server.stop();
+    }
+  });
+
+  it("restores readiness without replacing sources after a rejected drain", async () => {
+    const { configPath, dataDir, port } = await writeDaemonConfig();
+    const extraConfigPath = join(dataDir, "extra.yaml");
+    await writeFile(extraConfigPath, `projects:\n  extra:\n    path: ${dataDir}\n`);
+    const stop = vi.fn(async () => {
+      throw new Error("source stop failed");
+    });
+    controlledSourcesStop.starts = 0;
+    controlledSourcesStop.stop = stop;
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    const connect = () =>
+      fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: extraConfigPath }),
+      });
+    try {
+      expect((await connect()).status).toBe(500);
+      expect((await fetch(`http://127.0.0.1:${port}/info`)).status).toBe(200);
+      expect((await connect()).status).toBe(500);
+      expect(stop).toHaveBeenCalledOnce();
+      expect(controlledSourcesStop.starts).toBe(1);
+      expect(server.config.projects["extra"]).toBeUndefined();
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("restores readiness when teardown before config application throws", async () => {
+    const { configPath, dataDir, port } = await writeDaemonConfig();
+    const extraConfigPath = join(dataDir, "extra.yaml");
+    await writeFile(extraConfigPath, `projects:\n  extra:\n    path: ${dataDir}\n`);
+    throwingRuntimeLogsStop.enabled = true;
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: extraConfigPath }),
+      });
+      expect(response.status).toBe(500);
+      expect((await fetch(`http://127.0.0.1:${port}/info`)).status).toBe(200);
+      expect(server.config.projects["extra"]).toBeUndefined();
+    } finally {
+      await expect(server.stop()).rejects.toThrow("runtime logs stop boom");
+    }
+  });
+});
 
 describe("summarizeActiveResources", () => {
   it("retains distinct runtime warning callbacks within the same collapse window", async () => {
