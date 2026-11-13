@@ -347,7 +347,11 @@ async function waitForStableDaemonProbe(baseUrl: string): Promise<DaemonProbe> {
     }
   }
 
-  throw new Error(`Timed out waiting for daemon at ${baseUrl} to finish starting`);
+  throw startingTimeoutError(baseUrl);
+}
+
+function startingTimeoutError(baseUrl: string): Error {
+  return new Error(`Timed out waiting for daemon at ${baseUrl} to finish starting`);
 }
 
 function isMissingProcessError(error: unknown): boolean {
@@ -389,6 +393,26 @@ function managedDaemonError(configPath: string): Error {
   return new Error(
     `Spur daemon at ${configPath} is unreachable and spur-daemon.service owns this instance; restart it with systemctl instead of forking a detached daemon.`,
   );
+}
+
+function managedIncompatibleDaemonError(baseUrl: string): Error {
+  return new Error(
+    `Spur daemon at ${baseUrl} reports an API version this CLI does not support and spur-daemon.service owns this instance; install a matching Spur build, then restart it with systemctl.`,
+  );
+}
+
+function managedTimeoutError(probe: DaemonProbe, baseUrl: string, configPath: string): Error {
+  switch (probe.state) {
+    case "starting":
+      return startingTimeoutError(baseUrl);
+    case "incompatible":
+      return managedIncompatibleDaemonError(baseUrl);
+    case "unresponsive":
+      return unresponsiveDaemonError(baseUrl);
+    case "ready":
+    case "unreachable":
+      return managedDaemonError(configPath);
+  }
 }
 
 function spawnDaemon(
@@ -531,8 +555,10 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
     return baseUrl;
   }
   if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
+  let handledIncompatible = false;
   if (probe.state === "incompatible") {
     await stopIncompatibleDaemon(baseUrl, probe.pid);
+    handledIncompatible = true;
     probe = await probeDaemon(baseUrl);
     if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
   }
@@ -540,6 +566,7 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
     spawnDaemon(cliEntrypoint, resolvedConfigPath, "autostart");
   }
 
+  const managed = hasManagedDefaultDaemonUnit(resolvedConfigPath);
   const deadline = waitDeadline(DAEMON_START_ATTEMPTS);
   for (let attempt = 0; attempt < DAEMON_START_ATTEMPTS && Date.now() < deadline; attempt += 1) {
     await sleep(DAEMON_START_RETRY_DELAY_MS);
@@ -548,7 +575,10 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
       return baseUrl;
     }
     if (probe.state === "incompatible") {
+      // A managed unit restarts the same build, so a second stop cannot help.
+      if (managed && handledIncompatible) throw managedIncompatibleDaemonError(baseUrl);
       await stopIncompatibleDaemon(baseUrl, probe.pid);
+      handledIncompatible = true;
       probe = await probeDaemon(baseUrl);
       if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
       if (probe.state === "unreachable") {
@@ -557,9 +587,7 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
     }
   }
 
-  if (hasManagedDefaultDaemonUnit(resolvedConfigPath)) {
-    throw managedDaemonError(resolvedConfigPath);
-  }
+  if (managed) throw managedTimeoutError(probe, baseUrl, resolvedConfigPath);
   throw new Error(`Timed out waiting for daemon at ${baseUrl}`);
 }
 
