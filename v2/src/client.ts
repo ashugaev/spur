@@ -385,6 +385,12 @@ function hasManagedDefaultDaemonUnit(configPath: string): boolean {
   return resolveSystemdScope(homedir()).kind !== "missing";
 }
 
+function managedDaemonError(configPath: string): Error {
+  return new Error(
+    `Spur daemon at ${configPath} is unreachable and spur-daemon.service owns this instance; restart it with systemctl instead of forking a detached daemon.`,
+  );
+}
+
 function spawnDaemon(
   cliEntrypoint: string,
   configPath: string,
@@ -402,9 +408,8 @@ function spawnDaemon(
     );
   }
   if (hasManagedDefaultDaemonUnit(configPath)) {
-    throw new Error(
-      `Spur daemon at ${configPath} is unreachable and spur-daemon.service owns this instance; restart it with systemctl instead of forking a detached daemon.`,
-    );
+    if (reason === "autostart") return;
+    throw managedDaemonError(configPath);
   }
   if (reason === "autostart") {
     const sessionId = process.env.SPUR_SESSION?.trim() ?? "";
@@ -552,6 +557,9 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
     }
   }
 
+  if (hasManagedDefaultDaemonUnit(resolvedConfigPath)) {
+    throw managedDaemonError(resolvedConfigPath);
+  }
   throw new Error(`Timed out waiting for daemon at ${baseUrl}`);
 }
 
