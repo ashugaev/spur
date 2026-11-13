@@ -65003,6 +65003,45 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("re-arms a Cursor limit after submit rewrites a trailing limit at the same ordinal", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({
+        agent: "cursor",
+        agentSessionId: "chat-1",
+        launchCommand: "cursor-agent",
+        rateLimitedAt: "2026-03-18T10:00:00.000Z",
+      }));
+      const filePath = "cursor-chat.jsonl";
+      const oldKey = JSON.stringify([filePath, "old-event"]);
+      const newKey = JSON.stringify([filePath, "new-event"]);
+      let key = oldKey;
+      readCursorJsonlStateMock.mockImplementation(async () => ({
+        state: "error",
+        reader: {
+          filePath,
+          lastOffset: 1,
+          lastMtimeMs: 1,
+          tailRecords: [],
+          trailingRecords: [],
+          rateLimitOrdinal: 0,
+        },
+        rateLimit: {
+          limited: true,
+          reason: "cursor out of usage",
+          source: { filePath, ordinal: 1, key },
+        },
+      }));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect(await service.clearRateLimit("api-1", true, "cli")).toMatchObject({ state: "error" });
+      expect(sessions.get("api-1")?.rateLimitClearFence?.sourceOrdinals).toEqual({ [oldKey]: 1 });
+      expect((await service.get("api-1")).state).not.toBe("rate_limited");
+      key = newKey;
+      expect((await service.get("api-1")).state).toBe("rate_limited");
+      service.dispose();
+    });
+
     function reactivationQueued(store: ReturnType<typeof createSessionStore>): boolean {
       const messages = store.get("api-1")?.queuedMessages?.messages ?? [];
       return messages.some((message) => message.includes(REACTIVATION_MARKER));

@@ -15,6 +15,8 @@ export interface CursorParsedRecord {
   terminalError?: boolean;
   text?: string;
   timestampMs: number;
+  /** Hash of transcript bytes through this terminal error, stable across later appends. */
+  sourceIdentity?: string;
 }
 
 export interface CursorJsonlReaderState {
@@ -451,14 +453,6 @@ function isWithinActivityWindow(
   return nowMs - lastActivityMs(record, fileMtimeMs) <= windowMs;
 }
 
-function latestCursorTerminalError(records: readonly CursorParsedRecord[]): string | null {
-  const latest = records[records.length - 1];
-  if (latest?.terminalError && typeof latest.text === "string" && latest.text.length > 0) {
-    return latest.text;
-  }
-  return null;
-}
-
 function cursorRateLimitCount(records: readonly CursorParsedRecord[]): number {
   return records.filter(
     (record) => record.terminalError && detectCursorRateLimit(record.text ?? null)?.limited,
@@ -619,8 +613,20 @@ export async function readCursorJsonlState(
     records: readonly CursorParsedRecord[],
     ordinal: number,
   ): RateLimitDetection | null => {
-    const detection = detectCursorRateLimit(latestCursorTerminalError(records));
-    return detection?.limited ? { ...detection, source: { filePath, ordinal } } : detection;
+    const latest = records[records.length - 1];
+    const detection = detectCursorRateLimit(latest?.terminalError ? (latest.text ?? null) : null);
+    return detection?.limited
+      ? {
+          ...detection,
+          source: {
+            filePath,
+            ordinal,
+            ...(latest?.sourceIdentity
+              ? { key: JSON.stringify([filePath, latest.sourceIdentity]) }
+              : {}),
+          },
+        }
+      : detection;
   };
 
   if (
@@ -641,17 +647,23 @@ export async function readCursorJsonlState(
 
   const readOffset = Math.min(currentReader.lastOffset, fileStat.size);
   const nowMs = Date.now();
-  const parseRecords = (chunk: Buffer): CursorParsedRecord[] => {
+  const parseRecords = (chunk: Buffer, prefix: Hash): CursorParsedRecord[] => {
     const records: CursorParsedRecord[] = [];
-    for (const line of chunk.toString("utf8").split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        continue;
-      }
-      const record = parseCursorJsonlRecord(trimmed, fileStat.mtimeMs);
+    let start = 0;
+    while (start < chunk.length) {
+      const end = chunk.indexOf(NEWLINE, start);
+      if (end < 0) break;
+      const line = chunk.subarray(start, end).toString("utf8").trim();
+      prefix.update(chunk.subarray(start, end + 1));
+      const record = line ? parseCursorJsonlRecord(line, fileStat.mtimeMs) : null;
       if (record) {
-        records.push(record);
+        records.push(
+          record.terminalError
+            ? { ...record, sourceIdentity: prefix.copy().digest("hex") }
+            : record,
+        );
       }
+      start = end + 1;
     }
     return records;
   };
@@ -668,11 +680,12 @@ export async function readCursorJsonlState(
       await fd.read(buffer, 0, buffer.length, readOffset);
     }
     stableBytes = cursorStablePrefixBytes(buffer);
+    const stableHash = prefixHash.copy();
     prefixHash.update(buffer.subarray(0, stableBytes));
     const completeBytes = buffer.lastIndexOf(NEWLINE) + 1;
-    stableRecords = parseRecords(buffer.subarray(0, stableBytes));
+    stableRecords = parseRecords(buffer.subarray(0, stableBytes), stableHash);
     const trailing = buffer.subarray(stableBytes, completeBytes);
-    trailingRecords = parseRecords(trailing);
+    trailingRecords = parseRecords(trailing, prefixHash.copy());
     turnEnded = trailing.toString("utf8").trim().length > 0;
   } catch {
     return null;

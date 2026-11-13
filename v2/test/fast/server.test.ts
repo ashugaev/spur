@@ -64,6 +64,13 @@ describe("startServer", () => {
       });
       expect(denied.status).toBe(403);
       expect(clear).not.toHaveBeenCalled();
+      const deniedMcp = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-spur-origin": "mcp" },
+        body: JSON.stringify({ force: true }),
+      });
+      expect(deniedMcp.status).toBe(403);
+      expect(clear).not.toHaveBeenCalled();
       const accepted = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", "x-spur-origin": "cli" },

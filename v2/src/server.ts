@@ -2339,7 +2339,7 @@ export async function startServer(
 
       const clearRateLimitSessionId = path.match(/^\/sessions\/([^/]+)\/rate-limit\/clear$/)?.[1];
       if (method === "POST" && clearRateLimitSessionId) {
-        if (request.headers["x-spur-caller-session"] !== undefined) {
+        if (origin === "mcp" || request.headers["x-spur-caller-session"] !== undefined) {
           failRequest(response, 403, "Agent session cannot clear a rate limit", { method, path });
           return;
         }

@@ -6950,7 +6950,8 @@ export class SessionService {
   ): RateLimitDetection | null {
     const source = detection?.source;
     const fence = this.activeRateLimitClearFence(session);
-    return source && fence && source.ordinal <= (fence.sourceOrdinals[source.filePath] ?? 0)
+    return source && fence &&
+      source.ordinal <= (fence.sourceOrdinals[source.key ?? source.filePath] ?? 0)
       ? null
       : detection;
   }
@@ -7009,7 +7010,7 @@ export class SessionService {
     if (!result) throw new RateLimitClearError(`Rate-limit source unavailable for ${session.id}`);
     this.cursorJsonlReaders.set(session.id, result.reader);
     return {
-      [result.reader.filePath]: Math.max(
+      [result.rateLimit?.source?.key ?? result.reader.filePath]: Math.max(
         result.reader.rateLimitOrdinal ?? 0,
         result.rateLimit?.source?.ordinal ?? 0,
       ),

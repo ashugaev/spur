@@ -856,24 +856,30 @@ describe("findLatestCursorTranscriptFile", () => {
     const state = await readCursorJsonlState(worktreePath);
     expect(state?.state).toBe("error");
     expect(state?.rateLimit).toMatchObject({ limited: true, reason: "cursor out of usage" });
-    expect(state?.rateLimit?.source).toEqual({ filePath, ordinal: 1 });
+    expect(state?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1 });
+    const firstKey = state?.rateLimit?.source?.key;
+    expect(firstKey).toBeDefined();
     const cached = await readCursorJsonlState(worktreePath, state?.reader);
-    expect(cached?.rateLimit?.source).toEqual({ filePath, ordinal: 1 });
+    expect(cached?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1, key: firstKey });
     await appendFile(filePath, `${JSON.stringify({ type: "unrelated" })}\n`);
     const unrelated = await readCursorJsonlState(worktreePath, cached?.reader);
-    expect(unrelated?.rateLimit?.source).toEqual({ filePath, ordinal: 1 });
+    expect(unrelated?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1, key: firstKey });
     await appendFile(filePath, `${limitLine}\n`);
     const fresh = await readCursorJsonlState(worktreePath, unrelated?.reader);
-    expect(fresh?.rateLimit?.source).toEqual({ filePath, ordinal: 2 });
+    expect(fresh?.rateLimit?.source).toMatchObject({ filePath, ordinal: 2 });
+    expect(fresh?.rateLimit?.source?.key).not.toBe(firstKey);
     await writeFile(
       filePath,
       `${JSON.stringify({ role: "user", message: { content: [{ type: "text", text: "retry" }] } })}\n${JSON.stringify({ type: "unrelated", padding: "x".repeat(1_000) })}\n${limitLine}\n`,
     );
     const growingRewrite = await readCursorJsonlState(worktreePath, fresh?.reader);
-    expect(growingRewrite?.rateLimit?.source).toEqual({ filePath, ordinal: 1 });
+    expect(growingRewrite?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1 });
+    expect(growingRewrite?.rateLimit?.source?.key).not.toBe(firstKey);
+    const afterRestart = await readCursorJsonlState(worktreePath);
+    expect(afterRestart?.rateLimit?.source?.key).toBe(growingRewrite?.rateLimit?.source?.key);
     await writeFile(filePath, `${limitLine}\n`);
     const rewritten = await readCursorJsonlState(worktreePath, growingRewrite?.reader);
-    expect(rewritten?.rateLimit?.source).toEqual({ filePath, ordinal: 1 });
+    expect(rewritten?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1, key: firstKey });
   });
 
   it("returns null for rateLimit when historical terminalError is followed by user turn", async () => {
