@@ -57,7 +57,6 @@ import {
   type WorkItemRecordBase,
 } from "./work-item-retry.js";
 import type { EventBus } from "./event-bus.js";
-import { SessionLifecycleError } from "./session-lifecycle.js";
 import {
   getIdleWaitBeforeFlushMs,
   isIdleEnoughToReceive,
@@ -2658,7 +2657,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
               logger.warn(
                 `[trigger:${batch.projectId}/${batch.triggerId}] failed to deliver queued updates: ${message}`,
               );
-              const current = await loadSessionOrClear(queueKey, batch, "after_delivery_failure");
+              const current = await loadSessionOrClear(queueKey, batch);
               if (current && isClosedState(current.state)) {
                 for (const entry of batch.retryAccounting) {
                   if (submitted.get(entry.itemKey)?.fingerprint === entry.fingerprint)
@@ -2805,19 +2804,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const loadSessionOrClear = async (
     queueKey: string,
     batch: PendingBatch,
-    purpose: "before_delivery" | "after_delivery_failure",
   ): Promise<SessionView | null> => {
     const expectedRevision = batch.revision;
     try {
       return await deps.sessionService.get(batch.batch.sessionId);
     } catch (error) {
-      if (
-        purpose === "before_delivery" &&
-        error instanceof SessionLifecycleError &&
-        error.statusCode === 503 &&
-        error.payload.code === "session_lifecycle_snapshot_changed"
-      )
-        return null;
       const cleared = clearBatch(queueKey, batch, { expectedRevision });
       if (!cleared) return null;
       const message = error instanceof Error ? error.message : String(error);
@@ -2842,7 +2833,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const flushPending = async (queueKey: string, batch: PendingBatch): Promise<void> => {
     if (!pendingBatches.has(queueKey)) return;
 
-    const session = await loadSessionOrClear(queueKey, batch, "before_delivery");
+    const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
 
     // The memory shed pauses a session by writing status "stopped" with
@@ -3063,7 +3054,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     scheduleFlushLoop();
     if (activeClaim) return;
 
-    const session = await loadSessionOrClear(queueKey, batch, "before_delivery");
+    const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
     // Revision 1 is a new batch; a merge bumps it, and adds no second timer.
     if (batch.revision === 1 && sendBatch.interactive) {
