@@ -736,7 +736,9 @@ describe("SessionService", () => {
         reserveNextSessionIdMock.mockResolvedValue("api-2");
         const service = await createDisposedSessionService();
         vi.spyOn(
-          service as unknown as { claimPrAlertsLocked(record: SessionRecord, reason: string): void },
+          service as unknown as {
+            claimPrAlertsLocked(record: SessionRecord, reason: string): void;
+          },
           "claimPrAlertsLocked",
         ).mockImplementationOnce(() => {
           expect(sessions.get("api-2")?.closeoutOwner).toBe(true);
