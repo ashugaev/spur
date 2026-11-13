@@ -3,7 +3,7 @@ export interface RateLimitDetection {
   reason: string;
   /** Epoch ms the limit resets at, when the source text carries a parseable reset instant. */
   resetAtMs?: number;
-  /** Stable position among rate-limit events in one structured source file. */
+  /** Per-key occurrence count when keyed; file-global ordinal for legacy sources. */
   source?: { filePath: string; ordinal: number; key?: string };
 }
 

@@ -1304,6 +1304,7 @@ export interface SessionRecord {
   rateLimitedAt?: string;
   rateLimitClearFence?: {
     agentLaunchId: string | null;
+    /** Source key -> captured occurrence count; unkeyed readers use the file path. */
     sourceOrdinals: Record<string, number>;
     paneLatched: boolean;
   };

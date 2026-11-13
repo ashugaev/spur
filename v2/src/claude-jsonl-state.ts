@@ -1,4 +1,5 @@
 import { open, readFile, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { scanJsonlLines } from "./jsonl-scan.js";
 import type { SessionState, TranscriptEntry } from "./types.js";
 import type { ProviderTokenUsageSample } from "./token-usage.js";
@@ -39,6 +40,8 @@ export interface ParsedRecord {
   interrupted?: boolean;
   /** True when the record is a synthetic `error: "rate_limit"` API error. */
   rateLimited?: boolean;
+  /** Normalized limit payload fingerprint; never includes the reader's fallback time. */
+  limitFingerprint?: string;
   /**
    * Epoch ms the limit resets at, parsed from this record's own banner text
    * and anchored to this record's own timestamp. Absent when the record
@@ -65,8 +68,8 @@ export interface ClaudeJsonlReaderState {
   lastOffset: number;
   lastMtimeMs: number;
   tailRecords: ParsedRecord[];
-  /** Number of rate-limit records in the scanned prefix, including pruned tail records. */
-  rateLimitOrdinal?: number;
+  /** Occurrences of every semantic limit key, including records pruned from the tail. */
+  rateLimitCounts?: Record<string, number>;
   usageByMessage?: Map<string, ClaudeMessageTokenUsage>;
   generationId?: string;
   fileIno?: number;
@@ -88,6 +91,17 @@ export interface ClaudeConversationReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
+
+function claudeLimitKey(filePath: string, record: ParsedRecord): string {
+  // An undated, byte-identical replacement at the same count is indistinguishable
+  // from replay; keep that old episode fenced until evidence changes.
+  return JSON.stringify([
+    filePath,
+    record.messageId ?? null,
+    record.ownTimestampMs ?? null,
+    record.limitFingerprint,
+  ]);
+}
 
 function retainStateTail(records: ParsedRecord[]): ParsedRecord[] {
   const tailStart = Math.max(0, records.length - TAIL_RECORD_LIMIT);
@@ -486,6 +500,14 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
     const blocks = contentBlocks(message);
     const toolUseHints = extractToolUseHints(blocks);
     const isRateLimit = parsed["error"] === "rate_limit";
+    const limitFingerprint = isRateLimit
+      ? createHash("sha256")
+          .update(JSON.stringify([
+            "rate_limit",
+            extractTextContent(message).trim().toLowerCase().replace(/\s+/g, " "),
+          ]))
+          .digest("hex")
+      : undefined;
     // Anchored to this record's OWN timestamp only. A record with no
     // parseable own timestamp (ownTimestampMs is undefined) is left without
     // a resetAtMs rather than anchoring to `timestampMs`, which on the first
@@ -527,6 +549,7 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
       hasToolUse: toolUseHints.hasToolUse,
       ...(toolUseHints.requestsUserInput ? { requestsUserInput: true } : {}),
       ...(isRateLimit ? { rateLimited: true } : {}),
+      ...(limitFingerprint ? { limitFingerprint } : {}),
       ...(rateLimitResetAtMs !== undefined ? { rateLimitResetAtMs } : {}),
       ...(parsed["error"] === "server_error" ? { serverError: true } : {}),
       ...(parsed["error"] === "authentication_failed" ? { authenticationFailed: true } : {}),
@@ -653,7 +676,8 @@ export async function readClaudeJsonlState(
     reader.filePath === filePath &&
     reader.fileIno === fileStat.ino &&
     fileStat.size >= reader.lastOffset &&
-    fileStat.mtimeMs >= reader.lastMtimeMs;
+    fileStat.mtimeMs >= reader.lastMtimeMs &&
+    (fileStat.size !== reader.lastOffset || fileStat.mtimeMs === reader.lastMtimeMs);
   const currentReader: ClaudeJsonlReaderState = reuse
     ? reader
     : {
@@ -661,17 +685,22 @@ export async function readClaudeJsonlState(
         lastOffset: 0,
         lastMtimeMs: 0,
         tailRecords: [],
+        rateLimitCounts: {},
         usageByMessage: new Map(),
         fileIno: fileStat.ino,
       };
   const usageByMessage = currentReader.usageByMessage ?? new Map();
-  let rateLimitOrdinal =
-    currentReader.rateLimitOrdinal ?? currentReader.tailRecords.filter((record) => record.rateLimited).length;
+  const rateLimitCounts = { ...currentReader.rateLimitCounts };
   const detectLimit = (records: readonly ParsedRecord[]): RateLimitDetection | null => {
     const detection = detectClaudeRateLimit(records);
-    return detection?.limited
-      ? { ...detection, source: { filePath, ordinal: rateLimitOrdinal } }
-      : detection;
+    if (!detection?.limited) return detection;
+    const active = [...records].reverse().find((record) =>
+      !CLAUDE_BOOKKEEPING_RECORD_TYPES.has(record.type) &&
+      !CLAUDE_SESSION_META_RECORD_TYPES.has(record.type),
+    );
+    if (!active?.limitFingerprint) throw new Error("Claude rate-limit record missing fingerprint");
+    const key = claudeLimitKey(filePath, active);
+    return { ...detection, source: { filePath, key, ordinal: rateLimitCounts[key] ?? 0 } };
   };
 
   const usageSample = (): ProviderTokenUsageSample | undefined => {
@@ -748,7 +777,10 @@ export async function readClaudeJsonlState(
   const newRecords: ParsedRecord[] = [];
   for (const record of chunk.records) {
     newRecords.push(record);
-    if (record.rateLimited) rateLimitOrdinal += 1;
+    if (record.limitFingerprint) {
+      const key = claudeLimitKey(filePath, record);
+      rateLimitCounts[key] = (rateLimitCounts[key] ?? 0) + 1;
+    }
     if (record.messageId && record.sessionId && (record.tokenUsage || record.advisorTokenUsages)) {
       const generationId = `claude:${record.sessionId}:${record.messageId}`;
       if (!currentReader.generationId) currentReader.generationId = generationId;
@@ -819,7 +851,7 @@ export async function readClaudeJsonlState(
     lastOffset: readOffset + chunk.consumedBytes,
     lastMtimeMs: fileStat.mtimeMs,
     tailRecords: combined,
-    rateLimitOrdinal,
+    rateLimitCounts,
     usageByMessage,
     ...(currentReader.generationId ? { generationId: currentReader.generationId } : {}),
     fileIno: fileStat.ino,

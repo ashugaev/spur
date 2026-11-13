@@ -1200,7 +1200,7 @@ export interface CodexRolloutStateRecord {
 export interface CodexRolloutReadResult {
   rollout: CodexRolloutStateRecord | null;
   rateLimit: RateLimitDetection | null;
-  /** Limit-event ordinal for every root rollout file scanned in this read. */
+  /** Semantic limit-key occurrence counts across every root rollout file. */
   rateLimitOrdinals?: Record<string, number>;
   rateLimitObservedAtMs?: number;
   /** Timestamp of the newest parseable rollout line of any kind. */
@@ -1235,7 +1235,8 @@ interface CodexRolloutFold {
   // can reach the result, so the tail stays one turn long.
   stateTail: CodexRolloutStateLine[];
   rateLimit: RateLimitDetection | null;
-  rateLimitOrdinal: number;
+  rateLimitCounts: Record<string, number>;
+  activeRateLimitKey?: string;
   rateLimitObservedAtMs?: number;
   quotaDigest: Hash;
   hardLimitTurnId?: string;
@@ -1612,7 +1613,7 @@ function newCodexRolloutFold(): CodexRolloutFold {
     matchedCallIds: new Set(),
     stateTail: [],
     rateLimit: null,
-    rateLimitOrdinal: 0,
+    rateLimitCounts: {},
     quotaDigest: createHash("sha256"),
     token: { overflowed: false },
   };
@@ -1623,6 +1624,7 @@ function cloneCodexRolloutFold(fold: CodexRolloutFold): CodexRolloutFold {
     ...fold,
     matchedCallIds: new Set(fold.matchedCallIds),
     stateTail: fold.stateTail.slice(),
+    rateLimitCounts: { ...fold.rateLimitCounts },
     quotaDigest: fold.quotaDigest.copy(),
     token: { ...fold.token },
   };
@@ -1653,6 +1655,48 @@ function observeCodexRateLimit(fold: CodexRolloutFold, rawLine: string): void {
   fold.rateLimitObservedAtMs = Math.max(Date.now(), fold.rateLimitObservedAtMs ?? -Infinity);
 }
 
+function codexLimitTimestamp(parsed: Record<string, unknown>): number | null {
+  const raw = parsed["timestamp"];
+  if (typeof raw !== "string") return null;
+  const timestamp = Date.parse(raw);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function codexLimitKey(parts: readonly unknown[]): string {
+  return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+}
+
+function countCodexLimit(fold: CodexRolloutFold, key: string): void {
+  fold.rateLimitCounts[key] = (fold.rateLimitCounts[key] ?? 0) + 1;
+  fold.activeRateLimitKey = key;
+}
+
+function codexQuotaLimitKey(
+  parsed: Record<string, unknown>,
+  rateLimits: Record<string, unknown>,
+  detection: RateLimitDetection,
+): string {
+  const reachedType = rateLimits["rate_limit_reached_type"];
+  const credits = rateLimits["credits"];
+  const primary = rateLimits["primary"];
+  const secondary = rateLimits["secondary"];
+  const window = (value: unknown): readonly unknown[] | null =>
+    isRecord(value) && typeof value["used_percent"] === "number" && value["used_percent"] >= 100
+      ? [value["used_percent"], value["resets_at"] ?? null]
+      : null;
+  // Fixed tuple order projects only fields that identify this limit. Unrelated
+  // rollout metadata and object-key reordering during resume heal are ignored.
+  return codexLimitKey([
+    "quota",
+    detection.reason,
+    typeof reachedType === "string" ? reachedType : null,
+    window(primary),
+    window(secondary),
+    isRecord(credits) && credits["has_credits"] === false ? false : null,
+    codexLimitTimestamp(parsed),
+  ]);
+}
+
 function foldCodexRolloutLine(
   fold: CodexRolloutFold,
   parsed: Record<string, unknown>,
@@ -1670,6 +1714,7 @@ function foldCodexRolloutLine(
     if (fold.hardLimitTurnId !== undefined && state.turnId !== fold.hardLimitTurnId) {
       delete fold.hardLimitTurnId;
       fold.rateLimit = { limited: false, reason: "" };
+      delete fold.activeRateLimitKey;
       observeCodexRateLimit(fold, rawLine);
     }
   } else if (state?.reason === "task_complete") {
@@ -1678,18 +1723,22 @@ function foldCodexRolloutLine(
     if (isRecord(error) && error["codex_error_info"] === "usage_limit_exceeded") {
       fold.hardLimitTurnId = state.turnId ?? "";
       fold.rateLimit = { limited: true, reason: "codex usage_limit_exceeded" };
-      fold.rateLimitOrdinal += 1;
+      countCodexLimit(fold, codexLimitKey(["usage_limit_exceeded", codexLimitTimestamp(parsed)]));
       observeCodexRateLimit(fold, rawLine);
     } else if (error === null || error === undefined) {
       delete fold.hardLimitTurnId;
       fold.rateLimit = { limited: false, reason: "" };
+      delete fold.activeRateLimitKey;
       observeCodexRateLimit(fold, rawLine);
     }
   }
-  const detection = detectCodexRateLimit(extractCodexRateLimitsLine(parsed));
+  const rateLimits = extractCodexRateLimitsLine(parsed);
+  const detection = detectCodexRateLimit(rateLimits);
   if (detection && fold.hardLimitTurnId === undefined) {
     fold.rateLimit = detection;
-    if (detection.limited) fold.rateLimitOrdinal += 1;
+    if (detection.limited && isRecord(rateLimits))
+      countCodexLimit(fold, codexQuotaLimitKey(parsed, rateLimits, detection));
+    else delete fold.activeRateLimitKey;
     observeCodexRateLimit(fold, rawLine);
   }
   const model = extractCodexTurnContextModel(parsed);
@@ -1725,8 +1774,15 @@ function finalizeCodexRolloutFold(
   return {
     rollout,
     rateLimit:
-      fold.rateLimit?.limited && fold.rateLimitOrdinal > 0
-        ? { ...fold.rateLimit, source: { filePath: sourcePath, ordinal: fold.rateLimitOrdinal } }
+      fold.rateLimit?.limited && fold.activeRateLimitKey
+        ? {
+            ...fold.rateLimit,
+            source: {
+              filePath: sourcePath,
+              key: JSON.stringify([sourcePath, fold.activeRateLimitKey]),
+              ordinal: fold.rateLimitCounts[fold.activeRateLimitKey] ?? 0,
+            },
+          }
         : fold.rateLimit,
     ...(fold.rateLimitObservedAtMs !== undefined
       ? { rateLimitObservedAtMs: fold.rateLimitObservedAtMs }
@@ -1968,7 +2024,11 @@ async function readCodexRolloutStateSnapshot(
   for (const [filePath, fold] of observedFolds) {
     const meta = fold.meta;
     if (rootThreadId ? meta?.threadId !== rootThreadId : meta?.isSubagent === true) continue;
-    rateLimitOrdinals[relative(sessionsDir, filePath)] = fold.rateLimitOrdinal;
+    const sourcePath = relative(sessionsDir, filePath);
+    // Keep an empty-root boundary so pane-only clears still require a readable source.
+    rateLimitOrdinals[sourcePath] = 0;
+    for (const [key, count] of Object.entries(fold.rateLimitCounts))
+      rateLimitOrdinals[JSON.stringify([sourcePath, key])] = count;
   }
   const existing = candidates.filter(
     (candidate): candidate is CodexRolloutCandidate => candidate !== null,

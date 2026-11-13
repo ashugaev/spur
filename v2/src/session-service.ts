@@ -6990,12 +6990,9 @@ export class SessionService {
       );
       if (!result) throw new RateLimitClearError(`Rate-limit source unavailable for ${session.id}`);
       this.claudeJsonlReaders.set(session.id, result.reader);
-      return {
-        [result.reader.filePath]: Math.max(
-          result.reader.rateLimitOrdinal ?? 0,
-          result.rateLimit?.source?.ordinal ?? 0,
-        ),
-      };
+      if (result.reader.rateLimitCounts && Object.keys(result.reader.rateLimitCounts).length > 0)
+        return { ...result.reader.rateLimitCounts };
+      return { [result.reader.filePath]: 0 };
     }
     if (session.agent !== "cursor") return {};
     const cursorChatId = await this.cursorTranscriptId(session);

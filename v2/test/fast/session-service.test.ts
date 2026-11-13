@@ -64677,6 +64677,8 @@ describe("SessionService", () => {
 
   describe("rate-limit reactivation", () => {
     const REACTIVATION_MARKER = "rate limited earlier and should be able to continue now";
+    const CLAUDE_OLD_KEY = JSON.stringify(["test.jsonl", "old-limit"]);
+    const CLAUDE_NEW_KEY = JSON.stringify(["test.jsonl", "new-limit"]);
 
     function signal() {
       let resolve!: () => void;
@@ -64692,12 +64694,12 @@ describe("SessionService", () => {
           lastOffset: 1,
           lastMtimeMs: 1,
           tailRecords: [],
-          rateLimitOrdinal: 1,
+          rateLimitCounts: { [CLAUDE_OLD_KEY]: 1 },
         },
         rateLimit: {
           limited: true,
           reason: "claude rate_limit",
-          source: { filePath: "test.jsonl", ordinal: 1 },
+          source: { filePath: "test.jsonl", key: CLAUDE_OLD_KEY, ordinal: 1 },
         },
         serverError: false,
       };
@@ -64716,22 +64718,7 @@ describe("SessionService", () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T10:00:00.000Z" }));
       mockClaudeSessionStatus("waiting", "idle");
-      readClaudeJsonlStateMock.mockResolvedValue({
-        state: "waiting",
-        reader: {
-          filePath: "test.jsonl",
-          lastOffset: 1,
-          lastMtimeMs: 1,
-          tailRecords: [],
-          rateLimitOrdinal: 1,
-        },
-        rateLimit: {
-          limited: true,
-          reason: "claude rate_limit",
-          source: { filePath: "test.jsonl", ordinal: 1 },
-        },
-        serverError: false,
-      });
+      readClaudeJsonlStateMock.mockResolvedValue(oldClaudeLimit());
       captureTmuxPaneMock.mockResolvedValue("⚠ Usage limit reached");
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -64742,7 +64729,7 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
       expect(sessions.get("api-1")?.rateLimitClearFence).toEqual({
         agentLaunchId: null,
-        sourceOrdinals: { "test.jsonl": 1 },
+        sourceOrdinals: { [CLAUDE_OLD_KEY]: 1 },
         paneLatched: true,
       });
       service.dispose();
@@ -64756,12 +64743,12 @@ describe("SessionService", () => {
           lastOffset: 2,
           lastMtimeMs: 2,
           tailRecords: [],
-          rateLimitOrdinal: 2,
+          rateLimitCounts: { [CLAUDE_NEW_KEY]: 1 },
         },
         rateLimit: {
           limited: true,
           reason: "new claude rate_limit",
-          source: { filePath: "test.jsonl", ordinal: 2 },
+          source: { filePath: "test.jsonl", key: CLAUDE_NEW_KEY, ordinal: 1 },
         },
         serverError: false,
       });
@@ -64827,11 +64814,13 @@ describe("SessionService", () => {
       readClaudeJsonlStateMock.mockImplementation(async () => sessions.get("api-1")?.rateLimitClearFence
         ? {
             ...oldClaudeLimit(),
-            reader: { ...oldClaudeLimit().reader, rateLimitOrdinal: 2 },
+            reader: { ...oldClaudeLimit().reader, rateLimitCounts: {
+              [CLAUDE_OLD_KEY]: 1, [CLAUDE_NEW_KEY]: 1,
+            } },
             rateLimit: {
               limited: true,
               reason: "new claude rate_limit",
-              source: { filePath: "test.jsonl", ordinal: 2 },
+              source: { filePath: "test.jsonl", key: CLAUDE_NEW_KEY, ordinal: 1 },
             },
           }
         : oldClaudeLimit());
@@ -64989,12 +64978,12 @@ describe("SessionService", () => {
           lastOffset: 1,
           lastMtimeMs: 1,
           tailRecords: [],
-          rateLimitOrdinal: 1,
+          rateLimitCounts: { [CLAUDE_OLD_KEY]: 1 },
         },
         rateLimit: {
           limited: true,
           reason: "old claude rate_limit",
-          source: { filePath: "test.jsonl", ordinal: 1 },
+          source: { filePath: "test.jsonl", key: CLAUDE_OLD_KEY, ordinal: 1 },
         },
         serverError: false,
       });
@@ -65038,6 +65027,103 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")?.rateLimitClearFence?.sourceOrdinals).toEqual({ [oldKey]: 1 });
       expect((await service.get("api-1")).state).not.toBe("rate_limited");
       key = newKey;
+      expect((await service.get("api-1")).state).toBe("rate_limited");
+      service.dispose();
+    });
+
+    it("captures every Claude key so an older replay stays fenced and a new count-one key re-arms", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T10:00:00.000Z" }));
+      mockClaudeSessionStatus("waiting", "idle");
+      const filePath = "test.jsonl";
+      const aKey = JSON.stringify([filePath, "A"]);
+      const bKey = JSON.stringify([filePath, "B"]);
+      const cKey = JSON.stringify([filePath, "C"]);
+      let key = bKey;
+      const count = 1;
+      readClaudeJsonlStateMock.mockImplementation(async () => ({
+        state: "waiting",
+        reader: {
+          filePath, lastOffset: 1, lastMtimeMs: 1, tailRecords: [],
+          rateLimitCounts: key === bKey && count === 1
+            ? { [aKey]: 1, [bKey]: 1 }
+            : { [key]: count },
+        },
+        rateLimit: {
+          limited: true,
+          reason: "claude rate_limit",
+          source: { filePath, key, ordinal: count },
+        },
+        serverError: false,
+      }));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect((await service.clearRateLimit("api-1", true, "cli")).state).toBe("waiting");
+      expect(sessions.get("api-1")?.rateLimitClearFence?.sourceOrdinals).toEqual({
+        [aKey]: 1, [bKey]: 1,
+      });
+      service.dispose();
+      const restarted = new SessionService("/tmp/spur.yaml", "2026-03-18T10:01:00.000Z");
+      expect((await restarted.get("api-1")).state).toBe("waiting");
+      key = aKey;
+      expect((await restarted.get("api-1")).state).toBe("waiting");
+      key = cKey;
+      expect((await restarted.get("api-1")).state).toBe("rate_limited");
+      restarted.dispose();
+    });
+
+    it("re-arms an identical Claude append when its per-key count exceeds the fence", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T10:00:00.000Z" }));
+      mockClaudeSessionStatus("waiting", "idle");
+      const filePath = "test.jsonl";
+      const key = JSON.stringify([filePath, "same-limit"]);
+      let count = 1;
+      readClaudeJsonlStateMock.mockImplementation(async () => ({
+        state: "waiting",
+        reader: {
+          filePath, lastOffset: count, lastMtimeMs: count, tailRecords: [],
+          rateLimitCounts: { [key]: count },
+        },
+        rateLimit: {
+          limited: true, reason: "claude rate_limit", source: { filePath, key, ordinal: count },
+        },
+        serverError: false,
+      }));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      expect((await service.clearRateLimit("api-1", true, "cli")).state).toBe("waiting");
+      expect((await service.get("api-1")).state).toBe("waiting");
+      count = 2;
+      expect((await service.get("api-1")).state).toBe("rate_limited");
+      service.dispose();
+    });
+
+    it("captures all Codex root keys and fences a healed replay after a candidate switch", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({
+        agent: "codex", launchCommand: "codex", rateLimitedAt: "2026-03-18T10:00:00.000Z",
+      }));
+      const rootA = "2026/03/18/a.jsonl";
+      const rootB = "2026/03/18/b.jsonl";
+      const aKey = JSON.stringify([rootA, "old-a"]);
+      const bKey = JSON.stringify([rootB, "old-b"]);
+      const freshKey = JSON.stringify([rootA, "new-a"]);
+      let source = { filePath: rootB, key: bKey, ordinal: 1 };
+      const counts = { [rootA]: 0, [rootB]: 0, [aKey]: 1, [bKey]: 1 };
+      readCodexRolloutStateMock.mockImplementation(async () => ({
+        rollout: null,
+        rateLimit: { limited: true, reason: "codex primary", source },
+        rateLimitOrdinals: counts,
+      }));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      expect((await service.clearRateLimit("api-1", true, "cli")).state).toBe("waiting");
+      expect(sessions.get("api-1")?.rateLimitClearFence?.sourceOrdinals).toEqual(counts);
+      source = { filePath: rootA, key: aKey, ordinal: 1 };
+      expect((await service.get("api-1")).state).toBe("waiting");
+      source = { filePath: rootA, key: freshKey, ordinal: 1 };
       expect((await service.get("api-1")).state).toBe("rate_limited");
       service.dispose();
     });
