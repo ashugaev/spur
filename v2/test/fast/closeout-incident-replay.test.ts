@@ -267,10 +267,11 @@ describe("closeout incident replay", () => {
     const sessions = seedIncident();
     const owner = sessions.get("api-1");
     if (!owner) throw new Error("Missing closeout owner fixture");
+    const runningOwner = { ...owner };
+    delete runningOwner.stopReason;
     sessions.set("api-1", {
-      ...owner,
+      ...runningOwner,
       status: "running",
-      stopReason: undefined,
       allowedTriggers: [],
       rateLimitedAt: "2026-03-18T10:00:00.000Z",
     });
