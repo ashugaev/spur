@@ -1330,6 +1330,7 @@ type SessionServiceInternals = {
     sessionBatch?: SessionRecord[],
   ): Promise<{ view: SessionView; classified: unknown }>;
   restoreWarmupUntil: Map<string, number>;
+  restoreOwnsRuntimeRecovery(sessionId: string): boolean;
   withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
   confirmAgentExited(
     session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,

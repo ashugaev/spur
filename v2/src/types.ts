@@ -1148,6 +1148,9 @@ export interface SessionDailyWakeState {
   nextDueAt: string;
   message: string;
   stopCondition: string;
+  // Scheduled occurrence retried after an admission denial; nextDueAt is then
+  // the next retry. Cleared by the next claim.
+  admissionDeferredOccurrence?: string;
 }
 
 export interface SessionStateSubscription {
