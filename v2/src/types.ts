@@ -1223,6 +1223,8 @@ export interface SessionRecord {
   prAlertTransfer?: PrAlertTransfer;
   claudeAccountId?: string;
   allowedTriggers?: string[];
+  /** Send trigger ids already announced to the owner; one notice per id. */
+  blockedTriggerNotices?: string[];
   agentSessionId?: string;
   /** Cursor transcript position before the latest restore; excludes earlier activity from state. */
   cursorRestoreBoundary?: CursorRestoreBoundary;
@@ -1431,6 +1433,8 @@ export interface SessionView extends Omit<
   | "agentLaunchId"
   | "triggerBirthKey"
   | "triggerBirthRequest"
+  | "blockedTriggerNotices"
+  | "spawnIntent"
   | "sidecarLaunches"
   | "tokenUsage"
   | "preflightTokenUsage"
@@ -1439,6 +1443,7 @@ export interface SessionView extends Omit<
   | "restoredAt"
   | "errorSource"
 > {
+  spawnIntent?: Omit<DurableSpawnIntent, "closeoutTakenFrom">;
   lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -1489,6 +1494,8 @@ export type DashboardOmittedField =
   | "agentLaunchId"
   | "triggerBirthKey"
   | "triggerBirthRequest"
+  | "blockedTriggerNotices"
+  | "spawnIntent"
   | "sidecarLaunches"
   | "branchSource"
   | "tokenUsage"
@@ -1496,6 +1503,7 @@ export type DashboardOmittedField =
   | "errorSource";
 
 export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
+  spawnIntent?: SessionView["spawnIntent"];
   lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -1631,6 +1639,8 @@ export interface DurableSpawnIntent {
   };
   pane?: { pid: number; starttime: number };
   telegramOrigin?: TelegramSpawnOrigin;
+  /** Closeout owners this launch took; given back if the launch finally fails. */
+  closeoutTakenFrom?: string[];
 }
 
 /**

@@ -5466,6 +5466,7 @@ describe("startConfiguredTriggers", () => {
       allowedTriggers: [],
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const noticeMock = vi.fn();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -5475,6 +5476,7 @@ describe("startConfiguredTriggers", () => {
         get: getMock,
         deliver: deliverMock,
       } as never,
+      noticeBlockedTrigger: noticeMock,
       logger: {
         warn: vi.fn(),
       },
@@ -5492,9 +5494,76 @@ describe("startConfiguredTriggers", () => {
         ).toBe(true);
       });
       expect(deliverMock).not.toHaveBeenCalled();
+      expect(noticeMock).not.toHaveBeenCalled();
     } finally {
       await controller.stop();
     }
+  });
+
+  describe("closeout notice", () => {
+    const ownerSession = (overrides: Record<string, unknown> = {}) => ({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+      closeoutOwner: true,
+      allowedTriggers: [],
+      ...overrides,
+    });
+
+    it("notices the closeout owner when its allowlist drops a send trigger", async () => {
+      const getMock = vi.fn().mockResolvedValue(ownerSession());
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      const noticeMock = vi.fn();
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: { get: getMock, deliver: deliverMock } as never,
+        noticeBlockedTrigger: noticeMock,
+        logger: { warn: vi.fn() },
+      });
+
+      try {
+        bus.emit(githubEvent());
+        await vi.waitFor(() => expect(noticeMock).toHaveBeenCalledExactlyOnceWith("api-1", "send"));
+        expect(deliverMock).not.toHaveBeenCalled();
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("notices the closeout owner when a queued batch is dropped on flush", async () => {
+      const getMock = vi
+        .fn()
+        .mockResolvedValue(ownerSession({ allowedTriggers: ["send"], state: "working" }));
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      const noticeMock = vi.fn();
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: { get: getMock, deliver: deliverMock } as never,
+        noticeBlockedTrigger: noticeMock,
+        logger: { warn: vi.fn() },
+      });
+
+      try {
+        bus.emit(githubEvent());
+        await advanceSendWindow();
+        expect(noticeMock).not.toHaveBeenCalled();
+        getMock.mockResolvedValue(ownerSession());
+        await advanceSendWindow();
+        await vi.waitFor(() => expect(noticeMock).toHaveBeenCalledExactlyOnceWith("api-1", "send"));
+        expect(deliverMock).not.toHaveBeenCalled();
+      } finally {
+        await controller.stop();
+      }
+    });
   });
 
   it("delivers send triggers listed in the session allowlist", async () => {

@@ -660,11 +660,15 @@ function appendCodexModel(command: string, model: string | undefined): string {
   return `${command} --model ${shellEscape(model)}`;
 }
 
+// Codex TUI offers a model switch on rate limit; the blocking prompt stalls a Spur session.
+// Placed before user codexArgs so a user `-c notice.hide_rate_limit_model_nudge=...` wins.
+const CODEX_HIDE_RATE_LIMIT_MODEL_NUDGE = `-c ${shellEscape("notice.hide_rate_limit_model_nudge=true")}`;
+
 function codexLaunchFlags(restrictWrites?: boolean): string {
   if (restrictWrites) {
-    return "--enable hooks --sandbox read-only --ask-for-approval never --dangerously-bypass-hook-trust";
+    return `--enable hooks --sandbox read-only --ask-for-approval never --dangerously-bypass-hook-trust ${CODEX_HIDE_RATE_LIMIT_MODEL_NUDGE}`;
   }
-  return "--enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust";
+  return `--enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust ${CODEX_HIDE_RATE_LIMIT_MODEL_NUDGE}`;
 }
 
 export function buildCodexPlan(

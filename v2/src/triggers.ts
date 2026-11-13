@@ -75,6 +75,9 @@ interface StartConfiguredTriggersDeps {
   // dozens of fixtures build `sessionService` as `as never` and would pass
   // typecheck while throwing "is not a function" at runtime.
   memoryHoldEngaged?: () => boolean;
+  // Owner notice for a dropped send trigger; same optional-dep shape as
+  // `memoryHoldEngaged`, default no-op.
+  noticeBlockedTrigger?: (sessionId: string, triggerId: string) => void;
 }
 
 interface PendingBatch {
@@ -858,6 +861,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const logger = deps.logger ?? DEFAULT_TRIGGER_LOGGER;
   const autoPing = deps.autoPing;
   const memoryHoldEngaged = deps.memoryHoldEngaged ?? (() => false);
+  const noticeBlockedTrigger = deps.noticeBlockedTrigger ?? (() => {});
   const unsubscribers: Array<() => void> = [];
   const inFlight = new Set<Promise<void>>();
   const pendingBatches = new Map<string, PendingBatch>();
@@ -1714,6 +1718,27 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }
   };
 
+  const dropNotAllowed = (
+    queueKey: string,
+    batch: PendingBatch,
+    session: SessionView,
+    ids: { sessionId: string; projectId: string; sourceId: string; triggerId: string },
+  ): void => {
+    clearBatch(queueKey, batch);
+    logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
+      level: "warn",
+      ...ids,
+      message: `Dropped queued trigger update for ${ids.sessionId}: trigger ${ids.triggerId} is not allowed`,
+      details: {
+        reason: "trigger_not_allowed",
+      },
+    });
+    logger.warn(
+      `[trigger:${ids.projectId}/${ids.triggerId}] dropped queued update: trigger not allowed for ${ids.sessionId}`,
+    );
+    if (session.closeoutOwner === true) noticeBlockedTrigger(ids.sessionId, ids.triggerId);
+  };
+
   const flushPending = async (queueKey: string, batch: PendingBatch): Promise<void> => {
     if (!pendingBatches.has(queueKey)) return;
 
@@ -1753,21 +1778,12 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }
 
     if (!isSendTriggerAllowed(session, batch.triggerId)) {
-      clearBatch(queueKey, batch);
-      logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
-        level: "warn",
+      dropNotAllowed(queueKey, batch, session, {
         sessionId: batch.batch.sessionId,
         projectId: batch.projectId,
         sourceId: batch.sourceId,
         triggerId: batch.triggerId,
-        message: `Dropped queued trigger update for ${batch.batch.sessionId}: trigger ${batch.triggerId} is not allowed`,
-        details: {
-          reason: "trigger_not_allowed",
-        },
       });
-      logger.warn(
-        `[trigger:${batch.projectId}/${batch.triggerId}] dropped queued update: trigger not allowed for ${batch.batch.sessionId}`,
-      );
       return;
     }
 
@@ -1979,21 +1995,12 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }
 
     if (!isSendTriggerAllowed(session, triggerId)) {
-      clearBatch(queueKey, batch);
-      logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
-        level: "warn",
+      dropNotAllowed(queueKey, batch, session, {
         sessionId: sendBatch.sessionId,
         projectId,
         sourceId: trigger.source,
         triggerId,
-        message: `Dropped queued trigger update for ${sendBatch.sessionId}: trigger ${triggerId} is not allowed`,
-        details: {
-          reason: "trigger_not_allowed",
-        },
       });
-      logger.warn(
-        `[trigger:${projectId}/${triggerId}] dropped queued update: trigger not allowed for ${sendBatch.sessionId}`,
-      );
       return;
     }
 

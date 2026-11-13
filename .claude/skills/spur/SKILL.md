@@ -56,6 +56,7 @@ DOCS
   Config, admission, trigger-spawn retry, reviewer App/consent, pane-child fallback, OpenCode heartbeat: docs/configuration.md; events: docs/configuration.md#events
   GitHub PR feedback attribution, ownership and custom markers: docs/configuration.md#field-reference
   Native PR alert ownership: docs/configuration.md#pr-alert-ownership.
+  Closeout takeover and blocked-trigger notices: docs/commands.md, docs/configuration.md.
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
   Full-access MCP: Pages source binding, backend controls/logs, cached attached PR status; setup: docs/mcp.md
