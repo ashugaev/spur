@@ -1305,7 +1305,7 @@ describe("scanTmuxRateLimit", () => {
       reason: "tmux you've hit your 5-hour limit",
     });
     expect(scanTmuxRateLimit(`> ${banner}`)).toBeNull();
-    expect(scanTmuxRateLimit(`\"${banner}\"`)).toBeNull();
+    expect(scanTmuxRateLimit(`"${banner}"`)).toBeNull();
   });
 
   it("limits Codex banner fallback to the recent pane tail", () => {
