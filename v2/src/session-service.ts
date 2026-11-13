@@ -14578,7 +14578,7 @@ export class SessionService {
     const launchRecord = record;
     const writePlaceholder = (): void => {
       this.applyCloseoutTake(record, reuseCtx, takeAllowed, (takenFrom) => {
-        launchRecord.closeoutOwner = record.closeoutOwner;
+        if (record.closeoutOwner !== undefined) launchRecord.closeoutOwner = record.closeoutOwner;
         if (record.spawnIntent) launchRecord.spawnIntent = record.spawnIntent;
         onWritten(takenFrom);
       });
