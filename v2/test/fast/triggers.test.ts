@@ -988,6 +988,125 @@ describe("startConfiguredTriggers", () => {
     vi.restoreAllMocks();
   });
 
+  describe("session lookup errors", () => {
+    async function fixture() {
+      const dataDir = mkdtempSync(join(tmpdir(), "spur-lookup-drop-"));
+      const actual = await vi.importActual<typeof metadataModule>("../../src/metadata.js");
+      readPendingSendBatchesMock.mockImplementation(actual.readPendingSendBatches);
+      recordPendingSendBatchMock.mockImplementation(actual.recordPendingSendBatch);
+      readPendingSendBatchMock.mockImplementation(actual.readPendingSendBatch);
+      updatePendingSendBatchConditionalMock.mockImplementation(
+        actual.updatePendingSendBatchConditional,
+      );
+      deletePendingSendBatchConditionalMock.mockImplementation(
+        actual.deletePendingSendBatchConditional,
+      );
+      deletePendingSendBatchMock.mockImplementation(actual.deletePendingSendBatch);
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const { SessionLifecycleError } = await import("../../src/session-lifecycle.js");
+      const changed = (
+        status = 503,
+        code:
+          | "session_lifecycle_conflict"
+          | "session_lifecycle_snapshot_changed" = "session_lifecycle_snapshot_changed",
+      ) =>
+        new SessionLifecycleError("Snapshot changed", status, {
+          code,
+          lifecycle: { instanceId: "test-instance", revision: 1, operation: null },
+        });
+      const healthy = {
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        workspaceExists: true,
+        lastActivityAt: staleActivity(),
+      };
+      const get = vi.fn().mockRejectedValue(changed());
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      const bus = new EventBus();
+      const autoPing = new AutoPingService(dataDir);
+      const settings = { ...config({ event: "github:merge_conflict" }), dataDir };
+      const start = () =>
+        startConfiguredTriggers({
+          config: settings as never,
+          bus,
+          autoPing,
+          sessionService: { get, deliver } as never,
+          logger: { warn: vi.fn() },
+        });
+      readGitHubSourceSnapshotMock.mockReturnValue(mergeConflictSnapshot());
+      const pending = () => [...actual.readPendingSendBatches(dataDir).values()][0];
+      return {
+        changed,
+        healthy,
+        get,
+        deliver,
+        bus,
+        start,
+        pending,
+        cleanup: () => {
+          autoPing.dispose();
+          rmSync(dataDir, { recursive: true, force: true });
+        },
+      };
+    }
+
+    it.each(["typed 503", "503 conflict", "409", "not found"] as const)(
+      "drops the batch on any session lookup error (%s)",
+      async (kind) => {
+        const f = await fixture();
+        const { SessionResourceNotFoundError } = await import("../../src/session-service.js");
+        f.get.mockRejectedValue(
+          kind === "typed 503"
+            ? f.changed()
+            : kind === "503 conflict"
+              ? f.changed(503, "session_lifecycle_conflict")
+              : kind === "409"
+                ? f.changed(409)
+                : new SessionResourceNotFoundError("Session not found: api-1"),
+        );
+        const controller = f.start();
+        try {
+          f.bus.emit(mergeConflictEvent());
+          await vi.advanceTimersByTimeAsync(1);
+          expect(f.pending()).toBeUndefined();
+          expect(loggedEvents("trigger.send.dropped")).toHaveLength(1);
+          expect(loggedEvents("trigger.send.dropped")[0]?.details).toMatchObject({
+            reason: "session_lookup_failed",
+          });
+          expect(f.deliver).not.toHaveBeenCalled();
+        } finally {
+          await controller.stop();
+          f.cleanup();
+        }
+      },
+    );
+
+    it("does not replay an uncertain native write when the post-failure lookup fails", async () => {
+      const f = await fixture();
+      f.get.mockResolvedValue(f.healthy);
+      f.deliver.mockImplementation(async () => {
+        f.get.mockRejectedValueOnce(f.changed());
+        throw new Error("Input may already have been written");
+      });
+      let controller = f.start();
+      try {
+        f.bus.emit(mergeConflictEvent());
+        await advanceSendWindow();
+        expect(f.deliver).toHaveBeenCalledTimes(1);
+        expect(f.pending()).toBeUndefined();
+        expect(loggedEvents("trigger.send.failed")).toHaveLength(1);
+        await controller.stop();
+        controller = f.start();
+        await advanceSendWindow();
+        expect(f.deliver).toHaveBeenCalledTimes(1);
+      } finally {
+        await controller.stop();
+        f.cleanup();
+      }
+    });
+  });
+
   it.each([
     { accepted: false, reject: false, merge: false, kind: "ci_failed" as const },
     { accepted: true, reject: false, merge: false, kind: "ci_failed" as const },
