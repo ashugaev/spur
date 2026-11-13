@@ -886,12 +886,16 @@ function withSuppressUnstableFeaturesWarning(configText: string): string {
 // the host [notice] table when present. A top-level dotted or inline `notice`
 // key is left alone: a second [notice] table would make the config invalid.
 function withHiddenRateLimitModelNudge(configText: string): string {
-  if (codexTopLevelLines(configText).some((line) => /^\s*notice\s*[.=]/.test(line))) {
+  const notice = `(?:notice|"notice"|'notice')`;
+  if (
+    codexTopLevelLines(configText).some((line) => new RegExp(`^\\s*${notice}\\s*[.=]`).test(line))
+  ) {
     return configText;
   }
   const line = "hide_rate_limit_model_nudge = true";
-  const lines = configText.split("\n");
-  const headerIndex = lines.findIndex((l) => /^\s*\[\s*notice\s*\]\s*(?:#.*)?$/.test(l));
+  const lines = configText.split(/\r?\n/);
+  const headerPattern = new RegExp(`^\\s*\\[\\s*${notice}\\s*\\]\\s*(?:#.*)?$`);
+  const headerIndex = lines.findIndex((l) => headerPattern.test(l));
   if (headerIndex === -1) {
     const trimmed = configText.trimEnd();
     const separator = trimmed ? "\n\n" : "";
@@ -902,7 +906,9 @@ function withHiddenRateLimitModelNudge(configText: string): string {
     if (current.trim().startsWith("[")) {
       break;
     }
-    if (/^\s*hide_rate_limit_model_nudge\s*=/.test(current)) {
+    if (
+      /^\s*(?:hide_rate_limit_model_nudge|(["'])hide_rate_limit_model_nudge\1)\s*=/.test(current)
+    ) {
       lines[i] = line;
       return lines.join("\n");
     }

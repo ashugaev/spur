@@ -682,6 +682,41 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     expect(content.match(/notice\s*\]/g)).toHaveLength(1);
   });
 
+  it("adds the key once inside a CRLF notice table whose header has a comment", async () => {
+    const content = await writtenSessionConfig(
+      "[notice] # c\r\nhide_full_access_warning = true\r\n",
+    );
+    expect(content).toBe(
+      "suppress_unstable_features_warning = true\n\n[notice] # c\nhide_rate_limit_model_nudge = true\nhide_full_access_warning = true\n",
+    );
+    expect(content.match(/notice\s*\]/g)).toHaveLength(1);
+    expect(content.match(/hide_rate_limit_model_nudge/g)).toHaveLength(1);
+  });
+
+  it("adds the key once inside a quoted notice table header", async () => {
+    const content = await writtenSessionConfig('["notice"]\nhide_full_access_warning = true\n');
+    expect(content).toBe(
+      'suppress_unstable_features_warning = true\n\n["notice"]\nhide_rate_limit_model_nudge = true\nhide_full_access_warning = true\n',
+    );
+    expect(content.match(/notice"?\s*\]/g)).toHaveLength(1);
+  });
+
+  it("overrides a quoted hide_rate_limit_model_nudge key to true, one occurrence", async () => {
+    const content = await writtenSessionConfig('[notice]\n"hide_rate_limit_model_nudge" = false\n');
+    expect(content).toBe(
+      "suppress_unstable_features_warning = true\n\n[notice]\nhide_rate_limit_model_nudge = true\n",
+    );
+    expect(content.match(/hide_rate_limit_model_nudge/g)).toHaveLength(1);
+  });
+
+  it.each([
+    ["quoted dotted key", '"notice".hide_full_access_warning = true\n'],
+    ["quoted inline table", '"notice" = { hide_full_access_warning = true }\n'],
+  ])("leaves config unchanged when host defines notice as %s", async (_label, hostConfig) => {
+    const content = await writtenSessionConfig(hostConfig);
+    expect(content).toBe(`suppress_unstable_features_warning = true\n\n${hostConfig}`);
+  });
+
   it("returns the codex dir path", async () => {
     const result = await ensureCodexHooksConfig("/session/tool");
     expect(result).toBe("/session/tool/codex-home");
