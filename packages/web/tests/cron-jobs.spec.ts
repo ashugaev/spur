@@ -177,9 +177,7 @@ async function openEditor(page: Page) {
 }
 
 test.describe("Cron YAML editor", () => {
-  test("saves disk drafts, preserves defaults and reopens saved values while runtime stays unchanged", async ({
-    page,
-  }) => {
+  test("saves disk drafts, preserves defaults and reopens saved values", async ({ page }) => {
     await mockSessions(page, [], PROJECTS);
     await mockCron(page);
     let draft = structuredClone(EDIT_DRAFT);
@@ -189,7 +187,7 @@ test.describe("Cron YAML editor", () => {
         expect(body.blocks[1]?.agent).toBeNull();
         expect(body.blocks[0]?.model).toBe("custom-unlisted");
         draft = { ...draft, ...body, revision: "b".repeat(64) };
-        await route.fulfill({ json: { ...draft, saved: true, activation: "pending" } });
+        await route.fulfill({ json: { ...draft, saved: true, activation: "applied" } });
       } else await route.fulfill({ json: draft });
     });
     await openEditor(page);
@@ -197,15 +195,41 @@ test.describe("Cron YAML editor", () => {
     await expect(page.getByText(/schedule affects: audit, sibling/)).toBeVisible();
     await page.getByLabel("Block 2 prompt").fill("Saved second prompt");
     await page.getByRole("button", { name: "Save YAML" }).click();
-    await expect(page.getByText("Saved to YAML. Pending activation.")).toBeVisible();
-    await expect(page.getByRole("status").filter({ hasText: "Saved to YAML" })).toBeFocused();
-    await expect(page.getByRole("status").filter({ hasText: "Saved to YAML" })).toBeInViewport({
+    await expect(page.getByText("Saved and applied.")).toBeVisible();
+    await expect(page.getByRole("status").filter({ hasText: "Saved and applied" })).toBeFocused();
+    await expect(page.getByRole("status").filter({ hasText: "Saved and applied" })).toBeInViewport({
       ratio: 1,
     });
     await page.getByRole("button", { name: "Back to cron jobs" }).click();
     await expect(page.getByText("Audit errored sessions")).toBeVisible();
     await page.getByRole("button", { name: "Edit YAML" }).click();
     await expect(page.getByLabel("Block 2 prompt")).toHaveValue("Saved second prompt");
+  });
+
+  test("shows the reload failure and keeps draft values", async ({ page }) => {
+    await mockSessions(page, [], PROJECTS);
+    await mockCron(page);
+    await page.route("**/api/cron/edit?**", async (route) => {
+      if (route.request().method() === "PATCH") {
+        const body = route.request().postDataJSON() as CronJobEditUpdate;
+        await route.fulfill({
+          json: {
+            ...EDIT_DRAFT,
+            ...body,
+            revision: "b".repeat(64),
+            saved: true,
+            activation: "failed",
+          },
+        });
+      } else await route.fulfill({ json: EDIT_DRAFT });
+    });
+    await openEditor(page);
+    await page.getByLabel("Block 2 prompt").fill("Kept prompt");
+    await page.getByRole("button", { name: "Save YAML" }).click();
+    await expect(
+      page.getByText("Saved to YAML. Not applied: reload failed. Restart the daemon to apply."),
+    ).toBeVisible();
+    await expect(page.getByLabel("Block 2 prompt")).toHaveValue("Kept prompt");
   });
 
   test("preserves conflicted text and requires discard before reloading", async ({ page }) => {

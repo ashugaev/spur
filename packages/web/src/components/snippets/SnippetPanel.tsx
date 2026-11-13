@@ -14,6 +14,9 @@ import { CloseIcon } from "@/components/icons/CloseIcon";
 import { SendIcon } from "@/components/icons/SendIcon";
 import { Spinner } from "@/components/icons/Spinner";
 import { LoadingBar } from "@/components/LoadingBar";
+import { ChatVoiceView } from "@/components/ChatVoiceControls";
+import { useVoiceInput, type UseVoiceInput } from "@/hooks/useVoiceInput";
+import { placeVoiceSlots } from "@/lib/snippets/snippet-voice-layout";
 import { formatRelativeTime } from "@/lib/format";
 import { useTheme } from "@/lib/theme-context";
 import {
@@ -22,12 +25,14 @@ import {
   RELOADABLE_ERRORS,
   type PendingConfirm,
   type PanelRuntimeError,
+  type SnippetAction,
   type SnippetFontBuffer,
   type ApplyFileResult,
   type SnippetHost,
   type SnippetHostDeps,
   type SnippetPort,
   type SnippetSessionUpdate,
+  type StoreResponse,
 } from "@/lib/snippets/snippet-host";
 import type { SnippetManifest } from "@/lib/snippets/snippet-manifest";
 import {
@@ -37,14 +42,15 @@ import {
   SNIPPET_RETRY_STATUSES,
   SNIPPET_THEME_TOKENS,
   snippetStatusLabel,
-  type SnippetActionRecord,
   type SnippetTheme,
   type SnippetThemeToken,
+  type ChatLayout,
+  type VoiceRect,
 } from "@/lib/snippets/snippet-protocol";
 import { enterFullscreen, exitFullscreen, setInline } from "@/lib/snippets/snippet-dialog";
 import type { SnippetStorage } from "@/lib/snippets/snippet-store";
 import { buildSnippetSrcdoc, SNIPPET_FRAME_SANDBOX } from "@/lib/snippets/snippet-srcdoc";
-import type { ConversationMessage } from "@/lib/types";
+import { storeChangePoller } from "@/lib/store-change-poller";
 
 // ---------------------------------------------------------------------------
 // page-level assets: SDK source and fonts are fetched once per page
@@ -103,6 +109,24 @@ export function browserSnippetStorage(): SnippetStorage {
     return window.localStorage;
   } catch {
     return DENIED_STORAGE;
+  }
+}
+
+async function storeRequest(method: string, url: string, body?: unknown): Promise<StoreResponse> {
+  try {
+    const response = await fetch(url, {
+      method,
+      cache: "no-store",
+      headers: {
+        accept: "application/json",
+        ...(body !== undefined ? { "content-type": "application/json" } : {}),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    const json: unknown = await response.json().catch(() => ({}));
+    return { ok: response.ok, status: response.status, body: json };
+  } catch {
+    return { ok: false, status: 0, body: { error: "network error" } };
   }
 }
 
@@ -232,33 +256,45 @@ function ConfirmStrip({
     >
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <span className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
-          {confirm.label}
+          {confirm.kind === "invoke" ? confirm.label : "Message to agent"}
         </span>
-        <span className="text-[10px] text-[var(--color-text-tertiary)]">{confirm.actionId}</span>
+        {confirm.kind === "invoke" ? (
+          <span className="text-[10px] text-[var(--color-text-tertiary)]">{confirm.actionId}</span>
+        ) : null}
         <span className="text-[var(--color-status-attention)]">
           {SNIPPET_CONFIRM_REASON_TEXT[confirm.reason]}
         </span>
       </div>
-      <dl className="mt-2 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1">
-        {Object.entries(confirm.payload).map(([key, value]) => (
-          <div className="contents" key={key}>
-            <dt className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-              {key}
-            </dt>
-            <dd className="truncate text-[var(--color-text-secondary)]">{payloadPreview(value)}</dd>
-          </div>
-        ))}
-      </dl>
-      <details className="mt-2">
-        <summary
-          className={`cursor-pointer text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)] ${FOCUS_RING}`}
-        >
-          Full payload
-        </summary>
-        <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2 text-[11px] text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">
-          {JSON.stringify(confirm.payload, null, 2)}
+      {confirm.kind === "invoke" ? (
+        <>
+          <dl className="mt-2 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1">
+            {Object.entries(confirm.payload).map(([key, value]) => (
+              <div className="contents" key={key}>
+                <dt className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  {key}
+                </dt>
+                <dd className="truncate text-[var(--color-text-secondary)]">
+                  {payloadPreview(value)}
+                </dd>
+              </div>
+            ))}
+          </dl>
+          <details className="mt-2">
+            <summary
+              className={`cursor-pointer text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)] ${FOCUS_RING}`}
+            >
+              Full payload
+            </summary>
+            <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2 text-[11px] text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">
+              {JSON.stringify(confirm.payload, null, 2)}
+            </pre>
+          </details>
+        </>
+      ) : (
+        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2 text-[11px] text-[var(--color-text-secondary)] [overflow-wrap:anywhere]">
+          {confirm.message}
         </pre>
-      </details>
+      )}
       <div className="mt-2.5 flex justify-end gap-2 max-sm:[&>button]:flex-1">
         <button
           className={SECONDARY_BUTTON}
@@ -282,20 +318,18 @@ function ConfirmStrip({
 
 function StatusLine({
   action,
-  manifest,
   onRetry,
 }: {
-  action: SnippetActionRecord | null;
-  manifest: SnippetManifest;
+  action: SnippetAction | null;
   onRetry: (trusted: boolean) => void;
 }) {
   if (!action) {
     return <div aria-live="polite" className="h-0 overflow-hidden" role="status" />;
   }
-  const failed = action.status === "error" || action.status === "delivery_unknown";
+  const failed = action.status === "error";
   const attention = action.status === "timeout" || action.status === "awaiting_confirm";
   const working = !isTerminalSnippetStatus(action.status) && action.status !== "awaiting_confirm";
-  const label = manifest.actions.find((candidate) => candidate.id === action.actionId)?.label;
+  const { label } = action;
   const tone = failed
     ? "text-[var(--color-status-error)]"
     : attention
@@ -322,7 +356,7 @@ function StatusLine({
       </span>
       {label ? <span className="text-[var(--color-text-secondary)]">{label}</span> : null}
       <span className="ml-auto text-[var(--color-text-tertiary)]">
-        {formatRelativeTime(new Date(action.dispatchedAt).toISOString())}
+        {formatRelativeTime(new Date(action.createdAt).toISOString())}
       </span>
       {SNIPPET_RETRY_STATUSES.includes(action.status) ? (
         <button
@@ -358,13 +392,9 @@ export interface SnippetPanelProps {
   sessionId: string;
   manifest: SnippetManifest;
   html: string;
-  // listing metadata: lets the panel tell a poll that changed the file from one that did not
-  listingKey: string;
-  fetching: boolean;
   updatedAt?: string;
-  session: Omit<SnippetSessionUpdate, "messages" | "fileSettled">;
-  messages: readonly ConversationMessage[];
-  // Bridge seam: tests replace the browser-backed deps (channel, send, storage, clocks).
+  session: SnippetSessionUpdate;
+  // Bridge seam: tests replace the browser-backed deps (channel, request, poller, storage, clocks).
   bridge?: Partial<SnippetHostDeps>;
   // Outcome of each file handed to the controller (a lower revision is refused there).
   onApplyResult?: (result: ApplyFileResult) => void;
@@ -374,11 +404,8 @@ export function SnippetPanel({
   sessionId,
   manifest,
   html,
-  listingKey,
-  fetching,
   updatedAt,
   session,
-  messages,
   bridge,
   onApplyResult,
 }: SnippetPanelProps) {
@@ -387,12 +414,12 @@ export function SnippetPanel({
     onApplyResultRef.current = onApplyResult;
   }, [onApplyResult]);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const regionRef = useRef<HTMLDivElement | null>(null);
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const [host, setHost] = useState<SnippetHost | null>(null);
   const hostRef = useRef<SnippetHost | null>(null);
-  const prevKeyRef = useRef(listingKey);
   const titleId = `snippet-title-${sessionId}-${manifest.snippetId}`;
 
   function openFullscreen(): void {
@@ -423,18 +450,8 @@ export function SnippetPanel({
         const channel = new MessageChannel();
         return { hostPort: channel.port1 as unknown as SnippetPort, framePort: channel.port2 };
       },
-      send: async (prompt) => {
-        try {
-          const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ message: prompt, queue: true }),
-          });
-          return { kind: "response", status: response.status };
-        } catch {
-          return { kind: "failure" };
-        }
-      },
+      request: storeRequest,
+      poller: storeChangePoller,
       loadSdk,
       getFonts: currentFonts,
       getTheme: readTheme,
@@ -507,10 +524,8 @@ export function SnippetPanel({
   }, [host, manifest, html]);
 
   useEffect(() => {
-    const settled = prevKeyRef.current === listingKey && !fetching;
-    prevKeyRef.current = listingKey;
-    host?.updateSession({ ...session, messages, fileSettled: settled });
-  }, [host, session, messages, listingKey, fetching]);
+    host?.updateSession(session);
+  }, [host, session]);
 
   const fullscreen = state?.fullscreen ?? false;
   useEffect(() => {
@@ -643,21 +658,37 @@ export function SnippetPanel({
             {state.manifest.snippetId} · r{state.manifest.revision} · Esc to exit
           </span>
         </div>
-        {srcDoc !== null ? (
-          <iframe
-            className="snippet-frame block w-full border-0 bg-transparent"
-            key={state.mountKey}
-            onLoad={() => host.frameLoaded()}
-            ref={iframeRef}
-            referrerPolicy="no-referrer"
-            sandbox={SNIPPET_FRAME_SANDBOX}
-            srcDoc={srcDoc}
-            style={{ height: state.height ?? 160 }}
-            title={state.manifest.title}
-          />
-        ) : (
-          <FramePlaceholder />
-        )}
+        <div className="snippet-frame-region relative min-h-0 overflow-hidden" ref={regionRef}>
+          {srcDoc !== null ? (
+            <iframe
+              className="snippet-frame block w-full border-0 bg-transparent"
+              key={state.mountKey}
+              onLoad={() => host.frameLoaded()}
+              ref={iframeRef}
+              referrerPolicy="no-referrer"
+              sandbox={SNIPPET_FRAME_SANDBOX}
+              srcDoc={srcDoc}
+              style={{ height: state.height ?? 160 }}
+              title={state.manifest.title}
+            />
+          ) : (
+            <FramePlaceholder />
+          )}
+          {state.phase === "connected" &&
+          !state.conflict &&
+          state.availability.canInvoke &&
+          srcDoc !== null ? (
+            <SnippetVoice
+              key={`voice:${state.mountKey}`}
+              host={host}
+              sessionId={sessionId}
+              mountKey={state.mountKey}
+              frameRef={iframeRef}
+              regionRef={regionRef}
+              layout={state.voiceLayout}
+            />
+          ) : null}
+        </div>
         {state.confirm ? (
           <ConfirmStrip
             confirm={state.confirm}
@@ -665,12 +696,270 @@ export function SnippetPanel({
             onSend={(trusted) => host.confirmSend(trusted)}
           />
         ) : null}
-        <StatusLine
-          action={state.action}
-          manifest={state.manifest}
-          onRetry={(trusted) => host.retry(trusted)}
-        />
+        <StatusLine action={state.action} onRetry={(trusted) => host.retry(trusted)} />
       </dialog>
     </section>
+  );
+}
+
+function SnippetVoice({
+  host,
+  sessionId,
+  mountKey,
+  frameRef,
+  regionRef,
+  layout,
+}: {
+  host: SnippetHost;
+  sessionId: string;
+  mountKey: string;
+  frameRef: React.RefObject<HTMLIFrameElement | null>;
+  regionRef: React.RefObject<HTMLDivElement | null>;
+  layout: ChatLayout | null;
+}) {
+  const [slots, setSlots] = useState<Array<{ target: string; rect: VoiceRect }>>([]);
+  const [owner, setOwner] = useState<string | null>(null);
+  const [errorTarget, setErrorTarget] = useState<string | null>(null);
+  const claim = useRef<{ target: string; generation: number } | null>(null);
+  const generation = useRef(0);
+  const suspended = useRef(false);
+  const currentLayout = useRef(layout);
+  currentLayout.current = layout;
+  const eligible = () => {
+    if (suspended.current) return [];
+    const frame = frameRef.current;
+    const region = regionRef.current;
+    return frame && region ? placeVoiceSlots(frame, region, currentLayout.current) : [];
+  };
+  const voice = useVoiceInput({
+    contextKey: `snippet-chat:${sessionId}:${mountKey}`,
+    onTranscribed: (text) => {
+      const take = claim.current;
+      if (
+        take &&
+        take.generation === generation.current &&
+        eligible().some((slot) => slot.target === take.target)
+      )
+        host.insertVoiceText(take.target, mountKey, text);
+    },
+  });
+  const live = useRef({ voice, eligible });
+  live.current = { voice, eligible };
+  const cancel = useCallback(() => {
+    generation.current += 1;
+    claim.current = null;
+    setOwner(null);
+    setErrorTarget(null);
+    live.current.voice.cancelRecording();
+    void live.current.voice.discardRetainedTake();
+    live.current.voice.clearVoiceError();
+  }, []);
+  useEffect(() => {
+    const frame = frameRef.current;
+    const region = regionRef.current;
+    if (!frame || !region) return;
+    let scheduled = 0;
+    const measure = () => {
+      const next = live.current.eligible();
+      if (claim.current && !next.some((slot) => slot.target === claim.current?.target)) cancel();
+      setSlots((previous) => (JSON.stringify(previous) === JSON.stringify(next) ? previous : next));
+    };
+    const invalidate = () => {
+      if (!scheduled)
+        scheduled = requestAnimationFrame(() => {
+          scheduled = 0;
+          measure();
+        });
+    };
+    const motion = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Element && target.contains(frame)) {
+        setSlots([]);
+        cancel();
+      }
+    };
+    const hide = () => {
+      suspended.current = true;
+      cancel();
+      setSlots([]);
+    };
+    const show = () => {
+      suspended.current = false;
+      invalidate();
+    };
+    const resize = new ResizeObserver(invalidate);
+    const mutation = new MutationObserver(invalidate);
+    for (let node: HTMLElement | null = frame; node; node = node.parentElement) {
+      resize.observe(node);
+      mutation.observe(node, {
+        attributes: true,
+        attributeFilter: ["class", "style", "open", "hidden"],
+      });
+    }
+    const events = [
+      "scroll",
+      "resize",
+      "transitionend",
+      "transitioncancel",
+      "animationend",
+      "animationcancel",
+    ];
+    events.forEach((name) => window.addEventListener(name, invalidate, true));
+    window.addEventListener("transitionrun", motion, true);
+    window.addEventListener("animationstart", motion, true);
+    window.addEventListener("pagehide", hide);
+    window.addEventListener("pageshow", show);
+    window.visualViewport?.addEventListener("scroll", invalidate);
+    window.visualViewport?.addEventListener("resize", invalidate);
+    const timer = window.setInterval(measure, 500);
+    invalidate();
+    return () => {
+      cancelAnimationFrame(scheduled);
+      clearInterval(timer);
+      resize.disconnect();
+      mutation.disconnect();
+      events.forEach((name) => window.removeEventListener(name, invalidate, true));
+      window.removeEventListener("transitionrun", motion, true);
+      window.removeEventListener("animationstart", motion, true);
+      window.removeEventListener("pagehide", hide);
+      window.removeEventListener("pageshow", show);
+      window.visualViewport?.removeEventListener("scroll", invalidate);
+      window.visualViewport?.removeEventListener("resize", invalidate);
+      generation.current += 1;
+      claim.current = null;
+      for (const slot of currentLayout.current?.slots ?? [])
+        host.voiceState(slot.target, mountKey, {
+          starting: false,
+          unavailable: false,
+          error: null,
+        });
+      live.current.voice.cancelRecording();
+      void live.current.voice.discardRetainedTake();
+    };
+  }, [cancel, frameRef, regionRef, host, mountKey]);
+  // A snapshot invalidates placement without rebuilding the controller or its observers.
+  useEffect(() => {
+    const next = eligible();
+    if (claim.current && !next.some((slot) => slot.target === claim.current?.target)) cancel();
+    setSlots((previous) => (JSON.stringify(previous) === JSON.stringify(next) ? previous : next));
+    if (!layout) return;
+    const expiry = window.setTimeout(
+      () => {
+        if (claim.current) cancel();
+        setSlots([]);
+      },
+      Math.max(0, layout.receivedAt + 750 - Date.now()),
+    );
+    return () => clearTimeout(expiry);
+  }, [layout, cancel]);
+  useEffect(() => {
+    if (voice.hasRetainedTake && !claim.current) {
+      void voice.discardRetainedTake();
+      return;
+    }
+    if (!voice.recording && !voice.voiceBusy && !voice.hasRetainedTake && claim.current) {
+      setErrorTarget(voice.voiceError ? claim.current.target : null);
+      claim.current = null;
+      setOwner(null);
+    }
+  }, [voice.recording, voice.voiceBusy, voice.hasRetainedTake, voice.voiceError]);
+  useEffect(() => {
+    for (const slot of layout?.slots ?? [])
+      host.voiceState(slot.target, mountKey, {
+        starting: slot.target === owner && voice.voiceBusy === "starting",
+        unavailable: !voice.canUseVoice,
+        error:
+          slot.target === (owner ?? errorTarget)
+            ? (voice.voiceError?.slice(0, 2000) ?? null)
+            : null,
+      });
+  }, [
+    host,
+    mountKey,
+    layout,
+    owner,
+    errorTarget,
+    voice.voiceBusy,
+    voice.canUseVoice,
+    voice.voiceError,
+  ]);
+  const gesture = useRef<{ target: string; rect: string } | null>(null);
+  return (
+    <div
+      className="pointer-events-none absolute inset-0 overflow-hidden"
+      data-snippet-voice-overlay
+    >
+      {slots.map(({ target, rect }) => {
+        const other = owner !== null && owner !== target;
+        const view: UseVoiceInput = other
+          ? {
+              ...voice,
+              recording: false,
+              voiceBusy: "starting",
+              hasRetainedTake: false,
+              voiceError: null,
+            }
+          : {
+              ...voice,
+              toggleRecording: () => {
+                if (!claim.current) {
+                  claim.current = { target, generation: ++generation.current };
+                  setOwner(target);
+                  setErrorTarget(null);
+                  voice.clearVoiceError();
+                }
+                voice.toggleRecording();
+              },
+              cancelRecording: cancel,
+              discardRetainedTake: async () => {
+                cancel();
+              },
+            };
+        return (
+          <div
+            key={target}
+            data-voice-target={target}
+            className="absolute origin-top-left"
+            style={{
+              left: rect.x,
+              top: rect.y,
+              width: 32,
+              height: 108,
+              transform: `scale(${rect.width / 32}, ${rect.height / 108})`,
+            }}
+            onPointerDownCapture={() => {
+              const slot = eligible().find((item) => item.target === target);
+              gesture.current = slot
+                ? {
+                    target,
+                    rect: JSON.stringify(slot.rect),
+                  }
+                : null;
+            }}
+            onPointerCancel={() => {
+              gesture.current = null;
+            }}
+            onClickCapture={(event) => {
+              const slot = eligible().find((item) => item.target === target);
+              const pending = gesture.current;
+              gesture.current = null;
+              if (
+                !slot ||
+                (claim.current && claim.current.target !== target) ||
+                (event.detail > 0 &&
+                  (!pending ||
+                    pending.target !== target ||
+                    pending.rect !== JSON.stringify(slot.rect)))
+              ) {
+                event.preventDefault();
+                event.stopPropagation();
+              }
+            }}
+          >
+            <ChatVoiceView voice={view} />
+          </div>
+        );
+      })}
+    </div>
   );
 }

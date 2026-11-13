@@ -3,206 +3,24 @@ import {
   createSdkLoader,
   createSnippetHost,
   decideInvoke,
-  type SnippetChannel,
-  type SnippetFontBuffer,
-  type SnippetHost,
-  type SnippetHostDeps,
-  type SnippetPort,
-  type SnippetSessionUpdate,
+  decideSend,
 } from "@/lib/snippets/snippet-host";
-import type { SnippetManifest } from "@/lib/snippets/snippet-manifest";
-import type { SnippetSendOutcome, SnippetTheme } from "@/lib/snippets/snippet-protocol";
+import { budgetKey, readSnippetBudget, recordKey } from "@/lib/snippets/snippet-store";
 import {
-  budgetKey,
-  readSnippetBudget,
-  readSnippetRecord,
-  recordKey,
-  type SnippetStorage,
-  writeSnippetRecord,
-} from "@/lib/snippets/snippet-store";
+  FakeDaemon,
+  FakePoller,
+  FakePort,
+  flush,
+  harness,
+  manifest,
+  MemoryStorage,
+  ready,
+  SID,
+  THEME,
+  type Harness,
+} from "./fixtures/snippet-host-rig";
 
-class MemoryStorage implements SnippetStorage {
-  data = new Map<string, string>();
-  failSet: (key: string) => boolean = () => false;
-  failGet = false;
-  get length(): number {
-    return this.data.size;
-  }
-  key(index: number): string | null {
-    return [...this.data.keys()][index] ?? null;
-  }
-  getItem(key: string): string | null {
-    if (this.failGet) throw new Error("denied");
-    return this.data.get(key) ?? null;
-  }
-  setItem(key: string, value: string): void {
-    if (this.failSet(key)) throw new DOMException("full", "QuotaExceededError");
-    this.data.set(key, value);
-  }
-  removeItem(key: string): void {
-    this.data.delete(key);
-  }
-}
-
-class FakePort implements SnippetPort {
-  onmessage: ((event: { data: unknown }) => void) | null = null;
-  toFrame: Array<Record<string, unknown>> = [];
-  closed = false;
-  postMessage(message: unknown): void {
-    this.toFrame.push(message as Record<string, unknown>);
-  }
-  close(): void {
-    this.closed = true;
-  }
-  emit(data: unknown): void {
-    this.onmessage?.({ data });
-  }
-  ofType(type: string): Array<Record<string, unknown>> {
-    return this.toFrame.filter((message) => message.type === type);
-  }
-}
-
-const SID = "sp-ab12";
-const THEME = { mode: "dark", tokens: {} } as unknown as SnippetTheme;
-const notePayload = {
-  type: "object",
-  properties: { note: { type: "string", maxLength: 50 } },
-} as const;
-
-function manifest(overrides: Partial<SnippetManifest> = {}): SnippetManifest {
-  return {
-    protocolVersion: 1,
-    snippetId: "picker",
-    ownerSessionId: SID,
-    instanceId: "inst-00000001",
-    revision: 1,
-    title: "Picker",
-    actions: [
-      { id: "go", label: "Go", payload: notePayload },
-      { id: "danger", label: "Danger", payload: notePayload, confirm: "always" },
-    ],
-    ...overrides,
-  };
-}
-
-interface Harness {
-  host: SnippetHost;
-  storage: MemoryStorage;
-  sent: string[];
-  ports: FakePort[];
-  posts: Array<{ message: Record<string, unknown>; transfer: unknown[] }>;
-  focused: { value: boolean };
-  sendOutcome: { value: () => Promise<SnippetSendOutcome> };
-  sdkLoads: boolean[];
-  sdk: { fail: boolean };
-  fonts: { value: SnippetFontBuffer[] };
-  fullscreenRequests: boolean[];
-  port(): FakePort;
-  hello(nonce?: string): void;
-  connect(): FakePort;
-  invoke(actionId: string, payload: unknown, callId?: string): Record<string, unknown> | undefined;
-  session(update?: Partial<SnippetSessionUpdate>): void;
-  remount(m?: SnippetManifest): Harness;
-}
-
-let counter = 0;
-
-function harness(
-  opts: {
-    storage?: MemoryStorage;
-    manifest?: SnippetManifest;
-    html?: string;
-    sdkFail?: boolean;
-  } = {},
-): Harness {
-  const storage = opts.storage ?? new MemoryStorage();
-  const sent: string[] = [];
-  const ports: FakePort[] = [];
-  const posts: Harness["posts"] = [];
-  const focused = { value: false };
-  const sendOutcome = {
-    value: (): Promise<SnippetSendOutcome> => Promise.resolve({ kind: "response", status: 200 }),
-  };
-  const sdkLoads: boolean[] = [];
-  const sdk = { fail: opts.sdkFail ?? false };
-  const fonts: { value: SnippetFontBuffer[] } = { value: [] };
-  const fullscreenRequests: boolean[] = [];
-  const deps: SnippetHostDeps = {
-    sessionId: SID,
-    postToFrame: (message, transfer) =>
-      posts.push({ message: message as Record<string, unknown>, transfer }),
-    createChannel: (): SnippetChannel => {
-      const hostPort = new FakePort();
-      ports.push(hostPort);
-      return { hostPort, framePort: { port: ports.length } };
-    },
-    send: (prompt) => {
-      sent.push(prompt);
-      return sendOutcome.value();
-    },
-    loadSdk: (refetch) => {
-      sdkLoads.push(refetch);
-      return sdk.fail ? Promise.reject(new Error("sdk")) : Promise.resolve("sdk-source");
-    },
-    getFonts: () => fonts.value,
-    getTheme: () => THEME,
-    storage,
-    now: () => Date.now(),
-    uuid: () => `req-${String((counter += 1)).padStart(8, "0")}`,
-    nonce: () => `nonce-${(counter += 1)}`,
-    isFrameFocused: () => focused.value,
-    onFullscreenRequest: (open) => fullscreenRequests.push(open),
-  };
-  const host = createSnippetHost(deps, {
-    manifest: opts.manifest ?? manifest(),
-    html: opts.html ?? "<html>a</html>",
-  });
-  const h: Harness = {
-    host,
-    storage,
-    sent,
-    ports,
-    posts,
-    focused,
-    sendOutcome,
-    sdkLoads,
-    sdk,
-    fonts,
-    fullscreenRequests,
-    port: () => ports[ports.length - 1]!,
-    hello: (nonce) =>
-      host.onWindowMessage(
-        { type: "spur:hello", protocolVersion: 1, nonce: nonce ?? host.getState().nonce },
-        true,
-      ),
-    connect: () => {
-      h.hello();
-      return h.port();
-    },
-    invoke: (actionId, payload, callId = `c${(counter += 1)}`) => {
-      const port = h.port();
-      port.emit({ type: "invoke", callId, actionId, payload });
-      return port.ofType("invoke-result").find((message) => message.callId === callId);
-    },
-    session: (update = {}) =>
-      host.updateSession({
-        canSend: true,
-        state: "working",
-        queuedMessages: [],
-        messages: [],
-        fileSettled: true,
-        ...update,
-      }),
-    remount: (m) => harness({ storage, ...(m ? { manifest: m } : {}) }),
-  };
-  return h;
-}
-
-async function ready(h: Harness): Promise<FakePort> {
-  await vi.advanceTimersByTimeAsync(0);
-  h.focused.value = true;
-  return h.connect();
-}
+const sent = (h: Harness) => h.daemon.posts("/actions").length;
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -212,26 +30,78 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe("trusted chat voice routing", () => {
+  it("binds snapshots to the connected port, replaces omitted slots and purges on unregister", async () => {
+    const h = harness();
+    const port = await ready(h);
+    port.emit({ type: "chat-register", target: "one" });
+    const snapshot = {
+      type: "chat-layout",
+      sequence: 0,
+      viewport: { width: 400, height: 300 },
+      slots: [{ target: "one", rect: { x: 10, y: 10, width: 32, height: 108 } }],
+    };
+    port.emit(snapshot);
+    expect(h.host.getState().voiceLayout?.slots).toHaveLength(1);
+    port.emit({ ...snapshot, sequence: 1, slots: [] });
+    expect(h.host.getState().voiceLayout?.slots).toEqual([]);
+    port.emit(snapshot);
+    expect(h.host.getState().voiceLayout?.sequence).toBe(1);
+    port.emit({ ...snapshot, sequence: 2 });
+    port.emit({ type: "chat-unregister", target: "one" });
+    expect(h.host.getState().voiceLayout?.slots).toEqual([]);
+    const late = port.onmessage;
+    h.host.dispose();
+    late?.({ data: { ...snapshot, sequence: 3 } });
+    expect(h.host.getState().voiceLayout).toBeNull();
+  });
+  it("registers bounded targets and rejects stale mounts and unknown destinations", async () => {
+    const h = harness();
+    const port = await ready(h);
+    port.emit({ type: "chat-register", target: "chat-one" });
+    port.emit({ type: "chat-register", target: "chat-two" });
+    expect(h.host.getState().voiceTarget).toBe("chat-one");
+    port.emit({ type: "chat-focus", target: "chat-two" });
+    expect(h.host.getState().voiceTarget).toBe("chat-two");
+    const mount = h.host.getState().mountKey;
+    h.host.insertVoiceText("chat-one", mount, "dictated");
+    expect(port.toFrame.at(-1)).toEqual({
+      type: "chat-transcript",
+      target: "chat-one",
+      text: "dictated",
+    });
+    const count = port.toFrame.length;
+    h.host.insertVoiceText("missing", mount, "no");
+    h.host.insertVoiceText("chat-one", "stale", "no");
+    h.host.insertVoiceText("chat-one", mount, "x".repeat(20001));
+    expect(port.toFrame).toHaveLength(count);
+    port.emit({ type: "chat-unregister", target: "chat-two" });
+    expect(h.host.getState().voiceTarget).toBe("chat-one");
+    h.host.dispose();
+    expect(h.host.getState().voiceTarget).toBeNull();
+    h.host.insertVoiceText("chat-one", mount, "late");
+    expect(port.toFrame).toHaveLength(count);
+  });
+});
+
 describe("decideInvoke", () => {
   const base = {
     connected: true,
     conflict: false,
     manifest: manifest(),
-    sessionId: SID,
     actionId: "go",
     payload: { note: "x" },
     canSend: true,
     busy: false,
     hasInteraction: true,
     gates: { ok: true as const, unconfirmedRevision: null, unconfirmed: 0 },
-    requestId: "req-00000001",
   };
-  it("evaluates rejections in D4 order", () => {
+  it("evaluates rejections in order", () => {
     expect(
       decideInvoke({ ...base, connected: false, conflict: true, actionId: "nope" }),
     ).toMatchObject({ reason: "not_connected" });
     expect(decideInvoke({ ...base, conflict: true, actionId: "nope" })).toMatchObject({
-      reason: "revision_conflict",
+      reason: "stale",
     });
     expect(decideInvoke({ ...base, actionId: "nope", canSend: false })).toMatchObject({
       reason: "unknown_action",
@@ -256,40 +126,7 @@ describe("decideInvoke", () => {
     });
     expect(
       decideInvoke({ ...base, manifest: wide, payload: { note: "日".repeat(16_400) } }),
-    ).toMatchObject({
-      reason: "payload_too_large",
-    });
-  });
-  it("rejects when the built prompt passes 64 KiB although the payload fits", () => {
-    const wide = manifest({
-      actions: [
-        {
-          id: "go",
-          label: "Go",
-          payload: { type: "object", properties: { note: { type: "string", maxLength: 20000 } } },
-        },
-      ],
-    });
-    expect(
-      decideInvoke({
-        ...base,
-        manifest: wide,
-        payload: { a: 1 },
-      }),
-    ).toMatchObject({ reason: "invalid_payload" });
-    const manyQuotes = {
-      type: "object",
-      properties: {
-        a: { type: "string", maxLength: 20000 },
-        b: { type: "string", maxLength: 20000 },
-        c: { type: "string", maxLength: 20000 },
-      },
-    } as const;
-    const m = manifest({ actions: [{ id: "go", label: "Go", payload: manyQuotes }] });
-    const q = '"'.repeat(7000);
-    expect(decideInvoke({ ...base, manifest: m, payload: { a: q, b: q, c: q } })).toMatchObject({
-      reason: "payload_too_large",
-    });
+    ).toMatchObject({ reason: "payload_too_large" });
   });
   it("picks each confirm reason", () => {
     expect(decideInvoke({ ...base, actionId: "danger" })).toMatchObject({
@@ -310,10 +147,7 @@ describe("decideInvoke", () => {
     expect(
       decideInvoke({ ...base, gates: { ok: true, unconfirmedRevision: null, unconfirmed: 10 } }),
     ).toMatchObject({ reason: "budget" });
-    expect(decideInvoke(base)).toMatchObject({ kind: "send" });
-    expect(
-      decideInvoke({ ...base, gates: { ok: true, unconfirmedRevision: 0, unconfirmed: 9 } }),
-    ).toMatchObject({ kind: "send" });
+    expect(decideInvoke(base)).toMatchObject({ kind: "send", label: "Go" });
   });
   it("a trusted click skips the confirm gates but not structure or availability", () => {
     expect(
@@ -326,72 +160,114 @@ describe("decideInvoke", () => {
   });
 });
 
+describe("decideSend", () => {
+  const base = {
+    connected: true,
+    message: "hi",
+    canSend: true,
+    confirmPending: false,
+    hasInteraction: true,
+    gates: { ok: true as const, unconfirmedRevision: 1, unconfirmed: 0 },
+  };
+  it("rejects, confirms and sends like invoke, without the per-revision gate", () => {
+    expect(decideSend({ ...base, connected: false })).toMatchObject({ reason: "not_connected" });
+    expect(decideSend({ ...base, message: "  " })).toMatchObject({ reason: "invalid_payload" });
+    expect(decideSend({ ...base, message: 5 })).toMatchObject({ reason: "invalid_payload" });
+    expect(decideSend({ ...base, message: "日".repeat(16_400) })).toMatchObject({
+      reason: "payload_too_large",
+    });
+    expect(decideSend({ ...base, canSend: false })).toMatchObject({
+      reason: "session_unavailable",
+    });
+    expect(decideSend({ ...base, confirmPending: true })).toMatchObject({ reason: "busy" });
+    expect(decideSend({ ...base, hasInteraction: false })).toMatchObject({
+      kind: "confirm",
+      reason: "no_focus",
+    });
+    expect(decideSend({ ...base, gates: { ok: false } })).toMatchObject({
+      reason: "storage_unavailable",
+    });
+    expect(
+      decideSend({ ...base, gates: { ok: true, unconfirmedRevision: null, unconfirmed: 10 } }),
+    ).toMatchObject({ reason: "budget" });
+    expect(decideSend(base)).toEqual({ kind: "send", message: "hi" });
+  });
+});
+
 describe("handshake and teardown", () => {
   it("loads the SDK, then connects on the first matching hello with the port transferred", async () => {
     const h = harness();
     expect(h.host.getState().phase).toBe("loading");
-    await vi.advanceTimersByTimeAsync(0);
+    await flush();
     expect(h.host.getState().phase).toBe("connecting");
-    h.host.onWindowMessage({ type: "spur:hello", protocolVersion: 1, nonce: "wrong" }, true);
+    h.host.onWindowMessage({ type: "spur:hello", protocolVersion: 2, nonce: "wrong" }, true);
     h.host.onWindowMessage(
-      { type: "spur:hello", protocolVersion: 1, nonce: h.host.getState().nonce },
+      { type: "spur:hello", protocolVersion: 2, nonce: h.host.getState().nonce },
       false,
     );
     expect(h.posts).toHaveLength(0);
-    h.hello();
+    await h.connect();
     expect(h.posts).toHaveLength(1);
     expect(h.posts[0]?.message.type).toBe("spur:connect");
     expect(h.posts[0]?.transfer).toHaveLength(1);
     h.hello();
+    await flush();
     expect(h.posts).toHaveLength(1);
     expect(h.host.getState().phase).toBe("connected");
   });
 
-  it("connects without fonts while the font fetch is pending", async () => {
+  it("connect context names both stores, the gate data and fonts when loaded", async () => {
     const h = harness();
-    await vi.advanceTimersByTimeAsync(0);
-    h.fonts.value = [];
-    h.hello();
+    await flush();
+    await h.connect();
     const context = h.posts[0]?.message.context as Record<string, unknown>;
     expect(context.fonts).toBeUndefined();
     expect(context).toMatchObject({
+      dataStore: `session:${SID}`,
+      agentStore: `session:${SID}`,
+      snippetId: "picker",
+      instanceId: "inst-00000001",
+      revision: 1,
       previousRevision: null,
+      state: null,
+      controls: [],
+      action: null,
       actions: [
         { id: "go", label: "Go" },
         { id: "danger", label: "Danger" },
       ],
     });
-    const h2 = harness();
-    await vi.advanceTimersByTimeAsync(0);
+    const h2 = harness({ manifest: manifest({ store: "page:films" }) });
+    await flush();
     h2.fonts.value = [{ family: "Spur Mono", weight: "400", data: new ArrayBuffer(4) }];
-    h2.hello();
-    expect((h2.posts[0]?.message.context as Record<string, unknown>).fonts).toHaveLength(1);
+    await h2.connect();
+    const context2 = h2.posts[0]?.message.context as Record<string, unknown>;
+    expect(context2.fonts).toHaveLength(1);
+    expect(context2).toMatchObject({ dataStore: "page:films", agentStore: `session:${SID}` });
   });
 
   it("errors with hello_timeout after 10 s without an accepted hello", async () => {
     const h = harness();
-    await vi.advanceTimersByTimeAsync(0);
+    await flush();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(h.host.getState()).toMatchObject({ phase: "error", error: "hello_timeout" });
   });
 
   it("shows hello_timeout when the SDK fetch fails, and Reload refetches the SDK", async () => {
     const bad = harness({ sdkFail: true });
-    await vi.advanceTimersByTimeAsync(0);
+    await flush();
     expect(bad.host.getState()).toMatchObject({
       phase: "error",
       error: "hello_timeout",
       sdkSource: null,
     });
-    expect(bad.host.getState().phase).not.toBe("connecting");
     bad.sdk.fail = false;
     bad.host.reload(false);
     expect(bad.sdkLoads).toEqual([false]);
     bad.host.reload(true);
     expect(bad.sdkLoads).toEqual([false, true]);
-    await vi.advanceTimersByTimeAsync(0);
+    await flush();
     expect(bad.host.getState()).toMatchObject({ phase: "connecting", sdkSource: "sdk-source" });
-    expect(bad.sent).toHaveLength(0);
   });
 
   it("the SDK loader aborts a stalled fetch after 10 s, caches success and refetches on demand", async () => {
@@ -409,8 +285,7 @@ describe("handshake and teardown", () => {
       }
       return Promise.resolve(`sdk-${calls}`);
     });
-    const stalled = load(false);
-    const outcome = stalled.then(
+    const outcome = load(false).then(
       () => "ok",
       () => "rejected",
     );
@@ -441,20 +316,21 @@ describe("handshake and teardown", () => {
     expect(port.closed).toBe(true);
   });
 
-  it("drops port messages over 128 KiB in UTF-8 bytes and counts them toward flood", async () => {
+  it("drops port messages over 128 KiB in UTF-8 bytes", async () => {
     const h = harness();
     const port = await ready(h);
     port.emit({
       type: "invoke",
       callId: "big",
-      actionId: "go",
+      action: "go",
       payload: { note: "日".repeat(44_000) },
     });
+    await flush();
     expect(port.ofType("invoke-result")).toHaveLength(0);
-    expect(h.sent).toHaveLength(0);
+    expect(sent(h)).toBe(0);
   });
 
-  it("counts unserializable messages and ignores malformed ones", async () => {
+  it("ignores malformed messages", async () => {
     const h = harness();
     const port = await ready(h);
     const cyclic: Record<string, unknown> = { type: "resize" };
@@ -462,6 +338,7 @@ describe("handshake and teardown", () => {
     port.emit(cyclic);
     port.emit("junk");
     port.emit({ type: "unknown" });
+    port.emit({ type: "state-load", callId: "x" });
     expect(h.host.getState().phase).toBe("connected");
   });
 
@@ -476,15 +353,16 @@ describe("handshake and teardown", () => {
     expect(h.host.getState().height).toBe(301);
   });
 
-  it("Reload on hello_timeout, navigated and flood opens a new channel with a new nonce, zero sends, gates untouched", async () => {
+  it("Reload after navigated opens a new channel with a new nonce, zero sends, gates untouched", async () => {
     const h = harness();
     await ready(h);
     h.invoke("go", { note: "a" });
+    await flush();
     const before = [
       h.storage.data.get(recordKey(SID, "picker")),
       h.storage.data.get(budgetKey(SID)),
     ];
-    expect(h.sent).toHaveLength(1);
+    expect(sent(h)).toBe(1);
     h.host.frameLoaded();
     h.host.frameLoaded();
     const nonce = h.host.getState().nonce;
@@ -493,78 +371,121 @@ describe("handshake and teardown", () => {
     h.host.reload(true);
     expect(h.host.getState().phase).toBe("connecting");
     expect(h.host.getState().nonce).not.toBe(nonce);
-    h.hello();
+    await h.connect();
     expect(h.ports).toHaveLength(2);
-    expect(h.sent).toHaveLength(1);
-    const after = [
+    expect(sent(h)).toBe(1);
+    expect([
       h.storage.data.get(recordKey(SID, "picker")),
       h.storage.data.get(budgetKey(SID)),
-    ];
-    expect(JSON.parse(after[1] ?? "{}").unconfirmed).toBe(
-      JSON.parse(before[1] ?? "{}").unconfirmed,
-    );
-    expect(JSON.parse(after[0] ?? "{}").unconfirmedRevision).toBe(
-      JSON.parse(before[0] ?? "{}").unconfirmedRevision,
-    );
+    ]).toEqual(before);
   });
 
-  it("does not offer Reload on a protocol mismatch", async () => {
+  it("a protocol 1 hello fails with protocol and offers no Reload", async () => {
     const h = harness();
-    await vi.advanceTimersByTimeAsync(0);
-    h.host.onWindowMessage(
-      { type: "spur:hello", protocolVersion: 9, nonce: h.host.getState().nonce },
-      true,
-    );
+    await flush();
+    h.hello(undefined, 1);
     expect(h.host.getState()).toMatchObject({ phase: "error", error: "protocol" });
     h.host.reload(true);
     expect(h.host.getState().phase).toBe("error");
     expect(h.ports).toHaveLength(0);
   });
+
+  it("fails with protocol, without connecting, when the state doc id cannot be hashed", async () => {
+    vi.stubGlobal("crypto", { subtle: undefined });
+    try {
+      const h = harness();
+      await flush();
+      h.hello();
+      await flush();
+      expect(h.host.getState()).toMatchObject({ phase: "error", error: "protocol" });
+      expect(h.posts).toHaveLength(0);
+      expect(h.ports).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("agent events", () => {
+  it("connects with the agent status and posts agent-event only when the mapped state changes", async () => {
+    const h = harness();
+    h.host.updateSession({ canSend: true, state: "waiting" });
+    const port = await ready(h);
+    expect(h.posts[0]?.message.context).toMatchObject({
+      agentStatus: { state: "idle", sessionId: SID },
+    });
+    const events = () => port.toFrame.filter((message) => message.type === "agent-event");
+    h.host.updateSession({ canSend: true, state: "needs_input" });
+    expect(events()).toHaveLength(0);
+    h.host.updateSession({ canSend: true, state: "working" });
+    h.host.updateSession({ canSend: true, state: "working" });
+    h.host.updateSession({ canSend: false, state: "waiting", status: "budget_limited" });
+    h.host.updateSession({ canSend: false, state: "killed", status: "killed" });
+    expect(events().map((message) => message.status)).toEqual([
+      { state: "working", sessionId: SID },
+      { state: "rate_limited", sessionId: SID },
+      { state: "error", sessionId: SID },
+    ]);
+  });
+
+  it.each(["completed", "killed", "errored"] as const)(
+    "maps a %s session to error whatever its state",
+    async (status) => {
+      const h = harness();
+      h.host.updateSession({ canSend: true, state: "waiting", status: "running" });
+      const port = await ready(h);
+      h.host.updateSession({ canSend: false, state: "waiting", status });
+      expect(port.toFrame.filter((message) => message.type === "agent-event")).toEqual([
+        expect.objectContaining({ status: { state: "error", sessionId: SID } }),
+      ]);
+    },
+  );
 });
 
 describe("rejections send nothing", () => {
   it("returns typed results with zero sends", async () => {
     const h = harness();
-    // not connected
-    expect(h.host.getState().phase).toBe("loading");
-    await ready(h);
-    const cases: Array<[string, string, unknown, string]> = [
-      ["unknown", "nope", {}, "unknown_action"],
-      ["invalid", "go", { note: 5 }, "invalid_payload"],
-      ["extra", "go", { note: "a", x: 1 }, "invalid_payload"],
+    const port = await ready(h);
+    const cases: Array<[string, unknown, string]> = [
+      ["nope", {}, "unknown_action"],
+      ["go", { note: 5 }, "invalid_payload"],
+      ["go", { note: "a", x: 1 }, "invalid_payload"],
     ];
-    for (const [, actionId, payload, reason] of cases) {
-      expect(h.invoke(actionId, payload)).toMatchObject({ ok: false, reason });
+    for (const [action, payload, reason] of cases) {
+      const callId = h.invoke(action, payload);
+      expect(port.reply("invoke-result", callId)).toMatchObject({ ok: false, reason });
     }
     const invalid = h.invoke("go", { note: 5 });
-    expect(invalid?.issues).toEqual([{ path: "/note", code: "type" }]);
-    expect(h.sent).toHaveLength(0);
+    expect(port.reply("invoke-result", invalid)?.issues).toEqual([{ path: "/note", code: "type" }]);
+    expect(sent(h)).toBe(0);
   });
 
   it("session_unavailable posts availability and rejects", async () => {
     const h = harness();
     const port = await ready(h);
     h.session({ canSend: false });
-    expect(port.ofType("availability")).toHaveLength(1);
     expect(port.ofType("availability")[0]?.availability).toEqual({
       canInvoke: false,
       reason: "session_unavailable",
     });
-    expect(h.invoke("go", { note: "a" })).toMatchObject({
+    const callId = h.invoke("go", { note: "a" });
+    expect(port.reply("invoke-result", callId)).toMatchObject({
       ok: false,
       reason: "session_unavailable",
     });
     h.session({ canSend: true });
     expect(port.ofType("availability")).toHaveLength(2);
-    expect(h.sent).toHaveLength(0);
+    expect(sent(h)).toBe(0);
   });
 
-  it("busy while an action is in flight or a confirm is pending", async () => {
+  it("busy while an action is in flight", async () => {
     const h = harness();
-    await ready(h);
-    expect(h.invoke("go", { note: "a" })).toMatchObject({ ok: true });
-    expect(h.invoke("go", { note: "b" })).toMatchObject({ ok: false, reason: "busy" });
-    expect(h.sent).toHaveLength(1);
+    const port = await ready(h);
+    h.invoke("go", { note: "a" });
+    await flush();
+    const second = h.invoke("go", { note: "b" });
+    expect(port.reply("invoke-result", second)).toMatchObject({ ok: false, reason: "busy" });
+    expect(sent(h)).toBe(1);
   });
 
   it("not_connected after teardown", async () => {
@@ -572,144 +493,157 @@ describe("rejections send nothing", () => {
     const port = await ready(h);
     h.host.frameLoaded();
     h.host.frameLoaded();
-    port.emit({ type: "invoke", callId: "x", actionId: "go", payload: { note: "a" } });
-    expect(h.sent).toHaveLength(0);
+    port.emit({ type: "invoke", callId: "x", action: "go", payload: { note: "a" } });
+    await flush();
+    expect(sent(h)).toBe(0);
   });
 });
 
 describe("gates", () => {
-  it("G2: no focus signal asks for confirm, zero sends", async () => {
+  it("no focus signal asks for confirm, zero sends", async () => {
     const h = harness();
-    await vi.advanceTimersByTimeAsync(0);
-    h.connect();
+    await flush();
+    await h.connect();
     h.invoke("go", { note: "a" }, "c1");
-    expect(h.sent).toHaveLength(0);
+    await flush();
+    expect(sent(h)).toBe(0);
     expect(h.host.getState().confirm).toMatchObject({ reason: "no_focus", actionId: "go" });
     expect(h.host.getState().action?.status).toBe("awaiting_confirm");
     expect(h.port().ofType("invoke-result")).toHaveLength(0);
   });
 
-  it("G2 passes by the blur path and by the hasFocus path", async () => {
+  it("passes by the blur path and by the hasFocus path", async () => {
     const blur = harness();
-    await vi.advanceTimersByTimeAsync(0);
-    blur.connect();
+    await flush();
+    await blur.connect();
     blur.host.noteFrameFocus();
-    expect(blur.invoke("go", { note: "a" })).toMatchObject({ ok: true });
-    expect(blur.sent).toHaveLength(1);
+    blur.invoke("go", { note: "a" });
+    await flush();
+    expect(sent(blur)).toBe(1);
 
     const focus = harness();
     await ready(focus);
-    expect(focus.invoke("go", { note: "a" })).toMatchObject({ ok: true });
-    expect(focus.sent).toHaveLength(1);
+    focus.invoke("go", { note: "a" });
+    await flush();
+    expect(sent(focus)).toBe(1);
   });
 
-  it("G2 blur flag resets with each mounted document", async () => {
+  it("the blur flag resets with each mounted document", async () => {
     const h = harness();
-    await vi.advanceTimersByTimeAsync(0);
-    h.connect();
+    await flush();
+    await h.connect();
     h.host.noteFrameFocus();
     h.host.applyFile(manifest({ revision: 2 }), "<html>b</html>");
-    h.connect();
+    await h.connect();
     h.invoke("go", { note: "a" });
     expect(h.host.getState().confirm?.reason).toBe("no_focus");
-    expect(h.sent).toHaveLength(0);
+    expect(sent(h)).toBe(0);
   });
 
-  it("G3: second unconfirmed invoke on one revision needs confirm, also after the first finishes", async () => {
+  it("second unconfirmed invoke on one revision needs confirm, also after a controller re-create", async () => {
     const h = harness();
-    h.sendOutcome.value = () => Promise.resolve({ kind: "response", status: 409 });
     await ready(h);
     h.invoke("go", { note: "a" });
-    await vi.advanceTimersByTimeAsync(0);
-    expect(h.host.getState().action?.status).toBe("error");
+    await flush();
+    const id = h.host.getState().action?.id ?? "";
+    h.daemon.complete(id, { status: "done", result: { ok: 1 } });
+    (h.poller as FakePoller).emit(`session:${SID}`, {
+      type: "changes",
+      changes: [{ seq: 1, collection: "_actions", id, op: "set", rev: 2 }],
+    });
+    await flush();
+    expect(h.host.getState().action?.status).toBe("completed");
     h.invoke("go", { note: "b" }, "c9");
     expect(h.host.getState().confirm?.reason).toBe("repeat_in_revision");
-    expect(h.sent).toHaveLength(1);
-    // survives a controller re-create on the same storage
+    expect(sent(h)).toBe(1);
     const again = h.remount();
     await ready(again);
     again.invoke("go", { note: "c" }, "c10");
     expect(again.host.getState().confirm?.reason).toBe("repeat_in_revision");
-    expect(again.sent).toHaveLength(0);
+    expect(sent(again)).toBe(1);
   });
 
-  it("G4: the 11th consecutive unconfirmed send needs confirm, also after controller re-create", async () => {
+  it("the 11th consecutive unconfirmed send needs confirm, also after controller re-create", async () => {
     const storage = new MemoryStorage();
     let h = harness({ storage });
     await ready(h);
     for (let revision = 1; revision <= 10; revision += 1) {
       if (revision > 1) {
         h.host.applyFile(manifest({ revision }), `<html>${revision}</html>`);
-        h.connect();
+        await h.connect();
       }
-      expect(h.invoke("go", { note: "a" })).toMatchObject({ ok: true });
-      await vi.advanceTimersByTimeAsync(0);
+      h.invoke("go", { note: "a" });
+      await flush();
+      const id = h.host.getState().action?.id ?? "";
+      h.daemon.complete(id, { status: "done" });
+      (h.poller as FakePoller).emit(`session:${SID}`, { type: "reset" });
+      await flush();
     }
-    expect(h.sent).toHaveLength(10);
+    expect(sent(h)).toBe(10);
     h.host.applyFile(manifest({ revision: 11 }), "<html>11</html>");
-    h.connect();
+    await h.connect();
     h.invoke("go", { note: "a" }, "c11");
     expect(h.host.getState().confirm?.reason).toBe("budget");
-    expect(h.sent).toHaveLength(10);
+    expect(sent(h)).toBe(10);
 
     h = harness({ storage, manifest: manifest({ revision: 12 }) });
     await ready(h);
     h.invoke("go", { note: "a" }, "c12");
     expect(h.host.getState().confirm?.reason).toBe("budget");
-    expect(h.sent).toHaveLength(0);
+    expect(sent(h)).toBe(0);
   });
 
   it("budget resets only on a trusted confirm click, never by time", async () => {
     const h = harness();
     await ready(h);
     h.invoke("go", { note: "a" });
+    await flush();
     expect(readSnippetBudget(h.storage, SID)).toMatchObject({ value: { unconfirmed: 1 } });
     await vi.advanceTimersByTimeAsync(10 * 24 * 60 * 60 * 1000);
     expect(readSnippetBudget(h.storage, SID)).toMatchObject({ value: { unconfirmed: 1 } });
-    h.host.applyFile(manifest({ revision: 2 }), "<html>2</html>");
-    h.connect();
+    h.daemon.complete(h.host.getState().action?.id ?? "", { status: "done" });
+    (h.poller as FakePoller).emit(`session:${SID}`, { type: "reset" });
+    await flush();
     h.focused.value = false;
-    h.session();
-    h.host.applyFile(manifest({ revision: 3 }), "<html>3</html>");
-    h.connect();
+    h.host.applyFile(manifest({ revision: 2 }), "<html>2</html>");
+    await h.connect();
     h.invoke("go", { note: "b" });
     expect(h.host.getState().confirm?.reason).toBe("no_focus");
     h.host.confirmSend(false);
     expect(h.host.getState().confirm).not.toBeNull();
-    expect(h.sent).toHaveLength(1);
     expect(readSnippetBudget(h.storage, SID)).toMatchObject({ value: { unconfirmed: 1 } });
     h.host.confirmSend(true);
-    expect(h.sent).toHaveLength(2);
+    await flush();
+    expect(sent(h)).toBe(2);
     expect(readSnippetBudget(h.storage, SID)).toMatchObject({ value: { unconfirmed: 0 } });
   });
 
   it("Discard resolves declined with zero sends and restores the previous action", async () => {
     const h = harness();
-    await vi.advanceTimersByTimeAsync(0);
-    h.connect();
+    await flush();
+    await h.connect();
     h.invoke("go", { note: "a" }, "c1");
     h.host.confirmDiscard(false);
     expect(h.host.getState().confirm).not.toBeNull();
     h.host.confirmDiscard(true);
-    expect(h.port().ofType("invoke-result")[0]).toMatchObject({
-      callId: "c1",
-      ok: false,
-      reason: "declined",
-    });
+    expect(h.port().reply("invoke-result", "c1")).toMatchObject({ ok: false, reason: "declined" });
     expect(h.host.getState()).toMatchObject({ confirm: null, action: null });
-    expect(h.sent).toHaveLength(0);
+    expect(sent(h)).toBe(0);
   });
 
-  it("trusted Send dispatches once and reports ok to the snippet", async () => {
+  it("trusted Send dispatches once; the snippet's promise waits for the final status", async () => {
     const h = harness();
-    await vi.advanceTimersByTimeAsync(0);
-    h.connect();
+    await flush();
+    await h.connect();
     h.invoke("go", { note: "a" }, "c1");
     h.host.confirmSend(true);
-    expect(h.sent).toHaveLength(1);
-    expect(h.port().ofType("invoke-result")[0]).toMatchObject({ callId: "c1", ok: true });
+    await flush();
+    expect(sent(h)).toBe(1);
+    expect(h.host.getState().action).toMatchObject({ status: "queued", confirmReason: "no_focus" });
+    expect(h.port().reply("invoke-result", "c1")).toBeUndefined();
     h.host.confirmSend(true);
-    expect(h.sent).toHaveLength(1);
+    await flush();
+    expect(sent(h)).toBe(1);
   });
 
   it("a declared confirm action asks even with focus", async () => {
@@ -717,310 +651,49 @@ describe("gates", () => {
     await ready(h);
     h.invoke("danger", { note: "a" });
     expect(h.host.getState().confirm?.reason).toBe("declared");
-    expect(h.sent).toHaveLength(0);
+    expect(sent(h)).toBe(0);
   });
 
-  it("revision replaced while awaiting confirm resolves stale", async () => {
+  it("revision replaced or dispose while awaiting confirm resolves stale", async () => {
     const h = harness();
-    await vi.advanceTimersByTimeAsync(0);
-    const port = h.connect();
+    await flush();
+    const port = await h.connect();
     h.invoke("go", { note: "a" }, "c1");
     h.host.applyFile(manifest({ revision: 2 }), "<html>2</html>");
-    expect(port.ofType("invoke-result")[0]).toMatchObject({
-      callId: "c1",
-      ok: false,
-      reason: "stale",
-    });
+    expect(port.reply("invoke-result", "c1")).toMatchObject({ ok: false, reason: "stale" });
     expect(h.host.getState().confirm).toBeNull();
-    expect(h.sent).toHaveLength(0);
+
+    const d = harness();
+    await flush();
+    const dPort = await d.connect();
+    d.invoke("go", { note: "a" }, "c2");
+    d.host.dispose();
+    expect(dPort.reply("invoke-result", "c2")).toMatchObject({ reason: "stale" });
+    expect(sent(h) + sent(d)).toBe(0);
   });
 
-  it("dispose while awaiting confirm resolves stale", async () => {
-    const h = harness();
-    await vi.advanceTimersByTimeAsync(0);
-    const port = h.connect();
-    h.invoke("go", { note: "a" }, "c1");
-    h.host.dispose();
-    expect(port.ofType("invoke-result")[0]).toMatchObject({ reason: "stale" });
-  });
-
-  it("storage failure routes every invoke to confirm with zero unconfirmed sends", async () => {
+  it("storage failure routes every invoke to confirm", async () => {
     const h = harness();
     await ready(h);
     h.storage.failGet = true;
     h.invoke("go", { note: "a" }, "c1");
     expect(h.host.getState().confirm?.reason).toBe("storage_unavailable");
-    expect(h.sent).toHaveLength(0);
-  });
-
-  it("a G3/G4 write failure before the POST confirms instead of sending", async () => {
-    const h = harness();
-    await ready(h);
-    h.storage.failSet = (key) => key.startsWith("spur:snippet-budget");
-    h.invoke("go", { note: "a" }, "c1");
-    expect(h.host.getState().confirm?.reason).toBe("storage_unavailable");
-    expect(h.sent).toHaveLength(0);
     const second = harness();
     await ready(second);
-    second.storage.failSet = (key) => key.startsWith("spur:snippet:v1");
+    second.storage.failSet = (key) => key.startsWith("spur:snippet-budget");
     second.invoke("go", { note: "a" }, "c2");
     expect(second.host.getState().confirm?.reason).toBe("storage_unavailable");
-    expect(second.sent).toHaveLength(0);
+    const third = harness();
+    await ready(third);
+    third.storage.failSet = (key) => key.startsWith("spur:snippet:v2");
+    third.invoke("go", { note: "a" }, "c3");
+    expect(third.host.getState().confirm?.reason).toBe("storage_unavailable");
+    await flush();
+    expect(sent(h) + sent(second) + sent(third)).toBe(0);
   });
 });
 
-describe("lifecycle", () => {
-  it("walks submitting -> accepted -> queued -> processing -> completed", async () => {
-    const h = harness();
-    const port = await ready(h);
-    h.invoke("go", { note: "a" });
-    expect(h.host.getState().action?.status).toBe("submitting");
-    await vi.advanceTimersByTimeAsync(0);
-    const action = h.host.getState().action!;
-    expect(action.status).toBe("accepted");
-    h.session({ queuedMessages: [action.prompt] });
-    expect(h.host.getState().action?.status).toBe("queued");
-    h.session({
-      messages: [{ role: "user", text: `"requestId":"${action.requestId}"`, timestampMs: 1 }],
-    });
-    expect(h.host.getState().action?.status).toBe("processing");
-    h.host.applyFile(
-      manifest({ revision: 2, respondsToRequestId: action.requestId }),
-      "<html>2</html>",
-    );
-    expect(h.host.getState().action?.status).toBe("completed");
-    expect(port.ofType("action").map((m) => (m.action as { status: string }).status)).toEqual([
-      "submitting",
-      "accepted",
-      "queued",
-      "processing",
-    ]);
-    // the revision swap mounts a new document; it learns the outcome from connect
-    h.connect();
-    expect(h.posts.at(-1)?.message.context).toMatchObject({ action: { status: "completed" } });
-  });
-
-  it("a 4xx is an error, 5xx and network failure are delivery_unknown", async () => {
-    for (const [outcome, status, httpStatus] of [
-      [{ kind: "response", status: 409 }, "error", 409],
-      [{ kind: "response", status: 502 }, "delivery_unknown", 502],
-      [{ kind: "failure" }, "delivery_unknown", undefined],
-    ] as const) {
-      const h = harness();
-      h.sendOutcome.value = () => Promise.resolve(outcome);
-      await ready(h);
-      h.invoke("go", { note: "a" });
-      await vi.advanceTimersByTimeAsync(0);
-      expect(h.host.getState().action?.status).toBe(status);
-      expect(h.host.getState().action?.httpStatus).toBe(httpStatus);
-    }
-  });
-
-  it("a rejected send promise is delivery_unknown", async () => {
-    const h = harness();
-    h.sendOutcome.value = () => Promise.reject(new Error("boom"));
-    await ready(h);
-    h.invoke("go", { note: "a" });
-    await vi.advanceTimersByTimeAsync(0);
-    expect(h.host.getState().action?.status).toBe("delivery_unknown");
-  });
-
-  it("reload while submitting restores as delivery_unknown", async () => {
-    const h = harness();
-    h.sendOutcome.value = () => new Promise<SnippetSendOutcome>(() => undefined);
-    await ready(h);
-    h.invoke("go", { note: "a" });
-    expect(h.host.getState().action?.status).toBe("submitting");
-    const again = h.remount();
-    expect(again.host.getState().action?.status).toBe("delivery_unknown");
-    expect(readSnippetRecord(h.storage, SID, "picker")).toMatchObject({
-      value: { action: { status: "delivery_unknown" } },
-    });
-  });
-
-  it("times out 15 minutes after accept and a late matching revision still completes", async () => {
-    const h = harness();
-    await ready(h);
-    h.invoke("go", { note: "a" });
-    await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
-    h.session();
-    expect(h.host.getState().action?.status).toBe("timeout");
-    const id = h.host.getState().action!.requestId;
-    h.host.applyFile(manifest({ revision: 2, respondsToRequestId: id }), "<html>2</html>");
-    expect(h.host.getState().action?.status).toBe("completed");
-  });
-
-  it("Retry from the host button sends a new requestId with retryOf, resets the budget, needs a trusted click", async () => {
-    const h = harness();
-    h.sendOutcome.value = () => Promise.resolve({ kind: "response", status: 409 });
-    await ready(h);
-    h.invoke("go", { note: "a" });
-    await vi.advanceTimersByTimeAsync(0);
-    const failed = h.host.getState().action!;
-    expect(failed.status).toBe("error");
-    expect(readSnippetBudget(h.storage, SID)).toMatchObject({ value: { unconfirmed: 1 } });
-    h.sendOutcome.value = () => Promise.resolve({ kind: "response", status: 200 });
-    h.host.retry(false);
-    expect(h.sent).toHaveLength(1);
-    h.host.retry(true);
-    expect(h.sent).toHaveLength(2);
-    const next = h.host.getState().action!;
-    expect(next.requestId).not.toBe(failed.requestId);
-    expect(next.retryOf).toBe(failed.requestId);
-    expect(h.sent[1]).toContain(`"retryOf":"${failed.requestId}"`);
-    expect(readSnippetBudget(h.storage, SID)).toMatchObject({ value: { unconfirmed: 0 } });
-  });
-
-  it.each([
-    [{ kind: "response", status: 409 }, "error"],
-    [{ kind: "failure" }, "delivery_unknown"],
-  ] as const)(
-    "a new instance retires the prior %j action: no Retry, zero POSTs (D8)",
-    async (outcome, status) => {
-      const h = harness();
-      h.sendOutcome.value = () => Promise.resolve(outcome);
-      await ready(h);
-      h.invoke("go", { note: "old payload" });
-      await vi.advanceTimersByTimeAsync(0);
-      expect(h.host.getState().action?.status).toBe(status);
-      expect(h.sent).toHaveLength(1);
-      h.host.applyFile(manifest({ instanceId: "inst-00000002", revision: 1 }), "<html>new</html>");
-      expect(h.host.getState().action).toBeNull();
-      expect(readSnippetRecord(h.storage, SID, "picker")).toMatchObject({
-        value: { instanceId: "inst-00000002", action: null },
-      });
-      h.connect();
-      h.host.retry(true);
-      expect(h.sent).toHaveLength(1);
-    },
-  );
-
-  it.each([[{ kind: "response", status: 409 }], [{ kind: "failure" }]] as const)(
-    "a send settling after a new instance resolves replaced, never retryable: %j (D7)",
-    async (outcome) => {
-      const h = harness();
-      let settle!: () => void;
-      h.sendOutcome.value = () =>
-        new Promise<SnippetSendOutcome>((resolve) => {
-          settle = () => resolve(outcome);
-        });
-      await ready(h);
-      h.invoke("go", { note: "old payload" });
-      expect(h.host.getState().action?.status).toBe("submitting");
-      h.host.applyFile(manifest({ instanceId: "inst-00000002", revision: 1 }), "<html>new</html>");
-      settle();
-      await vi.advanceTimersByTimeAsync(0);
-      expect(h.host.getState().action?.status).toBe("replaced");
-      expect(readSnippetRecord(h.storage, SID, "picker")).toMatchObject({
-        value: { instanceId: "inst-00000002", action: { status: "replaced" } },
-      });
-      h.connect();
-      h.host.retry(true);
-      expect(h.sent).toHaveLength(1);
-    },
-  );
-
-  it("Retry refuses an action stamped with another instance, restored records included", async () => {
-    const h = harness();
-    h.sendOutcome.value = () => Promise.resolve({ kind: "response", status: 409 });
-    await ready(h);
-    h.invoke("go", { note: "old payload" });
-    await vi.advanceTimersByTimeAsync(0);
-    const stored = readSnippetRecord(h.storage, SID, "picker");
-    if (!stored.ok || !stored.value) throw new Error("no record");
-    const next = manifest({ instanceId: "inst-00000002", revision: 1 });
-    writeSnippetRecord(h.storage, SID, "picker", { ...stored.value, instanceId: "inst-00000002" });
-    const again = h.remount(next);
-    expect(again.host.getState().action).toMatchObject({
-      status: "error",
-      instanceId: "inst-00000001",
-    });
-    await ready(again);
-    again.host.retry(true);
-    expect(again.sent).toHaveLength(0);
-    const requestId = again.host.getState().action!.requestId;
-    again.port().emit({ type: "invoke", callId: "c1", actionId: "go", retryOf: requestId });
-    expect(again.sent).toHaveLength(0);
-    expect(again.port().ofType("invoke-result").at(-1)).toMatchObject({
-      ok: false,
-      reason: "stale",
-    });
-  });
-
-  it("a higher revision in the same instance keeps a failed action retryable", async () => {
-    const h = harness();
-    h.sendOutcome.value = () => Promise.resolve({ kind: "response", status: 409 });
-    await ready(h);
-    h.invoke("go", { note: "a" });
-    await vi.advanceTimersByTimeAsync(0);
-    h.host.applyFile(manifest({ revision: 2 }), "<html>2</html>");
-    expect(h.host.getState().action?.status).toBe("error");
-    h.connect();
-    h.host.retry(true);
-    expect(h.sent).toHaveLength(2);
-  });
-
-  it("a new instance voids a pending confirm and leaves no action to retry", async () => {
-    const h = harness();
-    h.sendOutcome.value = () => Promise.resolve({ kind: "response", status: 409 });
-    await ready(h);
-    h.invoke("go", { note: "a" });
-    await vi.advanceTimersByTimeAsync(0);
-    h.invoke("go", { note: "b" });
-    await vi.advanceTimersByTimeAsync(0);
-    expect(h.host.getState().confirm).not.toBeNull();
-    h.host.applyFile(manifest({ instanceId: "inst-00000002", revision: 1 }), "<html>new</html>");
-    expect(h.host.getState()).toMatchObject({ confirm: null, action: null });
-    h.connect();
-    h.host.retry(true);
-    expect(h.sent).toHaveLength(1);
-  });
-
-  it("SDK retry re-enters the gates as a new invoke with retryOf", async () => {
-    const h = harness();
-    h.sendOutcome.value = () => Promise.resolve({ kind: "response", status: 409 });
-    const port = await ready(h);
-    h.invoke("go", { note: "a" });
-    await vi.advanceTimersByTimeAsync(0);
-    const failed = h.host.getState().action!;
-    h.focused.value = false;
-    port.emit({
-      type: "invoke",
-      callId: "r1",
-      actionId: failed.actionId,
-      retryOf: failed.requestId,
-    });
-    expect(h.host.getState().confirm).toMatchObject({
-      reason: "no_focus",
-      retryOf: failed.requestId,
-    });
-    expect(h.sent).toHaveLength(1);
-    port.emit({ type: "invoke", callId: "r2", actionId: "go", retryOf: "req-unknown" });
-    expect(port.ofType("invoke-result").find((m) => m.callId === "r2")).toMatchObject({
-      ok: false,
-    });
-  });
-
-  it("a chat answer completes a processing action, clears busy and allows the next invoke", async () => {
-    const h = harness();
-    await ready(h);
-    h.invoke("go", { note: "a" });
-    await vi.advanceTimersByTimeAsync(0);
-    const id = h.host.getState().action!.requestId;
-    const user = { role: "user" as const, text: `"requestId":"${id}"`, timestampMs: 5 };
-    h.session({ messages: [user] });
-    expect(h.host.getState().action?.status).toBe("processing");
-    h.session({
-      messages: [user, { role: "assistant", text: "answered", timestampMs: 9 }],
-      state: "waiting",
-    });
-    expect(h.host.getState().action?.status).toBe("completed");
-    h.host.applyFile(manifest({ revision: 2 }), "<html>2</html>");
-    h.connect();
-    expect(h.invoke("go", { note: "b" })).toMatchObject({ ok: true });
-  });
-
+describe("file changes", () => {
   it("an equal-revision text change posts one availability revision_conflict and rejects invokes; a higher revision restores", async () => {
     const h = harness();
     const port = await ready(h);
@@ -1032,54 +705,31 @@ describe("lifecycle", () => {
       canInvoke: false,
       reason: "revision_conflict",
     });
-    expect(h.invoke("go", { note: "a" })).toMatchObject({ ok: false, reason: "revision_conflict" });
-    expect(h.sent).toHaveLength(0);
+    const callId = h.invoke("go", { note: "a" });
+    expect(port.reply("invoke-result", callId)).toMatchObject({ ok: false, reason: "stale" });
     expect(h.host.getState().html).toBe("<html>a</html>");
     expect(h.host.applyFile(manifest({ revision: 2 }), "<html>2</html>")).toBe("mounted");
     expect(h.host.getState()).toMatchObject({ conflict: false, availability: { canInvoke: true } });
+    expect(sent(h)).toBe(0);
   });
 
-  it("rejects a lower revision and resets state on a new instance", async () => {
+  it("refuses a lower revision; previousRevision tracks the instance", async () => {
     const h = harness({ manifest: manifest({ revision: 3 }) });
     await ready(h);
     expect(h.host.applyFile(manifest({ revision: 2 }), "<html>old</html>")).toBe("lower_revision");
     expect(h.host.getState().manifest.revision).toBe(3);
-    h.port().emit({
-      type: "state-set",
-      callId: "s1",
-      app: { k: 1 },
-      controls: [{ id: "c", value: "v" }],
-    });
-    expect(readSnippetRecord(h.storage, SID, "picker")).toMatchObject({
-      value: { state: { app: { k: 1 } } },
-    });
     h.host.applyFile(manifest({ revision: 4 }), "<html>4</html>");
-    h.connect();
-    expect(h.posts.at(-1)?.message.context).toMatchObject({ previousRevision: 3, state: { k: 1 } });
+    await h.connect();
+    expect(h.posts.at(-1)?.message.context).toMatchObject({ previousRevision: 3 });
     h.host.applyFile(manifest({ instanceId: "inst-00000002", revision: 1 }), "<html>new</html>");
-    h.connect();
-    expect(h.posts.at(-1)?.message.context).toMatchObject({
-      previousRevision: null,
-      state: null,
-      controls: [],
-    });
+    await h.connect();
+    expect(h.posts.at(-1)?.message.context).toMatchObject({ previousRevision: null });
   });
 
-  it("state-set persists, acks, and rejects over 64 KiB", async () => {
+  it("fullscreen request needs the interaction signal; escape exits", async () => {
     const h = harness();
-    const port = await ready(h);
-    port.emit({ type: "state-set", callId: "s1", app: { a: 1 }, controls: [] });
-    expect(port.ofType("state-ack")[0]).toMatchObject({ callId: "s1", ok: true });
-    port.emit({ type: "state-set", callId: "s2", app: "x".repeat(70_000), controls: [] });
-    expect(port.ofType("state-ack")[1]).toMatchObject({ callId: "s2", ok: false });
-    port.emit({ type: "state-set", callId: "s3", app: null, controls: "bad" });
-    expect(port.ofType("state-ack")[2]).toMatchObject({ ok: false });
-  });
-
-  it("fullscreen request needs the G2 signal; escape exits", async () => {
-    const h = harness();
-    await vi.advanceTimersByTimeAsync(0);
-    const port = h.connect();
+    await flush();
+    const port = await h.connect();
     port.emit({ type: "fullscreen", callId: "f1", open: true });
     expect(h.fullscreenRequests).toEqual([]);
     expect(port.ofType("fullscreen")[0]).toMatchObject({ callId: "f1", granted: false });
@@ -1096,17 +746,24 @@ describe("lifecycle", () => {
 describe("agent loop bound", () => {
   async function loop(focus: boolean): Promise<number> {
     const h = harness();
-    await vi.advanceTimersByTimeAsync(0);
+    await flush();
     h.focused.value = focus;
-    h.connect();
+    await h.connect();
     h.invoke("go", { note: "auto" });
+    await flush();
     for (let revision = 2; revision <= 51; revision += 1) {
+      const id = h.host.getState().action?.id;
+      if (id && h.daemon.actions.has(id)) {
+        h.daemon.complete(id, { status: "done" });
+        (h.poller as FakePoller).emit(`session:${SID}`, { type: "reset" });
+        await flush();
+      }
       h.host.applyFile(manifest({ revision }), `<html>${revision}</html>`);
-      h.connect();
+      await h.connect();
       h.invoke("go", { note: "auto" });
-      await vi.advanceTimersByTimeAsync(0);
+      await flush();
     }
-    return h.sent.length;
+    return sent(h);
   }
   it("sends nothing across 50 agent revisions when no focus signal exists", async () => {
     expect(await loop(false)).toBe(0);
@@ -1118,8 +775,8 @@ describe("agent loop bound", () => {
 
 describe("pending confirm is voided with its document and session state", () => {
   async function pending(h: Harness): Promise<FakePort> {
-    await vi.advanceTimersByTimeAsync(0);
-    const port = h.connect();
+    await flush();
+    const port = await h.connect();
     h.invoke("go", { note: "a" }, "c1");
     expect(h.host.getState().confirm?.reason).toBe("no_focus");
     return port;
@@ -1130,26 +787,13 @@ describe("pending confirm is voided with its document and session state", () => 
     const port = await pending(h);
     h.session({ canSend: false });
     expect(h.host.getState().confirm).toBeNull();
-    expect(port.ofType("invoke-result")[0]).toMatchObject({
-      callId: "c1",
-      ok: false,
-      reason: "stale",
-    });
+    expect(port.reply("invoke-result", "c1")).toMatchObject({ ok: false, reason: "stale" });
     h.host.confirmSend(true);
-    expect(h.sent).toHaveLength(0);
+    await flush();
+    expect(sent(h)).toBe(0);
   });
 
-  it("an equal-revision conflict drops the strip", async () => {
-    const h = harness();
-    const port = await pending(h);
-    expect(h.host.applyFile(manifest(), "<html>CHANGED</html>")).toBe("conflict");
-    expect(h.host.getState().confirm).toBeNull();
-    expect(port.ofType("invoke-result")[0]).toMatchObject({ reason: "stale" });
-    h.host.confirmSend(true);
-    expect(h.sent).toHaveLength(0);
-  });
-
-  it("flood, navigated and hello_timeout drop the strip; Reload does not bring it back", async () => {
+  it("flood and navigated drop the strip; Reload does not bring it back", async () => {
     for (const cause of ["flood", "navigated"] as const) {
       const h = harness();
       const port = await pending(h);
@@ -1162,25 +806,17 @@ describe("pending confirm is voided with its document and session state", () => 
       expect(h.host.getState()).toMatchObject({ phase: "error", error: cause, confirm: null });
       expect(h.host.getState().action).toBeNull();
       h.host.reload(true);
-      h.hello();
+      await h.connect();
       expect(h.host.getState().confirm).toBeNull();
       h.host.confirmSend(true);
-      expect(h.sent).toHaveLength(0);
+      await flush();
+      expect(sent(h)).toBe(0);
     }
-  });
-
-  it("a remount (Reload) clears a strip left by the previous document", async () => {
-    const h = harness();
-    await pending(h);
-    h.host.applyFile(manifest({ revision: 2 }), "<html>2</html>");
-    expect(h.host.getState().confirm).toBeNull();
-    h.host.confirmSend(true);
-    expect(h.sent).toHaveLength(0);
   });
 });
 
 describe("fullscreen, theme and focus on the controller", () => {
-  it("an error while fullscreen runs the exit path and clears the flag, so the toggle works after Reload", async () => {
+  it("an error while fullscreen runs the exit path and clears the flag", async () => {
     const h = harness();
     await ready(h);
     h.host.setFullscreen(true);
@@ -1196,47 +832,47 @@ describe("fullscreen, theme and focus on the controller", () => {
   it("themeChanged posts the current theme to a connected snippet only", async () => {
     const h = harness();
     h.host.themeChanged();
-    await vi.advanceTimersByTimeAsync(0);
+    await flush();
     h.host.themeChanged();
-    const port = h.connect();
+    const port = await h.connect();
     h.host.themeChanged();
     expect(port.ofType("theme")).toEqual([{ type: "theme", theme: THEME }]);
   });
 
   it("a window blur before connect does not count toward the interaction gate", async () => {
     const h = harness();
-    await vi.advanceTimersByTimeAsync(0);
+    await flush();
     h.host.noteFrameFocus();
-    h.connect();
+    await h.connect();
     h.invoke("go", { note: "a" }, "c1");
     expect(h.host.getState().confirm?.reason).toBe("no_focus");
-    expect(h.sent).toHaveLength(0);
   });
 
-  it("a retry that names no retryable action is refused as stale", async () => {
+  it("a retry with no retryable action is refused as stale", async () => {
     const h = harness();
     const port = await ready(h);
-    port.emit({ type: "invoke", callId: "r", actionId: "go", retryOf: "req-none" });
-    expect(port.ofType("invoke-result")[0]).toMatchObject({ ok: false, reason: "stale" });
-    expect(port.ofType("invoke-result")[0]?.issues).toBeUndefined();
+    port.emit({ type: "invoke", callId: "r", action: "go", retry: true });
+    await flush();
+    expect(port.reply("invoke-result", "r")).toMatchObject({ ok: false, reason: "stale" });
   });
 });
 
 describe("SDK load failure while fullscreen", () => {
-  it("routes through fail(): the exit path runs, the flag clears and the toggle works after Reload", async () => {
+  it("routes through fail(): the exit path runs and the flag clears", async () => {
     let rejectSdk: (error: Error) => void = () => undefined;
-    const storage = new MemoryStorage();
     const fullscreen: boolean[] = [];
+    const daemon = new FakeDaemon();
     const host = createSnippetHost(
       {
         sessionId: SID,
         postToFrame: () => undefined,
         createChannel: () => ({ hostPort: new FakePort(), framePort: {} }),
-        send: () => Promise.resolve({ kind: "response", status: 200 }),
+        request: (method, url, body) => daemon.handle(method, url, body),
+        poller: new FakePoller(),
         loadSdk: () => new Promise<string>((_resolve, reject) => (rejectSdk = reject)),
         getFonts: () => [],
         getTheme: () => THEME,
-        storage,
+        storage: new MemoryStorage(),
         now: () => Date.now(),
         uuid: () => "req-00000001",
         nonce: () => "nonce-x",
@@ -1245,17 +881,14 @@ describe("SDK load failure while fullscreen", () => {
       },
       { manifest: manifest(), html: "<html>a</html>" },
     );
-    expect(host.getState().phase).toBe("loading");
     host.setFullscreen(true);
     rejectSdk(new Error("sdk"));
-    await vi.advanceTimersByTimeAsync(0);
+    await flush();
     expect(host.getState()).toMatchObject({
       phase: "error",
       error: "hello_timeout",
       fullscreen: false,
     });
     expect(fullscreen).toEqual([false]);
-    host.setFullscreen(true);
-    expect(host.getState().fullscreen).toBe(true);
   });
 });

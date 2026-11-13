@@ -4,11 +4,12 @@
 
 import type { SpurSessionArtifact } from "@/lib/types";
 import {
+  isAllowedSnippetStore,
   isRecord,
   SNIPPET_ACTION_ID_RE,
   SNIPPET_ID_RE,
   SNIPPET_INSTANCE_ID_RE,
-  SNIPPET_REQUEST_ID_RE,
+  SNIPPET_PROTOCOL_VERSION,
   SNIPPET_RESERVED_RE,
   SNIPPET_TEXT_RE,
 } from "./snippet-protocol";
@@ -22,12 +23,13 @@ export interface SnippetActionDecl {
 }
 
 export interface SnippetManifest {
-  protocolVersion: 1;
+  protocolVersion: typeof SNIPPET_PROTOCOL_VERSION;
   snippetId: string;
   ownerSessionId: string;
   instanceId: string;
   revision: number;
-  respondsToRequestId?: string;
+  // Data store for spur.db and spur.state; absent = the owning session's store.
+  store?: string;
   title: string;
   actions: SnippetActionDecl[];
 }
@@ -83,6 +85,9 @@ export type ParsedSnippetManifest =
   | { ok: true; manifest: SnippetManifest }
   | { ok: false; error: SnippetManifestError };
 
+export const SNIPPET_V1_MESSAGE =
+  "Snippet protocol 1 is no longer supported; rewrite with protocolVersion 2";
+
 const MANIFEST_SCRIPT_SELECTOR = 'script[type="application/spur-snippet+json"]';
 const MANIFEST_KEYS = [
   "protocolVersion",
@@ -90,7 +95,7 @@ const MANIFEST_KEYS = [
   "ownerSessionId",
   "instanceId",
   "revision",
-  "respondsToRequestId",
+  "store",
   "title",
   "actions",
 ];
@@ -124,10 +129,13 @@ export function parseSnippetManifest(
     return invalid("", "manifest is not valid JSON");
   }
   if (!isRecord(raw)) return invalid("", "manifest must be an object");
+  if (raw.protocolVersion === 1) return invalid("/protocolVersion", SNIPPET_V1_MESSAGE);
+  if (raw.protocolVersion !== SNIPPET_PROTOCOL_VERSION) {
+    return invalid("/protocolVersion", "protocolVersion must be 2");
+  }
   for (const key of Object.keys(raw)) {
     if (!MANIFEST_KEYS.includes(key)) return invalid(`/${key}`, "unknown key");
   }
-  if (raw.protocolVersion !== 1) return invalid("/protocolVersion", "protocolVersion must be 1");
   if (typeof raw.snippetId !== "string" || !SNIPPET_ID_RE.test(raw.snippetId)) {
     return invalid("/snippetId", "invalid snippetId");
   }
@@ -156,11 +164,10 @@ export function parseSnippetManifest(
     return invalid("/revision", "revision must be an integer 1..2147483647");
   }
   if (
-    raw.respondsToRequestId !== undefined &&
-    (typeof raw.respondsToRequestId !== "string" ||
-      !SNIPPET_REQUEST_ID_RE.test(raw.respondsToRequestId))
+    raw.store !== undefined &&
+    (typeof raw.store !== "string" || !isAllowedSnippetStore(raw.store, expected.sessionId))
   ) {
-    return invalid("/respondsToRequestId", "invalid respondsToRequestId");
+    return invalid("/store", "store must be page:<id> or session:<owner>");
   }
   if (!validText(raw.title, 120)) return invalid("/title", "title must be 1..120 plain characters");
   const rawActions = raw.actions;
@@ -197,14 +204,12 @@ export function parseSnippetManifest(
   return {
     ok: true,
     manifest: {
-      protocolVersion: 1,
+      protocolVersion: SNIPPET_PROTOCOL_VERSION,
       snippetId: raw.snippetId,
       ownerSessionId: raw.ownerSessionId,
       instanceId: raw.instanceId,
       revision,
-      ...(typeof raw.respondsToRequestId === "string"
-        ? { respondsToRequestId: raw.respondsToRequestId }
-        : {}),
+      ...(typeof raw.store === "string" ? { store: raw.store } : {}),
       title: raw.title,
       actions,
     },

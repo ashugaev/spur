@@ -1056,3 +1056,67 @@ describe("runtime-tmux shared probe cache", () => {
     ).toBe(1);
   });
 });
+
+describe("readTmuxServerPid", () => {
+  afterEach(() => {
+    execFileAsyncMock.mockReset();
+    vi.resetModules();
+  });
+
+  it("asks display-message for the server pid on the configured socket", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "4844\n", stderr: "" });
+    const runtime = await import("../../src/runtime-tmux.js");
+    runtime.setTmuxSocketName("spur-test");
+    try {
+      expect(await runtime.readTmuxServerPid()).toEqual({ status: "running", pid: 4844 });
+    } finally {
+      runtime.setTmuxSocketName(undefined);
+    }
+    expect(execFileAsyncMock.mock.calls[0]?.slice(0, 2)).toEqual([
+      "tmux",
+      ["-L", "spur-test", "display-message", "-p", "#{pid}"],
+    ]);
+  });
+
+  it.each([
+    "no server running on /tmp/test-tmux/socket\n",
+    "error connecting to /tmp/test-tmux/socket (No such file or directory)\n",
+  ])("maps absent-server stderr to absent: %s", async (stderr) => {
+    execFileAsyncMock.mockRejectedValue(
+      Object.assign(new Error("tmux failed"), {
+        code: 1,
+        killed: false,
+        signal: null,
+        stdout: "",
+        stderr,
+      }),
+    );
+    const runtime = await import("../../src/runtime-tmux.js");
+    expect(await runtime.readTmuxServerPid()).toEqual({ status: "absent" });
+  });
+
+  it.each([
+    ["timeout kill", { killed: true, signal: "SIGTERM" }],
+    ["other stderr", { stderr: "permission denied" }],
+    ["other exit code", { code: 2 }],
+  ])("maps %s to unavailable", async (_label, override) => {
+    execFileAsyncMock.mockRejectedValue(
+      Object.assign(new Error("tmux failed"), {
+        code: 1,
+        killed: false,
+        signal: null,
+        stdout: "",
+        stderr: "no server running on /tmp/socket",
+        ...override,
+      }),
+    );
+    const runtime = await import("../../src/runtime-tmux.js");
+    expect(await runtime.readTmuxServerPid()).toEqual({ status: "unavailable" });
+  });
+
+  it.each(["", "abc", "0", "12x"])("maps stdout %j to unavailable", async (stdout) => {
+    execFileAsyncMock.mockResolvedValue({ stdout, stderr: "" });
+    const runtime = await import("../../src/runtime-tmux.js");
+    expect(await runtime.readTmuxServerPid()).toEqual({ status: "unavailable" });
+  });
+});

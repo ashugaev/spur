@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import type { FocusEvent } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useFooterPopover } from "@/lib/footer-popover";
+import { isTouchPointer, useFooterPopover } from "@/lib/footer-popover";
 
 function blurOutEvent(): FocusEvent<HTMLDivElement> {
   return {
@@ -130,5 +130,64 @@ describe("useFooterPopover", () => {
     expect(result.current.open).toBe(false);
     act(() => result.current.toggle());
     expect(result.current.open).toBe(true);
+  });
+  describe("closeDelayMs", () => {
+    it("keeps the popover open until the grace elapses", () => {
+      vi.useFakeTimers();
+      const { result } = renderHook(() => useFooterPopover({ closeDelayMs: 150 }));
+      act(() => {
+        result.current.onMouseEnter();
+        vi.advanceTimersByTime(100);
+      });
+      expect(result.current.open).toBe(true);
+      act(() => result.current.onMouseLeave());
+      act(() => vi.advanceTimersByTime(149));
+      expect(result.current.open).toBe(true);
+      act(() => vi.advanceTimersByTime(1));
+      expect(result.current.open).toBe(false);
+    });
+
+    it("stays open when the pointer re-enters within the grace", () => {
+      vi.useFakeTimers();
+      const { result } = renderHook(() => useFooterPopover({ closeDelayMs: 150 }));
+      act(() => {
+        result.current.onMouseEnter();
+        vi.advanceTimersByTime(100);
+      });
+      act(() => result.current.onMouseLeave());
+      act(() => vi.advanceTimersByTime(100));
+      act(() => result.current.onMouseEnter());
+      act(() => vi.advanceTimersByTime(500));
+      expect(result.current.open).toBe(true);
+    });
+
+    it("dismiss during the grace closes and a later mouseenter waits for the open delay", () => {
+      vi.useFakeTimers();
+      const { result } = renderHook(() => useFooterPopover({ closeDelayMs: 150 }));
+      act(() => {
+        result.current.onMouseEnter();
+        vi.advanceTimersByTime(100);
+      });
+      act(() => result.current.onMouseLeave());
+      act(() => result.current.dismiss());
+      expect(result.current.open).toBe(false);
+      act(() => result.current.onMouseEnter());
+      expect(result.current.open).toBe(false);
+      act(() => vi.advanceTimersByTime(100));
+      expect(result.current.open).toBe(true);
+    });
+  });
+
+  describe("isTouchPointer", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it.each([true, false])("reflects the coarse hover-less media query (%s)", (matches) => {
+      vi.stubGlobal("matchMedia", (query: string) => ({
+        matches: matches && query === "(hover: none) and (pointer: coarse)",
+      }));
+      expect(isTouchPointer()).toBe(matches);
+    });
   });
 });

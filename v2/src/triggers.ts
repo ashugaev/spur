@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { autoPingRouteFingerprint, type AutoPingService } from "./auto-ping.js";
 import { writeStderr } from "./io.js";
+import { allowsPrAlertBatch, isPrAlertEvent } from "./pr-alert-owner.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, logUserInputEvent, type SpurLogEntry } from "./event-log.js";
 import {
@@ -11,6 +12,7 @@ import {
 } from "./send-batches.js";
 import {
   deletePendingSendBatch,
+  readSession,
   readPendingSpawnWork,
   writePendingSpawnWork,
   deletePendingSpawnWork,
@@ -164,7 +166,10 @@ function isWorkItemEventData(data: unknown): data is WorkItemEventData {
   );
 }
 
-function isSendTriggerAllowed(session: SessionView, triggerId: string): boolean {
+function isSendTriggerAllowed(
+  session: Pick<SessionView, "allowedTriggers">,
+  triggerId: string,
+): boolean {
   if (session.allowedTriggers === undefined) {
     return true;
   }
@@ -916,6 +921,29 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     return true;
   };
 
+  const dropWrongPrAlertTarget = (
+    queueKey: string,
+    batch: PendingBatch,
+    session: SessionView,
+  ): boolean => {
+    if (
+      !isPrAlertEvent(batch.eventName) ||
+      allowsPrAlertBatch(deps.config.dataDir, session, batch.batch.serialize())
+    )
+      return false;
+    clearBatch(queueKey, batch);
+    logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: batch.projectId,
+      sourceId: batch.sourceId,
+      triggerId: batch.triggerId,
+      message: "Dropped PR alert after its owner or PR binding changed",
+      details: { reason: "pr_alert_owner_changed" },
+    });
+    return true;
+  };
+
   // One `trigger.send.suppressed` line per (work, item, reason, fingerprint):
   // a tick that meets the same suppressed item again stays silent.
   const logSuppressed = (
@@ -1236,14 +1264,65 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         ...submission.muteGrant(),
       });
       submission.attachHandle(handle);
+      let accepted = false;
+      let denied = false;
+      const allowDelivery = () => {
+        const current = readSession(deps.config.dataDir, submission.sessionId) ?? session;
+        const allowed =
+          isSendTriggerAllowed(current, batch.triggerId) &&
+          allowsPrAlertBatch(deps.config.dataDir, current, submission.serialize());
+        if (!allowed) denied = true;
+        return allowed;
+      };
       const delivery = deps.sessionService.deliver(submission.sessionId, submission.format(), {
         interrupt,
         sensitive: true,
+        ...(isPrAlertEvent(batch.eventName)
+          ? {
+              allowDelivery,
+              observeDelivery: (stage: "input-started" | "accepted") => {
+                if (stage === "accepted") accepted = true;
+              },
+            }
+          : {}),
       });
       return {
         run: async (): Promise<DeliveryOutcome> => {
           try {
-            await delivery;
+            try {
+              await delivery;
+            } catch (error) {
+              if (!isPrAlertEvent(batch.eventName) || !denied) throw error;
+            }
+            if (isPrAlertEvent(batch.eventName) && !accepted && (!allowDelivery() || denied)) {
+              return await autoPing.withRouteLock(batch.routeFingerprint, async () => {
+                const latest = readPendingSendBatch(deps.config.dataDir, batch.workId);
+                if (latest?.claim?.claimId !== claimId) return { status: "suppressed" };
+                if (conflictClaims.length > 0) autoPing.refundMergeConflict(batch.routeFingerprint);
+                if (latest.revision !== claimedRevision) {
+                  const latestBatch = restoreSendBatch(latest.batch);
+                  if (!latestBatch) return { status: "suppressed" };
+                  batch.batch = latestBatch;
+                  batch.retryAccounting = reconcileRetryAccounting(
+                    latestBatch,
+                    latest.retryAccounting ?? [],
+                  );
+                  claimed = { ...latest, claim: latest.claim };
+                  claimedRevision = latest.revision ?? 0;
+                  refundSubmitted();
+                  persistResult();
+                } else if (
+                  deletePendingSendBatchConditional(deps.config.dataDir, {
+                    workId: batch.workId,
+                    claimId,
+                    revision: claimedRevision,
+                  })
+                ) {
+                  clearBatch(queueKey, batch, { deletePersisted: false });
+                }
+                return { status: "suppressed" };
+              });
+            }
             return await autoPing.withRouteLock(batch.routeFingerprint, async () => {
               const latest = readPendingSendBatch(deps.config.dataDir, batch.workId);
               if (latest?.claim?.claimId !== claimId) return { status: "suppressed" };
@@ -1707,6 +1786,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
+    if (dropWrongPrAlertTarget(queueKey, batch, session)) return;
     const deliverable = isDeliverableState(session, sendWindowMs(batch.batch));
     if (batch.eventName.endsWith(":ci_failed")) {
       const trigger = deps.config.projects[batch.projectId]?.triggers[batch.triggerId];
@@ -1923,6 +2003,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
+    if (dropWrongPrAlertTarget(queueKey, batch, session)) return;
     if (batch.eventName.endsWith(":ci_failed")) {
       await flushPending(queueKey, batch);
       return;

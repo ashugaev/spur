@@ -65,7 +65,7 @@ describe("partitionSnippetArtifacts", () => {
 const actionSchema = { type: "object", properties: { note: { type: "string", maxLength: 10 } } };
 function manifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    protocolVersion: 1,
+    protocolVersion: 2,
     snippetId: "picker",
     ownerSessionId: SID,
     instanceId: "inst-00000001",
@@ -84,9 +84,43 @@ function parse(m: unknown) {
 
 describe("parseSnippetManifest", () => {
   it("accepts a valid manifest", () => {
-    const result = parse(manifest({ respondsToRequestId: "req-00000001" }));
+    const result = parse(manifest());
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.manifest.actions[0]?.id).toBe("go");
+    if (result.ok) {
+      expect(result.manifest.actions[0]?.id).toBe("go");
+      expect(result.manifest.store).toBeUndefined();
+    }
+  });
+
+  it("rejects protocol 1 with the rewrite message the error card shows", () => {
+    expect(parse(manifest({ protocolVersion: 1, respondsToRequestId: "req-00000001" }))).toEqual({
+      ok: false,
+      error: {
+        code: "manifest_invalid",
+        path: "/protocolVersion",
+        message: "Snippet protocol 1 is no longer supported; rewrite with protocolVersion 2",
+      },
+    });
+    expect(parse(manifest({ protocolVersion: 3 }))).toMatchObject({
+      ok: false,
+      error: { path: "/protocolVersion" },
+    });
+  });
+
+  it("drops respondsToRequestId from v2", () => {
+    expect(parse(manifest({ respondsToRequestId: "req-00000001" }))).toMatchObject({
+      ok: false,
+      error: { path: "/respondsToRequestId", message: "unknown key" },
+    });
+  });
+
+  it("accepts a page store or the owner's session store, nothing else", () => {
+    const page = parse(manifest({ store: "page:films" }));
+    expect(page.ok && page.manifest.store).toBe("page:films");
+    expect(parse(manifest({ store: `session:${SID}` })).ok).toBe(true);
+    for (const store of ["session:sp-ffff", "page:Films", "films", 7]) {
+      expect(parse(manifest({ store }))).toMatchObject({ ok: false, error: { path: "/store" } });
+    }
   });
 
   it("requires the manifest script and valid JSON", () => {

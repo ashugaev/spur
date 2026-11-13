@@ -37,6 +37,90 @@ describe("published interface contracts", () => {
     for (const field of ["BOT_TOKEN", "CHAT_ID", "ALLOWED_USERS", "ALLOWED_CHATS"])
       expect(configuration).toContain(`TELEGRAM_TEST_${field}`);
   });
+  it("documents store routes, the db command and links the store doc", async () => {
+    const [readme, commands, daemonApi, stores] = await Promise.all([
+      readRepoFile("README.md"),
+      readRepoFile("docs/commands.md"),
+      readRepoFile("docs/daemon-api.md"),
+      readRepoFile("docs/stores.md"),
+    ]);
+    expect(readme).toContain("docs/stores.md");
+    expect(commands).toContain("## db, page");
+    expect(commands).toContain("spur db <page:<id>|session:<sid>>");
+    for (const route of [
+      "GET /stores/:store/docs/:collection",
+      "POST /stores/:store/docs/:collection",
+      "GET /stores/:store/docs/:collection/:docId",
+      "POST /stores/:store/docs/:collection/:docId",
+      "PATCH /stores/:store/docs/:collection/:docId",
+      "DELETE /stores/:store/docs/:collection/:docId",
+      "POST /stores/:store/query/:collection",
+      "GET /stores/:store/changes",
+    ])
+      expect(daemonApi).toContain(`\`${route}\``);
+    expect(daemonApi).toContain("## Store routes");
+    for (const name of ["page:<pageId>", "session:<sid>", "_actions", "_state", "expectedRev"])
+      expect(stores).toContain(name);
+    const envelope = await readFile(
+      resolve(repoRoot, "v2/test/fixtures/spur-action-envelope.txt"),
+      "utf8",
+    );
+    expect(stores).toContain(envelope.trimEnd());
+    expect(commands).toContain("spur db <store> done <action-id>");
+    for (const route of [
+      "POST /stores/:store/actions",
+      "POST /stores/:store/actions/:actionId/complete",
+    ])
+      expect(daemonApi).toContain(`\`${route}\``);
+  });
+
+  it("documents page routes, the page command and links the pages doc", async () => {
+    const [readme, commands, daemonApi, pages] = await Promise.all([
+      readRepoFile("README.md"),
+      readRepoFile("docs/commands.md"),
+      readRepoFile("docs/daemon-api.md"),
+      readRepoFile("docs/pages.md"),
+    ]);
+    expect(readme).toContain("docs/pages.md");
+    expect(commands).toContain("spur page create <id>");
+    for (const route of [
+      "GET /pages",
+      "POST /pages",
+      "DELETE /pages/:id",
+      "GET /pages/:id/files/:path",
+      "GET /pages/:id/events",
+    ])
+      expect(daemonApi).toContain(`\`${route}\``);
+    for (const name of ["page.yaml", "/p/<id>/", "spur-sdk.md", "reload", "spur-page-<id>"])
+      expect(pages).toContain(name);
+    for (const route of [
+      "POST /stores/:store/agent/send",
+      "GET /stores/:store/agent/messages",
+      "GET /stores/:store/agent/status",
+    ])
+      expect(daemonApi).toContain(`\`${route}\``);
+    const configuration = await readRepoFile("docs/configuration.md");
+    expect(configuration).toMatch(/sessionPrefix[^\n]*`pg-\*`[^\n]*`spur-page-\*`/);
+  });
+
+  it("documents snippet protocol 2 and the shared SDK, linked from README and both skills", async () => {
+    const [readme, snippets, sdk, skill] = await Promise.all([
+      readRepoFile("README.md"),
+      readRepoFile("docs/snippets.md"),
+      readRepoFile("docs/spur-sdk.md"),
+      readRepoFile(".claude/skills/spur/SKILL.md"),
+    ]);
+    expect(readme).toContain("docs/spur-sdk.md");
+    expect(skill).toContain("docs/spur-sdk.md");
+    expect(skill).toContain("docs/stores.md");
+    expect(snippets).not.toContain("spur-snippet-action");
+    expect(snippets).not.toContain("respondsToRequestId");
+    for (const name of ['"protocolVersion": 2', "`store`", "[spur-action v1]", "spur-sdk.md"])
+      expect(snippets).toContain(name);
+    for (const name of ["agent.invoke", "agent.send", "db.collection", "state.set", "<spur-chat"])
+      expect(sdk).toContain(name);
+  });
+
   it("documents closeout ownership in command docs", async () => {
     const commands = await readRepoFile("docs/commands.md");
 

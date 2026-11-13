@@ -135,6 +135,16 @@ export interface SessionSlots {
   tags?: string[];
 }
 
+export type PrAlertOwner =
+  | { state: "owned"; sessionId: string; ownerRollbackId?: string }
+  | { state: "retired"; successorWorkspaceId: string; successorSessionId: string };
+
+export interface PrAlertTransfer {
+  kind: "owner" | "suppressed";
+  predecessorWorkspaceId: string;
+  predecessorSessionId: string;
+}
+
 export interface TagDefinition {
   name: string;
   description: string;
@@ -675,6 +685,7 @@ export interface ReviewSnapshot {
   prNumber: number | null;
   signals: Map<string, ReviewSignal>;
   mergeConflictClearId?: string;
+  ownerRollbackId?: string;
 }
 
 // The baseline to diff the next poll's signals against: the stored snapshot's
@@ -1209,6 +1220,7 @@ export interface SessionRecord {
   planMode?: boolean;
   restrictWrites?: boolean;
   closeoutOwner?: boolean;
+  prAlertTransfer?: PrAlertTransfer;
   claudeAccountId?: string;
   allowedTriggers?: string[];
   /** Send trigger ids already announced to the owner; one notice per id. */
@@ -1405,10 +1417,12 @@ export interface SessionSidecarView {
 export interface SessionView extends Omit<
   SessionRecord,
   | "queuedMessages"
+  | "prAlertTransfer"
   | "agentLaunchId"
   | "triggerBirthKey"
   | "triggerBirthRequest"
   | "blockedTriggerNotices"
+  | "spawnIntent"
   | "sidecarLaunches"
   | "tokenUsage"
   | "preflightTokenUsage"
@@ -1417,6 +1431,7 @@ export interface SessionView extends Omit<
   | "restoredAt"
   | "errorSource"
 > {
+  spawnIntent?: Omit<DurableSpawnIntent, "closeoutTakenFrom">;
   lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -1453,6 +1468,7 @@ export interface SessionView extends Omit<
  */
 export type DashboardOmittedField =
   | "queuedMessages"
+  | "prAlertTransfer"
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
   | "restoredAt"
@@ -1467,6 +1483,7 @@ export type DashboardOmittedField =
   | "triggerBirthKey"
   | "triggerBirthRequest"
   | "blockedTriggerNotices"
+  | "spawnIntent"
   | "sidecarLaunches"
   | "branchSource"
   | "tokenUsage"
@@ -1474,6 +1491,7 @@ export type DashboardOmittedField =
   | "errorSource";
 
 export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
+  spawnIntent?: SessionView["spawnIntent"];
   lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -1565,6 +1583,7 @@ export interface SpawnSessionRequest {
   planMode?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
+  prAlertOwner?: boolean;
   branch?: string;
   overrides?: SpawnOverrides;
   reuseWorkspaceSessionId?: string;
@@ -1842,6 +1861,7 @@ export interface KillSessionRequest {
 // (pane-rooted) survivor check; a pid that survives SIGKILL always refuses.
 export interface RestoreSessionRequest {
   operationId?: string;
+  restart?: boolean;
   force?: boolean;
   overrideTokenBudget?: boolean;
 }
@@ -2026,7 +2046,7 @@ export interface CronJobEditDraft extends CronJobEditUpdate {
 
 export interface CronJobEditResult extends CronJobEditDraft {
   saved: true;
-  activation: "pending";
+  activation: "applied" | "failed";
 }
 
 export interface SessionLaunchOptions {
@@ -2181,6 +2201,8 @@ export interface ConversationPage {
   messages: {
     index: number;
     role: "user" | "assistant";
+    /** Store-agent chat view only: chat send, `[spur-action v1]` summary, or agent reply. */
+    kind?: "chat" | "action" | "reply";
     text: string;
     timestampMs?: number;
     textTruncated?: boolean;

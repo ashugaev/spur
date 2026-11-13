@@ -17,8 +17,10 @@ import {
   cacheKeyForCoords,
   errorResponse,
   extractPrCoords,
+  inspectCachedPrStatus,
   readCachedPrStatus,
   recordSuccessfulPrStatus,
+  markPrStatusMerged,
   resetPrStatusCacheForTests,
 } from "@/lib/pr-status-store";
 
@@ -55,6 +57,42 @@ describe("extractPrCoords", () => {
 });
 
 describe("pr-status cache", () => {
+  it("retains reviewer names in stale and merged snapshots", () => {
+    const key = "a/b/1";
+    const reviewers = {
+      approved: ["alice"],
+      changesRequested: ["bob"],
+      pending: [{ name: "core", team: true }],
+    };
+    const checks = [{ name: "lint", state: "failed" as const }];
+    recordSuccessfulPrStatus(key, {
+      checks,
+      state: "open",
+      reviewDecision: "approved",
+      ciStatus: "success",
+      canMerge: true,
+      mergeConflict: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      reviewers,
+      reviewRequirement: "required",
+    });
+    expect(inspectCachedPrStatus(key)).toMatchObject({ reviewers, checks });
+    expect(errorResponse(key, "offline")).toMatchObject({
+      reviewers,
+      checks,
+      reviewRequirement: "required",
+      stale: true,
+    });
+    markPrStatusMerged("https://github.com/a/b/pull/1");
+    expect(readCachedPrStatus(key)).toMatchObject({
+      state: "merged",
+      reviewers,
+      checks,
+      reviewRequirement: "required",
+    });
+  });
+
   it("returns null for an unknown key", () => {
     expect(readCachedPrStatus("missing")).toBeNull();
   });

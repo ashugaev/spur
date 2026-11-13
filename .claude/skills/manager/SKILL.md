@@ -49,7 +49,7 @@ PROCESS
      Apply .agents/skills/github/references/agent-protocol.md product/interface gates; route independent classification/approval check before dependent coding.
   2  Per-todo plan: score with `shallow-scoring` for a tier. Build the team from tier plus property modifiers. Track each todo in Spur ToDo.
   3  Execute the canonical gate order above, one delegation per step. Critic selects one approach. Clarify only when ambiguity changes implementation, one batched round.
-       - Design (before architect, visible UI only): save proposed UI screenshot to artifacts; send screenshot and one-line request to authorized session Telegram, mirror request in current channel. Reuse matching approval; missing approval stops dependent implementation.
+       - Design (before architect, visible UI only): save proposed UI screenshot to artifacts; send screenshot and mirror request per agent-protocol.md, including any required summary. Reuse matching approval; missing approval stops dependent implementation.
        - Docs: same change as the surface; never stale or missing.
        - Close-out: mandatory after any code change, never without an open PR.
   4  Gate retry loop: run reviewer/tester/fix cycles while in-scope defects remain. `CHANGES_REQUESTED`/`FAIL` -> `developer` fixes -> same gate reruns. `SPEC_CHANGES_REQUESTED`/`SPEC_REJECTED` -> `architect` fixes, never `developer` -> `spec-critic` reruns. No verdict at all — subagent died, returned empty, no parsable verdict — is never a pass: rerun the same gate, no fix cycle first. Downstream gates run only when their input changed. Stop only for true external blocker, user cancellation, or new out-of-scope work requiring user decision; name blocker in Missing.

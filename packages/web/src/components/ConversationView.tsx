@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { Spinner } from "@/components/icons/Spinner";
-import { SnippetActionSummary } from "@/components/snippets/SnippetActionSummary";
+import { SpurActionSummary } from "@/components/snippets/SpurActionSummary";
 import { HARD_WRAP_TEXT_CLASS } from "@/design/classes";
 import type { ConversationMessage, TranscriptEntry } from "@/lib/types";
 
@@ -83,7 +83,7 @@ function MessageEntryRow({ entry }: { entry: Extract<TranscriptEntry, { kind: "m
       }`}
     >
       {entry.role === "user" ? (
-        <SnippetActionSummary text={entry.text} fallback={<MarkdownMessage text={entry.text} />} />
+        <SpurActionSummary text={entry.text} fallback={<MarkdownMessage text={entry.text} />} />
       ) : (
         <MarkdownMessage text={entry.text} />
       )}

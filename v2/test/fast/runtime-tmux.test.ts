@@ -2466,6 +2466,74 @@ describe("runtime-tmux", () => {
     expect(await isProcessRunningInTmux("lqcx-a1", ["codex"], { fresh: true })).toBe(false);
   });
 
+  it.each([false, true])(
+    "reports an owned agent outside the foreground group as unknown (paneChildFallback=%s)",
+    async (paneChildFallback) => {
+      execFileAsyncMock.mockImplementation(async (file, args) => {
+        if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+          return { stdout: "s 1 1 0 100 /dev/pts/1", stderr: "" };
+        }
+        if (file === "ps") {
+          return {
+            stdout: [
+              "100 1 100 102 pts/1 4200 -zsh",
+              "101 100 101 102 pts/1 90000 /opt/codex",
+              "102 101 102 102 pts/1 2048 sleep 30",
+            ].join("\n"),
+            stderr: "",
+          };
+        }
+        throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+      });
+
+      const { isProcessRunningInTmux, probeTmuxProcessMatch } =
+        await import("../../src/runtime-tmux.js");
+      const diagnostic = "Agent process is outside the pane's foreground process group.";
+
+      await expect(probeTmuxProcessMatch("s", ["codex"], { paneChildFallback })).resolves.toEqual({
+        alive: false,
+        matchedByName: false,
+        unresponsive: false,
+        diagnostic,
+      });
+      await expect(
+        isProcessRunningInTmux("s", ["codex"], { paneChildFallback }),
+      ).rejects.toMatchObject({ name: "TmuxProbeUnknownError", message: diagnostic });
+    },
+  );
+
+  it("keeps a foreground named agent on another tty alive despite an earlier background match", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return {
+          stdout: ["s 1 1 0 100 /dev/pts/1", "s 0 0 0 200 /dev/pts/2"].join("\n"),
+          stderr: "",
+        };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            "100 1 100 102 pts/1 4200 -zsh",
+            "101 100 101 102 pts/1 90000 /opt/codex",
+            "102 101 102 102 pts/1 2048 sleep 30",
+            "200 1 200 201 pts/2 4200 -zsh",
+            "201 200 201 201 pts/2 90000 /opt/codex",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { probeTmuxProcessMatch } = await import("../../src/runtime-tmux.js");
+
+    await expect(probeTmuxProcessMatch("s", ["codex"])).resolves.toEqual({
+      alive: true,
+      matchedByName: true,
+      unresponsive: false,
+    });
+  });
+
   it("keeps reading a foreground codex alive", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
