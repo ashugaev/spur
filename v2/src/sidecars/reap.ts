@@ -4,6 +4,7 @@ import { realpathSync } from "node:fs";
 import { dirname, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
+import { observationDeadline } from "../observation-deadline.js";
 import { getTmuxPanePid, killTmuxSession } from "../runtime-tmux.js";
 import { readProcessCwd } from "../process-tree.js";
 import {
@@ -211,10 +212,14 @@ export const _parsePsOutputForTests = parsePsOutput;
 export async function snapshotProcesses(): Promise<ProcSnapshot> {
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync("ps", PS_SNAPSHOT_ARGS, {
-      timeout: 5_000,
-      maxBuffer: PS_MAX_BUFFER_BYTES,
-    }));
+    ({ stdout } = await observationDeadline(
+      execFileAsync("ps", PS_SNAPSHOT_ARGS, {
+        timeout: 5_000,
+        killSignal: "SIGKILL",
+        maxBuffer: PS_MAX_BUFFER_BYTES,
+      }),
+      5_000,
+    ));
   } catch {
     return emptySnapshot();
   }

@@ -1872,6 +1872,34 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("releases lifecycle locks after a timed-out observation and can observe again", async () => {
+      vi.useRealTimers();
+      const { service, owner, internals, views } = await setup();
+      const { observationDeadline } = await import("../../src/observation-deadline.js");
+      snapshotProcessesMock.mockImplementationOnce(async () => {
+        try {
+          return await observationDeadline(new Promise<never>(() => {}), 30);
+        } catch {
+          return { ok: false, byPid: new Map(), byPgid: new Map() };
+        }
+      });
+      const locks = service as unknown as {
+        withSessionLifecycleLocks<T>(ids: string[], task: () => Promise<T>): Promise<T>;
+      };
+      const holding = locks.withSessionLifecycleLocks([owner.id], () => views());
+      let entered = false;
+      const waiting = locks.withSessionLifecycleLocks([owner.id], async () => {
+        entered = true;
+      });
+      await Promise.all([holding, waiting]);
+      expect(entered).toBe(true);
+      expect(internals.sidecarObservationRun).toBeUndefined();
+      internals.invalidateSidecarEndpoint(owner.id, "dev");
+      await views();
+      expect(snapshotProcessesMock).toHaveBeenCalledTimes(2);
+      service.dispose();
+    });
+
     it("drains a delegated reap before disposing fixture ownership", async () => {
       const { service, sessions, owner, internals } = await setup();
       sessions.set(owner.id, { ...owner, status: "stopped" });
