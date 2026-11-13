@@ -476,6 +476,29 @@ describe("client.ensureServer", () => {
     },
   );
 
+  it("stops a repeated incompatible daemon again when no managed unit owns it", async () => {
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo(-1, 4242)), { status: 200 }))
+      .mockRejectedValueOnce(new Error("daemon stopped"))
+      .mockRejectedValueOnce(new Error("connect ECONNREFUSED"))
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo(-1, 4343)), { status: 200 }))
+      .mockRejectedValueOnce(new Error("daemon stopped"))
+      .mockRejectedValueOnce(new Error("connect ECONNREFUSED"))
+      .mockResolvedValue(new Response(JSON.stringify(runtimeInfo()), { status: 200 }));
+
+    const { ensureServer } = await loadClientModule();
+    const outcome = await ensureServer("/tmp/dist/cli.js", "/tmp/spur.yaml").then(
+      (baseUrl) => ({ baseUrl }),
+      (error: unknown) => ({ error: (error as Error).message }),
+    );
+    expect(outcome).toEqual({ baseUrl: "http://127.0.0.1:4310" });
+    expect(kill).toHaveBeenCalledTimes(2);
+    expect(kill).toHaveBeenNthCalledWith(1, 4242, "SIGTERM");
+    expect(kill).toHaveBeenNthCalledWith(2, 4343, "SIGTERM");
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+  });
+
   it("reports the starting timeout when managed recovery ends on 503", async () => {
     await installManagedDefaultUnit();
     vi.mocked(fetch)
@@ -1025,6 +1048,44 @@ describe("client deadlines", () => {
     expect(spawnMock).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it.each([true, false])(
+    "returns when the probe after a stop is ready past the deadline (managed=%s)",
+    async (managed) => {
+      if (managed) await installManagedDefaultUnit();
+      const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+      routeFetch((call, init) => {
+        if (call === 1) return Promise.reject(new Error("connect ECONNREFUSED"));
+        if (call === 6) {
+          return Promise.resolve(
+            new Response(JSON.stringify(runtimeInfo(-1, 4242)), { status: 200 }),
+          );
+        }
+        if (call >= 17) {
+          return Promise.resolve(
+            new Response(JSON.stringify(runtimeInfo(SPUR_DAEMON_API_VERSION, 4343)), {
+              status: 200,
+            }),
+          );
+        }
+        return pendingUntilAbort(init);
+      });
+      const { ensureServer } = await loadClientModule();
+      const started = Date.now();
+      const outcome = ensureServer("/tmp/dist/cli.js", managed ? undefined : "/tmp/spur.yaml").then(
+        (baseUrl) => ({ baseUrl }),
+        (error: unknown) => ({ error: (error as Error).message }),
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await outcome).toEqual({ baseUrl: "http://127.0.0.1:4310" });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(50_000);
+      expect(fetch).toHaveBeenCalledTimes(18);
+      expect(kill).toHaveBeenCalledTimes(1);
+      expect(kill).toHaveBeenCalledWith(4242, "SIGTERM");
+      expect(spawnMock).toHaveBeenCalledTimes(managed ? 0 : 1);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
 
   it("restart rejects within the wall-clock cap when every post-spawn probe hangs", async () => {
     vi.spyOn(process, "kill").mockImplementation(() => true);

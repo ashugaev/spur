@@ -580,6 +580,7 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
       await stopIncompatibleDaemon(baseUrl, probe.pid);
       handledIncompatible = true;
       probe = await probeDaemon(baseUrl);
+      if (probe.state === "ready") return baseUrl;
       if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
       if (probe.state === "unreachable") {
         spawnDaemon(cliEntrypoint, resolvedConfigPath, "autostart");
