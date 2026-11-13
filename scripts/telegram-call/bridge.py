@@ -762,7 +762,7 @@ def private_session(values):
 
 async def check_dependencies():
     notices = load_notices(Path(__file__).with_name("audio"))
-    for package, version in (("py-tgcalls", "3.0.0"), ("ntgcalls", "3.0.3"), ("Telethon", "1.44.0")):
+    for package, version in (("py-tgcalls", "3.0.0"), ("ntgcalls", "3.0.6"), ("Telethon", "1.44.0")):
         if importlib.metadata.version(package) != version:
             raise BridgeError("unsupported_dependency_" + package)
     from telethon import TelegramClient
