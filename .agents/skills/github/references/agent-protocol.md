@@ -11,13 +11,13 @@ INTERFACE
   Classify UI, CLI, config, prompts and workflow surfaces; architect records proposed behavior/constraints, scope digest and approval evidence/absence.
   Ground before in bound base B; after covers the full proposed PR.
   Obtain matching user authorization before dependent coding; prior explicit approval covering proposed scope counts.
-  Mirror required approval request in current channel and authorized session Telegram. Keep full canonical manifest; daemon appends every clause. In current channel, show manifest path or rendered clauses; route UI screenshots per telegram skill.
+  Ask required approval in current session chat; user's typed reply there counts as approval. Mirror to authorized session Telegram only when session has Telegram. Missing channel never blocks and never enters Missing. Keep full canonical manifest; daemon appends every clause. In session chat, show manifest path or rendered clauses; route UI screenshots per telegram skill when session has Telegram.
   When frozen clauses make request unreadable, mirror one separate buttonless summary pointing to existing authenticated choices. Never use ordinary buttons as consent or rewrite/re-hash manifest.
   Treat typed/button reply as human prompt approval, never authenticated CI consent.
   Require spec-critic to independently check classification and matching authorization; implementer cannot self-exempt scope.
   Preserve screenshot approval gate per design skill; matching prior approval counts, changed scope invalidates affected approval.
   Require reviewer to classify final interface scope; record missing/stale interface approval without blocking inspection, verdict or publication. Never claim retroactive consent.
-  Request required interface consent before coding with `spur source reply --request-interface-approval`; schema: v2/src/review-interface.ts.
+  When session has Telegram, request required interface consent before coding with `spur source reply --request-interface-approval`; otherwise ask in session chat only; schema: v2/src/review-interface.ts.
   Manifest clause (before/after/constraints): one fact, max 80 chars, plain words; no file path or code identifier unless it is the user-facing surface, e.g. a flag name. Fewer clauses over longer ones; each still states full consented behavior, never drop scope to fit.
   SUMMARY: Write in requester language and plain words; max 600 characters, 7 nonblank lines, 3 change bullets. Name PR and effect, ask one decision, state one restriction. Omit hashes, session IDs, paths, raw schema and check history; omit unused bullets. Use:
   Approve <PR>: <effect>?
