@@ -347,14 +347,17 @@ describe("spur help", () => {
     const page = buildProgram().commands.find((command) => command.name() === "page");
     if (!page) throw new Error("Expected page command to be registered");
     const help = page.helpInformation();
-    expect(help).toContain("page <create|list|path|rm> [id]");
+    expect(help).toContain("page <create|list|source|path|rm> [id] [source-path]");
     for (const flag of [
       "--title <title>",
       "--runtime <agent>",
       "--model <model>",
       "--template <name>",
+      "--source <path>",
+      "--detach",
     ])
       expect(help).toContain(flag);
+    expect(help).toMatch(/parent folder[\s\S]*including siblings/);
   });
 });
 

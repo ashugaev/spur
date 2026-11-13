@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -208,11 +209,12 @@ describe("POST /sessions/:id/restore and /reopen forward the force override", ()
 
   it("starts source automation only after startup reconcile while routes remain unready", async () => {
     let reconciled = false;
+    let listeningPort: number | undefined;
     const original = SessionService.prototype.reconcileStoppedSessions;
     const reconcile = vi
       .spyOn(SessionService.prototype, "reconcileStoppedSessions")
       .mockImplementation(async function (this: SessionService) {
-        const response = await fetch(`http://127.0.0.1:${this.config.server.port}/sessions`);
+        const response = await fetch(`http://127.0.0.1:${listeningPort}/sessions`);
         expect(response.status).toBe(503);
         const result = await original.call(this);
         reconciled = true;
@@ -226,10 +228,15 @@ describe("POST /sessions/:id/restore and /reopen forward the force override", ()
         return start(options);
       });
     try {
-      await withServer(async () => {
-        expect(reconcile).toHaveBeenCalledOnce();
-        expect(sources).toHaveBeenCalledOnce();
-      });
+      await withServer(
+        async () => {
+          expect(reconcile).toHaveBeenCalledOnce();
+          expect(sources).toHaveBeenCalledOnce();
+        },
+        (port) => {
+          listeningPort = port;
+        },
+      );
     } finally {
       reconcile.mockRestore();
       sources.mockRestore();
@@ -336,12 +343,13 @@ describe("POST /sessions/:id/restore and /reopen forward the force override", ()
 
   async function withServer(
     run: (port: number, server: StartedServer) => Promise<void>,
+    onListening?: (port: number) => void,
   ): Promise<void> {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
     const dataDir = join(root, "data");
     const worktreeDir = join(root, "worktrees");
-    const port = await findFreePort();
+    const requestedPort = 43210;
     await mkdir(repoDir, { recursive: true });
     const configPath = join(root, "spur.yaml");
     await writeFile(
@@ -349,7 +357,7 @@ describe("POST /sessions/:id/restore and /reopen forward the force override", ()
       [
         "server:",
         "  host: 127.0.0.1",
-        `  port: ${port}`,
+        `  port: ${requestedPort}`,
         `dataDir: ${dataDir}`,
         `worktreeDir: ${worktreeDir}`,
         "projects:",
@@ -358,8 +366,55 @@ describe("POST /sessions/:id/restore and /reopen forward the force override", ()
       ].join("\n"),
       "utf8",
     );
-    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    const nativeListen = Server.prototype.listen;
+    let matched = 0;
+    let port: number | undefined;
+    let addressError: Error | undefined;
+    const listen = vi.spyOn(Server.prototype, "listen").mockImplementation(function (
+      this: Server,
+      ...args: Parameters<typeof nativeListen>
+    ): ReturnType<typeof nativeListen> {
+      const request: readonly unknown[] = args;
+      if (
+        request.length !== 3 ||
+        request[0] !== requestedPort ||
+        request[1] !== "127.0.0.1" ||
+        typeof request[2] !== "function"
+      )
+        return Reflect.apply(nativeListen, this, args);
+      if (++matched !== 1) throw new Error("Multiple fixture listeners requested");
+      this.once("listening", () => {
+        const address = this.address();
+        if (
+          !address ||
+          typeof address === "string" ||
+          address.address !== "127.0.0.1" ||
+          !Number.isSafeInteger(address.port) ||
+          address.port <= 0
+        ) {
+          addressError = new Error("Fixture listener has no owned loopback port");
+          return;
+        }
+        port = address.port;
+        onListening?.(port);
+      });
+      const nativeArgs = [0, ...args.slice(1)];
+      expect(nativeArgs).toEqual([0, "127.0.0.1", request[2]]);
+      return Reflect.apply(nativeListen, this, nativeArgs);
+    });
+    let server: StartedServer;
     try {
+      server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    } finally {
+      listen.mockRestore();
+    }
+    try {
+      if (addressError) throw addressError;
+      expect(server.config.server.port).toBe(requestedPort);
+      expect(server.config.server.port).toBeGreaterThan(0);
+      expect(matched).toBe(1);
+      if (port === undefined) throw new Error("Fixture listener was not captured");
+      expect(port).toBeGreaterThan(0);
       await run(port, server);
     } finally {
       await server.stop();

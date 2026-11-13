@@ -100,7 +100,51 @@ const cases: Array<{ name: string; info: PrInfo }> = [
       reviewRequirement: "unavailable",
     },
   },
+  {
+    name: "sp pending",
+    info: {
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "success",
+      canMerge: false,
+      mergeConflict: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      reviewers: {
+        approved: ["xena"],
+        changesRequested: ["yuri"],
+        pending: [
+          { name: "core", team: true },
+          { name: "zed", team: false },
+        ],
+      },
+      reviewRequirement: "none",
+    },
+  },
+  {
+    name: "none empty",
+    info: {
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "success",
+      canMerge: true,
+      mergeConflict: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      reviewers: { approved: [], changesRequested: [] },
+      reviewRequirement: "none",
+    },
+  },
 ];
+
+function badgeVisible(info: PrInfo): boolean {
+  return (
+    info.reviewRequirement === "required" ||
+    (info.reviewers?.approved.length ?? 0) > 0 ||
+    (info.reviewers?.changesRequested.length ?? 0) > 0 ||
+    (info.reviewers?.pending?.length ?? 0) > 0
+  );
+}
 
 for (const { name, info } of cases) {
   test(`reviewer metadata in dashboard and session header: ${name}`, async ({ page }) => {
@@ -118,7 +162,7 @@ for (const { name, info } of cases) {
       const badge = page.locator(`a[href='${prUrl}']`).first();
       await expect(badge).toBeVisible();
       const person = badge.locator("[data-pr-reviewers]");
-      if (info.reviewRequirement !== "required") {
+      if (!badgeVisible(info)) {
         await expect(person).toHaveCount(0);
       } else {
         await expect(person).toHaveCount(1);
@@ -126,12 +170,30 @@ for (const { name, info } of cases) {
           info.reviewers ? String(info.reviewers.approved.length) : "",
         );
         await person.hover();
-        if (info.reviewers) {
-          for (const login of [...info.reviewers.approved, ...info.reviewers.changesRequested]) {
-            await expect(person).toHaveAttribute("title", new RegExp(`@${login}`));
-          }
+        if (
+          info.reviewers &&
+          !(
+            info.reviewers.approved.length +
+              info.reviewers.changesRequested.length +
+              (info.reviewers.pending?.length ?? 0) ===
+            0
+          )
+        ) {
+          const card = page.locator("[data-pr-card]");
+          await expect(card).toBeVisible();
+          const names = [
+            ...info.reviewers.changesRequested.map((login) => `@${login}`),
+            ...(info.reviewers.pending ?? []).map((r) => (r.team ? `${r.name}team` : `@${r.name}`)),
+            ...info.reviewers.approved.map((login) => `@${login}`),
+          ];
+          await expect(card.locator("[data-pr-card-row]")).toHaveText(names);
+          await page.mouse.move(0, 0);
+          await expect(card).toHaveCount(0);
         } else {
-          await expect(person).toHaveAttribute("title", /Review history unavailable/);
+          await expect(person.locator("xpath=..")).toHaveAttribute(
+            "title",
+            info.reviewers ? /Approvals: 0/ : /Review history unavailable/,
+          );
         }
         const color =
           info.reviewDecision === "changes_requested" ||

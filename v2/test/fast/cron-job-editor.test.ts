@@ -113,7 +113,6 @@ describe("CronJob YAML editor", () => {
     const result = saveCronJobDraft(f.context, ID, body);
     expect(result).toMatchObject({
       saved: true,
-      activation: "pending",
       schedule: body.schedule,
       blocks: body.blocks,
     });

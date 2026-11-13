@@ -69,12 +69,12 @@ import { StoreActions } from "./store-actions.js";
 import {
   PageEvents,
   assertPagePrefixFree,
-  createPage,
   listPages,
   removePageDir,
   resolvePageFile,
   type CreatePageRequest,
 } from "./pages.js";
+import { PageSourceSync } from "./page-source.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import { captureTmuxPane } from "./runtime-tmux.js";
@@ -939,6 +939,7 @@ export async function startServer(
     readSession: (sessionId) => readSession(service.config.dataDir, sessionId),
   });
   const sseHub = new SseHub();
+  const pageSources = new PageSourceSync(() => service.config.dataDir);
   const pageEvents = new PageEvents({
     dataDir: () => service.config.dataDir,
     stores,
@@ -1076,7 +1077,7 @@ export async function startServer(
   const reloadAutomation = async (
     preview: ReturnType<SessionService["previewConfigConnect"]>,
     requestConfigPath: string,
-    action: "connect" | "disconnect",
+    action: "connect" | "disconnect" | "reload",
   ): Promise<void> => {
     // SessionService emits registry warnings while building the preview, so
     // diagnostics still land when no reload is needed.
@@ -1125,7 +1126,9 @@ export async function startServer(
           message:
             action === "connect"
               ? `Connected daemon project registry from ${requestConfigPath}`
-              : `Disconnected daemon project registry from ${requestConfigPath}`,
+              : action === "reload"
+                ? `Reloaded daemon project registry after cron edit of ${requestConfigPath}`
+                : `Disconnected daemon project registry from ${requestConfigPath}`,
           details: {
             configPaths: preview.registryPaths,
             projectCount: Object.keys(preview.config.projects).length,
@@ -1451,26 +1454,46 @@ export async function startServer(
       if ((method === "GET" || method === "PATCH") && path === "/projects/cron/edit") {
         try {
           const identity = cronJobIdentity(url.searchParams);
-          const context = {
+          const editorContext = () => ({
             running: service.config,
             bootstrapConfigPath: service.bootstrapConfigPath,
             registryPaths: service.getRegistryPaths(),
-          };
-          let body: unknown;
-          if (method === "PATCH") {
-            try {
-              body = await readJsonBody<unknown>(request);
-            } catch {
-              throw new CronJobEditError(400, "invalid_body", "Invalid editor JSON body.");
-            }
+          });
+          if (method === "GET") {
+            sendJson(response, 200, readCronJobDraft(editorContext(), identity));
+            return;
           }
-          sendJson(
-            response,
-            200,
-            method === "GET"
-              ? readCronJobDraft(context, identity)
-              : saveCronJobDraft(context, identity, body),
-          );
+          let body: unknown;
+          try {
+            body = await readJsonBody<unknown>(request);
+          } catch {
+            throw new CronJobEditError(400, "invalid_body", "Invalid editor JSON body.");
+          }
+          // Save and reload share the gate so a queued connect/disconnect cannot
+          // interleave between the YAML write and the reload.
+          const result = await withReloadGate(async () => {
+            const saved = saveCronJobDraft(editorContext(), identity, body);
+            try {
+              await reloadAutomation(
+                service.previewConfigReload(saved.ownerPath),
+                saved.ownerPath,
+                "reload",
+              );
+              return { ...saved, activation: "applied" as const };
+            } catch (error) {
+              // sources === null: rollback failed, onRollbackFailed already logged.
+              if (sources !== null) {
+                logEvent("daemon.reload.failed", {
+                  level: "error",
+                  message: `Cron edit reload failed; previous config restored: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                });
+              }
+              return { ...saved, activation: "failed" as const };
+            }
+          });
+          sendJson(response, 200, result);
         } catch (error) {
           if (!(error instanceof CronJobEditError)) throw error;
           sendJson(response, error.status, {
@@ -2683,7 +2706,9 @@ export async function startServer(
       }
 
       if (method === "GET" && path === "/pages") {
-        sendJson(response, 200, { pages: listPages(service.config.dataDir) });
+        sendJson(response, 200, {
+          pages: listPages(service.config.dataDir).map((page) => pageSources.summarize(page)),
+        });
         return;
       }
       if (method === "POST" && path === "/pages") {
@@ -2694,17 +2719,37 @@ export async function startServer(
             service.listProjects().map((project) => project.prefix),
           );
         }
-        sendJson(response, 201, createPage(service.config.dataDir, body));
+        sendJson(response, 201, await pageSources.create(body));
+        return;
+      }
+
+      const sourcePageId = path.match(/^\/pages\/([^/]+)\/source$/)?.[1];
+      if (method === "PATCH" && sourcePageId) {
+        const body: unknown = await readJsonBody(request);
+        if (typeof body !== "object" || body === null || Array.isArray(body)) {
+          throw new StoreError(400, "source requires path: an absolute path or null");
+        }
+        const sourcePath = (body as { path?: unknown }).path;
+        if (sourcePath !== null && typeof sourcePath !== "string") {
+          throw new StoreError(400, "source requires path: an absolute path or null");
+        }
+        sendJson(
+          response,
+          200,
+          await pageSources.bind(decodeURIComponent(sourcePageId), sourcePath),
+        );
         return;
       }
 
       const pageId = path.match(/^\/pages\/([^/]+)$/)?.[1];
       if (method === "DELETE" && pageId) {
         const id = decodeURIComponent(pageId);
-        await storeAgent.deletePage(id, () => {
-          pageEvents.closePage(id);
-          removePageDir(service.config.dataDir, id);
-        });
+        await pageSources.remove(id, (dataDir) =>
+          storeAgent.deletePage(id, () => {
+            pageEvents.closePage(id);
+            removePageDir(dataDir, id);
+          }),
+        );
         sendJson(response, 200, { deleted: true, id });
         return;
       }
@@ -2980,6 +3025,7 @@ export async function startServer(
   const closeServer = async (): Promise<void> => {
     // Open event streams never end on their own; end them so close() does not wait out the grace.
     clearInterval(agentStatusSampler);
+    await pageSources.stop();
     sseHub.closeAll();
     await new Promise<void>((resolve) => {
       // server.closeAllConnections() destroys every tracked socket, including
@@ -3011,6 +3057,8 @@ export async function startServer(
     await closeServer();
     throw error;
   }
+
+  pageSources.start();
 
   let driftedSessions: Parameters<SessionService["restoreRebootedSessions"]>[0] = [];
   try {

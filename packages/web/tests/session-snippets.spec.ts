@@ -54,6 +54,7 @@ class Rig {
   queued: string[] = [];
   messages: Array<{ role: "user" | "assistant"; text: string; timestampMs: number }> = [];
   posts: Post[] = [];
+  chatSends: Array<{ message: string; userGesture: boolean }> = [];
   sendStatus = 200;
   sessionState: "working" | "waiting" = "working";
   // In-memory owner store: `_actions` docs, `_state` docs and the change log.
@@ -214,6 +215,7 @@ function storeResponse(rig: Rig, method: string, url: URL, raw: string) {
     return json(200, { sessionId: SESSION_ID, messages: [], nextFrom: 0 });
   }
   if (method === "POST" && head === "agent" && collection === "send") {
+    rig.chatSends.push(JSON.parse(raw) as { message: string; userGesture: boolean });
     return json(200, { sessionId: SESSION_ID });
   }
   return json(404, { error: "not found" });
@@ -278,6 +280,110 @@ async function install(page: Page, rig: Rig): Promise<void> {
 async function open(page: Page, rig: Rig): Promise<void> {
   await install(page, rig);
   await page.goto(`/sessions/${SESSION_ID}`);
+}
+
+test("host-owned chat voice preserves the draft on denial and explicit Send works in the sandbox", async ({
+  page,
+}) => {
+  const rig = new Rig();
+  rig.publish("candidate-picker", fixtureHtml("candidate-picker", {}) + "<spur-chat></spur-chat>");
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: () =>
+          Promise.reject(new DOMException("Permission denied", "NotAllowedError")),
+      },
+    });
+  });
+  await page.route("**/api/runtime/voice", (route) =>
+    route.fulfill({ json: { available: true, language: "auto" } }),
+  );
+  await open(page, rig);
+  const frame = frameOf(page, "Text variants");
+  const draft = frame.getByRole("textbox", { name: "Message", exact: true });
+  await draft.fill("Keep this draft");
+  await draft.scrollIntoViewIfNeeded();
+  await expect(frame.getByRole("button", { name: "Start voice recording" })).toHaveCount(0);
+  const targets = page.locator('[data-snippet-panel="candidate-picker"] [data-voice-target]');
+  await expect(targets).toHaveCount(1);
+  const microphone = targets.getByRole("button", { name: "Start voice recording", exact: true });
+  await expect(microphone).toHaveCount(1);
+  await expect(microphone).toBeVisible();
+  await microphone.click();
+  await expect(
+    frame.getByRole("alert").filter({ hasText: "Microphone access is blocked" }),
+  ).toBeVisible();
+  await expect(draft).toHaveValue("Keep this draft");
+  await expect(iframeLocator(page, "Text variants")).toHaveAttribute("sandbox", "allow-scripts");
+  expect(rig.chatSends).toEqual([]);
+  await frame.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(draft).toHaveValue("");
+  expect(rig.chatSends).toEqual([{ message: "Keep this draft", userGesture: true }]);
+});
+
+for (const touch of [false, true]) {
+  test(`two in-input trusted microphones route the first ${touch ? "touch" : "click"} before focus`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: touch ? 390 : 1280, height: 1000 });
+    const rig = new Rig();
+    rig.publish(
+      "candidate-picker",
+      fixtureHtml("candidate-picker", {}) +
+        '<spur-chat id="first"></spur-chat><spur-chat id="second"></spur-chat>',
+    );
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "mediaDevices", {
+        configurable: true,
+        value: {
+          getUserMedia: () =>
+            Promise.reject(new DOMException("Permission denied", "NotAllowedError")),
+        },
+      });
+    });
+    await page.route("**/api/runtime/voice", (route) =>
+      route.fulfill({ json: { available: true, language: "auto" } }),
+    );
+    await open(page, rig);
+    const frame = frameOf(page, "Text variants");
+    const second = frame.locator("#second textarea");
+    await second.scrollIntoViewIfNeeded();
+    const targets = page.locator("[data-voice-target]");
+    const mic = targets.last().getByRole("button", { name: "Start voice recording", exact: true });
+    await expect(mic).toBeVisible();
+    const inputBox = await second.boundingBox();
+    const micBox = await mic.boundingBox();
+    expect(micBox!.x).toBeGreaterThan(inputBox!.x);
+    expect(micBox!.x + micBox!.width).toBeLessThan(inputBox!.x + inputBox!.width);
+    expect(micBox!.y + micBox!.height).toBeLessThan(inputBox!.y + inputBox!.height);
+    await expect(second).not.toBeFocused();
+    if (touch) {
+      // Chromium CDP touch input keeps the directly operated host control trusted.
+      const cdp = await page.context().newCDPSession(page);
+      const x = micBox!.x + micBox!.width / 2;
+      const y = micBox!.y + micBox!.height / 2;
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      await cdp.detach();
+    } else await mic.click();
+    await expect(frame.locator("#second .spur-chat-feedback")).toContainText(
+      "Microphone access is blocked",
+    );
+    await expect(frame.locator("#first .spur-chat-feedback")).toBeEmpty();
+    expect(rig.chatSends).toEqual([]);
+    const before = await mic.boundingBox();
+    await iframeLocator(page, "Text variants").evaluate((node) => {
+      (node as HTMLElement).style.transformOrigin = "top left";
+      (node as HTMLElement).style.transform = "scale(0.8)";
+    });
+    await expect.poll(async () => (await mic.boundingBox())?.width).toBeCloseTo(25.6, 0);
+    expect((await mic.boundingBox())!.x).not.toBe(before!.x);
+    await iframeLocator(page, "Text variants").evaluate((node) => {
+      (node as HTMLElement).style.transform = "rotate(5deg)";
+    });
+    await expect(targets).toHaveCount(0);
+  });
 }
 
 function frameOf(page: Page, title: string) {

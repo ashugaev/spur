@@ -247,6 +247,16 @@ const capturePaneAgentProcessesMock = vi.fn<typeof capturePaneAgentProcesses>(
 const terminateAgentProcessesMock = vi.fn<
   (processes: readonly AgentProcessRef[]) => Promise<AgentTerminationOutcome>
 >(() => Promise.resolve({ status: "clear" }));
+const terminateDetachedSessionProcessesMock = vi.fn<
+  (input: {
+    sessionId: string;
+    sessionToolDir: string;
+    tmuxServerPid: number | null;
+  }) => Promise<AgentTerminationOutcome | { status: "unavailable" }>
+>(() => Promise.resolve({ status: "clear" }));
+const readTmuxServerPidMock = vi.fn<() => Promise<runtimeTmuxModule.TmuxServerPid>>(() =>
+  Promise.resolve({ status: "running", pid: 4844 }),
+);
 // "unavailable" is the safe default: it is what a real host without a
 // readable process environment (e.g. macOS, or a CI sandbox without procfs)
 // returns, and matches the P2 guard's own never-blocks-on-what-it-cannot-see
@@ -859,6 +869,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
     getFleetSessionRssBytes: getFleetSessionRssBytesMock,
     isProcessRunningInTmux: isProcessRunningInTmuxMock,
     probeTmuxProcessMatch: probeTmuxProcessMatchMock,
+    readTmuxServerPid: readTmuxServerPidMock,
     killTmuxSession: killTmuxSessionMock,
     killTmuxSessionTree: killTmuxSessionTreeMock,
     setTmuxSocketName: setTmuxSocketNameMock,
@@ -877,6 +888,7 @@ vi.mock("../../src/agent-processes.js", () => ({
   captureAgentProcessesForLaunch: captureAgentProcessesForLaunchMock,
   capturePaneAgentProcesses: capturePaneAgentProcessesMock,
   terminateAgentProcesses: terminateAgentProcessesMock,
+  terminateDetachedSessionProcesses: terminateDetachedSessionProcessesMock,
   findForeignAgentProcessesForSession: findForeignAgentProcessesForSessionMock,
 }));
 
@@ -1737,6 +1749,8 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   captureAgentProcessesForLaunchMock.mockReset().mockResolvedValue({ status: "ok", processes: [] });
   capturePaneAgentProcessesMock.mockReset().mockResolvedValue({ status: "ok", processes: [] });
   terminateAgentProcessesMock.mockReset().mockResolvedValue({ status: "clear" });
+  terminateDetachedSessionProcessesMock.mockReset().mockResolvedValue({ status: "clear" });
+  readTmuxServerPidMock.mockReset().mockResolvedValue({ status: "running", pid: 4844 });
   findForeignAgentProcessesForSessionMock.mockReset().mockResolvedValue({ status: "unavailable" });
   killTmuxSessionTreeMock.mockReset().mockResolvedValue(true);
   sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
@@ -2078,6 +2092,8 @@ export {
   captureAgentProcessesForLaunchMock,
   capturePaneAgentProcessesMock,
   terminateAgentProcessesMock,
+  terminateDetachedSessionProcessesMock,
+  readTmuxServerPidMock,
   findForeignAgentProcessesForSessionMock,
   killTmuxSessionTreeMock,
   sendMessageToTmuxMock,

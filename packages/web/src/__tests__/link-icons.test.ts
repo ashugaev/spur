@@ -53,8 +53,14 @@ function jsonResponse(body: unknown, ok = true, status = 200): Response {
 describe("fetchPrInfo", () => {
   it("preserves reviewer metadata through fetch, batch cache, storage, and last-good reads", async () => {
     const url = "https://github.com/org/repo/pull/reviewers-cache";
-    const reviewers = { approved: ["alice", "bob"], changesRequested: ["carol"] };
+    const reviewers = {
+      approved: ["alice", "bob"],
+      changesRequested: ["carol"],
+      pending: [{ name: "core", team: true }],
+    };
+    const checks = [{ name: "lint", state: "failed" }];
     const snapshot = {
+      checks,
       state: "open",
       reviewDecision: "approved",
       ciStatus: "success",
@@ -66,18 +72,27 @@ describe("fetchPrInfo", () => {
       reviewRequirement: "required",
     };
     mockFetch.mockResolvedValueOnce(jsonResponse(snapshot));
-    expect(await fetchPrInfo(url)).toMatchObject({ reviewers, reviewRequirement: "required" });
+    expect(await fetchPrInfo(url)).toMatchObject({
+      reviewers,
+      checks,
+      reviewRequirement: "required",
+    });
     mockFetch.mockResolvedValueOnce(jsonResponse({ results: { [url]: snapshot } }));
     await fetchPrInfoBatch([url]);
     const { result } = renderHook(() => usePrInfo(url));
     expect(result.current.reviewers).toEqual(reviewers);
+    expect(result.current.checks).toEqual(checks);
     expect(result.current.reviewRequirement).toBe("required");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(250);
     });
     expect(window.localStorage.getItem("spur:pr-status-cache:v1")).toContain("alice");
     mockFetch.mockResolvedValueOnce(jsonResponse({}, false));
-    expect(await fetchPrInfo(url)).toMatchObject({ reviewers, reviewRequirement: "required" });
+    expect(await fetchPrInfo(url)).toMatchObject({
+      reviewers,
+      checks,
+      reviewRequirement: "required",
+    });
   });
 
   it("treats malformed reviewer metadata as unknown without losing aggregate data", async () => {
@@ -85,6 +100,7 @@ describe("fetchPrInfo", () => {
       jsonResponse({
         state: "open",
         reviewDecision: "approved",
+        checks: [{ name: "lint", state: "bogus" }],
         reviewers: { approved: [42], changesRequested: [] },
         reviewRequirement: "optional",
       }),
@@ -93,6 +109,7 @@ describe("fetchPrInfo", () => {
     expect(result.state).toBe("open");
     expect(result.reviewDecision).toBe("approved");
     expect(result.reviewers).toBeNull();
+    expect(result.checks).toBeNull();
     expect(result.reviewRequirement).toBe("unavailable");
   });
 

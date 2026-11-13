@@ -17,6 +17,7 @@ import {
   cacheKeyForCoords,
   errorResponse,
   extractPrCoords,
+  inspectCachedPrStatus,
   readCachedPrStatus,
   recordSuccessfulPrStatus,
   markPrStatusMerged,
@@ -58,8 +59,14 @@ describe("extractPrCoords", () => {
 describe("pr-status cache", () => {
   it("retains reviewer names in stale and merged snapshots", () => {
     const key = "a/b/1";
-    const reviewers = { approved: ["alice"], changesRequested: ["bob"] };
+    const reviewers = {
+      approved: ["alice"],
+      changesRequested: ["bob"],
+      pending: [{ name: "core", team: true }],
+    };
+    const checks = [{ name: "lint", state: "failed" as const }];
     recordSuccessfulPrStatus(key, {
+      checks,
       state: "open",
       reviewDecision: "approved",
       ciStatus: "success",
@@ -70,8 +77,10 @@ describe("pr-status cache", () => {
       reviewers,
       reviewRequirement: "required",
     });
+    expect(inspectCachedPrStatus(key)).toMatchObject({ reviewers, checks });
     expect(errorResponse(key, "offline")).toMatchObject({
       reviewers,
+      checks,
       reviewRequirement: "required",
       stale: true,
     });
@@ -79,6 +88,7 @@ describe("pr-status cache", () => {
     expect(readCachedPrStatus(key)).toMatchObject({
       state: "merged",
       reviewers,
+      checks,
       reviewRequirement: "required",
     });
   });

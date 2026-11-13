@@ -60,18 +60,19 @@ describe("transport parity", () => {
     for (const { doc, expected } of outcomes) {
       const page = await pageRig("");
       page.respond((method, url, body) => {
-        if (method === "POST" && url === "./_spur/actions") {
+        if (method === "POST" && url === "/p/films/_spur/actions") {
           return [200, { id: (body as { id: string }).id, rev: 1, data: { status: "pending" } }];
         }
-        if (method === "GET" && url.startsWith("./_spur/db/docs/_actions/")) {
+        if (method === "GET" && url.startsWith("/p/films/_spur/db/docs/_actions/")) {
           return [200, { id: url.split("/").at(-1), rev: 2, data: doc }];
         }
         return undefined;
       });
       const pagePending = page.win.spur.agent.invoke("pick", {});
       await flush();
-      const id = (page.requests.find((r) => r.url === "./_spur/actions")?.body as { id: string })
-        .id;
+      const id = (
+        page.requests.find((r) => r.url === "/p/films/_spur/actions")?.body as { id: string }
+      ).id;
       page.sources[0]?.emit("change", { seq: 1, collection: "_actions", id, op: "set" }, "1");
       const pageResult = await pagePending;
 

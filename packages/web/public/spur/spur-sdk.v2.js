@@ -8,6 +8,8 @@
  * textContent only. */
 (function () {
   "use strict";
+  if (window.__SPUR_SDK_BOOTED__) return;
+  window.__SPUR_SDK_BOOTED__ = true;
 
   const MSG = {
     hello: "spur:hello",
@@ -28,6 +30,12 @@
     dbChange: "db-change",
     dbReset: "db-reset",
     agentEvent: "agent-event",
+    chatRegister: "chat-register",
+    chatFocus: "chat-focus",
+    chatUnregister: "chat-unregister",
+    chatTranscript: "chat-transcript",
+    chatLayout: "chat-layout",
+    chatVoiceState: "chat-voice-state",
   };
   const PROTOCOL_VERSION = 2;
   const HELLO_INTERVAL_MS = 200;
@@ -96,7 +104,10 @@
     "input-border": "GrayText",
     "text-inverse": "AccentColorText",
   };
-  const PAGE_PALETTE_HREF = "./_spur/theme.css";
+  const pageMatch = /^\/p\/([a-z0-9][a-z0-9-]{0,39})(?:\/|$)/.exec(window.location.pathname);
+  const pageRoot = pageMatch ? "/p/" + pageMatch[1] + "/" : null;
+  const PAGE_PALETTE_HREF = pageRoot + "_spur/theme.css";
+  const chats = new Map();
   const FIELD_TAGS = "spur-choice-list, spur-text-input, spur-textarea";
   const BOUND_SELECTOR =
     "[data-spur-action], spur-button, spur-choice-list, spur-choice, spur-text-input, spur-textarea";
@@ -260,6 +271,21 @@
         if (data.type !== MSG.fullscreen) return;
       }
       switch (data.type) {
+        case MSG.chatTranscript:
+          if (
+            typeof data.target === "string" &&
+            typeof data.text === "string" &&
+            data.text.length <= 20000
+          ) {
+            const chat = chats.get(data.target);
+            if (chat) chat.insertTranscript(data.text);
+          }
+          return;
+        case MSG.chatVoiceState: {
+          const chat = chats.get(data.target);
+          if (chat) chat.voiceState(data);
+          return;
+        }
         case MSG.action:
           setAction(data.action);
           return;
@@ -344,6 +370,12 @@
 
     return {
       kind: "port",
+      chatTarget: function (type, target) {
+        post({ type: type, target: target });
+      },
+      chatLayout: function (snapshot) {
+        post(Object.assign({ type: MSG.chatLayout }, snapshot));
+      },
       connect: connect,
       connected: function () {
         return port !== null;
@@ -389,7 +421,8 @@
   }
 
   function createPageTransport() {
-    const base = "./_spur/";
+    if (!pageRoot) throw new Error("Page SDK requires a /p/<id>/ URL");
+    const base = pageRoot + "_spur/";
     let source = null;
     const waiters = new Map();
 
@@ -658,16 +691,28 @@
     ".spur-chat-tag{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--spur-text-tertiary);margin-right:8px}",
     ".spur-chat-status{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--spur-text-tertiary)}",
     ".spur-chat-status[data-tone=error]{color:var(--spur-status-error)}",
-    ".spur-chat-form{display:flex;gap:6px}",
-    ".spur-chat-form input{flex:1;font:inherit;color:var(--spur-text-primary);background:var(--spur-input-bg);border:1px solid var(--spur-input-border);padding:6px 8px;border-radius:0}",
-    ".spur-chat-form input[aria-invalid=true]{border-color:var(--spur-status-error)}",
-    ".spur-chat-form input:disabled{opacity:.55}",
+    ".spur-chat-form{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px}",
+    ".spur-chat-field{position:relative;width:100%;min-width:0}",
+    ".spur-chat-form textarea{box-sizing:border-box;display:block;width:100%;min-width:0;min-height:144px;resize:vertical;font:inherit;color:var(--spur-text-primary);background:var(--spur-input-bg);border:1px solid var(--spur-input-border);padding:6px 96px 56px 8px;border-radius:0}",
+    ".spur-chat-form textarea:focus-visible{outline:2px solid var(--spur-accent);outline-offset:-2px}",
+    ".spur-chat-form textarea[aria-invalid=true]{border-color:var(--spur-status-error)}",
+    ".spur-chat-form textarea:disabled{opacity:.55}",
+    ".spur-chat-rail{position:absolute;right:8px;bottom:8px;width:32px;height:108px;pointer-events:none}",
+    ".spur-chat-voice{display:block;width:32px;height:108px;border:0;background:transparent;pointer-events:auto}",
+    ".spur-chat-feedback{width:100%;overflow-wrap:anywhere;color:var(--spur-status-error)}",
+    ".spur-chat-feedback:empty{display:none}",
   ].join("\n");
 
   function installStyles() {
     const style = document.createElement("style");
     style.setAttribute("data-spur-sdk", "");
-    style.textContent = STYLE;
+    style.textContent = boot
+      ? STYLE
+      : STYLE.split("\n")
+          .filter(function (line) {
+            return !/^(html|body|\*)/.test(line);
+          })
+          .join("\n");
     const head = document.head || document.documentElement;
     head.insertBefore(style, head.firstChild);
   }
@@ -1629,31 +1674,237 @@
     },
   );
 
+  // One invalidation scheduler for every opaque-frame chat. No idle rAF loop.
+  let layoutCleanup = null;
+  let layoutResume = null;
+  let layoutSequence = 0;
+  function watchChatLayout() {
+    if (transport.kind !== "port") return;
+    if (!chats.size) {
+      if (layoutCleanup) layoutCleanup();
+      layoutCleanup = null;
+      if (layoutResume) window.removeEventListener("pageshow", layoutResume);
+      layoutResume = null;
+      return;
+    }
+    if (layoutCleanup) {
+      layoutCleanup.invalidate();
+      return;
+    }
+    let frame = 0;
+    let flush = 0;
+    let heartbeat = 0;
+    let previous = "";
+    let sentAt = -Infinity;
+    let times = [];
+    let closed = false;
+    function validStyle(node) {
+      const style = window.getComputedStyle(node);
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.visibility === "collapse" ||
+        (style.clipPath && style.clipPath !== "none") ||
+        (style.maskImage && style.maskImage !== "none") ||
+        (style.perspective && style.perspective !== "none") ||
+        (style.rotate && style.rotate !== "none" && style.rotate !== "0deg") ||
+        (style.scale &&
+          style.scale !== "none" &&
+          style.scale.split(/\s+/).some((value) => !(Number(value) > 0)))
+      )
+        return false;
+      if (
+        node.getAnimations &&
+        node.getAnimations().some((animation) => animation.playState === "running")
+      )
+        return false;
+      if (style.transform && style.transform !== "none") {
+        const match = /^matrix\(([^)]+)\)$/.exec(style.transform);
+        if (!match) return false;
+        const values = match[1].split(",").map(Number);
+        if (
+          values.length !== 6 ||
+          !values.every(Number.isFinite) ||
+          values[0] <= 0 ||
+          values[3] <= 0 ||
+          values[1] !== 0 ||
+          values[2] !== 0
+        )
+          return false;
+      }
+      return true;
+    }
+    function slotRect(chat, viewport) {
+      const rail = chat._rail;
+      if (!rail || !chat.isConnected || chat._input.disabled) return null;
+      const box = rail.getBoundingClientRect();
+      if (
+        box.width < 8 ||
+        box.width > 128 ||
+        box.height < 27 ||
+        box.height > 432 ||
+        box.left < 0 ||
+        box.top < 0 ||
+        box.right > viewport.width ||
+        box.bottom > viewport.height
+      )
+        return null;
+      for (let node = rail; node; node = node.parentElement) {
+        if (!validStyle(node)) return null;
+        const style = window.getComputedStyle(node);
+        const clip = node.getBoundingClientRect();
+        const sx = node.offsetWidth ? clip.width / node.offsetWidth : 1;
+        const sy = node.offsetHeight ? clip.height / node.offsetHeight : 1;
+        const left = clip.left + node.clientLeft * sx;
+        const top = clip.top + node.clientTop * sy;
+        if (
+          /(hidden|clip|scroll|auto)/.test(style.overflowX || style.overflow) &&
+          (box.left < left || box.right > left + node.clientWidth * sx)
+        )
+          return null;
+        if (
+          /(hidden|clip|scroll|auto)/.test(style.overflowY || style.overflow) &&
+          (box.top < top || box.bottom > top + node.clientHeight * sy)
+        )
+          return null;
+      }
+      return { x: box.left, y: box.top, width: box.width, height: box.height };
+    }
+    function measure(force) {
+      if (closed || !chats.size) return;
+      const now = Date.now();
+      times = times.filter((time) => now - time < 10000);
+      const wait = Math.max(
+        250 - (now - sentAt),
+        times.length >= 40 ? 10000 - (now - times[0]) : 0,
+      );
+      if (wait > 0) {
+        if (!flush)
+          flush = window.setTimeout(() => {
+            flush = 0;
+            measure(force);
+          }, wait);
+        return;
+      }
+      const viewport = { width: window.innerWidth, height: window.innerHeight };
+      const slots = Array.from(chats.values())
+        .slice(0, 16)
+        .map((chat) => ({ target: chat._chatId, rect: slotRect(chat, viewport) }));
+      const value = JSON.stringify({ viewport: viewport, slots: slots });
+      if (force || value !== previous) {
+        transport.chatLayout({ sequence: layoutSequence++, viewport: viewport, slots: slots });
+        previous = value;
+        sentAt = now;
+        times.push(now);
+      }
+    }
+    function invalidate() {
+      if (!frame && !closed)
+        frame = window.requestAnimationFrame(() => {
+          frame = 0;
+          measure(false);
+        });
+    }
+    const resize = new ResizeObserver(invalidate);
+    resize.observe(document.documentElement);
+    chats.forEach((chat) => resize.observe(chat._rail.parentElement));
+    const mutations = new MutationObserver(invalidate);
+    mutations.observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["style", "class", "hidden", "disabled"],
+    });
+    const events = [
+      "scroll",
+      "resize",
+      "transitionrun",
+      "transitionend",
+      "transitioncancel",
+      "animationstart",
+      "animationend",
+      "animationcancel",
+    ];
+    events.forEach((name) => window.addEventListener(name, invalidate, true));
+    window.visualViewport?.addEventListener("scroll", invalidate);
+    window.visualViewport?.addEventListener("resize", invalidate);
+    function beat() {
+      measure(true);
+      heartbeat = window.setTimeout(beat, 500);
+    }
+    function resume() {
+      layoutResume = null;
+      watchChatLayout();
+    }
+    function suspend() {
+      if (layoutCleanup) layoutCleanup();
+      layoutCleanup = null;
+      layoutResume = resume;
+      window.addEventListener("pageshow", resume, { once: true });
+    }
+    window.addEventListener("pagehide", suspend);
+    heartbeat = window.setTimeout(beat, 500);
+    layoutCleanup = () => {
+      closed = true;
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(flush);
+      window.clearTimeout(heartbeat);
+      resize.disconnect();
+      mutations.disconnect();
+      events.forEach((name) => window.removeEventListener(name, invalidate, true));
+      window.visualViewport?.removeEventListener("scroll", invalidate);
+      window.visualViewport?.removeEventListener("resize", invalidate);
+      window.removeEventListener("pagehide", suspend);
+    };
+    layoutCleanup.invalidate = () => {
+      chats.forEach((chat) => resize.observe(chat._rail.parentElement));
+      invalidate();
+    };
+    invalidate();
+  }
+
   // Chat with the store's agent. Messages render through textContent only.
   define(
     "spur-chat",
     class extends HTMLElement {
       connectedCallback() {
         whenParsed(() => {
-          if (this._ready) return;
+          if (!this.isConnected) return;
+          if (this._ready) {
+            this._attach();
+            return;
+          }
           this._ready = true;
+          this._chatId = randomId();
           const status = el("div", "spur-chat-status", AGENT_LABELS[agentStatus.state] || "");
           const log = el("div", "spur-chat-log");
           log.setAttribute("role", "log");
           log.setAttribute("aria-live", "polite");
-          const form = el("form", "spur-chat-form");
-          const input = document.createElement("input");
-          input.type = "text";
+          const form = el("div", "spur-chat-form");
+          const input = document.createElement("textarea");
+          input.rows = 3;
           input.maxLength = 20000;
           input.placeholder = this.getAttribute("placeholder") || "Message the agent...";
           input.setAttribute("aria-label", "Message");
           const send = el("button", "spur-btn", "Send");
-          send.type = "submit";
-          form.appendChild(input);
+          send.type = "button";
+          const field = el("div", "spur-chat-field");
+          const rail = el("div", "spur-chat-rail");
+          const feedback = el("div", "spur-chat-feedback");
+          feedback.setAttribute("aria-live", "polite");
+          field.appendChild(input);
+          field.appendChild(rail);
+          form.appendChild(field);
+          form.appendChild(feedback);
           form.appendChild(send);
           this.appendChild(status);
           this.appendChild(log);
           this.appendChild(form);
+          this._input = input;
+          this._form = form;
+          this._rail = rail;
+          this._feedback = feedback;
+          this._status = status;
           const render = (message) => {
             const node = el("div", "spur-chat-msg");
             if (message.kind === "action") node.appendChild(el("span", "spur-chat-tag", "Action"));
@@ -1663,24 +1914,31 @@
             log.appendChild(node);
             log.scrollTop = log.scrollHeight;
           };
-          messagePoll.messages.forEach(render);
-          sdk.agent.onMessage(render);
-          sdk.on("agent", function (next) {
+          this._renderMessage = render;
+          this._renderStatus = function (next) {
             status.textContent = AGENT_LABELS[next.state] || next.state;
             status.removeAttribute("data-tone");
+          };
+          messagePoll.messages.forEach(render);
+          this._attach();
+          input.addEventListener("focus", () => {
+            if (transport.kind === "port") transport.chatTarget(MSG.chatFocus, this._chatId);
           });
           input.addEventListener("input", function () {
             input.removeAttribute("aria-invalid");
           });
-          form.addEventListener("submit", (submitEvent) => {
-            submitEvent.preventDefault();
+          send.addEventListener("click", (clickEvent) => {
             const text = input.value.trim();
             if (!text) return;
+            if (text.length > 20000) {
+              this._voiceError("Message exceeds 20,000 characters");
+              return;
+            }
             send.disabled = true;
             input.disabled = true;
             status.removeAttribute("data-tone");
             status.textContent = "Sending…";
-            sendMessage(text, submitEvent.isTrusted).then(function (result) {
+            sendMessage(text, clickEvent.isTrusted).then(function (result) {
               send.disabled = false;
               input.disabled = false;
               input.focus();
@@ -1696,6 +1954,130 @@
             });
           });
         });
+      }
+      _attach() {
+        if (this._offMessage) return;
+        chats.set(this._chatId, this);
+        this._offMessage = sdk.agent.onMessage(this._renderMessage);
+        this._offAgent = sdk.on("agent", this._renderStatus);
+        if (transport.kind === "port") {
+          sdk.ready().then(() => {
+            if (this.isConnected) {
+              transport.chatTarget(MSG.chatRegister, this._chatId);
+              watchChatLayout();
+            }
+          });
+        } else if (!this.hasAttribute("data-floating-chat")) this.setVoiceActive(true);
+      }
+      _voiceError(message) {
+        this._status.textContent = message;
+        this._status.setAttribute("data-tone", "error");
+      }
+      voiceState(data) {
+        if (
+          typeof data.starting !== "boolean" ||
+          typeof data.unavailable !== "boolean" ||
+          !(data.error === null || (typeof data.error === "string" && data.error.length <= 2000))
+        )
+          return;
+        const key = JSON.stringify([data.starting, data.unavailable, data.error]);
+        if (key === this._voiceStateKey) return;
+        this._voiceStateKey = key;
+        this._feedback.replaceChildren();
+        this._feedback.setAttribute("role", data.error ? "alert" : "status");
+        if (data.starting) {
+          const spinner = el("span");
+          spinner.innerHTML = SPINNER;
+          spinner.setAttribute("role", "status");
+          spinner.setAttribute("aria-label", "Starting microphone");
+          this._feedback.appendChild(spinner);
+        }
+        if (data.unavailable)
+          this._feedback.appendChild(document.createTextNode("Voice unavailable"));
+        if (data.error) this._feedback.appendChild(el("span", "", data.error));
+      }
+      insertTranscript(text) {
+        if (!this.isConnected || typeof text !== "string" || this._input.disabled) return;
+        const input = this._input;
+        const start = input.selectionStart ?? input.value.length;
+        const end = input.selectionEnd ?? start;
+        const next = input.value.slice(0, start) + text + input.value.slice(end);
+        if (next.length > 20000) {
+          this._voiceError("Dictation exceeds 20,000 characters");
+          return;
+        }
+        input.value = next;
+        input.setSelectionRange(start + text.length, start + text.length);
+        input.dispatchEvent(new window.Event("input", { bubbles: true }));
+      }
+      setVoiceActive(active) {
+        if (transport.kind !== "page" || !this._form) return;
+        if (!active) {
+          if (this._voiceFrame) this._voiceFrame.remove();
+          if (this._voiceListener) window.removeEventListener("message", this._voiceListener);
+          this._voiceFrame = null;
+          this._voiceListener = null;
+          this._feedback.replaceChildren();
+          this._voiceStateKey = null;
+          return;
+        }
+        if (this._voiceFrame) return;
+        const frame = document.createElement("iframe");
+        const nonce = randomId();
+        const page = pageMatch[1];
+        const chat = this._chatId;
+        const origin = window.location.origin;
+        frame.className = "spur-chat-voice";
+        frame.title = "Voice input";
+        frame.allow = "microphone";
+        frame.src =
+          "/page-voice?" + new window.URLSearchParams({ page: page, chat: chat, nonce: nonce });
+        this._voiceFrame = frame;
+        this._voiceListener = (event) => {
+          const data = event.data;
+          if (
+            this._voiceFrame !== frame ||
+            !this.isConnected ||
+            event.origin !== origin ||
+            event.source !== frame.contentWindow ||
+            !data ||
+            data.page !== page ||
+            data.chat !== chat ||
+            data.nonce !== nonce
+          )
+            return;
+          if (data.type === "spur:voice-ready")
+            frame.contentWindow.postMessage(
+              { type: "spur:voice-connect", page: page, chat: chat, nonce: nonce },
+              origin,
+            );
+          if (data.type === "spur:voice-state") this.voiceState(data);
+          if (
+            data.type === "spur:voice-transcript" &&
+            typeof data.text === "string" &&
+            data.text.length <= 20000
+          )
+            this.insertTranscript(data.text);
+          if (
+            data.type === "spur:voice-size" &&
+            typeof data.height === "number" &&
+            Number.isFinite(data.height)
+          )
+            frame.style.height = Math.min(120, Math.max(36, data.height)) + "px";
+        };
+        window.addEventListener("message", this._voiceListener);
+        this._rail.appendChild(frame);
+      }
+      disconnectedCallback() {
+        this.setVoiceActive(false);
+        chats.delete(this._chatId);
+        watchChatLayout();
+        if (this._offMessage) this._offMessage();
+        if (this._offAgent) this._offAgent();
+        this._offMessage = null;
+        this._offAgent = null;
+        if (transport.kind === "port" && this._chatId)
+          transport.chatTarget(MSG.chatUnregister, this._chatId);
       }
     },
   );
@@ -1726,4 +2108,75 @@
       false,
     );
   });
+
+  function installPageWidget() {
+    if (boot || !pageRoot || document.querySelector("[data-spur-page-widget]")) return;
+    const host = document.createElement("div");
+    host.setAttribute("data-spur-page-widget", "");
+    host.style.cssText =
+      "all:initial!important;font:12px ui-monospace,monospace!important;color:var(--spur-text-primary)!important;position:fixed!important;inset:auto var(--spur-widget-inset) var(--spur-widget-inset) auto!important;z-index:2147483646!important;max-width:calc(100vw - 32px)!important";
+    const root = host.attachShadow({ mode: "open" });
+    const styles = document.createElement("style");
+    styles.textContent =
+      STYLE +
+      "\n:host{--spur-widget-inset:24px}[hidden]{display:none!important}.panel{width:360px;max-width:calc(100vw - 32px);max-height:calc(100dvh - 100px);overflow:auto;background:var(--spur-bg-surface);border:1px solid var(--spur-border-default);margin-bottom:8px}.head{display:flex;align-items:center;justify-content:space-between;padding:8px;border-bottom:1px solid var(--spur-border-subtle);font-weight:700;text-transform:uppercase}.panel spur-chat{border:0}.toggle{width:48px;height:48px;margin-left:auto;display:flex;align-items:center;justify-content:center;background:var(--spur-bg-surface);padding:0}.toggle svg{width:22px;height:22px}.panel .spur-chat-msg{overflow-wrap:anywhere}.panel .spur-chat-log{max-height:min(320px,40dvh)}@media(max-width:639px){.toggle{width:44px;height:44px}:host{--spur-widget-inset:16px}}";
+    root.appendChild(styles);
+    const panel = el("section", "panel");
+    panel.hidden = true;
+    panel.setAttribute("aria-label", "Agent chat");
+    const header = el("div", "head");
+    header.appendChild(el("span", "", "Agent chat"));
+    const close = el("button", "spur-btn", "×");
+    close.type = "button";
+    close.setAttribute("aria-label", "Close agent chat");
+    header.appendChild(close);
+    panel.appendChild(header);
+    const chat = document.createElement("spur-chat");
+    chat.setAttribute("data-floating-chat", "");
+    panel.appendChild(chat);
+    root.appendChild(panel);
+    const toggle = el("button", "spur-btn toggle");
+    toggle.type = "button";
+    toggle.setAttribute("aria-label", "Open agent chat");
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.innerHTML =
+      '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 3v3M9 3h6M4 9h16v12H4zM1 12v6M23 12v6M8 17h8M8 12h1M15 12h1"/></svg>';
+    root.appendChild(toggle);
+    let open = false;
+    function setOpen(next) {
+      open = next;
+      panel.hidden = !open;
+      toggle.setAttribute("aria-expanded", String(open));
+      toggle.setAttribute("aria-label", open ? "Close agent chat" : "Open agent chat");
+      chat.setVoiceActive(open);
+      if (open && chat._input) chat._input.focus();
+      if (!open) toggle.focus();
+    }
+    toggle.addEventListener("click", function () {
+      setOpen(!open);
+    });
+    close.addEventListener("click", function () {
+      setOpen(false);
+    });
+    root.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && open) {
+        event.preventDefault();
+        setOpen(false);
+      }
+    });
+    window.addEventListener("pagehide", function () {
+      chat.setVoiceActive(false);
+    });
+    window.addEventListener("pageshow", function (event) {
+      if (event.persisted && open) chat.setVoiceActive(true);
+    });
+    document.body.appendChild(host);
+    const url = new window.URL(window.location.href);
+    if (url.searchParams.get("chat") === "open") {
+      url.searchParams.delete("chat");
+      window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+      setOpen(true);
+    }
+  }
+  whenParsed(installPageWidget);
 })();
