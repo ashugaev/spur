@@ -939,6 +939,22 @@ describe("parseJsonlRecord token usage", () => {
 // ── parseJsonlRecord rate-limit reset detection ─────────────────────────
 
 describe("parseJsonlRecord rate_limit reset detection", () => {
+  const structuredLine = (fields: Record<string, unknown>) =>
+    JSON.stringify({
+      type: "assistant",
+      isApiErrorMessage: true,
+      error: "rate_limit",
+      message: {
+        model: "<synthetic>",
+        role: "assistant",
+        stop_reason: "stop_sequence",
+        content: [{ type: "text", text: "You've hit your 5-hour limit · resets 2:40am (UTC)" }],
+      },
+      ...fields,
+    });
+  const resetAtMs = Date.parse("2026-11-13T02:20:00.000Z");
+  const resetSeconds = resetAtMs / 1000;
+
   const RATE_LIMIT_LINE_NO_TIMESTAMP = JSON.stringify({
     type: "assistant",
     isApiErrorMessage: true,
@@ -975,6 +991,64 @@ describe("parseJsonlRecord rate_limit reset detection", () => {
     const record = parseJsonlRecord(RATE_LIMIT_LINE_WITH_TIMESTAMP, 0);
     expect(record?.rateLimited).toBe(true);
     expect(record?.rateLimitResetAtMs).toBe(Date.parse("2026-07-12T19:00:00.000Z"));
+  });
+
+  it("takes quotaLimits before apiErrorParams without an own timestamp", () => {
+    const record = parseJsonlRecord(
+      structuredLine({
+        quotaLimits: { resetsAt: resetSeconds },
+        apiErrorParams: { rate_limit_info: { resetsAt: resetSeconds + 60 } },
+      }),
+      0,
+    );
+    expect(record?.rateLimited).toBe(true);
+    expect(record?.rateLimitResetAtMs).toBe(resetAtMs);
+  });
+
+  it("takes a valid structured reset before a different banner reset", () => {
+    const record = parseJsonlRecord(
+      structuredLine({
+        timestamp: "2026-11-13T01:28:46.000Z",
+        quotaLimits: { resetsAt: resetSeconds },
+      }),
+      0,
+    );
+    expect(record?.rateLimitResetAtMs).toBe(resetAtMs);
+  });
+
+  it.each(["invalid", 0, -1, 1e16, null])(
+    "falls through malformed primary reset %s to apiErrorParams",
+    (resetsAt) => {
+      const record = parseJsonlRecord(
+        structuredLine({
+          quotaLimits: { resetsAt },
+          apiErrorParams: { rate_limit_info: { resetsAt: resetSeconds } },
+        }),
+        0,
+      );
+      expect(record?.rateLimitResetAtMs).toBe(resetAtMs);
+    },
+  );
+
+  it("falls through malformed structured resets to text anchored to the own timestamp", () => {
+    const record = parseJsonlRecord(
+      structuredLine({
+        timestamp: "2026-11-13T01:28:46.000Z",
+        quotaLimits: { resetsAt: 1e16 },
+        apiErrorParams: { rate_limit_info: { resetsAt: "invalid" } },
+      }),
+      Date.parse("2026-11-14T12:00:00.000Z"),
+    );
+    expect(record?.rateLimitResetAtMs).toBe(Date.parse("2026-11-13T02:40:00.000Z"));
+  });
+
+  it("does not take structured resets from a non-rate-limit assistant record", () => {
+    const record = parseJsonlRecord(
+      structuredLine({ error: undefined, quotaLimits: { resetsAt: resetSeconds } }),
+      0,
+    );
+    expect(record?.rateLimited).toBeUndefined();
+    expect(record?.rateLimitResetAtMs).toBeUndefined();
   });
 
   it("leaves rateLimitResetAtMs undefined on a normal (non-rate-limit) assistant record", () => {
@@ -1532,6 +1606,55 @@ describe("readClaudeJsonlState rate limit detection", () => {
       await utimes(filePath, new Date(Date.now() + 2_000), new Date(Date.now() + 2_000));
       const rewritten = await readClaudeJsonlState(tempDir, fresh?.reader);
       expect(rewritten?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1, key });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keys a structured reset change separately while preserving no-reset identity", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "claude-structured-limit-key-"));
+    const filePath = join(tempDir, "session.jsonl");
+    const firstReset = 1_800_000_000;
+    const secondReset = firstReset + 3_600;
+    const limit = (resetsAt: number) =>
+      JSON.stringify({
+        type: "assistant",
+        error: "rate_limit",
+        quotaLimits: { resetsAt },
+        message: { role: "assistant", content: [{ type: "text", text: "same limit" }] },
+      });
+    const noReset = JSON.stringify({
+      type: "assistant",
+      error: "rate_limit",
+      message: { role: "assistant", content: [{ type: "text", text: "same limit" }] },
+    });
+    expect(parseJsonlRecord(noReset, 0)?.limitFingerprint).toBe(
+      "3214eeda819c592695924438d94939bf1ff0207e2d061e90e35df8d5c80f76c0",
+    );
+    try {
+      await writeFile(filePath, `${limit(firstReset)}\n`);
+      const first = await readClaudeJsonlState(tempDir, {
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      const firstKey = first?.rateLimit?.source?.key;
+      expect(first?.rateLimit).toMatchObject({ resetAtMs: firstReset * 1_000 });
+      expect(first?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1 });
+      await writeFile(filePath, `${limit(firstReset)}\n`);
+      await utimes(filePath, new Date(Date.now() + 2_000), new Date(Date.now() + 2_000));
+      const replay = await readClaudeJsonlState(tempDir, first?.reader);
+      expect(replay?.rateLimit?.source).toMatchObject({ key: firstKey, ordinal: 1 });
+      await appendFile(filePath, `${limit(firstReset)}\n`);
+      const repeated = await readClaudeJsonlState(tempDir, replay?.reader);
+      expect(repeated?.rateLimit?.source).toMatchObject({ key: firstKey, ordinal: 2 });
+      await writeFile(filePath, `${limit(secondReset)}\n`);
+      await utimes(filePath, new Date(Date.now() + 4_000), new Date(Date.now() + 4_000));
+      const fresh = await readClaudeJsonlState(tempDir, repeated?.reader);
+      expect(fresh?.rateLimit).toMatchObject({ resetAtMs: secondReset * 1_000 });
+      expect(fresh?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1 });
+      expect(fresh?.rateLimit?.source?.key).not.toBe(firstKey);
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }

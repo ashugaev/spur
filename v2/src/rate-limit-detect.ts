@@ -1,7 +1,7 @@
 export interface RateLimitDetection {
   limited: boolean;
   reason: string;
-  /** Epoch ms the limit resets at, when the source text carries a parseable reset instant. */
+  /** Epoch ms the limit resets at, when the source carries a parseable reset instant. */
   resetAtMs?: number;
   /** Per-key occurrence count when keyed; file-global ordinal for legacy sources. */
   source?: { filePath: string; ordinal: number; key?: string };
@@ -13,6 +13,7 @@ const NOT_LIMITED: RateLimitDetection = { limited: false, reason: "" };
 // Used for cursor transcript text and the tmux pane fallback scan. Lowercased.
 export const RATE_LIMIT_MARKERS: readonly string[] = [
   "hit your session limit",
+  "hit your 5-hour limit",
   "hit your weekly limit",
   "hit your usage limit",
   "hit your opus limit",
@@ -46,6 +47,7 @@ const TMUX_BANNER_MARKERS: readonly string[] = [
   "out of usage",
   "out of extra usage",
   "hit your session limit",
+  "you've hit your 5-hour limit",
   "hit your weekly limit",
   "hit your usage limit",
   "hit your opus limit",
@@ -173,7 +175,7 @@ export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | 
 export interface ClaudeRateLimitRecord {
   type: string;
   rateLimited?: boolean;
-  /** Epoch ms the limit resets at, parsed from the record's own banner text. */
+  /** Epoch ms the limit resets at, parsed from structured fields or the record's banner. */
   rateLimitResetAtMs?: number;
 }
 
@@ -205,6 +207,7 @@ const MONTH_ABBREVIATIONS: readonly string[] = [
 // The opus banner is assumed to share that formatter.
 const RESET_BANNERS: readonly string[] = [
   "hit your session limit",
+  "hit your 5-hour limit",
   "hit your weekly limit",
   "hit your opus limit",
 ];

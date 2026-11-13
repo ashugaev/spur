@@ -65225,6 +65225,58 @@ describe("SessionService", () => {
       }
     });
 
+    it("fences a replayed Claude structured reset and re-arms a new reset", async () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "spur-claude-clear-reset-"));
+      const filePath = join(tempDir, "session.jsonl");
+      const firstReset = 1_800_000_000;
+      const secondReset = firstReset + 3_600;
+      const limit = (resetsAt: number) =>
+        JSON.stringify({
+          type: "assistant",
+          error: "rate_limit",
+          quotaLimits: { resetsAt },
+          message: { role: "assistant", content: [{ type: "text", text: "same limit" }] },
+        });
+      const { readClaudeJsonlState: actualRead } = await vi.importActual<{
+        readClaudeJsonlState: typeof readClaudeJsonlState;
+      }>("../../src/claude-jsonl-state.js");
+      const readResult: { value: Awaited<ReturnType<typeof actualRead>> } = { value: null };
+      const seed = { filePath, lastOffset: 0, lastMtimeMs: 0, tailRecords: [] };
+      readClaudeJsonlStateMock.mockImplementation(
+        async (path: string, reader?: ClaudeJsonlReaderState, sessionId?: string) => {
+          readResult.value = await actualRead(path, reader ?? seed, sessionId);
+          return readResult.value;
+        },
+      );
+      try {
+        writeFileSync(filePath, `${limit(firstReset)}\n`);
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T10:00:00.000Z" }));
+        mockClaudeSessionStatus("waiting", "idle");
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        try {
+          expect((await service.clearRateLimit("api-1", true, "cli")).state).toBe("waiting");
+          const fenced = sessions.get("api-1")?.rateLimitClearFence?.sourceOrdinals ?? {};
+          expect(Object.values(fenced)).toEqual([1]);
+          writeFileSync(filePath, `${limit(firstReset)}\n`);
+          utimesSync(filePath, new Date(Date.now() + 2_000), new Date(Date.now() + 2_000));
+          expect((await service.get("api-1")).state).toBe("waiting");
+          expect(fenced[readResult.value?.rateLimit?.source?.key ?? ""]).toBe(1);
+          writeFileSync(filePath, `${limit(secondReset)}\n`);
+          utimesSync(filePath, new Date(Date.now() + 4_000), new Date(Date.now() + 4_000));
+          expect((await service.get("api-1")).state).toBe("rate_limited");
+          expect(readResult.value?.rateLimit).toMatchObject({ resetAtMs: secondReset * 1_000 });
+          expect(readResult.value?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1 });
+          expect(fenced[readResult.value?.rateLimit?.source?.key ?? ""]).toBeUndefined();
+        } finally {
+          service.dispose();
+        }
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it("captures all Codex root keys and fences a healed replay after a candidate switch", async () => {
       const sessions = createSessionStore();
       sessions.set(
