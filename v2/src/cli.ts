@@ -61,7 +61,6 @@ import { checkAgentProcessOwnership } from "./agent-processes.js";
 import { recordReviewCommentsSeen } from "./comment-seen.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
 import type { UsageReport } from "./usage-report.js";
-import type { RateLimitClearResult } from "./types.js";
 import { appendAgentIssue, readAgentIssueLog, type AgentIssueRecord } from "./agent-issue-log.js";
 import type { UserActionRecord } from "./user-action-log.js";
 import type { StoreDoc } from "./stores.js";
@@ -156,6 +155,7 @@ import {
   type OpenPrAction,
   type ProjectConfigMutationResponse,
   type ProviderReasoningEffort,
+  type RateLimitClearResult,
   type RespawnSessionRequest,
   type RuntimeInfo,
   type RunServiceRequest,

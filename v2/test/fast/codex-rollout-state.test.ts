@@ -203,7 +203,6 @@ describe("readCodexRolloutState", () => {
       },
     ]);
     const firstPath = rolloutPath(sessionsDir, "first.jsonl");
-    const secondPath = rolloutPath(sessionsDir, "second.jsonl");
     const firstSource = join("2026", "04", "19", "first.jsonl");
     const secondSource = join("2026", "04", "19", "second.jsonl");
     const reader: CodexRolloutReaderState = { files: new Map() };

@@ -577,19 +577,17 @@ export async function readCursorJsonlState(
     (fileStat.mtimeMs !== reader.lastMtimeMs ||
       fileStat.size !== reader.lastOffset ||
       reader.tailRecords.length + reader.trailingRecords.length === 0);
-  const verifiedPrefix =
-    verifyNeeded && reader
-      ? await hashCursorPrefix(filePath, reader.scanStartOffset ?? 0, reader.lastOffset)
-      : null;
+  const verifiedPrefix = verifyNeeded
+    ? await hashCursorPrefix(filePath, reader.scanStartOffset ?? 0, reader.lastOffset)
+    : null;
   if (verifyNeeded && verifiedPrefix === null) return null;
   const prefixMatches =
     !canReuse ||
-    !reader ||
     verifiedPrefix === null ||
     reader.prefixHash === undefined ||
     verifiedPrefix.copy().digest("hex") === reader.prefixHash;
   const currentReader: CursorJsonlReaderState =
-    canReuse && prefixMatches && reader
+    canReuse && prefixMatches
       ? reader
       : {
           filePath,

@@ -1509,7 +1509,7 @@ function normalizeRateLimitClearFence(value: unknown): SessionRecord["rateLimitC
     sourceOrdinals[path] = ordinal as number;
   }
   return {
-    agentLaunchId: value["agentLaunchId"] as string | null,
+    agentLaunchId: value["agentLaunchId"],
     paneLatched: value["paneLatched"],
     sourceOrdinals,
   };

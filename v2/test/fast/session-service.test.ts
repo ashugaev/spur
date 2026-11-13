@@ -258,6 +258,7 @@ import {
   classifyClaudeJsonlState,
   parseJsonlRecord,
   type ClaudeJsonlReaderState,
+  type readClaudeJsonlState,
 } from "../../src/claude-jsonl-state.js";
 import type * as claudeModule from "../../src/agents/claude.js";
 import type * as codexModule from "../../src/agents/codex.js";
@@ -65180,9 +65181,9 @@ describe("SessionService", () => {
         });
       const oldContent = `${usageLine("old-usage", 7)}\n${limitLine("A")}\n${limitLine("B")}\n`;
       const replacement = `${usageLine("new-usage", 2)}\n${limitLine("C")}\n${JSON.stringify({ type: "system", padding: "x".repeat(oldContent.length) })}\n`;
-      const { readClaudeJsonlState: actualRead } = await vi.importActual<
-        typeof import("../../src/claude-jsonl-state.js")
-      >("../../src/claude-jsonl-state.js");
+      const { readClaudeJsonlState: actualRead } = await vi.importActual<{
+        readClaudeJsonlState: typeof readClaudeJsonlState;
+      }>("../../src/claude-jsonl-state.js");
       const readResult: { value: Awaited<ReturnType<typeof actualRead>> } = { value: null };
       const seed = { filePath, lastOffset: 0, lastMtimeMs: 0, tailRecords: [] };
       readClaudeJsonlStateMock.mockImplementation(
