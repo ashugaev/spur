@@ -1486,6 +1486,7 @@ describe("parseRateLimitResetAtMs", () => {
       Date.parse("2026-11-13T01:28:46.000Z"),
     );
     expect(parsed).toBe(resetAtMs);
+    if (parsed === undefined) throw new Error("Expected 5-hour reset");
     const detection = { limited: true, reason: "claude rate_limit", resetAtMs: parsed };
     expect(rateLimitExpired(detection, resetAtMs - 1)).toBe(false);
     expect(rateLimitExpired(detection, resetAtMs)).toBe(true);
