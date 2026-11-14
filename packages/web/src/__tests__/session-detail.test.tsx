@@ -5496,6 +5496,8 @@ describe("SessionDetail artifacts", () => {
     expect(
       screen.getByRole("dialog", { name: "Artifact preview agent-output.txt" }),
     ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Next artifact" })).toBeDisabled();
 
     sessionPayload = sessionFixture({
       artifacts: [
@@ -6904,6 +6906,49 @@ describe("SessionDetail artifacts", () => {
         ).toBeInTheDocument();
       },
     );
+
+    it("list view viewer prev/next follows the displayed sort order, not payload order", async () => {
+      stubSessions({
+        "api-a1": () => [
+          { name: "c.png" },
+          { name: "notes.txt" },
+          { name: "a.png" },
+          { name: "b.png" },
+        ],
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByText("a.png")).toBeInTheDocument();
+      });
+      fireEvent.click(
+        within(screen.getByRole("tablist", { name: "Artifact view" })).getByRole("button", {
+          name: "List",
+        }),
+      );
+      fireEvent.click(formatButton("PNG (3)"));
+      const table = screen.getByRole("table");
+      fireEvent.click(within(table).getByRole("button", { name: /^Name/ }));
+      expect(
+        within(table)
+          .getAllByRole("button", { name: /^Preview / })
+          .map((button) => button.getAttribute("aria-label")),
+      ).toEqual(["Preview a.png", "Preview b.png", "Preview c.png"]);
+
+      fireEvent.click(within(table).getByRole("button", { name: "Preview a.png" }));
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview a.png" }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
+      fireEvent.keyDown(window, { key: "ArrowRight" });
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview b.png" }),
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Next artifact" }));
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview c.png" }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Next artifact" })).toBeDisabled();
+    });
 
     it("hides the format control when the category has one extension", async () => {
       stubSessions({ "api-a1": () => [{ name: "a.png" }, { name: "b.png" }] });
