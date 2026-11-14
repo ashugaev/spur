@@ -613,10 +613,13 @@ import {
 import {
   listSnapshots,
   readSnapshot as readSnapshotVersion,
+  snapshotDue,
   snapshotGateBlock,
   snapshotSettings,
   writeSnapshot as storeSnapshot,
+  SNAPSHOT_REQUEST_MESSAGE,
   SnapshotConflictError,
+  SnapshotCorruptError,
   WorkSnapshotRequiredError,
 } from "./snapshots.js";
 import { cursorShowsReadyPrompt } from "./cursor-state.js";
@@ -1370,6 +1373,7 @@ type PreparedTodoNudge = {
   lifecycleIds: string[];
   generation: PaneGeneration;
   stamp: SessionLifecycleStamp;
+  slot: "todoNudge" | "snapshotNudge";
   fingerprint: string;
   attempts: number;
   session: AgentMessageTarget;
@@ -4151,6 +4155,8 @@ export class SessionService {
     string,
     { kind: "ledger_corrupt" | "target_gone"; reason: string }
   >();
+  // Latest corrupt snapshot version already logged per session.
+  private readonly snapshotCorruptLogged = new Map<string, number>();
   private readonly todoNudgeBackoff = new Map<
     string,
     { failures: number; nextRetryAtMs: number }
@@ -8095,7 +8101,7 @@ export class SessionService {
             view.state === "waiting" &&
             !this.isInRestoreWarmup(session.id)
           ) {
-            this.scheduleTodoNudge(session);
+            this.scheduleTodoNudge(session, classified.agentActivityAt);
           }
           const attention: AttentionState | null =
             view.state === "needs_input"
@@ -8188,6 +8194,9 @@ export class SessionService {
     }
     for (const sessionId of this.todoNudgeBackoff.keys()) {
       if (!liveIds.has(sessionId)) this.todoNudgeBackoff.delete(sessionId);
+    }
+    for (const sessionId of this.snapshotCorruptLogged.keys()) {
+      if (!liveIds.has(sessionId)) this.snapshotCorruptLogged.delete(sessionId);
     }
     // Keyed `${sessionId}\0${sidecarName}`, unlike every other map here —
     // test only the first \0-split segment against liveIds.
@@ -9878,7 +9887,7 @@ export class SessionService {
   // a reminder never queues behind (or ahead of) a user send, and one pane's
   // ack wait never stalls the sweep for every other session. A skipped tick
   // is retried by the next sweep; attempts stay bounded by todoNudge.
-  private scheduleTodoNudge(session: SessionRecord): void {
+  private scheduleTodoNudge(session: SessionRecord, agentActivityAt: Date | null): void {
     if (
       this.todoNudgesInFlight.has(session.id) ||
       this.sessionLifecycleLocks.has(session.id) ||
@@ -9887,7 +9896,7 @@ export class SessionService {
       return;
     }
     this.todoNudgesInFlight.add(session.id);
-    void this.maybeNudgeTodo(session, { detached: true })
+    void this.maybeNudgeTodo(session, { detached: true, agentActivityAt })
       .catch(() => {})
       .finally(() => {
         this.todoNudgesInFlight.delete(session.id);
@@ -9896,7 +9905,7 @@ export class SessionService {
 
   private async maybeNudgeTodo(
     session: SessionRecord,
-    options?: { detached?: boolean },
+    options?: { detached?: boolean; agentActivityAt?: Date | null },
   ): Promise<void> {
     if (
       this.isInRestoreWarmup(session.id) ||
@@ -9917,7 +9926,7 @@ export class SessionService {
         const lifecycleIds = this.lifecycleIdsFor(session);
         const prepared = await this.withSessionLifecycleLocks(lifecycleIds, async () => {
           if (options?.detached && this.deliveryStopped) return null;
-          return this.maybeNudgeTodoLocked(session, lifecycleIds);
+          return this.maybeNudgeTodoLocked(session, lifecycleIds, options?.agentActivityAt ?? null);
         });
         if (!prepared) return;
 
@@ -9997,6 +10006,7 @@ export class SessionService {
   private async maybeNudgeTodoLocked(
     session: SessionRecord,
     lifecycleIds: string[],
+    agentActivityAt: Date | null,
   ): Promise<PreparedTodoNudge | null> {
     const current = readSession(this.config.dataDir, session.id);
     if (
@@ -10019,6 +10029,22 @@ export class SessionService {
     )
       return null;
     session = current;
+    const snapshotRequest = this.prepareSnapshotRequest(session, agentActivityAt);
+    if (snapshotRequest) {
+      session = { ...session, snapshotNudge: snapshotRequest };
+      writeSession(this.config.dataDir, session);
+      return {
+        sessionId: session.id,
+        workspaceId: workspaceIdOf(session),
+        lifecycleIds,
+        generation: await this.capturePaneGeneration(session),
+        stamp: this.lifecycleStamp(session),
+        slot: "snapshotNudge",
+        ...snapshotRequest,
+        session,
+        message: SNAPSHOT_REQUEST_MESSAGE,
+      };
+    }
     const projection = ensureTodoLedger(this.config.dataDir, session);
     const ledgerSession = readSession(this.config.dataDir, session.id);
     if (!ledgerSession) return null;
@@ -10105,11 +10131,56 @@ export class SessionService {
       lifecycleIds,
       generation,
       stamp: this.lifecycleStamp(session),
+      slot: "todoNudge",
       fingerprint,
       attempts,
       session,
       message,
     };
+  }
+
+  /** Next snapshotNudge slot value when a snapshot request is due and budgeted, else null. */
+  private prepareSnapshotRequest(
+    session: SessionRecord,
+    agentActivityAt: Date | null,
+  ): { fingerprint: string; attempts: number } | null {
+    if (agentActivityAt === null) return null;
+    let latest;
+    try {
+      latest = readSnapshotVersion(this.config.dataDir, session, "latest");
+    } catch (error) {
+      if (!(error instanceof SnapshotCorruptError)) throw error;
+      if (this.snapshotCorruptLogged.get(session.id) !== error.version) {
+        this.snapshotCorruptLogged.set(session.id, error.version);
+        this.logEvent("session.snapshot.request_skipped", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Snapshot request skipped for ${session.id}: ${error.message}`,
+          details: { kind: "snapshot_corrupt", version: error.version },
+        });
+      }
+      return null;
+    }
+    const freshnessMs =
+      snapshotSettings(this.resolveProjectForSession(session)).freshnessMinutes * 60_000;
+    if (
+      !snapshotDue({
+        latestAt: latest?.at ?? null,
+        sessionCreatedAt: session.createdAt,
+        activityAt: agentActivityAt,
+        freshnessMs,
+      })
+    ) {
+      return null;
+    }
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify(["snapshot", latest?.version ?? 0]))
+      .digest("hex");
+    const priorAttempts =
+      session.snapshotNudge?.fingerprint === fingerprint ? session.snapshotNudge.attempts : 0;
+    if (priorAttempts >= AUTOMATIC_REMINDER_MAX_ATTEMPTS) return null;
+    return { fingerprint, attempts: priorAttempts + 1 };
   }
 
   private async todoNudgeMatches(prepared: PreparedTodoNudge): Promise<boolean> {
@@ -10124,8 +10195,8 @@ export class SessionService {
       current.pipeline?.status !== "running" &&
       !submitPending(current) &&
       !hasPendingTelegramSend(this.config.dataDir, current.id) &&
-      current.todoNudge?.fingerprint === prepared.fingerprint &&
-      current.todoNudge.attempts === prepared.attempts &&
+      current[prepared.slot]?.fingerprint === prepared.fingerprint &&
+      current[prepared.slot]?.attempts === prepared.attempts &&
       this.lifecycleStampMatches(current, prepared.stamp) &&
       (await this.paneGenerationMatches(current, prepared.generation))
     );
