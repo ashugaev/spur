@@ -32,6 +32,10 @@ import type * as openCodeModule from "../../src/agents/opencode.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
 import type * as metadataModule from "../../src/metadata.js";
+let actualMetadataModule: typeof metadataModule;
+export function sessionMetadataModule(): typeof metadataModule {
+  return actualMetadataModule;
+}
 import type * as sessionPrModule from "../../src/session-pr.js";
 import type * as releasesCacheModule from "../../src/releases-cache.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
@@ -699,7 +703,10 @@ vi.mock("../../src/ids.js", () => ({
 // real triggers.ts against this service; session-service.ts uses none of them.
 vi.mock("../../src/metadata.js", async (importOriginal) => {
   const actual = await importOriginal<typeof metadataModule>();
+  actualMetadataModule = actual;
   return {
+    observeSessionWrites: actual.observeSessionWrites,
+    withSessionWriteGuard: actual.withSessionWriteGuard,
     deletePendingSendBatch: actual.deletePendingSendBatch,
     deletePendingSendBatchConditional: actual.deletePendingSendBatchConditional,
     deletePendingSpawnWork: actual.deletePendingSpawnWork,

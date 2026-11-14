@@ -17,6 +17,7 @@ import { SELF_DESTRUCT_TOOL_NAME } from "./self-destruct.js";
 import type {
   AgentName,
   SessionLink,
+  SessionLinkFilter,
   SessionSlots,
   SessionSlotsUpdateResult,
   TagDefinition,
@@ -109,6 +110,26 @@ export function normalizeSlotUrl(url: string): string {
   } catch {
     throw new Error(`Invalid slot link URL: ${trimmed}`);
   }
+}
+
+export function parseSessionLinkFilters(raw: string[]): SessionLinkFilter[] {
+  return raw.map((value) => {
+    const separator = value.indexOf("=");
+    const label = normalizeSlotLabel(separator < 0 ? value : value.slice(0, separator));
+    return separator < 0 ? { label } : { label, url: normalizeSlotUrl(value.slice(separator + 1)) };
+  });
+}
+
+export function matchesSessionLinks(
+  links: readonly SessionLink[],
+  filters: readonly SessionLinkFilter[] = [],
+): boolean {
+  return filters.every((filter) =>
+    links.some(
+      (link) =>
+        link.label === filter.label && (filter.url === undefined || link.url === filter.url),
+    ),
+  );
 }
 
 function normalizeTitle(title: string): string {
