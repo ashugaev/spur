@@ -1192,6 +1192,13 @@ export interface CursorRestoreBoundary {
   offset: number;
 }
 
+export interface ClaudeStatusOwner {
+  agentLaunchId: string;
+  agentSessionId: string;
+  pid: number;
+  procStart?: string;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
@@ -1306,6 +1313,12 @@ export interface SessionRecord {
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
+  /**
+   * Pid (and start time) of the pane's interactive claude that last reported
+   * agentSessionId for agentLaunchId; a session-id change is accepted only from
+   * it. Ignored when agentLaunchId differs.
+   */
+  claudeStatusOwner?: ClaudeStatusOwner;
   rateLimitedAt?: string;
   rateLimitClearFence?: {
     agentLaunchId: string | null;

@@ -554,6 +554,7 @@ import {
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
+  type ClaudeStatusOwner,
   type RateLimitClearResult,
   type PrAlertTransfer,
   type DurableSpawnIntent,
@@ -1616,6 +1617,22 @@ async function wakeDeliverability(session: SessionRecord): Promise<WakeDeliverab
 
 function hasSessionErrorEvidence(session: Pick<SessionRecord, "error">): boolean {
   return typeof session.error === "string" && session.error.trim().length > 0;
+}
+
+// The persisted owner proves which pane process reported the stored claude id
+// for this launch. Two absent procStart values match (older claude builds).
+function claudeStatusOwnerMatches(
+  session: Pick<SessionRecord, "agentLaunchId" | "agentSessionId" | "claudeStatusOwner">,
+  status: { pid: number; procStart?: string },
+): boolean {
+  const owner = session.claudeStatusOwner;
+  return (
+    owner !== undefined &&
+    owner.agentLaunchId === session.agentLaunchId &&
+    owner.agentSessionId === session.agentSessionId &&
+    owner.pid === status.pid &&
+    owner.procStart === status.procStart
+  );
 }
 
 function sameSessionRuntimeOwner(left: SessionRecord, right: SessionRecord): boolean {
@@ -4045,12 +4062,6 @@ export class SessionService {
   private readonly claudeJsonlReaders = new Map<
     string,
     { agentSessionId: string | undefined; reader: ClaudeJsonlReaderState }
-  >();
-  // Pid that last reported the stored agentSessionId from the pane's own claude
-  // process; a rotation is accepted only from the same pid.
-  private readonly claudeStatusOwners = new Map<
-    string,
-    { agentLaunchId: string; agentSessionId: string; pid: number }
   >();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly conversationReaders = new Map<string, ClaudeConversationReaderState>();
@@ -7034,9 +7045,42 @@ export class SessionService {
   // pane. One synchronous span: re-read, check, write.
   private rotateClaudeSessionId(
     session: SessionRecord,
-    agentLaunchId: string,
     agentSessionId: string,
-    pid: number,
+    status: { pid: number; procStart?: string },
+    probeRevision: number,
+  ): SessionRecord | undefined {
+    const current = this.readClaudeStatusRecordIfUnchanged(session, probeRevision);
+    if (!current?.claudeStatusOwner || !claudeStatusOwnerMatches(current, status)) {
+      return undefined;
+    }
+    const rotated = {
+      ...current,
+      agentSessionId,
+      claudeStatusOwner: { ...current.claudeStatusOwner, agentSessionId },
+    };
+    writeSession(this.config.dataDir, rotated);
+    this.stateCache.delete(session.id);
+    this.claudeJsonlReaders.delete(session.id);
+    return rotated;
+  }
+
+  // Records the pane process that reports the stored id, once per change.
+  private persistClaudeStatusOwner(
+    session: SessionRecord,
+    owner: ClaudeStatusOwner,
+    probeRevision: number,
+  ): SessionRecord | undefined {
+    const current = this.readClaudeStatusRecordIfUnchanged(session, probeRevision);
+    if (!current || isDeepStrictEqual(current.claudeStatusOwner, owner)) return undefined;
+    const persisted = { ...current, claudeStatusOwner: owner };
+    writeSession(this.config.dataDir, persisted);
+    return persisted;
+  }
+
+  // Freshest record, only while the classify's launch, owner, lifecycle and
+  // revision still hold; callers write in the same synchronous span.
+  private readClaudeStatusRecordIfUnchanged(
+    session: SessionRecord,
     probeRevision: number,
   ): SessionRecord | undefined {
     const current = readSession(this.config.dataDir, session.id);
@@ -7044,7 +7088,7 @@ export class SessionService {
     if (
       !current ||
       current.agentSessionId !== session.agentSessionId ||
-      current.agentLaunchId !== agentLaunchId ||
+      current.agentLaunchId !== session.agentLaunchId ||
       !sameSessionRuntimeOwner(current, session) ||
       !this.lifecycleStateMatches(current, this.lifecycleStamp(session)) ||
       lifecycle.revision !== probeRevision ||
@@ -7052,12 +7096,7 @@ export class SessionService {
     ) {
       return undefined;
     }
-    const rotated = { ...current, agentSessionId };
-    writeSession(this.config.dataDir, rotated);
-    this.stateCache.delete(session.id);
-    this.claudeJsonlReaders.delete(session.id);
-    this.claudeStatusOwners.set(session.id, { agentLaunchId, agentSessionId, pid });
-    return rotated;
+    return current;
   }
 
   private async captureRateLimitSourceOrdinals(
@@ -8147,11 +8186,6 @@ export class SessionService {
     for (const sessionId of this.claudeJsonlReaders.keys()) {
       if (!liveIds.has(sessionId)) {
         this.claudeJsonlReaders.delete(sessionId);
-      }
-    }
-    for (const sessionId of this.claudeStatusOwners.keys()) {
-      if (!liveIds.has(sessionId)) {
-        this.claudeStatusOwners.delete(sessionId);
       }
     }
     for (const sessionId of this.cursorJsonlReaders.keys()) {
@@ -13498,6 +13532,7 @@ export class SessionService {
         session.agent,
         {
           ...this.submitAckContext(session),
+          ackNotBeforeMs: Date.parse(originalTyped.typedAt),
           ...(qualifiedObservation ? { codexAckScope: "current-native-baseline" as const } : {}),
         },
         originalTyped.ackBaseline,
@@ -20920,7 +20955,6 @@ export class SessionService {
     // for the life of the daemon as sessions are created and discarded.
     this.evictConversationReaders(sessionId);
     this.claudeJsonlReaders.delete(sessionId);
-    this.claudeStatusOwners.delete(sessionId);
     this.cursorJsonlReaders.delete(sessionId);
     this.cursorPaneReadyOverrides.delete(sessionId);
     this.explicitInterruptAt.delete(sessionId);
@@ -25139,7 +25173,7 @@ export class SessionService {
       const binding = typed.ackBaseline
         ? await resumeAgentSubmitAckBinding(
             session.agent,
-            this.submitAckContext(session),
+            { ...this.submitAckContext(session), ackNotBeforeMs: Date.parse(typed.typedAt) },
             typed.ackBaseline,
           )
         : null;
@@ -27568,23 +27602,28 @@ export class SessionService {
           session.agentSessionId !== undefined &&
           session.agentLaunchId !== undefined
         ) {
-          const owner = this.claudeStatusOwners.get(session.id);
+          const observed = {
+            pid: statusResult.pid,
+            ...(statusResult.procStart !== undefined ? { procStart: statusResult.procStart } : {}),
+          };
           if (statusResult.sessionId === session.agentSessionId) {
-            this.claudeStatusOwners.set(session.id, {
-              agentLaunchId: session.agentLaunchId,
-              agentSessionId: session.agentSessionId,
-              pid: statusResult.pid,
-            });
-          } else if (
-            owner?.agentLaunchId === session.agentLaunchId &&
-            owner.agentSessionId === session.agentSessionId &&
-            owner.pid === statusResult.pid
-          ) {
+            if (!claudeStatusOwnerMatches(session, observed)) {
+              const persisted = this.persistClaudeStatusOwner(
+                session,
+                {
+                  agentLaunchId: session.agentLaunchId,
+                  agentSessionId: session.agentSessionId,
+                  ...observed,
+                },
+                probeRevision,
+              );
+              if (persisted) effectiveSession = persisted;
+            }
+          } else if (claudeStatusOwnerMatches(session, observed)) {
             rotated = this.rotateClaudeSessionId(
               session,
-              session.agentLaunchId,
               statusResult.sessionId,
-              statusResult.pid,
+              observed,
               probeRevision,
             );
           }

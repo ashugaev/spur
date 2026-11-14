@@ -79507,7 +79507,17 @@ describe("SessionService", () => {
           undefined,
           "ses_2",
         );
-        expect(contexts).toEqual([expect.objectContaining({ agentSessionId: "ses_2" })]);
+        expect(contexts).toEqual([
+          expect.objectContaining({
+            agentSessionId: "ses_2",
+            ackNotBeforeMs: Date.parse(PENDING_LAUNCH_AT),
+          }),
+        ]);
+        expect(record?.claudeStatusOwner).toEqual({
+          agentLaunchId: "held-launch",
+          agentSessionId: "ses_2",
+          pid: 4242,
+        });
         expect(
           logSpurEventMock.mock.calls.filter(([, entry]) =>
             String((entry as { event: string }).event).startsWith("session.server_error"),
@@ -79555,6 +79565,92 @@ describe("SessionService", () => {
             details: expect.objectContaining({ transcriptFound: false }),
           }),
         ]);
+        service.dispose();
+      });
+
+      // A daemon restart: the owner came from the record, not from a tick.
+      async function persistedOwnerFixture(
+        owner: Partial<NonNullable<SessionRecord["claudeStatusOwner"]>>,
+      ) {
+        const sessions = createSessionStore();
+        seedSendHold(sessions, "claude", {
+          claudeStatusOwner: {
+            agentLaunchId: "held-launch",
+            agentSessionId: "ses_1",
+            pid: 4242,
+            procStart: "777",
+            ...owner,
+          },
+        });
+        mockAgentActivity("claude", beforeHold);
+        readClaudeJsonlStateMock.mockImplementation(async (_w: string, _r: unknown, id: string) =>
+          jsonlFor(id),
+        );
+        mockPaneStatus({ id: "ses_2", pid: 4242 }, { procStart: "777" });
+        const contexts = mockRotationScan();
+        return { sessions, service: await deferredService(), contexts };
+      }
+
+      it("rotates on the first tick after a restart from the persisted owner", async () => {
+        const { sessions, service } = await persistedOwnerFixture({});
+
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.agentSessionId).toBe("ses_2");
+        expect(record?.claudeStatusOwner).toEqual({
+          agentLaunchId: "held-launch",
+          agentSessionId: "ses_2",
+          pid: 4242,
+          procStart: "777",
+        });
+        expect(record?.submitUnconfirmedAt).toBeUndefined();
+        expect(eventsNamed("session.submit.confirmed")).toEqual([
+          expect.objectContaining({ details: { evidence: "ack" } }),
+        ]);
+        expect(eventsNamed("session.agent_session_id.rotated")).toHaveLength(1);
+        service.dispose();
+      });
+
+      it.each([
+        ["a reused pid (different procStart)", { procStart: "778" }],
+        ["an owner from an older launch", { agentLaunchId: "old-launch" }],
+      ])("does not rotate from a persisted owner with %s", async (_label, owner) => {
+        const { sessions, service } = await persistedOwnerFixture(owner);
+
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.agentSessionId).toBe("ses_1");
+        expect(record?.submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+        expect(eventsNamed("session.agent_session_id.rotated")).toHaveLength(0);
+        service.dispose();
+      });
+
+      it("writes the owner once while the observation is unchanged", async () => {
+        const sessions = createSessionStore();
+        seedSendHold(sessions, "claude");
+        mockAgentActivity("claude", beforeHold);
+        readClaudeJsonlStateMock.mockImplementation(async (_w: string, _r: unknown, id: string) =>
+          jsonlFor(id),
+        );
+        mockPaneStatus({ id: "ses_1", pid: 4242 }, { procStart: "777" });
+        const service = await deferredService();
+        const persist = vi.spyOn(
+          service as unknown as { persistClaudeStatusOwner: () => unknown },
+          "persistClaudeStatusOwner",
+        );
+
+        await service.get("api-1");
+        await service.get("api-1");
+        await service.get("api-1");
+        expect(sessions.get("api-1")?.claudeStatusOwner).toEqual({
+          agentLaunchId: "held-launch",
+          agentSessionId: "ses_1",
+          pid: 4242,
+          procStart: "777",
+        });
+        // A concurrent classify may still hold the pre-write record and call
+        // the helper; only one call writes.
+        expect(persist.mock.results.filter((result) => result.value !== undefined)).toHaveLength(1);
         service.dispose();
       });
 
@@ -79624,6 +79720,11 @@ describe("SessionService", () => {
 
         await service.get("api-1");
         await service.get("api-1");
+        expect(resumeAgentSubmitAckBindingMock).toHaveBeenCalledWith(
+          "claude",
+          expect.objectContaining({ ackNotBeforeMs: Date.parse(PENDING_LAUNCH_AT) }),
+          expect.anything(),
+        );
         const record = sessions.get("api-1");
         expect(record?.submitUnconfirmedAt).toBeUndefined();
         expect(record).not.toHaveProperty("queuedMessageTyped");
