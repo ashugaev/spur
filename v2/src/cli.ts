@@ -678,8 +678,16 @@ function moveSelection(
 async function loadRawSessions(
   cliEntrypoint: string,
   configPath?: string,
+  filters?: { all?: boolean; links?: string[] },
 ): Promise<SessionListItemView[]> {
-  return getJson<SessionListItemView[]>(cliEntrypoint, "/sessions", configPath);
+  const query = new URLSearchParams();
+  if (filters?.all) query.set("includeCompleted", "1");
+  for (const link of filters?.links ?? []) query.append("link", link);
+  return getJson<SessionListItemView[]>(
+    cliEntrypoint,
+    query.size ? `/sessions?${query}` : "/sessions",
+    configPath,
+  );
 }
 
 function visibleSessionsForHumanList(sessions: SessionListItemView[]): SessionListItemView[] {
@@ -3522,7 +3530,12 @@ export function createProgram(cliEntrypoint: string): Command {
     .alias("ls")
     .description("Show sessions; on a TTY, open the live selector.")
     .option("--json", "Print raw JSON")
+    .option("--all", "Include completed sessions in JSON output")
+    .option("--link <label[=url]>", "Filter JSON output by link", collectOptionValue, [])
     .action(async (options, command) => {
+      if (!options.json && (options.all || options.link.length > 0)) {
+        throw new Error("list --all and --link require --json");
+      }
       const parentProgram = command.parent as Command;
       const explicitConfigPath = getConfigPath(parentProgram);
       const instance = prepareInstanceConfig(parentProgram);
@@ -3543,7 +3556,11 @@ export function createProgram(cliEntrypoint: string): Command {
         await outputResult({
           json: true,
           label: "loading sessions",
-          action: () => loadRawSessions(cliEntrypoint, configPath),
+          action: () =>
+            loadRawSessions(cliEntrypoint, configPath, {
+              all: Boolean(options.all),
+              links: options.link,
+            }),
           render: () => "",
         });
         return;

@@ -1662,6 +1662,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     // stay legible, but nothing writes a fresh one.
     ...(normalizedSession.deskId ? { deskId: normalizedSession.deskId } : {}),
     ...(normalizedSession.slots ? { slots: normalizedSession.slots } : {}),
+    ...(normalizedSession.terminalSlotsCaptured === true
+      ? { terminalSlotsCaptured: true as const }
+      : {}),
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
     ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
     ...(sidecarProcs ? { sidecarProcs } : {}),

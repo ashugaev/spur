@@ -12,7 +12,7 @@ import { readDaemonLogs } from "./mcp-daemon-logs.js";
 export interface DaemonRequest {
   operationId: string;
   pathParams?: Record<string, string> | undefined;
-  query?: Record<string, string | number | boolean | undefined> | undefined;
+  query?: Record<string, string | number | boolean | string[] | undefined> | undefined;
   body?: unknown;
   bodyHandle?: string | undefined;
 }
@@ -155,8 +155,13 @@ export class McpGateway {
     if (!path.startsWith("/") || path.startsWith("//") || path.includes("{"))
       throw new Error("Invalid daemon path");
     const query = new URLSearchParams();
-    for (const [name, value] of Object.entries(input.query ?? {}))
-      if (value !== undefined) query.set(name, String(value));
+    for (const [name, value] of Object.entries(input.query ?? {})) {
+      if (Array.isArray(value)) {
+        for (const item of value) query.append(name, item);
+      } else if (value !== undefined) {
+        query.set(name, String(value));
+      }
+    }
     if (query.size) path += `?${query}`;
     const info = await this.info(signal);
     let cursor: WaitCursor | undefined;

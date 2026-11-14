@@ -569,6 +569,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
           false,
         ),
         field("view", '"full"|"dashboard"', "Session detail projection.", false, "full"),
+        field("link", "string[]", "Repeatable link label or label=URL; all must match."),
       ],
       examples: [{ query: { includeCompleted: "true", view: "full" } }],
       response: "SessionListView[]; x-spur-lifecycle-instance-id header",

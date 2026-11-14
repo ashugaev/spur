@@ -13,7 +13,10 @@ import { encodeMcpResult, MCP_RESULT_BYTES } from "./mcp-results.js";
 const id = z.string().min(1).max(1024);
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const params = z.record(z.string(), z.string());
-const query = z.record(z.string(), z.union([z.string(), z.number().finite(), z.boolean()]));
+const query = z.record(
+  z.string(),
+  z.union([z.string(), z.number().finite(), z.boolean(), z.array(z.string())]),
+);
 
 export function mcpResult(data: Record<string, unknown>): CallToolResult {
   const output = encodeMcpResult(data);
@@ -217,7 +220,11 @@ export function createMcpWrapper(gateway: McpGateway): McpServer {
   register(
     "list_sessions",
     "List daemon sessions with daemon filters.",
-    { view: z.enum(["full", "dashboard"]).optional(), includeCompleted: z.boolean().optional() },
+    {
+      view: z.enum(["full", "dashboard"]).optional(),
+      includeCompleted: z.boolean().optional(),
+      link: z.array(z.string()).optional(),
+    },
     false,
     (input, signal) =>
       gateway.dispatch(
@@ -228,6 +235,7 @@ export function createMcpWrapper(gateway: McpGateway): McpServer {
             ...(input.includeCompleted !== undefined
               ? { includeCompleted: input.includeCompleted ? "1" : "0" }
               : {}),
+            ...(input.link ? { link: input.link } : {}),
           },
         },
         signal,

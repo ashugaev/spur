@@ -1423,6 +1423,24 @@ describe("session workspaceId normalization", () => {
     expect(readSession(dataDir, "api-2")?.workspaceId).toBe("api-1");
   });
 
+  it("keeps a captured empty terminal slot state distinct from legacy records", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = {
+      ...legacyBase,
+      id: "api-1",
+      tmuxSession: "api-1",
+      status: "completed",
+      terminalSlotsCaptured: true,
+      slots: { links: [] },
+    };
+    writeSession(dataDir, record);
+    expect(readSession(dataDir, record.id)).toMatchObject({ terminalSlotsCaptured: true });
+    expect(readSession(dataDir, record.id)).not.toHaveProperty("slots");
+
+    writeSession(dataDir, { ...record, terminalSlotsCaptured: false } as unknown as SessionRecord);
+    expect(readSession(dataDir, record.id)).not.toHaveProperty("terminalSlotsCaptured");
+  });
+
   it("persists a rate-limit clear fence and drops malformed provenance", async () => {
     const dataDir = await newDataDir();
     const record: SessionRecord = { ...legacyBase, id: "api-2", tmuxSession: "api-2" };

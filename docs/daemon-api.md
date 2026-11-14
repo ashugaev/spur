@@ -36,7 +36,7 @@
 
 ## Session routes
 
-- `GET /sessions` — array body, `sidecars[].url` ready endpoint, `sidecars[].ports[].listening` host TCP listener true|false|null; `v2/src/types.ts`; producing `x-spur-lifecycle-instance-id` header, per-row `lifecycle`; `v2/src/session-lifecycle.ts`; never `503` on lifecycle churn, a still-moving row carries its last build and that build's receipt.
+- `GET /sessions` — array; `includeCompleted=1|true` adds completed; repeated `link=<label[=URL]>` uses AND (`label`: any URL, `URL`: normalized; invalid: 400); `sidecars[].url` ready endpoint, `sidecars[].ports[].listening` host TCP listener true|false|null; `x-spur-lifecycle-instance-id` header, per-row `lifecycle`; `v2/src/server.ts`, `v2/src/session-lifecycle.ts`; no `503` on lifecycle churn, moving row carries last build and receipt.
 - `POST /sessions` — `201` accepted spawning identity under [admission pressure](configuration.md#admission-control); optional `allowedTriggers` (omitted = all sends, `[]` = none; carried by respawn/handoff), `reasoningEffort`, `prAlertOwner` (default `false`, [exclusive PR alerts](configuration.md#pr-alert-ownership)); writable `reuseWorkspaceSessionId` [closeout take](commands.md#session-tools-and-environment); `400 pr_alert_owner_invalid`, `409 pr_alert_owner_conflict` body `{ code, error }`; `v2/src/session-service.ts`, `v2/src/pr-alert-owner.ts`.
 - `POST /sessions/background` — `201` accepted spawning identity before [resource recovery](configuration.md#admission-control); same allowlist, PR-alert and closeout-take contracts as `POST /sessions`; `409 spawn_in_progress|spawn_committed|spawn_failed` body `{ code, sessionId, error }` for claimed `preflightBatchId`; `v2/src/session-service.ts`.
 - `POST /shepherd/spawn`
