@@ -81,14 +81,33 @@ export class WorkSnapshotRequiredError extends Error {
   }
 }
 
+export const DEFAULT_SNAPSHOT_FRESHNESS_MINUTES = 10;
+export const SNAPSHOT_HOOK_TOOL_NAME = "spur-snapshot-hook";
+export const SNAPSHOT_REQUEST_MESSAGE =
+  'Spur snapshot is stale: work moved on since your latest snapshot. Write one now with "$SPUR_SNAPSHOT_COMMAND" write --file <path> (--file - reads stdin), then continue.';
+
 export function snapshotSettings(project: ProjectConfig | undefined): {
   maxBytes: number;
   requireFinal: boolean;
+  freshnessMinutes: number;
 } {
   return {
     maxBytes: project?.snapshots?.maxBytes ?? DEFAULT_SNAPSHOT_MAX_BYTES,
     requireFinal: project?.snapshots?.requireFinal ?? false,
+    freshnessMinutes: project?.snapshots?.freshnessMinutes ?? DEFAULT_SNAPSHOT_FRESHNESS_MINUTES,
   };
+}
+
+/** Due when the agent worked more than freshnessMs after the latest snapshot (or session start). */
+export function snapshotDue(input: {
+  latestAt: string | null;
+  sessionCreatedAt: string;
+  activityAt: Date | null;
+  freshnessMs: number;
+}): boolean {
+  if (input.activityAt === null) return false;
+  const baseline = Date.parse(input.latestAt ?? input.sessionCreatedAt);
+  return input.activityAt.getTime() - baseline > input.freshnessMs;
 }
 
 export function snapshotDir(dataDir: string, sessionId: string, project?: string): string {

@@ -887,6 +887,7 @@ export interface ProjectConfig {
 export interface ProjectSnapshotsConfig {
   maxBytes?: number;
   requireFinal?: boolean;
+  freshnessMinutes?: number;
 }
 
 export type ProviderReasoningEffort =
@@ -1372,6 +1373,7 @@ export interface SessionRecord {
   serverErrorAt?: string;
   serverErrorReactivationAttempts?: number;
   todoNudge?: { fingerprint: string; attempts: number };
+  snapshotNudge?: { fingerprint: string; attempts: number };
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
   /** Internal provenance for a retained session error; absent on legacy records. */

@@ -5144,6 +5144,28 @@ projects:
     expect(() => loadConfig(configPath)).toThrow("projects.api.snapshots.maxBytes");
   });
 
+  it("parses snapshots.freshnessMinutes", async () => {
+    const set = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    snapshots:
+      freshnessMinutes: 15
+`);
+    expect(loadConfig(set).projects["api"]?.snapshots).toEqual({ freshnessMinutes: 15 });
+  });
+
+  it.each(["0", "1.5", "x"])("rejects snapshots.freshnessMinutes %s", async (value) => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    snapshots:
+      freshnessMinutes: ${value}
+`);
+    expect(() => loadConfig(configPath)).toThrow("projects.api.snapshots.freshnessMinutes");
+  });
+
   it("rejects unknown snapshots keys and a non-boolean requireFinal", async () => {
     const unknown = await writeConfig(`
 projects:
@@ -5153,7 +5175,7 @@ projects:
       retain: 3
 `);
     expect(() => loadConfig(unknown)).toThrow(
-      'projects.api.snapshots only supports "maxBytes" and "requireFinal" (got: retain)',
+      'projects.api.snapshots only supports "maxBytes", "requireFinal" and "freshnessMinutes" (got: retain)',
     );
     const bad = await writeConfig(`
 projects:

@@ -1646,6 +1646,27 @@ describe("session workspaceId normalization", () => {
     },
   );
 
+  it("round-trips snapshotNudge and drops a malformed fingerprint", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-2",
+      tmuxSession: "api-2",
+      snapshotNudge: { fingerprint: "b".repeat(64), attempts: 2 },
+    });
+    expect(readSession(dataDir, "api-2")?.snapshotNudge).toEqual({
+      fingerprint: "b".repeat(64),
+      attempts: 2,
+    });
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-3",
+      tmuxSession: "api-3",
+      snapshotNudge: { fingerprint: "invalid", attempts: 1 },
+    });
+    expect(readSession(dataDir, "api-3")?.snapshotNudge).toBeUndefined();
+  });
+
   it("drops a malformed ToDo reminder fingerprint", async () => {
     const dataDir = await newDataDir();
     writeSession(dataDir, {

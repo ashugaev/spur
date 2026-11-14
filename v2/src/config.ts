@@ -1469,10 +1469,12 @@ function parseProjectSnapshots(
   if (value === undefined) return undefined;
   const label = `projects.${projectId}.snapshots`;
   const raw = asObject(value, label);
-  const extraKeys = Object.keys(raw).filter((key) => key !== "maxBytes" && key !== "requireFinal");
+  const extraKeys = Object.keys(raw).filter(
+    (key) => key !== "maxBytes" && key !== "requireFinal" && key !== "freshnessMinutes",
+  );
   if (extraKeys.length > 0) {
     throw new Error(
-      `${label} only supports "maxBytes" and "requireFinal" (got: ${extraKeys.join(", ")})`,
+      `${label} only supports "maxBytes", "requireFinal" and "freshnessMinutes" (got: ${extraKeys.join(", ")})`,
     );
   }
   const maxBytes = asOptionalPositiveInteger(raw["maxBytes"], `${label}.maxBytes`);
@@ -1480,9 +1482,14 @@ function parseProjectSnapshots(
     throw new Error(`${label}.maxBytes must be at most ${MAX_SNAPSHOT_BYTES_CEILING}`);
   }
   const requireFinal = asOptionalBoolean(raw["requireFinal"], `${label}.requireFinal`);
+  const freshnessMinutes = asOptionalPositiveInteger(
+    raw["freshnessMinutes"],
+    `${label}.freshnessMinutes`,
+  );
   return {
     ...(maxBytes !== undefined ? { maxBytes } : {}),
     ...(requireFinal !== undefined ? { requireFinal } : {}),
+    ...(freshnessMinutes !== undefined ? { freshnessMinutes } : {}),
   };
 }
 
