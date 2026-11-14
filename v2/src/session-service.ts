@@ -27496,7 +27496,7 @@ export class SessionService {
     let liveModel: string | undefined;
     let tokenUsage: ProviderTokenUsageSample | undefined;
     let tokenUsages: ProviderTokenUsageSample[] | undefined;
-    let codexProbeRecovery: Awaited<ReturnType<typeof this.classifyCodexState>> | undefined;
+    let codexProbeRecovery: Awaited<ReturnType<SessionService["classifyCodexState"]>> | undefined;
     if (
       options?.reconcileRuntime !== false &&
       (effectiveSession.status === "running" || effectiveSession.status === "spawning")
