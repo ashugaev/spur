@@ -35442,7 +35442,11 @@ describe("SessionService", () => {
         prompt: "Ship the feature",
         originalTaskPrompt: "Ship it",
         agentLaunchId: "launch-generation-1",
-        claudeStatusOwner: { agentLaunchId: "launch-generation-1", agentSessionId: "native-1", pid: 4242 },
+        claudeStatusOwner: {
+          agentLaunchId: "launch-generation-1",
+          agentSessionId: "native-1",
+          pid: 4242,
+        },
         restoredAt: "2026-03-18T10:00:00.000Z",
       }),
     );
