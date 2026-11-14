@@ -735,6 +735,7 @@ export const QUEUED_MESSAGE_SETTLE_MS = 2_000;
 // Longest a queued send() waits for the delivery runner's pane write before
 // answering with the message still queued. Never covers the submit ack.
 export const QUEUED_SEND_PANE_WRITE_WAIT_MS = 3_000;
+const SEND_INTERRUPT_GUARD_MS = 5_000;
 const CURSOR_TURN_ENDED_STORE_FILE = "cursor-turn-ended.json";
 
 export function getIdleWaitBeforeFlushMs(): number {
@@ -1331,6 +1332,7 @@ type AgentMessageOptions = AgentMessageWriteOptions & {
   /** Text carries a credential: stdin-loaded, scrubbed buffer, never in argv. */
   sensitive?: true;
   authorizeInput?: (send: () => Promise<void>) => Promise<boolean>;
+  onInterrupt?: () => void;
 };
 
 type PlannedAgentMessage = {
@@ -3765,6 +3767,7 @@ export class SessionService {
   // Epoch ms at which the last queued delivery's submit ack was confirmed;
   // lets waitForQueuedMessage release the prompt hold without its grace.
   private readonly queuedDeliveryAckedAt = new Map<string, number>();
+  private readonly explicitInterruptAt = new Map<string, number>();
   // Epoch ms of the first drain-ready poll that yielded to each pending
   // send-trigger batch (session -> workId); bounds yieldsToTriggerBatch.
   private readonly triggerBatchYieldSince = new Map<string, Map<string, number>>();
@@ -17914,6 +17917,8 @@ export class SessionService {
     request: SendMessageRequest,
     wakeClaim?: ScheduledWakeClaim,
   ): Promise<{ view: SessionView; attempt: Promise<boolean> | null }> {
+    const interruptRequestedAt =
+      request.queue === false && request.interrupt === true ? Date.now() : undefined;
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -17944,6 +17949,7 @@ export class SessionService {
     if (request.queue === false) {
       const view = await this.deliverPrepared(sessionId, finalMessage, {
         interrupt: request.interrupt === true,
+        ...(interruptRequestedAt !== undefined ? { interruptRequestedAt } : {}),
         entryPoint: "send",
         hasAttachments: (request.attachments?.length ?? 0) > 0,
         ...(wakeClaim
@@ -18647,6 +18653,7 @@ export class SessionService {
     intent: DeliveryIntent,
     options?: {
       interrupt?: boolean;
+      interruptRequestedAt?: number;
       recoverOnLiveAckTimeout?: boolean;
       interactive?: boolean;
       /** Message text never persists: no queue entry, typed marker, or requeue. */
@@ -18659,6 +18666,7 @@ export class SessionService {
     record: SessionRecord | null;
     recovered: SubmitAckTimeoutError | null;
     queuedAhead?: boolean;
+    sendOutcome?: SessionView["sendOutcome"];
   }> {
     if (options?.sensitive && (options.interactive || intent.kind !== "direct")) {
       throw new Error("Sensitive messages are delivered directly, never queued");
@@ -18697,6 +18705,9 @@ export class SessionService {
             record: readSession(this.config.dataDir, sessionId),
             recovered: null,
             queuedAhead: true,
+            ...(options?.interruptRequestedAt !== undefined
+              ? { sendOutcome: { kind: "queued" as const, reason: "no_interrupt" as const } }
+              : {}),
           };
       }
 
@@ -18847,6 +18858,39 @@ export class SessionService {
           })) === true;
       }
 
+      const lastInterruptAt = this.explicitInterruptAt.get(sessionId);
+      if (
+        interrupt &&
+        options?.interruptRequestedAt !== undefined &&
+        agentInterruptKeys(prepared.session.agent).length > 0 &&
+        lastInterruptAt !== undefined &&
+        options.interruptRequestedAt - lastInterruptAt < SEND_INTERRUPT_GUARD_MS
+      ) {
+        const record = await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+          const current = readSession(this.config.dataDir, sessionId);
+          if (
+            options.allowDelivery?.() === false ||
+            !current ||
+            !this.lifecycleStateMatches(current, prepared.stamp) ||
+            !(await this.paneGenerationMatches(current, prepared.generation))
+          ) {
+            throw new Error(`Session ${sessionId} changed during message delivery`);
+          }
+          if (options.allowDelivery?.() === false) {
+            throw new Error(`Session ${sessionId} changed during message delivery`);
+          }
+          const queued = this.appendQueuedMessage(current, message, true, options.wakeClaim);
+          options.observeDelivery?.("accepted");
+          this.scheduleDeliveryRunner(sessionId);
+          return queued;
+        });
+        return {
+          record,
+          recovered: null,
+          sendOutcome: { kind: "queued" as const, reason: "interrupt_guard" as const },
+        };
+      }
+
       const generationStillMatches = () =>
         this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
           const current = readSession(this.config.dataDir, sessionId);
@@ -18872,6 +18916,7 @@ export class SessionService {
           return true;
         });
       let recovered: SubmitAckTimeoutError | null = null;
+      let interrupted = false;
       const pane: {
         typed: NonNullable<SessionRecord["queuedMessageTyped"]> | null;
         written: boolean;
@@ -18879,6 +18924,14 @@ export class SessionService {
       try {
         const submission = await this.beginAgentMessage(prepared.session, message, {
           interrupt,
+          ...(options?.interruptRequestedAt !== undefined
+            ? {
+                onInterrupt: () => {
+                  this.explicitInterruptAt.set(sessionId, Date.now());
+                  interrupted = true;
+                },
+              }
+            : {}),
           interactive: options?.interactive === true,
           ...(options?.sensitive ? { sensitive: true as const } : {}),
           onPaneWritten: (ackBaseline, pastedAt) => {
@@ -19002,7 +19055,13 @@ export class SessionService {
         recovered,
         options?.allowDelivery,
       );
-      return { record, recovered };
+      return {
+        record,
+        recovered,
+        ...(options?.interruptRequestedAt !== undefined
+          ? { sendOutcome: { kind: "sent" as const, interrupted } }
+          : {}),
+      };
     });
     if (result.record && options?.allowDelivery?.() !== false) {
       await this.captureAgentSessionId(
@@ -19071,6 +19130,7 @@ export class SessionService {
     message: string,
     options: {
       interrupt?: boolean;
+      interruptRequestedAt?: number;
       sensitive?: true;
       entryPoint: "send" | "deliver" | "flush";
       hasAttachments?: boolean;
@@ -19109,6 +19169,9 @@ export class SessionService {
         { kind: "direct" },
         {
           ...(options.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
+          ...(options.interruptRequestedAt !== undefined
+            ? { interruptRequestedAt: options.interruptRequestedAt }
+            : {}),
           recoverOnLiveAckTimeout: true,
           interactive,
           ...(options.sensitive ? { sensitive: true as const } : {}),
@@ -19121,7 +19184,14 @@ export class SessionService {
       if (!persisted) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       if (options.allowDelivery?.() === false) return await this.enrich(persisted);
       if (result.queuedAhead) {
-        return { ...(await this.enrich(persisted)), queuedAheadReason: "no_interrupt" };
+        return {
+          ...(await this.enrich(persisted)),
+          queuedAheadReason: "no_interrupt",
+          ...(result.sendOutcome ? { sendOutcome: result.sendOutcome } : {}),
+        };
+      }
+      if (result.sendOutcome?.kind === "queued") {
+        return { ...(await this.enrich(persisted)), sendOutcome: result.sendOutcome };
       }
       if (result.recovered) {
         this.logEvent("session.message.delivery_recovered", {
@@ -19151,7 +19221,10 @@ export class SessionService {
           },
         });
       }
-      return await this.enrich(persisted);
+      return {
+        ...(await this.enrich(persisted)),
+        ...(result.sendOutcome ? { sendOutcome: result.sendOutcome } : {}),
+      };
     } catch (error) {
       if (options.wakeClaim && !this.scheduledWakeClaimCurrent(options.wakeClaim)) throw error;
       if (initialSession && options.allowDelivery?.() === false) {
@@ -19533,6 +19606,7 @@ export class SessionService {
     const interruptState = { interrupted: false };
     if (options?.interrupt === true) {
       const interrupt = async () => {
+        if (agentInterruptKeys(session.agent).length > 0) options.onInterrupt?.();
         interruptState.interrupted = await sendInterruptKeysToTmux(
           session.tmuxSession,
           session.agent,
@@ -20720,6 +20794,7 @@ export class SessionService {
     this.claudeJsonlReaders.delete(sessionId);
     this.cursorJsonlReaders.delete(sessionId);
     this.cursorPaneReadyOverrides.delete(sessionId);
+    this.explicitInterruptAt.delete(sessionId);
     const anchorId = workspaceIdOf(session);
     // A desk sibling's own session-tools dir is per-session, so it goes now.
     // The anchor's doubles as the tool dir of the desk's shared sidecars, so
