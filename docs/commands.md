@@ -59,7 +59,7 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 
 ## list
 
-`spur list [--json] [--all] [--link <label[=URL]>...]` reads `GET /sessions` ([daemon-api.md#session-routes](daemon-api.md#session-routes)); `--all` includes completed, repeated `--link` filters use AND, both require `--json`; default excludes completed. TTY: live selector (`Enter` attach, `l` log, `p` pause, `c` complete, `r` restore, `k` kill).
+`spur list [--json] [--all] [--link <label[=URL]>...]` — `--all` adds completed; repeated `--link` uses AND; both require `--json`; TTY selector (`Enter` attach, `l` log, `p` pause, `c` complete, `r` restore, `k` kill); `v2/src/cli.ts`, [GET /sessions](daemon-api.md#session-routes).
 `spur pause <sessionId> [--json]` — keeps the worktree. `spur complete <sessionId> [--pr-action leave_open|close] [--skip-pr-check] [--json]`.
 `spur kill <sessionId> [--force] [--pr-action leave_open|close] [--skip-pr-check] [--json]` — `--force` skips the dirty-worktree/unpushed-commit confirmation.
 `spur restore <sessionId> [--force] [--json]`, `spur reopen <sessionId> [--force] [--json]` (in place, prompt not resent) — `--force` bypasses the foreign-live-process refusal; token-budget refusal: [configuration](configuration.md#field-reference). A restore/reopen that clears both gates also clears the session's durable GitHub poll-disable ([configuration.md#automatic-reminders](configuration.md#automatic-reminders)); one refused by either gate leaves it untouched.
