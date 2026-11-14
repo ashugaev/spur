@@ -2852,7 +2852,7 @@ describe("SessionService", () => {
     const service = await createDisposedSessionService();
     const claude = await vi.importActual<typeof claudeModule>("../../src/agents/claude.js");
     setupAgentHooksMock.mockImplementationOnce(async () => ({
-      claudeSettingsPath: await claude.ensureClaudeRestrictWritesSettings(setupDir),
+      claudeSettingsPath: await claude.ensureClaudeSettings(setupDir, { restrictWrites: true }),
     }));
     const record = runningSession({ status: "stopped", stopReason: "manual_pause" });
     sessions.set(record.id, record);
@@ -4098,6 +4098,35 @@ describe("SessionService", () => {
         expect(send.mock.calls[1]?.[1]).toBe(SNAPSHOT_REQUEST_MESSAGE);
         expect(sessions.get(session.id)?.todoNudge).toEqual(todoNudge);
         expect(sessions.get(session.id)?.snapshotNudge?.attempts).toBe(1);
+        service.dispose();
+      });
+
+      it("bakes freshnessMinutes into session tools for claude and codex only", async () => {
+        const config = baseConfig();
+        loadConfigMock.mockReturnValue({
+          ...config,
+          projects: {
+            api: { ...config.projects.api, snapshots: { freshnessMinutes: 7 } },
+          },
+        });
+        createSessionStore();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const prepare = (
+          service as unknown as {
+            prepareSessionTools(id: string, agent: AgentName, project: string): string;
+          }
+        ).prepareSessionTools.bind(service);
+
+        ensureSessionSlotToolMock.mockClear();
+        prepare("api-1", "claude", "api");
+        prepare("api-1", "codex", "api");
+        prepare("api-1", "cursor", "api");
+
+        const calls = ensureSessionSlotToolMock.mock.calls.map(([args]) => args);
+        expect(calls[0]).toMatchObject({ agent: "claude", snapshotFreshnessMinutes: 7 });
+        expect(calls[1]).toMatchObject({ agent: "codex", snapshotFreshnessMinutes: 7 });
+        expect(calls[2]).not.toHaveProperty("snapshotFreshnessMinutes");
         service.dispose();
       });
 
@@ -11017,6 +11046,7 @@ describe("SessionService", () => {
       configPath: customConfig,
       projectId: "api",
       agent: "claude",
+      snapshotFreshnessMinutes: 10,
     });
   });
 
@@ -25957,6 +25987,7 @@ describe("SessionService", () => {
       "api-1",
       runningSession({
         agent: "codex",
+        createdAt: now.toISOString(),
         queuedMessages: { messages: ["please continue"], awaitingPrompt: false },
       }),
     );

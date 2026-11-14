@@ -493,6 +493,38 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     expect(commands).toContain(SPUR_COMMAND);
   });
 
+  it("adds the snapshot hook to Stop only and does not duplicate it on rerun", async () => {
+    const snapshotCommand = "'/session/tool/spur-snapshot-hook'";
+    type Doc = { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> };
+    const lastHooksWrite = (): Doc => {
+      const writes = mockWriteFile.mock.calls.filter(
+        (c) => typeof c[0] === "string" && c[0].endsWith("hooks.json"),
+      );
+      return JSON.parse(requireValue(writes.at(-1), "expected hooks.json write")[1] as string);
+    };
+    const commandsOf = (doc: Doc, event: string) =>
+      (doc.hooks[event] ?? []).flatMap((group) => group.hooks.map((hook) => hook.command));
+    mockReadFile.mockImplementation(async (filePath: unknown) => {
+      if (typeof filePath === "string" && filePath.endsWith("hooks.json")) {
+        throw new Error("ENOENT");
+      }
+      return "";
+    });
+
+    await ensureCodexHooksConfig("/session/tool");
+    const first = lastHooksWrite();
+    expect(commandsOf(first, "Stop")).toContain(snapshotCommand);
+    expect(commandsOf(first, "PostToolUse")).not.toContain(snapshotCommand);
+
+    mockReadFile.mockImplementation(async (filePath: unknown) =>
+      typeof filePath === "string" && filePath.endsWith("hooks.json") ? JSON.stringify(first) : "",
+    );
+    await ensureCodexHooksConfig("/session/tool");
+    expect(commandsOf(lastHooksWrite(), "Stop").filter((c) => c === snapshotCommand)).toHaveLength(
+      1,
+    );
+  });
+
   it("handles invalid JSON in hooks.json by returning a fresh document", async () => {
     mockReadFile.mockImplementation(async (filePath: unknown) => {
       if (typeof filePath === "string" && filePath.endsWith("hooks.json")) {
