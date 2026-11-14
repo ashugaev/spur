@@ -437,6 +437,59 @@ describe("session transitions service", () => {
     await expect(service.get("api-1")).rejects.toThrow("session write failed");
   });
 
+  it("keeps subscriber-triggered native send actions strict outside the read observation boundary", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "subscriber", status: "stopped" }));
+    await service.get("api-1");
+    service.subscribeToSessionStates("subscriber", {
+      targetSessionId: "api-1",
+      states: ["rate_limited"],
+    });
+    const store = (
+      service as unknown as {
+        transitionsBinding: {
+          store: {
+            observeStatus(record: SessionRecord, links: { label: string; url: string }[]): void;
+          };
+        };
+      }
+    ).transitionsBinding.store;
+    const observe = store.observeStatus.bind(store);
+    let failedWrites = 0;
+    vi.spyOn(store, "observeStatus").mockImplementation((record, links) => {
+      if (record.id === "subscriber" && record.status === "running") {
+        failedWrites += 1;
+        throw new Error("action journal unavailable");
+      }
+      observe(record, links);
+    });
+    const nativeSend = service.send.bind(service);
+    const dispatched: ReturnType<typeof nativeSend>[] = [];
+    vi.spyOn(service, "send").mockImplementation((...args) => {
+      const pending = nativeSend(...args);
+      dispatched.push(pending);
+      return pending;
+    });
+    evidence("working", "2026-03-18T11:00:00.000Z");
+    expect(await service.get("api-1")).toMatchObject({ state: "rate_limited" });
+    expect(dispatched).toHaveLength(1);
+    const [pending] = dispatched;
+    if (!pending) throw new Error("Missing subscriber send");
+    const outcome = await pending.then(
+      () => "resolved",
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    expect(failedWrites).toBeGreaterThan(0);
+    const subscriber = metadata.readSession(TEST_DATA_DIR, "subscriber");
+    expect(subscriber?.status).toBe("running");
+    if (!subscriber) throw new Error("Missing subscriber");
+    metadata.writeSession(TEST_DATA_DIR, { ...subscriber, status: "stopped" });
+    await expect(nativeSend("subscriber", { message: "direct strict control" })).rejects.toThrow(
+      "action journal unavailable",
+    );
+    expect(outcome).toBe("action journal unavailable");
+  });
+
   it.each(["runtime", "workspace"] as const)(
     "rejects structured %s diagnostics in strict polls before retaining a false error",
     async (probe) => {

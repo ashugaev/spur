@@ -7,7 +7,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { AsyncLocalStorage } from "node:async_hooks";
 import { getBuildId } from "./build-identity.js";
 import {
   consentPolicy,
@@ -1478,6 +1477,8 @@ interface SidecarReapEntryContext {
 // "dead_looking" = one plain read found no live agent; it is confirmed by a
 // later fresh read before anything treats it as dead.
 type MemberRuntimeSample = "live" | "dead" | "dead_looking" | "unknown";
+
+type SessionJournalPolicy = "strict" | "read";
 
 interface SessionStateResult {
   session: SessionRecord;
@@ -3943,7 +3944,7 @@ export class SessionService {
     engagedCause: MemoryDenialCause | null;
   } = { engaged: false, clearTicks: 0, engagedAtMs: null, engagedCause: null };
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
-  private readonly transitionReadContext = new AsyncLocalStorage<boolean>();
+  private journalWritePolicy: SessionJournalPolicy = "strict";
   private transitionsBinding:
     | {
         dataDir: string;
@@ -26466,17 +26467,31 @@ export class SessionService {
   private publishSessionTransition(
     session: Pick<SessionRecord, "id" | "project">,
     publish: () => void,
+    policy = this.journalWritePolicy,
   ): void {
     try {
       publish();
     } catch (error) {
-      if (!this.transitionReadContext.getStore()) throw error;
+      if (policy === "strict") throw error;
       this.logEvent("session.transitions.write_failed", {
         level: "warn",
         sessionId: session.id,
         projectId: session.project,
         message: error instanceof Error ? error.message : String(error),
       });
+    }
+  }
+
+  private writeClassifiedSession(
+    session: SessionRecord,
+    policy: SessionJournalPolicy = "strict",
+  ): void {
+    const previous = this.journalWritePolicy;
+    this.journalWritePolicy = policy;
+    try {
+      writeSession(this.config.dataDir, session);
+    } finally {
+      this.journalWritePolicy = previous;
     }
   }
 
@@ -26488,13 +26503,14 @@ export class SessionService {
     serverError: boolean,
     serverErrorEvidence?: "error" | "recovered",
     rateLimitResetAt?: string,
+    journalPolicy: SessionJournalPolicy = "strict",
   ): Promise<SessionStateTransition[]> {
     if (this.isDeliveryStopped()) return [];
     // Recovery evidence is independent of the displayed state and restore warmup.
     if (serverError && !session.serverErrorAt) {
-      this.writeServerErrorMarker(session.id, nowIso());
+      this.writeServerErrorMarker(session.id, nowIso(), undefined, journalPolicy);
     } else if (serverErrorEvidence === "recovered" && session.serverErrorAt) {
-      this.writeServerErrorMarker(session.id, null, session.serverErrorAt);
+      this.writeServerErrorMarker(session.id, null, session.serverErrorAt, journalPolicy);
     }
 
     const history = this.stateHistory.get(session.id) ?? [];
@@ -26516,19 +26532,24 @@ export class SessionService {
           : undefined;
       if (current.rateLimitedAt !== limitedAt || current.rateLimitResetAt !== reset) {
         const { rateLimitedAt: _oldLimit, rateLimitResetAt: _oldReset, ...base } = current;
-        writeSession(this.config.dataDir, {
-          ...base,
-          ...(limitedAt ? { rateLimitedAt: limitedAt } : {}),
-          ...(reset ? { rateLimitResetAt: reset } : {}),
-          updatedAt: nowIso(),
-        });
+        this.writeClassifiedSession(
+          {
+            ...base,
+            ...(limitedAt ? { rateLimitedAt: limitedAt } : {}),
+            ...(reset ? { rateLimitResetAt: reset } : {}),
+            updatedAt: nowIso(),
+          },
+          journalPolicy,
+        );
         current = readSession(this.config.dataDir, session.id);
       }
       if (current) {
         const observed = current;
         const links = this.displaySlotsForSession(observed)?.links ?? [];
-        this.publishSessionTransition(observed, () =>
-          this.transitionsBinding?.store.observeState(observed, state, links),
+        this.publishSessionTransition(
+          observed,
+          () => this.transitionsBinding?.store.observeState(observed, state, links),
+          journalPolicy,
         );
       }
     }
@@ -26567,6 +26588,7 @@ export class SessionService {
     sessionId: string,
     serverErrorAt: string | null,
     observedMarker?: string,
+    journalPolicy: SessionJournalPolicy = "strict",
   ): void {
     const current = readSession(this.config.dataDir, sessionId);
     if (!current) return;
@@ -26576,7 +26598,10 @@ export class SessionService {
       // here can find the marker already armed by another tick, and writing
       // again would restart the 30-minute window for no reason.
       if (current.serverErrorAt) return;
-      writeSession(this.config.dataDir, { ...current, serverErrorAt, updatedAt: nowIso() });
+      this.writeClassifiedSession(
+        { ...current, serverErrorAt, updatedAt: nowIso() },
+        journalPolicy,
+      );
     } else {
       if (!current.serverErrorAt || current.serverErrorAt !== observedMarker) return;
       const {
@@ -26584,7 +26609,7 @@ export class SessionService {
         serverErrorReactivationAttempts: _attempts,
         ...base
       } = current;
-      writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+      this.writeClassifiedSession({ ...base, updatedAt: nowIso() }, journalPolicy);
     }
   }
 
@@ -26644,6 +26669,7 @@ export class SessionService {
     reason: "boot" | "runtime_check",
     workspaceMissing: boolean,
     probeRevision = this.lifecycle.snapshot(session.id).revision,
+    journalPolicy: SessionJournalPolicy = "strict",
   ): Promise<{ session: SessionRecord; runtime: SessionRuntimeSnapshot }> {
     if (this.isDeliveryStopped() || this.staleParksInFlight.has(session.id)) {
       return { session, runtime };
@@ -26672,6 +26698,7 @@ export class SessionService {
           runtime.diagnostic ?? "runtime probe (tmux or ps) timed out; runtime state unknown",
           "runtime_probe",
           probeRevision,
+          journalPolicy,
         ),
         runtime,
       };
@@ -26696,6 +26723,7 @@ export class SessionService {
             diagnostic,
             "runtime_probe",
             probeRevision,
+            journalPolicy,
           );
           return {
             session: retained,
@@ -26762,6 +26790,7 @@ export class SessionService {
             "runtime probe (tmux or ps) timed out; runtime state unknown",
           "runtime_probe",
           probeRevision,
+          journalPolicy,
         );
         this.logEvent("session.runtime.probe_unresponsive", {
           level: "warn",
@@ -26813,7 +26842,7 @@ export class SessionService {
         updatedAt,
       };
     }
-    writeSession(this.config.dataDir, updated);
+    this.writeClassifiedSession(updated, journalPolicy);
     this.stateCache.delete(session.id);
     this.logEvent(
       reason === "boot" ? "session.reconcile.drift" : `session.runtime.${updated.status}`,
@@ -26851,6 +26880,7 @@ export class SessionService {
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
     workspaceMissing: boolean,
+    journalPolicy: SessionJournalPolicy = "strict",
   ): SessionRecord {
     // Shepherd is not exempt: its own terminal exits are "completed" (self
     // destruct) or "killed", and it is never stale-parked, so a stopped or
@@ -26892,7 +26922,7 @@ export class SessionService {
       updatedAt: nowIso(),
     };
     delete updated.stopReason;
-    writeSession(this.config.dataDir, updated);
+    this.writeClassifiedSession(updated, journalPolicy);
     this.stateCache.delete(session.id);
     this.logEvent("session.reconcile.running", {
       level: "warn",
@@ -26918,6 +26948,7 @@ export class SessionService {
     workspacePresent: boolean,
     probeRevision: number,
     observePromotion?: (session: SessionRecord) => void,
+    journalPolicy: SessionJournalPolicy = "strict",
   ): SessionRecord {
     // Shepherd included, for the reason spelled out in
     // reconcileStaleStoppedSession above.
@@ -26957,7 +26988,7 @@ export class SessionService {
       delete updated.errorSource;
     }
     delete updated.stopReason;
-    writeSession(this.config.dataDir, updated);
+    this.writeClassifiedSession(updated, journalPolicy);
     observePromotion?.(updated);
     this.stateCache.delete(session.id);
     this.logEvent("session.reconcile.running", {
@@ -27041,6 +27072,7 @@ export class SessionService {
       suppressMenuConfirmation?: boolean;
       strictErrors?: boolean;
       assertCurrent?: () => void;
+      journalPolicy?: SessionJournalPolicy;
     },
     observePreparation?: (session: SessionRecord) => void,
   ): Promise<SessionStateResult> {
@@ -27073,7 +27105,13 @@ export class SessionService {
         ) {
           throw error;
         }
-        return this.classificationErrorResult(observation, error, "other", probeRevision);
+        return this.classificationErrorResult(
+          observation,
+          error,
+          "other",
+          probeRevision,
+          options?.journalPolicy,
+        );
       }
     })();
     if (!options?.bypassClearBarrier) {
@@ -27097,9 +27135,16 @@ export class SessionService {
     error: unknown,
     errorSource: "runtime_probe" | "other",
     probeRevision: number,
+    journalPolicy: SessionJournalPolicy = "strict",
   ): SessionStateResult {
     const diagnostic = error instanceof Error ? error.message : String(error);
-    const retained = this.retainDetectionError(session, diagnostic, errorSource, probeRevision);
+    const retained = this.retainDetectionError(
+      session,
+      diagnostic,
+      errorSource,
+      probeRevision,
+      journalPolicy,
+    );
     return {
       session: retained,
       runtime: {
@@ -27123,6 +27168,7 @@ export class SessionService {
     diagnostic: string,
     errorSource: "runtime_probe" | "other",
     probeRevision: number,
+    journalPolicy: SessionJournalPolicy = "strict",
   ): SessionRecord {
     const latest = readSession(this.config.dataDir, session.id);
     if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
@@ -27144,7 +27190,7 @@ export class SessionService {
       return latest;
     if (latest.error === message) return latest;
     const retained = { ...latest, error: message, errorSource, updatedAt: nowIso() };
-    writeSession(this.config.dataDir, retained);
+    this.writeClassifiedSession(retained, journalPolicy);
     this.stateCache.delete(session.id);
     this.logEvent("session.runtime.probe_unresponsive", {
       level: "error",
@@ -27241,6 +27287,7 @@ export class SessionService {
       suppressMenuConfirmation?: boolean;
       strictErrors?: boolean;
       assertCurrent?: () => void;
+      journalPolicy?: SessionJournalPolicy;
     },
     observePreparation?: (session: SessionRecord) => void,
   ): Promise<SessionStateResult> {
@@ -27310,6 +27357,7 @@ export class SessionService {
           error,
           "runtime_probe",
           probeRevision,
+          options?.journalPolicy,
         );
         return {
           ...result,
@@ -27383,6 +27431,7 @@ export class SessionService {
           ? "runtime_probe"
           : "other",
         probeRevision,
+        options?.journalPolicy,
       );
     } else if (
       session.status !== "errored" &&
@@ -27409,7 +27458,7 @@ export class SessionService {
       ) {
         const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recovered } = latest;
         effectiveSession = { ...recovered, updatedAt: nowIso() };
-        writeSession(this.config.dataDir, effectiveSession);
+        this.writeClassifiedSession(effectiveSession, options?.journalPolicy);
         observePreparation?.(effectiveSession);
         this.stateCache.delete(session.id);
         if (this.shouldRunDelivery(effectiveSession)) this.scheduleDeliveryRunner(session.id);
@@ -27449,6 +27498,7 @@ export class SessionService {
         "runtime_check",
         workspace.missing,
         probeRevision,
+        options?.journalPolicy,
       );
       effectiveSession = reconciled.session;
       runtime = reconciled.runtime;
@@ -27457,6 +27507,7 @@ export class SessionService {
       effectiveSession,
       runtime,
       workspace.missing,
+      options?.journalPolicy,
     );
     if (!runtimeOwnerChanged) {
       effectiveSession = this.reconcileStaleErroredSession(
@@ -27465,6 +27516,7 @@ export class SessionService {
         workspace.exists,
         probeRevision,
         observePreparation,
+        options?.journalPolicy,
       );
     }
 
@@ -27564,7 +27616,7 @@ export class SessionService {
       ) {
         const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recovered } = current;
         effectiveSession = { ...recovered, updatedAt: nowIso() };
-        writeSession(this.config.dataDir, effectiveSession);
+        this.writeClassifiedSession(effectiveSession, options?.journalPolicy);
         this.stateCache.delete(session.id);
         codexProbeRecovery = native;
       }
@@ -28148,13 +28200,7 @@ export class SessionService {
     return (await this.assembleDashboard(session))?.view;
   }
 
-  private assembleDashboard(
-    session: SessionRecord,
-  ): ReturnType<SessionService["assembleDashboardInContext"]> {
-    return this.transitionReadContext.run(true, () => this.assembleDashboardInContext(session));
-  }
-
-  private async assembleDashboardInContext(
+  private async assembleDashboard(
     session: SessionRecord,
   ): Promise<
     { view: Omit<DashboardSessionView, "lifecycle">; source: SessionRecord | null } | undefined
@@ -28164,8 +28210,11 @@ export class SessionService {
     // last un-batched fork): jsonl/hook-sourced rate limits still show up
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
     // viewed-session enrich still run the tmux-banner/usage-menu scan.
-    const classified = await this.classifySessionRecord(session, { scanPane: false });
-    const persisted = this.persistClassifiedTokenUsage(classified.session, classified);
+    const classified = await this.classifySessionRecord(session, {
+      scanPane: false,
+      journalPolicy: "read",
+    });
+    const persisted = this.persistClassifiedTokenUsage(classified.session, classified, "read");
     if (persisted.status === "missing") return undefined;
     session = persisted.session;
     const workspacePresent = classified.workspacePresent;
@@ -28223,6 +28272,7 @@ export class SessionService {
       classified.serverError,
       classified.serverErrorEvidence,
       classified.rateLimitResetAt,
+      "read",
     );
     const marked = readSession(this.config.dataDir, session.id);
     if (!marked) return undefined;
@@ -28270,6 +28320,7 @@ export class SessionService {
   private persistClassifiedTokenUsage(
     session: SessionRecord,
     classified: Pick<SessionStateResult, "tokenUsage" | "tokenUsages">,
+    journalPolicy: SessionJournalPolicy = "strict",
   ): { status: "present"; session: SessionRecord } | { status: "missing" } {
     const current = readSession(this.config.dataDir, session.id);
     if (!current) return { status: "missing" };
@@ -28284,7 +28335,7 @@ export class SessionService {
     if (!tokenUsage || JSON.stringify(tokenUsage) === JSON.stringify(current.tokenUsage)) {
       return { status: "present", session: current };
     }
-    writeSession(this.config.dataDir, { ...current, tokenUsage });
+    this.writeClassifiedSession({ ...current, tokenUsage }, journalPolicy);
     // Re-read so downstream sources deep-equal the stored (normalized) record.
     const written = readSession(this.config.dataDir, session.id);
     return written ? { status: "present", session: written } : { status: "missing" };
@@ -28548,15 +28599,7 @@ export class SessionService {
   // SessionView: this is also the builder the list path and the attention
   // sweep use, and neither needs the artifact walk or the prompt bodies.
   // `enrich()` re-attaches those six fields itself via withSessionDetail.
-  private enrichWithClassified(
-    ...args: Parameters<SessionService["assembleSessionWithClassified"]>
-  ): ReturnType<SessionService["assembleSessionWithClassified"]> {
-    return this.transitionReadContext.run(args[3] === undefined, () =>
-      this.assembleSessionWithClassified(...args),
-    );
-  }
-
-  private async assembleSessionWithClassified(
+  private async enrichWithClassified(
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],
@@ -28576,10 +28619,15 @@ export class SessionService {
     assertCurrent?.();
     const classified = await this.classifySessionRecord(session, {
       strictErrors: assertCurrent !== undefined,
+      journalPolicy: assertCurrent ? "strict" : "read",
       ...(assertCurrent ? { assertCurrent } : {}),
     });
     assertCurrent?.();
-    const persisted = this.persistClassifiedTokenUsage(classified.session, classified);
+    const persisted = this.persistClassifiedTokenUsage(
+      classified.session,
+      classified,
+      assertCurrent ? "strict" : "read",
+    );
     if (persisted.status === "missing") {
       throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
     }
@@ -28625,6 +28673,7 @@ export class SessionService {
       classified.serverError,
       classified.serverErrorEvidence,
       classified.rateLimitResetAt,
+      assertCurrent ? "strict" : "read",
     );
     assertCurrent?.();
     const marked = readSession(this.config.dataDir, session.id);
