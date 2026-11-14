@@ -162,7 +162,11 @@ const send = body("SendMessageRequest", [
   field("message", "string", "Message text; attachments may accompany the message.", true),
   attachments,
   field("queue", "boolean", "Queue delivery while session is busy."),
-  field("interrupt", "boolean", "Interrupt active provider work before delivery."),
+  field(
+    "interrupt",
+    "boolean",
+    "Requires queue:false; interrupts active work, killing the tool call in flight. Repeats within 5 seconds queue at the tail; waiting sessions receive ordinary delivery.",
+  ),
 ]);
 const restore = body("RestoreSessionRequest", [
   field("operationId", "string", "Optional lifecycle operation ID for receipt reconciliation."),
@@ -986,12 +990,15 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "Send task/message with full queue, interrupt and attachment options.",
     {
       body: send,
+      response:
+        "SessionView; explicit queue:false + interrupt:true adds sendOutcome: sent with interrupted:boolean, or queued with reason interrupt_guard (tail) / no_interrupt (head). Older queued messages follow a direct send; submitUnconfirmedAt means receipt is unconfirmed.",
       examples: [
         { body: { message: "Continue", queue: true } },
         {
           body: {
             message: "Inspect file",
             attachments: [{ name: "input.txt", data: "aGVsbG8=" }],
+            queue: false,
             interrupt: true,
           },
         },

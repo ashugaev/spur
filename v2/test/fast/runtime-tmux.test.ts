@@ -1747,10 +1747,10 @@ describe("runtime-tmux", () => {
     expect(pasteIndex).toBeGreaterThan(cuIndex);
   });
 
-  it("swallows tmux cancel failure and continues the send path", async () => {
+  it("swallows tmux not-in-mode cancellation and continues the send path", async () => {
     execFileAsyncMock.mockImplementation(async (_file, args) => {
       if (args[0] === "send-keys" && args.includes("-X") && args.includes("cancel")) {
-        throw new Error("cancel not available");
+        throw new Error("not in a mode");
       }
       return { stdout: "", stderr: "" };
     });
@@ -1928,7 +1928,10 @@ describe("runtime-tmux", () => {
 
     await expect(sendInterruptKeysToTmux("api-1", "codex")).resolves.toBe(true);
 
-    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual(["C-c"]);
+    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
+      "cancel",
+      "C-c",
+    ]);
     expect(sleepMock).toHaveBeenCalledWith(500);
   });
 
@@ -1939,7 +1942,10 @@ describe("runtime-tmux", () => {
 
     await expect(sendInterruptKeysToTmux("api-1", "claude")).resolves.toBe(true);
 
-    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual(["C-c"]);
+    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
+      "cancel",
+      "C-c",
+    ]);
   });
 
   // opencode binds ctrl+c to app_exit: C-c here kills the agent and the
@@ -1952,6 +1958,7 @@ describe("runtime-tmux", () => {
     await expect(sendInterruptKeysToTmux("api-1", "opencode")).resolves.toBe(true);
 
     expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
+      "cancel",
       "Escape",
       "Escape",
     ]);
@@ -1967,6 +1974,39 @@ describe("runtime-tmux", () => {
 
     expect(execFileAsyncMock).not.toHaveBeenCalled();
     expect(sleepMock).not.toHaveBeenCalled();
+  });
+
+  it("exits copy-mode before stamping and delivering the interrupt key", async () => {
+    let copyMode = true;
+    let interrupted = false;
+    const writes: string[] = [];
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args.includes("-X") && args.includes("cancel")) {
+        copyMode = false;
+        writes.push("cancel");
+      } else if (args.includes("C-c")) {
+        interrupted = !copyMode;
+        writes.push("C-c");
+      }
+      return { stdout: "", stderr: "" };
+    });
+    const { sendInterruptKeysToTmux } = await import("../../src/runtime-tmux.js");
+    await expect(
+      sendInterruptKeysToTmux("api-1", "claude", () => writes.push("stamp")),
+    ).resolves.toBe(true);
+    expect(interrupted).toBe(true);
+    expect(writes).toEqual(["cancel", "stamp", "C-c"]);
+  });
+
+  it("does not stamp or send interrupt keys when copy-mode cancellation fails", async () => {
+    execFileAsyncMock.mockRejectedValue(new Error("connection lost"));
+    const stamp = vi.fn();
+    const { sendInterruptKeysToTmux } = await import("../../src/runtime-tmux.js");
+    await expect(sendInterruptKeysToTmux("api-1", "claude", stamp)).rejects.toThrow(
+      "connection lost",
+    );
+    expect(stamp).not.toHaveBeenCalled();
+    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual(["cancel"]);
   });
 
   it("types a cursor message without any interrupt key", async () => {

@@ -47,7 +47,7 @@
 - `GET /sessions/:id/user-actions`
 - `GET /sessions/:id/subscriptions`
 - `GET /sessions/:id/logs` — `scope=runtime|sidecar|service|all`, `name`, `limit` (default 200 globally); retained pane and archived rows; existing session record and `limit>0`: 404 for named no-pane/no-archive or outputless stopped service, 502 for failed capture; absent record: archived rows (200); `v2/src/server.ts`.
-- `POST /sessions/:id/send` — response `queuedAheadReason: "no_interrupt"`: queued at the head
+- `POST /sessions/:id/send` — `{message,queue:false,interrupt:true}` interrupts active work; interrupt ignored without `queue:false`; repeats within 5 seconds queue at tail; explicit interrupt response `sendOutcome`: `{kind:"sent",interrupted:boolean}` or `{kind:"queued",reason:"interrupt_guard"|"no_interrupt"}`; `no_interrupt` retains `queuedAheadReason:"no_interrupt"` for head queue — `v2/src/session-service.ts`, `v2/src/daemon-contracts.ts`.
 - `POST /sessions/:id/source-poll-enable` — `{}`. Clears durable poll-disable registry (every file under the project, incl. removed sources) + live in-process gate per `github` source; `200 { ok, sessionId, projectId, cleared: { sourceId, prNumber }[] }`; `cleared: []` no-op; `404` unknown session. See [source](commands.md#source)
 - `POST /sessions/:id/answer`
 - `POST /sessions/:id/launch/submit` — presses submit over a pending `submitUnconfirmedAt` prompt

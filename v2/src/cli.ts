@@ -3720,10 +3720,15 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Send a follow-up message to a session.")
     .argument("<sessionId>", "Session id")
     .argument("<message...>", "Message to send")
+    .option("--interrupt", "Interrupt active work; kills the tool call in flight")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, messageParts: string[], options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
       const payload: SendMessageRequest = { message: messageParts.join(" ") };
+      if (options.interrupt) {
+        payload.queue = false;
+        payload.interrupt = true;
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "sending message",
@@ -3731,12 +3736,23 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/send`, payload, configPath),
         success: (session) => {
           const pending = queuedMessageCount(session);
+          const outcome = options.interrupt ? session.sendOutcome : undefined;
           const line =
-            pending > 0
-              ? `Queued message for ${session.id} (${pending} pending).`
-              : session.submitUnconfirmedAt
-                ? `Sent message to ${session.id}; the agent has not confirmed it yet.`
-                : `Delivered message to ${session.id}.`;
+            outcome?.kind === "queued"
+              ? outcome.reason === "interrupt_guard"
+                ? `Queued message for ${session.id} (${pending} pending); interrupt guard suppressed a repeat.`
+                : `Queued message for ${session.id} at the head; the agent has no interrupt key.`
+              : outcome?.kind === "sent"
+                ? session.submitUnconfirmedAt
+                  ? `Sent message to ${session.id}${outcome.interrupted ? " after interrupting the turn" : " without interrupting"}; the agent has not confirmed it yet.`
+                  : outcome.interrupted
+                    ? `Interrupted turn and delivered message to ${session.id}.`
+                    : `Delivered message to ${session.id} without interrupting.`
+                : pending > 0
+                  ? `Queued message for ${session.id} (${pending} pending).`
+                  : session.submitUnconfirmedAt
+                    ? `Sent message to ${session.id}; the agent has not confirmed it yet.`
+                    : `Delivered message to ${session.id}.`;
           const failed = session.submitFailedMessage;
           return failed
             ? `${line}\nAgent did not confirm: "${failed.message}". Retry or dismiss it in the web view.`

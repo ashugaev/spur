@@ -1473,6 +1473,10 @@ export interface SessionView extends Omit<
    * not waiting.
    */
   queuedAheadReason?: "no_interrupt";
+  /** Explicit immediate-interrupt send response only; never persisted. */
+  sendOutcome?:
+    | { kind: "sent"; interrupted: boolean }
+    | { kind: "queued"; reason: "interrupt_guard" | "no_interrupt" };
 }
 
 /**
