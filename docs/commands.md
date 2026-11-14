@@ -67,15 +67,15 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 `spur respawn <sessionId> [--reasoning-effort <level>] [--force] [--json]` — fresh id; same-agent reasoning override inherited; `v2/src/cli.ts`.
 `spur handoff <sessionId> --agent <name> [--model <id>] [--reasoning-effort <level>] [--notes <text>] [--json]` — same workspace; provider/model effort validation in `v2/src/session-service.ts`.
 
-## todo
+## todo, snapshot
 
-`spur todo list|add|complete|cancel|hold|resume --session <id> [<itemId>] [--text <text>] [--reason <reason>] [--human-action <action>]`. `$SPUR_TODO_COMMAND`: session-bound, no `--session`. Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). `spur snapshot write <sessionId> --file <path|-> [--final] [--json]` / `list <sessionId> [--json]` / `show <sessionId> [<version>] [--json]`: full Markdown work snapshot per write, Spur fills metadata, `show` prints the latest content by default; agents write only their own session; `$SPUR_SNAPSHOT_COMMAND`: session-bound, no `<sessionId>`; gate: [configuration.md](configuration.md#field-reference) `projects.<id>.snapshots`; `v2/src/snapshots.ts`.
+`spur todo list|add|complete|cancel|hold|resume --session <id> [<itemId>] [--text <text>] [--reason <reason>] [--human-action <action>]`. `$SPUR_TODO_COMMAND`: session-bound, no `--session`. Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes).
+`spur snapshot write <sessionId> --file <path|-> [--final] [--json]` / `list <sessionId> [--json]` / `show <sessionId> [<version>] [--json]`: each write stores a full Markdown snapshot as the next version, Spur fills metadata; `show` defaults to latest; agents write only their own session. `$SPUR_SNAPSHOT_COMMAND`: session-bound, no `<sessionId>`. Gate: `projects.<id>.snapshots` ([configuration.md](configuration.md#field-reference)); `v2/src/snapshots.ts`.
 
 ## auto-ping
 
 `spur auto-ping mute <handle> [--for <dur>] [--forever] [--reason <why>] [--session <id>] [--json]`: one handle per ping, printed in the ping footer. Default holds until the subject changes (github/gitlab pings only); `--for` max 24h and `--forever` (whole trigger route, this session) need `--reason` — `v2/src/auto-ping.ts`.
-`spur auto-ping list [--session <id>] [--all] [--json]`: active mutes; `--all` adds the session's mute history. `SPUR_SESSION` selects the session inside agents — `v2/src/auto-ping.ts`.
-`spur auto-ping resume <handle|id> [--session <id>] [--json]`: `SPUR_SESSION` supplies session inside agents — `v2/src/auto-ping.ts`.
+`spur auto-ping list [--session <id>] [--all] [--json]`: active mutes; `--all` adds the session's mute history. `spur auto-ping resume <handle|id> [--session <id>] [--json]`. Both: `SPUR_SESSION` selects the session inside agents — `v2/src/auto-ping.ts`.
 
 ## send, queue
 
