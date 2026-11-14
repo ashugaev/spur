@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { agentStateStrategy } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { spurInstallLockPath } from "./install-lock.js";
+import { SNAPSHOT_HOOK_TOOL_NAME, SNAPSHOT_REQUEST_MESSAGE, snapshotDir } from "./snapshots.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "./self-destruct.js";
 import type {
   AgentName,
@@ -37,6 +38,8 @@ const INSTALL_LOCK_WAIT_SECONDS = 90;
 export const SLOT_TOOL_NAME = "spur-slots";
 export const AGENT_STATE_TOOL_NAME = "spur-agent-state";
 const AGENT_STATE_UPDATER_NAME = "spur-agent-state-updater.mjs";
+const SNAPSHOT_HOOK_SCRIPT_NAME = "spur-snapshot-hook.mjs";
+const SNAPSHOT_HOOK_STAMP_NAME = "snapshot-hook-stamp.json";
 const SPUR_WRAPPER_NAME = "spur";
 const GIT_WRAPPER_NAME = "git";
 // Every generated git wrapper carries this text; wrappers detect each other by it.
@@ -355,6 +358,104 @@ function shouldWriteAgentStateTools(agent: AgentName | undefined): boolean {
   return agentStateStrategy(agent) === "hook";
 }
 
+// Standalone like the agent-state updater: runs from the session tool dir, never imports Spur modules.
+// Every failure path exits 0 with empty stdout; the only output is one hook JSON object.
+// Keep the version regex and staleness comparison in step with snapshots.ts.
+function snapshotHookScript(): string {
+  return `#!/usr/bin/env node
+import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+
+const MESSAGE = ${JSON.stringify(SNAPSHOT_REQUEST_MESSAGE)};
+const [snapshotDir, freshnessArg, stampPath] = process.argv.slice(2);
+const freshnessMs = Number(freshnessArg);
+
+function readPayload() {
+  try {
+    const parsed = JSON.parse(readFileSync(0, "utf8"));
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function readStamp() {
+  try {
+    const parsed = JSON.parse(readFileSync(stampPath, "utf8"));
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeStamp(stamp) {
+  const tmpPath = stampPath + ".tmp." + process.pid;
+  try {
+    mkdirSync(dirname(stampPath), { recursive: true });
+    writeFileSync(tmpPath, JSON.stringify(stamp), "utf8");
+    renameSync(tmpPath, stampPath);
+  } catch {}
+}
+
+// undefined: unreadable newest snapshot (skip); null: no snapshot yet.
+function latestSnapshotAt() {
+  let names;
+  try {
+    names = readdirSync(snapshotDir);
+  } catch (error) {
+    return error && error.code === "ENOENT" ? null : undefined;
+  }
+  let newest = 0;
+  for (const name of names) {
+    const match = /^([1-9][0-9]*)\.json$/.exec(name);
+    if (match && Number(match[1]) > newest) newest = Number(match[1]);
+  }
+  if (newest === 0) return null;
+  try {
+    const at = Date.parse(JSON.parse(readFileSync(join(snapshotDir, newest + ".json"), "utf8")).at);
+    return Number.isNaN(at) ? undefined : at;
+  } catch {
+    return undefined;
+  }
+}
+
+function run() {
+  if (!snapshotDir || !stampPath || !(freshnessMs > 0)) return;
+  const payload = readPayload();
+  if (!payload) return;
+  if (typeof payload.agent_id === "string" || payload.permission_mode === "plan") return;
+  const event = payload.hook_event_name;
+  if (event !== "PostToolUse" && event !== "Stop") return;
+  if (event === "Stop" && payload.stop_hook_active === true) return;
+  const latestAt = latestSnapshotAt();
+  if (latestAt === undefined) return;
+  const now = Date.now();
+  const stamp = readStamp();
+  const firstSeenAt = typeof stamp.firstSeenAt === "number" ? stamp.firstSeenAt : undefined;
+  const baseline = latestAt ?? firstSeenAt;
+  if (baseline === undefined) {
+    writeStamp({ ...stamp, firstSeenAt: now });
+    return;
+  }
+  if (now - baseline <= freshnessMs) return;
+  if (event === "Stop") {
+    process.stdout.write(JSON.stringify({ decision: "block", reason: MESSAGE }));
+    return;
+  }
+  const lastRequestAt = typeof stamp.lastRequestAt === "number" ? stamp.lastRequestAt : 0;
+  if (now - lastRequestAt < freshnessMs / 2) return;
+  process.stdout.write(
+    JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: MESSAGE } }),
+  );
+  writeStamp({ ...stamp, lastRequestAt: now });
+}
+
+try {
+  run();
+} catch {}
+`;
+}
+
 // Tool wrappers are re-written while the owner agent may be live; truncate-then-write
 // would let a concurrent exec read a partial script. Same-dir temp + rename is atomic.
 function writeToolFileAtomic(
@@ -381,6 +482,7 @@ export function ensureSessionSlotTool(args: {
   branchNamingRegex?: string;
   agent?: AgentName;
   installLockPath?: string;
+  snapshotFreshnessMinutes?: number;
 }): string {
   const toolDir = slotToolDir(args.dataDir, args.sessionId);
   const stateFilePath = join(args.dataDir, "session-agent-state", `${args.sessionId}.json`);
@@ -666,6 +768,20 @@ try {
       `#!/usr/bin/env bash
 set -euo pipefail
 exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UPDATER_NAME))} ${shellEscape(stateFilePath)}
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+  }
+  if (args.snapshotFreshnessMinutes !== undefined) {
+    writeToolFileAtomic(join(toolDir, SNAPSHOT_HOOK_SCRIPT_NAME), snapshotHookScript(), {
+      encoding: "utf8",
+      mode: 0o755,
+    });
+    writeToolFileAtomic(
+      join(toolDir, SNAPSHOT_HOOK_TOOL_NAME),
+      `#!/usr/bin/env bash
+set -euo pipefail
+exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_SCRIPT_NAME))} ${shellEscape(snapshotDir(args.dataDir, args.sessionId))} ${args.snapshotFreshnessMinutes * 60_000} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_STAMP_NAME))}
 `,
       { encoding: "utf8", mode: 0o755 },
     );
