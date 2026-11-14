@@ -3656,6 +3656,27 @@ describe("SessionService", () => {
       });
     });
 
+    it("passes the raw agent activity time, not the restore-bumped park time, to the sweep nudge", async () => {
+      const activityMs = Date.parse("2026-03-18T10:02:00.000Z");
+      mockClaudeJsonlState("waiting", { lastMtimeMs: activityMs });
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      const session = runningSession({
+        worktree: false,
+        restoredAt: "2026-03-18T10:04:00.000Z",
+      });
+      sessions.set(session.id, session);
+      const nudge = vi.spyOn(internals, "maybeNudgeTodo").mockResolvedValue();
+
+      await internals.pollAttentionStates(false);
+
+      expect(nudge).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: session.id }), {
+        detached: true,
+        agentActivityAt: new Date(activityMs),
+      });
+    });
+
     it("suppresses ToDo reads and delivery until the exact restore warmup deadline", async () => {
       const sessions = createSessionStore();
       await useRealTodoLedger();
