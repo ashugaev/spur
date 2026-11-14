@@ -1255,6 +1255,8 @@ export interface SessionRecord {
   lastOpenedAt?: string;
   retainInList?: boolean;
   slots?: SessionSlots;
+  /** Distinguishes a captured empty terminal slot state from a legacy record. */
+  terminalSlotsCaptured?: true;
   selfDestruct?: SelfDestructConfig;
   sidecarNames?: string[];
   // Sidecar names that were tmux-alive at park time (stale_timeout), replayed
@@ -1426,6 +1428,7 @@ export interface SessionView extends Omit<
   | "codexRestoreStartedAt"
   | "restoredAt"
   | "errorSource"
+  | "terminalSlotsCaptured"
 > {
   lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
@@ -1481,7 +1484,8 @@ export type DashboardOmittedField =
   | "branchSource"
   | "tokenUsage"
   | "preflightTokenUsage"
-  | "errorSource";
+  | "errorSource"
+  | "terminalSlotsCaptured";
 
 export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
   lifecycle: SessionLifecycleSnapshot;

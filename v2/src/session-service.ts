@@ -391,6 +391,7 @@ import { readDiskBudgetReport } from "./disk-budget.js";
 import {
   deleteWorkspaceState,
   readPrAlertOwnership,
+  readWorkspaceState,
   resolveWorkspaceState,
   writeWorkspaceState,
   type WorkspaceState,
@@ -3398,6 +3399,7 @@ export function resolveRespawnRequest(
     model?: string;
     reasoningEffort?: ProviderReasoningEffort | null;
     bootstrap?: boolean;
+    links?: SessionSlots["links"];
   },
 ): SpawnSessionRequest {
   const agent = options?.agent ?? session.agent;
@@ -3421,6 +3423,7 @@ export function resolveRespawnRequest(
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
     ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
+    ...(options?.links?.length ? { slots: { links: options.links } } : {}),
     ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
     overrides: { worktree: session.worktree },
     ...(session.worktree &&
@@ -6751,10 +6754,7 @@ export class SessionService {
           (row.identity === true || !isDeepStrictEqual(record, row.source))) ||
         !isDeepStrictEqual(
           row.view.slots,
-          this.projectSidecarSlots(
-            record,
-            deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, record)),
-          ),
+          this.displaySlotsForSession(record),
         )
       );
     };
@@ -11136,6 +11136,32 @@ export class SessionService {
     return links.length === slots.links.length ? slots : { ...slots, links };
   }
 
+  private displaySlotsForSession(
+    session: SessionRecord,
+    workspaceState?: Pick<SessionRecord, "slots" | "pr">,
+  ): SessionSlots | undefined {
+    const captured =
+      session.terminalSlotsCaptured === true &&
+      (isTerminalSessionStatus(session.status) ||
+        !readWorkspaceState(this.config.dataDir, workspaceIdOf(session)));
+    const state = captured
+      ? session
+      : (workspaceState ?? resolveWorkspaceState(this.config.dataDir, session));
+    return this.projectSidecarSlots(session, deriveSessionSlots(state));
+  }
+
+  private captureTerminalSlots(session: SessionRecord): SessionSlots | undefined {
+    const slots = this.displaySlotsForSession(session);
+    const record: SessionRecord = {
+      ...(readSession(this.config.dataDir, session.id) ?? session),
+      terminalSlotsCaptured: true,
+    };
+    if (slots) record.slots = slots;
+    else delete record.slots;
+    writeSession(this.config.dataDir, record);
+    return slots;
+  }
+
   private pruneLegacySidecarLinks(
     session: SessionRecord,
     names: ReadonlySet<string>,
@@ -11650,6 +11676,7 @@ export class SessionService {
   async list(options?: {
     includeCompleted?: boolean;
     view?: "full" | "dashboard";
+    links?: readonly { label: string; url?: string }[];
     signal?: AbortSignal | undefined;
   }): Promise<SessionListView[]> {
     const allSessions = listSessions(this.config.dataDir);
@@ -11660,6 +11687,13 @@ export class SessionService {
         this.lifecycle.snapshot(view.id).operation,
         options?.includeCompleted === true,
       );
+    const matchesLinks = (view: { slots?: SessionSlots }) =>
+      options?.links?.every((filter) =>
+        view.slots?.links.some(
+          (link) =>
+            link.label === filter.label && (filter.url === undefined || link.url === filter.url),
+        ),
+      ) ?? true;
     if (options?.view === "dashboard") {
       if (this.dashboardCacheReady) {
         await this.dashboardCacheReady;
@@ -11702,7 +11736,7 @@ export class SessionService {
         { includePending: true, onExhausted: "lastBuild", signal: options.signal },
       );
       for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
-      return views.filter(included);
+      return views.filter((view) => included(view) && matchesLinks(view));
     }
     const sessions = allSessions.filter(included);
     // Compute the claude accounts snapshot once for the whole batch instead of
@@ -11736,7 +11770,7 @@ export class SessionService {
       { includePending: true, onExhausted: "lastBuild", signal: options?.signal },
     );
     for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
-    return views.filter(included);
+    return views.filter((view) => included(view) && matchesLinks(view));
   }
 
   getSessionIdentity(sessionId: string): Pick<SessionRecord, "id" | "agent"> {
@@ -20815,6 +20849,7 @@ export class SessionService {
     const eventAction: ManualStatusAction =
       options?.eventAction ?? (targetStatus === "stopped" ? "pause" : "complete");
     let startupAttachmentsCleaned = false;
+    let terminalSlots: SessionSlots | undefined;
 
     try {
       if (targetStatus === "completed" && eventAction !== "handoff") {
@@ -20862,6 +20897,7 @@ export class SessionService {
         await this.cleanupSessionServices(session);
       }
       if (targetStatus === "completed") {
+        terminalSlots = this.captureTerminalSlots(session);
         const { ranCleanup } = this.removeSessionArtifacts(session, {
           preserveAgentHistory: true,
         });
@@ -20888,6 +20924,11 @@ export class SessionService {
       updatedAt: nowIso(),
       ...(options?.retainInList ? { retainInList: true } : {}),
     };
+    if (targetStatus === "completed") {
+      record.terminalSlotsCaptured = true;
+      if (terminalSlots) record.slots = terminalSlots;
+      else delete record.slots;
+    }
     if (targetStatus !== "stopped") {
       delete record.stopReason;
     }
@@ -20960,6 +21001,8 @@ export class SessionService {
 
     await this.ensureKillDirtyWorktreeAllowed(session, request.force === true);
 
+    let terminalSlots: SessionSlots | undefined;
+
     try {
       if (session.status !== "killed" && !request.skipPrCheck) {
         if (session.worktree && session.worktreePath && !workspaceExists(session.worktreePath)) {
@@ -20989,6 +21032,7 @@ export class SessionService {
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
       await this.terminateDetachedSessionProcesses(session);
       await this.cleanupSessionServices(session);
+      if (currentSession.status !== "killed") terminalSlots = this.captureTerminalSlots(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -21026,6 +21070,9 @@ export class SessionService {
       [],
       false,
     );
+    record.terminalSlotsCaptured = true;
+    if (terminalSlots) record.slots = terminalSlots;
+    else delete record.slots;
     delete record.retainInList;
     delete record.submitUnconfirmedAt;
     delete record.queuedMessageTyped;
@@ -23521,12 +23568,17 @@ export class SessionService {
       );
     }
 
+    const sourceSlots = this.displaySlotsForSession(session);
+    const knownTags = new Set(this.config.tags.map((tag) => tag.name));
+    const carryTags = (sourceSlots?.tags ?? []).filter((tag) => knownTags.has(tag));
+
     const forceKillSource = request.forceKillSource === true;
     const prAlertOwnerTransfer = this.prAlertTransferFrom(session, "respawn");
     if (prAlertOwnerTransfer?.kind === "owner")
       assertPrAlertRoutes(this.getProject(session.project), session.allowedTriggers);
     const bootstrap = this.isUnconfiguredProjectId(session.project);
     const respawnRequest = resolveRespawnRequest(session, {
+      ...(sourceSlots?.links.length ? { links: sourceSlots.links } : {}),
       ...(bootstrap ? { bootstrap: true } : {}),
       ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
       ...(request.model !== undefined ? { model: request.model } : {}),
@@ -23586,6 +23638,7 @@ export class SessionService {
     // already succeeded — so admission never counts the source twice.
     const spawned = await this.spawn(
       resolveRespawnRequest(session, {
+        ...(sourceSlots?.links.length ? { links: sourceSlots.links } : {}),
         ...(bootstrap ? { bootstrap: true } : {}),
         ...(!bootstrap && request.prompt !== undefined ? { prompt: request.prompt } : {}),
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
@@ -23603,11 +23656,21 @@ export class SessionService {
         ...(request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : {}),
       },
     );
+    if (carryTags.length > 0) {
+      const successor = readSession(this.config.dataDir, spawned.id);
+      if (!successor) throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
+      const workspaceState = resolveWorkspaceState(this.config.dataDir, successor);
+      const slots = applySlotsUpdate(workspaceState.slots, { tags: carryTags });
+      this.writeWorkspaceStateWithLegacyMirror(successor, {
+        ...workspaceState,
+        ...(slots ? { slots } : {}),
+      });
+    }
     this.clearCloseoutOwner(session.id);
     if (session.status !== "completed") {
       await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
     }
-    return spawned;
+    return carryTags.length > 0 ? this.get(spawned.id) : spawned;
   }
 
   async handoff(
@@ -27202,7 +27265,7 @@ export class SessionService {
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
     const workspaceState = resolveWorkspaceState(this.config.dataDir, session);
-    const displaySlots = this.projectSidecarSlots(session, deriveSessionSlots(workspaceState));
+    const displaySlots = this.displaySlotsForSession(session, workspaceState);
     const sidecars = await this.sidecarViews(session, this.resolveProjectForSession(session));
     const runningSidecarNames = sidecars.filter((view) => view.alive).map((view) => view.name);
 
@@ -27233,6 +27296,7 @@ export class SessionService {
       errorSource: _errorSource,
       pr: _recordPr,
       prAlertTransfer: _prAlertTransfer,
+      terminalSlotsCaptured: _terminalSlotsCaptured,
       ...dashboardSession
     } = session;
     const state = this.stabilizeState(
@@ -27620,7 +27684,7 @@ export class SessionService {
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
     const workspaceState = resolveWorkspaceState(this.config.dataDir, anchorRecord);
-    const displaySlots = this.projectSidecarSlots(session, deriveSessionSlots(workspaceState));
+    const displaySlots = this.displaySlotsForSession(session, workspaceState);
     const deskGroupMembers = await this.buildDeskGroupMembers(
       session,
       {
@@ -27649,6 +27713,7 @@ export class SessionService {
       errorSource: _errorSource,
       pr: _recordPr,
       prAlertTransfer: _prAlertTransfer,
+      terminalSlotsCaptured: _terminalSlotsCaptured,
       ...sessionWithoutDetailFields
     } = session;
 

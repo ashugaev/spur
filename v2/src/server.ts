@@ -62,6 +62,7 @@ import type { SourceWorkbench, SourceWorkSessionItem } from "./event-sources/typ
 import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { readSession } from "./metadata.js";
+import { normalizeSlotLabel, normalizeSlotUrl } from "./session-slots.js";
 import { ACTIONS_COLLECTION, StoreError, StoreService, type StoreQuery } from "./stores.js";
 import { SseHub, acceptsEventStream } from "./sse.js";
 import { StoreAgent, parseAgentMessage } from "./store-agent.js";
@@ -1430,13 +1431,28 @@ export async function startServer(
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "true";
         const requestedView = url.searchParams.get("view")?.trim().toLowerCase();
         const view = requestedView === "dashboard" ? "dashboard" : "full";
+        let links: { label: string; url?: string }[];
+        try {
+          links = url.searchParams.getAll("link").map((raw) => {
+            const separator = raw.indexOf("=");
+            const label = normalizeSlotLabel(separator < 0 ? raw : raw.slice(0, separator));
+            return separator < 0
+              ? { label }
+              : { label, url: normalizeSlotUrl(raw.slice(separator + 1)) };
+          });
+        } catch (error) {
+          sendJson(response, 400, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return;
+        }
         const abort = new AbortController();
         response.once("close", () => {
           if (!response.writableEnded) abort.abort();
         });
         let sessions: Awaited<ReturnType<typeof service.list>>;
         try {
-          sessions = await service.list({ includeCompleted, view, signal: abort.signal });
+          sessions = await service.list({ includeCompleted, view, links, signal: abort.signal });
         } catch (error) {
           if (abort.signal.aborted) return;
           throw error;

@@ -36,7 +36,7 @@ Check installation, linger and logs in [npm install](install-from-npm.md) or [so
 
 - `describe_operations`: paged daemon operation catalog, fields, defaults and examples.
 - `daemon_request`: invoke a catalog `operationId`, supplying path parameters, query and body.
-- `list_projects`, `list_sessions`, `get_session`, `get_conversation`: discovery and inspection.
+- `list_projects`, `list_sessions`, `get_session`, `get_conversation`: discovery and inspection; `list_sessions.link: string[]` sends repeated [session link filters](daemon-api.md#session-routes).
 - `spawn_session`: full spawn request; background by default, `background: false` selects interactive spawn.
 - `send_message`: full daemon send request.
 - `wait_session`: wait for a new answer, question or terminal state, using the `after` cursor from spawn/send.

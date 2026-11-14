@@ -1309,7 +1309,7 @@ describe("startServer", () => {
     );
 
     const originalList = SessionService.prototype.list;
-    const calls: Array<{ includeCompleted?: boolean; view?: "full" | "dashboard" }> = [];
+    const calls: Array<Parameters<SessionService["list"]>[0]> = [];
     SessionService.prototype.list = async function mockList(options = {}) {
       calls.push(options);
       return [
@@ -1354,15 +1354,37 @@ describe("startServer", () => {
       const dashboardResponse = await fetch(`http://127.0.0.1:${port}/sessions?view=dashboard`);
       expect(dashboardResponse.status).toBe(200);
       await expect(dashboardResponse.json()).resolves.toMatchObject([{ id: "demo-done" }]);
+
+      const query = new URLSearchParams({ includeCompleted: "1" });
+      query.append("link", "BOARD-TASK=https://example.com/task?a=b");
+      query.append("link", "board-role");
+      const filteredResponse = await fetch(`http://127.0.0.1:${port}/sessions?${query}`);
+      expect(filteredResponse.status).toBe(200);
+      expect(await filteredResponse.json()).toMatchObject([{ id: "demo-done" }]);
+      for (const invalid of ["board-role=reviewer", "=https://example.com/role", "board-role="]) {
+        const invalidResponse = await fetch(
+          `http://127.0.0.1:${port}/sessions?${new URLSearchParams({ link: invalid })}`,
+        );
+        expect(invalidResponse.status).toBe(400);
+      }
     } finally {
       SessionService.prototype.list = originalList;
       await server.stop();
     }
 
     expect(calls).toEqual([
-      { includeCompleted: false, view: "full", signal: expect.any(AbortSignal) },
-      { includeCompleted: true, view: "full", signal: expect.any(AbortSignal) },
-      { includeCompleted: false, view: "dashboard", signal: expect.any(AbortSignal) },
+      { includeCompleted: false, view: "full", links: [], signal: expect.any(AbortSignal) },
+      { includeCompleted: true, view: "full", links: [], signal: expect.any(AbortSignal) },
+      { includeCompleted: false, view: "dashboard", links: [], signal: expect.any(AbortSignal) },
+      {
+        includeCompleted: true,
+        view: "full",
+        links: [
+          { label: "board-task", url: "https://example.com/task?a=b" },
+          { label: "board-role" },
+        ],
+        signal: expect.any(AbortSignal),
+      },
     ]);
   });
 

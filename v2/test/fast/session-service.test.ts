@@ -745,6 +745,56 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it.each(["completed", "killed", "errored"] as const)(
+      "carries effective links and configured tags from a %s source",
+      async (status) => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          tags: [{ name: "feature", description: "feature work", color: "#3fb950" }],
+        });
+        const slotModule = await vi.importActual<typeof sessionSlotsModule>(
+          "../../src/session-slots.js",
+        );
+        applySlotsUpdateMock.mockImplementation(slotModule.applySlotsUpdate);
+        const sessions = createSessionStore();
+        const source = sessionRecord({
+          id: "api-1",
+          status,
+          ...(status !== "errored"
+            ? {
+                terminalSlotsCaptured: true as const,
+                slots: {
+                  links: [{ label: "board-task", url: "https://example.com/task" }],
+                  tags: ["feature", "unknown-tag"],
+                },
+              }
+            : {}),
+        });
+        sessions.set(source.id, source);
+        if (status === "errored") {
+          writeWorkspaceState(TEST_DATA_DIR, source.id, {
+            slots: {
+              links: [{ label: "board-task", url: "https://example.com/task" }],
+              tags: ["feature", "unknown-tag"],
+            },
+          });
+        }
+        reserveNextSessionIdMock.mockResolvedValue("api-2");
+        workspaceExistsMock.mockReturnValue(true);
+        mockClaudeJsonlState("waiting");
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const successor = await service.respawn(source.id);
+        expect(successor.slots?.links).toEqual([
+          { label: "board-task", url: "https://example.com/task" },
+        ]);
+        expect(successor.slots?.tags).toEqual(["feature"]);
+        expect(sessions.get(successor.id)?.slots?.tags).toEqual(["feature"]);
+        service.dispose();
+      },
+    );
+
     it("rolls back a proved prelaunch handoff failure while preserving closeout semantics", async () => {
       const config = configurePrAlerts();
       const sessions = createSessionStore();
@@ -6090,6 +6140,30 @@ describe("SessionService", () => {
       expect(readTelegramReplyTargetMock()).toBeNull();
     },
   );
+
+  it("writes the slot snapshot before terminal cleanup can erase workspace state", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1" }));
+    const { writeWorkspaceState, deleteWorkspaceState } = await loadWorkspaceStoreModule();
+    writeWorkspaceState(TEST_DATA_DIR, "api-1", {
+      slots: { links: [{ label: "board-task", url: "https://example.com/task" }] },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const cleanup = service as unknown as { removeSessionArtifacts: () => never };
+    vi.spyOn(cleanup, "removeSessionArtifacts").mockImplementation(() => {
+      deleteWorkspaceState(TEST_DATA_DIR, "api-1");
+      throw new Error("cleanup failed");
+    });
+
+    await expect(service.complete("api-1", { skipPrCheck: true })).rejects.toThrow("cleanup failed");
+    expect(sessions.get("api-1")?.terminalSlotsCaptured).toBe(true);
+    expect(sessions.get("api-1")?.slots?.links).toEqual([
+      { label: "board-task", url: "https://example.com/task" },
+    ]);
+    expect((await service.get("api-1")).slots?.links).toEqual(sessions.get("api-1")?.slots?.links);
+    service.dispose();
+  });
 
   it.each(["complete", "kill"] as const)(
     "canonical Telegram late native creation cannot overwrite %s",
@@ -37500,6 +37574,105 @@ describe("SessionService", () => {
 
     expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.title).toBe("Shared");
   });
+
+  it("keeps an empty completed snapshot when a sibling adds links", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1" }));
+    sessions.set("api-2", sessionRecord({ id: "api-2", workspaceId: "api-1" }));
+    const { readWorkspaceState, writeWorkspaceState, deleteWorkspaceState } =
+      await loadWorkspaceStoreModule();
+    writeWorkspaceState(TEST_DATA_DIR, "api-1", {});
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-1", { skipPrCheck: true });
+    expect(sessions.get("api-1")?.terminalSlotsCaptured).toBe(true);
+    expect(sessions.get("api-1")?.slots).toBeUndefined();
+    writeWorkspaceState(TEST_DATA_DIR, "api-1", {
+      slots: { links: [{ label: "board-task", url: "https://example.com/task" }] },
+    });
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.links).toHaveLength(1);
+    for (const removeWorkspace of [false, true]) {
+      if (removeWorkspace) deleteWorkspaceState(TEST_DATA_DIR, "api-1");
+      const full = await service.get("api-1");
+      expect(full.slots?.links ?? []).toEqual([]);
+      expect(full).not.toHaveProperty("terminalSlotsCaptured");
+      for (const view of ["full", "dashboard"] as const) {
+        const completed = (await service.list({ view, includeCompleted: true })).find(
+          (row) => row.id === "api-1",
+        );
+        expect(completed?.slots?.links ?? []).toEqual([]);
+        expect(completed).not.toHaveProperty("terminalSlotsCaptured");
+      }
+    }
+    service.dispose();
+  });
+
+  it.each(["complete", "kill"] as const)(
+    "keeps each member's nonempty links after %s and workspace deletion",
+    async (action) => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1" }));
+      sessions.set("api-2", sessionRecord({ id: "api-2", workspaceId: "api-1" }));
+      const { writeWorkspaceState, deleteWorkspaceState } = await loadWorkspaceStoreModule();
+      writeWorkspaceState(TEST_DATA_DIR, "api-1", {
+        slots: { links: [{ label: "board-task", url: "https://example.com/task/1" }] },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      if (action === "kill") await service.kill("api-1", { force: true, skipPrCheck: true });
+      else await service.complete("api-1", { skipPrCheck: true });
+      writeWorkspaceState(TEST_DATA_DIR, "api-1", {
+        slots: {
+          links: [
+            { label: "board-task", url: "https://example.com/task/2" },
+            { label: "board-role", url: "https://example.com/role/reviewer" },
+          ],
+        },
+      });
+      await service.complete("api-2", { skipPrCheck: true });
+      deleteWorkspaceState(TEST_DATA_DIR, "api-1");
+      sessions.set(
+        "api-3",
+        sessionRecord({
+          id: "api-3",
+          status: "completed",
+          terminalSlotsCaptured: true,
+          slots: { links: [{ label: "board-task", url: "https://example.com/task/2" }] },
+        }),
+      );
+
+      expect((await service.get("api-1")).slots?.links).toEqual([
+        { label: "board-task", url: "https://example.com/task/1" },
+      ]);
+      expect((await service.get("api-2")).slots?.links).toEqual([
+        { label: "board-task", url: "https://example.com/task/2" },
+        { label: "board-role", url: "https://example.com/role/reviewer" },
+      ]);
+      const listed = await service.list({ includeCompleted: true });
+      expect(listed.find((view) => view.id === "api-1") !== undefined).toBe(action === "complete");
+      expect(listed.find((view) => view.id === "api-2")?.slots?.links[0]?.url).toBe(
+        "https://example.com/task/2",
+      );
+      for (const view of ["full", "dashboard"] as const) {
+        const filtered = await service.list({
+          includeCompleted: true,
+          view,
+          links: [
+            { label: "board-task", url: "https://example.com/task/2" },
+            { label: "board-role", url: "https://example.com/role/reviewer" },
+          ],
+        });
+        expect(filtered.map((row) => row.id)).toEqual(["api-2"]);
+        expect(
+          (await service.list({ includeCompleted: true, view, links: [{ label: "board-role" }] }))
+            .map((row) => row.id),
+        ).toEqual(["api-2"]);
+      }
+      service.dispose();
+    },
+  );
 
   it("keeps the shared artifacts dir for a desk member parked stopped by a handoff, which holds no sidecar", async () => {
     const store = createSessionStore();
