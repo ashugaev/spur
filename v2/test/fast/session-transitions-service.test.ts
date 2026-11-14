@@ -12,16 +12,24 @@ import {
   TEST_DATA_DIR,
   sessionServiceInternals,
   sessionMetadataModule,
+  probeWorkspaceMock,
 } from "../helpers/session-service-harness.js";
 import { readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as Metadata from "../../src/metadata.js";
+import type * as Config from "../../src/config.js";
 import type { SessionService } from "../../src/session-service.js";
-import type { SessionRecord, SessionState, SessionTransitionsQuery } from "../../src/types.js";
+import type {
+  AppConfig,
+  SessionRecord,
+  SessionState,
+  SessionTransitionsQuery,
+} from "../../src/types.js";
 
 let metadata: typeof Metadata;
 let service: SessionService;
+let config: AppConfig;
 const task = { label: "task", url: "https://example.com/task/1" };
 
 function evidence(state: "working" | "waiting", reset?: string, limited = reset !== undefined) {
@@ -43,6 +51,9 @@ const poll = (query: SessionTransitionsQuery = {}) => service.listSessionTransit
 
 beforeEach(async () => {
   await resetSessionServiceHarness(() => []);
+  const { parseConfigText } = await vi.importActual<typeof Config>("../../src/config.js");
+  const { tags: _tags, ...rawConfig } = baseConfig();
+  config = parseConfigText("/tmp/spur.yaml", JSON.stringify(rawConfig));
   const module = await loadSessionServiceModule();
   metadata = sessionMetadataModule();
   readSessionMock.mockImplementation(metadata.readSession);
@@ -286,7 +297,7 @@ describe("session transitions service", () => {
     const secondDir = join(TEST_DATA_DIR, "second");
     const otherLink = { label: "task", url: "https://example.com/task/2" };
     metadata.writeSession(secondDir, record({ slots: { links: [otherLink] } }));
-    const nextConfig = { ...baseConfig(), dataDir: secondDir };
+    const nextConfig = { ...config, dataDir: secondDir };
     service.applyConfig(nextConfig, []);
     const second = await poll();
     expect(second.nextCursor.split(".")[0]).not.toBe(first.nextCursor.split(".")[0]);
@@ -325,10 +336,149 @@ describe("session transitions service", () => {
     });
     const pending = poll();
     const nextDir = join(TEST_DATA_DIR, "next");
-    service.applyConfig({ ...baseConfig(), dataDir: nextDir }, []);
+    service.applyConfig({ ...config, dataDir: nextDir }, []);
     release?.();
     await expect(pending).rejects.toThrow("data directory changed");
     expect((await poll()).entries).toEqual([]);
     expect(metadata.listSessions(nextDir)).toEqual([]);
+  });
+
+  it.each([
+    ["get", "append"],
+    ["get", "checkpoint"],
+    ["list", "append"],
+    ["list", "checkpoint"],
+    ["dashboard", "append"],
+    ["dashboard", "checkpoint"],
+  ] as const)(
+    "keeps %s and subscriptions available on %s journal failure while strict polls fail and retry",
+    async (read, failure) => {
+      metadata.writeSession(TEST_DATA_DIR, record());
+      metadata.writeSession(TEST_DATA_DIR, record({ id: "subscriber" }));
+      const cursor = (await poll()).nextCursor;
+      const subscriber = await service.get("subscriber");
+      const sent = vi.spyOn(service, "send").mockResolvedValue(subscriber);
+      service.subscribeToSessionStates("subscriber", {
+        targetSessionId: "api-1",
+        states: ["rate_limited"],
+      });
+      const store = (
+        service as unknown as {
+          transitionsBinding: {
+            store: {
+              observeState(record: SessionRecord, state: SessionState, links: unknown[]): void;
+              saveCheckpoint(): void;
+            };
+          };
+        }
+      ).transitionsBinding.store;
+      const fault =
+        failure === "append" ? vi.spyOn(store, "observeState") : vi.spyOn(store, "saveCheckpoint");
+      fault.mockImplementation(() => {
+        throw new Error(`journal ${failure} failed`);
+      });
+      evidence("working", "2026-03-18T11:00:00.000Z");
+      const view =
+        read === "get"
+          ? await service.get("api-1")
+          : read === "list"
+            ? (await service.list({ includeCompleted: true })).find((entry) => entry.id === "api-1")
+            : await sessionServiceInternals(service).enrichDashboard(record());
+      expect(view).toMatchObject({
+        state: "rate_limited",
+        rateLimitResetAt: "2026-03-18T11:00:00.000Z",
+      });
+      for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
+      expect(sent).toHaveBeenCalledWith(
+        "subscriber",
+        expect.objectContaining({ message: expect.stringContaining("api-1") }),
+      );
+      await expect(poll({ since: cursor })).rejects.toThrow(`journal ${failure} failed`);
+      fault.mockRestore();
+      const recovered = await poll({ since: cursor });
+      expect(recovered.entries.filter((entry) => entry.sessionId === "api-1")).toEqual([
+        expect.objectContaining({ kind: "state", from: "working", to: "rate_limited" }),
+      ]);
+      expect(sent).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("keeps ordinary runtime reconciliation available when its status journal append fails", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await poll();
+    const store = (
+      service as unknown as {
+        transitionsBinding: {
+          store: {
+            observeStatus(record: SessionRecord, links: unknown[]): void;
+          };
+        };
+      }
+    ).transitionsBinding.store;
+    vi.spyOn(store, "observeStatus").mockImplementation(() => {
+      throw new Error("status append failed");
+    });
+    vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot").mockResolvedValue({
+      runtimeAlive: false,
+      paneUsable: false,
+      processAlive: false,
+      probeUnresponsive: false,
+    });
+    expect(await service.get("api-1")).toMatchObject({ status: "stopped", state: "stopped" });
+  });
+
+  it("does not swallow an ordinary session marker persistence failure", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    await poll();
+    evidence("working", "2026-03-18T11:00:00.000Z");
+    writeSessionMock.mockImplementationOnce(() => {
+      throw new Error("session write failed");
+    });
+    await expect(service.get("api-1")).rejects.toThrow("session write failed");
+  });
+
+  it.each(["runtime", "workspace"] as const)(
+    "rejects structured %s diagnostics in strict polls before retaining a false error",
+    async (probe) => {
+      metadata.writeSession(TEST_DATA_DIR, record());
+      const cursor = (await poll()).nextCursor;
+      const checkpointPath = join(TEST_DATA_DIR, "session-transitions", "checkpoint.json");
+      const before = readFileSync(checkpointPath, "utf8");
+      const runtime = vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot");
+      if (probe === "runtime")
+        runtime.mockResolvedValue({
+          runtimeAlive: false,
+          paneUsable: false,
+          processAlive: false,
+          probeUnresponsive: true,
+          diagnostic: "probe timed out",
+        });
+      else
+        probeWorkspaceMock.mockReturnValue({
+          exists: false,
+          missing: false,
+          diagnostic: "probe timed out",
+        });
+      await expect(poll({ since: cursor })).rejects.toThrow("probe timed out");
+      expect(metadata.readSession(TEST_DATA_DIR, "api-1")).not.toHaveProperty("error");
+      expect(readFileSync(checkpointPath, "utf8")).toBe(before);
+      expect(await service.get("api-1")).toMatchObject({ state: "error" });
+      runtime.mockRestore();
+      probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+      expect((await poll({ since: cursor })).hasMore).toBe(false);
+    },
+  );
+
+  it("accepts an empty but healthy runtime snapshot as an authoritative stopped state", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot").mockResolvedValue({
+      runtimeAlive: false,
+      paneUsable: false,
+      processAlive: false,
+      probeUnresponsive: false,
+    });
+    expect((await poll()).entries).toContainEqual(
+      expect.objectContaining({ kind: "status", to: "stopped" }),
+    );
   });
 });

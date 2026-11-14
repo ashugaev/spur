@@ -1,6 +1,7 @@
 import {
   appendFileSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -17,7 +18,12 @@ import type { SessionRecord } from "../../src/types.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof fs>();
-  return { ...actual, unlinkSync: vi.fn(actual.unlinkSync), renameSync: vi.fn(actual.renameSync) };
+  return {
+    ...actual,
+    openSync: vi.fn(actual.openSync),
+    unlinkSync: vi.fn(actual.unlinkSync),
+    renameSync: vi.fn(actual.renameSync),
+  };
 });
 
 const dirs: string[] = [];
@@ -221,5 +227,63 @@ describe("retained session transitions", () => {
     expect(new SessionTransitions(dir, bounds).query({ since: predecessor }).entries).toHaveLength(
       2,
     );
+  });
+
+  it("reads no journal segments for caught-up polls, including after restart", () => {
+    const dir = temp();
+    let store = new SessionTransitions(dir, { segmentBytes: 1, retainSegments: 6 });
+    store.observeStatus(session(), [task]);
+    store.observeStatus(session("completed"), [task]);
+    store.observeStatus(session("running"), [task]);
+    const cursor = store.query().nextCursor;
+    vi.mocked(openSync).mockClear();
+    expect(store.query({ since: cursor })).toEqual({
+      entries: [],
+      nextCursor: cursor,
+      hasMore: false,
+    });
+    expect(openSync).not.toHaveBeenCalled();
+    store = new SessionTransitions(dir, { segmentBytes: 1, retainSegments: 6 });
+    vi.mocked(openSync).mockClear();
+    expect(store.query({ since: cursor })).toEqual({
+      entries: [],
+      nextCursor: cursor,
+      hasMore: false,
+    });
+    expect(openSync).not.toHaveBeenCalled();
+  });
+
+  it("reads only relevant segments after a cursor while advancing sparse-filter progress", () => {
+    const dir = temp();
+    const store = new SessionTransitions(dir, { segmentBytes: 1, retainSegments: 6 });
+    store.observeStatus(session(), [task]);
+    store.observeStatus(session("completed"), [task]);
+    const cursor = store.query().nextCursor;
+    store.observeStatus(session("running"), [role]);
+    vi.mocked(openSync).mockClear();
+    const sparse = store.query({ since: cursor, links: [task] });
+    expect(sparse.entries).toEqual([]);
+    expect(sparse.nextCursor).not.toBe(cursor);
+    expect(vi.mocked(openSync).mock.calls.map(([path]) => path)).toEqual([
+      join(dir, "session-transitions", "3.jsonl"),
+    ]);
+    store.observeStatus(session("completed"), [task]);
+    const match = store.query({ since: sparse.nextCursor, links: [task], limit: 1 });
+    expect(match.entries.map((entry) => entry.to)).toEqual(["completed"]);
+  });
+
+  it("validates relevant segment corruption and every retained segment on restart", () => {
+    const dir = temp();
+    const bounds = { segmentBytes: 1, retainSegments: 6 };
+    const store = new SessionTransitions(dir, bounds);
+    store.observeStatus(session(), []);
+    store.observeStatus(session("completed"), []);
+    const cursor = store.query().nextCursor;
+    store.observeStatus(session("running"), []);
+    writeFileSync(join(dir, "session-transitions", "1.jsonl"), "{invalid}\n");
+    expect(store.query({ since: cursor }).entries.map((entry) => entry.to)).toEqual(["running"]);
+    expect(() => new SessionTransitions(dir, bounds)).toThrow("Invalid session transitions JSON");
+    writeFileSync(join(dir, "session-transitions", "3.jsonl"), "{invalid}\n");
+    expect(() => store.query({ since: cursor })).toThrow("Invalid session transitions JSON");
   });
 });

@@ -7,6 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { getBuildId } from "./build-identity.js";
 import {
   consentPolicy,
@@ -3942,6 +3943,7 @@ export class SessionService {
     engagedCause: MemoryDenialCause | null;
   } = { engaged: false, clearTicks: 0, engagedAtMs: null, engagedCause: null };
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
+  private readonly transitionReadContext = new AsyncLocalStorage<boolean>();
   private transitionsBinding:
     | {
         dataDir: string;
@@ -6398,7 +6400,8 @@ export class SessionService {
       const binding = { dataDir, store, unregister: () => {} };
       binding.unregister = observeSessionWrites(dataDir, (record) => {
         if (this.transitionsBinding !== binding) return;
-        store.observeStatus(record, this.displaySlotsForSession(record)?.links ?? []);
+        const links = this.displaySlotsForSession(record)?.links ?? [];
+        this.publishSessionTransition(record, () => store.observeStatus(record, links));
       });
       this.transitionsBinding = binding;
       for (const record of listSessions(dataDir)) {
@@ -26460,6 +26463,23 @@ export class SessionService {
     }
   }
 
+  private publishSessionTransition(
+    session: Pick<SessionRecord, "id" | "project">,
+    publish: () => void,
+  ): void {
+    try {
+      publish();
+    } catch (error) {
+      if (!this.transitionReadContext.getStore()) throw error;
+      this.logEvent("session.transitions.write_failed", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   private async updateStateHistory(
     session: SessionRecord,
     state: SessionState,
@@ -26480,7 +26500,7 @@ export class SessionService {
     const history = this.stateHistory.get(session.id) ?? [];
     const lastEntry = history[history.length - 1];
     const previousState =
-      this.transitionsBinding?.store.observedState(session.id) ?? lastEntry?.state;
+      lastEntry?.state ?? this.transitionsBinding?.store.observedState(session.id);
     let current = readSession(this.config.dataDir, session.id);
     if (current) {
       const limitedAt =
@@ -26504,12 +26524,13 @@ export class SessionService {
         });
         current = readSession(this.config.dataDir, session.id);
       }
-      if (current)
-        this.transitionsBinding?.store.observeState(
-          current,
-          state,
-          this.displaySlotsForSession(current)?.links ?? [],
+      if (current) {
+        const observed = current;
+        const links = this.displaySlotsForSession(observed)?.links ?? [];
+        this.publishSessionTransition(observed, () =>
+          this.transitionsBinding?.store.observeState(observed, state, links),
         );
+      }
     }
     if (history.length === 0 || lastEntry?.state !== state) {
       const transitionAt = new Date().toISOString();
@@ -27250,6 +27271,8 @@ export class SessionService {
       this.isInRestoreWarmup(session.id) &&
       !hasRetainedSessionError(session)
     ) {
+      const workspace = probeWorkspace(session.worktreePath);
+      if (options?.strictErrors && workspace.diagnostic) throw new Error(workspace.diagnostic);
       this.lastClassifiedLogStates.delete(session.id);
       return {
         session,
@@ -27263,7 +27286,7 @@ export class SessionService {
         state: "working",
         source: "status",
         historySourcePath: null,
-        workspacePresent: probeWorkspace(session.worktreePath).exists,
+        workspacePresent: workspace.exists,
         serverError: false,
         agentActivityAt: null,
       };
@@ -27310,6 +27333,12 @@ export class SessionService {
         agentActivityAt: null,
       };
     const workspace = probeWorkspace(session.worktreePath);
+    if (
+      options?.strictErrors &&
+      (runtime.probeUnresponsive || runtime.diagnostic || workspace.diagnostic)
+    ) {
+      throw new Error(runtime.diagnostic ?? workspace.diagnostic ?? "Runtime probe unresponsive");
+    }
     const observed = readSession(this.config.dataDir, session.id);
     if (
       observed &&
@@ -28119,7 +28148,13 @@ export class SessionService {
     return (await this.assembleDashboard(session))?.view;
   }
 
-  private async assembleDashboard(
+  private assembleDashboard(
+    session: SessionRecord,
+  ): ReturnType<SessionService["assembleDashboardInContext"]> {
+    return this.transitionReadContext.run(true, () => this.assembleDashboardInContext(session));
+  }
+
+  private async assembleDashboardInContext(
     session: SessionRecord,
   ): Promise<
     { view: Omit<DashboardSessionView, "lifecycle">; source: SessionRecord | null } | undefined
@@ -28513,7 +28548,15 @@ export class SessionService {
   // SessionView: this is also the builder the list path and the attention
   // sweep use, and neither needs the artifact walk or the prompt bodies.
   // `enrich()` re-attaches those six fields itself via withSessionDetail.
-  private async enrichWithClassified(
+  private enrichWithClassified(
+    ...args: Parameters<SessionService["assembleSessionWithClassified"]>
+  ): ReturnType<SessionService["assembleSessionWithClassified"]> {
+    return this.transitionReadContext.run(args[3] === undefined, () =>
+      this.assembleSessionWithClassified(...args),
+    );
+  }
+
+  private async assembleSessionWithClassified(
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],

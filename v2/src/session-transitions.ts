@@ -114,6 +114,7 @@ export class SessionTransitions {
   private readonly checkpointPath: string;
   private checkpoint: Checkpoint;
   private segments: [number, ...number[]];
+  private readonly segmentRanges = new Map<number, { first: number; last: number }>();
   private firstSequence = 1;
   private dirty = false;
 
@@ -174,8 +175,10 @@ export class SessionTransitions {
     return sequence;
   }
 
-  private *entries(): Generator<SessionTransition> {
+  private *entries(after = 0): Generator<SessionTransition> {
     for (const segment of this.segments) {
+      const range = this.segmentRanges.get(segment);
+      if (range && range.last <= after) continue;
       const path = this.path(segment);
       if (!existsSync(path)) continue;
       const size = statSync(path).size;
@@ -187,10 +190,20 @@ export class SessionTransitions {
           truncateSync(path, offset);
           break;
         }
-        yield transitionSchema.parse(parseJson(line)) as SessionTransition;
+        const entry = transitionSchema.parse(parseJson(line)) as SessionTransition;
+        this.noteSegmentSequence(segment, this.sequenceOf(entry.cursor));
+        yield entry;
         offset = end;
       }
     }
+  }
+
+  private noteSegmentSequence(segment: number, sequence: number): void {
+    const range = this.segmentRanges.get(segment);
+    this.segmentRanges.set(segment, {
+      first: range?.first ?? sequence,
+      last: Math.max(range?.last ?? sequence, sequence),
+    });
   }
 
   private saveCheckpoint(): void {
@@ -217,14 +230,13 @@ export class SessionTransitions {
   private prune(): void {
     // Checkpoint precedes deletion: interruption leaves extra readable segments.
     while (this.segments.length > this.bounds.retainSegments) {
-      unlinkSync(this.path(this.segments[0]));
+      const segment = this.segments[0];
+      unlinkSync(this.path(segment));
       this.segments.shift();
+      this.segmentRanges.delete(segment);
     }
-    this.firstSequence = this.checkpoint.sequence + 1;
-    for (const first of this.entries()) {
-      this.firstSequence = this.sequenceOf(first.cursor);
-      break;
-    }
+    this.firstSequence =
+      this.segmentRanges.get(this.segments[0])?.first ?? this.checkpoint.sequence + 1;
   }
 
   private append(
@@ -250,6 +262,7 @@ export class SessionTransitions {
       if (existsSync(target)) truncateSync(target, priorBytes);
       throw error;
     }
+    this.noteSegmentSequence(segment, sequence);
     this.apply(complete, sequence);
     this.saveCheckpoint();
     this.prune();
@@ -317,7 +330,7 @@ export class SessionTransitions {
     const limit = query.limit ?? 200;
     const entries: SessionTransition[] = [];
     let position = after;
-    for (const entry of this.entries()) {
+    for (const entry of this.entries(after)) {
       const sequence = this.sequenceOf(entry.cursor);
       if (sequence <= after) continue;
       const selected = query.kinds
