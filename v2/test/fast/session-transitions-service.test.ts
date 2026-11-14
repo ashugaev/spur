@@ -534,4 +534,44 @@ describe("session transitions service", () => {
       expect.objectContaining({ kind: "status", to: "stopped" }),
     );
   });
+
+  it.each(["structured", "thrown"] as const)(
+    "rejects a %s confirmation runtime probe failure without advancing strict observations",
+    async (failure) => {
+      metadata.writeSession(TEST_DATA_DIR, record());
+      const cursor = (await poll()).nextCursor;
+      const checkpointPath = join(TEST_DATA_DIR, "session-transitions", "checkpoint.json");
+      const before = readFileSync(checkpointPath, "utf8");
+      const snapshots = vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot");
+      const dead = {
+        runtimeAlive: false,
+        paneUsable: false,
+        processAlive: false,
+        probeUnresponsive: false,
+      };
+      const failConfirmation = () => {
+        snapshots.mockReset().mockResolvedValueOnce(dead);
+        if (failure === "thrown")
+          snapshots.mockRejectedValue(new Error("confirmation probe timed out"));
+        else
+          snapshots.mockResolvedValue({
+            ...dead,
+            probeUnresponsive: true,
+            diagnostic: "confirmation probe timed out",
+          });
+      };
+      failConfirmation();
+      await expect(poll({ since: cursor })).rejects.toThrow("confirmation probe timed out");
+      expect(metadata.readSession(TEST_DATA_DIR, "api-1")).not.toHaveProperty("error");
+      expect(metadata.readSession(TEST_DATA_DIR, "api-1")?.status).toBe("running");
+      expect(readFileSync(checkpointPath, "utf8")).toBe(before);
+      failConfirmation();
+      expect(await service.get("api-1")).toMatchObject({ state: "error" });
+      expect(metadata.readSession(TEST_DATA_DIR, "api-1")?.error).toContain(
+        "confirmation probe timed out",
+      );
+      snapshots.mockRestore();
+      expect((await poll({ since: cursor })).hasMore).toBe(false);
+    },
+  );
 });

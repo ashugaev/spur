@@ -26670,6 +26670,7 @@ export class SessionService {
     workspaceMissing: boolean,
     probeRevision = this.lifecycle.snapshot(session.id).revision,
     journalPolicy: SessionJournalPolicy = "strict",
+    strictErrors = false,
   ): Promise<{ session: SessionRecord; runtime: SessionRuntimeSnapshot }> {
     if (this.isDeliveryStopped() || this.staleParksInFlight.has(session.id)) {
       return { session, runtime };
@@ -26716,7 +26717,9 @@ export class SessionService {
         // both reads and mark a genuinely live session stopped.
         try {
           confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
+          if (strictErrors) this.assertClassificationProbe(confirmedRuntime);
         } catch (error) {
+          if (strictErrors) throw error;
           const diagnostic = error instanceof Error ? error.message : String(error);
           const retained = this.retainDetectionError(
             session,
@@ -26767,6 +26770,7 @@ export class SessionService {
               return this.stopOrphanedSpawnPane(session, assertCurrent);
             },
           );
+          if (strictErrors) this.assertClassificationProbe(confirmedRuntime);
         } catch (error) {
           if (error !== superseded) throw error;
           return {
@@ -27279,6 +27283,16 @@ export class SessionService {
     }
   }
 
+  private assertClassificationProbe(
+    runtime?: Pick<SessionRuntimeSnapshot, "probeUnresponsive" | "diagnostic">,
+    workspaceDiagnostic?: string,
+  ): void {
+    const diagnostic = runtime?.diagnostic ?? workspaceDiagnostic;
+    if (runtime?.probeUnresponsive || diagnostic || workspaceDiagnostic) {
+      throw new Error(diagnostic ?? "Runtime probe unresponsive");
+    }
+  }
+
   private async classifySessionRecordKnown(
     session: SessionRecord,
     options?: {
@@ -27319,7 +27333,7 @@ export class SessionService {
       !hasRetainedSessionError(session)
     ) {
       const workspace = probeWorkspace(session.worktreePath);
-      if (options?.strictErrors && workspace.diagnostic) throw new Error(workspace.diagnostic);
+      if (options?.strictErrors) this.assertClassificationProbe(undefined, workspace.diagnostic);
       this.lastClassifiedLogStates.delete(session.id);
       return {
         session,
@@ -27381,12 +27395,7 @@ export class SessionService {
         agentActivityAt: null,
       };
     const workspace = probeWorkspace(session.worktreePath);
-    if (
-      options?.strictErrors &&
-      (runtime.probeUnresponsive || runtime.diagnostic || workspace.diagnostic)
-    ) {
-      throw new Error(runtime.diagnostic ?? workspace.diagnostic ?? "Runtime probe unresponsive");
-    }
+    if (options?.strictErrors) this.assertClassificationProbe(runtime, workspace.diagnostic);
     const observed = readSession(this.config.dataDir, session.id);
     if (
       observed &&
@@ -27499,6 +27508,7 @@ export class SessionService {
         workspace.missing,
         probeRevision,
         options?.journalPolicy,
+        options?.strictErrors,
       );
       effectiveSession = reconciled.session;
       runtime = reconciled.runtime;
