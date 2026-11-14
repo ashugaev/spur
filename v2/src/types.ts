@@ -1279,7 +1279,8 @@ export interface SessionRecord {
    * ISO time of a launch or send whose submit never confirmed. Every typed
    * send holds while set. A launch hold clears on the first transcript
    * activity after it; a send's hold (with `queuedMessageTyped`) clears only
-   * on the agent's ack of that text. Read from the legacy
+   * on the agent's ack of that text, or releases once it has stood past
+   * `SUBMIT_HOLD_CEILING_MS` with the agent at its prompt. Read from the legacy
    * `launchUnconfirmedAt` on older records.
    */
   submitUnconfirmedAt?: string;
@@ -1298,8 +1299,8 @@ export interface SessionRecord {
    */
   submitRequeuedMessage?: string;
   /**
-   * A send the agent never acked, after its one re-queue: the hold is
-   * released, the text shown with Retry and Dismiss until the user acts.
+   * A send the agent never acked, after its one re-queue or past the hold
+   * ceiling: the hold is released, the text shown with Retry and Dismiss until the user acts.
    */
   submitFailedMessage?: { message: string; at: string };
   scheduledWake?: SessionScheduledWakeState;
