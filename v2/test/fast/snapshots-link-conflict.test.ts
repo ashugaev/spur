@@ -3,13 +3,25 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type * as NodeFs from "node:fs";
 
-const linkState = vi.hoisted(() => ({ failWith: undefined as string | undefined }));
+const linkState = vi.hoisted(() => ({
+  failWith: undefined as string | undefined,
+  shortWrite: false,
+  links: 0,
+}));
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFs>();
   return {
     ...actual,
+    writeSync: (fd: number, data: Uint8Array, offset: number) => {
+      if (!linkState.shortWrite) return actual.writeSync(fd, data, offset);
+      const error = new Error("disk full") as NodeJS.ErrnoException;
+      error.code = "ENOSPC";
+      if (offset > 0) throw error;
+      return actual.writeSync(fd, data, 0, 1);
+    },
     linkSync: (existing: string, target: string) => {
+      linkState.links += 1;
       if (linkState.failWith) {
         const error = new Error("link failed") as NodeJS.ErrnoException;
         error.code = linkState.failWith;
@@ -45,6 +57,7 @@ const context = {
   headSha: null,
   dirty: null,
   todoRevision: "",
+  links: [],
 };
 
 describe("snapshot link failures", () => {
@@ -66,5 +79,20 @@ describe("snapshot link failures", () => {
     linkState.failWith = undefined;
     expect(await readFile(join(snaps, "1.json"), "utf8")).toBe(before);
     expect(await readdir(snaps)).toEqual(["1.json"]);
+  });
+
+  it("completes a short write or fails before linking, never publishing truncated JSON", async () => {
+    const dir = await createTempDir("spur-snapshots-short-");
+    await mkdir(join(dir, "sessions", session.id), { recursive: true });
+    const snaps = snapshotDir(dir, session.id, session.project);
+    linkState.failWith = undefined;
+    linkState.shortWrite = true;
+    linkState.links = 0;
+    expect(() => writeSnapshot(dir, session, { content: "one", final: false }, context)).toThrow(
+      "disk full",
+    );
+    linkState.shortWrite = false;
+    expect(linkState.links).toBe(0);
+    expect(await readdir(snaps)).toEqual([]);
   });
 });

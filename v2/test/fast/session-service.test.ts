@@ -3368,6 +3368,26 @@ describe("SessionService", () => {
         service.dispose();
       });
 
+      it("captures the effective links, including the native PR link, in snapshot metadata", async () => {
+        const { service } = await gatedService(
+          false,
+          runningSession({
+            slots: { links: [{ label: "Doc", url: "https://example.test/doc" }] },
+            pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+          }),
+        );
+
+        const meta = await service.writeSnapshot("api-1", { content: "# Notes", final: false });
+
+        expect(meta.links).toEqual(
+          expect.arrayContaining([
+            { label: "Doc", url: "https://example.test/doc" },
+            expect.objectContaining({ url: "https://github.com/acme/api/pull/42" }),
+          ]),
+        );
+        service.dispose();
+      });
+
       it("refuses again after a ToDo change follows the final snapshot", async () => {
         const { sessions, service } = await gatedService(true);
         await resolveOneItem(service);

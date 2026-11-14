@@ -192,6 +192,7 @@ export interface SnapshotWriteContext {
   headSha: string | null;
   dirty: boolean | null;
   todoRevision: string;
+  links: SessionLink[];
 }
 
 export function writeSnapshot(
@@ -218,7 +219,7 @@ export function writeSnapshot(
     headSha: context.headSha,
     dirty: context.dirty,
     todoRevision: context.todoRevision,
-    links: session.slots?.links ?? [],
+    links: context.links,
     trigger: input.final ? "final" : "manual",
     final: input.final,
     content: input.content,
@@ -227,7 +228,9 @@ export function writeSnapshot(
   try {
     const descriptor = openSync(tmp, "wx", 0o600);
     try {
-      writeSync(descriptor, JSON.stringify(snapshot), undefined, "utf8");
+      const data = Buffer.from(JSON.stringify(snapshot), "utf8");
+      let offset = 0;
+      while (offset < data.length) offset += writeSync(descriptor, data, offset);
       fsyncSync(descriptor);
     } finally {
       closeSync(descriptor);

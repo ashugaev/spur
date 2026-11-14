@@ -23,7 +23,6 @@ const session: SessionRecord = {
   project: "test",
   agent: "claude",
   model: "opus",
-  slots: { links: [{ label: "PR", url: "https://example.test/1" }] },
   prompt: "p",
   branch: "feature/x",
   worktree: true,
@@ -42,6 +41,7 @@ function context(overrides: Partial<SnapshotWriteContext> = {}): SnapshotWriteCo
     headSha: "abc123",
     dirty: false,
     todoRevision: "rev-1",
+    links: [{ label: "PR", url: "https://example.test/1" }],
     ...overrides,
   };
 }

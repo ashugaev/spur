@@ -20359,6 +20359,7 @@ export class SessionService {
         maxBytes: snapshotSettings(this.resolveProjectForSession(session)).maxBytes,
         ...head,
         todoRevision: ensureTodoLedger(this.config.dataDir, session).revision,
+        links: this.displaySlotsForSession(session)?.links ?? [],
       });
     });
   }
