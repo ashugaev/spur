@@ -35576,6 +35576,11 @@ describe("SessionService", () => {
         },
       ],
       agentLaunchId: "launch-generation-1",
+      claudeStatusOwner: {
+        agentLaunchId: "launch-generation-1",
+        agentSessionId: "native-1",
+        pid: 4242,
+      },
     });
     sessions.set("api-2", {
       id: "api-2",
@@ -35635,6 +35640,7 @@ describe("SessionService", () => {
     expect(listed[0]).not.toHaveProperty("allowedTriggers");
     expect(listed[0]).not.toHaveProperty("agentSessionId");
     expect(listed[0]).not.toHaveProperty("agentLaunchId");
+    expect(listed[0]).not.toHaveProperty("claudeStatusOwner");
     expect(listed[0]).not.toHaveProperty("branchSource");
     // The strip must not overreach into what the listing renders.
     expect(listed[0]).toMatchObject({ project: "api", prompt: "Ship the feature" });
