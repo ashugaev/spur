@@ -139,7 +139,11 @@ const spawn = body("SpawnSessionRequest", [
     "Opt into exclusive native PR CI and conflict alerts; requires an allowed send route for each class.",
   ),
   overrides,
-  field("reuseWorkspaceSessionId", "string", "Reuse the named session workspace."),
+  field(
+    "reuseWorkspaceSessionId",
+    "string",
+    "Reuse the named session workspace. Takes closeout from a completed, killed, errored, budget-limited, token-budget-stopped or manually paused owner.",
+  ),
   field("originalTaskPrompt", "string", "Original task retained across task handoffs."),
   field("bareSpawnMessage", "boolean", "Use the supplied task without normal spawn wrapping."),
   field("configPath", "string", "Project configuration path."),
@@ -1156,6 +1160,19 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "Mark session as opened.",
   ),
   operation("pause_session", "POST", "/sessions/{sessionId}/pause", "Pause session."),
+  operation(
+    "clear_session_rate_limit",
+    "POST",
+    "/sessions/{sessionId}/rate-limit/clear",
+    "Clear a live session's stale rate limit after checking provider quota.",
+    {
+      body: body("RateLimitClearRequest", [
+        field("force", "boolean", "Skip provider quota check.", false, false),
+      ]),
+      examples: [{ body: {} }, { body: { force: true } }],
+      response: "RateLimitClearResult",
+    },
+  ),
   operation(
     "get_todo",
     "GET",

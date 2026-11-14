@@ -416,6 +416,7 @@ async function claudeSource(
   deps: UsageReportDeps,
   account: ClaudeAccount,
   boundSessionIds: readonly string[],
+  fresh = false,
 ): Promise<QuotaSourceResult> {
   const base = {
     provider: "claude" as const,
@@ -437,7 +438,7 @@ async function claudeSource(
   );
   if (best.expiresAt !== null && best.expiresAt <= deps.nowMs)
     return errorResult(base, deps.nowMs, "expired");
-  return cached(`claude:${account.id}`, deps.nowMs, () =>
+  const fetchQuota = () =>
     requestQuota(
       deps,
       base,
@@ -448,19 +449,39 @@ async function claudeSource(
         return windows ? { plan: null, windows } : null;
       },
       best.plan,
-    ),
-  );
+    );
+  return fresh
+    ? (await fetchQuota()).result
+    : cached(`claude:${account.id}`, deps.nowMs, fetchQuota);
 }
 
-async function codexSource(deps: UsageReportDeps): Promise<QuotaSourceResult> {
+async function codexSource(deps: UsageReportDeps, fresh = false): Promise<QuotaSourceResult> {
   const base = { provider: "codex" as const, source: "codex", label: "codex" };
   const credential = await readCodexCredential(deps.homeDir);
   if (!credential) return errorResult(base, deps.nowMs, "no_credentials");
   const headers: Record<string, string> = { Authorization: `Bearer ${credential.accessToken}` };
   if (credential.accountId !== null) headers["ChatGPT-Account-Id"] = credential.accountId;
-  return cached("codex:codex", deps.nowMs, () =>
-    requestQuota(deps, base, CODEX_URL, headers, parseCodexUsage, null),
-  );
+  const fetchQuota = () => requestQuota(deps, base, CODEX_URL, headers, parseCodexUsage, null);
+  return fresh ? (await fetchQuota()).result : cached("codex:codex", deps.nowMs, fetchQuota);
+}
+
+export async function readFreshSessionQuota(
+  deps: UsageReportDeps,
+  session: { id: string; agent: string; claudeAccountId?: string },
+): Promise<QuotaSourceResult | null> {
+  if (session.agent === "codex") return codexSource(deps, true);
+  if (session.agent !== "claude") return null;
+  const accountId = session.claudeAccountId ?? "default";
+  const account =
+    claudeAccounts(deps.dataDir).find((item) => item.id === accountId) ??
+    (accountId === "default"
+      ? { id: "default", configDir: join(deps.homeDir, ".claude"), createdAt: "" }
+      : null);
+  if (!account) return null;
+  const boundSessionIds = safeListSessions(deps.dataDir)
+    .filter((candidate) => candidate.claudeAccountId === accountId)
+    .map((candidate) => candidate.id);
+  return claudeSource(deps, account, boundSessionIds, true);
 }
 
 function claudeAccounts(dataDir: string): ClaudeAccount[] {

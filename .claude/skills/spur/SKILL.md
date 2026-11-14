@@ -26,6 +26,7 @@ INTERFACES
   Telegram: bot DM for commands/spawn; agent communication in assigned forum topics; completion deletes owned topics. Source identity: `docs/commands.md#source`; attachments/binding: `docs/configuration.md#telegram-binding`; sends: `docs/commands.md#source-reply`.
   Native Telegram calls to sandbox Shepherd: docs/telegram-calls.md.
   Provider quota windows and session token totals: `spur usage`; docs/commands.md#usage.
+  Manual rate-limit clear: docs/commands.md#usage; docs/daemon-api.md#session-routes.
   Mute unwanted auto-pings with `spur auto-ping mute <handle>`, handle from the ping footer. `--for <dur>` and `--forever` need `--reason`. Modes and resume: `docs/commands.md#auto-ping`; API: `docs/daemon-api.md`.
 
 SAFETY
@@ -55,6 +56,7 @@ DOCS
   Config, admission, trigger-spawn retry, reviewer App/consent, pane-child fallback, OpenCode heartbeat: docs/configuration.md; events: docs/configuration.md#events
   GitHub PR feedback attribution, ownership and custom markers: docs/configuration.md#field-reference
   Native PR alert ownership: docs/configuration.md#pr-alert-ownership.
+  Closeout takeover and blocked-trigger notices: docs/commands.md, docs/configuration.md.
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
   Full-access MCP: Pages source binding, backend controls/logs, cached attached PR status; setup: docs/mcp.md

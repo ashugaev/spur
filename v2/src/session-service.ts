@@ -25,7 +25,7 @@ import {
   SessionLifecycleError,
   SessionLifecycleRegister,
 } from "./session-lifecycle.js";
-import { userInfo } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setImmediate as yieldToEventLoop, setTimeout as sleep } from "node:timers/promises";
 import {
@@ -147,6 +147,7 @@ import {
   type RateLimitDetection,
 } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
+import { readFreshSessionQuota, type QuotaSourceResult } from "./usage-report.js";
 import {
   ACTIVITY_WINDOW_MS,
   CONVERSATION_PAGE_ENTRIES,
@@ -553,6 +554,7 @@ import {
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
+  type RateLimitClearResult,
   type PrAlertTransfer,
   type DurableSpawnIntent,
   type CursorRestoreBoundary,
@@ -1130,6 +1132,16 @@ export class SpawnBatchConflictError extends Error {
 
 export class SessionRateLimitedError extends Error {
   readonly statusCode = 409;
+}
+
+export class RateLimitClearError extends Error {
+  readonly statusCode = 409;
+  constructor(
+    message: string,
+    readonly resetAt: string | null = null,
+  ) {
+    super(message);
+  }
 }
 
 // Message-only (like SessionRateLimitedError): the candidate session ids to
@@ -1952,6 +1964,24 @@ function resolveCloseoutOwner(args: {
   if (args.transferredOwner !== undefined) return args.transferredOwner;
   if (args.reusesWorkspace) return false;
   return args.worktree;
+}
+
+// Terminal or hand-paused records no longer run the Stop-hook closeout. Daemon
+// stops (stale, memory, runtime_lost) leave the owner in place for handoff.
+function isReleasedCloseoutStatus(record: Pick<SessionRecord, "status" | "stopReason">): boolean {
+  switch (record.status) {
+    case "completed":
+    case "killed":
+    case "errored":
+    case "budget_limited":
+      return true;
+    case "stopped":
+      return record.stopReason === "manual_pause" || record.stopReason === "token_budget";
+    case "spawning":
+    case "running":
+    case "paused":
+      return false;
+  }
 }
 
 async function setupSessionAgentHooks(args: {
@@ -3344,6 +3374,7 @@ interface PreparedSpawn {
   sessionId: string;
   resolvedBranch?: ResolvedSpawnBranch;
   reuseWorkspacePath?: string;
+  closeoutTakenFrom?: string[];
   placeholder: SessionRecord;
   startupAttachments: StoredImageAttachment[];
   preflightBatchId: string;
@@ -3640,6 +3671,11 @@ const TELEGRAM_TOPIC_NAME_MAX = 128;
 // longer than this after the message arrived.
 const TELEGRAM_TYPING_MAX_MS = 10 * 60_000;
 
+function publicSpawnIntent(intent: DurableSpawnIntent): NonNullable<SessionView["spawnIntent"]> {
+  const { closeoutTakenFrom: _closeoutTakenFrom, ...view } = intent;
+  return view;
+}
+
 function sessionTitle(session: Pick<SessionView, "slots">): string | undefined {
   const title = session.slots?.title?.trim();
   return title ? title : undefined;
@@ -3928,6 +3964,11 @@ export class SessionService {
   // before the agent reaches its prompt and settles the record itself, so a
   // not-yet-started agent must not be reconciled to errored meanwhile.
   private readonly launchesInFlight = new Set<string>();
+  // Key = taking session id. Open from the take until the taking spawn exits.
+  private readonly closeoutTakesInFlight = new Map<
+    string,
+    { from: readonly string[]; settled: Promise<void>; settle: () => void }
+  >();
   private readonly triggerBirthsInFlight = new Map<
     string,
     { request: SpawnSessionRequest; result: Promise<SessionView> }
@@ -3990,6 +4031,9 @@ export class SessionService {
   // classes acquire pane-write before lifecycle; lifecycle-only helpers use
   // the Locked suffix and never acquire the pane lock.
   private readonly sessionLifecycleLocks = new Map<string, Promise<void>>();
+  private readonly rateLimitClearBarriers = new Map<string, Promise<void>>();
+  private readonly classificationsInFlight = new Map<string, Set<Promise<SessionStateResult>>>();
+  private readonly rateLimitClearRevisions = new Map<string, number>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly conversationReaders = new Map<string, ClaudeConversationReaderState>();
@@ -6927,6 +6971,204 @@ export class SessionService {
     return session.rateLimitedAt !== undefined;
   }
 
+  private activeRateLimitClearFence(session: SessionRecord): SessionRecord["rateLimitClearFence"] {
+    const fence = session.rateLimitClearFence;
+    return fence?.agentLaunchId === (session.agentLaunchId ?? null) ? fence : undefined;
+  }
+
+  private fencedStructuredRateLimit(
+    session: SessionRecord,
+    detection: RateLimitDetection | null,
+  ): RateLimitDetection | null {
+    const source = detection?.source;
+    const fence = this.activeRateLimitClearFence(session);
+    return source &&
+      fence &&
+      source.ordinal <= (fence.sourceOrdinals[source.key ?? source.filePath] ?? 0)
+      ? null
+      : detection;
+  }
+
+  private paneRateLimitFenced(
+    session: SessionRecord,
+    paneText: string,
+    detection: RateLimitDetection | null,
+  ): boolean {
+    if (!this.activeRateLimitClearFence(session)?.paneLatched) return false;
+    if (detection?.limited || paneText.trim() === "") return true;
+    const current = readSession(this.config.dataDir, session.id);
+    if (current?.rateLimitClearFence?.agentLaunchId === (session.agentLaunchId ?? null)) {
+      writeSession(this.config.dataDir, {
+        ...current,
+        rateLimitClearFence: { ...current.rateLimitClearFence, paneLatched: false },
+      });
+    }
+    return false;
+  }
+
+  private async captureRateLimitSourceOrdinals(
+    session: SessionRecord,
+  ): Promise<Record<string, number>> {
+    if (session.agent === "codex") {
+      const ordinals = (await this.classifyCodexState(session)).rateLimitOrdinals;
+      if (!ordinals || Object.keys(ordinals).length === 0)
+        throw new RateLimitClearError(`Rate-limit source unavailable for ${session.id}`);
+      return ordinals;
+    }
+    if (session.agent === "claude") {
+      const result = await readClaudeJsonlState(
+        session.worktreePath,
+        this.claudeJsonlReaders.get(session.id),
+        session.agentSessionId,
+      );
+      if (!result) throw new RateLimitClearError(`Rate-limit source unavailable for ${session.id}`);
+      this.claudeJsonlReaders.set(session.id, result.reader);
+      if (result.reader.rateLimitCounts && Object.keys(result.reader.rateLimitCounts).length > 0)
+        return { ...result.reader.rateLimitCounts };
+      return { [result.reader.filePath]: 0 };
+    }
+    if (session.agent !== "cursor") return {};
+    const cursorChatId = await this.cursorTranscriptId(session);
+    const result = cursorChatId
+      ? await readCursorJsonlState(
+          session.worktreePath,
+          this.cursorJsonlReaders.get(session.id),
+          cursorChatId,
+          session.cursorRestoreBoundary ? { after: session.cursorRestoreBoundary } : {},
+        )
+      : null;
+    if (!result) throw new RateLimitClearError(`Rate-limit source unavailable for ${session.id}`);
+    this.cursorJsonlReaders.set(session.id, result.reader);
+    return {
+      [result.rateLimit?.source?.key ?? result.reader.filePath]: Math.max(
+        result.reader.rateLimitOrdinal ?? 0,
+        result.rateLimit?.source?.ordinal ?? 0,
+      ),
+    };
+  }
+
+  private async freshQuotaForClear(session: SessionRecord): Promise<QuotaSourceResult | null> {
+    const nowMs = Date.now();
+    const todayStart = new Date(nowMs);
+    todayStart.setHours(0, 0, 0, 0);
+    return readFreshSessionQuota(
+      {
+        fetch: globalThis.fetch,
+        homeDir: homedir(),
+        dataDir: this.config.dataDir,
+        nowMs,
+        todayStartMs: todayStart.getTime(),
+      },
+      session,
+    );
+  }
+
+  async clearRateLimit(
+    sessionId: string,
+    force: boolean,
+    actor: string,
+  ): Promise<RateLimitClearResult> {
+    const initial = readSession(this.config.dataDir, sessionId);
+    if (!initial) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    if (initial.status !== "running" || !this.isLiveStateRateLimited(initial))
+      throw new RateLimitClearError(`Session ${sessionId} is not live and rate limited`);
+    if (!force) {
+      const quota = await this.freshQuotaForClear(initial);
+      if (!quota || quota.status !== "ok" || quota.windows.length === 0)
+        throw new RateLimitClearError(`Quota unavailable for session ${sessionId}; use --force`);
+      const exhausted = quota.windows.filter((window) => window.usedPercent >= 100);
+      if (exhausted.length > 0) {
+        const resets = exhausted
+          .map((window) => window.resetsAt)
+          .filter((reset): reset is string => reset !== null && Number.isFinite(Date.parse(reset)));
+        const resetAt =
+          resets.sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
+        throw new RateLimitClearError(
+          `Quota exhausted for session ${sessionId}; reset ${resetAt ?? "unknown"}`,
+          resetAt,
+        );
+      }
+    }
+    return this.withSessionLifecycleLock(sessionId, async () => {
+      const current = readSession(this.config.dataDir, sessionId);
+      if (!current) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      if (
+        current.status !== "running" ||
+        !this.isLiveStateRateLimited(current) ||
+        current.agent !== initial.agent ||
+        current.agentLaunchId !== initial.agentLaunchId ||
+        current.agentSessionId !== initial.agentSessionId ||
+        (current.agent === "claude" &&
+          (current.claudeAccountId ?? "default") !== (initial.claudeAccountId ?? "default"))
+      )
+        throw new RateLimitClearError(`Session/account changed; retry clear`);
+      let release!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      this.rateLimitClearBarriers.set(sessionId, barrier);
+      this.rateLimitClearRevisions.set(
+        sessionId,
+        (this.rateLimitClearRevisions.get(sessionId) ?? 0) + 1,
+      );
+      try {
+        await Promise.allSettled([...(this.classificationsInFlight.get(sessionId) ?? [])]);
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (!latest || latest.status !== "running")
+          throw new RateLimitClearError(`Session ${sessionId} changed during clear`);
+        const sourceOrdinals = await this.captureRateLimitSourceOrdinals(latest);
+        const paneText = await captureTmuxPane(latest.tmuxSession);
+        const paneLatched =
+          paneText === null ||
+          paneText.trim() === "" ||
+          Boolean(scanTmuxRateLimit(paneText)) ||
+          (latest.agent === "claude" && Boolean(detectClaudeUsageLimitMenu(paneText)));
+        const { rateLimitedAt: _rateLimitedAt, ...base } = latest;
+        const cleared: SessionRecord = {
+          ...base,
+          rateLimitClearFence: {
+            agentLaunchId: latest.agentLaunchId ?? null,
+            sourceOrdinals,
+            paneLatched,
+          },
+          updatedAt: nowIso(),
+        };
+        writeSession(this.config.dataDir, cleared);
+        this.claudeRateLimitReconfirmOverrides.delete(sessionId);
+        this.codexPaneLimitObservedAt.delete(sessionId);
+        this.lastClassifiedLogStates.delete(sessionId);
+        this.stateCache.delete(sessionId);
+        const classified = await this.classifySessionRecord(cleared, {
+          bypassClearBarrier: true,
+          suppressMenuConfirmation: true,
+          reconcileRuntime: false,
+        });
+        const state = this.stabilizeState(sessionId, classified.state);
+        await this.updateStateHistory(
+          cleared,
+          state,
+          classified.source,
+          classified.historySourcePath ?? null,
+          classified.serverError,
+          classified.serverErrorEvidence,
+        );
+        const deliveryScheduled = state !== "rate_limited";
+        if (deliveryScheduled) this.ensureDeliveryRunner(sessionId);
+        this.logEvent("session.rate_limit.cleared", {
+          level: "info",
+          sessionId,
+          projectId: latest.project,
+          message: `Rate limit cleared for ${sessionId}`,
+          details: { actor, force },
+        });
+        return { sessionId, state, deliveryScheduled };
+      } finally {
+        this.rateLimitClearBarriers.delete(sessionId);
+        release();
+      }
+    });
+  }
+
   private async confirmClaudeUsageLimitMenu(
     session: Pick<SessionRecord, "id" | "project" | "tmuxSession">,
   ): Promise<void> {
@@ -7764,6 +8006,9 @@ export class SessionService {
   // runDashboardCacheTick owns their pruning.
   private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
     this.codexRateLimitPoller.prune(liveIds);
+    for (const sessionId of this.rateLimitClearRevisions.keys()) {
+      if (!liveIds.has(sessionId)) this.rateLimitClearRevisions.delete(sessionId);
+    }
     for (const sessionId of this.scheduledWakeClaims.keys()) {
       if (!liveIds.has(sessionId)) this.scheduledWakeClaims.delete(sessionId);
     }
@@ -9212,6 +9457,45 @@ export class SessionService {
       sessionId,
       message: `Telegram ${context} failed for ${sessionId}: ${message}`,
     });
+  }
+
+  /** Once per (owner, trigger): the claim is persisted before the send, so a restart never repeats it. */
+  noticeBlockedTrigger(sessionId: string, triggerId: string): void {
+    const record = readSession(this.config.dataDir, sessionId);
+    if (
+      !record ||
+      record.closeoutOwner !== true ||
+      record.blockedTriggerNotices?.includes(triggerId)
+    ) {
+      return;
+    }
+    writeSession(this.config.dataDir, {
+      ...record,
+      blockedTriggerNotices: [...(record.blockedTriggerNotices ?? []), triggerId],
+    });
+    this.stateCache.delete(sessionId);
+    const telegram = this.resolveTelegramNotice(sessionId) !== null;
+    this.logEvent("trigger.send.blocked_notice", {
+      level: "warn",
+      sessionId,
+      projectId: record.project,
+      message: `${sessionId} owns closeout but allowedTriggers blocks ${triggerId}`,
+      details: { triggerId, telegram },
+    });
+    if (telegram) void this.sendBlockedTriggerNotice(sessionId, triggerId);
+  }
+
+  private async sendBlockedTriggerNotice(sessionId: string, triggerId: string): Promise<void> {
+    try {
+      const view = await this.get(sessionId);
+      await this.pushTelegramNotice(
+        sessionId,
+        view,
+        `${telegramSessionLabel(view)} owns closeout; allowedTriggers blocks ${triggerId}, alert dropped. Fix: spur pause ${sessionId}, then spawn with reuseWorkspaceSessionId and allowedTriggers omitted.`,
+      );
+    } catch (error) {
+      this.logTelegramNoticeFailure(sessionId, "blocked-trigger notice", error);
+    }
   }
 
   private async pushTelegramNotice(
@@ -13353,6 +13637,7 @@ export class SessionService {
     let workspacePath = "";
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let createdAt: string | undefined;
+    let closeoutTakenFrom: string[] | null = null;
     const placeholderState = { written: false };
     let prAlertReservation: string | undefined;
     let prAlertLaunchStarted = false;
@@ -13616,9 +13901,16 @@ export class SessionService {
         originalTaskPrompt,
       };
       this.assertReuseAnchorPresent(reuseCtx);
-      await this.persistSpawnPlaceholder(placeholder, request.prAlertOwner === true, () => {
-        placeholderState.written = true;
-      });
+      await this.persistSpawnPlaceholder(
+        placeholder,
+        request.prAlertOwner === true,
+        reuseCtx,
+        !restrictWrites && worktree && options?.closeoutOwnerTransfer === undefined,
+        (takenFrom) => {
+          placeholderState.written = true;
+          closeoutTakenFrom = takenFrom;
+        },
+      );
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
       // Before the launch prompt exists: an agent that replies ahead of the
@@ -14117,6 +14409,7 @@ export class SessionService {
           const erroredRecord: SessionRecord = {
             id: sessionId,
             project: request.project,
+            ...(closeoutTakenFrom ? { closeoutOwner: true } : {}),
             ...(options?.prAlertOwnerTransfer
               ? { prAlertTransfer: options.prAlertOwnerTransfer }
               : {}),
@@ -14148,6 +14441,14 @@ export class SessionService {
           const persistedFailure = killed ? null : this.carrySpawnQueue(settledFailure);
           if (persistedFailure) {
             writeSession(this.config.dataDir, persistedFailure);
+          }
+          if (
+            closeoutTakenFrom &&
+            !prAlertBirthConfirmed &&
+            (!prAlertLaunchStarted ||
+              (launchCandidate && !(await this.launchResourcesMayRemain(launchCandidate))))
+          ) {
+            this.returnTakenCloseout(sessionId, closeoutTakenFrom);
           }
 
           this.logEvent("session.spawn.failed", {
@@ -14236,6 +14537,7 @@ export class SessionService {
       }
       if (sessionId) {
         this.spawnsInFlight.delete(sessionId);
+        this.settleCloseoutTake(sessionId);
       }
     }
   }
@@ -14519,11 +14821,20 @@ export class SessionService {
   private async persistSpawnPlaceholder(
     record: SessionRecord,
     alertsRequested: boolean,
-    onWritten: () => void,
+    reuseCtx: { workspaceId: string } | null,
+    takeAllowed: boolean,
+    onWritten: (takenFrom: string[] | null) => void,
   ): Promise<void> {
+    const launchRecord = record;
+    const writePlaceholder = (): void => {
+      this.applyCloseoutTake(record, reuseCtx, takeAllowed, (takenFrom) => {
+        if (record.closeoutOwner !== undefined) launchRecord.closeoutOwner = record.closeoutOwner;
+        if (record.spawnIntent) launchRecord.spawnIntent = record.spawnIntent;
+        onWritten(takenFrom);
+      });
+    };
     if (!alertsRequested && !record.prAlertTransfer) {
-      writeSession(this.config.dataDir, record);
-      onWritten();
+      writePlaceholder();
       return;
     }
     record = normalizeSessionPrBinding(record);
@@ -14564,8 +14875,7 @@ export class SessionService {
           this.writePrAlertRoleLocked(record, { state: "owned", sessionId: record.id });
         }
       }
-      writeSession(this.config.dataDir, record);
-      onWritten();
+      writePlaceholder();
       if (transfer?.kind !== "suppressed") this.claimPrAlertsLocked(record, "birth");
     });
   }
@@ -14860,7 +15170,11 @@ export class SessionService {
     let agent: SessionRecord["agent"] | undefined;
     let worktree = false;
     let createdAt: string | undefined;
-    const placeholderState = { written: false };
+    const placeholderState: { written: boolean; closeoutTakenFrom: string[] | null } = {
+      written: false,
+      closeoutTakenFrom: null,
+    };
+    let preparationSucceeded = false;
     let ownedClaimBatchId: string | undefined;
     let prAlertReservation: string | undefined;
     let prompt = "";
@@ -15039,9 +15353,16 @@ export class SessionService {
       if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
       this.pendingSpawnIds.add(sessionId);
       this.spawnsInFlight.add(sessionId);
-      await this.persistSpawnPlaceholder(placeholder, request.prAlertOwner === true, () => {
-        placeholderState.written = true;
-      });
+      await this.persistSpawnPlaceholder(
+        placeholder,
+        request.prAlertOwner === true,
+        reuseCtx,
+        !restrictWrites && worktree,
+        (takenFrom) => {
+          placeholderState.written = true;
+          placeholderState.closeoutTakenFrom = takenFrom;
+        },
+      );
       ownedClaimBatchId = undefined;
       if (options.telegramOrigin) {
         writeTelegramReplyTarget(this.config.dataDir, {
@@ -15074,6 +15395,7 @@ export class SessionService {
         attachments: startupAttachments,
       });
 
+      preparationSucceeded = true;
       return {
         request,
         launchSelection,
@@ -15091,6 +15413,9 @@ export class SessionService {
         sessionId,
         ...(resolvedBranch ? { resolvedBranch } : {}),
         ...(reuseCtx ? { reuseWorkspacePath: reuseCtx.workspacePath } : {}),
+        ...(placeholderState.closeoutTakenFrom
+          ? { closeoutTakenFrom: placeholderState.closeoutTakenFrom }
+          : {}),
         placeholder,
         startupAttachments,
         preflightBatchId,
@@ -15155,6 +15480,8 @@ export class SessionService {
             this.config.dataDir,
             this.settlePrAlertTransferLocked(failedRecord, "rollback"),
           );
+          if (placeholderState.closeoutTakenFrom)
+            this.returnTakenCloseout(failedRecord.id, placeholderState.closeoutTakenFrom);
         });
       }
       this.logEvent("session.spawn.failed", {
@@ -15172,7 +15499,10 @@ export class SessionService {
       throw error;
     } finally {
       if (prAlertReservation) this.prAlertReservations.delete(prAlertReservation);
-      if (sessionId) this.spawnsPreparing.delete(sessionId);
+      if (sessionId) {
+        this.spawnsPreparing.delete(sessionId);
+        if (!preparationSucceeded) this.settleCloseoutTake(sessionId);
+      }
     }
   }
 
@@ -15877,10 +16207,23 @@ export class SessionService {
               : this.prAlertBirthUnlaunched(current) || launchProvenAbsent
                 ? "rollback"
                 : null;
+          const takenFrom = current.spawnIntent?.closeoutTakenFrom ?? prepared.closeoutTakenFrom;
+          if (takenFrom && outcome === null) {
+            this.holdDurableSpawn(sessionId, message);
+            return;
+          }
           this.retireDurableSpawn(
             outcome ? this.settlePrAlertTransferLocked(failure, outcome) : failure,
           );
+          if (takenFrom && outcome === "rollback") {
+            this.returnTakenCloseout(sessionId, takenFrom);
+          }
         });
+      } else if (
+        prepared.closeoutTakenFrom &&
+        (!launchCandidate || !(await this.launchResourcesMayRemain(launchCandidate)))
+      ) {
+        this.returnTakenCloseout(sessionId, prepared.closeoutTakenFrom);
       }
       this.logEvent("session.spawn.failed", {
         level: "error",
@@ -15983,6 +16326,7 @@ export class SessionService {
             }
           } finally {
             this.durableSpawnRuns.delete(prepared.sessionId);
+            this.settleCloseoutTake(prepared.sessionId);
             const current = readSession(this.config.dataDir, prepared.sessionId);
             if (!current?.spawnIntent) {
               this.durableSpawnIds.delete(prepared.sessionId);
@@ -16118,6 +16462,7 @@ export class SessionService {
       placeholder: record,
       startupAttachments,
       preflightBatchId: intent.preflightBatchId,
+      ...(intent.closeoutTakenFrom ? { closeoutTakenFrom: intent.closeoutTakenFrom } : {}),
     };
   }
 
@@ -18458,8 +18803,9 @@ export class SessionService {
               const native = await this.classifyCodexState(current);
               const paneText = await captureTmuxPane(current.tmuxSession, 200, { fresh: true });
               if (paneText === null) throw new Error(uncertainInput);
+              const nativeLimit = this.fencedStructuredRateLimit(current, native.rateLimit);
               const permission =
-                native.state === "waiting" && native.rateLimit?.limited
+                native.state === "waiting" && nativeLimit?.limited
                   ? this.codexRateLimitPoller.permission(
                       sessionId,
                       codexHookHomePath(join(this.config.dataDir, "session-tools", sessionId)),
@@ -18467,12 +18813,12 @@ export class SessionService {
                     )
                   : null;
               if (
-                (permission !== true && rateLimitActive(native.rateLimit, Date.now())) ||
+                (permission !== true && rateLimitActive(nativeLimit, Date.now())) ||
                 rateLimitActive(
                   this.codexPaneRateLimit(
                     sessionId,
                     paneText,
-                    permission === true ? { limited: false, reason: "" } : native.rateLimit,
+                    permission === true ? { limited: false, reason: "" } : nativeLimit,
                     native.activityMs,
                   ),
                   Date.now(),
@@ -21017,6 +21363,11 @@ export class SessionService {
         }
       }
       this.cancelWaitingHandoff(sessionId);
+      const closeoutRecord = readSession(this.config.dataDir, sessionId);
+      const closeoutTakenFrom =
+        closeoutRecord && this.prAlertBirthUnlaunched(closeoutRecord)
+          ? closeoutRecord.spawnIntent?.closeoutTakenFrom
+          : undefined;
       if (session.prAlertTransfer && this.prAlertBirthUnlaunched(session)) {
         session = this.settlePrAlertTransferLocked(session, "rollback");
         writeSession(this.config.dataDir, session);
@@ -21034,6 +21385,10 @@ export class SessionService {
       await this.cleanupSessionServices(session);
       if (currentSession.status !== "killed") terminalSlots = this.captureTerminalSlots(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
+      if (closeoutTakenFrom) {
+        this.returnTakenCloseout(sessionId, closeoutTakenFrom);
+        session.closeoutOwner = false;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.kill.failed", {
@@ -21484,6 +21839,16 @@ export class SessionService {
       );
     }
 
+    // Caller holds this session's lifecycle lock, so waiting on the take would
+    // deadlock against the taking spawn; refuse before anything destructive.
+    const closeoutTake = this.closeoutTakeFrom(session.id);
+    if (closeoutTake) {
+      throw new SessionStartingError(
+        `Session ${session.id} closeout is moving to ${closeoutTake.takerId}; retry after it launches or kill ${closeoutTake.takerId}`,
+      );
+    }
+    this.assertNoHeldCloseoutTake(session.id);
+
     const project = this.getProject(session.project);
     // Same restore-warmup protection as restore() above: relaunchSessionInPlace
     // starts the MCP sidecar before this session's status is guaranteed
@@ -21495,9 +21860,15 @@ export class SessionService {
     // "working" the way a genuine post-restore warmup intentionally does.
     this.restoreWarmupUntil.set(session.id, Date.now() + RESTORE_WARMUP_MS);
     this.launchesInFlight.add(session.id);
+    // The caller's record predates the awaits above; a reuse spawn can have
+    // taken closeout since, and env plus record writes must carry the flag.
+    const relaunchTarget: SessionRecord = {
+      ...session,
+      closeoutOwner: readSession(this.config.dataDir, session.id)?.closeoutOwner === true,
+    };
     let recovered: ReadySessionForSend;
     try {
-      recovered = await this.relaunchSessionInPlace(session, project, {
+      recovered = await this.relaunchSessionInPlace(relaunchTarget, project, {
         ...options,
         paneAlreadyOwned: options?.paneAlreadyOwned === true,
         ...(operation ? { operation } : {}),
@@ -22120,6 +22491,12 @@ export class SessionService {
     request: RestoreSessionRequest,
     operation?: RestoreOperationContext,
   ): Promise<SessionView> {
+    // No lock held here. A failed taking spawn gives closeout back before it
+    // settles, so the launch below reads the final flag.
+    // Persisted background takes refuse now; only foreground takes wait.
+    this.assertNoHeldCloseoutTake(sessionId);
+    await this.waitForCloseoutTakeFrom(sessionId, operation);
+    this.assertNoHeldCloseoutTake(sessionId);
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     return this.withPaneWriteLock(
@@ -23038,6 +23415,11 @@ export class SessionService {
     sessionId: string,
     request: RestoreSessionRequest,
   ): Promise<SessionView> {
+    // Before the claim: awaiting between the has-check and the set would race.
+    // Persisted background takes refuse now; only foreground takes wait.
+    this.assertNoHeldCloseoutTake(sessionId);
+    await this.waitForCloseoutTakeFrom(sessionId);
+    this.assertNoHeldCloseoutTake(sessionId);
     // Refuse a second concurrent reopen outright instead of narrowing the
     // read-check-then-write window: two overlapping calls that both pass the
     // `status !== "completed"` guard would otherwise race into restore() for
@@ -23557,6 +23939,146 @@ export class SessionService {
     this.stateCache.delete(sessionId);
   }
 
+  private holdsCloseout(record: SessionRecord): boolean {
+    return (
+      record.closeoutOwner === true &&
+      (!isReleasedCloseoutStatus(record) ||
+        this.launchesInFlight.has(record.id) ||
+        this.handoffsInFlight.has(record.id) ||
+        this.lifecycle.snapshot(record.id).operation?.phase === "pending")
+    );
+  }
+
+  // Pure read: ids of the workspace's closeout owners when every one is
+  // released, null when nothing is takeable.
+  private takeReleasedCloseout(workspaceId: string, newSessionId: string): string[] | null {
+    const anchor = readSession(this.config.dataDir, workspaceId);
+    if (!anchor) return null;
+    const owners = this.listWorkspaceRuntimeMembers(
+      anchor,
+      listSessions(this.config.dataDir),
+    ).filter((member) => member.id !== newSessionId && member.closeoutOwner === true);
+    if (owners.length === 0 || owners.some((owner) => this.holdsCloseout(owner))) return null;
+    return owners.map((owner) => owner.id);
+  }
+
+  // Runs in the same sync span as the placeholder write; the old owners are
+  // cleared only after the write succeeded.
+  private applyCloseoutTake(
+    placeholder: SessionRecord,
+    reuseCtx: { workspaceId: string } | null,
+    takeAllowed: boolean,
+    onWritten: (takenFrom: string[] | null) => void,
+  ): string[] | null {
+    const takenFrom =
+      reuseCtx && takeAllowed
+        ? this.takeReleasedCloseout(reuseCtx.workspaceId, placeholder.id)
+        : null;
+    if (takenFrom) {
+      placeholder.closeoutOwner = true;
+      // Durable: a restart-resumed queued launch still gives back on final failure.
+      if (placeholder.spawnIntent) {
+        placeholder.spawnIntent = { ...placeholder.spawnIntent, closeoutTakenFrom: takenFrom };
+      }
+    }
+    writeSession(this.config.dataDir, placeholder);
+    onWritten(takenFrom);
+    if (!takenFrom || !reuseCtx) return takenFrom;
+    for (const id of takenFrom) this.clearCloseoutOwner(id);
+    let settle = (): void => undefined;
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    this.closeoutTakesInFlight.set(placeholder.id, { from: takenFrom, settled, settle });
+    this.logEvent("session.closeout.taken", {
+      level: "info",
+      sessionId: placeholder.id,
+      projectId: placeholder.project,
+      message: `${placeholder.id} took closeout from ${takenFrom.join(", ")}`,
+      details: { workspaceId: reuseCtx.workspaceId, fromSessionIds: takenFrom },
+    });
+    return takenFrom;
+  }
+
+  private settleCloseoutTake(takerId: string): void {
+    this.closeoutTakesInFlight.get(takerId)?.settle();
+    this.closeoutTakesInFlight.delete(takerId);
+  }
+
+  private closeoutTakeFrom(
+    sessionId: string,
+  ): { takerId: string; settled: Promise<void> } | undefined {
+    for (const [takerId, take] of this.closeoutTakesInFlight) {
+      if (take.from.includes(sessionId)) return { takerId, settled: take.settled };
+    }
+    return undefined;
+  }
+
+  // Loops: a new take cannot start from a pending session, but the loop keeps
+  // the wait correct if one was already registered. Hold no lock while waiting.
+  private async waitForCloseoutTakeFrom(
+    sessionId: string,
+    operation?: RestoreOperationContext,
+  ): Promise<void> {
+    for (
+      let take = this.closeoutTakeFrom(sessionId);
+      take;
+      take = this.closeoutTakeFrom(sessionId)
+    ) {
+      await (operation ? operation.wait(take.settled) : take.settled);
+    }
+  }
+
+  // The in-memory wait covers a take that is running. A held or restart-queued
+  // taker keeps its persisted intent but has no in-flight entry, and may still
+  // fail and give closeout back to this session. Restoring or handing it off
+  // now would launch a helper that the later give-back skips. Persisted record
+  // only, read-only, no lock.
+  private assertNoHeldCloseoutTake(sessionId: string): void {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) return;
+    const taker = this.listWorkspaceRuntimeMembers(session, listSessions(this.config.dataDir)).find(
+      (member) =>
+        member.id !== sessionId &&
+        !isTerminalSessionStatus(member.status) &&
+        member.spawnIntent?.closeoutTakenFrom?.includes(sessionId) === true,
+    );
+    if (taker) {
+      throw new SessionStartingError(
+        `Session ${sessionId} closeout is moving to ${taker.id}; retry after it launches or kill ${taker.id}`,
+      );
+    }
+  }
+
+  // Sync with the failed-record write. A live launch retained by the failure
+  // path never reaches here.
+  private returnTakenCloseout(failedSessionId: string, takenFrom: readonly string[]): void {
+    const failed = readSession(this.config.dataDir, failedSessionId);
+    if (failed?.closeoutOwner === true) {
+      writeSession(this.config.dataDir, { ...failed, closeoutOwner: false });
+      this.stateCache.delete(failedSessionId);
+    }
+    if (!failed) return;
+    const members = this.listWorkspaceRuntimeMembers(failed, listSessions(this.config.dataDir));
+    for (const id of takenFrom) {
+      const record = members.find((member) => member.id === id);
+      if (
+        !record ||
+        record.closeoutOwner === true ||
+        !isReleasedCloseoutStatus(record) ||
+        this.launchesInFlight.has(id) ||
+        members.some(
+          (member) =>
+            member.id !== failedSessionId && member.id !== id && member.closeoutOwner === true,
+        )
+      ) {
+        continue;
+      }
+      writeSession(this.config.dataDir, { ...record, closeoutOwner: true });
+      this.stateCache.delete(id);
+    }
+  }
+
   async respawn(sessionId: string, request: RespawnSessionRequest = {}): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -23678,8 +24200,12 @@ export class SessionService {
     request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
   ): Promise<SessionView> {
+    // Refuse before queueing for admission; handoffTransaction rechecks after the wait.
+    this.assertNoHeldCloseoutTake(sessionId);
     const waiting = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const session = this.validateHandoffSource(sessionId, options);
+      // A take may have landed while this call waited on the lock.
+      this.assertNoHeldCloseoutTake(sessionId);
       if (this.prAlertTransferFrom(session, "handoff")?.kind === "owner")
         assertPrAlertRoutes(this.getProject(session.project), session.allowedTriggers);
       if (this.handoffsInFlight.has(sessionId)) {
@@ -23757,8 +24283,19 @@ export class SessionService {
     options: { todoActor?: TodoActor } | undefined,
     waiting: HandoffAdmission,
   ): Promise<SessionView> {
+    // Persisted background takes refuse now; only foreground takes wait.
+    this.assertNoHeldCloseoutTake(sessionId);
+    await this.waitForCloseoutTakeFrom(sessionId);
+    this.assertNoHeldCloseoutTake(sessionId);
+    // A failed take gives ownership back during the wait; admit against that.
+    const { closeoutOwner: _stale, ...unowned } = waiting.session;
+    const settledOwner = readSession(this.config.dataDir, sessionId)?.closeoutOwner;
+    const admitted: HandoffAdmission = {
+      ...waiting,
+      session: settledOwner === undefined ? unowned : { ...unowned, closeoutOwner: settledOwner },
+    };
     const prepared = await this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.prepareHandoffLocked(sessionId, request, options, waiting),
+      this.prepareHandoffLocked(sessionId, request, options, admitted),
     );
     try {
       const spawned = await this.spawn(prepared.spawnRequest, prepared.spawnOptions);
@@ -24973,6 +25510,7 @@ export class SessionService {
     rolloutState: CodexRolloutStateRecord | null;
     rateLimit: RateLimitDetection | null;
     rateLimitObservedAtMs?: number;
+    rateLimitOrdinals?: Record<string, number>;
     activityMs: number;
     threadId?: string;
     model?: string;
@@ -25048,6 +25586,9 @@ export class SessionService {
       hookState,
       rolloutState,
       rateLimit: rolloutRead.rateLimit,
+      ...(rolloutRead.rateLimitOrdinals
+        ? { rateLimitOrdinals: rolloutRead.rateLimitOrdinals }
+        : {}),
       ...(rolloutRead.rateLimitObservedAtMs !== undefined
         ? { rateLimitObservedAtMs: rolloutRead.rateLimitObservedAtMs }
         : {}),
@@ -25066,6 +25607,8 @@ export class SessionService {
     activityMs: number,
   ): RateLimitDetection | null {
     const hit = scanTmuxRateLimit(paneText, { tailLines: CODEX_RATE_LIMIT_PANE_TAIL_LINES });
+    const session = readSession(this.config.dataDir, sessionId);
+    if (session && this.paneRateLimitFenced(session, paneText, hit)) return null;
     if (!hit) {
       this.codexPaneLimitObservedAt.delete(sessionId);
       return null;
@@ -26207,25 +26750,55 @@ export class SessionService {
 
   private async classifySessionRecord(
     session: SessionRecord,
-    options?: { scanPane?: boolean; reconcileRuntime?: boolean },
+    options?: {
+      scanPane?: boolean;
+      reconcileRuntime?: boolean;
+      bypassClearBarrier?: boolean;
+      suppressMenuConfirmation?: boolean;
+    },
     observePreparation?: (session: SessionRecord) => void,
   ): Promise<SessionStateResult> {
-    const probeRevision = this.lifecycle.snapshot(session.id).revision;
-    let observation = session;
-    try {
-      return await this.classifySessionRecordKnown(session, options, (prepared) => {
-        observation = prepared;
-        observePreparation?.(prepared);
-      });
-    } catch (error) {
-      if (
-        error instanceof SessionResourceNotFoundError &&
-        !readSession(this.config.dataDir, session.id)
-      ) {
-        throw error;
+    if (!options?.bypassClearBarrier) {
+      const barrier = this.rateLimitClearBarriers.get(session.id);
+      if (barrier) {
+        await barrier;
+        const current = readSession(this.config.dataDir, session.id);
+        if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+        session = current;
       }
-      return this.classificationErrorResult(observation, error, "other", probeRevision);
     }
+    const run = (async (): Promise<SessionStateResult> => {
+      const probeRevision = this.lifecycle.snapshot(session.id).revision;
+      let observation = session;
+      try {
+        return await this.classifySessionRecordKnown(session, options, (prepared) => {
+          observation = prepared;
+          observePreparation?.(prepared);
+        });
+      } catch (error) {
+        if (
+          error instanceof SessionResourceNotFoundError &&
+          !readSession(this.config.dataDir, session.id)
+        ) {
+          throw error;
+        }
+        return this.classificationErrorResult(observation, error, "other", probeRevision);
+      }
+    })();
+    if (!options?.bypassClearBarrier) {
+      const inFlight =
+        this.classificationsInFlight.get(session.id) ?? new Set<Promise<SessionStateResult>>();
+      inFlight.add(run);
+      this.classificationsInFlight.set(session.id, inFlight);
+      void run
+        .finally(() => {
+          inFlight.delete(run);
+          if (inFlight.size === 0 && this.classificationsInFlight.get(session.id) === inFlight)
+            this.classificationsInFlight.delete(session.id);
+        })
+        .catch(() => {});
+    }
+    return run;
   }
 
   private classificationErrorResult(
@@ -26371,7 +26944,11 @@ export class SessionService {
 
   private async classifySessionRecordKnown(
     session: SessionRecord,
-    options?: { scanPane?: boolean; reconcileRuntime?: boolean },
+    options?: {
+      scanPane?: boolean;
+      reconcileRuntime?: boolean;
+      suppressMenuConfirmation?: boolean;
+    },
     observePreparation?: (session: SessionRecord) => void,
   ): Promise<SessionStateResult> {
     const probeLifecycle = this.lifecycle.snapshot(session.id);
@@ -26697,7 +27274,7 @@ export class SessionService {
     } else if (codexProbeRecovery) {
       state = codexProbeRecovery.state;
       stateSource = codexProbeRecovery.source;
-      rateLimit = codexProbeRecovery.rateLimit;
+      rateLimit = this.fencedStructuredRateLimit(session, codexProbeRecovery.rateLimit);
       agentActivityAt = activityAtFromMs(codexProbeRecovery.activityMs);
       liveModel = codexProbeRecovery.model;
       tokenUsage = codexProbeRecovery.tokenUsage;
@@ -26733,7 +27310,7 @@ export class SessionService {
         );
         if (jsonlResult) {
           this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
-          rateLimit = jsonlResult.rateLimit;
+          rateLimit = this.fencedStructuredRateLimit(session, jsonlResult.rateLimit);
           hasServerErrorRecord = jsonlResult.serverError;
           hasAuthenticationFailure = hasTrailingClaudeAuthenticationFailure(
             jsonlResult.reader.tailRecords,
@@ -26810,7 +27387,7 @@ export class SessionService {
         const codexState = await this.classifyCodexState(session);
         state = codexState.state;
         stateSource = codexState.source;
-        rateLimit = codexState.rateLimit;
+        rateLimit = this.fencedStructuredRateLimit(session, codexState.rateLimit);
         codexLimitObservedAtMs = codexState.rateLimitObservedAtMs ?? 0;
         if (codexState.state === "waiting" && rateLimit?.limited) {
           codexPermission = this.codexRateLimitPoller.permission(
@@ -26848,7 +27425,7 @@ export class SessionService {
           : null;
         if (jsonlResult) {
           this.cursorJsonlReaders.set(session.id, jsonlResult.reader);
-          rateLimit = jsonlResult.rateLimit;
+          rateLimit = this.fencedStructuredRateLimit(session, jsonlResult.rateLimit);
           state = jsonlResult.state;
           stateSource = "jsonl";
           historySourcePath = jsonlResult.reader.filePath;
@@ -26938,14 +27515,21 @@ export class SessionService {
             this.claudeCompactingOverrides.delete(session.id);
           }
         } else {
-          const menuHit = detectClaudeUsageLimitMenu(paneText);
+          const rawMenuHit = detectClaudeUsageLimitMenu(paneText);
+          const rawTmuxHit = scanTmuxRateLimit(paneText);
+          const paneFenced = this.paneRateLimitFenced(session, paneText, rawTmuxHit ?? rawMenuHit);
+          const menuHit = paneFenced ? null : rawMenuHit;
           if (!rateLimit?.limited) {
-            const tmuxHit = scanTmuxRateLimit(paneText) ?? menuHit;
+            const tmuxHit = paneFenced ? null : (rawTmuxHit ?? menuHit);
             if (tmuxHit?.limited) {
               rateLimit = tmuxHit;
             }
           }
-          if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
+          if (
+            !options?.suppressMenuConfirmation &&
+            menuHit?.limited &&
+            claudeUsageMenuOptionOneSelected(paneText)
+          ) {
             await this.confirmClaudeUsageLimitMenu(session);
           }
           // Re-confirmation: the detection is flagged but its parsed reset has
@@ -27109,7 +27693,7 @@ export class SessionService {
         } else {
           if (!rateLimit?.limited) {
             const tmuxHit = scanTmuxRateLimit(paneText);
-            if (tmuxHit?.limited) {
+            if (!this.paneRateLimitFenced(session, paneText, tmuxHit) && tmuxHit?.limited) {
               rateLimit = tmuxHit;
             }
           }
@@ -27144,7 +27728,11 @@ export class SessionService {
         // A failed fork takes no observation: it only ever promotes on a hit,
         // so this is a pure guard.
         const tmuxHit = paneText === null ? null : scanTmuxRateLimit(paneText);
-        if (tmuxHit?.limited) {
+        if (
+          paneText !== null &&
+          !this.paneRateLimitFenced(session, paneText, tmuxHit) &&
+          tmuxHit?.limited
+        ) {
           rateLimit = tmuxHit;
         }
       }
@@ -27254,6 +27842,7 @@ export class SessionService {
   ): Promise<
     { view: Omit<DashboardSessionView, "lifecycle">; source: SessionRecord | null } | undefined
   > {
+    const clearRevision = this.rateLimitClearRevisions.get(session.id) ?? 0;
     // The 2s dashboard-cache tick skips the per-session capture-pane scan (the
     // last un-batched fork): jsonl/hook-sourced rate limits still show up
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
@@ -27270,6 +27859,10 @@ export class SessionService {
     const runningSidecarNames = sidecars.filter((view) => view.alive).map((view) => view.name);
 
     const hasServiceIssues = await this.hasServiceIssues(session);
+    if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
+      const current = readSession(this.config.dataDir, session.id);
+      return current ? this.assembleDashboard(current) : undefined;
+    }
     const persistedSession = session;
     session = this.withReportingError(session);
     const source = isDeepStrictEqual(session, persistedSession) ? session : null;
@@ -27290,6 +27883,8 @@ export class SessionService {
       agentLaunchId: _agentLaunchId,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
+      blockedTriggerNotices: _blockedTriggerNotices,
+      spawnIntent: _spawnIntent,
       sidecarLaunches: _sidecarLaunches,
       branchSource: _branchSource,
       error: _error,
@@ -27311,11 +27906,16 @@ export class SessionService {
       classified.serverError,
       classified.serverErrorEvidence,
     );
+    if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
+      const current = readSession(this.config.dataDir, session.id);
+      return current ? this.assembleDashboard(current) : undefined;
+    }
     this.guardSidecarViews(session.id, sidecars);
     return {
       source,
       view: {
         ...dashboardSession,
+        ...(session.spawnIntent ? { spawnIntent: publicSpawnIntent(session.spawnIntent) } : {}),
         ...(session.error ? { error: session.error } : {}),
         // Always resolved for consumers, whatever shape the stored record is in.
         // `deskId` rides along as a compat alias so a browser tab still running
@@ -27633,6 +28233,7 @@ export class SessionService {
     source: SessionRecord | null;
     detectionOnlyError: boolean;
   }> {
+    const clearRevision = this.rateLimitClearRevisions.get(session.id) ?? 0;
     const hasIndependentError = (record: SessionRecord): boolean =>
       record.status === "errored" ||
       Boolean(record.serverErrorAt) ||
@@ -27667,6 +28268,11 @@ export class SessionService {
     // workspace file yet.
     const anchorRecord = this.deskAnchorRecord(session);
     const sidecars = await this.sidecarViews(session, project);
+    if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
+      const current = readSession(this.config.dataDir, session.id);
+      if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+      return this.enrichWithClassified(current, claudeAccounts, sessionBatch);
+    }
     const persistedSession = session;
     session = this.withReportingError(session);
     const source = isDeepStrictEqual(session, persistedSession) ? session : null;
@@ -27681,6 +28287,11 @@ export class SessionService {
       classified.serverError,
       classified.serverErrorEvidence,
     );
+    if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
+      const current = readSession(this.config.dataDir, session.id);
+      if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+      return this.enrichWithClassified(current, claudeAccounts, sessionBatch);
+    }
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
     const workspaceState = resolveWorkspaceState(this.config.dataDir, anchorRecord);
@@ -27702,6 +28313,8 @@ export class SessionService {
       agentLaunchId: _agentLaunchId,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
+      blockedTriggerNotices: _blockedTriggerNotices,
+      spawnIntent: _spawnIntent,
       sidecarLaunches: _sidecarLaunches,
       tokenUsage: _tokenUsage,
       preflightTokenUsage: _preflightTokenUsage,
@@ -27719,6 +28332,7 @@ export class SessionService {
 
     const view: Omit<SessionListItemView, "lifecycle"> = {
       ...sessionWithoutDetailFields,
+      ...(session.spawnIntent ? { spawnIntent: publicSpawnIntent(session.spawnIntent) } : {}),
       // See enrichDashboard: always resolved, with `deskId` as a compat alias
       // for a browser tab still running the previous bundle.
       workspaceId: workspaceIdOf(session),

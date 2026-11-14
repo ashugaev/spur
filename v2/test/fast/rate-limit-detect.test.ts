@@ -1461,7 +1461,7 @@ describe("readCodexRolloutState rate limits", () => {
       payload: { type: "token_count", info: null, rate_limits: CODEX_OUT_OF_CREDITS },
     });
     const dir = await makeSessionsDir(line);
-    expect((await readCodexRolloutState(dir)).rateLimit).toEqual({
+    expect((await readCodexRolloutState(dir)).rateLimit).toMatchObject({
       limited: true,
       reason: "codex out of credits",
     });

@@ -1522,6 +1522,17 @@ describe("parseConversationBatch", () => {
 });
 
 describe("readClaudeJsonlState rate limit detection", () => {
+  const limitLine = (text: string, messageId?: string, timestamp?: string) =>
+    JSON.stringify({
+      type: "assistant",
+      error: "rate_limit",
+      ...(timestamp ? { timestamp } : {}),
+      message: {
+        role: "assistant",
+        ...(messageId ? { id: messageId } : {}),
+        content: [{ type: "text", text }],
+      },
+    });
   const fixtures = [
     "ratelimit-trailing-system-record-0f9e.jsonl",
     "ratelimit-trailing-system-record-5b47.jsonl",
@@ -1548,16 +1559,259 @@ describe("readClaudeJsonlState rate limit detection", () => {
         if (!result) {
           throw new Error("expected fixture result");
         }
-        expect(result.rateLimit).toEqual({
+        expect(result.rateLimit).toMatchObject({
           limited: true,
           reason: "claude rate_limit",
           resetAtMs: Date.parse("2026-07-12T19:00:00.000Z"),
         });
+        expect(result.rateLimit?.source).toMatchObject({ filePath: tempFile, ordinal: 1 });
+        expect(result.rateLimit?.source?.key).toBeDefined();
       } finally {
         await rm(tempDir, { recursive: true, force: true });
       }
     },
   );
+
+  it("keeps a semantic source key across cached reads and counts identical appends", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "claude-limit-ordinal-"));
+    const filePath = join(tempDir, "session.jsonl");
+    const limit = JSON.stringify({
+      type: "assistant",
+      error: "rate_limit",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "You've hit your session limit" }],
+      },
+    });
+    try {
+      await writeFile(filePath, `${limit}\n`);
+      const first = await readClaudeJsonlState(tempDir, {
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      expect(first?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1 });
+      const key = first?.rateLimit?.source?.key;
+      expect(key).toBeDefined();
+      const cached = await readClaudeJsonlState(tempDir, first?.reader);
+      expect(cached?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1, key });
+      await appendFile(filePath, `${JSON.stringify({ type: "system" })}\n`);
+      const unrelated = await readClaudeJsonlState(tempDir, cached?.reader);
+      expect(unrelated?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1, key });
+      await appendFile(filePath, `${limit}\n`);
+      const fresh = await readClaudeJsonlState(tempDir, unrelated?.reader);
+      expect(fresh?.rateLimit?.source).toMatchObject({ filePath, ordinal: 2, key });
+      await writeFile(filePath, `${limit}\n`);
+      await utimes(filePath, new Date(Date.now() + 2_000), new Date(Date.now() + 2_000));
+      const rewritten = await readClaudeJsonlState(tempDir, fresh?.reader);
+      expect(rewritten?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1, key });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keys a structured reset change separately while preserving no-reset identity", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "claude-structured-limit-key-"));
+    const filePath = join(tempDir, "session.jsonl");
+    const firstReset = 1_800_000_000;
+    const secondReset = firstReset + 3_600;
+    const limit = (resetsAt: number) =>
+      JSON.stringify({
+        type: "assistant",
+        error: "rate_limit",
+        quotaLimits: { resetsAt },
+        message: { role: "assistant", content: [{ type: "text", text: "same limit" }] },
+      });
+    const noReset = JSON.stringify({
+      type: "assistant",
+      error: "rate_limit",
+      message: { role: "assistant", content: [{ type: "text", text: "same limit" }] },
+    });
+    expect(parseJsonlRecord(noReset, 0)?.limitFingerprint).toBe(
+      "3214eeda819c592695924438d94939bf1ff0207e2d061e90e35df8d5c80f76c0",
+    );
+    try {
+      await writeFile(filePath, `${limit(firstReset)}\n`);
+      const first = await readClaudeJsonlState(tempDir, {
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      const firstKey = first?.rateLimit?.source?.key;
+      expect(first?.rateLimit).toMatchObject({ resetAtMs: firstReset * 1_000 });
+      expect(first?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1 });
+      await writeFile(filePath, `${limit(firstReset)}\n`);
+      await utimes(filePath, new Date(Date.now() + 2_000), new Date(Date.now() + 2_000));
+      const replay = await readClaudeJsonlState(tempDir, first?.reader);
+      expect(replay?.rateLimit?.source).toMatchObject({ key: firstKey, ordinal: 1 });
+      await appendFile(filePath, `${limit(firstReset)}\n`);
+      const repeated = await readClaudeJsonlState(tempDir, replay?.reader);
+      expect(repeated?.rateLimit?.source).toMatchObject({ key: firstKey, ordinal: 2 });
+      await writeFile(filePath, `${limit(secondReset)}\n`);
+      await utimes(filePath, new Date(Date.now() + 4_000), new Date(Date.now() + 4_000));
+      const fresh = await readClaudeJsonlState(tempDir, repeated?.reader);
+      expect(fresh?.rateLimit).toMatchObject({ resetAtMs: secondReset * 1_000 });
+      expect(fresh?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1 });
+      expect(fresh?.rateLimit?.source?.key).not.toBe(firstKey);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("retains all old keys past tail pruning and distinguishes a replacement at count one", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "claude-limit-keys-"));
+    const filePath = join(tempDir, "session.jsonl");
+    const a = limitLine("limit A", "msg-a", "2026-07-12T18:00:00Z");
+    const b = limitLine("limit B", "msg-b", "2026-07-12T18:01:00Z");
+    const c = limitLine("limit C", "msg-c", "2026-07-12T18:02:00Z");
+    try {
+      await writeFile(filePath, `${a}\n${b}\n${Array(49).fill('{"type":"system"}').join("\n")}\n`);
+      const first = await readClaudeJsonlState(tempDir, {
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      const counts = first?.reader.rateLimitCounts ?? {};
+      expect(Object.values(counts)).toEqual([1, 1]);
+      expect(first?.reader.tailRecords.some((record) => record.messageId === "msg-a")).toBe(false);
+      const bKey = first?.rateLimit?.source?.key;
+      expect(bKey).toBeDefined();
+      await writeFile(filePath, `${a}\n`);
+      const replayA = await readClaudeJsonlState(tempDir, first?.reader);
+      const aKey = replayA?.rateLimit?.source?.key;
+      expect(aKey).toBeDefined();
+      expect(aKey).not.toBe(bKey);
+      expect(counts[aKey ?? ""]).toBe(1);
+      expect(replayA?.rateLimit?.source?.ordinal).toBe(1);
+      await writeFile(filePath, `${c}\n`);
+      const freshC = await readClaudeJsonlState(tempDir, replayA?.reader);
+      expect(freshC?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1 });
+      expect(counts[freshC?.rateLimit?.source?.key ?? ""]).toBeUndefined();
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes a replayed limit and counts a duplicate after A is dropped", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "claude-limit-replay-"));
+    const filePath = join(tempDir, "session.jsonl");
+    const a = limitLine("alpha limit");
+    const b = limitLine("BETA  limit");
+    try {
+      await writeFile(filePath, `${a}\n${b}\n`);
+      const first = await readClaudeJsonlState(tempDir, {
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      const bKey = first?.rateLimit?.source?.key;
+      await writeFile(filePath, `${limitLine(" beta limit ")}\n`);
+      const replay = await readClaudeJsonlState(tempDir, first?.reader);
+      expect(replay?.rateLimit?.source).toMatchObject({ key: bKey, ordinal: 1 });
+      await appendFile(filePath, `${b}\n`);
+      const duplicate = await readClaudeJsonlState(tempDir, replay?.reader);
+      expect(duplicate?.rateLimit?.source).toMatchObject({ key: bKey, ordinal: 2 });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("cold-resets token usage and generation on an equal-size newer-mtime rewrite", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "claude-equal-rewrite-"));
+    const filePath = join(tempDir, "session.jsonl");
+    const usageLine = (messageId: string, inputTokens: number) =>
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "session-1",
+        message: {
+          id: messageId,
+          role: "assistant",
+          usage: { input_tokens: inputTokens, output_tokens: 1 },
+        },
+      });
+    const oldContent = `${usageLine("msg-old", 7)}\n${limitLine("limit A")}\n`;
+    const newContent = `${usageLine("msg-new", 2)}\n${limitLine("limit B")}\n`;
+    expect(Buffer.byteLength(newContent)).toBe(Buffer.byteLength(oldContent));
+    try {
+      await writeFile(filePath, oldContent);
+      const old = await readClaudeJsonlState(tempDir, {
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      expect(old?.tokenUsage).toMatchObject({
+        generationId: "claude:session-1:msg-old",
+        inputTokens: 7,
+      });
+      await writeFile(filePath, newContent);
+      await utimes(filePath, new Date(Date.now() + 2_000), new Date(Date.now() + 2_000));
+      const replacement = await readClaudeJsonlState(tempDir, old?.reader);
+      expect(replacement?.tokenUsage).toMatchObject({
+        generationId: "claude:session-1:msg-new",
+        inputTokens: 2,
+      });
+      expect(Array.from(replacement?.reader.usageByMessage?.keys() ?? [])).toEqual(["msg-new"]);
+      expect(replacement?.reader.tailRecords.some((record) => record.messageId === "msg-old")).toBe(
+        false,
+      );
+      expect(replacement?.rateLimit?.source?.key).not.toBe(old?.rateLimit?.source?.key);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("cold-resets a growing same-inode rewrite before reading a fresh limit", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "claude-growing-rewrite-"));
+    const filePath = join(tempDir, "session.jsonl");
+    const usageLine = (messageId: string, inputTokens: number) =>
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "session-1",
+        message: {
+          id: messageId,
+          role: "assistant",
+          usage: { input_tokens: inputTokens, output_tokens: 1 },
+        },
+      });
+    const oldContent = `${usageLine("msg-old", 7)}\n${limitLine("limit A", "limit-a")}\n${limitLine("limit B", "limit-b")}\n`;
+    const replacementContent = `${usageLine("msg-new", 2)}\n${limitLine("limit C", "limit-c")}\n${JSON.stringify({ type: "system", padding: "x".repeat(oldContent.length) })}\n`;
+    expect(Buffer.byteLength(replacementContent)).toBeGreaterThan(Buffer.byteLength(oldContent));
+    try {
+      await writeFile(filePath, oldContent);
+      const old = await readClaudeJsonlState(tempDir, {
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      const oldIno = (await stat(filePath)).ino;
+      const oldCounts = old?.reader.rateLimitCounts ?? {};
+      expect(Object.values(oldCounts)).toEqual([1, 1]);
+      expect(old?.tokenUsage).toMatchObject({
+        generationId: "claude:session-1:msg-old",
+        inputTokens: 7,
+      });
+      await writeFile(filePath, replacementContent);
+      await utimes(filePath, new Date(Date.now() + 2_000), new Date(Date.now() + 2_000));
+      expect((await stat(filePath)).ino).toBe(oldIno);
+      const replacement = await readClaudeJsonlState(tempDir, old?.reader);
+      expect(replacement?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1 });
+      expect(oldCounts[replacement?.rateLimit?.source?.key ?? ""]).toBeUndefined();
+      expect(Object.values(replacement?.reader.rateLimitCounts ?? {})).toEqual([1]);
+      expect(replacement?.tokenUsage).toMatchObject({
+        generationId: "claude:session-1:msg-new",
+        inputTokens: 2,
+      });
+      expect(Array.from(replacement?.reader.usageByMessage?.keys() ?? [])).toEqual(["msg-new"]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("readClaudeTranscriptEntries", () => {

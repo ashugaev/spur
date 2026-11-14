@@ -96,6 +96,7 @@ import {
   PreflightPreviewError,
   isListedSessionView,
   QueueDeliveryInFlightError,
+  RateLimitClearError,
   SessionAdmissionDeniedError,
   SessionEndedError,
   SessionNotReopenableError,
@@ -1025,6 +1026,8 @@ export async function startServer(
       sessionService: service,
       autoPing,
       memoryHoldEngaged: () => service.memoryHoldEngaged(),
+      noticeBlockedTrigger: (sessionId, triggerId) =>
+        service.noticeBlockedTrigger(sessionId, triggerId),
       logger: {
         warn: logger.warn ?? writeStderr,
         ...(logger.info ? { info: logger.info } : {}),
@@ -2352,6 +2355,31 @@ export async function startServer(
         return;
       }
 
+      const clearRateLimitSessionId = path.match(/^\/sessions\/([^/]+)\/rate-limit\/clear$/)?.[1];
+      if (method === "POST" && clearRateLimitSessionId) {
+        if (origin === "mcp" || request.headers["x-spur-caller-session"] !== undefined) {
+          failRequest(response, 403, "Agent session cannot clear a rate limit", { method, path });
+          return;
+        }
+        const body = await readJsonBody<unknown>(request);
+        if (
+          !isRecord(body) ||
+          Object.keys(body).some((key) => key !== "force") ||
+          (body.force !== undefined && typeof body.force !== "boolean")
+        ) {
+          failRequest(response, 400, "Rate-limit clear body must be {force?: boolean}", {
+            method,
+            path,
+          });
+          return;
+        }
+        const targetSessionId = decodeURIComponent(clearRateLimitSessionId);
+        const result = await service.clearRateLimit(targetSessionId, body.force === true, origin);
+        if (result.deliveryScheduled) triggers?.nudgeSession(targetSessionId);
+        sendJson(response, 200, result);
+        return;
+      }
+
       const todoSessionId = path.match(/^\/sessions\/([^/]+)\/todo$/)?.[1];
       if (method === "GET" && todoSessionId) {
         sendJson(response, 200, await service.readTodo(decodeURIComponent(todoSessionId)));
@@ -2907,6 +2935,14 @@ export async function startServer(
             preflightBatchId: error.preflightBatchId,
             preflightTokenUsageView: error.preflightTokenUsageView,
           },
+        });
+        return;
+      }
+      if (error instanceof RateLimitClearError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: { error: message, resetAt: error.resetAt },
         });
         return;
       }

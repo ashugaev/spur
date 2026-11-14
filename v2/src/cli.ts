@@ -155,6 +155,7 @@ import {
   type OpenPrAction,
   type ProjectConfigMutationResponse,
   type ProviderReasoningEffort,
+  type RateLimitClearResult,
   type RespawnSessionRequest,
   type RuntimeInfo,
   type RunServiceRequest,
@@ -3136,6 +3137,31 @@ export function createProgram(cliEntrypoint: string): Command {
         label: "loading usage",
         action: () => getJson<UsageReport>(cliEntrypoint, "/usage", configPath),
         render: renderUsageReport,
+      });
+    });
+
+  program
+    .command("rate-limit")
+    .description("Manage a live session's rate-limit episode.")
+    .command("clear")
+    .description("Clear a stale rate limit after checking provider quota.")
+    .argument("<sessionId>", "Session id")
+    .option("--force", "Skip the provider quota check")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options: { force?: boolean; json?: boolean }, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "clearing rate limit",
+        action: () =>
+          postJson<RateLimitClearResult>(
+            cliEntrypoint,
+            `/sessions/${encodeURIComponent(sessionId)}/rate-limit/clear`,
+            options.force ? { force: true } : {},
+            configPath,
+          ),
+        render: (result) =>
+          `Rate limit cleared for ${result.sessionId}: ${result.state}; delivery ${result.deliveryScheduled ? "scheduled" : "held"}.`,
       });
     });
 

@@ -1441,6 +1441,23 @@ describe("session workspaceId normalization", () => {
     expect(readSession(dataDir, record.id)).not.toHaveProperty("terminalSlotsCaptured");
   });
 
+  it("persists a rate-limit clear fence and drops malformed provenance", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = { ...legacyBase, id: "api-2", tmuxSession: "api-2" };
+    const fence = {
+      agentLaunchId: "launch-1",
+      sourceOrdinals: { "/transcript.jsonl": 2 },
+      paneLatched: true,
+    };
+    writeSession(dataDir, { ...record, rateLimitClearFence: fence });
+    expect(readSession(dataDir, record.id)?.rateLimitClearFence).toEqual(fence);
+    writeSession(dataDir, {
+      ...record,
+      rateLimitClearFence: { ...fence, sourceOrdinals: { "/transcript.jsonl": -1 } },
+    });
+    expect(readSession(dataDir, record.id)?.rateLimitClearFence).toBeUndefined();
+  });
+
   it("persists the restore idle baseline and accepts legacy records without one", async () => {
     const dataDir = await newDataDir();
     const record: SessionRecord = { ...legacyBase, id: "api-1", tmuxSession: "api-1" };
@@ -2395,6 +2412,35 @@ describe("session metadata PR migration", () => {
     writeSession(dataDir, session);
 
     expect(readSession(dataDir, "api-1")).toEqual(expect.objectContaining({ allowedTriggers: [] }));
+  });
+
+  it("keeps blockedTriggerNotices string array and drops malformed values", async () => {
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "own closeout",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+
+    writeSession(dataDir, { ...session, blockedTriggerNotices: ["a"] });
+    expect(readSession(dataDir, "api-1")?.blockedTriggerNotices).toEqual(["a"]);
+
+    for (const malformed of ["x", [1], ["a", 1]]) {
+      writeSession(dataDir, {
+        ...session,
+        blockedTriggerNotices: malformed as unknown as string[],
+      });
+      expect(readSession(dataDir, "api-1")?.blockedTriggerNotices).toBeUndefined();
+    }
   });
 
   it("preserves serverErrorAt when writing and reading a session record", async () => {

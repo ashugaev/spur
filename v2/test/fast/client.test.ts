@@ -49,6 +49,22 @@ async function loadClientModule() {
   return import("../../src/client.js");
 }
 
+async function installManagedDefaultUnit(xdg = false) {
+  isDefaultInstanceConfigPathMock.mockReturnValue(true);
+  const home = await mkdtemp(join(tmpdir(), "spur-client-managed-unit-"));
+  tempDirs.push(home);
+  const configHome = join(home, xdg ? "xdg" : ".config");
+  if (xdg) vi.stubEnv("XDG_CONFIG_HOME", configHome);
+  const unitDir = join(configHome, "systemd", "user");
+  await mkdir(unitDir, { recursive: true });
+  await writeFile(join(unitDir, "spur-daemon.service"), "[Service]\n", "utf8");
+  vi.stubEnv("HOME", home);
+  loadConfigMock.mockReturnValue({
+    configPath: join(home, ".spur", "config.yaml"),
+    server: { host: "127.0.0.1", port: 4310 },
+  });
+}
+
 describe("client.ensureServer", () => {
   beforeEach(() => {
     vi.stubEnv("XDG_CONFIG_HOME", undefined);
@@ -369,20 +385,7 @@ describe("client.ensureServer", () => {
   ] as const)(
     "refuses detached %s when a user unit owns the default instance (XDG=%s)",
     async (reason, xdg) => {
-      isDefaultInstanceConfigPathMock.mockReturnValue(true);
-      const home = await mkdtemp(join(tmpdir(), "spur-client-managed-unit-"));
-      tempDirs.push(home);
-      const configHome = join(home, xdg ? "xdg" : ".config");
-      if (xdg) vi.stubEnv("XDG_CONFIG_HOME", configHome);
-      const unitDir = join(configHome, "systemd", "user");
-      await mkdir(unitDir, { recursive: true });
-      await writeFile(join(unitDir, "spur-daemon.service"), "[Service]\n", "utf8");
-      const configPath = join(home, ".spur", "config.yaml");
-      vi.stubEnv("HOME", home);
-      loadConfigMock.mockReturnValue({
-        configPath,
-        server: { host: "127.0.0.1", port: 4310 },
-      });
+      await installManagedDefaultUnit(xdg);
       vi.mocked(fetch).mockRejectedValue(new Error("connect ECONNREFUSED"));
       if (reason === "restart") {
         vi.spyOn(process, "kill").mockReturnValue(true);
@@ -394,9 +397,133 @@ describe("client.ensureServer", () => {
       const { ensureServer, restartDaemonIfRunning } = await loadClientModule();
       const operation = reason === "restart" ? restartDaemonIfRunning : ensureServer;
       await expect(operation("/tmp/dist/cli.js")).rejects.toThrow(/spur-daemon.service/);
+      expect(fetch).toHaveBeenCalledTimes(reason === "autostart" ? 161 : 22);
+      expect(sleepMock).toHaveBeenCalledTimes(reason === "autostart" ? 160 : 21);
       expect(spawnMock).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    ["fetch", false],
+    ["http", false],
+    ["fetch", true],
+    ["http", true],
+  ] as const)(
+    "waits for managed recovery after a failed %s probe (XDG=%s)",
+    async (failure, xdg) => {
+      await installManagedDefaultUnit(xdg);
+      if (failure === "fetch") {
+        vi.mocked(fetch).mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+      } else {
+        vi.mocked(fetch).mockResolvedValueOnce(new Response("{}", { status: 500 }));
+      }
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(new Response("{}", { status: 503 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }));
+
+      const { ensureServer } = await loadClientModule();
+      await expect(ensureServer("/tmp/dist/cli.js")).resolves.toBe("http://127.0.0.1:4310");
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(sleepMock).toHaveBeenCalledTimes(2);
+      expect(spawnMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("waits for managed recovery after an incompatible daemon stops during startup", async () => {
+    await installManagedDefaultUnit();
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response("{}", { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo(-1)), { status: 200 }))
+      .mockRejectedValueOnce(new Error("daemon stopped"))
+      .mockRejectedValueOnce(new Error("connect ECONNREFUSED"))
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }));
+
+    const { ensureServer } = await loadClientModule();
+    await expect(ensureServer("/tmp/dist/cli.js")).resolves.toBe("http://127.0.0.1:4310");
+    expect(kill).toHaveBeenCalledWith(4242, "SIGTERM");
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["initial", "recovery"] as const)(
+    "stops an incompatible managed daemon once, then fails typed (%s)",
+    async (firstStop) => {
+      await installManagedDefaultUnit();
+      const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+      vi.mocked(fetch).mockImplementation(
+        async () => new Response(JSON.stringify(runtimeInfo(-1, 4343)), { status: 200 }),
+      );
+      if (firstStop === "recovery") {
+        vi.mocked(fetch).mockResolvedValueOnce(new Response("{}", { status: 503 }));
+      }
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo(-1)), { status: 200 }))
+        .mockRejectedValueOnce(new Error("daemon stopped"))
+        .mockRejectedValueOnce(new Error("connect ECONNREFUSED"))
+        .mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+
+      const { ensureServer } = await loadClientModule();
+      const error = await ensureServer("/tmp/dist/cli.js").then(
+        () => undefined,
+        (reason: unknown) => reason as Error,
+      );
+      expect(error?.message).toMatch(/reports an API version this CLI does not support/);
+      expect(error?.message).not.toMatch(/is unreachable/);
+      expect(fetch).toHaveBeenCalledTimes(firstStop === "initial" ? 5 : 6);
+      expect(kill).toHaveBeenCalledTimes(1);
+      expect(kill).toHaveBeenCalledWith(4242, "SIGTERM");
+      expect(spawnMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("stops a repeated incompatible daemon again when no managed unit owns it", async () => {
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo(-1, 4242)), { status: 200 }))
+      .mockRejectedValueOnce(new Error("daemon stopped"))
+      .mockRejectedValueOnce(new Error("connect ECONNREFUSED"))
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo(-1, 4343)), { status: 200 }))
+      .mockRejectedValueOnce(new Error("daemon stopped"))
+      .mockRejectedValueOnce(new Error("connect ECONNREFUSED"))
+      .mockResolvedValue(new Response(JSON.stringify(runtimeInfo()), { status: 200 }));
+
+    const { ensureServer } = await loadClientModule();
+    const outcome = await ensureServer("/tmp/dist/cli.js", "/tmp/spur.yaml").then(
+      (baseUrl) => ({ baseUrl }),
+      (error: unknown) => ({ error: (error as Error).message }),
+    );
+    expect(outcome).toEqual({ baseUrl: "http://127.0.0.1:4310" });
+    expect(kill).toHaveBeenCalledTimes(2);
+    expect(kill).toHaveBeenNthCalledWith(1, 4242, "SIGTERM");
+    expect(kill).toHaveBeenNthCalledWith(2, 4343, "SIGTERM");
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports the starting timeout when managed recovery ends on 503", async () => {
+    await installManagedDefaultUnit();
+    vi.mocked(fetch)
+      .mockImplementation(async () => new Response("{}", { status: 503 }))
+      .mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+
+    const { ensureServer } = await loadClientModule();
+    await expect(ensureServer("/tmp/dist/cli.js")).rejects.toThrow(
+      new Error("Timed out waiting for daemon at http://127.0.0.1:4310 to finish starting"),
+    );
+    expect(fetch).toHaveBeenCalledTimes(161);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps disabled autostart refusal ahead of managed recovery", async () => {
+    await installManagedDefaultUnit();
+    vi.stubEnv("SPUR_DISABLE_AUTOSTART", "1");
+    vi.mocked(fetch).mockRejectedValue(new Error("connect ECONNREFUSED"));
+
+    const { ensureServer } = await loadClientModule();
+    await expect(ensureServer("/tmp/dist/cli.js")).rejects.toThrow(/SPUR_DISABLE_AUTOSTART/);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(sleepMock).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
 
   it("auto-starts a non-default config even when a user systemd unit exists", async () => {
     const home = await mkdtemp(join(tmpdir(), "spur-client-non-default-unit-"));
@@ -771,11 +898,12 @@ describe("client deadlines", () => {
     vi.stubGlobal("fetch", vi.fn());
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
   it("probe reports unresponsive when /info does not answer within 10s", async () => {
@@ -879,6 +1007,85 @@ describe("client deadlines", () => {
     expect(Date.now() - started).toBeLessThanOrEqual(60_000);
     expect(spawnMock).toHaveBeenCalledTimes(1);
   });
+
+  it("bounds managed recovery when every probe after the initial failure hangs", async () => {
+    await installManagedDefaultUnit();
+    routeFetch((call, init) =>
+      call === 1 ? Promise.reject(new Error("connect ECONNREFUSED")) : pendingUntilAbort(init),
+    );
+    const { ensureServer } = await loadClientModule();
+    const result = track(ensureServer("/tmp/dist/cli.js"));
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(result.state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await result.done();
+    expect(result.state.error?.message).toBe(
+      "Spur daemon at http://127.0.0.1:4310 did not answer GET /info within 10s; the process holds the port but is not responding.",
+    );
+    expect(fetch).toHaveBeenCalledTimes(6);
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("reports the incompatible error when managed recovery ends on an incompatible probe", async () => {
+    await installManagedDefaultUnit();
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+    const incompatible = (pid: number) =>
+      Promise.resolve(new Response(JSON.stringify(runtimeInfo(-1, pid)), { status: 200 }));
+    routeFetch((call, init) => {
+      if (call === 1) return Promise.reject(new Error("connect ECONNREFUSED"));
+      if (call === 6) return incompatible(4242);
+      if (call >= 17) return incompatible(4343);
+      return pendingUntilAbort(init);
+    });
+    const { ensureServer } = await loadClientModule();
+    const result = track(ensureServer("/tmp/dist/cli.js"));
+    await vi.advanceTimersByTimeAsync(60_000);
+    await result.done();
+    expect(result.state.error?.message).toMatch(/reports an API version this CLI does not support/);
+    expect(fetch).toHaveBeenCalledTimes(18);
+    expect(kill).toHaveBeenCalledTimes(1);
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([true, false])(
+    "returns when the probe after a stop is ready past the deadline (managed=%s)",
+    async (managed) => {
+      if (managed) await installManagedDefaultUnit();
+      const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+      routeFetch((call, init) => {
+        if (call === 1) return Promise.reject(new Error("connect ECONNREFUSED"));
+        if (call === 6) {
+          return Promise.resolve(
+            new Response(JSON.stringify(runtimeInfo(-1, 4242)), { status: 200 }),
+          );
+        }
+        if (call >= 17) {
+          return Promise.resolve(
+            new Response(JSON.stringify(runtimeInfo(SPUR_DAEMON_API_VERSION, 4343)), {
+              status: 200,
+            }),
+          );
+        }
+        return pendingUntilAbort(init);
+      });
+      const { ensureServer } = await loadClientModule();
+      const started = Date.now();
+      const outcome = ensureServer("/tmp/dist/cli.js", managed ? undefined : "/tmp/spur.yaml").then(
+        (baseUrl) => ({ baseUrl }),
+        (error: unknown) => ({ error: (error as Error).message }),
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await outcome).toEqual({ baseUrl: "http://127.0.0.1:4310" });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(50_000);
+      expect(fetch).toHaveBeenCalledTimes(18);
+      expect(kill).toHaveBeenCalledTimes(1);
+      expect(kill).toHaveBeenCalledWith(4242, "SIGTERM");
+      expect(spawnMock).toHaveBeenCalledTimes(managed ? 0 : 1);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
 
   it("restart rejects within the wall-clock cap when every post-spawn probe hangs", async () => {
     vi.spyOn(process, "kill").mockImplementation(() => true);

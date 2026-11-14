@@ -1223,6 +1223,8 @@ export interface SessionRecord {
   prAlertTransfer?: PrAlertTransfer;
   claudeAccountId?: string;
   allowedTriggers?: string[];
+  /** Send trigger ids already announced to the owner; one notice per id. */
+  blockedTriggerNotices?: string[];
   agentSessionId?: string;
   /** Cursor transcript position before the latest restore; excludes earlier activity from state. */
   cursorRestoreBoundary?: CursorRestoreBoundary;
@@ -1304,6 +1306,12 @@ export interface SessionRecord {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   rateLimitedAt?: string;
+  rateLimitClearFence?: {
+    agentLaunchId: string | null;
+    /** Source key -> captured occurrence count; unkeyed readers use the file path. */
+    sourceOrdinals: Record<string, number>;
+    paneLatched: boolean;
+  };
   serverErrorAt?: string;
   serverErrorReactivationAttempts?: number;
   todoNudge?: { fingerprint: string; attempts: number };
@@ -1313,6 +1321,12 @@ export interface SessionRecord {
   errorSource?: "inferred_runtime_exit" | "runtime_probe" | "other";
   /** Presence distinguishes initialized ledgers from pre-ToDo records. */
   todoLedgerVersion?: 1;
+}
+
+export interface RateLimitClearResult {
+  sessionId: string;
+  state: SessionState;
+  deliveryScheduled: boolean;
 }
 
 // Terminal-for-lifecycle predicate. Gates ~16 session-service.ts call sites
@@ -1421,6 +1435,8 @@ export interface SessionView extends Omit<
   | "agentLaunchId"
   | "triggerBirthKey"
   | "triggerBirthRequest"
+  | "blockedTriggerNotices"
+  | "spawnIntent"
   | "sidecarLaunches"
   | "tokenUsage"
   | "preflightTokenUsage"
@@ -1430,6 +1446,7 @@ export interface SessionView extends Omit<
   | "errorSource"
   | "terminalSlotsCaptured"
 > {
+  spawnIntent?: Omit<DurableSpawnIntent, "closeoutTakenFrom">;
   lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -1480,6 +1497,8 @@ export type DashboardOmittedField =
   | "agentLaunchId"
   | "triggerBirthKey"
   | "triggerBirthRequest"
+  | "blockedTriggerNotices"
+  | "spawnIntent"
   | "sidecarLaunches"
   | "branchSource"
   | "tokenUsage"
@@ -1488,6 +1507,7 @@ export type DashboardOmittedField =
   | "terminalSlotsCaptured";
 
 export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
+  spawnIntent?: SessionView["spawnIntent"];
   lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -1623,6 +1643,8 @@ export interface DurableSpawnIntent {
   };
   pane?: { pid: number; starttime: number };
   telegramOrigin?: TelegramSpawnOrigin;
+  /** Closeout owners this launch took; given back if the launch finally fails. */
+  closeoutTakenFrom?: string[];
 }
 
 /**
