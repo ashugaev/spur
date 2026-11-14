@@ -2541,21 +2541,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           ),
     [visibleArtifacts, activeArtifactFormat],
   );
-  // List mode's viewer navigation must step over the same sort the list
-  // renders, not the raw payload order. It still walks every category
-  // (matching `allArtifacts` below, same as grid mode) — jumping across
-  // categories on next/prev is a pre-existing, separate gap, out of scope
-  // here.
+  // Viewer navigation steps over exactly what the panel renders: the active
+  // category and format filter, in list mode also in the list's sort order.
   const listSortedArtifacts = useMemo(
-    () => sortArtifacts(allArtifacts, artifactListSort),
-    [allArtifacts, artifactListSort],
+    () => sortArtifacts(filteredArtifacts, artifactListSort),
+    [filteredArtifacts, artifactListSort],
   );
-  const artifactNavigationOrder = artifactViewMode === "list" ? listSortedArtifacts : allArtifacts;
+  const artifactNavigationOrder =
+    artifactViewMode === "list" ? listSortedArtifacts : filteredArtifacts;
   const selectedArtifactIndex = selectedArtifactId
     ? artifactNavigationOrder.findIndex((artifact) => artifact.id === selectedArtifactId)
     : -1;
-  const selectedArtifact =
-    selectedArtifactIndex >= 0 ? (artifactNavigationOrder[selectedArtifactIndex] ?? null) : null;
+  // The open artifact may sit outside the filtered list (the viewer stays open
+  // across category and format changes); it then has no prev/next neighbours.
+  const selectedArtifact = selectedArtifactId
+    ? (allArtifacts.find((artifact) => artifact.id === selectedArtifactId) ?? null)
+    : null;
   const selectedArtifactHref =
     session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
   const canSelectPreviousArtifact = selectedArtifactIndex > 0;

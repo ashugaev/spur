@@ -6860,6 +6860,51 @@ describe("SessionDetail artifacts", () => {
       expect(within(table).queryByText("Makefile")).not.toBeInTheDocument();
     });
 
+    it.each(["Grid", "List"])(
+      "viewer prev/next walks only the filtered artifacts in %s view",
+      async (view) => {
+        stubSessions({
+          "api-a1": () => [
+            { name: "a.png" },
+            { name: "notes.txt" },
+            { name: "b.png" },
+            { name: "Makefile" },
+            { name: "c.png" },
+          ],
+        });
+        render(<SessionDetail sessionId="api-a1" />);
+        await waitFor(() => {
+          expect(screen.getByText("a.png")).toBeInTheDocument();
+        });
+        fireEvent.click(
+          within(screen.getByRole("tablist", { name: "Artifact view" })).getByRole("button", {
+            name: view,
+          }),
+        );
+        fireEvent.click(formatButton("PNG (3)"));
+
+        fireEvent.click(screen.getByRole("button", { name: "Preview a.png" }));
+        expect(
+          await screen.findByRole("dialog", { name: "Artifact preview a.png" }),
+        ).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
+
+        fireEvent.click(screen.getByRole("button", { name: "Next artifact" }));
+        expect(
+          await screen.findByRole("dialog", { name: "Artifact preview b.png" }),
+        ).toBeInTheDocument();
+        fireEvent.keyDown(window, { key: "ArrowRight" });
+        expect(
+          await screen.findByRole("dialog", { name: "Artifact preview c.png" }),
+        ).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Next artifact" })).toBeDisabled();
+        fireEvent.keyDown(window, { key: "ArrowLeft" });
+        expect(
+          await screen.findByRole("dialog", { name: "Artifact preview b.png" }),
+        ).toBeInTheDocument();
+      },
+    );
+
     it("hides the format control when the category has one extension", async () => {
       stubSessions({ "api-a1": () => [{ name: "a.png" }, { name: "b.png" }] });
       render(<SessionDetail sessionId="api-a1" />);
