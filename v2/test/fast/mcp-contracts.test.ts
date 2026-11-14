@@ -24,10 +24,10 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "6ca819e5bbc5ae3e7fc2251bd0de4ab8f010453bb80924d596651216d9596147",
-  "types.ts": "37d034c9e757e4db2157e1909503a40309301c1ef8497fb5e56536efea8c436b",
+  "server.ts": "5b706bdf099de04b4cf02f8a6158b5c16ef82dcc654961ba68f9522246b03c01",
+  "types.ts": "81bc3208cb1c10367150e8072ae6d7dfff99600cb3ad66b007fb0fc260f7dc51",
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
-  "session-service.ts": "aea5a3acbc0f4d2fe2d3ee6cda54c79bf18cf0f8470d1aaeba40298ca3b009f5",
+  "session-service.ts": "531d1ed11143bd89377022ad20dded259631450ab14e92fd00de72c3eef7f3e0",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "1d06c2d904fa46b95ef8bed971c5767fad76663482f22822f9a541b345f161ff",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -69,9 +69,9 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(103);
+    expect(routes).toHaveLength(104);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(103);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(104);
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("spawn_background_session")?.path).toBe("/sessions/background");
     expect(getDaemonOperation("missing")).toBeUndefined();
@@ -368,7 +368,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(103);
+      expect(page.total).toBe(104);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",
@@ -439,6 +439,19 @@ describe("catalog examples at the real daemon router", () => {
     };
     return { server, request, configPath };
   }
+
+  it("denies a force clear sent through the MCP operation catalog", async () => {
+    const { server, request } = await fixture();
+    try {
+      const response = await request("clear_session_rate_limit", { force: true });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({
+        error: "Agent session cannot clear a rate limit",
+      });
+    } finally {
+      await server.stop();
+    }
+  });
 
   it("binds and detaches source through catalog requests and rejects malformed bodies without mutation", async () => {
     // Test owns the page-source cadence: start() is inert, checks fire via sync.reconcile().

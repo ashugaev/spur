@@ -1160,6 +1160,19 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
   ),
   operation("pause_session", "POST", "/sessions/{sessionId}/pause", "Pause session."),
   operation(
+    "clear_session_rate_limit",
+    "POST",
+    "/sessions/{sessionId}/rate-limit/clear",
+    "Clear a live session's stale rate limit after checking provider quota.",
+    {
+      body: body("RateLimitClearRequest", [
+        field("force", "boolean", "Skip provider quota check.", false, false),
+      ]),
+      examples: [{ body: {} }, { body: { force: true } }],
+      response: "RateLimitClearResult",
+    },
+  ),
+  operation(
     "get_todo",
     "GET",
     "/sessions/{sessionId}/todo",

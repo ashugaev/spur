@@ -788,6 +788,7 @@ async function loadTriggersModule() {
         autoPing,
       } as TriggerDeps);
       return {
+        nudgeSession: controller.nudgeSession,
         async stop(): Promise<void> {
           await controller.stop();
           autoPing.dispose();
@@ -4897,6 +4898,11 @@ describe("startConfiguredTriggers", () => {
       bus.emit(githubEvent());
       await Promise.resolve();
       expect(deliverMock).not.toHaveBeenCalled();
+
+      const readsBeforeNudge = getMock.mock.calls.length;
+      controller.nudgeSession("api-1");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getMock.mock.calls.length).toBeGreaterThan(readsBeforeNudge);
 
       await advanceSendWindow();
 

@@ -10,6 +10,8 @@ import {
   loadSessionServiceModule,
   logSpurEventMock,
   mockClaudeJsonlState,
+  mockClaudeSessionStatus,
+  readClaudeJsonlStateMock,
   readTelegramBindingsMock,
   readTelegramReplyTargetMock,
   reserveNextSessionIdMock,
@@ -260,4 +262,106 @@ describe("closeout incident replay", () => {
       }
     },
   );
+
+  it("drops a held CI send after clear and nudges one blocked closeout notice", async () => {
+    const sessions = seedIncident();
+    const owner = sessions.get("api-1");
+    if (!owner) throw new Error("Missing closeout owner fixture");
+    const runningOwner = { ...owner };
+    delete runningOwner.stopReason;
+    sessions.set("api-1", {
+      ...runningOwner,
+      status: "running",
+      allowedTriggers: [],
+      rateLimitedAt: "2026-03-18T10:00:00.000Z",
+    });
+    loadConfigMock.mockReturnValue(projectConfig());
+    mockClaudeSessionStatus("waiting", "idle");
+    const filePath = "test.jsonl";
+    const key = JSON.stringify([filePath, "held-limit"]);
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: {
+        filePath,
+        lastOffset: 1,
+        lastMtimeMs: 1,
+        tailRecords: [],
+        rateLimitCounts: { [key]: 1 },
+      },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        source: { filePath, key, ordinal: 1 },
+      },
+      serverError: false,
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const { startConfiguredTriggers } = await import("../../src/triggers.js");
+    const { AutoPingService } = await import("../../src/auto-ping.js");
+    const { EventBus } = await import("../../src/event-bus.js");
+    const actualMetadata = await vi.importActual<typeof metadataModule>("../../src/metadata.js");
+    const policyDir = mkdtempSync(join(tmpdir(), "spur-held-closeout-"));
+    const autoPing = new AutoPingService(policyDir);
+    const bus = new EventBus();
+    let service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const startController = () => {
+      vi.spyOn(service, "deliver").mockImplementation(deliver);
+      const current = service;
+      return startConfiguredTriggers({
+        config: current.config,
+        bus,
+        sessionService: current,
+        autoPing,
+        noticeBlockedTrigger: (id, triggerId) => current.noticeBlockedTrigger(id, triggerId),
+        logger: { warn: vi.fn() },
+      });
+    };
+    actualMetadata.writeGitHubSourceSnapshot(TEST_DATA_DIR, "api", "pr-watch", "api-1", {
+      prNumber: 42,
+      signals: new Map([
+        ["ci_failed", { key: "ci_failed", kind: "ci_failed", text: "CI is failing: test suite." }],
+      ]),
+    });
+    let controller = startController();
+    const events = (event: string) =>
+      logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === event && entry.sessionId === "api-1");
+    try {
+      bus.emit(ciFailedEvent("api-1", 1));
+      await vi.advanceTimersByTimeAsync(SEND_WINDOW_MS);
+      expect(actualMetadata.readPendingSendBatches(TEST_DATA_DIR).size).toBe(1);
+      expect(deliver).not.toHaveBeenCalled();
+      expect(events("trigger.send.dropped")).toHaveLength(0);
+
+      const cleared = await service.clearRateLimit("api-1", true, "cli");
+      expect(cleared).toMatchObject({ state: "waiting", deliveryScheduled: true });
+      if (cleared.deliveryScheduled) controller.nudgeSession("api-1");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(actualMetadata.readPendingSendBatches(TEST_DATA_DIR).size).toBe(0);
+      expect(deliver).not.toHaveBeenCalled();
+      expect(
+        events("trigger.send.dropped").filter(
+          (entry) => entry.details?.reason === "trigger_not_allowed",
+        ),
+      ).toHaveLength(1);
+      expect(events("trigger.send.blocked_notice")).toHaveLength(1);
+      expect(sessions.get("api-1")?.blockedTriggerNotices).toEqual(["gh-ci-failed"]);
+
+      await controller.stop();
+      service.dispose();
+      service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      controller = startController();
+      bus.emit(ciFailedEvent("api-1", 2));
+      await vi.advanceTimersByTimeAsync(SEND_WINDOW_MS);
+      expect(deliver).not.toHaveBeenCalled();
+      expect(events("trigger.send.blocked_notice")).toHaveLength(1);
+    } finally {
+      await controller.stop();
+      service.dispose();
+      autoPing.dispose();
+      rmSync(policyDir, { recursive: true, force: true });
+    }
+  });
 });

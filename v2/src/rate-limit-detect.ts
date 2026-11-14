@@ -3,6 +3,8 @@ export interface RateLimitDetection {
   reason: string;
   /** Epoch ms the limit resets at, when the source carries a parseable reset instant. */
   resetAtMs?: number;
+  /** Per-key occurrence count when keyed; file-global ordinal for legacy sources. */
+  source?: { filePath: string; ordinal: number; key?: string };
 }
 
 const NOT_LIMITED: RateLimitDetection = { limited: false, reason: "" };

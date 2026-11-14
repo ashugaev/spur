@@ -1304,6 +1304,12 @@ export interface SessionRecord {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   rateLimitedAt?: string;
+  rateLimitClearFence?: {
+    agentLaunchId: string | null;
+    /** Source key -> captured occurrence count; unkeyed readers use the file path. */
+    sourceOrdinals: Record<string, number>;
+    paneLatched: boolean;
+  };
   serverErrorAt?: string;
   serverErrorReactivationAttempts?: number;
   todoNudge?: { fingerprint: string; attempts: number };
@@ -1313,6 +1319,12 @@ export interface SessionRecord {
   errorSource?: "inferred_runtime_exit" | "runtime_probe" | "other";
   /** Presence distinguishes initialized ledgers from pre-ToDo records. */
   todoLedgerVersion?: 1;
+}
+
+export interface RateLimitClearResult {
+  sessionId: string;
+  state: SessionState;
+  deliveryScheduled: boolean;
 }
 
 // Terminal-for-lifecycle predicate. Gates ~16 session-service.ts call sites

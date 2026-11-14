@@ -52,6 +52,9 @@ function startConfiguredTriggers(
     });
   const controller = startTriggerController({ ...deps, sessionService, autoPing });
   return {
+    nudgeSession(sessionId: string): void {
+      controller.nudgeSession(sessionId);
+    },
     async stop(): Promise<void> {
       await controller.stop();
       autoPing.dispose();

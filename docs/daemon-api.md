@@ -57,6 +57,7 @@
 - `GET /sessions/:id/source-info` — read-only association and cached bot identity; `v2/src/server.ts`, `v2/src/session-service.ts`.
 - `POST /sessions/:id/opened`
 - `POST /sessions/:id/pause`
+- `POST /sessions/:id/rate-limit/clear` — rejects MCP origin and caller-session header; optional `force`; `v2/src/server.ts`.
 - `POST /sessions/:id/complete` — optional correlation `operationId`, group `completedIds`/outcomes, lifecycle 409/503; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/self-destruct`
 - `POST /sessions/:id/kill`
@@ -94,9 +95,7 @@
 
 ## Store routes
 
-`:store` = `page:<id>` or `session:<sid>`, `:` accepted as `%3A`; [stores.md](stores.md); `v2/src/stores.ts`, `v2/src/store-agent.ts`, `v2/src/store-actions.ts`.
-
-- `GET /stores/:store/docs/:collection`
+- `GET /stores/:store/docs/:collection` — `:store` = `page:<id>` or `session:<sid>`, `:` accepted as `%3A`; [stores.md](stores.md); `v2/src/stores.ts`, `v2/src/store-agent.ts`, `v2/src/store-actions.ts`.
 - `POST /stores/:store/docs/:collection`
 - `GET /stores/:store/docs/:collection/:docId`
 - `POST /stores/:store/docs/:collection/:docId`
