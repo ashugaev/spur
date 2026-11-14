@@ -3388,6 +3388,31 @@ describe("SessionService", () => {
         service.dispose();
       });
 
+      it("captures owner workspace links and PR for a desk sibling snapshot", async () => {
+        const config = baseConfig();
+        loadConfigMock.mockReturnValue(config);
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ workspaceId: "desk-1" }));
+        sessions.set("api-2", runningSession({ id: "api-2", workspaceId: "desk-1" }));
+        await useRealTodoLedger();
+        writeWorkspaceState(TEST_DATA_DIR, "desk-1", {
+          slots: { links: [{ label: "Doc", url: "https://example.test/doc" }] },
+          pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+        });
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const meta = await service.writeSnapshot("api-2", { content: "# Sibling", final: false });
+
+        expect(meta.links).toEqual(
+          expect.arrayContaining([
+            { label: "Doc", url: "https://example.test/doc" },
+            expect.objectContaining({ url: "https://github.com/acme/api/pull/42" }),
+          ]),
+        );
+        service.dispose();
+      });
+
       it("refuses again after a ToDo change follows the final snapshot", async () => {
         const { sessions, service } = await gatedService(true);
         await resolveOneItem(service);

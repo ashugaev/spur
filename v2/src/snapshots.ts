@@ -230,7 +230,11 @@ export function writeSnapshot(
     try {
       const data = Buffer.from(JSON.stringify(snapshot), "utf8");
       let offset = 0;
-      while (offset < data.length) offset += writeSync(descriptor, data, offset);
+      while (offset < data.length) {
+        const written = writeSync(descriptor, data, offset);
+        if (written === 0) throw new Error("Snapshot write made no progress");
+        offset += written;
+      }
       fsyncSync(descriptor);
     } finally {
       closeSync(descriptor);

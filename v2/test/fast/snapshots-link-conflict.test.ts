@@ -6,6 +6,8 @@ import type * as NodeFs from "node:fs";
 const linkState = vi.hoisted(() => ({
   failWith: undefined as string | undefined,
   shortWrite: false,
+  zeroWrite: false,
+  zeroCalls: 0,
   links: 0,
 }));
 
@@ -14,6 +16,12 @@ vi.mock("node:fs", async (importOriginal) => {
   return {
     ...actual,
     writeSync: (fd: number, data: Uint8Array, offset: number) => {
+      if (linkState.zeroWrite) {
+        // A sync loop cannot be interrupted by a test timeout; cap retries instead.
+        linkState.zeroCalls += 1;
+        if (linkState.zeroCalls > 100) throw new Error("writeSync retried without progress");
+        return 0;
+      }
       if (!linkState.shortWrite) return actual.writeSync(fd, data, offset);
       const error = new Error("disk full") as NodeJS.ErrnoException;
       error.code = "ENOSPC";
@@ -95,4 +103,24 @@ describe("snapshot link failures", () => {
     expect(linkState.links).toBe(0);
     expect(await readdir(snaps)).toEqual([]);
   });
+
+  it("aborts a zero-progress write before linking instead of looping forever", async () => {
+    const dir = await createTempDir("spur-snapshots-zero-");
+    await mkdir(join(dir, "sessions", session.id), { recursive: true });
+    const snaps = snapshotDir(dir, session.id, session.project);
+    linkState.failWith = undefined;
+    linkState.zeroWrite = true;
+    linkState.zeroCalls = 0;
+    linkState.links = 0;
+    try {
+      expect(() => writeSnapshot(dir, session, { content: "one", final: false }, context)).toThrow(
+        "Snapshot write made no progress",
+      );
+      expect(linkState.zeroCalls).toBe(1);
+    } finally {
+      linkState.zeroWrite = false;
+    }
+    expect(linkState.links).toBe(0);
+    expect(await readdir(snaps)).toEqual([]);
+  }, 2000);
 });
