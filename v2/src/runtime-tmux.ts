@@ -1669,6 +1669,23 @@ export async function sendSensitiveMessageToTmux(
 const INTERRUPT_KEY_GAP_MS = 200;
 const INTERRUPT_SETTLE_MS = 500;
 
+async function cancelCopyMode(target: string, operation?: RestoreOperationContext): Promise<void> {
+  try {
+    await mutateTmux(operation, "send-keys", "-t", target, "-X", "cancel");
+  } catch (error) {
+    const detail =
+      error !== null &&
+      typeof error === "object" &&
+      "stderr" in error &&
+      typeof error.stderr === "string"
+        ? error.stderr
+        : error instanceof Error
+          ? error.message
+          : "";
+    if (!detail.includes("not in a mode")) throw error;
+  }
+}
+
 /**
  * Sends the agent's interrupt key sequence and waits for the turn to settle.
  * Returns false when the agent has no interrupt key, so nothing was sent.
@@ -1676,12 +1693,15 @@ const INTERRUPT_SETTLE_MS = 500;
 export async function sendInterruptKeysToTmux(
   sessionName: string,
   agent: AgentName,
+  onInterrupt?: () => void,
 ): Promise<boolean> {
   const keys = agentInterruptKeys(agent);
   if (keys.length === 0) {
     return false;
   }
   const target = exactPaneTarget(sessionName);
+  await cancelCopyMode(target);
+  onInterrupt?.();
   for (const [index, key] of keys.entries()) {
     if (index > 0) {
       await sleep(INTERRUPT_KEY_GAP_MS);
@@ -1702,12 +1722,8 @@ export async function sendMessageToTmux(
     options?.agent !== undefined &&
     agentSendMode(options.agent) === "bracketed_paste" &&
     !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
-  // Exit copy-mode before issuing line-edit keys. `-X cancel` is a no-op
-  // outside copy-mode; if a user accidentally entered it (mouse drag, PageUp),
-  // C-u and Enter would otherwise be interpreted by the copy buffer and never
-  // reach the agent's stdin. Older tmux builds may exit non-zero here — swallow.
   const operation = options?.operation;
-  await mutateTmux(operation, "send-keys", "-t", target, "-X", "cancel").catch(() => {});
+  await cancelCopyMode(target, operation);
   await mutateTmux(operation, "send-keys", "-t", target, "C-u");
   if (useBracketedPaste) {
     // Codex TUI enables bracketed paste and handles it as a distinct paste event.

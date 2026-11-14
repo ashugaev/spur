@@ -15242,6 +15242,62 @@ describe("SessionService", () => {
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
     });
 
+    it("queues a concurrent guarded repeat after ack timeout without clearing the submit hold", async () => {
+      mockClaudeJsonlState("working");
+      createAgentSubmitAckBindingMock.mockResolvedValue({
+        scan: async () => ({ found: false, lastScannedFile: "/x.jsonl" }),
+      });
+      const sessions = createSessionStore(
+        runningSession({
+          queuedMessages: { messages: ["older"], awaitingPrompt: true },
+        }),
+      );
+      const service = await createDisposedSessionService();
+      const { SubmitAckTimeoutError, LaunchPromptPendingError } =
+        await import("../../src/session-service.js");
+      let releaseAck: () => void = () => {};
+      let enteredAck: () => void = () => {};
+      const ackEntered = new Promise<void>((resolve) => {
+        enteredAck = resolve;
+      });
+      const ackGate = new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementationOnce(
+        async () => {
+          enteredAck();
+          await ackGate;
+          throw new SubmitAckTimeoutError({
+            sessionId: "api-1",
+            agent: "claude",
+            elapsedMs: 10_000,
+            lastScannedFile: "/x.jsonl",
+            processAlive: true,
+            probeUnresponsive: false,
+          });
+        },
+      );
+      const first = service.send("api-1", { message: "first", ...immediate });
+      await ackEntered;
+      const second = service.send("api-1", { message: "second", ...immediate });
+      vi.setSystemTime(Date.now() + 10_000);
+      releaseAck();
+      const firstView = await first;
+      expect(firstView.submitUnconfirmedAt).toBeDefined();
+      const heldTyped = sessions.get("api-1")?.queuedMessageTyped;
+      expect((await second).sendOutcome).toEqual({ kind: "queued", reason: "interrupt_guard" });
+      expect(sessions.get("api-1")).toMatchObject({
+        submitUnconfirmedAt: firstView.submitUnconfirmedAt,
+        queuedMessageTyped: heldTyped,
+        queuedMessages: { messages: ["older", "second"], awaitingPrompt: true },
+      });
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      await expect(
+        service.send("api-1", { message: "outside window", ...immediate }),
+      ).rejects.toBeInstanceOf(LaunchPromptPendingError);
+    });
+
     it("does not guard or stamp waiting delivery between busy candidates", async () => {
       mockClaudeJsonlState("waiting");
       createSessionStore(runningSession());

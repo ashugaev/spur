@@ -18677,11 +18677,74 @@ export class SessionService {
     const result = await this.withPaneWriteLock(hint.tmuxSession, async () => {
       if (options?.allowDelivery?.() === false) return { record: null, recovered: null };
       const lifecycleIds = this.lifecycleIdsFor(hint);
-      const prepared = await this.withSessionLifecycleLocks(lifecycleIds, () =>
-        options?.allowDelivery?.() === false
-          ? Promise.resolve(null)
-          : this.prepareDeliveryLocked(sessionId, hint.tmuxSession, intent, options?.wakeClaim),
-      );
+      const lastInterruptAt = this.explicitInterruptAt.get(sessionId);
+      const guardedRequest =
+        options?.interruptRequestedAt !== undefined &&
+        lastInterruptAt !== undefined &&
+        options.interruptRequestedAt - lastInterruptAt < SEND_INTERRUPT_GUARD_MS;
+      const queueGuardedInterrupt = async (
+        target: Pick<PreparedDelivery, "session" | "lifecycleIds" | "stamp" | "generation">,
+      ) => {
+        const record = await this.withSessionLifecycleLocks(target.lifecycleIds, async () => {
+          const current = readSession(this.config.dataDir, sessionId);
+          if (
+            options?.allowDelivery?.() === false ||
+            !current ||
+            !this.lifecycleStateMatches(current, target.stamp) ||
+            !(await this.paneGenerationMatches(current, target.generation))
+          ) {
+            throw new Error(`Session ${sessionId} changed during message delivery`);
+          }
+          if (options?.allowDelivery?.() === false) {
+            throw new Error(`Session ${sessionId} changed during message delivery`);
+          }
+          const queued = this.appendQueuedMessage(current, message, true, options?.wakeClaim);
+          options?.observeDelivery?.("accepted");
+          this.scheduleDeliveryRunner(sessionId);
+          return queued;
+        });
+        return {
+          record,
+          recovered: null,
+          sendOutcome: { kind: "queued" as const, reason: "interrupt_guard" as const },
+        };
+      };
+      let prepared: PreparedDelivery | null;
+      try {
+        prepared = await this.withSessionLifecycleLocks(lifecycleIds, () =>
+          options?.allowDelivery?.() === false
+            ? Promise.resolve(null)
+            : this.prepareDeliveryLocked(sessionId, hint.tmuxSession, intent, options?.wakeClaim),
+        );
+      } catch (error) {
+        if (!(error instanceof LaunchPromptPendingError) || !guardedRequest) throw error;
+        const held = await this.withSessionLifecycleLocks(lifecycleIds, async () => {
+          const current = readSession(this.config.dataDir, sessionId);
+          if (
+            !current ||
+            current.status !== "running" ||
+            !submitPending(current) ||
+            this.lifecycle.snapshot(sessionId).revision !== deliveryRevision ||
+            !this.lifecycleStateMatches(current, this.lifecycleStamp(hint)) ||
+            !sameSessionRuntimeOwner(current, hint) ||
+            current.agentLaunchId !== hint.agentLaunchId ||
+            agentInterruptKeys(current.agent).length === 0
+          ) {
+            throw error;
+          }
+          this.assertTokenBudgetAllowsActivation(current);
+          if (this.isLiveStateRateLimited(current)) {
+            throw new SessionRateLimitedError(`Session ${sessionId} is rate limited`);
+          }
+          return {
+            session: current,
+            lifecycleIds,
+            stamp: this.lifecycleStamp(current),
+            generation: await this.capturePaneGeneration(current),
+          };
+        });
+        return queueGuardedInterrupt(held);
+      }
       if (!prepared) return { record: null, recovered: null };
 
       if (
@@ -18705,7 +18768,7 @@ export class SessionService {
             record: readSession(this.config.dataDir, sessionId),
             recovered: null,
             queuedAhead: true,
-            ...(options?.interruptRequestedAt !== undefined
+            ...(options.interruptRequestedAt !== undefined
               ? { sendOutcome: { kind: "queued" as const, reason: "no_interrupt" as const } }
               : {}),
           };
@@ -18858,37 +18921,8 @@ export class SessionService {
           })) === true;
       }
 
-      const lastInterruptAt = this.explicitInterruptAt.get(sessionId);
-      if (
-        interrupt &&
-        options?.interruptRequestedAt !== undefined &&
-        agentInterruptKeys(prepared.session.agent).length > 0 &&
-        lastInterruptAt !== undefined &&
-        options.interruptRequestedAt - lastInterruptAt < SEND_INTERRUPT_GUARD_MS
-      ) {
-        const record = await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
-          const current = readSession(this.config.dataDir, sessionId);
-          if (
-            options.allowDelivery?.() === false ||
-            !current ||
-            !this.lifecycleStateMatches(current, prepared.stamp) ||
-            !(await this.paneGenerationMatches(current, prepared.generation))
-          ) {
-            throw new Error(`Session ${sessionId} changed during message delivery`);
-          }
-          if (options.allowDelivery?.() === false) {
-            throw new Error(`Session ${sessionId} changed during message delivery`);
-          }
-          const queued = this.appendQueuedMessage(current, message, true, options.wakeClaim);
-          options.observeDelivery?.("accepted");
-          this.scheduleDeliveryRunner(sessionId);
-          return queued;
-        });
-        return {
-          record,
-          recovered: null,
-          sendOutcome: { kind: "queued" as const, reason: "interrupt_guard" as const },
-        };
+      if (interrupt && guardedRequest && agentInterruptKeys(prepared.session.agent).length > 0) {
+        return queueGuardedInterrupt(prepared);
       }
 
       const generationStillMatches = () =>
@@ -19606,10 +19640,10 @@ export class SessionService {
     const interruptState = { interrupted: false };
     if (options?.interrupt === true) {
       const interrupt = async () => {
-        if (agentInterruptKeys(session.agent).length > 0) options.onInterrupt?.();
         interruptState.interrupted = await sendInterruptKeysToTmux(
           session.tmuxSession,
           session.agent,
+          ...(options.onInterrupt ? ([options.onInterrupt] as const) : []),
         );
       };
       if (options.authorizeInput) {

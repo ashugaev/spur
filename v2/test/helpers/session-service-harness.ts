@@ -1774,7 +1774,12 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   findForeignAgentProcessesForSessionMock.mockReset().mockResolvedValue({ status: "unavailable" });
   killTmuxSessionTreeMock.mockReset().mockResolvedValue(true);
   sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
-  sendInterruptKeysToTmuxMock.mockReset().mockResolvedValue(true);
+  sendInterruptKeysToTmuxMock
+    .mockReset()
+    .mockImplementation(async (_session, _agent, onInterrupt?: () => void) => {
+      onInterrupt?.();
+      return true;
+    });
   sendSensitiveMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
   sendSubmitKeyToTmuxMock.mockReset().mockResolvedValue(undefined);
   sendMenuSelectionKeysMock.mockReset().mockResolvedValue(undefined);
