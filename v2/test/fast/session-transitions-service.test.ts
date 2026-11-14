@@ -535,6 +535,57 @@ describe("session transitions service", () => {
     );
   });
 
+  it("bypasses a cached alive runtime on the first strict poll while ordinary reads retain their cache", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    const cursor = (await poll()).nextCursor;
+    const cachedAlive = {
+      runtimeAlive: true,
+      paneUsable: true,
+      processAlive: true,
+      probeUnresponsive: false,
+    };
+    const nowDead = {
+      runtimeAlive: false,
+      paneUsable: false,
+      processAlive: false,
+      probeUnresponsive: false,
+    };
+    const snapshots = vi
+      .spyOn(sessionServiceInternals(service), "readRuntimeSnapshot")
+      .mockImplementation(async (_record, options) => (options?.fresh ? nowDead : cachedAlive));
+    expect(await service.get("api-1")).toMatchObject({ state: "working" });
+    expect(snapshots.mock.calls[0]?.[1]?.fresh).not.toBe(true);
+    const instant = Date.now();
+    const firstPoll = await poll({ since: cursor });
+    expect(firstPoll.entries).toContainEqual(
+      expect.objectContaining({ kind: "status", to: "stopped" }),
+    );
+    expect(snapshots.mock.calls[1]?.[1]?.fresh).toBe(true);
+    expect(Date.now()).toBe(instant);
+  });
+
+  it("retries an unchanged terminal observation missing from the journal after an ordinary append failure", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record({ status: "completed" }));
+    const store = (
+      service as unknown as {
+        transitionsBinding: {
+          store: {
+            observeState(record: SessionRecord, state: SessionState, links: unknown[]): void;
+          };
+        };
+      }
+    ).transitionsBinding.store;
+    vi.spyOn(store, "observeState").mockImplementationOnce(() => {
+      throw new Error("terminal append failed");
+    });
+    expect(await service.get("api-1")).toMatchObject({ state: "stopped" });
+    expect(await service.get("api-1")).toMatchObject({ state: "stopped" });
+    const page = await poll({ kinds: ["state"] });
+    expect(page.entries).toEqual([
+      expect.objectContaining({ sessionId: "api-1", from: null, to: "stopped" }),
+    ]);
+  });
+
   it.each(["structured", "thrown"] as const)(
     "rejects a %s confirmation runtime probe failure without advancing strict observations",
     async (failure) => {
