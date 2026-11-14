@@ -580,6 +580,31 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     },
   ),
   operation(
+    "list_session_transitions",
+    "GET",
+    "/sessions/transitions",
+    "Poll retained session lifecycle transitions with event-time links.",
+    {
+      query: [
+        field("since", "string", "Exclusive opaque cursor; omitted starts oldest retained."),
+        field("link", "string[]", "Repeatable S5 link label or label=URL; all must match."),
+        field("limit", "integer", "Matching entries per page, 1..1000.", false, 200),
+        field("kinds", "string", "Comma-separated status,state; omitted excludes live chatter."),
+      ],
+      examples: [{ query: { link: "tracker=https://example.com/tasks/42", limit: "200" } }],
+      response: "SessionTransitionsResponse {entries,nextCursor,hasMore}; invalid cursor 400.",
+      extraResponses: [
+        {
+          status: 410,
+          contentType: "application/json",
+          description:
+            "Expired cursor: {error,floorCursor,latestCursor}; full-list resync required.",
+        },
+      ],
+      source: "v2/src/session-transitions.ts",
+    },
+  ),
+  operation(
     "list_projects",
     "GET",
     "/projects",

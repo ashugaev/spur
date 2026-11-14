@@ -62,7 +62,11 @@ import type { SourceWorkbench, SourceWorkSessionItem } from "./event-sources/typ
 import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { readSession } from "./metadata.js";
-import { normalizeSlotLabel, normalizeSlotUrl } from "./session-slots.js";
+import { parseSessionLinkFilters } from "./session-slots.js";
+import {
+  parseSessionTransitionsQuery,
+  SessionTransitionsCursorError,
+} from "./session-transitions.js";
 import { ACTIONS_COLLECTION, StoreError, StoreService, type StoreQuery } from "./stores.js";
 import { SseHub, acceptsEventStream } from "./sse.js";
 import { StoreAgent, parseAgentMessage } from "./store-agent.js";
@@ -1428,6 +1432,42 @@ export async function startServer(
         return;
       }
 
+      // Poll-only lifecycle feed. Query: exclusive opaque `since`, repeated S5
+      // `link=label[=URL]` predicates (AND), integer `limit` 1..1000 (default 200),
+      // optional comma-separated `kinds=status,state`. Omitted kinds includes
+      // every status edge and state edges involving needs_input, rate_limited,
+      // stale, stopped, error or killed; working/waiting chatter is excluded.
+      // Thus defaults cover completion, kill, errors, park/stale, rate-limit
+      // entry/reset/exit and resume. Entries retain event-time links after GC.
+      // Response: {entries,nextCursor,hasMore}, in commit order. Omitted since
+      // starts oldest retained; an empty poll still returns a usable cursor.
+      // Cursors survive restart; invalid/foreign/future -> 400, expired -> 410
+      // with floorCursor/latestCursor (resync through a full sessions list).
+      // Retention: hot + five uncompressed 16 MiB segments, entry overshoot;
+      // no minimum time window. A fresh observation failure fails the request.
+      if (method === "GET" && path === "/sessions/transitions") {
+        let query: ReturnType<typeof parseSessionTransitionsQuery>;
+        try {
+          query = parseSessionTransitionsQuery(url.searchParams);
+        } catch (error) {
+          sendJson(response, 400, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return;
+        }
+        try {
+          sendJson(response, 200, await service.listSessionTransitions(query));
+        } catch (error) {
+          if (!(error instanceof SessionTransitionsCursorError)) throw error;
+          sendJson(response, error.status, {
+            error: error.message,
+            ...(error.floorCursor !== undefined ? { floorCursor: error.floorCursor } : {}),
+            ...(error.latestCursor !== undefined ? { latestCursor: error.latestCursor } : {}),
+          });
+        }
+        return;
+      }
+
       if (method === "GET" && path === "/sessions") {
         const includeCompleted =
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "1" ||
@@ -1436,13 +1476,7 @@ export async function startServer(
         const view = requestedView === "dashboard" ? "dashboard" : "full";
         let links: { label: string; url?: string }[];
         try {
-          links = url.searchParams.getAll("link").map((raw) => {
-            const separator = raw.indexOf("=");
-            const label = normalizeSlotLabel(separator < 0 ? raw : raw.slice(0, separator));
-            return separator < 0
-              ? { label }
-              : { label, url: normalizeSlotUrl(raw.slice(separator + 1)) };
-          });
+          links = parseSessionLinkFilters(url.searchParams.getAll("link"));
         } catch (error) {
           sendJson(response, 400, {
             error: error instanceof Error ? error.message : String(error),

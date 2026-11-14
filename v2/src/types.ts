@@ -5,15 +5,17 @@ export type AgentName = "claude" | "codex" | "cursor" | "opencode";
 export const SPUR_DAEMON_API_VERSION = 3;
 export const AUTOMATIC_REMINDER_MAX_ATTEMPTS = 3;
 
-export type SessionStatus =
-  | "spawning"
-  | "running"
-  | "stopped"
-  | "budget_limited"
-  | "paused"
-  | "errored"
-  | "completed"
-  | "killed";
+export const SESSION_STATUSES = [
+  "spawning",
+  "running",
+  "stopped",
+  "budget_limited",
+  "paused",
+  "errored",
+  "completed",
+  "killed",
+] as const;
+export type SessionStatus = (typeof SESSION_STATUSES)[number];
 export const SESSION_STATES = [
   "working",
   "waiting",
@@ -49,6 +51,39 @@ export type SessionLogScope = "all" | "runtime" | "service" | "sidecar";
 export interface SessionLink {
   label: string;
   url: string;
+}
+export interface SessionLinkFilter {
+  label: string;
+  url?: string;
+}
+
+interface SessionTransitionFields {
+  cursor: string;
+  sessionId: string;
+  project: string;
+  at: string;
+  links: SessionLink[];
+  reason?: string;
+  stopReason?: string;
+  error?: string;
+  rateLimitResetAt?: string;
+  successorId?: string;
+}
+export type SessionTransition = SessionTransitionFields &
+  (
+    | { kind: "status"; from: SessionStatus | null; to: SessionStatus }
+    | { kind: "state"; from: SessionState | null; to: SessionState }
+  );
+export interface SessionTransitionsQuery {
+  since?: string;
+  links?: SessionLinkFilter[];
+  limit?: number;
+  kinds?: ("status" | "state")[];
+}
+export interface SessionTransitionsResponse {
+  entries: SessionTransition[];
+  nextCursor: string;
+  hasMore: boolean;
 }
 export type SessionSlotTitleSource = "manual" | "agent";
 export interface SessionPrBinding {
@@ -1306,6 +1341,8 @@ export interface SessionRecord {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   rateLimitedAt?: string;
+  /** Known active provider reset instant, ISO UTC; absent when unknown or cleared. */
+  rateLimitResetAt?: string;
   rateLimitClearFence?: {
     agentLaunchId: string | null;
     /** Source key -> captured occurrence count; unkeyed readers use the file path. */
