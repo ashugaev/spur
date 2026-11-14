@@ -15613,7 +15613,11 @@ describe("SessionService", () => {
           }
 
           expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1", 200, { fresh: true });
-          expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith("api-1", "codex");
+          expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith(
+            "api-1",
+            "codex",
+            ...(entryPoint === "send now" ? [expect.any(Function)] : []),
+          );
           expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledBefore(sendMessageToTmuxMock);
           expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "flush me", {
             agent: "codex",
@@ -15938,7 +15942,11 @@ describe("SessionService", () => {
     });
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith("api-1", "claude");
+    expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith(
+      "api-1",
+      "claude",
+      expect.any(Function),
+    );
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "send immediately", {
       agent: "claude",
     });
@@ -15985,7 +15993,11 @@ describe("SessionService", () => {
       service.send("api-1", { message: "send immediately", queue: false, interrupt: true }),
     ).rejects.toThrow("exited after the interrupt; message not sent");
 
-    expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith("api-1", "claude");
+    expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith(
+      "api-1",
+      "claude",
+      expect.any(Function),
+    );
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
     expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
   });
@@ -79881,7 +79893,11 @@ describe("SessionService", () => {
 
       sendInterruptKeysToTmuxMock.mockResolvedValue(true);
       await service.send("api-1", { message: "now", queue: false, interrupt: true });
-      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith("api-1", "claude");
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        "claude",
+        expect.any(Function),
+      );
       expect(sendInterruptKeysToTmuxMock.mock.invocationCallOrder[0]).toBeLessThan(
         sendMessageToTmuxMock.mock.invocationCallOrder[0] ?? 0,
       );
