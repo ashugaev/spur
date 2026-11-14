@@ -1521,6 +1521,28 @@ function normalizeRateLimitClearFence(value: unknown): SessionRecord["rateLimitC
   };
 }
 
+function normalizeClaudeStatusOwner(value: unknown): SessionRecord["claudeStatusOwner"] {
+  if (
+    !isRecord(value) ||
+    typeof value["agentLaunchId"] !== "string" ||
+    !value["agentLaunchId"] ||
+    typeof value["agentSessionId"] !== "string" ||
+    !value["agentSessionId"] ||
+    typeof value["pid"] !== "number" ||
+    !Number.isSafeInteger(value["pid"]) ||
+    value["pid"] <= 0
+  )
+    return undefined;
+  const procStart = value["procStart"];
+  if (procStart !== undefined && (typeof procStart !== "string" || !procStart)) return undefined;
+  return {
+    agentLaunchId: value["agentLaunchId"],
+    agentSessionId: value["agentSessionId"],
+    pid: value["pid"],
+    ...(procStart !== undefined ? { procStart } : {}),
+  };
+}
+
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   validateDurableSpawnFields(session);
   const normalizedSession = normalizeSessionPrBinding(session);
@@ -1547,6 +1569,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const tokenUsage = normalizeTokenUsage(normalizedSession.tokenUsage);
   const preflightTokenUsage = normalizePreflightTokenUsage(normalizedSession.preflightTokenUsage);
   const rateLimitClearFence = normalizeRateLimitClearFence(normalizedSession.rateLimitClearFence);
+  const claudeStatusOwner = normalizeClaudeStatusOwner(normalizedSession.claudeStatusOwner);
   // Records written before the rename carry the hold as launchUnconfirmedAt;
   // read it once here so an existing hold survives, and write only the new name.
   const legacyUnconfirmed = (normalizedSession as { launchUnconfirmedAt?: unknown })
@@ -1711,6 +1734,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { rateLimitResetAt: new Date(normalizedSession.rateLimitResetAt).toISOString() }
       : {}),
     ...(rateLimitClearFence ? { rateLimitClearFence } : {}),
+    ...(claudeStatusOwner ? { claudeStatusOwner } : {}),
     ...(normalizedSession.serverErrorAt ? { serverErrorAt: normalizedSession.serverErrorAt } : {}),
     ...(typeof normalizedSession.serverErrorReactivationAttempts === "number" &&
     Number.isInteger(normalizedSession.serverErrorReactivationAttempts) &&

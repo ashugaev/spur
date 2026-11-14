@@ -20059,9 +20059,15 @@ describe("SessionService", () => {
           sessionId: "api-1",
         }),
       );
-      await expect(service.send("api-1", { message: "again", queue: false })).rejects.toThrow(
-        /has not confirmed the last prompt/,
+      const refusal = await service.send("api-1", { message: "again", queue: false }).then(
+        () => null,
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
       );
+      expect(refusal).toMatch(
+        /has not confirmed the last prompt: api-1\. Waiting for its transcript ack/,
+      );
+      expect(refusal).toMatch(/Pause and restore the session/);
+      expect(refusal).not.toMatch(/Submit it first/);
       await service.send("api-1", { message: "queued", queue: true });
       const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
       await realTimers.setTimeout(1_500);
@@ -20078,6 +20084,22 @@ describe("SessionService", () => {
         vi.setSystemTime(new Date(now));
         expect(typedMessages()).toEqual(["now", "queued"]);
       });
+    });
+
+    it("refuses a send on a launch hold without promising the Retry/Dismiss ceiling", async () => {
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:03:00.000Z") });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ submitUnconfirmedAt: "2026-03-18T10:04:00.000Z" }));
+      const service = await liveService();
+
+      const refusal = await service.send("api-1", { message: "again", queue: false }).then(
+        () => null,
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      );
+      expect(refusal).toMatch(/has not confirmed the last prompt: api-1\./);
+      expect(refusal).toMatch(/Waiting for its transcript activity\. Pause and restore/);
+      expect(refusal).not.toMatch(/Retry\/Dismiss/);
+      service.dispose();
     });
 
     it("stamps an unacked Send now's hold at the paste, so the interrupted turn's own record never clears it", async () => {
@@ -20779,7 +20801,10 @@ describe("SessionService", () => {
       await expectRequeuedOnBoot(sessions);
       expect(resumeAgentSubmitAckBindingMock).toHaveBeenCalledWith(
         "claude",
-        expect.objectContaining({ worktreePath: "/tmp/spur-worktrees/api/api-1" }),
+        expect.objectContaining({
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          ackNotBeforeMs: Date.parse("2026-03-18T10:04:00.000Z"),
+        }),
         restartBaseline,
       );
       expect(scan).toHaveBeenCalledWith("typed");
@@ -35417,6 +35442,11 @@ describe("SessionService", () => {
         prompt: "Ship the feature",
         originalTaskPrompt: "Ship it",
         agentLaunchId: "launch-generation-1",
+        claudeStatusOwner: {
+          agentLaunchId: "launch-generation-1",
+          agentSessionId: "native-1",
+          pid: 4242,
+        },
         restoredAt: "2026-03-18T10:00:00.000Z",
       }),
     );
@@ -35439,11 +35469,13 @@ describe("SessionService", () => {
       expect(listed[0]).not.toHaveProperty(field);
     }
     expect(listed[0]).not.toHaveProperty("agentLaunchId");
+    expect(listed[0]).not.toHaveProperty("claudeStatusOwner");
     expect(listed[0]).not.toHaveProperty("restoredAt");
     expect(listSessionArtifactsMock).not.toHaveBeenCalled();
 
     const detail = await service.get("api-1");
     expect(detail).not.toHaveProperty("agentLaunchId");
+    expect(detail).not.toHaveProperty("claudeStatusOwner");
     expect(detail).not.toHaveProperty("restoredAt");
     expect(detail.artifacts).toEqual([]);
     expect(detail.launchCommand).toBe("claude --dangerously-skip-permissions");
@@ -35544,6 +35576,11 @@ describe("SessionService", () => {
         },
       ],
       agentLaunchId: "launch-generation-1",
+      claudeStatusOwner: {
+        agentLaunchId: "launch-generation-1",
+        agentSessionId: "native-1",
+        pid: 4242,
+      },
     });
     sessions.set("api-2", {
       id: "api-2",
@@ -35603,6 +35640,7 @@ describe("SessionService", () => {
     expect(listed[0]).not.toHaveProperty("allowedTriggers");
     expect(listed[0]).not.toHaveProperty("agentSessionId");
     expect(listed[0]).not.toHaveProperty("agentLaunchId");
+    expect(listed[0]).not.toHaveProperty("claudeStatusOwner");
     expect(listed[0]).not.toHaveProperty("branchSource");
     // The strip must not overreach into what the listing renders.
     expect(listed[0]).toMatchObject({ project: "api", prompt: "Ship the feature" });
@@ -79387,6 +79425,10 @@ describe("SessionService", () => {
         expect(record?.queuedMessages?.messages ?? []).not.toContain("typed");
         expect(eventsNamed("session.message.requeued")).toHaveLength(0);
         expect(eventsNamed("session.submit.released")).toHaveLength(1);
+        expect(eventsNamed("session.submit.released")[0]?.details).toEqual({
+          messageLength: 5,
+          reason: "requeue_exhausted",
+        });
         // Never silent: the failure stays on the record for the view.
         expect(record?.submitFailedMessage).toEqual({ message: "typed", at: expect.any(String) });
         expect((await service.get("api-1")).submitFailedMessage?.message).toBe("typed");
@@ -79394,6 +79436,362 @@ describe("SessionService", () => {
         service.dispose();
       },
     );
+
+    describe("claude session-id rotation and hold ceiling", () => {
+      const beforeHold = Date.parse(PENDING_LAUNCH_AT) - 1_000;
+
+      function jsonlFor(id: string) {
+        return {
+          state: "waiting",
+          reader: {
+            filePath: `/t/${id}.jsonl`,
+            lastOffset: 0,
+            lastMtimeMs: id === "ses_2" ? afterHold : beforeHold,
+            tailRecords: [],
+          },
+        };
+      }
+
+      // The pane's claude reports `reported.id` from `reported.pid`.
+      function mockPaneStatus(reported: { id: string; pid: number }, extra: object = {}) {
+        readClaudeSessionStatusMock.mockImplementation(async () => ({
+          state: "waiting",
+          status: "idle",
+          filePath: "/s/4242.json",
+          updatedMs: afterHold,
+          sessionId: reported.id,
+          pid: reported.pid,
+          kind: "interactive",
+          paneOwned: true,
+          ...extra,
+        }));
+      }
+
+      function mockRotationScan() {
+        const contexts: unknown[] = [];
+        const scan = vi.fn().mockResolvedValue({ found: true, lastScannedFile: null });
+        resumeAgentSubmitAckBindingMock.mockImplementation(
+          async (_agent: string, ctx: unknown, baseline: unknown) => {
+            contexts.push(ctx);
+            return { baseline, scan };
+          },
+        );
+        return contexts;
+      }
+
+      async function rotationFixture(transcriptForNewId: boolean | "rejects") {
+        const sessions = createSessionStore();
+        seedSendHold(sessions, "claude");
+        mockAgentActivity("claude", beforeHold);
+        readClaudeJsonlStateMock.mockImplementation(async (_w: string, _r: unknown, id: string) => {
+          if (id === "ses_2" && transcriptForNewId === "rejects") throw new Error("read failed");
+          return id === "ses_2" && !transcriptForNewId ? null : jsonlFor(id);
+        });
+        const reported = { id: "ses_1", pid: 4242 };
+        mockPaneStatus(reported);
+        const service = await deferredService();
+        await service.get("api-1");
+        reported.id = "ses_2";
+        return { sessions, service };
+      }
+
+      it("rebinds the id after /clear and settles the hold by ack in the same tick", async () => {
+        const { sessions, service } = await rotationFixture(true);
+        const contexts = mockRotationScan();
+
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.agentSessionId).toBe("ses_2");
+        expect(record?.submitUnconfirmedAt).toBeUndefined();
+        expect(record).not.toHaveProperty("queuedMessageTyped");
+        expect(eventsNamed("session.submit.confirmed")).toEqual([
+          expect.objectContaining({ details: { evidence: "ack" } }),
+        ]);
+        expect(eventsNamed("session.agent_session_id.rotated")).toEqual([
+          expect.objectContaining({
+            details: {
+              agent: "claude",
+              pid: 4242,
+              previousAgentSessionId: "ses_1",
+              agentSessionId: "ses_2",
+              transcriptFound: true,
+            },
+          }),
+        ]);
+        expect(readClaudeJsonlStateMock).toHaveBeenCalledWith(
+          record?.worktreePath,
+          undefined,
+          "ses_2",
+        );
+        expect(contexts).toEqual([
+          expect.objectContaining({
+            agentSessionId: "ses_2",
+            ackNotBeforeMs: Date.parse(PENDING_LAUNCH_AT),
+          }),
+        ]);
+        expect(record?.claudeStatusOwner).toEqual({
+          agentLaunchId: "held-launch",
+          agentSessionId: "ses_2",
+          pid: 4242,
+        });
+        expect(
+          logSpurEventMock.mock.calls.filter(([, entry]) =>
+            String((entry as { event: string }).event).startsWith("session.server_error"),
+          ),
+        ).toHaveLength(0);
+        expect(tmuxTexts()).not.toContain("typed");
+        service.dispose();
+      });
+
+      it("never reuses a reader cached under the old id after a rotation", async () => {
+        const { sessions, service } = await rotationFixture(true);
+        mockRotationScan();
+        await service.get("api-1");
+        expect(sessions.get("api-1")?.agentSessionId).toBe("ses_2");
+
+        // A classify that started before the rotation re-pins its old reader.
+        (
+          service as unknown as {
+            claudeJsonlReaders: Map<string, { agentSessionId: string; reader: unknown }>;
+          }
+        ).claudeJsonlReaders.set("api-1", {
+          agentSessionId: "ses_1",
+          reader: jsonlFor("ses_1").reader,
+        });
+        await service.get("api-1");
+        const lastCall = readClaudeJsonlStateMock.mock.calls.at(-1);
+        expect(lastCall?.[1]).toBeUndefined();
+        expect(lastCall?.[2]).toBe("ses_2");
+        expect(sessions.get("api-1")?.agentSessionId).toBe("ses_2");
+        service.dispose();
+      });
+
+      it("rebinds with no new transcript yet: jsonl-derived fields reset, hold stays", async () => {
+        const { sessions, service } = await rotationFixture(false);
+        mockHoldAckScan(false);
+
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.agentSessionId).toBe("ses_2");
+        expect(record?.submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+        expect(eventsNamed("session.submit.confirmed")).toHaveLength(0);
+        expect(eventsNamed("session.submit.released")).toHaveLength(0);
+        expect(eventsNamed("session.agent_session_id.rotated")).toEqual([
+          expect.objectContaining({
+            details: expect.objectContaining({ transcriptFound: false }),
+          }),
+        ]);
+        service.dispose();
+      });
+
+      // A daemon restart: the owner came from the record, not from a tick.
+      async function persistedOwnerFixture(
+        owner: Partial<NonNullable<SessionRecord["claudeStatusOwner"]>>,
+      ) {
+        const sessions = createSessionStore();
+        seedSendHold(sessions, "claude", {
+          claudeStatusOwner: {
+            agentLaunchId: "held-launch",
+            agentSessionId: "ses_1",
+            pid: 4242,
+            procStart: "777",
+            ...owner,
+          },
+        });
+        mockAgentActivity("claude", beforeHold);
+        readClaudeJsonlStateMock.mockImplementation(async (_w: string, _r: unknown, id: string) =>
+          jsonlFor(id),
+        );
+        mockPaneStatus({ id: "ses_2", pid: 4242 }, { procStart: "777" });
+        const contexts = mockRotationScan();
+        return { sessions, service: await deferredService(), contexts };
+      }
+
+      it("rotates on the first tick after a restart from the persisted owner", async () => {
+        const { sessions, service } = await persistedOwnerFixture({});
+
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.agentSessionId).toBe("ses_2");
+        expect(record?.claudeStatusOwner).toEqual({
+          agentLaunchId: "held-launch",
+          agentSessionId: "ses_2",
+          pid: 4242,
+          procStart: "777",
+        });
+        expect(record?.submitUnconfirmedAt).toBeUndefined();
+        expect(eventsNamed("session.submit.confirmed")).toEqual([
+          expect.objectContaining({ details: { evidence: "ack" } }),
+        ]);
+        expect(eventsNamed("session.agent_session_id.rotated")).toHaveLength(1);
+        service.dispose();
+      });
+
+      it.each([
+        ["a reused pid (different procStart)", { procStart: "778" }],
+        ["an owner from an older launch", { agentLaunchId: "old-launch" }],
+      ])("does not rotate from a persisted owner with %s", async (_label, owner) => {
+        const { sessions, service } = await persistedOwnerFixture(owner);
+
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.agentSessionId).toBe("ses_1");
+        expect(record?.submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+        expect(eventsNamed("session.agent_session_id.rotated")).toHaveLength(0);
+        service.dispose();
+      });
+
+      it("writes the owner once while the observation is unchanged", async () => {
+        const sessions = createSessionStore();
+        seedSendHold(sessions, "claude");
+        mockAgentActivity("claude", beforeHold);
+        readClaudeJsonlStateMock.mockImplementation(async (_w: string, _r: unknown, id: string) =>
+          jsonlFor(id),
+        );
+        mockPaneStatus({ id: "ses_1", pid: 4242 }, { procStart: "777" });
+        const service = await deferredService();
+        const persist = vi.spyOn(
+          service as unknown as { persistClaudeStatusOwner: () => unknown },
+          "persistClaudeStatusOwner",
+        );
+
+        await service.get("api-1");
+        await service.get("api-1");
+        await service.get("api-1");
+        expect(sessions.get("api-1")?.claudeStatusOwner).toEqual({
+          agentLaunchId: "held-launch",
+          agentSessionId: "ses_1",
+          pid: 4242,
+          procStart: "777",
+        });
+        // A concurrent classify may still hold the pre-write record and call
+        // the helper; only one call writes.
+        expect(persist.mock.results.filter((result) => result.value !== undefined)).toHaveLength(1);
+        service.dispose();
+      });
+
+      it("still logs the rotation when the new transcript read rejects", async () => {
+        const { sessions, service } = await rotationFixture("rejects");
+        mockHoldAckScan(false);
+
+        await service.get("api-1");
+        expect(sessions.get("api-1")?.agentSessionId).toBe("ses_2");
+        expect(eventsNamed("session.agent_session_id.rotated")).toEqual([
+          expect.objectContaining({
+            details: expect.objectContaining({ transcriptFound: false }),
+          }),
+        ]);
+        service.dispose();
+      });
+
+      it.each([
+        ["a different pid", { id: "ses_2", pid: 5555 }, {}, true],
+        ["a non-interactive kind", { id: "ses_2", pid: 4242 }, { kind: undefined }, true],
+        [
+          "a status file the pane does not own",
+          { id: "ses_2", pid: 4242 },
+          { paneOwned: undefined },
+          true,
+        ],
+        ["no prior observation", { id: "ses_2", pid: 4242 }, {}, false],
+      ])("does not rebind on %s", async (_label, second, extra, observeFirst) => {
+        const sessions = createSessionStore();
+        seedSendHold(sessions, "claude");
+        mockAgentActivity("claude", beforeHold);
+        readClaudeJsonlStateMock.mockImplementation(async (_w: string, _r: unknown, id: string) =>
+          jsonlFor(id),
+        );
+        mockHoldAckScan(true);
+        const service = await deferredService();
+        if (observeFirst) {
+          mockPaneStatus({ id: "ses_1", pid: 4242 }, extra);
+          await service.get("api-1");
+        }
+        mockPaneStatus(second, extra);
+
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.agentSessionId).toBe("ses_1");
+        expect(record?.submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+        expect(eventsNamed("session.agent_session_id.rotated")).toHaveLength(0);
+        expect(readClaudeJsonlStateMock.mock.calls.some((call) => call[2] === "ses_2")).toBe(false);
+        service.dispose();
+      });
+
+      async function ceilingFixture(
+        state: "waiting" | "working",
+        options: { acked?: boolean; extra?: Partial<SessionRecord> } = {},
+      ) {
+        const sessions = createSessionStore();
+        seedSendHold(sessions, "claude", { ...options.extra });
+        mockAgentActivity("claude", beforeHold, state);
+        mockHoldAckScan(options.acked ?? false);
+        const { SUBMIT_HOLD_CEILING_MS } = await loadSessionServiceModule();
+        vi.setSystemTime(Date.parse(PENDING_LAUNCH_AT) + SUBMIT_HOLD_CEILING_MS + 1_000);
+        return { sessions, service: await deferredService() };
+      }
+
+      it("releases a typed hold past the ceiling to Retry/Dismiss without typing it again", async () => {
+        const { sessions, service } = await ceilingFixture("waiting");
+
+        await service.get("api-1");
+        await service.get("api-1");
+        expect(resumeAgentSubmitAckBindingMock).toHaveBeenCalledWith(
+          "claude",
+          expect.objectContaining({ ackNotBeforeMs: Date.parse(PENDING_LAUNCH_AT) }),
+          expect.anything(),
+        );
+        const record = sessions.get("api-1");
+        expect(record?.submitUnconfirmedAt).toBeUndefined();
+        expect(record).not.toHaveProperty("queuedMessageTyped");
+        expect(record?.submitFailedMessage).toEqual({ message: "typed", at: expect.any(String) });
+        expect(record?.queuedMessages?.messages).toEqual(["later"]);
+        expect(eventsNamed("session.submit.released")).toEqual([
+          expect.objectContaining({ details: { messageLength: 5, reason: "ceiling" } }),
+        ]);
+        expect(eventsNamed("session.message.requeued")).toHaveLength(0);
+        expect(tmuxTexts()).not.toContain("typed");
+        service.dispose();
+      });
+
+      it("releases a typed hold with no ack baseline past the ceiling", async () => {
+        const { sessions, service } = await ceilingFixture("waiting", {
+          extra: { queuedMessageTyped: { message: "typed", typedAt: PENDING_LAUNCH_AT } },
+        });
+
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.submitUnconfirmedAt).toBeUndefined();
+        expect(record?.submitFailedMessage).toEqual({ message: "typed", at: expect.any(String) });
+        expect(eventsNamed("session.submit.released")).toEqual([
+          expect.objectContaining({ details: { messageLength: 5, reason: "ceiling" } }),
+        ]);
+        expect(eventsNamed("session.submit.confirmed")).toHaveLength(0);
+        service.dispose();
+      });
+
+      it("confirms by ack, not releases, when the ack lands in the ceiling tick", async () => {
+        const { sessions, service } = await ceilingFixture("waiting", { acked: true });
+
+        await service.get("api-1");
+        expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+        expect(sessions.get("api-1")).not.toHaveProperty("submitFailedMessage");
+        expect(eventsNamed("session.submit.confirmed")).toEqual([
+          expect.objectContaining({ details: { evidence: "ack" } }),
+        ]);
+        expect(eventsNamed("session.submit.released")).toHaveLength(0);
+        service.dispose();
+      });
+
+      it("does not release past the ceiling while the agent is working", async () => {
+        const { sessions, service } = await ceilingFixture("working");
+
+        await service.get("api-1");
+        expect(sessions.get("api-1")?.submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+        expect(eventsNamed("session.submit.released")).toHaveLength(0);
+        service.dispose();
+      });
+    });
 
     it("a recovered trigger deliver() re-pastes its digest at most once, then releases", async () => {
       const sessions = createSessionStore();

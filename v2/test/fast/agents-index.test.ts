@@ -596,6 +596,7 @@ describe("createAgentSubmitAckBinding", () => {
       "hello",
       ctx.worktreePath,
       undefined,
+      undefined,
     );
   });
 
@@ -617,6 +618,29 @@ describe("createAgentSubmitAckBinding", () => {
       "hello",
       ctx.worktreePath,
       "pinned-uuid",
+      undefined,
+    );
+  });
+
+  it("forwards ackNotBeforeMs to the claude scan", async () => {
+    captureClaudeSubmitBaselineMock.mockResolvedValue({ file: "/some/file.jsonl", size: 42 });
+    scanClaudeJsonlForMessageMock.mockResolvedValue({
+      found: false,
+      scannedFile: "/some/file.jsonl",
+    });
+
+    const binding = await createAgentSubmitAckBinding("claude", {
+      ...ctx,
+      agentSessionId: "pinned-uuid",
+      ackNotBeforeMs: 1_700_000_000_000,
+    });
+    await binding?.scan("hello");
+    expect(scanClaudeJsonlForMessageMock).toHaveBeenCalledWith(
+      { file: "/some/file.jsonl", size: 42 },
+      "hello",
+      ctx.worktreePath,
+      "pinned-uuid",
+      { notBeforeMs: 1_700_000_000_000 },
     );
   });
 

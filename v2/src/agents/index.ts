@@ -156,6 +156,8 @@ export interface AgentSubmitAckContext {
   cursorConfigDir?: string;
   /** Opt-in historical Codex receipt from its original persisted native file. */
   codexAckScope?: "current-native-baseline";
+  /** claude: ignore entries older than this in a transcript other than the baseline file. */
+  ackNotBeforeMs?: number;
 }
 
 export interface SubmitAckScanResult {
@@ -547,6 +549,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
             text,
             ctx.worktreePath,
             ctx.agentSessionId,
+            ctx.ackNotBeforeMs !== undefined ? { notBeforeMs: ctx.ackNotBeforeMs } : undefined,
           );
           return { found: result.found, lastScannedFile: result.scannedFile };
         },

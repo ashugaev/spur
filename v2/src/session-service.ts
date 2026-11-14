@@ -558,6 +558,7 @@ import {
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
+  type ClaudeStatusOwner,
   type RateLimitClearResult,
   type PrAlertTransfer,
   type DurableSpawnIntent,
@@ -729,6 +730,9 @@ const PANE_WRITE_FENCE_MS = 30_000;
 const CODEX_HUNG_AFTER_TOOLS_MS = 300_000;
 // Hookless turns have no hook to rule out a running tool, so require longer rollout silence (pure inference observed to ~312s).
 const CODEX_HOOKLESS_HUNG_MS = 600_000;
+// A typed send unacked this long with the agent waiting at its prompt moves to
+// Retry/Dismiss instead of holding the queue: over 2x the 300s ack window.
+export const SUBMIT_HOLD_CEILING_MS = 10 * 60_000;
 const RESTORE_WARMUP_MS = 30_000;
 const RESTORE_SETTLE_MS = 2_000;
 const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
@@ -1622,6 +1626,22 @@ async function wakeDeliverability(session: SessionRecord): Promise<WakeDeliverab
 
 function hasSessionErrorEvidence(session: Pick<SessionRecord, "error">): boolean {
   return typeof session.error === "string" && session.error.trim().length > 0;
+}
+
+// The persisted owner proves which pane process reported the stored claude id
+// for this launch. Two absent procStart values match (older claude builds).
+function claudeStatusOwnerMatches(
+  session: Pick<SessionRecord, "agentLaunchId" | "agentSessionId" | "claudeStatusOwner">,
+  status: { pid: number; procStart?: string },
+): boolean {
+  const owner = session.claudeStatusOwner;
+  return (
+    owner !== undefined &&
+    owner.agentLaunchId === session.agentLaunchId &&
+    owner.agentSessionId === session.agentSessionId &&
+    owner.pid === status.pid &&
+    owner.procStart === status.procStart
+  );
 }
 
 function sameSessionRuntimeOwner(left: SessionRecord, right: SessionRecord): boolean {
@@ -4057,7 +4077,12 @@ export class SessionService {
   private readonly rateLimitClearBarriers = new Map<string, Promise<void>>();
   private readonly classificationsInFlight = new Map<string, Set<Promise<SessionStateResult>>>();
   private readonly rateLimitClearRevisions = new Map<string, number>();
-  private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
+  // A reader pins its transcript path over the id, so each entry is tagged with
+  // the agentSessionId it was read under and reused only for that id.
+  private readonly claudeJsonlReaders = new Map<
+    string,
+    { agentSessionId: string | undefined; reader: ClaudeJsonlReaderState }
+  >();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly conversationReaders = new Map<string, ClaudeConversationReaderState>();
   // Kept for the life of the session, not pruned with live ids: a viewed
@@ -7059,6 +7084,74 @@ export class SessionService {
     return false;
   }
 
+  private claudeJsonlReaderFor(session: SessionRecord): ClaudeJsonlReaderState | undefined {
+    const entry = this.claudeJsonlReaders.get(session.id);
+    if (!entry || entry.agentSessionId !== session.agentSessionId) return undefined;
+    return entry.reader;
+  }
+
+  private cacheClaudeJsonlReader(session: SessionRecord, reader: ClaudeJsonlReaderState): void {
+    this.claudeJsonlReaders.set(session.id, { agentSessionId: session.agentSessionId, reader });
+  }
+
+  // Rebinds the stored claude id after /clear or /resume rotated it in the
+  // pane. One synchronous span: re-read, check, write.
+  private rotateClaudeSessionId(
+    session: SessionRecord,
+    agentSessionId: string,
+    status: { pid: number; procStart?: string },
+    probeRevision: number,
+  ): SessionRecord | undefined {
+    const current = this.readClaudeStatusRecordIfUnchanged(session, probeRevision);
+    if (!current?.claudeStatusOwner || !claudeStatusOwnerMatches(current, status)) {
+      return undefined;
+    }
+    const rotated = {
+      ...current,
+      agentSessionId,
+      claudeStatusOwner: { ...current.claudeStatusOwner, agentSessionId },
+    };
+    writeSession(this.config.dataDir, rotated);
+    this.stateCache.delete(session.id);
+    this.claudeJsonlReaders.delete(session.id);
+    return rotated;
+  }
+
+  // Records the pane process that reports the stored id, once per change.
+  private persistClaudeStatusOwner(
+    session: SessionRecord,
+    owner: ClaudeStatusOwner,
+    probeRevision: number,
+  ): SessionRecord | undefined {
+    const current = this.readClaudeStatusRecordIfUnchanged(session, probeRevision);
+    if (!current || isDeepStrictEqual(current.claudeStatusOwner, owner)) return undefined;
+    const persisted = { ...current, claudeStatusOwner: owner };
+    writeSession(this.config.dataDir, persisted);
+    return persisted;
+  }
+
+  // Freshest record, only while the classify's launch, owner, lifecycle and
+  // revision still hold; callers write in the same synchronous span.
+  private readClaudeStatusRecordIfUnchanged(
+    session: SessionRecord,
+    probeRevision: number,
+  ): SessionRecord | undefined {
+    const current = readSession(this.config.dataDir, session.id);
+    const lifecycle = this.lifecycle.snapshot(session.id);
+    if (
+      !current ||
+      current.agentSessionId !== session.agentSessionId ||
+      current.agentLaunchId !== session.agentLaunchId ||
+      !sameSessionRuntimeOwner(current, session) ||
+      !this.lifecycleStateMatches(current, this.lifecycleStamp(session)) ||
+      lifecycle.revision !== probeRevision ||
+      lifecycle.operation?.phase === "pending"
+    ) {
+      return undefined;
+    }
+    return current;
+  }
+
   private async captureRateLimitSourceOrdinals(
     session: SessionRecord,
   ): Promise<Record<string, number>> {
@@ -7071,11 +7164,11 @@ export class SessionService {
     if (session.agent === "claude") {
       const result = await readClaudeJsonlState(
         session.worktreePath,
-        this.claudeJsonlReaders.get(session.id),
+        this.claudeJsonlReaderFor(session),
         session.agentSessionId,
       );
       if (!result) throw new RateLimitClearError(`Rate-limit source unavailable for ${session.id}`);
-      this.claudeJsonlReaders.set(session.id, result.reader);
+      this.cacheClaudeJsonlReader(session, result.reader);
       if (result.reader.rateLimitCounts && Object.keys(result.reader.rateLimitCounts).length > 0)
         return { ...result.reader.rateLimitCounts };
       return { [result.reader.filePath]: 0 };
@@ -13486,7 +13579,9 @@ export class SessionService {
   //   that text confirms it; a busy turn's own records never do. The agent
   //   back at its prompt, quiet past the queued-send grace, with no ack: the
   //   text goes back to the queue head once (submitRequeuedMessage); a second
-  //   miss for the same text releases the hold (session.submit.released).
+  //   miss for the same text releases the hold (session.submit.released). A
+  //   typed hold older than SUBMIT_HOLD_CEILING_MS with the agent waiting
+  //   releases at once, without a re-queue.
   private async settleSubmitHold(
     session: SessionRecord,
     state: SessionState,
@@ -13498,11 +13593,15 @@ export class SessionService {
     const typed = session.queuedMessageTyped;
     const strictCodex = session.agent === "codex" && typed?.ackBaseline?.agent === "codex";
     const qualifiedObservation = ackOnly || strictCodex;
-    if (
-      !holdAt ||
-      (!qualifiedObservation &&
-        (!agentActivityAt || agentActivityAt.getTime() < Date.parse(holdAt)))
-    ) {
+    if (!holdAt) return session;
+    const ceilingReached =
+      mode === "normal" &&
+      state === "waiting" &&
+      typed?.typedAt === holdAt &&
+      Date.now() - Date.parse(holdAt) >= SUBMIT_HOLD_CEILING_MS;
+    const activityAfterHold =
+      agentActivityAt !== null && agentActivityAt.getTime() >= Date.parse(holdAt);
+    if (!qualifiedObservation && !activityAfterHold && !ceilingReached) {
       return session;
     }
     if (!typed?.ackBaseline) {
@@ -13510,6 +13609,9 @@ export class SessionService {
       const latest = readSession(this.config.dataDir, session.id);
       if (!latest || latest.submitUnconfirmedAt !== holdAt) {
         return latest ?? session;
+      }
+      if (ceilingReached && !activityAfterHold) {
+        return this.releaseUnconfirmedSubmit(latest, typed.message, "ceiling");
       }
       return this.confirmSubmitHold(latest, "activity");
     }
@@ -13561,6 +13663,7 @@ export class SessionService {
         session.agent,
         {
           ...this.submitAckContext(session),
+          ackNotBeforeMs: Date.parse(originalTyped.typedAt),
           ...(qualifiedObservation ? { codexAckScope: "current-native-baseline" as const } : {}),
         },
         originalTyped.ackBaseline,
@@ -13589,6 +13692,8 @@ export class SessionService {
     if (acked) {
       return this.confirmSubmitHold(latest, "ack");
     }
+    // Past the ceiling the text is never typed again, whatever else holds.
+    if (ceilingReached) return this.releaseUnconfirmedSubmit(latest, typed.message, "ceiling");
     if (
       ackOnly ||
       (strictCodex && !qualifiedNoMatch) ||
@@ -13633,6 +13738,40 @@ export class SessionService {
     return confirmed;
   }
 
+  // Never silent: the view shows the text with Retry and Dismiss. Never types
+  // or re-queues the text; only the user's Retry puts it back.
+  private releaseUnconfirmedSubmit(
+    latest: SessionRecord,
+    message: string,
+    reason: "requeue_exhausted" | "ceiling",
+  ): SessionRecord {
+    const {
+      submitUnconfirmedAt: _held,
+      queuedMessageTyped: _typed,
+      submitRequeuedMessage: requeued,
+      ...base
+    } = latest;
+    const failed: SessionRecord = {
+      ...base,
+      ...(requeued !== undefined && requeued !== message
+        ? { submitRequeuedMessage: requeued }
+        : {}),
+      submitFailedMessage: { message, at: nowIso() },
+    };
+    writeSession(this.config.dataDir, failed);
+    this.logEvent("session.submit.released", {
+      level: "warn",
+      sessionId: latest.id,
+      projectId: latest.project,
+      message:
+        reason === "ceiling"
+          ? `Released the unconfirmed prompt hold for ${latest.id}: no ack of it after ${SUBMIT_HOLD_CEILING_MS / 60_000} min with the agent at its prompt`
+          : `Released the unconfirmed prompt hold for ${latest.id}: the agent took no ack of it after one re-queue`,
+      details: { messageLength: message.length, reason },
+    });
+    return failed;
+  }
+
   private requeueUnconfirmedSubmit(latest: SessionRecord, message: string): SessionRecord {
     const {
       submitUnconfirmedAt: _held,
@@ -13641,20 +13780,7 @@ export class SessionService {
       ...base
     } = latest;
     if (requeued === message) {
-      // Never silent: the view shows the text with Retry and Dismiss.
-      const failed: SessionRecord = {
-        ...base,
-        submitFailedMessage: { message, at: nowIso() },
-      };
-      writeSession(this.config.dataDir, failed);
-      this.logEvent("session.submit.released", {
-        level: "warn",
-        sessionId: latest.id,
-        projectId: latest.project,
-        message: `Released the unconfirmed prompt hold for ${latest.id}: the agent took no ack of it after one re-queue`,
-        details: { messageLength: message.length },
-      });
-      return failed;
+      return this.releaseUnconfirmedSubmit(latest, message, "requeue_exhausted");
     }
     const record = withQueuedMessages(
       { ...base, submitRequeuedMessage: message, updatedAt: nowIso() },
@@ -18662,8 +18788,11 @@ export class SessionService {
     if (intent.kind !== "queued-drain" && submitPending(current)) {
       const held = (await this.classifySessionRecord(current)).session;
       if (submitPending(held)) {
+        const typedHold = held.queuedMessageTyped?.typedAt === held.submitUnconfirmedAt;
         throw new LaunchPromptPendingError(
-          `Agent has not confirmed the last prompt: ${sessionId}. Submit it first.`,
+          typedHold
+            ? `Agent has not confirmed the last prompt: ${sessionId}. Waiting for its transcript ack; an unacked send moves to Retry/Dismiss in the web view after ${SUBMIT_HOLD_CEILING_MS / 60_000} min at the prompt. Pause and restore the session to clear it now.`
+            : `Agent has not confirmed the last prompt: ${sessionId}. Waiting for its transcript activity. Pause and restore the session to clear it now.`,
           held.submitUnconfirmedAt,
         );
       }
@@ -19242,8 +19371,8 @@ export class SessionService {
 
   // An unacked write on a live agent may still sit in the composer: hold every
   // pane writer until the agent acks the typed text (settleSubmitHold); the
-  // banner's submit (Enter only) is the escape. The typed marker carries the
-  // text and its ack baseline for that scan.
+  // SUBMIT_HOLD_CEILING_MS bounds a typed send's hold. The typed marker
+  // carries the text and its ack baseline for that scan.
   private withSubmitUnconfirmed(
     record: SessionRecord,
     typed: NonNullable<SessionRecord["queuedMessageTyped"]>,
@@ -25187,7 +25316,7 @@ export class SessionService {
       const binding = typed.ackBaseline
         ? await resumeAgentSubmitAckBinding(
             session.agent,
-            this.submitAckContext(session),
+            { ...this.submitAckContext(session), ackNotBeforeMs: Date.parse(typed.typedAt) },
             typed.ackBaseline,
           )
         : null;
@@ -27045,10 +27174,10 @@ export class SessionService {
     if (session.agent === "claude") {
       const result = await readClaudeJsonlState(
         session.worktreePath,
-        this.claudeJsonlReaders.get(session.id),
+        this.claudeJsonlReaderFor(session),
         session.agentSessionId,
       ).catch(() => null);
-      if (result) this.claudeJsonlReaders.set(session.id, result.reader);
+      if (result) this.cacheClaudeJsonlReader(session, result.reader);
       return result?.tokenUsage ? { tokenUsage: result.tokenUsage } : {};
     }
     if (session.agent === "codex") {
@@ -27682,31 +27811,48 @@ export class SessionService {
         // Independent I/O (tmux exec vs. file read): fetch the pane pid
         // concurrently with the jsonl read so it stays off the critical path.
         const panePidPromise = getTmuxPanePid(session.tmuxSession);
-        const jsonlResult = await readClaudeJsonlState(
+        let jsonlResult = await readClaudeJsonlState(
           session.worktreePath,
-          this.claudeJsonlReaders.get(session.id),
+          this.claudeJsonlReaderFor(session),
           session.agentSessionId,
         );
-        if (jsonlResult) {
-          this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
-          rateLimit = this.fencedStructuredRateLimit(session, jsonlResult.rateLimit);
-          hasServerErrorRecord = jsonlResult.serverError;
-          hasAuthenticationFailure = hasTrailingClaudeAuthenticationFailure(
-            jsonlResult.reader.tailRecords,
-          );
-          if (jsonlResult.serverError) serverErrorEvidence = "error";
+        const claudeJsonlFields = (result: typeof jsonlResult, record: SessionRecord) => {
+          let evidence: "error" | "recovered" | undefined;
+          if (result?.serverError) evidence = "error";
           else if (
-            session.agentSessionId &&
-            session.serverErrorAt &&
-            hasClaudeRecoveryAfter(jsonlResult.reader.tailRecords, session.serverErrorAt)
+            result &&
+            record.agentSessionId &&
+            record.serverErrorAt &&
+            hasClaudeRecoveryAfter(result.reader.tailRecords, record.serverErrorAt)
           ) {
-            serverErrorEvidence = "recovered";
+            evidence = "recovered";
           }
-          serverErrorJsonlPath = jsonlResult.reader.filePath;
-          // The reader already stat()ed the pinned transcript; reuse its mtime.
-          agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
-          liveModel = jsonlResult.liveModel;
-          tokenUsage = jsonlResult.tokenUsage;
+          return {
+            rateLimit: result ? this.fencedStructuredRateLimit(record, result.rateLimit) : null,
+            hasServerErrorRecord: result?.serverError ?? false,
+            hasAuthenticationFailure: result
+              ? hasTrailingClaudeAuthenticationFailure(result.reader.tailRecords)
+              : false,
+            serverErrorEvidence: evidence,
+            serverErrorJsonlPath: result?.reader.filePath ?? null,
+            // The reader already stat()ed the pinned transcript; reuse its mtime.
+            agentActivityAt: result ? activityAtFromMs(result.reader.lastMtimeMs) : null,
+            liveModel: result?.liveModel,
+            tokenUsage: result?.tokenUsage,
+          };
+        };
+        if (jsonlResult) {
+          this.cacheClaudeJsonlReader(session, jsonlResult.reader);
+          ({
+            rateLimit,
+            hasServerErrorRecord,
+            hasAuthenticationFailure,
+            serverErrorEvidence,
+            serverErrorJsonlPath,
+            agentActivityAt,
+            liveModel,
+            tokenUsage,
+          } = claudeJsonlFields(jsonlResult, session));
         }
         const panePid = await panePidPromise;
         const statusResult = await readClaudeSessionStatus(
@@ -27715,6 +27861,74 @@ export class SessionService {
           undefined,
           panePid !== null ? { panePid } : {},
         );
+        let rotated: SessionRecord | undefined;
+        if (
+          statusResult?.paneOwned === true &&
+          statusResult.kind === "interactive" &&
+          statusResult.pid !== undefined &&
+          statusResult.sessionId !== undefined &&
+          session.agentSessionId !== undefined &&
+          session.agentLaunchId !== undefined
+        ) {
+          const observed = {
+            pid: statusResult.pid,
+            ...(statusResult.procStart !== undefined ? { procStart: statusResult.procStart } : {}),
+          };
+          if (statusResult.sessionId === session.agentSessionId) {
+            if (!claudeStatusOwnerMatches(session, observed)) {
+              const persisted = this.persistClaudeStatusOwner(
+                session,
+                {
+                  agentLaunchId: session.agentLaunchId,
+                  agentSessionId: session.agentSessionId,
+                  ...observed,
+                },
+                probeRevision,
+              );
+              if (persisted) effectiveSession = persisted;
+            }
+          } else if (claudeStatusOwnerMatches(session, observed)) {
+            rotated = this.rotateClaudeSessionId(
+              session,
+              statusResult.sessionId,
+              observed,
+              probeRevision,
+            );
+          }
+        }
+        if (rotated) {
+          effectiveSession = rotated;
+          // The id is already rebound: a failed read counts as no transcript.
+          jsonlResult = await readClaudeJsonlState(
+            rotated.worktreePath,
+            undefined,
+            rotated.agentSessionId,
+          ).catch(() => null);
+          if (jsonlResult) this.cacheClaudeJsonlReader(rotated, jsonlResult.reader);
+          ({
+            rateLimit,
+            hasServerErrorRecord,
+            hasAuthenticationFailure,
+            serverErrorEvidence,
+            serverErrorJsonlPath,
+            agentActivityAt,
+            liveModel,
+            tokenUsage,
+          } = claudeJsonlFields(jsonlResult, rotated));
+          this.logEvent("session.agent_session_id.rotated", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Claude session ${session.id} switched to a new native session id`,
+            details: {
+              agent: session.agent,
+              pid: statusResult?.pid,
+              previousAgentSessionId: session.agentSessionId,
+              agentSessionId: rotated.agentSessionId,
+              transcriptFound: jsonlResult !== null,
+            },
+          });
+        }
         if (statusResult) {
           state = statusResult.state;
           stateSource = "claude_status";
@@ -27731,6 +27945,7 @@ export class SessionService {
           const statusAt = statusResult.statusUpdatedMs;
           const current = readSession(this.config.dataDir, session.id);
           if (
+            rotated === undefined &&
             hasServerErrorRecord &&
             errorAt !== undefined &&
             statusAt !== undefined &&
@@ -28269,6 +28484,7 @@ export class SessionService {
       allowedTriggers: _allowedTriggers,
       agentSessionId: _agentSessionId,
       agentLaunchId: _agentLaunchId,
+      claudeStatusOwner: _claudeStatusOwner,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
       blockedTriggerNotices: _blockedTriggerNotices,
@@ -28731,6 +28947,7 @@ export class SessionService {
       prompt: _prompt,
       originalTaskPrompt: _originalTaskPrompt,
       agentLaunchId: _agentLaunchId,
+      claudeStatusOwner: _claudeStatusOwner,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
       blockedTriggerNotices: _blockedTriggerNotices,

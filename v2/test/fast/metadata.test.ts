@@ -1513,6 +1513,33 @@ describe("session workspaceId normalization", () => {
     expect(readSession(dataDir, record.id)?.rateLimitClearFence).toBeUndefined();
   });
 
+  it("persists the claude status owner and drops a malformed one", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = { ...legacyBase, id: "api-2", tmuxSession: "api-2" };
+    const owner = {
+      agentLaunchId: "launch-1",
+      agentSessionId: "ses_1",
+      pid: 4242,
+      procStart: "777",
+    };
+    writeSession(dataDir, { ...record, claudeStatusOwner: owner });
+    expect(readSession(dataDir, record.id)?.claudeStatusOwner).toEqual(owner);
+    const { procStart: _procStart, ...withoutProcStart } = owner;
+    writeSession(dataDir, { ...record, claudeStatusOwner: withoutProcStart });
+    expect(readSession(dataDir, record.id)?.claudeStatusOwner).toEqual(withoutProcStart);
+    for (const malformed of [
+      { ...owner, pid: 0 },
+      { ...owner, agentLaunchId: 7 },
+      { ...owner, procStart: "" },
+    ]) {
+      writeSession(dataDir, {
+        ...record,
+        claudeStatusOwner: malformed as unknown as NonNullable<SessionRecord["claudeStatusOwner"]>,
+      });
+      expect(readSession(dataDir, record.id)?.claudeStatusOwner).toBeUndefined();
+    }
+  });
+
   it("persists the restore idle baseline and accepts legacy records without one", async () => {
     const dataDir = await newDataDir();
     const record: SessionRecord = { ...legacyBase, id: "api-1", tmuxSession: "api-1" };
