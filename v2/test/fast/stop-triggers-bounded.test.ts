@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stopTriggersBounded } from "../../src/server.js";
 import type { TriggerGroupController } from "../../src/triggers.js";
 
-const controllerWith = (stop: () => Promise<void>): TriggerGroupController => ({ stop });
+const controllerWith = (stop: () => Promise<void>): TriggerGroupController => ({
+  stop,
+  nudgeSession: () => {},
+});
 
 describe("stopTriggersBounded", () => {
   beforeEach(() => {

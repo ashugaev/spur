@@ -1,4 +1,13 @@
-import { mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -844,19 +853,42 @@ describe("findLatestCursorTranscriptFile", () => {
       "agent-transcripts",
     );
     await mkdir(join(transcriptsDir, "rate-limit-chat"), { recursive: true });
-    await writeFile(
-      join(transcriptsDir, "rate-limit-chat", "rate-limit-chat.jsonl"),
-      `${JSON.stringify({
-        type: "turn_ended",
-        status: "error",
-        error:
-          "Increase limits for faster responses You're out of usage. Switch to auto, Auto, or Composer 2.5, or ask your admin to increase your limit to continue.",
-      })}\n`,
-    );
+    const filePath = join(transcriptsDir, "rate-limit-chat", "rate-limit-chat.jsonl");
+    const limitLine = JSON.stringify({
+      type: "turn_ended",
+      status: "error",
+      error:
+        "Increase limits for faster responses You're out of usage. Switch to auto, Auto, or Composer 2.5, or ask your admin to increase your limit to continue.",
+    });
+    await writeFile(filePath, `${limitLine}\n`);
 
     const state = await readCursorJsonlState(worktreePath);
     expect(state?.state).toBe("error");
-    expect(state?.rateLimit).toEqual({ limited: true, reason: "cursor out of usage" });
+    expect(state?.rateLimit).toMatchObject({ limited: true, reason: "cursor out of usage" });
+    expect(state?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1 });
+    const firstKey = state?.rateLimit?.source?.key;
+    expect(firstKey).toBeDefined();
+    const cached = await readCursorJsonlState(worktreePath, state?.reader);
+    expect(cached?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1, key: firstKey });
+    await appendFile(filePath, `${JSON.stringify({ type: "unrelated" })}\n`);
+    const unrelated = await readCursorJsonlState(worktreePath, cached?.reader);
+    expect(unrelated?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1, key: firstKey });
+    await appendFile(filePath, `${limitLine}\n`);
+    const fresh = await readCursorJsonlState(worktreePath, unrelated?.reader);
+    expect(fresh?.rateLimit?.source).toMatchObject({ filePath, ordinal: 2 });
+    expect(fresh?.rateLimit?.source?.key).not.toBe(firstKey);
+    await writeFile(
+      filePath,
+      `${JSON.stringify({ role: "user", message: { content: [{ type: "text", text: "retry" }] } })}\n${JSON.stringify({ type: "unrelated", padding: "x".repeat(1_000) })}\n${limitLine}\n`,
+    );
+    const growingRewrite = await readCursorJsonlState(worktreePath, fresh?.reader);
+    expect(growingRewrite?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1 });
+    expect(growingRewrite?.rateLimit?.source?.key).not.toBe(firstKey);
+    const afterRestart = await readCursorJsonlState(worktreePath);
+    expect(afterRestart?.rateLimit?.source?.key).toBe(growingRewrite?.rateLimit?.source?.key);
+    await writeFile(filePath, `${limitLine}\n`);
+    const rewritten = await readCursorJsonlState(worktreePath, growingRewrite?.reader);
+    expect(rewritten?.rateLimit?.source).toMatchObject({ filePath, ordinal: 1, key: firstKey });
   });
 
   it("returns null for rateLimit when historical terminalError is followed by user turn", async () => {

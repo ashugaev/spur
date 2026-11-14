@@ -24,10 +24,10 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "cbe1ead229cf36a55961fc877aa6bbb8924f8b9bde3794492f97a123e538bcb8",
-  "types.ts": "4d16a95243899dcb759dac72b3d273f692ba965a22472c96534dee10558248cd",
+  "server.ts": "7ed6b017bf1468c07b9e3856c26708856f587a744fc73d54ab0883a020704ace",
+  "types.ts": "5a9ce63bd5b424466bae357627855876e202cc5027681c8d2219ffd1e5a6c7fe",
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
-  "session-service.ts": "99763aebb66a6ba446ca21df8b76eeb8de66a2f00e13ba6b300ca40a47b5d210",
+  "session-service.ts": "a326ac1d2dcbaac72998af958aceee16525c2f3e8e1b34118fa34288da497360",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "1d06c2d904fa46b95ef8bed971c5767fad76663482f22822f9a541b345f161ff",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -69,9 +69,9 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(111);
+    expect(routes).toHaveLength(112);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(111);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(112);
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("spawn_background_session")?.path).toBe("/sessions/background");
     expect(getDaemonOperation("missing")).toBeUndefined();
@@ -269,6 +269,17 @@ describe("daemon MCP operation contracts", () => {
     }
   });
 
+  it("states reuseWorkspaceSessionId closeout take in the spawn contracts", () => {
+    for (const id of ["spawn_session", "spawn_background_session"]) {
+      expect(
+        getDaemonOperation(id)?.body?.fields.find(
+          (entry) => entry.name === "reuseWorkspaceSessionId",
+        )?.description,
+        id,
+      ).toContain("Takes closeout");
+    }
+  });
+
   it("describes the scoped Cron disk draft and save-and-reload contract", async () => {
     for (const operationId of ["get_cron_job_draft", "save_cron_job_draft"]) {
       const operation = getDaemonOperation(operationId);
@@ -357,7 +368,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(111);
+      expect(page.total).toBe(112);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",
@@ -428,6 +439,19 @@ describe("catalog examples at the real daemon router", () => {
     };
     return { server, request, configPath };
   }
+
+  it("denies a force clear sent through the MCP operation catalog", async () => {
+    const { server, request } = await fixture();
+    try {
+      const response = await request("clear_session_rate_limit", { force: true });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({
+        error: "Agent session cannot clear a rate limit",
+      });
+    } finally {
+      await server.stop();
+    }
+  });
 
   it("binds and detaches source through catalog requests and rejects malformed bodies without mutation", async () => {
     // Test owns the page-source cadence: start() is inert, checks fire via sync.reconcile().

@@ -4,7 +4,7 @@ on:
   issue_comment:
     types: [created, edited, deleted]
   pull_request_target:
-    types: [opened, synchronize, reopened, edited, closed]
+    types: [opened, synchronize, reopened, edited, closed, ready_for_review, converted_to_draft]
   workflow_run:
     workflows: [CI, Spur Review Wake]
     types: [requested, in_progress, completed]
