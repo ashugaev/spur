@@ -91,8 +91,9 @@ export function parseSessionTransitionsQuery(params: URLSearchParams): SessionTr
   if (kinds && kinds.some((kind) => kind !== "status" && kind !== "state")) {
     throw new Error("kinds must be status, state, or status,state");
   }
+  const since = params.get("since");
   return {
-    ...(params.has("since") ? { since: params.get("since")! } : {}),
+    ...(since !== null ? { since } : {}),
     links: parseSessionLinkFilters(params.getAll("link")),
     limit: limit === null ? 200 : Number(limit),
     ...(kinds ? { kinds: kinds as ("status" | "state")[] } : {}),
@@ -112,7 +113,7 @@ export class SessionTransitions {
   private readonly dir: string;
   private readonly checkpointPath: string;
   private checkpoint: Checkpoint;
-  private segments: number[];
+  private segments: [number, ...number[]];
   private firstSequence = 1;
   private dirty = false;
 
@@ -131,11 +132,11 @@ export class SessionTransitions {
       : { stream: randomUUID(), sequence: 0, observations: {} };
     // Persist identity before the first entry, including an empty feed cursor.
     if (!existsSync(this.checkpointPath)) this.saveCheckpoint();
-    this.segments = readdirSync(this.dir)
+    const [first = 1, ...older] = readdirSync(this.dir)
       .filter((name) => /^\d+\.jsonl$/.test(name))
       .map((name) => Number(name.slice(0, -6)))
       .sort((a, b) => a - b);
-    if (this.segments.length === 0) this.segments.push(1);
+    this.segments = [first, ...older];
     let prior: number | undefined;
     for (const entry of this.entries()) {
       const sequence = this.sequenceOf(entry.cursor);
@@ -216,7 +217,7 @@ export class SessionTransitions {
   private prune(): void {
     // Checkpoint precedes deletion: interruption leaves extra readable segments.
     while (this.segments.length > this.bounds.retainSegments) {
-      unlinkSync(this.path(this.segments[0]!));
+      unlinkSync(this.path(this.segments[0]));
       this.segments.shift();
     }
     this.firstSequence = this.checkpoint.sequence + 1;
@@ -232,14 +233,14 @@ export class SessionTransitions {
       | Omit<Extract<SessionTransition, { kind: "state" }>, "cursor">,
   ): void {
     if (this.dirty) this.saveCheckpoint();
-    let segment = this.segments.at(-1)!;
+    let segment = this.segments.reduce((_, current) => current);
     const path = this.path(segment);
     if (existsSync(path) && statSync(path).size >= this.bounds.segmentBytes) {
       segment += 1;
       this.segments.push(segment);
     }
     const sequence = this.checkpoint.sequence + 1;
-    const complete = { ...entry, cursor: this.cursor(sequence) } as SessionTransition;
+    const complete = { ...entry, cursor: this.cursor(sequence) };
     const target = this.path(segment);
     const priorBytes = existsSync(target) ? statSync(target).size : 0;
     try {

@@ -8,6 +8,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import type * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -15,7 +16,7 @@ import { SessionTransitions, parseSessionTransitionsQuery } from "../../src/sess
 import type { SessionRecord } from "../../src/types.js";
 
 vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
+  const actual = await importOriginal<typeof fs>();
   return { ...actual, unlinkSync: vi.fn(actual.unlinkSync), renameSync: vi.fn(actual.renameSync) };
 });
 
