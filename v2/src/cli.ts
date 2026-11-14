@@ -194,6 +194,9 @@ import {
   type HandoffSessionRequest,
   type TodoMutationRequest,
   type TodoProjection,
+  type WorkSnapshot,
+  type WorkSnapshotMeta,
+  type WriteSnapshotRequest,
 } from "./types.js";
 import { getVersion } from "./version.js";
 import {
@@ -4028,6 +4031,77 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         request: { action: "resume", itemId },
         configPath: prepareInstanceConfig(command.parent?.parent as Command).configPath,
+      });
+    });
+
+  const snapshotCommand = program
+    .command("snapshot")
+    .description("Write, list or show a session's work snapshots.");
+  const snapshotsPath = (sessionId: string): string =>
+    `/sessions/${encodeURIComponent(sessionId)}/snapshots`;
+  snapshotCommand
+    .command("write")
+    .argument("<sessionId>", "Session id")
+    .requiredOption("--file <path>", "Markdown file; - reads stdin")
+    .option("--final", "Mark as the final snapshot")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const filePath = (options.file as string).trim();
+      const request: WriteSnapshotRequest = {
+        content: readFileSync(filePath === "-" ? 0 : filePath, "utf-8"),
+        ...(options.final ? { final: true } : {}),
+      };
+      await outputResult({
+        json: Boolean(options.json),
+        label: "writing snapshot",
+        action: () =>
+          postJson<WorkSnapshotMeta>(cliEntrypoint, snapshotsPath(sessionId), request, configPath),
+        render: (meta) =>
+          `Wrote snapshot ${meta.version} for ${meta.sessionId}${meta.final ? " (final)" : ""}.`,
+      });
+    });
+  snapshotCommand
+    .command("list")
+    .argument("<sessionId>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading snapshots",
+        action: () =>
+          getJson<WorkSnapshotMeta[]>(cliEntrypoint, snapshotsPath(sessionId), configPath),
+        render: (snapshots) =>
+          snapshots
+            .map(
+              (meta) =>
+                `${meta.version}\t${meta.at}\t${meta.trigger}\t${meta.branch ?? "-"}\t${meta.headSha?.slice(0, 8) ?? "-"}`,
+            )
+            .join("\n"),
+      });
+    });
+  snapshotCommand
+    .command("show")
+    .argument("<sessionId>", "Session id")
+    .argument("[version]", "Snapshot version; defaults to the latest")
+    .option("--json", "Print the full snapshot as JSON")
+    .action(async (sessionId: string, versionArg: string | undefined, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const version = versionArg?.trim() ?? "latest";
+      if (version !== "latest" && !/^[1-9][0-9]*$/.test(version)) {
+        throw new Error("version must be a positive integer");
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading snapshot",
+        action: () =>
+          getJson<WorkSnapshot>(
+            cliEntrypoint,
+            `${snapshotsPath(sessionId)}/${version}`,
+            configPath,
+          ),
+        render: (snapshot) => snapshot.content,
       });
     });
 

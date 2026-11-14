@@ -307,6 +307,11 @@ const TODO_PROMPT = `Spur ToDo:
 - Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.
 - Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.
 
+Spur snapshot:
+- Keep a backward-looking Markdown snapshot of your work: \`"$SPUR_SNAPSHOT_COMMAND" write --file <path>\` (\`--file -\` reads stdin). Each write stores a full new version.
+- Write one after each finished step and before you stop. Suggested sections: Now, Established, Tried, Next, Questions and risks, References.
+- When the project requires it, finishing or self-destruct needs a \`--final\` snapshot written after your last ToDo change; handoff needs any snapshot written after it.
+
 Read associated chat and bot with \`"$SPUR_SESSION_TOOL_DIR/spur" source info --json\`.`;
 const TELEGRAM_PROMPT = [
   "Telegram: the user reads this session in Telegram. Your terminal output is invisible to them.",
@@ -3058,6 +3063,7 @@ describe("SessionService", () => {
         SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
+        SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -3299,6 +3305,228 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")?.status).toBe("running");
       expect(sessions.get("api-2")?.status).toBe("running");
       service.dispose();
+    });
+
+    describe("work snapshot gate", () => {
+      const agent = { kind: "agent", agent: "claude", sessionId: "api-1" } as const;
+
+      async function gatedService(requireFinal: boolean, session = runningSession()) {
+        const config = baseConfig();
+        loadConfigMock.mockReturnValue({
+          ...config,
+          projects: { api: { ...config.projects.api, snapshots: { requireFinal } } },
+        });
+        const sessions = createSessionStore();
+        sessions.set(session.id, session);
+        await useRealTodoLedger();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        return { sessions, service };
+      }
+
+      async function resolveOneItem(
+        service: Awaited<ReturnType<typeof createDisposedSessionService>>,
+      ) {
+        const added = await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Ship it", reason: "Session objective" },
+          agent,
+        );
+        const itemId = added.items.at(-1)?.id;
+        if (!itemId) throw new Error("Expected added ToDo item");
+        await service.mutateTodo("api-1", { action: "complete", itemId, reason: "Done" }, agent);
+      }
+
+      it("refuses agent complete without a final snapshot, then allows it after one is written", async () => {
+        const { sessions, service } = await gatedService(true);
+        await resolveOneItem(service);
+
+        await expect(service.complete("api-1", { skipPrCheck: true })).rejects.toMatchObject({
+          code: "work_snapshot_required",
+          sessionIds: ["api-1"],
+          required: "final",
+        });
+        expect(sessions.get("api-1")?.status).toBe("running");
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.complete.failed",
+            level: "warn",
+            details: { kind: "work_snapshot_required" },
+          }),
+        );
+
+        await service.writeSnapshot("api-1", { content: "# Not final", final: false });
+        await expect(service.complete("api-1", { skipPrCheck: true })).rejects.toMatchObject({
+          code: "work_snapshot_required",
+        });
+
+        const meta = await service.writeSnapshot("api-1", { content: "# Done", final: true });
+        expect(meta).toMatchObject({ version: 2, final: true, agent: "claude" });
+        await service.complete("api-1", { skipPrCheck: true });
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
+      it("refuses again after a ToDo change follows the final snapshot", async () => {
+        const { sessions, service } = await gatedService(true);
+        await resolveOneItem(service);
+        await service.writeSnapshot("api-1", { content: "# Done", final: true });
+        await resolveOneItem(service);
+
+        await expect(service.complete("api-1", { skipPrCheck: true })).rejects.toMatchObject({
+          code: "work_snapshot_required",
+        });
+        expect(sessions.get("api-1")?.status).toBe("running");
+        service.dispose();
+      });
+
+      it("lets a human complete without a snapshot", async () => {
+        const { sessions, service } = await gatedService(true);
+
+        await service.complete(
+          "api-1",
+          { skipPrCheck: true },
+          { todoActor: { kind: "human", origin: "cli" } },
+        );
+
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
+      it("skips the check when requireFinal is false", async () => {
+        const { sessions, service } = await gatedService(false);
+        await resolveOneItem(service);
+
+        await service.complete("api-1", { skipPrCheck: true });
+
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
+      it("reports the ToDo block before the snapshot block", async () => {
+        const { service } = await gatedService(true);
+
+        await expect(service.complete("api-1")).rejects.toMatchObject({
+          code: "todo_ledger_empty",
+        });
+        service.dispose();
+      });
+
+      it("refuses self-destruct without a final snapshot and allows it after one", async () => {
+        const { sessions, service } = await gatedService(true);
+        await resolveOneItem(service);
+
+        await expect(service.selfDestruct("api-1")).rejects.toMatchObject({
+          code: "work_snapshot_required",
+        });
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.self_destruct.failed",
+            level: "warn",
+            details: { kind: "work_snapshot_required" },
+          }),
+        );
+
+        await service.writeSnapshot("api-1", { content: "# Done", final: true });
+        await service.selfDestruct("api-1");
+
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
+      it("refuses a desk complete naming every blocked member and completes none", async () => {
+        const config = baseConfig();
+        loadConfigMock.mockReturnValue({
+          ...config,
+          projects: { api: { ...config.projects.api, snapshots: { requireFinal: true } } },
+        });
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ workspaceId: "desk-1" }));
+        sessions.set("api-2", runningSession({ id: "api-2", workspaceId: "desk-1" }));
+        await useRealTodoLedger();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        for (const sessionId of ["api-1", "api-2"]) {
+          const actor = { kind: "agent", agent: "claude", sessionId } as const;
+          const added = await service.mutateTodo(
+            sessionId,
+            { action: "add", text: "Ship it", reason: "Session objective" },
+            actor,
+          );
+          const itemId = added.items[0]?.id;
+          if (!itemId) throw new Error("Expected added ToDo item");
+          await service.mutateTodo(
+            sessionId,
+            { action: "complete", itemId, reason: "Done" },
+            actor,
+          );
+        }
+        await service.writeSnapshot("api-1", { content: "# Done", final: true });
+
+        await expect(service.completeDesk("api-1", { skipPrCheck: true })).rejects.toMatchObject({
+          code: "work_snapshot_required",
+          sessionIds: ["api-2"],
+        });
+        expect(sessions.get("api-1")?.status).toBe("running");
+        expect(sessions.get("api-2")?.status).toBe("running");
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.desk_complete.failed",
+            level: "warn",
+            details: { kind: "work_snapshot_required" },
+          }),
+        );
+        service.dispose();
+      });
+
+      it("refuses agent handoff without any snapshot, then accepts a non-final one", async () => {
+        mockClaudeJsonlState("waiting");
+        const source = sessionRecord({
+          id: "api-1",
+          status: "running",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        });
+        const { sessions, service } = await gatedService(true, source);
+        workspaceExistsMock.mockReturnValue(true);
+        reserveNextSessionIdMock.mockResolvedValue("api-2");
+        await resolveOneItem(service);
+
+        await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toMatchObject({
+          code: "work_snapshot_required",
+          required: "any",
+        });
+        expect(sessions.get("api-1")?.status).toBe("running");
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.handoff.failed",
+            level: "warn",
+            details: { kind: "work_snapshot_required" },
+          }),
+        );
+
+        await service.writeSnapshot("api-1", { content: "# Handoff notes", final: false });
+        const spawned = await service.handoff("api-1", { agent: "cursor" });
+
+        expect(spawned.id).toBe("api-2");
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
+      it("refuses snapshot writes on a terminal session and for a missing one", async () => {
+        const { service } = await gatedService(false, runningSession({ status: "completed" }));
+
+        await expect(
+          service.writeSnapshot("api-1", { content: "x", final: false }),
+        ).rejects.toMatchObject({ code: "snapshot_conflict" });
+        await expect(
+          service.writeSnapshot("missing", { content: "x", final: false }),
+        ).rejects.toMatchObject({ statusCode: 404 });
+        service.dispose();
+      });
     });
 
     it("preserves ledger history when a session pauses", async () => {
@@ -10527,6 +10755,7 @@ describe("SessionService", () => {
         SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
+        SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -41859,6 +42088,7 @@ describe("SessionService", () => {
         SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
+        SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -48427,6 +48657,7 @@ describe("SessionService", () => {
         SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
+        SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -49045,6 +49276,7 @@ describe("SessionService", () => {
         SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
+        SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -50468,6 +50700,7 @@ describe("SessionService", () => {
         SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
+        SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),

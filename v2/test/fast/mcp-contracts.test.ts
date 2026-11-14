@@ -29,7 +29,7 @@ const reviewedFingerprints = {
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
   "session-service.ts": "c931df128def0d3ce7fd097a83ac47b52e73669ba16badf510e2faf4b5513c2e",
   "session-transitions.ts": "832771b8d95a6722cf67fc05685f2fd5f03e7a60a923c7a438e1b5b3bc0dcbb0",
-  "session-slots.ts": "dc362c95b5ad6039a06b8990c33cddd993a416ded9096a0816bcd58480d9c230",
+  "session-slots.ts": "a87132b113add143a65611cca222c5a4d7cd6025ce93823a6827d2c36ea90bc9",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "1d06c2d904fa46b95ef8bed971c5767fad76663482f22822f9a541b345f161ff",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -71,9 +71,9 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(105);
+    expect(routes).toHaveLength(108);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(105);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(108);
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("list_sessions")?.query).toContainEqual(
       expect.objectContaining({ name: "link", type: "string[]", required: false }),
@@ -252,6 +252,7 @@ describe("daemon MCP operation contracts", () => {
       ["complete_session", "CompleteSessionRequest"],
       ["kill_session", "KillSessionRequest"],
       ["save_cron_job_draft", "CronJobEditUpdate"],
+      ["write_snapshot", "WriteSnapshotRequest"],
     ] as const;
     for (const [id, dto] of mappings) {
       const actual = getDaemonOperation(id)?.body?.fields.map(({ name, required }) => ({
@@ -382,7 +383,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(105);
+      expect(page.total).toBe(108);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",
@@ -453,6 +454,23 @@ describe("catalog examples at the real daemon router", () => {
     };
     return { server, request, configPath };
   }
+
+  it("writes and reads work snapshots through MCP operator rights", async () => {
+    const { server, request } = await fixture();
+    try {
+      const written = await request("write_snapshot", { content: "# Now\nMCP" });
+      expect(written.status).toBe(200);
+      expect(await written.json()).toMatchObject({ version: 1, final: false });
+      expect((await request("write_snapshot", { content: " " })).status).toBe(400);
+      const latest = await request("get_snapshot", undefined, { version: "latest" });
+      expect(latest.status).toBe(200);
+      expect(await latest.json()).toMatchObject({ version: 1, content: "# Now\nMCP" });
+      const list = await request("list_snapshots");
+      expect(await list.json()).toMatchObject([{ version: 1 }]);
+    } finally {
+      await server.stop();
+    }
+  });
 
   it("denies a force clear sent through the MCP operation catalog", async () => {
     const { server, request } = await fixture();

@@ -311,6 +311,21 @@ const requestBodies = {
       "resume:{action,itemId}",
     ],
   ),
+  snapshot: body("WriteSnapshotRequest", [
+    field(
+      "content",
+      "string",
+      "Nonblank Markdown; at most projects.<id>.snapshots.maxBytes.",
+      true,
+    ),
+    field(
+      "final",
+      "boolean",
+      "Mark as the final snapshot; stored trigger becomes final.",
+      false,
+      false,
+    ),
+  ]),
   complete: body(
     "CompleteSessionRequest",
     [
@@ -1203,6 +1218,47 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
       ]),
       examples: [{ body: {} }, { body: { force: true } }],
       response: "RateLimitClearResult",
+    },
+  ),
+  operation(
+    "list_snapshots",
+    "GET",
+    "/sessions/{sessionId}/snapshots",
+    "List work snapshot metadata, ascending by version.",
+    { response: "WorkSnapshotMeta[]; content omitted.", source: "v2/src/snapshots.ts" },
+  ),
+  operation(
+    "write_snapshot",
+    "POST",
+    "/sessions/{sessionId}/snapshots",
+    "Store a full Markdown work snapshot as the next version; Spur fills metadata.",
+    {
+      body: requestBodies.snapshot,
+      examples: [
+        { body: { content: "# Now\nWorking" } },
+        { body: { content: "# Done", final: true } },
+      ],
+      response: "WorkSnapshotMeta of the stored version.",
+      extraResponses: [
+        {
+          status: 413,
+          contentType: "application/json",
+          description:
+            "snapshot_too_large: {code,limitBytes,actualBytes,error}; content exceeds projects.<id>.snapshots.maxBytes.",
+        },
+      ],
+      source: "v2/src/snapshots.ts",
+    },
+  ),
+  operation(
+    "get_snapshot",
+    "GET",
+    "/sessions/{sessionId}/snapshots/{version}",
+    "Read one work snapshot; version is a positive integer or latest.",
+    {
+      examples: [{ pathParams: { sessionId: "example-sessionId", version: "latest" } }],
+      response: "WorkSnapshot including content; 404 when none exists.",
+      source: "v2/src/snapshots.ts",
     },
   ),
   operation(

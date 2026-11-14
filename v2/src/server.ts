@@ -152,6 +152,7 @@ import {
   type UpdateSessionSlotsRequest,
   type TodoActor,
   type TodoMutationRequest,
+  type WriteSnapshotRequest,
   type SessionListView,
   type SessionView,
 } from "./types.js";
@@ -162,6 +163,13 @@ import {
   TodoOpenWorkError,
   TodoTransitionConflictError,
 } from "./todo.js";
+import {
+  InvalidSnapshotRequestError,
+  SnapshotConflictError,
+  SnapshotCorruptError,
+  SnapshotTooLargeError,
+  WorkSnapshotRequiredError,
+} from "./snapshots.js";
 
 interface JsonError {
   error: string;
@@ -325,19 +333,20 @@ export async function resolveTodoMutationActor(args: {
   lookup: (
     sessionId: string,
   ) => { id: string; agent: AgentName } | Promise<{ id: string; agent: AgentName }>;
+  invalid?: new (message: string) => Error;
 }): Promise<TodoActor> {
   const { origin, callerHeader, targetSessionId, lookup } = args;
-  if (Array.isArray(callerHeader))
-    throw new InvalidTodoRequestError("Caller session header is invalid");
+  const Invalid = args.invalid ?? InvalidTodoRequestError;
+  if (Array.isArray(callerHeader)) throw new Invalid("Caller session header is invalid");
   if (callerHeader) {
-    if (origin !== "cli") throw new InvalidTodoRequestError("Caller session requires CLI origin");
+    if (origin !== "cli") throw new Invalid("Caller session requires CLI origin");
     if (callerHeader !== targetSessionId)
-      throw new InvalidTodoRequestError("Caller session does not match ToDo owner");
+      throw new Invalid("Caller session does not match target session");
     const caller = await lookup(callerHeader);
     return { kind: "agent", agent: caller.agent, sessionId: caller.id };
   }
   if (origin === "cli" || origin === "ui" || origin === "mcp") return { kind: "human", origin };
-  throw new InvalidTodoRequestError("ToDo mutation origin is invalid");
+  throw new Invalid("Request origin is invalid");
 }
 
 async function authorizeAutoPingTarget(args: {
@@ -656,6 +665,16 @@ export function parseCompleteSessionRequest(raw: unknown): CompleteSessionReques
     ...(prAction ? { prAction } : {}),
     ...(raw["skipPrCheck"] === true ? { skipPrCheck: true } : {}),
   };
+}
+
+function parseWriteSnapshotRequest(raw: unknown): { content: string; final: boolean } {
+  if (!isRecord(raw)) throw new Error("Snapshot request must be an object");
+  if (Object.keys(raw).some((key) => key !== "content" && key !== "final"))
+    throw new Error("Snapshot request contains unknown fields");
+  const { content, final } = raw as Partial<Record<keyof WriteSnapshotRequest, unknown>>;
+  if (typeof content !== "string" || !content.trim()) throw new Error("content must be nonblank");
+  if (final !== undefined && typeof final !== "boolean") throw new Error("final must be a boolean");
+  return { content, final: final === true };
 }
 
 function parseTodoMutationRequest(raw: unknown): TodoMutationRequest {
@@ -2414,6 +2433,49 @@ export async function startServer(
         return;
       }
 
+      const snapshotsSessionId = path.match(/^\/sessions\/([^/]+)\/snapshots$/)?.[1];
+      if (method === "GET" && snapshotsSessionId) {
+        sendJson(response, 200, service.readSnapshots(decodeURIComponent(snapshotsSessionId)));
+        return;
+      }
+      if (method === "POST" && snapshotsSessionId) {
+        const targetSessionId = decodeURIComponent(snapshotsSessionId);
+        await resolveTodoMutationActor({
+          origin,
+          callerHeader: request.headers["x-spur-caller-session"],
+          targetSessionId,
+          lookup: (callerSessionId) => service.getSessionIdentity(callerSessionId),
+          invalid: InvalidSnapshotRequestError,
+        });
+        let body: { content: string; final: boolean };
+        try {
+          body = parseWriteSnapshotRequest(await readJsonBody<unknown>(request));
+        } catch (parseError) {
+          throw new InvalidSnapshotRequestError(
+            parseError instanceof Error ? parseError.message : "Invalid snapshot request",
+          );
+        }
+        sendJson(response, 200, await service.writeSnapshot(targetSessionId, body));
+        return;
+      }
+
+      const snapshotVersionMatch = path.match(/^\/sessions\/([^/]+)\/snapshots\/([^/]+)$/);
+      if (method === "GET" && snapshotVersionMatch) {
+        const requested = decodeURIComponent(snapshotVersionMatch[2] ?? "");
+        if (requested !== "latest" && !/^[1-9][0-9]*$/.test(requested)) {
+          throw new InvalidSnapshotRequestError('version must be a positive integer or "latest"');
+        }
+        sendJson(
+          response,
+          200,
+          service.readSnapshot(
+            decodeURIComponent(snapshotVersionMatch[1] ?? ""),
+            requested === "latest" ? "latest" : Number(requested),
+          ),
+        );
+        return;
+      }
+
       const todoSessionId = path.match(/^\/sessions\/([^/]+)\/todo$/)?.[1];
       if (method === "GET" && todoSessionId) {
         sendJson(response, 200, await service.readTodo(decodeURIComponent(todoSessionId)));
@@ -3046,6 +3108,55 @@ export async function startServer(
               : { sessionIds: error.sessionIds }),
             error: error.message,
           },
+        });
+        return;
+      }
+      if (error instanceof WorkSnapshotRequiredError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            code: error.code,
+            ...(error.sessionIds.length === 1
+              ? { sessionId: error.sessionIds[0] }
+              : { sessionIds: error.sessionIds }),
+            required: error.required,
+            error: error.message,
+          },
+        });
+        return;
+      }
+      if (error instanceof SnapshotTooLargeError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            code: error.code,
+            limitBytes: error.limitBytes,
+            actualBytes: error.actualBytes,
+            error: error.message,
+          },
+        });
+        return;
+      }
+      if (error instanceof SnapshotCorruptError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            code: error.code,
+            sessionId: error.sessionId,
+            version: error.version,
+            error: error.message,
+          },
+        });
+        return;
+      }
+      if (error instanceof InvalidSnapshotRequestError || error instanceof SnapshotConflictError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: { code: error.code, error: error.message },
         });
         return;
       }

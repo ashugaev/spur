@@ -351,6 +351,7 @@ import {
 import {
   AGENT_STATE_TOOL_NAME,
   SLOT_TOOL_NAME,
+  SNAPSHOT_TOOL_NAME,
   TODO_TOOL_NAME,
   applyNormalizedSlotsUpdate,
   applySlotsUpdate,
@@ -596,6 +597,8 @@ import {
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   type TodoMutationRequest,
   type TodoProjection,
+  type WorkSnapshot,
+  type WorkSnapshotMeta,
 } from "./types.js";
 import {
   ensureTodoLedger,
@@ -607,6 +610,15 @@ import {
   todoLedgerBlock,
   unfinishedTodo,
 } from "./todo.js";
+import {
+  listSnapshots,
+  readSnapshot as readSnapshotVersion,
+  snapshotGateBlock,
+  snapshotSettings,
+  writeSnapshot as storeSnapshot,
+  SnapshotConflictError,
+  WorkSnapshotRequiredError,
+} from "./snapshots.js";
 import { cursorShowsReadyPrompt } from "./cursor-state.js";
 import { readCursorTokenUsage } from "./cursor-token-usage.js";
 import {
@@ -635,6 +647,7 @@ import {
   hasUnpushedCommits,
   isGitWorktree,
   readCurrentBranch,
+  readWorktreeHead,
   removeWorktree,
   workspaceExists,
   probeWorkspace,
@@ -2568,7 +2581,9 @@ function buildInitialMessage(
     base = `${base}\n\nBranch naming:\n- Current project requires branch names to match \`${branchNamingRegex}\`.\n- Use \`spur-branch create <name>\` or \`spur-branch rename <name>\`; it rejects invalid names. \`git push\` is blocked when the current branch does not match.`;
   }
   const todoInstructions = `Spur ToDo:\n- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.\n- The ledger starts empty. You own every item; nothing is added for you.\n- One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.\n- Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.\n- Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.`;
+  const snapshotInstructions = `Spur snapshot:\n- Keep a backward-looking Markdown snapshot of your work: \`"$SPUR_SNAPSHOT_COMMAND" write --file <path>\` (\`--file -\` reads stdin). Each write stores a full new version.\n- Write one after each finished step and before you stop. Suggested sections: Now, Established, Tried, Next, Questions and risks, References.\n- When the project requires it, finishing or self-destruct needs a \`--final\` snapshot written after your last ToDo change; handoff needs any snapshot written after it.`;
   base = base ? `${base}\n\n${todoInstructions}` : todoInstructions;
+  base = `${base}\n\n${snapshotInstructions}`;
   base = `${base}\n\nRead associated chat and bot with \`"$SPUR_SESSION_TOOL_DIR/spur" source info --json\`.`;
   if (telegramInstructions) {
     base = `${base}\n\n${telegramInstructions}`;
@@ -2835,6 +2850,7 @@ function buildSessionEnv(args: {
     SPUR_SESSION_WORK_DIR: ensureSessionWorkDir(args.dataDir, args.artifactsSessionId),
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_TODO_COMMAND: join(args.sessionToolDir, TODO_TOOL_NAME),
+    SPUR_SNAPSHOT_COMMAND: join(args.sessionToolDir, SNAPSHOT_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
     // Real HOME from /etc/passwd, unaffected by sandboxes that remap $HOME to a scratch dir.
@@ -20303,6 +20319,66 @@ export class SessionService {
     });
   }
 
+  readSnapshots(sessionId: string): WorkSnapshotMeta[] {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    return listSnapshots(this.config.dataDir, session);
+  }
+
+  readSnapshot(sessionId: string, version: number | "latest"): WorkSnapshot {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    const snapshot = readSnapshotVersion(this.config.dataDir, session, version);
+    if (!snapshot) {
+      throw new SessionResourceNotFoundError(
+        version === "latest"
+          ? `Session ${sessionId} has no snapshots`
+          : `Snapshot ${version} not found for session ${sessionId}`,
+      );
+    }
+    return snapshot;
+  }
+
+  async writeSnapshot(
+    sessionId: string,
+    request: { content: string; final: boolean },
+  ): Promise<WorkSnapshotMeta> {
+    const initial = readSession(this.config.dataDir, sessionId);
+    if (!initial) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    // Git reads stay outside the lifecycle lock: three 5s timeouts must not block complete.
+    const head = await readWorktreeHead(initial.worktreePath);
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      if (isTerminalSessionStatus(session.status)) {
+        throw new SnapshotConflictError(
+          `Session ${sessionId} is ${session.status}; snapshots are closed`,
+        );
+      }
+      return storeSnapshot(this.config.dataDir, session, request, {
+        maxBytes: snapshotSettings(this.resolveProjectForSession(session)).maxBytes,
+        agent: session.agent,
+        model: session.model ?? null,
+        ...head,
+        todoRevision: ensureTodoLedger(this.config.dataDir, session).revision,
+        links: session.slots?.links ?? [],
+      });
+    });
+  }
+
+  // True when the project requires a snapshot the agent has not written since its
+  // last ToDo change. Humans are exempt; the caller runs it after the ToDo gate.
+  private snapshotGateBlocks(
+    session: SessionRecord,
+    todoRevision: string,
+    require: "final" | "any",
+  ): boolean {
+    return (
+      snapshotSettings(this.resolveProjectForSession(session)).requireFinal &&
+      snapshotGateBlock(this.config.dataDir, session, todoRevision, require)
+    );
+  }
+
   async selfDestruct(sessionId: string): Promise<SessionView> {
     return this.runLifecycle("complete", [sessionId], undefined, () =>
       this.withWorkspaceLifecycleLocks(sessionId, () => {
@@ -20343,6 +20419,7 @@ export class SessionService {
             openItemIds: string[];
             heldItemIds: string[];
           }> = [];
+          const snapshotBlockedIds: string[] = [];
           for (const candidate of candidates) {
             const current = readSession(this.config.dataDir, candidate.id);
             if (!current)
@@ -20353,6 +20430,11 @@ export class SessionService {
             if (block === "empty") emptySessionIds.push(candidate.id);
             else if (block === "unfinished") {
               unfinishedBlocked.push({ sessionId: candidate.id, ...unfinishedTodo(projection) });
+            } else if (
+              options?.todoActor?.kind !== "human" &&
+              this.snapshotGateBlocks(current, projection.revision, "final")
+            ) {
+              snapshotBlockedIds.push(candidate.id);
             }
           }
           if (options?.todoActor?.kind !== "human") {
@@ -20369,6 +20451,17 @@ export class SessionService {
             }
             if (unfinishedBlocked.length > 0) {
               const error = new TodoOpenWorkError(unfinishedBlocked);
+              this.logManualStatusFailure(
+                "desk_complete",
+                "completed",
+                sessionId,
+                session.project,
+                error,
+              );
+              throw error;
+            }
+            if (snapshotBlockedIds.length > 0) {
+              const error = new WorkSnapshotRequiredError(snapshotBlockedIds, "final");
               this.logManualStatusFailure(
                 "desk_complete",
                 "completed",
@@ -21447,8 +21540,8 @@ export class SessionService {
     );
   }
 
-  // Classifies a manual-status-gate refusal for the failure event. A ToDo
-  // cause (empty ledger or unfinished work) demotes to `warn` with
+  // Classifies a manual-status-gate refusal for the failure event. A gate
+  // cause (empty ledger, unfinished work, missing snapshot) demotes to `warn` with
   // `details.kind`, because the gate rejected before any teardown and the
   // session is untouched. Every other cause stays `error` with no `details`.
   private logManualStatusFailure(
@@ -21459,11 +21552,14 @@ export class SessionService {
     error: unknown,
   ): void {
     const message = error instanceof Error ? error.message : String(error);
-    const isTodoCause = error instanceof TodoEmptyLedgerError || error instanceof TodoOpenWorkError;
-    const level = isTodoCause ? "warn" : "error";
-    const details = isTodoCause
-      ? { kind: error instanceof TodoEmptyLedgerError ? "todo_ledger_empty" : "todo_open_work" }
-      : undefined;
+    const gateError =
+      error instanceof TodoEmptyLedgerError ||
+      error instanceof TodoOpenWorkError ||
+      error instanceof WorkSnapshotRequiredError
+        ? error
+        : undefined;
+    const level = gateError ? "warn" : "error";
+    const details = gateError ? { kind: gateError.code } : undefined;
     this.logEvent(`session.${action}.failed`, {
       level,
       sessionId,
@@ -21577,6 +21673,12 @@ export class SessionService {
         if (block && options?.todoActor?.kind !== "human") {
           if (block === "empty") throw new TodoEmptyLedgerError([sessionId]);
           throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(projection) }]);
+        }
+        if (
+          options?.todoActor?.kind !== "human" &&
+          this.snapshotGateBlocks(session, projection.revision, "final")
+        ) {
+          throw new WorkSnapshotRequiredError([sessionId], "final");
         }
       }
       if (targetStatus === "completed" && !request.skipPrCheck) {
@@ -24779,6 +24881,14 @@ export class SessionService {
         handoffBlock === "empty"
           ? new TodoEmptyLedgerError([sessionId])
           : new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(handoffProjection) }]);
+      this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
+      throw error;
+    }
+    if (
+      options?.todoActor?.kind !== "human" &&
+      this.snapshotGateBlocks(session, handoffProjection.revision, "any")
+    ) {
+      const error = new WorkSnapshotRequiredError([sessionId], "any");
       this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
       throw error;
     }
