@@ -20801,7 +20801,10 @@ describe("SessionService", () => {
       await expectRequeuedOnBoot(sessions);
       expect(resumeAgentSubmitAckBindingMock).toHaveBeenCalledWith(
         "claude",
-        expect.objectContaining({ worktreePath: "/tmp/spur-worktrees/api/api-1" }),
+        expect.objectContaining({
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          ackNotBeforeMs: Date.parse("2026-03-18T10:04:00.000Z"),
+        }),
         restartBaseline,
       );
       expect(scan).toHaveBeenCalledWith("typed");
