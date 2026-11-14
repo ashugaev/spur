@@ -50,7 +50,7 @@ DOCS
 
   Doc index: https://raw.githubusercontent.com/ashugaev/spur/main/README.md
   Any path under `docs/` resolves as https://raw.githubusercontent.com/ashugaev/spur/main/<path>
-  Commands, session tools, list/feed link filters and variables: docs/commands.md
+  Commands, session tools/variables, list/feed links: docs/commands.md
   Cursor send correlation and retained acknowledgement baselines: docs/commands.md, docs/daemon-api.md.
   Review feedback, recovery, package checks: docs/commands.md
   Routes, session transitions/reset times, PR reviewer metadata, bounded conversation pages, pre-flight batches, lifecycle receipts, terminal restart, restore cancellation: docs/daemon-api.md
