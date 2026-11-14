@@ -301,6 +301,34 @@ export async function readCurrentBranch(repoPath: string): Promise<string> {
   return runGit(repoPath, ["rev-parse", "--abbrev-ref", "HEAD"], GIT_READ_TIMEOUT_MS);
 }
 
+export interface WorktreeHead {
+  branch: string | null;
+  headSha: string | null;
+  dirty: boolean | null;
+}
+
+/** Git state of a worktree; each field is null when its git call fails. */
+export async function readWorktreeHead(worktreePath: string): Promise<WorktreeHead> {
+  const read = async (args: string[]): Promise<string | null> => {
+    if (!worktreePath.trim() || !existsSync(worktreePath)) return null;
+    try {
+      return await runGit(worktreePath, args, GIT_READ_TIMEOUT_MS);
+    } catch {
+      return null;
+    }
+  };
+  const [branch, headSha, status] = await Promise.all([
+    read(["rev-parse", "--abbrev-ref", "HEAD"]),
+    read(["rev-parse", "HEAD"]),
+    read(["status", "--porcelain"]),
+  ]);
+  return {
+    branch: branch || null,
+    headSha: headSha || null,
+    dirty: status === null ? null : status.trim().length > 0,
+  };
+}
+
 /**
  * Configured URL of every git remote, keyed by remote name. One spawn for the
  * whole set instead of one `remote get-url` per candidate remote, and no GitHub

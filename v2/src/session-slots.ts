@@ -43,6 +43,7 @@ const GIT_WRAPPER_NAME = "git";
 const GIT_WRAPPER_SIGNATURE = "Spur git wrapper could not find git";
 const BRANCH_TOOL_NAME = "spur-branch";
 export const TODO_TOOL_NAME = "spur-todo";
+export const SNAPSHOT_TOOL_NAME = "spur-snapshot";
 export const MANUAL_TITLE_LOCK_MESSAGE =
   "title editing unavailable because title was set manually; do not attempt title edits again.";
 
@@ -420,6 +421,23 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" self-destruct ${shellEscape(args.session
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
 exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" todo "$@" --session ${shellEscape(args.sessionId)}
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  writeToolFileAtomic(
+    join(toolDir, SNAPSHOT_TOOL_NAME),
+    `#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+action="\${1-}"
+case "$action" in
+  write|list|show) shift ;;
+  *)
+    echo "Usage: ${SNAPSHOT_TOOL_NAME} write|list|show [options]" >&2
+    exit 2
+    ;;
+esac
+exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" snapshot "$action" ${shellEscape(args.sessionId)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );

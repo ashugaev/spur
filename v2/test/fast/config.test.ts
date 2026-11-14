@@ -5111,6 +5111,60 @@ projects:
     );
   });
 
+  it("leaves snapshots unset and parses projects.<id>.snapshots", async () => {
+    const absent = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(absent).projects["api"]?.snapshots).toBeUndefined();
+
+    const set = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    snapshots:
+      maxBytes: 131072
+      requireFinal: true
+`);
+    expect(loadConfig(set).projects["api"]?.snapshots).toEqual({
+      maxBytes: 131072,
+      requireFinal: true,
+    });
+  });
+
+  it.each(["0", "1.5", "131073", "big"])("rejects snapshots.maxBytes %s", async (value) => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    snapshots:
+      maxBytes: ${value}
+`);
+    expect(() => loadConfig(configPath)).toThrow("projects.api.snapshots.maxBytes");
+  });
+
+  it("rejects unknown snapshots keys and a non-boolean requireFinal", async () => {
+    const unknown = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    snapshots:
+      retain: 3
+`);
+    expect(() => loadConfig(unknown)).toThrow(
+      'projects.api.snapshots only supports "maxBytes" and "requireFinal" (got: retain)',
+    );
+    const bad = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    snapshots:
+      requireFinal: "yes"
+`);
+    expect(() => loadConfig(bad)).toThrow("projects.api.snapshots.requireFinal must be a boolean");
+  });
+
   it("rejects a non-array mcp.exclude", async () => {
     const configPath = await writeConfig(`
 projects:

@@ -26,6 +26,7 @@ import {
   normalizeSlotsUpdate,
   removeSessionSlotTool,
   withSessionSlotInstructions,
+  SNAPSHOT_TOOL_NAME,
   TODO_TOOL_NAME,
 } from "../../src/session-slots.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "../../src/self-destruct.js";
@@ -358,6 +359,30 @@ describe("session slots", () => {
     const todoWrapper = readFileSync(join(toolDir, TODO_TOOL_NAME), "utf8");
     expect(todoWrapper).toContain('exec "$SCRIPT_DIR/spur" todo "$@" --session \'api-1\'');
     expect(todoWrapper).not.toContain("delete");
+  });
+
+  it("routes the snapshot helper to spur snapshot <action> <id> and rejects other actions", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-1",
+      configPath: "/tmp/spur.yaml",
+    });
+    const wrapper = join(toolDir, SNAPSHOT_TOOL_NAME);
+    expect(readFileSync(wrapper, "utf8")).toContain(
+      'exec "$SCRIPT_DIR/spur" snapshot "$action" \'api-1\' "$@"',
+    );
+    // Fake spur in place of the generated wrapper captures argv.
+    writeFileSync(join(toolDir, "spur"), '#!/usr/bin/env bash\nprintf "%s\\n" "$@"\n', {
+      mode: 0o755,
+    });
+    expect(
+      execFileSync(wrapper, ["write", "--file", "-"], { encoding: "utf8" }).trim().split("\n"),
+    ).toEqual(["snapshot", "write", "api-1", "--file", "-"]);
+    const bad = spawnSync(wrapper, ["delete"], { encoding: "utf8" });
+    expect(bad.status).toBe(2);
+    expect(bad.stderr).toContain("Usage: spur-snapshot");
   });
 
   it("rewrites tool wrappers atomically via rename", async () => {

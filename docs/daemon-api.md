@@ -59,16 +59,19 @@
 - `POST /sessions/:id/opened`
 - `POST /sessions/:id/pause`
 - `POST /sessions/:id/rate-limit/clear` — rejects MCP origin and caller-session header; optional `force`; `v2/src/server.ts`.
-- `POST /sessions/:id/complete` — optional correlation `operationId`, group `completedIds`/outcomes, lifecycle 409/503; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
-- `POST /sessions/:id/self-destruct`
+- `POST /sessions/:id/complete` — optional correlation `operationId`, group `completedIds`/outcomes, lifecycle 409/503, agent `409 work_snapshot_required`; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
+- `POST /sessions/:id/self-destruct` — `409 work_snapshot_required`
 - `POST /sessions/:id/kill`
 - `POST /sessions/:id/restore` — optional `operationId`; `restart` defaults false, replaces running terminal; settled receipt, lifecycle 409/503, 20-minute deadline 504, disconnect cancellation; `v2/src/server.ts`.
 - `POST /sessions/:id/reopen` — restore request fields and single reopen receipt; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
-- `POST /sessions/:id/handoff` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
+- `POST /sessions/:id/handoff` — agent `409 work_snapshot_required`; `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
 - `POST /sessions/:id/respawn` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
 - `POST /sessions/:id/switch-auth` — 404 unless `authRotation.switchAuth: true`
 - `GET /sessions/:id/todo`
-- `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo)
+- `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo-snapshot)
+- `GET /sessions/:id/snapshots` — metadata, ascending by version; `404|500 snapshot_corrupt`; `v2/src/snapshots.ts`
+- `POST /sessions/:id/snapshots` — `{content, final?}`; caller header, when set, must equal `:id`; `400|404|409 snapshot_conflict|413 snapshot_too_large`. See [snapshot](commands.md#todo-snapshot)
+- `GET /sessions/:id/snapshots/:version` — positive integer or `latest`; `400|404|500 snapshot_corrupt`
 - `GET /sessions/:id/auto-ping-suppressions` — `?all=1` adds `history`. See [auto-ping](commands.md#auto-ping)
 - `POST /sessions/:id/auto-ping-suppressions/mute` — `{handle, mode: until_change|for|forever, durationMs?, reason?}`; `400|403|404`. See [auto-ping](commands.md#auto-ping)
 - `POST /sessions/:id/auto-ping-suppressions/resume` — exactly one of `{handle}` or `{suppressionId}`; `400|403|404`. See [auto-ping](commands.md#auto-ping)
@@ -94,7 +97,7 @@
 - `POST /sessions/:id/shared-memory/:scope/:key`
 - `DELETE /sessions/:id/shared-memory/:scope/:key`
 
-## Store routes
+## Store routes, page routes
 
 - `GET /stores/:store/docs/:collection` — `:store` = `page:<id>` or `session:<sid>`, `:` accepted as `%3A`; [stores.md](stores.md); `v2/src/stores.ts`, `v2/src/store-agent.ts`, `v2/src/store-actions.ts`.
 - `POST /stores/:store/docs/:collection`
@@ -109,9 +112,6 @@
 - `GET /stores/:store/agent/status`
 - `POST /stores/:store/actions`
 - `POST /stores/:store/actions/:actionId/complete` — CLI and agents only; the web proxy refuses it.
-
-## Page routes
-
 - `GET /pages` — title/icon catalogue; [pages.md](pages.md); `v2/src/pages.ts`.
 - `POST /pages`
 - `PATCH /pages/:id/source` — MCP `update_page_source`; `v2/src/server.ts`, `v2/src/daemon-contracts.ts`.
