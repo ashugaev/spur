@@ -272,6 +272,14 @@ describe("daemon MCP operation contracts", () => {
     }
   });
 
+  it("exposes interrupt send outcomes in the successful response contract", () => {
+    const response = getDaemonOperation("send_message")?.responses.find(
+      ({ status }) => status === 200,
+    );
+    for (const field of ["sendOutcome", "interrupted", "interrupt_guard", "no_interrupt"])
+      expect(response?.description).toContain(field);
+  });
+
   it("states reuseWorkspaceSessionId closeout take in the spawn contracts", () => {
     for (const id of ["spawn_session", "spawn_background_session"]) {
       expect(

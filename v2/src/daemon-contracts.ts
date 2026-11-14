@@ -990,7 +990,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "Send task/message with full queue, interrupt and attachment options.",
     {
       body: send,
-      responseSummary:
+      response:
         "SessionView; explicit queue:false + interrupt:true adds sendOutcome: sent with interrupted:boolean, or queued with reason interrupt_guard (tail) / no_interrupt (head). Older queued messages follow a direct send; submitUnconfirmedAt means receipt is unconfirmed.",
       examples: [
         { body: { message: "Continue", queue: true } },
