@@ -757,6 +757,10 @@ describe("SessionService", () => {
         );
         applySlotsUpdateMock.mockImplementation(slotModule.applySlotsUpdate);
         const sessions = createSessionStore();
+        const links = [
+          { label: "board-task", url: "https://example.com/task" },
+          { label: "board-role", url: "https://example.com/role/reviewer" },
+        ];
         const source = sessionRecord({
           id: "api-1",
           status,
@@ -764,7 +768,7 @@ describe("SessionService", () => {
             ? {
                 terminalSlotsCaptured: true as const,
                 slots: {
-                  links: [{ label: "board-task", url: "https://example.com/task" }],
+                  links,
                   tags: ["feature", "unknown-tag"],
                 },
               }
@@ -774,7 +778,7 @@ describe("SessionService", () => {
         if (status === "errored") {
           writeWorkspaceState(TEST_DATA_DIR, source.id, {
             slots: {
-              links: [{ label: "board-task", url: "https://example.com/task" }],
+              links,
               tags: ["feature", "unknown-tag"],
             },
           });
@@ -786,11 +790,16 @@ describe("SessionService", () => {
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
         const successor = await service.respawn(source.id);
-        expect(successor.slots?.links).toEqual([
-          { label: "board-task", url: "https://example.com/task" },
-        ]);
+        expect(successor.slots?.links).toEqual(links);
         expect(successor.slots?.tags).toEqual(["feature"]);
         expect(sessions.get(successor.id)?.slots?.tags).toEqual(["feature"]);
+        const discovered = await service.list({
+          links: [
+            { label: "board-task", url: "https://example.com/task" },
+            { label: "board-role", url: "https://example.com/role/reviewer" },
+          ],
+        });
+        expect(discovered.map((row) => row.id)).toContain(successor.id);
         service.dispose();
       },
     );
