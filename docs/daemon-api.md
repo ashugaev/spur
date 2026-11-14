@@ -69,7 +69,7 @@
 - `POST /sessions/:id/switch-auth` — 404 unless `authRotation.switchAuth: true`
 - `GET /sessions/:id/todo`
 - `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo-snapshot)
-- `GET /sessions/:id/snapshots` — metadata, ascending by version; `404`; `v2/src/snapshots.ts`
+- `GET /sessions/:id/snapshots` — metadata, ascending by version; `404|500 snapshot_corrupt`; `v2/src/snapshots.ts`
 - `POST /sessions/:id/snapshots` — `{content, final?}`; caller header, when set, must equal `:id`; `400|404|409 snapshot_conflict|413 snapshot_too_large`. See [snapshot](commands.md#todo-snapshot)
 - `GET /sessions/:id/snapshots/:version` — positive integer or `latest`; `400|404|500 snapshot_corrupt`
 - `GET /sessions/:id/auto-ping-suppressions` — `?all=1` adds `history`. See [auto-ping](commands.md#auto-ping)

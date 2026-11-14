@@ -20357,23 +20357,22 @@ export class SessionService {
       }
       return storeSnapshot(this.config.dataDir, session, request, {
         maxBytes: snapshotSettings(this.resolveProjectForSession(session)).maxBytes,
-        agent: session.agent,
-        model: session.model ?? null,
         ...head,
         todoRevision: ensureTodoLedger(this.config.dataDir, session).revision,
-        links: session.slots?.links ?? [],
       });
     });
   }
 
   // True when the project requires a snapshot the agent has not written since its
-  // last ToDo change. Humans are exempt; the caller runs it after the ToDo gate.
+  // last ToDo change. A human actor is exempt; the caller runs it after the ToDo gate.
   private snapshotGateBlocks(
     session: SessionRecord,
     todoRevision: string,
     require: "final" | "any",
+    actor: TodoActor | undefined,
   ): boolean {
     return (
+      actor?.kind !== "human" &&
       snapshotSettings(this.resolveProjectForSession(session)).requireFinal &&
       snapshotGateBlock(this.config.dataDir, session, todoRevision, require)
     );
@@ -20431,8 +20430,7 @@ export class SessionService {
             else if (block === "unfinished") {
               unfinishedBlocked.push({ sessionId: candidate.id, ...unfinishedTodo(projection) });
             } else if (
-              options?.todoActor?.kind !== "human" &&
-              this.snapshotGateBlocks(current, projection.revision, "final")
+              this.snapshotGateBlocks(current, projection.revision, "final", options?.todoActor)
             ) {
               snapshotBlockedIds.push(candidate.id);
             }
@@ -21674,10 +21672,7 @@ export class SessionService {
           if (block === "empty") throw new TodoEmptyLedgerError([sessionId]);
           throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(projection) }]);
         }
-        if (
-          options?.todoActor?.kind !== "human" &&
-          this.snapshotGateBlocks(session, projection.revision, "final")
-        ) {
+        if (this.snapshotGateBlocks(session, projection.revision, "final", options?.todoActor)) {
           throw new WorkSnapshotRequiredError([sessionId], "final");
         }
       }
@@ -24884,10 +24879,7 @@ export class SessionService {
       this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
       throw error;
     }
-    if (
-      options?.todoActor?.kind !== "human" &&
-      this.snapshotGateBlocks(session, handoffProjection.revision, "any")
-    ) {
+    if (this.snapshotGateBlocks(session, handoffProjection.revision, "any", options?.todoActor)) {
       const error = new WorkSnapshotRequiredError([sessionId], "any");
       this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
       throw error;

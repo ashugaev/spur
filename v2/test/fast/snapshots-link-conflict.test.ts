@@ -40,13 +40,10 @@ const session = {
 
 const context = {
   maxBytes: 1000,
-  agent: "claude" as const,
-  model: null,
   branch: null,
   headSha: null,
   dirty: null,
   todoRevision: "",
-  links: [],
 };
 
 describe("snapshot link failures", () => {

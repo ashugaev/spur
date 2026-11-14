@@ -3516,6 +3516,29 @@ describe("SessionService", () => {
         service.dispose();
       });
 
+      it("lets a human hand off without a snapshot", async () => {
+        mockClaudeJsonlState("waiting");
+        const source = sessionRecord({
+          id: "api-1",
+          status: "running",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        });
+        const { sessions, service } = await gatedService(true, source);
+        workspaceExistsMock.mockReturnValue(true);
+        reserveNextSessionIdMock.mockResolvedValue("api-2");
+        await resolveOneItem(service);
+
+        const spawned = await service.handoff(
+          "api-1",
+          { agent: "cursor" },
+          { todoActor: { kind: "human", origin: "cli" } },
+        );
+
+        expect(spawned.id).toBe("api-2");
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
       it("refuses snapshot writes on a terminal session and for a missing one", async () => {
         const { service } = await gatedService(false, runningSession({ status: "completed" }));
 

@@ -22,6 +22,8 @@ const session: SessionRecord = {
   id: "snap-1",
   project: "test",
   agent: "claude",
+  model: "opus",
+  slots: { links: [{ label: "PR", url: "https://example.test/1" }] },
   prompt: "p",
   branch: "feature/x",
   worktree: true,
@@ -36,13 +38,10 @@ const session: SessionRecord = {
 function context(overrides: Partial<SnapshotWriteContext> = {}): SnapshotWriteContext {
   return {
     maxBytes: DEFAULT_SNAPSHOT_MAX_BYTES,
-    agent: "claude",
-    model: "opus",
     branch: "feature/x",
     headSha: "abc123",
     dirty: false,
     todoRevision: "rev-1",
-    links: [{ label: "PR", url: "https://example.test/1" }],
     ...overrides,
   };
 }
@@ -108,16 +107,12 @@ describe("snapshot store", () => {
 
   it("refuses over-limit content naming both numbers and stores nothing", async () => {
     const dir = await dataDir();
-    expect(() =>
-      writeSnapshot(dir, session, { content: "ééé", final: false }, context({ maxBytes: 5 })),
-    ).toThrow(SnapshotTooLargeError);
-    try {
+    const write = () =>
       writeSnapshot(dir, session, { content: "ééé", final: false }, context({ maxBytes: 5 }));
-    } catch (error) {
-      expect((error as SnapshotTooLargeError).message).toBe(
-        "Snapshot is 6 bytes; limit is 5 bytes (projects.test.snapshots.maxBytes).",
-      );
-    }
+    expect(write).toThrow(SnapshotTooLargeError);
+    expect(write).toThrow(
+      "Snapshot is 6 bytes; limit is 5 bytes (projects.test.snapshots.maxBytes).",
+    );
     expect(listSnapshots(dir, session)).toEqual([]);
   });
 

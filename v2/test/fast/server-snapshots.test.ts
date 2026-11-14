@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -20,6 +21,9 @@ async function fixture(extraProjectYaml: string[] = []) {
   const repoDir = join(root, "repo");
   const port = await findFreePort();
   await mkdir(repoDir);
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: repoDir, stdio: "pipe" });
+  git("init", "-b", "main");
+  git("-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init");
   const configPath = join(root, "config.yaml");
   await writeFile(
     configPath,
@@ -62,7 +66,7 @@ async function fixture(extraProjectYaml: string[] = []) {
       headers: { "content-type": "application/json", ...headers },
       body: typeof body === "string" ? body : JSON.stringify(body),
     });
-  return { dataDir, session, url, post };
+  return { dataDir, session, url, post, repoDir };
 }
 
 const agentHeaders = (id: string) => ({ "x-spur-origin": "cli", "x-spur-caller-session": id });
@@ -82,16 +86,26 @@ describe("snapshot routes", () => {
       project: "test",
       agent: "codex",
       model: "gpt-test",
-      branch: null,
-      headSha: null,
-      dirty: null,
+      branch: "main",
+      dirty: false,
       todoRevision: "",
       links: [{ label: "PR", url: "https://example.test/pr/1" }],
       trigger: "manual",
       final: false,
     });
+    const stored = (await fetch(`${url}/snap-owner/snapshots/1`).then((r) => r.json())) as {
+      headSha: string;
+    };
+    expect(stored.headSha).toMatch(/^[0-9a-f]{40}$/);
     const full = await fetch(`${url}/snap-owner/snapshots/1`);
     expect(await full.json()).toMatchObject({ version: 1, content: "# Now\nstep" });
+  });
+
+  it("records a dirty worktree after an untracked file appears", async () => {
+    const { post, repoDir } = await fixture();
+    await writeFile(join(repoDir, "scratch.txt"), "x");
+    const response = await post("snap-owner", { content: "dirty" }, { "x-spur-origin": "cli" });
+    expect(await response.json()).toMatchObject({ dirty: true });
   });
 
   it("stores final writes and serves latest and the list", async () => {
@@ -151,7 +165,9 @@ describe("snapshot routes", () => {
 
   it("returns 400 for a body over 1MB", async () => {
     const { post, url } = await fixture();
-    const response = await post("snap-owner", "x".repeat(1_000_001), { "x-spur-origin": "cli" });
+    const response = await post("snap-owner", JSON.stringify({ content: "x".repeat(1_000_001) }), {
+      "x-spur-origin": "cli",
+    });
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ code: "invalid_snapshot_request" });
     expect(await (await fetch(`${url}/snap-owner/snapshots`)).json()).toEqual([]);

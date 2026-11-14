@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type {
+  AgentName,
   ProjectConfig,
   SessionLink,
   SessionRecord,
@@ -27,7 +28,7 @@ export const MAX_SNAPSHOT_BYTES_CEILING = 131072;
 
 const VERSION_FILE = /^([1-9][0-9]*)\.json$/;
 const TRIGGERS: readonly WorkSnapshotTrigger[] = ["manual", "timer", "hook", "event", "final"];
-const AGENTS: readonly string[] = ["claude", "codex", "cursor", "opencode"];
+const AGENTS: readonly AgentName[] = ["claude", "codex", "cursor", "opencode"];
 
 export class InvalidSnapshotRequestError extends Error {
   readonly statusCode = 400;
@@ -136,7 +137,7 @@ function parseSnapshot(text: string, owner: string, version: number): WorkSnapsh
     Number.isNaN(Date.parse(value["at"])) ||
     typeof value["project"] !== "string" ||
     typeof value["agent"] !== "string" ||
-    !AGENTS.includes(value["agent"]) ||
+    !AGENTS.includes(value["agent"] as AgentName) ||
     !nullableString("model") ||
     !nullableString("branch") ||
     !nullableString("headSha") ||
@@ -187,13 +188,10 @@ export interface WriteSnapshotInput {
 
 export interface SnapshotWriteContext {
   maxBytes: number;
-  agent: SessionRecord["agent"];
-  model: string | null;
   branch: string | null;
   headSha: string | null;
   dirty: boolean | null;
   todoRevision: string;
-  links: SessionLink[];
 }
 
 export function writeSnapshot(
@@ -214,13 +212,13 @@ export function writeSnapshot(
     at: new Date().toISOString(),
     sessionId: session.id,
     project: session.project,
-    agent: context.agent,
-    model: context.model,
+    agent: session.agent,
+    model: session.model ?? null,
     branch: context.branch,
     headSha: context.headSha,
     dirty: context.dirty,
     todoRevision: context.todoRevision,
-    links: context.links,
+    links: session.slots?.links ?? [],
     trigger: input.final ? "final" : "manual",
     final: input.final,
     content: input.content,

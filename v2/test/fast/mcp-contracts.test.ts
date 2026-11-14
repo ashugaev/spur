@@ -24,10 +24,10 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "07928972097b657e1b39f1e5d08b0ce8b916c583202e10be0160284efddfe705",
-  "types.ts": "d60e2b7b4edd08170ae71c639c0a12445e621c40d0bc6916cc29651ca510641b",
+  "server.ts": "19eef8aa8701f91a7e10ff2daae19a3019f5cb40583d353690c15a5b5fa8b097",
+  "types.ts": "82589f1a6f3f6cb0641d82ba59d61d6380dd355cb0f106c400a549dbbced3c00",
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
-  "session-service.ts": "c931df128def0d3ce7fd097a83ac47b52e73669ba16badf510e2faf4b5513c2e",
+  "session-service.ts": "6f01bdabf8443d7ee2f3a5336c775503f58d2c0c3c22275eca06978960946f66",
   "session-transitions.ts": "832771b8d95a6722cf67fc05685f2fd5f03e7a60a923c7a438e1b5b3bc0dcbb0",
   "session-slots.ts": "a87132b113add143a65611cca222c5a4d7cd6025ce93823a6827d2c36ea90bc9",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
