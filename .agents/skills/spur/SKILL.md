@@ -16,6 +16,7 @@ WHAT SPUR IS
 INTERFACES
 
   CLI: `spur --help`, then `spur <command> --help`.
+  Default to plain `spur send`; use `--interrupt` only to correct course, start message with instruction to check working state before continuing; cost and guard: docs/commands.md#send-queue.
   `$SPUR_SESSION_TOOL_DIR` holds the session-bound wrappers; `ls "$SPUR_SESSION_TOOL_DIR"` enumerates them. Call each as `"$SPUR_SESSION_TOOL_DIR/<tool>"`, never bare.
   Session variables: `env | grep '^SPUR_'`.
   Agent launch identity contract: `docs/commands.md#session-tools-and-environment`.

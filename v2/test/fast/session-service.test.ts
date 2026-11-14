@@ -15135,6 +15135,294 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  describe("interrupt send guard", () => {
+    const immediate = { queue: false, interrupt: true } as const;
+
+    it.each(["working", "waiting"] as const)(
+      "reports actual delivery for a %s agent",
+      async (state) => {
+        mockClaudeJsonlState(state);
+        const sessions = createSessionStore(
+          runningSession({
+            queuedMessages: { messages: ["older"], awaitingPrompt: true },
+          }),
+        );
+        const service = await createDisposedSessionService();
+        const sent = await service.send("api-1", { message: "correction", ...immediate });
+        expect(sent.sendOutcome).toEqual({ kind: "sent", interrupted: state === "working" });
+        expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(state === "working" ? 1 : 0);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "correction", {
+          agent: "claude",
+        });
+        expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["older"]);
+        expect(sessions.get("api-1")).not.toHaveProperty("sendOutcome");
+      },
+    );
+
+    it.each([4_999, 5_000])(
+      "suppresses only arrivals before the 5000ms boundary: %s",
+      async (elapsed) => {
+        mockClaudeJsonlState("working");
+        const sessions = createSessionStore(
+          runningSession({
+            queuedMessages: { messages: ["older"], awaitingPrompt: true },
+          }),
+        );
+        const service = await createDisposedSessionService();
+        const start = Date.now();
+        await service.send("api-1", { message: "first", ...immediate });
+        vi.setSystemTime(start + elapsed);
+        const sent = await service.send("api-1", { message: "second", ...immediate });
+        const guarded = elapsed < 5_000;
+        expect(sent.sendOutcome).toEqual(
+          guarded
+            ? { kind: "queued", reason: "interrupt_guard" }
+            : { kind: "sent", interrupted: true },
+        );
+        expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(guarded ? 1 : 2);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(guarded ? 1 : 2);
+        expect(sessions.get("api-1")?.queuedMessages).toEqual({
+          messages: guarded ? ["older", "second"] : ["older"],
+          awaitingPrompt: true,
+        });
+        expect(sessions.get("api-1")).not.toHaveProperty("sendOutcome");
+      },
+    );
+
+    it("does not extend the window for guarded duplicates and isolates sessions", async () => {
+      mockClaudeJsonlState("working");
+      const sessions = createSessionStore(runningSession(), runningSession({ id: "api-2" }));
+      const service = await createDisposedSessionService();
+      const start = Date.now();
+      await service.send("api-1", { message: "first", ...immediate });
+      vi.setSystemTime(start + 4_999);
+      await service.send("api-1", { message: "second", ...immediate });
+      await service.send("api-1", { message: "second", ...immediate });
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["second"]);
+      expect(
+        (await service.send("api-2", { message: "independent", ...immediate })).sendOutcome,
+      ).toEqual({ kind: "sent", interrupted: true });
+      vi.setSystemTime(start + 5_000);
+      expect((await service.send("api-1", { message: "third", ...immediate })).sendOutcome).toEqual(
+        { kind: "sent", interrupted: true },
+      );
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(3);
+    });
+
+    it("uses arrival time when a first acknowledgement holds the pane lock past the window", async () => {
+      mockClaudeJsonlState("working");
+      createAgentSubmitAckBindingMock.mockResolvedValue({
+        scan: async () => ({ found: true, lastScannedFile: "/x.jsonl" }),
+      });
+      createSessionStore(runningSession());
+      const service = await createDisposedSessionService();
+      let releaseAck: () => void = () => {};
+      let enteredAck: () => void = () => {};
+      const ackEntered = new Promise<void>((resolve) => {
+        enteredAck = resolve;
+      });
+      const ackGate = new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementationOnce(
+        async () => {
+          enteredAck();
+          await ackGate;
+          return { found: true, lastScannedFile: "/x.jsonl" };
+        },
+      );
+      const first = service.send("api-1", { message: "first", ...immediate });
+      await ackEntered;
+      const second = service.send("api-1", { message: "second", ...immediate });
+      vi.setSystemTime(Date.now() + 10_000);
+      releaseAck();
+      await first;
+      expect((await second).sendOutcome).toEqual({ kind: "queued", reason: "interrupt_guard" });
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("queues a concurrent guarded repeat after ack timeout without clearing the submit hold", async () => {
+      mockClaudeJsonlState("working");
+      createAgentSubmitAckBindingMock.mockResolvedValue({
+        scan: async () => ({ found: false, lastScannedFile: "/x.jsonl" }),
+      });
+      const sessions = createSessionStore(
+        runningSession({
+          queuedMessages: { messages: ["older"], awaitingPrompt: true },
+        }),
+      );
+      const service = await createDisposedSessionService();
+      const { SubmitAckTimeoutError, LaunchPromptPendingError } =
+        await import("../../src/session-service.js");
+      let releaseAck: () => void = () => {};
+      let enteredAck: () => void = () => {};
+      const ackEntered = new Promise<void>((resolve) => {
+        enteredAck = resolve;
+      });
+      const ackGate = new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementationOnce(
+        async () => {
+          enteredAck();
+          await ackGate;
+          throw new SubmitAckTimeoutError({
+            sessionId: "api-1",
+            agent: "claude",
+            elapsedMs: 10_000,
+            lastScannedFile: "/x.jsonl",
+            processAlive: true,
+            probeUnresponsive: false,
+          });
+        },
+      );
+      const first = service.send("api-1", { message: "first", ...immediate });
+      await ackEntered;
+      const second = service.send("api-1", { message: "second", ...immediate });
+      vi.setSystemTime(Date.now() + 10_000);
+      releaseAck();
+      const firstView = await first;
+      expect(firstView.submitUnconfirmedAt).toBeDefined();
+      const heldTyped = sessions.get("api-1")?.queuedMessageTyped;
+      expect((await second).sendOutcome).toEqual({ kind: "queued", reason: "interrupt_guard" });
+      expect(sessions.get("api-1")).toMatchObject({
+        submitUnconfirmedAt: firstView.submitUnconfirmedAt,
+        queuedMessageTyped: heldTyped,
+        queuedMessages: { messages: ["older", "second"], awaitingPrompt: true },
+      });
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      await expect(
+        service.send("api-1", { message: "outside window", ...immediate }),
+      ).rejects.toBeInstanceOf(LaunchPromptPendingError);
+    });
+
+    it("does not guard or stamp waiting delivery between busy candidates", async () => {
+      mockClaudeJsonlState("waiting");
+      createSessionStore(runningSession());
+      const service = await createDisposedSessionService();
+      await service.send("api-1", { message: "waiting first", ...immediate });
+      mockClaudeJsonlState("working");
+      const start = Date.now();
+      expect((await service.send("api-1", { message: "busy", ...immediate })).sendOutcome).toEqual({
+        kind: "sent",
+        interrupted: true,
+      });
+      vi.setSystemTime(start + 4_999);
+      mockClaudeJsonlState("waiting");
+      expect(
+        (await service.send("api-1", { message: "waiting again", ...immediate })).sendOutcome,
+      ).toEqual({ kind: "sent", interrupted: false });
+      vi.setSystemTime(start + 5_000);
+      mockClaudeJsonlState("working");
+      expect(
+        (await service.send("api-1", { message: "busy again", ...immediate })).sendOutcome,
+      ).toEqual({ kind: "sent", interrupted: true });
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("retains suppression after keys landed but paste failed", async () => {
+      mockClaudeJsonlState("working");
+      createSessionStore(runningSession());
+      const service = await createDisposedSessionService();
+      sendMessageToTmuxMock.mockRejectedValueOnce(new Error("paste failed"));
+      await expect(service.send("api-1", { message: "first", ...immediate })).rejects.toThrow(
+        "paste failed",
+      );
+      expect(
+        (await service.send("api-1", { message: "second", ...immediate })).sendOutcome,
+      ).toEqual({ kind: "queued", reason: "interrupt_guard" });
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not stamp when key authorization fails", async () => {
+      mockClaudeJsonlState("working");
+      createSessionStore(runningSession());
+      const service = await createDisposedSessionService();
+      const matches = vi.spyOn(sessionServiceInternals(service), "paneGenerationMatches");
+      matches.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+      await expect(service.send("api-1", { message: "denied", ...immediate })).rejects.toThrow(
+        /changed/,
+      );
+      expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      matches.mockResolvedValue(true);
+      expect(
+        (await service.send("api-1", { message: "allowed", ...immediate })).sendOutcome,
+      ).toEqual({ kind: "sent", interrupted: true });
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects a guard queue write after the pane generation changes", async () => {
+      mockClaudeJsonlState("working");
+      const sessions = createSessionStore(runningSession());
+      const service = await createDisposedSessionService();
+      await service.send("api-1", { message: "first", ...immediate });
+      const matches = vi.spyOn(sessionServiceInternals(service), "paneGenerationMatches");
+      matches.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+      await expect(service.send("api-1", { message: "stale", ...immediate })).rejects.toThrow(
+        /changed/,
+      );
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).not.toContain("stale");
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps ordinary sends and immediate noninterrupt delivery outside the guard", async () => {
+      mockClaudeJsonlState("working");
+      createSessionStore(runningSession());
+      const service = await createDisposedSessionService();
+      const ordinary = await service.send("api-1", { message: "plain", interrupt: true });
+      expect(ordinary.sendOutcome).toBeUndefined();
+      expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      const direct = await service.send("api-1", { message: "direct", queue: false });
+      expect(direct.sendOutcome).toBeUndefined();
+      await service.send("api-1", { message: "interrupt", ...immediate });
+      const after = await service.send("api-1", { message: "direct again", queue: false });
+      expect(after.sendOutcome).toBeUndefined();
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(3);
+    });
+
+    it("preserves head queuing and reports no_interrupt for a busy no-key agent", async () => {
+      agentInterruptKeysMock.mockReturnValue([]);
+      mockClaudeJsonlState("working");
+      const sessions = createSessionStore(
+        runningSession({
+          queuedMessages: { messages: ["older"], awaitingPrompt: true },
+        }),
+      );
+      const service = await createDisposedSessionService();
+      const sent = await service.send("api-1", { message: "now", ...immediate });
+      expect(sent.sendOutcome).toEqual({ kind: "queued", reason: "no_interrupt" });
+      expect(sent.queuedAheadReason).toBe("no_interrupt");
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["now", "older"]);
+      expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      agentInterruptKeysMock.mockReturnValue(["C-c"]);
+      expect(
+        (await service.send("api-1", { message: "with keys", ...immediate })).sendOutcome,
+      ).toEqual({ kind: "sent", interrupted: true });
+    });
+
+    it("keeps flush and trigger delivery outside the explicit send guard", async () => {
+      mockClaudeJsonlState("working");
+      createSessionStore(
+        runningSession({
+          queuedMessages: { messages: ["flush me"], awaitingPrompt: true },
+        }),
+      );
+      const service = await createDisposedSessionService();
+      await service.flushQueuedMessage("api-1", "flush me");
+      await service.deliver("api-1", "trigger before", { interrupt: true });
+      expect(
+        (await service.send("api-1", { message: "explicit", ...immediate })).sendOutcome,
+      ).toEqual({ kind: "sent", interrupted: true });
+      await service.deliver("api-1", "trigger after", { interrupt: true });
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(4);
+    });
+  });
+
   it.each([
     ["working", true],
     ["waiting", false],
