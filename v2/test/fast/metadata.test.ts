@@ -1479,7 +1479,7 @@ describe("session workspaceId normalization", () => {
     ]) {
       writeSession(dataDir, {
         ...record,
-        claudeStatusOwner: malformed as unknown as SessionRecord["claudeStatusOwner"],
+        claudeStatusOwner: malformed as unknown as NonNullable<SessionRecord["claudeStatusOwner"]>,
       });
       expect(readSession(dataDir, record.id)?.claudeStatusOwner).toBeUndefined();
     }

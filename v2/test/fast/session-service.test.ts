@@ -79710,7 +79710,7 @@ describe("SessionService", () => {
         options: { acked?: boolean; extra?: Partial<SessionRecord> } = {},
       ) {
         const sessions = createSessionStore();
-        seedSendHold(sessions, "claude", { submitRequeuedMessage: undefined, ...options.extra });
+        seedSendHold(sessions, "claude", { ...options.extra });
         mockAgentActivity("claude", beforeHold, state);
         mockHoldAckScan(options.acked ?? false);
         const { SUBMIT_HOLD_CEILING_MS } = await loadSessionServiceModule();
