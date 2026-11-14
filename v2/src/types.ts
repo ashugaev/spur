@@ -881,6 +881,12 @@ export interface ProjectConfig {
   tokenBudget?: number;
   tokenBudgetWarnOnly?: boolean;
   staleAfterMinutes?: number;
+  snapshots?: ProjectSnapshotsConfig;
+}
+
+export interface ProjectSnapshotsConfig {
+  maxBytes?: number;
+  requireFinal?: boolean;
 }
 
 export type ProviderReasoningEffort =
@@ -1922,6 +1928,33 @@ export type TodoMutationRequest =
       requiredHumanAction?: string;
     }
   | { action: "resume"; itemId: string };
+
+export type WorkSnapshotTrigger = "manual" | "timer" | "hook" | "event" | "final";
+
+export interface WorkSnapshotMeta {
+  version: number;
+  at: string;
+  sessionId: string;
+  project: string;
+  agent: AgentName;
+  model: string | null;
+  branch: string | null;
+  headSha: string | null;
+  dirty: boolean | null;
+  todoRevision: string;
+  links: SessionLink[];
+  trigger: WorkSnapshotTrigger;
+  final: boolean;
+}
+
+export interface WorkSnapshot extends WorkSnapshotMeta {
+  content: string;
+}
+
+export interface WriteSnapshotRequest {
+  content: string;
+  final?: boolean;
+}
 
 export interface KillSessionRequest {
   force?: boolean;
