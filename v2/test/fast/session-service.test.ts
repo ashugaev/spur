@@ -68961,7 +68961,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("clears serverErrorAt while stabilizeState still damps the displayed state to error", async () => {
+    it("clears serverErrorAt and immediately exits the displayed error state", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession({ agentSessionId: "native-1" }));
       mockServerError();
@@ -68983,7 +68983,7 @@ describe("SessionService", () => {
 
       const secondView = await service.get("api-1");
 
-      expect(secondView.state).toBe("error");
+      expect(secondView.state).toBe("waiting");
       expect(sessions.get("api-1")?.serverErrorAt).toBeUndefined();
       service.dispose();
     });

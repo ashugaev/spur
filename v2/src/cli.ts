@@ -168,6 +168,7 @@ import {
   type SessionMemoryRecordResponse,
   type SessionGcStatus,
   type SessionState,
+  type SessionTransitionsResponse,
   type SessionStateSubscription,
   type SessionStateSubscriptionListResponse,
   type SessionStateSubscriptionRecordResponse,
@@ -3573,6 +3574,48 @@ export function createProgram(cliEntrypoint: string): Command {
         loadHumanListData(cliEntrypoint, configPath),
       );
       writeStdout(renderSessionDashboard(data));
+    });
+
+  program
+    .command("transitions")
+    .description("Poll retained session lifecycle transitions.")
+    .option("--since <cursor>", "Resume after an opaque cursor")
+    .option(
+      "--link <label[=url]>",
+      "Filter by event-time link; repeated filters use AND",
+      collectOptionValue,
+      [],
+    )
+    .option("--limit <n>", "Maximum matching entries (1..1000; default 200)")
+    .option("--kinds <kinds>", "Comma-separated status,state; omit for lifecycle events")
+    .option("--json", "Print the response envelope")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const query = new URLSearchParams();
+      if (options.since !== undefined) query.set("since", options.since);
+      if (options.limit !== undefined) query.set("limit", options.limit);
+      if (options.kinds !== undefined) query.set("kinds", options.kinds);
+      for (const link of options.link) query.append("link", link);
+      const suffix = query.size > 0 ? `?${query.toString()}` : "";
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading transitions",
+        action: () =>
+          getJson<SessionTransitionsResponse>(
+            cliEntrypoint,
+            `/sessions/transitions${suffix}`,
+            configPath,
+          ),
+        render: (result) =>
+          [
+            ...result.entries.map(
+              (entry) =>
+                `${entry.at} ${entry.sessionId} ${entry.kind} ${entry.from ?? "∅"} -> ${entry.to}`,
+            ),
+            `nextCursor: ${result.nextCursor}`,
+            `hasMore: ${result.hasMore}`,
+          ].join("\n"),
+      });
     });
 
   program

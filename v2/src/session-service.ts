@@ -222,6 +222,7 @@ import {
   sessionUserActionLogPath,
 } from "./user-action-log.js";
 import { archivePath, tryRotate } from "./jsonl-log-io.js";
+import { SessionTransitions } from "./session-transitions.js";
 import { DISK_PROBE_TIMEOUT_MS, readFreeKb } from "./disk-space.js";
 import { reserveNextSessionId } from "./ids.js";
 import {
@@ -290,6 +291,8 @@ import {
   writeTelegramReplyTarget,
   writeServiceInstance,
   writeSession,
+  observeSessionWrites,
+  withSessionWriteGuard,
 } from "./metadata.js";
 import { runSpawnPreflight, type SpawnPreflightResult } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
@@ -355,6 +358,7 @@ import {
   normalizeSlotLinks,
   normalizeSlotLabel,
   normalizeSlotUrl,
+  matchesSessionLinks,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
   slotToolDir,
@@ -574,6 +578,8 @@ import {
   type SidecarStopView,
   type SessionListItemView,
   type SessionStateTransition,
+  type SessionTransitionsQuery,
+  type SessionTransitionsResponse,
   type SubscribeSessionStatesRequest,
   type SessionWorkspaceAccess,
   type UpdateProjectRequest,
@@ -1481,6 +1487,7 @@ interface SessionStateResult {
   workspacePresent: boolean;
   serverError: boolean;
   serverErrorEvidence?: "error" | "recovered";
+  rateLimitResetAt?: string;
   // When the agent last wrote to its own structured artifact (claude transcript
   // JSONL / codex rollout + hook state / cursor transcript JSONL). Null only
   // when the agent has no such artifact yet. Every value here is a byproduct of
@@ -3935,6 +3942,16 @@ export class SessionService {
     engagedCause: MemoryDenialCause | null;
   } = { engaged: false, clearTicks: 0, engagedAtMs: null, engagedCause: null };
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
+  private transitionsBinding:
+    | {
+        dataDir: string;
+        store: SessionTransitions;
+        unregister: () => void;
+      }
+    | undefined;
+  private transitionsRefresh:
+    | { binding: NonNullable<SessionService["transitionsBinding"]>; run: Promise<void> }
+    | undefined;
   // Local (in-worktree) project config resolved per session. The 2s dashboard
   // tick resolves a project for every session, so without this each tick
   // re-parsed the same YAML for the whole fleet — and re-logged the same parse
@@ -4269,6 +4286,8 @@ export class SessionService {
   }
 
   dispose(): void {
+    this.transitionsBinding?.unregister();
+    this.transitionsBinding = undefined;
     this.admissionStopped = true;
     for (const waiter of this.spawnAdmissionWaiters) {
       this.cancelSpawnAdmission(waiter, "disposed");
@@ -5999,7 +6018,11 @@ export class SessionService {
                 this.rateLimitReactivationLastSkip.delete(session.id);
                 const current = readSession(this.config.dataDir, session.id) ?? session;
                 if (current.rateLimitedAt === session.rateLimitedAt) {
-                  const { rateLimitedAt: _rateLimitedAt, ...base } = current;
+                  const {
+                    rateLimitedAt: _rateLimitedAt,
+                    rateLimitResetAt: _reset,
+                    ...base
+                  } = current;
                   writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
                 }
               }
@@ -6356,6 +6379,32 @@ export class SessionService {
     setTmuxSocketName(this.config.tmux.socketName);
     mkdirSync(this.config.dataDir, { recursive: true });
     mkdirSync(this.config.worktreeDir, { recursive: true });
+    const dataDir = resolvePath(this.config.dataDir);
+    if (this.transitionsBinding?.dataDir !== dataDir) {
+      this.transitionsBinding?.unregister();
+      this.transitionsBinding = undefined;
+      this.stateCache.clear();
+      this.stateHistory.clear();
+      this.claudeJsonlReaders.clear();
+      this.lastClassifiedLogStates.clear();
+      this.claudeRateLimitReconfirmOverrides.clear();
+      this.codexPaneLimitObservedAt.clear();
+      this.claudeCompactingOverrides.clear();
+      this.codexMcpDialogOverrides.clear();
+      this.cursorPaneReadyOverrides.clear();
+      this.dashboardCache.clear();
+      this.dashboardEnrichedRecords.clear();
+      const store = new SessionTransitions(dataDir);
+      const binding = { dataDir, store, unregister: () => {} };
+      binding.unregister = observeSessionWrites(dataDir, (record) => {
+        if (this.transitionsBinding !== binding) return;
+        store.observeStatus(record, this.displaySlotsForSession(record)?.links ?? []);
+      });
+      this.transitionsBinding = binding;
+      for (const record of listSessions(dataDir)) {
+        store.observeStatus(record, this.displaySlotsForSession(record)?.links ?? []);
+      }
+    }
     const removeIds = new Set(options.unconfiguredToRemove ?? []);
     mutateConfigRegistry(this.config.dataDir, (current) => ({
       configPaths: this.registryPaths,
@@ -7123,7 +7172,7 @@ export class SessionService {
           paneText.trim() === "" ||
           Boolean(scanTmuxRateLimit(paneText)) ||
           (latest.agent === "claude" && Boolean(detectClaudeUsageLimitMenu(paneText)));
-        const { rateLimitedAt: _rateLimitedAt, ...base } = latest;
+        const { rateLimitedAt: _rateLimitedAt, rateLimitResetAt: _reset, ...base } = latest;
         const cleared: SessionRecord = {
           ...base,
           rateLimitClearFence: {
@@ -11972,12 +12021,7 @@ export class SessionService {
         options?.includeCompleted === true,
       );
     const matchesLinks = (view: { slots?: SessionSlots }) =>
-      options?.links?.every((filter) =>
-        view.slots?.links.some(
-          (link) =>
-            link.label === filter.label && (filter.url === undefined || link.url === filter.url),
-        ),
-      ) ?? true;
+      matchesSessionLinks(view.slots?.links ?? [], options?.links);
     if (options?.view === "dashboard") {
       if (this.dashboardCacheReady) {
         await this.dashboardCacheReady;
@@ -12055,6 +12099,87 @@ export class SessionService {
     );
     for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
     return views.filter((view) => included(view) && matchesLinks(view));
+  }
+
+  async listSessionTransitions(
+    query: SessionTransitionsQuery = {},
+  ): Promise<SessionTransitionsResponse> {
+    const binding = this.transitionsBinding;
+    if (!binding) throw new Error("Session transitions service is disposed");
+    const assertCurrent = () => {
+      if (this.transitionsBinding !== binding)
+        throw new Error("Session transitions data directory changed; retry poll");
+    };
+    let refresh = this.transitionsRefresh;
+    if (!refresh || refresh.binding !== binding) {
+      const run = withSessionWriteGuard(assertCurrent, () =>
+        this.refreshSessionTransitions(binding, assertCurrent),
+      );
+      refresh = { binding, run };
+      this.transitionsRefresh = refresh;
+    }
+    try {
+      await refresh.run;
+    } finally {
+      if (this.transitionsRefresh === refresh) this.transitionsRefresh = undefined;
+    }
+    assertCurrent();
+    return binding.store.query(query);
+  }
+
+  private async refreshSessionTransitions(
+    binding: NonNullable<SessionService["transitionsBinding"]>,
+    assertCurrent: () => void,
+  ): Promise<void> {
+    const accounts = this.computeClaudeAccountsView();
+    const seen = new Set<string>();
+    const rows: {
+      view: Omit<SessionListItemView, "lifecycle">;
+      source: SessionRecord | null;
+      receipt: SessionLifecycleSnapshot;
+    }[] = [];
+    for (let pass = 0; pass < LIFECYCLE_REBUILD_PASSES; pass += 1) {
+      assertCurrent();
+      const records = listSessions(binding.dataDir);
+      for (const record of records) {
+        binding.store.observeStatus(record, this.displaySlotsForSession(record)?.links ?? []);
+        if (seen.has(record.id)) continue;
+        const receipt = this.lifecycle.snapshot(record.id);
+        try {
+          const { view, source } = await this.enrichWithClassified(
+            record,
+            accounts,
+            records,
+            assertCurrent,
+          );
+          assertCurrent();
+          rows.push({ view, source, receipt });
+          seen.add(record.id);
+        } catch (error) {
+          assertCurrent();
+          if (
+            error instanceof SessionResourceNotFoundError &&
+            !readSession(binding.dataDir, record.id)
+          )
+            continue;
+          throw error;
+        }
+      }
+      await this.finalizeLifecycleRows(
+        rows,
+        (record, listing) => this.enrichWithClassified(record, accounts, listing, assertCurrent),
+        { includePending: true, onExhausted: "refuse" },
+      );
+      assertCurrent();
+      const current = listSessions(binding.dataDir);
+      if (current.every((record) => seen.has(record.id))) {
+        // No await between final reconciliation and caller's high-water snapshot.
+        for (const record of current)
+          binding.store.observeStatus(record, this.displaySlotsForSession(record)?.links ?? []);
+        return;
+      }
+    }
+    throw new Error("Session set changed during transitions refresh; retry poll");
   }
 
   getSessionIdentity(sessionId: string): Pick<SessionRecord, "id" | "agent"> {
@@ -24289,6 +24414,11 @@ export class SessionService {
         ...(request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : {}),
       },
     );
+    this.transitionsBinding?.store.observeStatus(
+      readSession(this.config.dataDir, session.id) ?? session,
+      sourceSlots?.links ?? [],
+      spawned.id,
+    );
     if (carryTags.length > 0) {
       const successor = readSession(this.config.dataDir, spawned.id);
       if (!successor) throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
@@ -24414,6 +24544,13 @@ export class SessionService {
       if (!receipt || receipt.sessionId !== spawned.id) {
         throw new Error(`Handoff successor receipt unavailable for ${spawned.id}`);
       }
+      const source = readSession(this.config.dataDir, sessionId);
+      if (source)
+        this.transitionsBinding?.store.observeStatus(
+          source,
+          this.displaySlotsForSession(source)?.links ?? [],
+          spawned.id,
+        );
       const finalized = await this.withPaneWriteLock(receipt.generation.tmuxSession, () =>
         this.withSessionLifecycleLocks(
           [...prepared.lifecycleIds, spawned.id],
@@ -26207,17 +26344,14 @@ export class SessionService {
   private stabilizeState(sessionId: string, nextState: SessionState): SessionState {
     const cached = this.stateCache.get(sessionId);
     const now = Date.now();
-    if (cached && nextState !== cached.state && now - cached.classifiedAt < STATE_HOLD_MS) {
-      if (
-        nextState !== "needs_input" &&
-        nextState !== "rate_limited" &&
-        nextState !== "stale" &&
-        nextState !== "stopped" &&
-        nextState !== "killed" &&
-        nextState !== "error"
-      ) {
-        return cached.state;
-      }
+    if (
+      cached &&
+      nextState !== cached.state &&
+      now - cached.classifiedAt < STATE_HOLD_MS &&
+      (cached.state === "working" || cached.state === "waiting") &&
+      (nextState === "working" || nextState === "waiting")
+    ) {
+      return cached.state;
     }
     this.stateCache.set(sessionId, { state: nextState, classifiedAt: now });
     return nextState;
@@ -26333,6 +26467,7 @@ export class SessionService {
     historySourcePath: string | null,
     serverError: boolean,
     serverErrorEvidence?: "error" | "recovered",
+    rateLimitResetAt?: string,
   ): Promise<SessionStateTransition[]> {
     if (this.isDeliveryStopped()) return [];
     // Recovery evidence is independent of the displayed state and restore warmup.
@@ -26344,6 +26479,38 @@ export class SessionService {
 
     const history = this.stateHistory.get(session.id) ?? [];
     const lastEntry = history[history.length - 1];
+    const previousState =
+      this.transitionsBinding?.store.observedState(session.id) ?? lastEntry?.state;
+    let current = readSession(this.config.dataDir, session.id);
+    if (current) {
+      const limitedAt =
+        state === "rate_limited"
+          ? (current.rateLimitedAt ?? (previousState !== "rate_limited" ? nowIso() : undefined))
+          : undefined;
+      const reset =
+        state === "rate_limited" && limitedAt !== undefined
+          ? (rateLimitResetAt ??
+            (Date.parse(current.rateLimitResetAt ?? "") > Date.now()
+              ? current.rateLimitResetAt
+              : undefined))
+          : undefined;
+      if (current.rateLimitedAt !== limitedAt || current.rateLimitResetAt !== reset) {
+        const { rateLimitedAt: _oldLimit, rateLimitResetAt: _oldReset, ...base } = current;
+        writeSession(this.config.dataDir, {
+          ...base,
+          ...(limitedAt ? { rateLimitedAt: limitedAt } : {}),
+          ...(reset ? { rateLimitResetAt: reset } : {}),
+          updatedAt: nowIso(),
+        });
+        current = readSession(this.config.dataDir, session.id);
+      }
+      if (current)
+        this.transitionsBinding?.store.observeState(
+          current,
+          state,
+          this.displaySlotsForSession(current)?.links ?? [],
+        );
+    }
     if (history.length === 0 || lastEntry?.state !== state) {
       const transitionAt = new Date().toISOString();
       history.push({ state, at: transitionAt, source: stateSource });
@@ -26351,21 +26518,6 @@ export class SessionService {
         history.splice(0, history.length - STATE_HISTORY_LIMIT);
       }
       this.stateHistory.set(session.id, history);
-      const current = readSession(this.config.dataDir, session.id);
-      if (current) {
-        if (state === "rate_limited") {
-          if (!current.rateLimitedAt) {
-            writeSession(this.config.dataDir, {
-              ...current,
-              rateLimitedAt: transitionAt,
-              updatedAt: nowIso(),
-            });
-          }
-        } else if (current.rateLimitedAt) {
-          const { rateLimitedAt: _rateLimitedAt, ...base } = current;
-          writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
-        }
-      }
       if (lastEntry) {
         await this.logStateTransition(
           session,
@@ -26866,6 +27018,8 @@ export class SessionService {
       reconcileRuntime?: boolean;
       bypassClearBarrier?: boolean;
       suppressMenuConfirmation?: boolean;
+      strictErrors?: boolean;
+      assertCurrent?: () => void;
     },
     observePreparation?: (session: SessionRecord) => void,
   ): Promise<SessionStateResult> {
@@ -26882,11 +27036,16 @@ export class SessionService {
       const probeRevision = this.lifecycle.snapshot(session.id).revision;
       let observation = session;
       try {
-        return await this.classifySessionRecordKnown(session, options, (prepared) => {
+        options?.assertCurrent?.();
+        const result = await this.classifySessionRecordKnown(session, options, (prepared) => {
           observation = prepared;
           observePreparation?.(prepared);
         });
+        options?.assertCurrent?.();
+        return result;
       } catch (error) {
+        options?.assertCurrent?.();
+        if (options?.strictErrors) throw error;
         if (
           error instanceof SessionResourceNotFoundError &&
           !readSession(this.config.dataDir, session.id)
@@ -27059,6 +27218,8 @@ export class SessionService {
       scanPane?: boolean;
       reconcileRuntime?: boolean;
       suppressMenuConfirmation?: boolean;
+      strictErrors?: boolean;
+      assertCurrent?: () => void;
     },
     observePreparation?: (session: SessionRecord) => void,
   ): Promise<SessionStateResult> {
@@ -27117,7 +27278,10 @@ export class SessionService {
     if (!isTerminalSessionStatus(session.status)) {
       try {
         runtime = await this.readRuntimeSnapshot(session);
+        options?.assertCurrent?.();
       } catch (error) {
+        options?.assertCurrent?.();
+        if (options?.strictErrors) throw error;
         const result = this.classificationErrorResult(
           session,
           error,
@@ -27239,6 +27403,7 @@ export class SessionService {
     // agrees with the live scan instead of flapping every cycle.
     let paneReconfirmedLimit = false;
     let rateLimitExpiredAtMs: number | undefined;
+    let activeRateLimitResetAt: string | undefined;
     let stateSource: StateSource = "status";
     let historySourcePath: string | null = null;
     let liveModel: string | undefined;
@@ -27870,6 +28035,9 @@ export class SessionService {
         rateLimit?.limited && !rateLimitActive(rateLimit, nowMs) ? rateLimit.resetAtMs : undefined;
       if (rateLimitActive(rateLimit, nowMs) || paneReconfirmedLimit) {
         state = "rate_limited";
+        if (rateLimit?.resetAtMs !== undefined && rateLimit.resetAtMs > nowMs) {
+          activeRateLimitResetAt = new Date(rateLimit.resetAtMs).toISOString();
+        }
         classifiedDetail = `State: rate_limited (${rateLimit?.reason}${paneReconfirmedLimit && !rateLimitActive(rateLimit, nowMs) ? ", pane menu re-confirmed after expiry" : ""})`;
       } else if (rateLimitExpiredResetAtMs !== undefined) {
         // The parsed reset instant has passed and no live menu re-confirmed
@@ -27936,6 +28104,9 @@ export class SessionService {
       workspacePresent: workspace.exists,
       agentActivityAt,
       ...(rateLimitExpiredAtMs !== undefined ? { rateLimitExpiredAtMs } : {}),
+      ...(state === "rate_limited" && activeRateLimitResetAt
+        ? { rateLimitResetAt: activeRateLimitResetAt }
+        : {}),
       ...(liveModel ? { liveModel } : {}),
       ...(tokenUsage ? { tokenUsage } : {}),
       ...(tokenUsages ? { tokenUsages } : {}),
@@ -27976,7 +28147,7 @@ export class SessionService {
     }
     const persistedSession = session;
     session = this.withReportingError(session);
-    const source = isDeepStrictEqual(session, persistedSession) ? session : null;
+    let source = isDeepStrictEqual(session, persistedSession) ? session : null;
     const {
       queuedMessages: _queuedMessages,
       pipeline: _pipeline,
@@ -28003,6 +28174,8 @@ export class SessionService {
       pr: _recordPr,
       prAlertTransfer: _prAlertTransfer,
       terminalSlotsCaptured: _terminalSlotsCaptured,
+      rateLimitedAt: _oldLimit,
+      rateLimitResetAt: _oldReset,
       ...dashboardSession
     } = session;
     const state = this.stabilizeState(
@@ -28016,7 +28189,12 @@ export class SessionService {
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
+      classified.rateLimitResetAt,
     );
+    const marked = readSession(this.config.dataDir, session.id);
+    if (!marked) return undefined;
+    session = this.withReportingError(marked);
+    source = isDeepStrictEqual(session, marked) ? session : null;
     if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
       const current = readSession(this.config.dataDir, session.id);
       return current ? this.assembleDashboard(current) : undefined;
@@ -28026,6 +28204,9 @@ export class SessionService {
       source,
       view: {
         ...dashboardSession,
+        updatedAt: session.updatedAt,
+        ...(session.rateLimitedAt ? { rateLimitedAt: session.rateLimitedAt } : {}),
+        ...(session.rateLimitResetAt ? { rateLimitResetAt: session.rateLimitResetAt } : {}),
         ...(session.spawnIntent ? { spawnIntent: publicSpawnIntent(session.spawnIntent) } : {}),
         ...(session.error ? { error: session.error } : {}),
         // Always resolved for consumers, whatever shape the stored record is in.
@@ -28338,6 +28519,7 @@ export class SessionService {
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],
+    assertCurrent?: () => void,
   ): Promise<{
     view: Omit<SessionListItemView, "lifecycle">;
     classified: SessionStateResult;
@@ -28350,7 +28532,12 @@ export class SessionService {
       Boolean(record.serverErrorAt) ||
       Boolean(record.error?.trim() && !record.error.startsWith(STATUS_DETECTION_ERROR_PREFIX));
     const inputHasIndependentError = hasIndependentError(session);
-    const classified = await this.classifySessionRecord(session);
+    assertCurrent?.();
+    const classified = await this.classifySessionRecord(session, {
+      strictErrors: assertCurrent !== undefined,
+      ...(assertCurrent ? { assertCurrent } : {}),
+    });
+    assertCurrent?.();
     const persisted = this.persistClassifiedTokenUsage(classified.session, classified);
     if (persisted.status === "missing") {
       throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
@@ -28379,14 +28566,15 @@ export class SessionService {
     // workspace file yet.
     const anchorRecord = this.deskAnchorRecord(session);
     const sidecars = await this.sidecarViews(session, project);
+    assertCurrent?.();
     if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
       const current = readSession(this.config.dataDir, session.id);
       if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
-      return this.enrichWithClassified(current, claudeAccounts, sessionBatch);
+      return this.enrichWithClassified(current, claudeAccounts, sessionBatch, assertCurrent);
     }
     const persistedSession = session;
     session = this.withReportingError(session);
-    const source = isDeepStrictEqual(session, persistedSession) ? session : null;
+    let source = isDeepStrictEqual(session, persistedSession) ? session : null;
     classified.session = session;
     if (hasRetainedSessionError(session)) classified.state = "error";
     const state = this.stabilizeState(session.id, classified.state);
@@ -28397,11 +28585,18 @@ export class SessionService {
       classified.historySourcePath ?? null,
       classified.serverError,
       classified.serverErrorEvidence,
+      classified.rateLimitResetAt,
     );
+    assertCurrent?.();
+    const marked = readSession(this.config.dataDir, session.id);
+    if (!marked) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+    session = this.withReportingError(marked);
+    classified.session = session;
+    source = isDeepStrictEqual(session, marked) ? session : null;
     if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
       const current = readSession(this.config.dataDir, session.id);
       if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
-      return this.enrichWithClassified(current, claudeAccounts, sessionBatch);
+      return this.enrichWithClassified(current, claudeAccounts, sessionBatch, assertCurrent);
     }
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);

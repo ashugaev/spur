@@ -10,7 +10,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname, join, relative, sep } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isCursorDeliveryId } from "./agents/cursor-submit-ack.js";
 import { appendEventLog } from "./event-log.js";
@@ -1700,7 +1701,15 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.scheduledWake ? { scheduledWake: normalizedSession.scheduledWake } : {}),
     ...(normalizedSession.intervalWake ? { intervalWake: normalizedSession.intervalWake } : {}),
     ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
-    ...(normalizedSession.rateLimitedAt ? { rateLimitedAt: normalizedSession.rateLimitedAt } : {}),
+    ...(!isTerminalSessionStatus(normalizedSession.status) && normalizedSession.rateLimitedAt
+      ? { rateLimitedAt: normalizedSession.rateLimitedAt }
+      : {}),
+    ...(!isTerminalSessionStatus(normalizedSession.status) &&
+    normalizedSession.rateLimitedAt &&
+    typeof normalizedSession.rateLimitResetAt === "string" &&
+    Number.isFinite(Date.parse(normalizedSession.rateLimitResetAt))
+      ? { rateLimitResetAt: new Date(normalizedSession.rateLimitResetAt).toISOString() }
+      : {}),
     ...(rateLimitClearFence ? { rateLimitClearFence } : {}),
     ...(normalizedSession.serverErrorAt ? { serverErrorAt: normalizedSession.serverErrorAt } : {}),
     ...(typeof normalizedSession.serverErrorReactivationAttempts === "number" &&
@@ -1748,9 +1757,34 @@ function normalizeServiceInstanceRecord(service: ServiceInstanceRecord): Service
   };
 }
 
+type SessionWriteObserver = (session: SessionRecord, previous: SessionRecord | null) => void;
+const sessionWriteObservers = new Map<string, Set<SessionWriteObserver>>();
+const sessionWriteGuard = new AsyncLocalStorage<() => void>();
+
+/** Fence writes made inside an asynchronous classification across config reloads. */
+export function withSessionWriteGuard<T>(guard: () => void, action: () => T): T {
+  return sessionWriteGuard.run(guard, action);
+}
+
+export function observeSessionWrites(dataDir: string, observer: SessionWriteObserver): () => void {
+  const key = resolve(dataDir);
+  const observers = sessionWriteObservers.get(key) ?? new Set<SessionWriteObserver>();
+  observers.add(observer);
+  sessionWriteObservers.set(key, observers);
+  return () => {
+    observers.delete(observer);
+    if (observers.size === 0) sessionWriteObservers.delete(key);
+  };
+}
+
 export function writeSession(dataDir: string, session: SessionRecord): void {
+  sessionWriteGuard.getStore()?.();
   const path = sessionFilePath(dataDir, session.project, session.id);
-  writeJsonFile(path, normalizeSessionRecord(session));
+  const observers = sessionWriteObservers.get(resolve(dataDir));
+  const previous = observers?.size ? readSession(dataDir, session.id) : null;
+  const normalized = normalizeSessionRecord(session);
+  writeJsonFile(path, normalized);
+  for (const observer of observers ?? []) observer(normalized, previous);
   writeSessionIndexEntry(dataDir, session.id, path);
 }
 

@@ -65,6 +65,8 @@ import {
   writeTelegramBindings,
   writeTelegramReplyTarget,
   writeSession,
+  observeSessionWrites,
+  withSessionWriteGuard,
   updatePendingSendBatchConditional,
 } from "../../src/metadata.js";
 import { appendEventLog, readEventLog } from "../../src/event-log.js";
@@ -1407,6 +1409,60 @@ describe("session workspaceId normalization", () => {
     createdAt: "2026-03-18T10:00:00.000Z",
     updatedAt: "2026-03-18T10:01:00.000Z",
   };
+
+  it("publishes normalized reset metadata after commit and unregisters synchronous observers", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = {
+      ...legacyBase,
+      id: "api-1",
+      tmuxSession: "api-1",
+      rateLimitedAt: "2026-03-18T10:00:00.000Z",
+      rateLimitResetAt: "2026-03-18T12:00:00+01:00",
+    };
+    const seen: (SessionRecord | null)[] = [];
+    const unregister = observeSessionWrites(dataDir, (current, prior) => {
+      expect(readSession(dataDir, current.id)).toEqual(current);
+      seen.push(prior);
+    });
+    try {
+      writeSession(dataDir, record);
+      expect(readSession(dataDir, record.id)?.rateLimitResetAt).toBe("2026-03-18T11:00:00.000Z");
+      writeSession(dataDir, { ...record, status: "completed" });
+      expect(readSession(dataDir, record.id)).not.toHaveProperty("rateLimitedAt");
+      expect(readSession(dataDir, record.id)).not.toHaveProperty("rateLimitResetAt");
+      expect(seen[0]).toBeNull();
+      expect(seen[1]?.status).toBe("running");
+    } finally {
+      unregister();
+    }
+    writeSession(dataDir, record);
+    expect(seen).toHaveLength(2);
+  });
+
+  it("propagates observer failure after committed status and fences async stale writes before commit", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = { ...legacyBase, id: "api-1", tmuxSession: "api-1" };
+    const unregister = observeSessionWrites(dataDir, () => {
+      throw new Error("journal failed");
+    });
+    expect(() => writeSession(dataDir, record)).toThrow("journal failed");
+    expect(readSession(dataDir, record.id)?.status).toBe("running");
+    unregister();
+    let current = true;
+    await expect(
+      withSessionWriteGuard(
+        () => {
+          if (!current) throw new Error("reloaded");
+        },
+        async () => {
+          await Promise.resolve();
+          current = false;
+          writeSession(dataDir, { ...record, status: "completed" });
+        },
+      ),
+    ).rejects.toThrow("reloaded");
+    expect(readSession(dataDir, record.id)?.status).toBe("running");
+  });
 
   it("survives a write/read round-trip", async () => {
     // Guards the whitelist trap: normalizeSessionRecord drops any field it

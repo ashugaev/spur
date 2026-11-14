@@ -50,10 +50,10 @@ DOCS
 
   Doc index: https://raw.githubusercontent.com/ashugaev/spur/main/README.md
   Any path under `docs/` resolves as https://raw.githubusercontent.com/ashugaev/spur/main/<path>
-  Commands, session tools, list link filters and variables: docs/commands.md
+  Commands, session tools, list/feed link filters and variables: docs/commands.md
   Cursor send correlation and retained acknowledgement baselines: docs/commands.md, docs/daemon-api.md.
   Review feedback, recovery, package checks: docs/commands.md
-  Routes, PR reviewer metadata, bounded conversation pages, pre-flight batches, lifecycle receipts, terminal restart, restore cancellation: docs/daemon-api.md
+  Routes, session transitions/reset times, PR reviewer metadata, bounded conversation pages, pre-flight batches, lifecycle receipts, terminal restart, restore cancellation: docs/daemon-api.md
   Config, admission, trigger-spawn retry, reviewer App/consent, pane-child fallback, OpenCode heartbeat: docs/configuration.md; events: docs/configuration.md#events
   GitHub PR feedback attribution, ownership and custom markers: docs/configuration.md#field-reference
   Native PR alert ownership: docs/configuration.md#pr-alert-ownership.
