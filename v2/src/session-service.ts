@@ -6796,10 +6796,7 @@ export class SessionService {
         receipt.revision !== row.receipt.revision ||
         (record !== row.source &&
           (row.identity === true || !isDeepStrictEqual(record, row.source))) ||
-        !isDeepStrictEqual(
-          row.view.slots,
-          this.displaySlotsForSession(record),
-        )
+        !isDeepStrictEqual(row.view.slots, this.displaySlotsForSession(record))
       );
     };
     let live = [...rows];
@@ -15093,6 +15090,11 @@ export class SessionService {
       member.id === workspaceId ? member : readSession(this.config.dataDir, workspaceId);
     if (!owner) {
       return null;
+    }
+    // A terminal owner's record is its own frozen snapshot. Active siblings
+    // still read the workspace file written above.
+    if (isTerminalSessionStatus(owner.status) && owner.terminalSlotsCaptured === true) {
+      return owner;
     }
     const mirrored: SessionRecord = {
       ...owner,

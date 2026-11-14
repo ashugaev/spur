@@ -7432,7 +7432,9 @@ describe("SessionService", () => {
       throw new Error("cleanup failed");
     });
 
-    await expect(service.complete("api-1", { skipPrCheck: true })).rejects.toThrow("cleanup failed");
+    await expect(service.complete("api-1", { skipPrCheck: true })).rejects.toThrow(
+      "cleanup failed",
+    );
     expect(sessions.get("api-1")?.terminalSlotsCaptured).toBe(true);
     expect(sessions.get("api-1")?.slots?.links).toEqual([
       { label: "board-task", url: "https://example.com/task" },
@@ -38942,10 +38944,66 @@ describe("SessionService", () => {
         });
         expect(filtered.map((row) => row.id)).toEqual(["api-2"]);
         expect(
-          (await service.list({ includeCompleted: true, view, links: [{ label: "board-role" }] }))
-            .map((row) => row.id),
+          (
+            await service.list({ includeCompleted: true, view, links: [{ label: "board-role" }] })
+          ).map((row) => row.id),
         ).toEqual(["api-2"]);
       }
+      service.dispose();
+    },
+  );
+
+  it.each(["complete", "kill"] as const)(
+    "keeps a %s anchor snapshot when a live sibling updates workspace links",
+    async (action) => {
+      const slotModule = await vi.importActual<typeof sessionSlotsModule>(
+        "../../src/session-slots.js",
+      );
+      applySlotsUpdateMock.mockImplementation(slotModule.applySlotsUpdate);
+      const sessions = createSessionStore();
+      const pr = {
+        repo: "org/repo",
+        number: 42,
+        url: "https://github.com/org/repo/pull/42",
+      };
+      sessions.set("api-1", sessionRecord({ id: "api-1", pr }));
+      sessions.set("api-2", sessionRecord({ id: "api-2", workspaceId: "api-1" }));
+      const original = { label: "board-task", url: "https://example.com/task/1" };
+      const updated = { label: "board-task", url: "https://example.com/task/2" };
+      const { writeWorkspaceState, readWorkspaceState } = await loadWorkspaceStoreModule();
+      writeWorkspaceState(TEST_DATA_DIR, "api-1", { slots: { links: [original] }, pr });
+      reserveNextSessionIdMock.mockResolvedValue("api-3");
+      workspaceExistsMock.mockReturnValue(true);
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      if (action === "kill") await service.kill("api-1", { force: true, skipPrCheck: true });
+      else await service.complete("api-1", { skipPrCheck: true });
+      await service.updateSlots("api-2", { links: [updated], unlinkLabels: ["pr"] });
+
+      expect(sessions.get("api-1")?.slots?.links).toEqual([original]);
+      expect(sessions.get("api-1")?.pr).toEqual(pr);
+      expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.links).toEqual([updated]);
+      expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.pr).toBeUndefined();
+      expect((await service.get("api-1")).slots?.links).toEqual([
+        original,
+        { label: "pr", url: pr.url },
+      ]);
+      expect((await service.get("api-2")).slots?.links).toEqual([updated]);
+      const oldMatches = await service.list({
+        includeCompleted: true,
+        links: [{ label: original.label, url: original.url }],
+      });
+      expect(oldMatches.map((row) => row.id).includes("api-1")).toBe(action === "complete");
+      expect(
+        (await service.list({ links: [{ label: updated.label, url: updated.url }] })).map(
+          (row) => row.id,
+        ),
+      ).toContain("api-2");
+
+      const successor = await service.respawn("api-1");
+      expect(successor.slots?.links).toEqual([original, { label: "pr", url: pr.url }]);
       service.dispose();
     },
   );
