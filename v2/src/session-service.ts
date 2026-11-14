@@ -18622,8 +18622,11 @@ export class SessionService {
     if (intent.kind !== "queued-drain" && submitPending(current)) {
       const held = (await this.classifySessionRecord(current)).session;
       if (submitPending(held)) {
+        const typedHold = held.queuedMessageTyped?.typedAt === held.submitUnconfirmedAt;
         throw new LaunchPromptPendingError(
-          `Agent has not confirmed the last prompt: ${sessionId}. Waiting for its transcript ack; an unacked send moves to Retry/Dismiss in the web view after ${SUBMIT_HOLD_CEILING_MS / 60_000} min at the prompt. Pause and restore the session to clear it now.`,
+          typedHold
+            ? `Agent has not confirmed the last prompt: ${sessionId}. Waiting for its transcript ack; an unacked send moves to Retry/Dismiss in the web view after ${SUBMIT_HOLD_CEILING_MS / 60_000} min at the prompt. Pause and restore the session to clear it now.`
+            : `Agent has not confirmed the last prompt: ${sessionId}. Waiting for its transcript activity. Pause and restore the session to clear it now.`,
           held.submitUnconfirmedAt,
         );
       }
@@ -27588,11 +27591,12 @@ export class SessionService {
         }
         if (rotated) {
           effectiveSession = rotated;
+          // The id is already rebound: a failed read counts as no transcript.
           jsonlResult = await readClaudeJsonlState(
             rotated.worktreePath,
             undefined,
             rotated.agentSessionId,
-          );
+          ).catch(() => null);
           if (jsonlResult) this.cacheClaudeJsonlReader(rotated, jsonlResult.reader);
           ({
             rateLimit,

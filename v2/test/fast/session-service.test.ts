@@ -79447,13 +79447,14 @@ describe("SessionService", () => {
         return contexts;
       }
 
-      async function rotationFixture(transcriptForNewId: boolean) {
+      async function rotationFixture(transcriptForNewId: boolean | "rejects") {
         const sessions = createSessionStore();
         seedSendHold(sessions, "claude");
         mockAgentActivity("claude", beforeHold);
-        readClaudeJsonlStateMock.mockImplementation(async (_w: string, _r: unknown, id: string) =>
-          id === "ses_2" && !transcriptForNewId ? null : jsonlFor(id),
-        );
+        readClaudeJsonlStateMock.mockImplementation(async (_w: string, _r: unknown, id: string) => {
+          if (id === "ses_2" && transcriptForNewId === "rejects") throw new Error("read failed");
+          return id === "ses_2" && !transcriptForNewId ? null : jsonlFor(id);
+        });
         const reported = { id: "ses_1", pid: 4242 };
         mockPaneStatus(reported);
         const service = await deferredService();
@@ -79541,6 +79542,20 @@ describe("SessionService", () => {
         service.dispose();
       });
 
+      it("still logs the rotation when the new transcript read rejects", async () => {
+        const { sessions, service } = await rotationFixture("rejects");
+        mockHoldAckScan(false);
+
+        await service.get("api-1");
+        expect(sessions.get("api-1")?.agentSessionId).toBe("ses_2");
+        expect(eventsNamed("session.agent_session_id.rotated")).toEqual([
+          expect.objectContaining({
+            details: expect.objectContaining({ transcriptFound: false }),
+          }),
+        ]);
+        service.dispose();
+      });
+
       it.each([
         ["a different pid", { id: "ses_2", pid: 5555 }, {}, true],
         ["a non-interactive kind", { id: "ses_2", pid: 4242 }, { kind: undefined }, true],
@@ -79575,11 +79590,14 @@ describe("SessionService", () => {
         service.dispose();
       });
 
-      async function ceilingFixture(state: "waiting" | "working") {
+      async function ceilingFixture(
+        state: "waiting" | "working",
+        options: { acked?: boolean; extra?: Partial<SessionRecord> } = {},
+      ) {
         const sessions = createSessionStore();
-        seedSendHold(sessions, "claude", { submitRequeuedMessage: undefined });
+        seedSendHold(sessions, "claude", { submitRequeuedMessage: undefined, ...options.extra });
         mockAgentActivity("claude", beforeHold, state);
-        mockHoldAckScan(false);
+        mockHoldAckScan(options.acked ?? false);
         const { SUBMIT_HOLD_CEILING_MS } = await loadSessionServiceModule();
         vi.setSystemTime(Date.parse(PENDING_LAUNCH_AT) + SUBMIT_HOLD_CEILING_MS + 1_000);
         return { sessions, service: await deferredService() };
@@ -79600,6 +79618,35 @@ describe("SessionService", () => {
         ]);
         expect(eventsNamed("session.message.requeued")).toHaveLength(0);
         expect(tmuxTexts()).not.toContain("typed");
+        service.dispose();
+      });
+
+      it("releases a typed hold with no ack baseline past the ceiling", async () => {
+        const { sessions, service } = await ceilingFixture("waiting", {
+          extra: { queuedMessageTyped: { message: "typed", typedAt: PENDING_LAUNCH_AT } },
+        });
+
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.submitUnconfirmedAt).toBeUndefined();
+        expect(record?.submitFailedMessage).toEqual({ message: "typed", at: expect.any(String) });
+        expect(eventsNamed("session.submit.released")).toEqual([
+          expect.objectContaining({ details: { messageLength: 5, reason: "ceiling" } }),
+        ]);
+        expect(eventsNamed("session.submit.confirmed")).toHaveLength(0);
+        service.dispose();
+      });
+
+      it("confirms by ack, not releases, when the ack lands in the ceiling tick", async () => {
+        const { sessions, service } = await ceilingFixture("waiting", { acked: true });
+
+        await service.get("api-1");
+        expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+        expect(sessions.get("api-1")).not.toHaveProperty("submitFailedMessage");
+        expect(eventsNamed("session.submit.confirmed")).toEqual([
+          expect.objectContaining({ details: { evidence: "ack" } }),
+        ]);
+        expect(eventsNamed("session.submit.released")).toHaveLength(0);
         service.dispose();
       });
 
