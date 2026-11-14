@@ -146,6 +146,30 @@ describe("readClaudeSessionStatus", () => {
     });
   });
 
+  it("exposes the status file kind only when present", async () => {
+    const sessionsDir = await makeSessionsDir();
+    await writeStatus(sessionsDir, "a.json", {
+      cwd: "/tmp/kind-a",
+      pid: 300,
+      kind: "interactive",
+      status: "idle",
+      updatedAt: "2026-03-18T10:00:00.000Z",
+    });
+    await writeStatus(sessionsDir, "b.json", {
+      cwd: "/tmp/kind-b",
+      pid: 301,
+      status: "idle",
+      updatedAt: "2026-03-18T10:00:00.000Z",
+    });
+
+    const withKind = await readClaudeSessionStatus("/tmp/kind-a", undefined, sessionsDir);
+    const withoutKind = await readClaudeSessionStatus("/tmp/kind-b", undefined, sessionsDir);
+
+    expect(withKind?.kind).toBe("interactive");
+    expect(withoutKind).not.toBeNull();
+    expect(withoutKind).not.toHaveProperty("kind");
+  });
+
   it("ignores a stranger's status file that shares the workspace when a pane pid is known", async () => {
     const sessionsDir = await makeSessionsDir();
     // Idle process actually in this session's pane.

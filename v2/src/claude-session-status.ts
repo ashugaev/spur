@@ -15,6 +15,7 @@ export interface ClaudeSessionStatusRecord {
   sessionId?: string;
   waitingFor?: string;
   pid?: number;
+  kind?: string;
   // Set only by the ancestry probe; a UUID/cwd match cannot establish it.
   paneOwned?: true;
 }
@@ -113,6 +114,7 @@ function extractCandidate(
   const sessionId = readString(parsed["sessionId"]);
   const waitingFor = readWaitingFor(parsed);
   const pid = readPid(parsed["pid"]);
+  const kind = readString(parsed["kind"]);
   const statusUpdatedMs =
     readTimestampMs(parsed["statusUpdatedAt"]) ?? readTimestampMs(parsed["statusUpdated"]);
   return {
@@ -124,6 +126,7 @@ function extractCandidate(
     ...(sessionId ? { sessionId } : {}),
     ...(waitingFor !== undefined ? { waitingFor } : {}),
     ...(pid !== undefined ? { pid } : {}),
+    ...(kind ? { kind } : {}),
   };
 }
 
