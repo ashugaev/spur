@@ -20086,6 +20086,22 @@ describe("SessionService", () => {
       });
     });
 
+    it("refuses a send on a launch hold without promising the Retry/Dismiss ceiling", async () => {
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:03:00.000Z") });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ submitUnconfirmedAt: "2026-03-18T10:04:00.000Z" }));
+      const service = await liveService();
+
+      const refusal = await service.send("api-1", { message: "again", queue: false }).then(
+        () => null,
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      );
+      expect(refusal).toMatch(/has not confirmed the last prompt: api-1\./);
+      expect(refusal).toMatch(/Waiting for its transcript activity\. Pause and restore/);
+      expect(refusal).not.toMatch(/Retry\/Dismiss/);
+      service.dispose();
+    });
+
     it("stamps an unacked Send now's hold at the paste, so the interrupted turn's own record never clears it", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
