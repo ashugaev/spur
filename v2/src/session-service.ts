@@ -28145,9 +28145,7 @@ export class SessionService {
       const current = readSession(this.config.dataDir, session.id);
       return current ? this.assembleDashboard(current) : undefined;
     }
-    const persistedSession = session;
     session = this.withReportingError(session);
-    let source = isDeepStrictEqual(session, persistedSession) ? session : null;
     const {
       queuedMessages: _queuedMessages,
       pipeline: _pipeline,
@@ -28194,7 +28192,7 @@ export class SessionService {
     const marked = readSession(this.config.dataDir, session.id);
     if (!marked) return undefined;
     session = this.withReportingError(marked);
-    source = isDeepStrictEqual(session, marked) ? session : null;
+    const source = isDeepStrictEqual(session, marked) ? session : null;
     if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
       const current = readSession(this.config.dataDir, session.id);
       return current ? this.assembleDashboard(current) : undefined;
@@ -28572,9 +28570,7 @@ export class SessionService {
       if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
       return this.enrichWithClassified(current, claudeAccounts, sessionBatch, assertCurrent);
     }
-    const persistedSession = session;
     session = this.withReportingError(session);
-    let source = isDeepStrictEqual(session, persistedSession) ? session : null;
     classified.session = session;
     if (hasRetainedSessionError(session)) classified.state = "error";
     const state = this.stabilizeState(session.id, classified.state);
@@ -28592,7 +28588,7 @@ export class SessionService {
     if (!marked) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
     session = this.withReportingError(marked);
     classified.session = session;
-    source = isDeepStrictEqual(session, marked) ? session : null;
+    const source = isDeepStrictEqual(session, marked) ? session : null;
     if ((this.rateLimitClearRevisions.get(session.id) ?? 0) !== clearRevision) {
       const current = readSession(this.config.dataDir, session.id);
       if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);

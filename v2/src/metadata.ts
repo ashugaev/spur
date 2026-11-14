@@ -1757,7 +1757,7 @@ function normalizeServiceInstanceRecord(service: ServiceInstanceRecord): Service
   };
 }
 
-type SessionWriteObserver = (session: SessionRecord, previous: SessionRecord | null) => void;
+type SessionWriteObserver = (session: SessionRecord) => void;
 const sessionWriteObservers = new Map<string, Set<SessionWriteObserver>>();
 const sessionWriteGuard = new AsyncLocalStorage<() => void>();
 
@@ -1781,10 +1781,9 @@ export function writeSession(dataDir: string, session: SessionRecord): void {
   sessionWriteGuard.getStore()?.();
   const path = sessionFilePath(dataDir, session.project, session.id);
   const observers = sessionWriteObservers.get(resolve(dataDir));
-  const previous = observers?.size ? readSession(dataDir, session.id) : null;
   const normalized = normalizeSessionRecord(session);
   writeJsonFile(path, normalized);
-  for (const observer of observers ?? []) observer(normalized, previous);
+  for (const observer of observers ?? []) observer(normalized);
   writeSessionIndexEntry(dataDir, session.id, path);
 }
 

@@ -1419,10 +1419,10 @@ describe("session workspaceId normalization", () => {
       rateLimitedAt: "2026-03-18T10:00:00.000Z",
       rateLimitResetAt: "2026-03-18T12:00:00+01:00",
     };
-    const seen: (SessionRecord | null)[] = [];
-    const unregister = observeSessionWrites(dataDir, (current, prior) => {
+    const seen: SessionRecord[] = [];
+    const unregister = observeSessionWrites(dataDir, (current) => {
       expect(readSession(dataDir, current.id)).toEqual(current);
-      seen.push(prior);
+      seen.push(current);
     });
     try {
       writeSession(dataDir, record);
@@ -1430,8 +1430,7 @@ describe("session workspaceId normalization", () => {
       writeSession(dataDir, { ...record, status: "completed" });
       expect(readSession(dataDir, record.id)).not.toHaveProperty("rateLimitedAt");
       expect(readSession(dataDir, record.id)).not.toHaveProperty("rateLimitResetAt");
-      expect(seen[0]).toBeNull();
-      expect(seen[1]?.status).toBe("running");
+      expect(seen.map((session) => session.status)).toEqual(["running", "completed"]);
     } finally {
       unregister();
     }
