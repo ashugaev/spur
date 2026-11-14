@@ -67,6 +67,9 @@ const checkpointSchema = z.object({
   observations: z.record(z.string(), observationSchema),
 });
 type Checkpoint = z.infer<typeof checkpointSchema>;
+type PendingTransition =
+  | Readonly<Omit<Extract<SessionTransition, { kind: "status" }>, "cursor">>
+  | Readonly<Omit<Extract<SessionTransition, { kind: "state" }>, "cursor">>;
 
 export class SessionTransitionsCursorError extends Error {
   constructor(
@@ -117,6 +120,7 @@ export class SessionTransitions {
   private readonly segmentRanges = new Map<number, { first: number; last: number }>();
   private firstSequence = 1;
   private dirty = false;
+  private readonly pending: PendingTransition[] = [];
 
   constructor(
     dataDir: string,
@@ -239,12 +243,37 @@ export class SessionTransitions {
       this.segmentRanges.get(this.segments[0])?.first ?? this.checkpoint.sequence + 1;
   }
 
-  private append(
-    entry:
-      | Omit<Extract<SessionTransition, { kind: "status" }>, "cursor">
-      | Omit<Extract<SessionTransition, { kind: "state" }>, "cursor">,
-  ): void {
+  private settle(): void {
     if (this.dirty) this.saveCheckpoint();
+    this.prune();
+  }
+
+  flushPending(): void {
+    this.settle();
+    for (let head = this.pending[0]; head; head = this.pending[0]) {
+      const sequence = this.checkpoint.sequence;
+      try {
+        this.append(head);
+      } catch (error) {
+        if (this.checkpoint.sequence > sequence) this.pending.shift();
+        throw error;
+      }
+      this.pending.shift();
+    }
+  }
+
+  private latestPending(
+    sessionId: string,
+    kind: PendingTransition["kind"],
+  ): PendingTransition | undefined {
+    for (let index = this.pending.length - 1; index >= 0; index -= 1) {
+      const entry = this.pending[index];
+      if (entry?.sessionId === sessionId && entry.kind === kind) return entry;
+    }
+    return undefined;
+  }
+
+  private append(entry: PendingTransition): void {
     let segment = this.segments.reduce((_, current) => current);
     const path = this.path(segment);
     if (existsSync(path) && statSync(path).size >= this.bounds.segmentBytes) {
@@ -264,38 +293,45 @@ export class SessionTransitions {
     }
     this.noteSegmentSequence(segment, sequence);
     this.apply(complete, sequence);
-    this.saveCheckpoint();
-    this.prune();
+    this.settle();
   }
 
   observeStatus(session: SessionRecord, links: SessionLink[], successorId?: string): void {
     const previous = this.checkpoint.observations[session.id];
-    if (
-      previous?.status === session.status &&
-      (!successorId || previous.successorId === successorId)
-    )
-      return;
-    const successor = successorId ?? previous?.successorId;
-    this.append({
-      kind: "status",
-      from: previous?.status ?? null,
-      to: session.status,
-      ...this.fields(session, links),
-      ...(successor ? { successorId: successor } : {}),
-    });
+    const pending = this.latestPending(session.id, "status");
+    const status = pending?.kind === "status" ? pending.to : previous?.status;
+    const carriedSuccessor =
+      pending?.kind === "status" ? pending.successorId : previous?.successorId;
+    if (status !== session.status || (successorId && carriedSuccessor !== successorId)) {
+      const successor = successorId ?? carriedSuccessor;
+      this.pending.push({
+        kind: "status",
+        from: status ?? null,
+        to: session.status,
+        ...this.fields(session, links),
+        ...(successor ? { successorId: successor } : {}),
+      });
+    }
+    this.flushPending();
   }
 
   observeState(session: SessionRecord, state: SessionState, links: SessionLink[]): void {
     const previous = this.checkpoint.observations[session.id];
+    const pending = this.latestPending(session.id, "state");
+    const previousState = pending?.kind === "state" ? pending.to : previous?.state;
+    const previousReset =
+      pending?.kind === "state" ? pending.rateLimitResetAt : previous?.rateLimitResetAt;
     const reset = state === "rate_limited" ? session.rateLimitResetAt : undefined;
-    if (previous?.state === state && previous.rateLimitResetAt === reset) return;
-    this.append({
-      kind: "state",
-      from: previous?.state ?? null,
-      to: state,
-      ...this.fields(session, links),
-      ...(reset ? { rateLimitResetAt: reset } : {}),
-    });
+    if (previousState !== state || previousReset !== reset) {
+      this.pending.push({
+        kind: "state",
+        from: previousState ?? null,
+        to: state,
+        ...this.fields(session, links),
+        ...(reset ? { rateLimitResetAt: reset } : {}),
+      });
+    }
+    this.flushPending();
   }
 
   observedState(sessionId: string): SessionState | undefined {
@@ -314,8 +350,7 @@ export class SessionTransitions {
   }
 
   query(query: SessionTransitionsQuery = {}): SessionTransitionsResponse {
-    if (this.dirty) this.saveCheckpoint();
-    this.prune();
+    this.flushPending();
     const floor = this.firstSequence - 1;
     const after = query.since === undefined ? floor : this.sequenceOf(query.since);
     if (after > this.checkpoint.sequence)

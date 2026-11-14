@@ -20,6 +20,8 @@ vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof fs>();
   return {
     ...actual,
+    appendFileSync: vi.fn(actual.appendFileSync),
+    writeFileSync: vi.fn(actual.writeFileSync),
     openSync: vi.fn(actual.openSync),
     unlinkSync: vi.fn(actual.unlinkSync),
     renameSync: vi.fn(actual.renameSync),
@@ -32,7 +34,13 @@ function temp() {
   dirs.push(dir);
   return dir;
 }
-afterEach(() => {
+afterEach(async () => {
+  const actual = await vi.importActual<typeof fs>("node:fs");
+  vi.mocked(appendFileSync).mockReset().mockImplementation(actual.appendFileSync);
+  vi.mocked(writeFileSync).mockReset().mockImplementation(actual.writeFileSync);
+  vi.mocked(renameSync).mockReset().mockImplementation(actual.renameSync);
+  vi.mocked(unlinkSync).mockReset().mockImplementation(actual.unlinkSync);
+  vi.useRealTimers();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 const session = (status: SessionRecord["status"] = "running"): SessionRecord => ({
@@ -286,4 +294,168 @@ describe("retained session transitions", () => {
     writeFileSync(join(dir, "session-transitions", "3.jsonl"), "{invalid}\n");
     expect(() => store.query({ since: cursor })).toThrow("Invalid session transitions JSON");
   });
+
+  it("retains immutable globally ordered transient facts admitted before an ongoing append outage clears", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const actual = await vi.importActual<typeof fs>("node:fs");
+    const dir = temp();
+    const store = new SessionTransitions(dir);
+    store.observeState(session(), "working", []);
+    const other = { ...session(), id: "s-2" };
+    store.observeStatus(other, []);
+    const cursor = store.query().nextCursor;
+    vi.mocked(appendFileSync).mockImplementation(() => {
+      throw new Error("append unavailable");
+    });
+    const originalLink = { label: "task", url: "https://example.com/original" };
+    const links = [originalLink];
+    const limited = {
+      ...session(),
+      project: "original",
+      error: "limit one",
+      rateLimitResetAt: "2026-01-01T01:00:00.000Z",
+    };
+    vi.setSystemTime(new Date("2026-01-01T00:00:01.000Z"));
+    expect(() => store.observeState(limited, "rate_limited", links)).toThrow("append unavailable");
+    expect(store.observedState("s-1")).toBe("working");
+    limited.project = "mutated";
+    limited.error = "mutated";
+    originalLink.url = "https://example.com/mutated";
+    vi.setSystemTime(new Date("2026-01-01T00:00:02.000Z"));
+    expect(() =>
+      store.observeStatus({ ...other, status: "stopped", stopReason: "stale_timeout" }, [task]),
+    ).toThrow("append unavailable");
+    vi.setSystemTime(new Date("2026-01-01T00:00:03.000Z"));
+    expect(() =>
+      store.observeState(
+        { ...session(), rateLimitResetAt: "2026-01-01T02:00:00.000Z" },
+        "rate_limited",
+        [role],
+      ),
+    ).toThrow("append unavailable");
+    expect(() =>
+      store.observeState(
+        { ...session(), rateLimitResetAt: "2026-01-01T02:00:00.000Z" },
+        "rate_limited",
+        [task],
+      ),
+    ).toThrow("append unavailable");
+    vi.setSystemTime(new Date("2026-01-01T00:00:04.000Z"));
+    expect(() => store.observeStatus(other, [role], "successor")).toThrow("append unavailable");
+    vi.setSystemTime(new Date("2026-01-01T00:00:04.500Z"));
+    expect(() => store.observeStatus(other, [task], "next-successor")).toThrow(
+      "append unavailable",
+    );
+    vi.setSystemTime(new Date("2026-01-01T00:00:05.000Z"));
+    expect(() => store.observeState(session(), "working", [task])).toThrow("append unavailable");
+    expect(() => store.observeStatus(other, [task])).toThrow("append unavailable");
+    vi.mocked(appendFileSync).mockImplementation(actual.appendFileSync);
+    const page = store.query({ since: cursor, kinds: ["state", "status"] });
+    expect(page.entries.map(({ cursor: _cursor, ...entry }) => entry)).toEqual([
+      {
+        kind: "state",
+        from: "working",
+        to: "rate_limited",
+        sessionId: "s-1",
+        project: "original",
+        error: "limit one",
+        rateLimitResetAt: "2026-01-01T01:00:00.000Z",
+        at: "2026-01-01T00:00:01.000Z",
+        links: [{ label: "task", url: "https://example.com/original" }],
+      },
+      {
+        kind: "status",
+        from: "running",
+        to: "stopped",
+        sessionId: "s-2",
+        project: "p",
+        stopReason: "stale_timeout",
+        at: "2026-01-01T00:00:02.000Z",
+        links: [task],
+      },
+      {
+        kind: "state",
+        from: "rate_limited",
+        to: "rate_limited",
+        sessionId: "s-1",
+        project: "p",
+        rateLimitResetAt: "2026-01-01T02:00:00.000Z",
+        at: "2026-01-01T00:00:03.000Z",
+        links: [role],
+      },
+      {
+        kind: "status",
+        from: "stopped",
+        to: "running",
+        sessionId: "s-2",
+        project: "p",
+        successorId: "successor",
+        at: "2026-01-01T00:00:04.000Z",
+        links: [role],
+      },
+      {
+        kind: "status",
+        from: "running",
+        to: "running",
+        sessionId: "s-2",
+        project: "p",
+        successorId: "next-successor",
+        at: "2026-01-01T00:00:04.500Z",
+        links: [task],
+      },
+      {
+        kind: "state",
+        from: "rate_limited",
+        to: "working",
+        sessionId: "s-1",
+        project: "p",
+        at: "2026-01-01T00:00:05.000Z",
+        links: [task],
+      },
+    ]);
+    expect(page.entries.map((entry) => Number(entry.cursor.split(".").at(-1)))).toEqual([
+      3, 4, 5, 6, 7, 8,
+    ]);
+    expect(new SessionTransitions(dir).query({ since: page.nextCursor }).entries).toEqual([]);
+  });
+
+  it.each(["append", "checkpoint", "prune", "dirty save"] as const)(
+    "retains reversal through %s failure without duplicating a committed head",
+    async (failure) => {
+      const actual = await vi.importActual<typeof fs>("node:fs");
+      const dir = temp();
+      const store = new SessionTransitions(dir, { segmentBytes: 1, retainSegments: 2 });
+      store.observeState(session(), "working", []);
+      store.observeStatus(session(), []);
+      const cursor = store.query().nextCursor;
+      const unavailable = () => {
+        throw new Error("journal unavailable");
+      };
+      if (failure === "append") vi.mocked(appendFileSync).mockImplementation(unavailable);
+      else if (failure === "prune") vi.mocked(unlinkSync).mockImplementation(unavailable);
+      else if (failure === "checkpoint") vi.mocked(renameSync).mockImplementation(unavailable);
+      else vi.mocked(renameSync).mockImplementationOnce(unavailable);
+      expect(() => store.observeState(session(), "rate_limited", [role])).toThrow(
+        "journal unavailable",
+      );
+      if (failure === "dirty save") vi.mocked(writeFileSync).mockImplementation(unavailable);
+      expect(() => store.observeState(session(), "working", [task])).toThrow("journal unavailable");
+      vi.mocked(appendFileSync).mockImplementation(actual.appendFileSync);
+      vi.mocked(renameSync).mockImplementation(actual.renameSync);
+      vi.mocked(unlinkSync).mockImplementation(actual.unlinkSync);
+      vi.mocked(writeFileSync).mockImplementation(actual.writeFileSync);
+      const page = store.query({ since: cursor, kinds: ["state"] });
+      expect(page.entries.map((entry) => [entry.from, entry.to])).toEqual([
+        ["working", "rate_limited"],
+        ["rate_limited", "working"],
+      ]);
+      expect(page.entries.map((entry) => Number(entry.cursor.split(".").at(-1)))).toEqual([3, 4]);
+      expect(
+        new SessionTransitions(dir, { segmentBytes: 1, retainSegments: 2 }).query({
+          since: page.nextCursor,
+        }).entries,
+      ).toEqual([]);
+    },
+  );
 });

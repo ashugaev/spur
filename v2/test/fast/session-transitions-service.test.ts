@@ -14,8 +14,9 @@ import {
   sessionMetadataModule,
   probeWorkspaceMock,
 } from "../helpers/session-service-harness.js";
-import { readFileSync, readdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import type * as Fs from "node:fs";
+import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as Metadata from "../../src/metadata.js";
 import type * as Config from "../../src/config.js";
@@ -31,6 +32,29 @@ let metadata: typeof Metadata;
 let service: SessionService;
 let config: AppConfig;
 const task = { label: "task", url: "https://example.com/task/1" };
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof Fs>();
+  return { ...actual, appendFileSync: vi.fn(actual.appendFileSync) };
+});
+
+function failJournalAppends(dataDir = TEST_DATA_DIR): () => void {
+  const append = vi.mocked(appendFileSync);
+  const original = append.getMockImplementation();
+  if (!original) throw new Error("Missing append implementation");
+  append.mockImplementation((path, data, options) => {
+    if (
+      String(path).startsWith(join(dataDir, "session-transitions") + sep) &&
+      String(path).endsWith(".jsonl")
+    ) {
+      throw new Error("journal append unavailable");
+    }
+    original(path, data, options);
+  });
+  return () => {
+    append.mockImplementation(original);
+  };
+}
 
 function evidence(state: "working" | "waiting", reset?: string, limited = reset !== undefined) {
   mockClaudeSessionStatus(state, state === "working" ? "running" : "idle");
@@ -63,10 +87,247 @@ beforeEach(async () => {
   evidence("working");
 });
 afterEach(async () => {
+  vi.mocked(appendFileSync).mockRestore();
   await disposeSessionServiceHarness();
 });
 
 describe("session transitions service", () => {
+  it.each(["get", "list", "dashboard"] as const)(
+    "retains a transient limit reversal admitted by ordinary %s before append recovery",
+    async (read) => {
+      metadata.writeSession(TEST_DATA_DIR, record());
+      const cursor = (await poll()).nextCursor;
+      const readCurrent = () =>
+        read === "get"
+          ? service.get("api-1")
+          : read === "list"
+            ? service
+                .list({ includeCompleted: true })
+                .then((views) => views.find((view) => view.id === "api-1"))
+            : sessionServiceInternals(service).enrichDashboard(record());
+      const restore = failJournalAppends();
+      evidence("working", "2026-03-18T11:00:00.000Z");
+      const enteredAt = new Date().toISOString();
+      expect(await readCurrent()).toMatchObject({ state: "rate_limited" });
+      vi.setSystemTime(new Date(Date.now() + 1000));
+      evidence("working");
+      const exitedAt = new Date().toISOString();
+      expect(await readCurrent()).toMatchObject({ state: "working" });
+      expect(metadata.readSession(TEST_DATA_DIR, "api-1")).not.toHaveProperty("rateLimitedAt");
+      expect(metadata.readSession(TEST_DATA_DIR, "api-1")).not.toHaveProperty("rateLimitResetAt");
+      await expect(poll({ since: cursor })).rejects.toThrow("journal append unavailable");
+      restore();
+      const page = await poll({ since: cursor });
+      expect(page.entries).toEqual([
+        expect.objectContaining({
+          kind: "state",
+          from: "working",
+          to: "rate_limited",
+          at: enteredAt,
+          rateLimitResetAt: "2026-03-18T11:00:00.000Z",
+          links: [task],
+        }),
+        expect.objectContaining({
+          kind: "state",
+          from: "rate_limited",
+          to: "working",
+          at: exitedAt,
+          links: [task],
+        }),
+      ]);
+      expect(page.entries[1]).not.toHaveProperty("rateLimitResetAt");
+      expect(await poll({ since: page.nextCursor })).toEqual({
+        entries: [],
+        nextCursor: page.nextCursor,
+        hasMore: false,
+      });
+    },
+  );
+
+  it("drains an admitted backlog before strict classification or account/session reads", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    const cursor = (await poll()).nextCursor;
+    const restore = failJournalAppends();
+    evidence("working", "2026-03-18T11:00:00.000Z");
+    await service.get("api-1");
+    const runtime = vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot");
+    const accounts = vi.spyOn(
+      service as unknown as { computeClaudeAccountsView(): unknown },
+      "computeClaudeAccountsView",
+    );
+    listSessionsMock.mockClear();
+    readSessionMock.mockClear();
+    await expect(poll({ since: cursor })).rejects.toThrow("journal append unavailable");
+    expect(runtime).not.toHaveBeenCalled();
+    expect(accounts).not.toHaveBeenCalled();
+    expect(listSessionsMock).not.toHaveBeenCalled();
+    expect(readSessionMock).not.toHaveBeenCalled();
+    restore();
+    expect((await poll({ since: cursor })).entries).toContainEqual(
+      expect.objectContaining({ to: "rate_limited" }),
+    );
+  });
+
+  it("drains observations admitted during the awaited refresh before acknowledging its cursor", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "other" }));
+    const cursor = (await poll()).nextCursor;
+    const internals = service as unknown as {
+      refreshSessionTransitions(binding: unknown, assertCurrent: () => void): Promise<void>;
+    };
+    const refresh = internals.refreshSessionTransitions.bind(internals);
+    vi.spyOn(internals, "refreshSessionTransitions").mockImplementationOnce(async (...args) => {
+      await refresh(...args);
+      const restore = failJournalAppends();
+      expect(() =>
+        metadata.writeSession(
+          TEST_DATA_DIR,
+          record({ id: "other", status: "stopped", stopReason: "manual_pause" }),
+        ),
+      ).toThrow("journal append unavailable");
+      restore();
+    });
+    const page = await poll({ since: cursor });
+    expect(page.entries).toContainEqual(
+      expect.objectContaining({ sessionId: "other", kind: "status", to: "stopped" }),
+    );
+  });
+
+  it("retains stopped-to-running status reversal from ordinary reconciliation before append recovery", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    const cursor = (await poll()).nextCursor;
+    const restore = failJournalAppends();
+    const snapshots = vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot");
+    snapshots.mockResolvedValue({
+      runtimeAlive: false,
+      paneUsable: false,
+      processAlive: false,
+      probeUnresponsive: false,
+    });
+    expect(await service.get("api-1")).toMatchObject({ status: "stopped" });
+    snapshots.mockResolvedValue({
+      runtimeAlive: true,
+      paneUsable: true,
+      processAlive: true,
+      probeUnresponsive: false,
+    });
+    expect(await service.get("api-1")).toMatchObject({ status: "running" });
+    restore();
+    const page = await poll({ since: cursor });
+    expect(
+      page.entries
+        .filter((entry) => entry.kind === "status")
+        .map((entry) => [entry.from, entry.to]),
+    ).toEqual([
+      ["running", "stopped"],
+      ["stopped", "running"],
+    ]);
+  });
+
+  it("does not fabricate classified state admission when a strict marker callback fails on an older backlog", async () => {
+    metadata.writeSession(TEST_DATA_DIR, record());
+    metadata.writeSession(TEST_DATA_DIR, record({ id: "other" }));
+    const cursor = (await poll()).nextCursor;
+    const store = (
+      service as unknown as {
+        transitionsBinding: {
+          store: {
+            observeState(record: SessionRecord, state: SessionState, links: unknown[]): void;
+          };
+        };
+      }
+    ).transitionsBinding.store;
+    const observed = vi.spyOn(store, "observeState");
+    let release: (() => void) | undefined;
+    let reached: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const internals = sessionServiceInternals(service);
+    const original = internals.readRuntimeSnapshot.bind(internals);
+    vi.spyOn(internals, "readRuntimeSnapshot").mockImplementationOnce(async (...args) => {
+      reached?.();
+      await gate;
+      return original(...args);
+    });
+    evidence("working", "2026-03-18T11:00:00.000Z");
+    const pending = poll({ since: cursor });
+    await entered;
+    const restore = failJournalAppends();
+    expect(() =>
+      metadata.writeSession(
+        TEST_DATA_DIR,
+        record({ id: "other", status: "stopped", stopReason: "manual_pause" }),
+      ),
+    ).toThrow("journal append unavailable");
+    release?.();
+    await expect(pending).rejects.toThrow("journal append unavailable");
+    expect(
+      observed.mock.calls.some(
+        ([record, state]) => record.id === "api-1" && state === "rate_limited",
+      ),
+    ).toBe(false);
+    restore();
+    evidence("working");
+    const recovered = await poll({ since: cursor });
+    expect(recovered.entries).toContainEqual(
+      expect.objectContaining({ sessionId: "other", kind: "status", to: "stopped" }),
+    );
+    expect(
+      recovered.entries.some((entry) => entry.sessionId === "api-1" && entry.to === "rate_limited"),
+    ).toBe(false);
+  });
+
+  it.each(["same", "different", "disposed"] as const)(
+    "keeps pending observations scoped to the original binding on %s lifecycle change",
+    async (change) => {
+      metadata.writeSession(TEST_DATA_DIR, record());
+      const cursor = (await poll()).nextCursor;
+      const originalBinding = (service as unknown as { transitionsBinding: object })
+        .transitionsBinding;
+      const restore = failJournalAppends();
+      evidence("working", "2026-03-18T11:00:00.000Z");
+      await service.get("api-1");
+      evidence("working");
+      await service.get("api-1");
+      if (change === "same") {
+        service.applyConfig(config, []);
+        expect((service as unknown as { transitionsBinding: object }).transitionsBinding).toBe(
+          originalBinding,
+        );
+        restore();
+        expect((await poll({ since: cursor })).entries.map((entry) => entry.to)).toEqual([
+          "rate_limited",
+          "working",
+        ]);
+      } else if (change === "different") {
+        const nextDir = join(TEST_DATA_DIR, "new-binding");
+        metadata.writeSession(
+          nextDir,
+          record({ slots: { links: [{ label: "task", url: "https://example.com/new-binding" }] } }),
+        );
+        service.applyConfig({ ...config, dataDir: nextDir }, []);
+        restore();
+        const page = await poll();
+        expect(page.entries.some((entry) => entry.to === "rate_limited")).toBe(false);
+        expect(
+          page.entries.every((entry) => entry.links[0]?.url === "https://example.com/new-binding"),
+        ).toBe(true);
+        expect(page.nextCursor.split(".")[0]).not.toBe(cursor.split(".")[0]);
+      } else {
+        service.dispose();
+        restore();
+        const module = await loadSessionServiceModule();
+        service = new module.SessionService("/tmp/spur.yaml", undefined, {
+          deferBackgroundLoops: true,
+        });
+        expect((await poll({ since: cursor })).entries).toEqual([]);
+      }
+    },
+  );
   it("observes a structured reset on the first poll and projects identical GET/full-list/dashboard markers", async () => {
     metadata.writeSession(TEST_DATA_DIR, record());
     const reset = "2026-03-18T11:00:00.000Z";
