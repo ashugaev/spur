@@ -1,11 +1,12 @@
 import { mkdir, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import type * as NodeFs from "node:fs";
 
 const linkState = vi.hoisted(() => ({ failWith: undefined as string | undefined }));
 
 vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
+  const actual = await importOriginal<typeof NodeFs>();
   return {
     ...actual,
     linkSync: (existing: string, target: string) => {

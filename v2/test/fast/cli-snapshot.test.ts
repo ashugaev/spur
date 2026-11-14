@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type * as NodeFs from "node:fs";
 import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
 
 const getJsonMock = vi.fn();
@@ -10,7 +11,7 @@ const writeStdoutMock = vi.fn();
 const stdinMock = vi.hoisted(() => ({ text: "" }));
 
 vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
+  const actual = await importOriginal<typeof NodeFs>();
   return {
     ...actual,
     readFileSync: ((path: unknown, ...rest: unknown[]) =>
