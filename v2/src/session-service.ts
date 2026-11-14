@@ -13479,7 +13479,7 @@ export class SessionService {
       if (!latest || latest.submitUnconfirmedAt !== holdAt) {
         return latest ?? session;
       }
-      if (ceilingReached && typed && !activityAfterHold) {
+      if (ceilingReached && !activityAfterHold) {
         return this.releaseUnconfirmedSubmit(latest, typed.message, "ceiling");
       }
       return this.confirmSubmitHold(latest, "activity");
