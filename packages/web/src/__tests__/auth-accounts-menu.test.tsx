@@ -423,7 +423,7 @@ describe("AuthAccountSelect", () => {
 
     const loading = screen.getByLabelText("Spawn auth") as HTMLSelectElement;
     expect(loading.disabled).toBe(true);
-    expect(loading.options[0]?.text).toBe("Auth · Loading…");
+    expect(loading.getAttribute("aria-busy")).toBe("true");
     release();
 
     await waitFor(() =>
@@ -490,7 +490,7 @@ describe("SwitchAuthDialog", () => {
       />,
     );
 
-    expect(screen.getByTestId("switch-auth-loading").textContent).toBe("Loading accounts…");
+    expect(screen.getByRole("status", { name: "Loading accounts" })).toBeTruthy();
     release();
     await waitFor(() => expect(screen.queryByTestId("switch-auth-loading")).toBeNull());
   });

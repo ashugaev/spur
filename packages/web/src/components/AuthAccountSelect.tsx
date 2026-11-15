@@ -23,8 +23,14 @@ export function AuthAccountSelect({ agent, value, onChange }: AuthAccountSelectP
   if (!managed) return null;
   if (query.isPending || query.isError) {
     return (
-      <select aria-label="Spawn auth" className={SELECT_CLASS} disabled value="">
-        <option value="">{query.isError ? "Auth · unavailable" : "Auth · Loading…"}</option>
+      <select
+        aria-busy={query.isPending || undefined}
+        aria-label="Spawn auth"
+        className={SELECT_CLASS}
+        disabled
+        value=""
+      >
+        <option value="">{query.isError ? "Auth · unavailable" : "Auth"}</option>
       </select>
     );
   }

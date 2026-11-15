@@ -2,7 +2,13 @@
 
 import { useRef, useState } from "react";
 import { BusyContent } from "@/components/BusyContent";
-import { INPUT_CLASS, SECONDARY_BUTTON_CLASS } from "@/design/classes";
+import { Spinner } from "@/components/icons/Spinner";
+import {
+  ATTENTION_BUTTON_CLASS,
+  CHECKBOX_CLASS,
+  INPUT_CLASS,
+  SECONDARY_BUTTON_CLASS,
+} from "@/design/classes";
 import { useDialogFocus } from "@/hooks/useDialogFocus";
 import { getAgentDisplayName } from "@/lib/agents";
 import { authAccountName, authAccountOptionLabel, useAuthAccounts } from "@/lib/auth-accounts";
@@ -88,21 +94,27 @@ export function SwitchAuthDialog({
           </select>
         </label>
         {accountsQuery.isPending ? (
-          <p
-            className="mb-3 normal-case tracking-normal text-[var(--color-text-tertiary)]"
+          <div
+            aria-label="Loading accounts"
+            className="mb-3 flex justify-center text-[var(--color-text-tertiary)]"
             data-testid="switch-auth-loading"
+            role="status"
           >
-            Loading accounts…
-          </p>
+            <Spinner className="h-4 w-4" strokeWidth={1.5} />
+          </div>
         ) : null}
         {accountsQuery.isError ? (
-          <p className="mb-3 normal-case tracking-normal text-[var(--color-status-error)]">
+          <p
+            className="mb-3 normal-case tracking-normal text-[var(--color-status-error)]"
+            role="alert"
+          >
             {accountsQuery.error.message}
           </p>
         ) : null}
         <label className="mb-3 flex items-center gap-2 normal-case tracking-normal text-[var(--color-text-secondary)]">
           <input
             checked={force}
+            className={CHECKBOX_CLASS}
             disabled={pending}
             type="checkbox"
             onChange={(event) => setForce(event.target.checked)}
@@ -113,6 +125,7 @@ export function SwitchAuthDialog({
           <p
             className="mb-3 normal-case tracking-normal text-[var(--color-status-error)]"
             data-testid="switch-auth-error"
+            role="alert"
           >
             {errorMessage}
           </p>
@@ -130,7 +143,7 @@ export function SwitchAuthDialog({
           <button
             aria-busy={pending || undefined}
             aria-label={pending ? "Switching account" : undefined}
-            className="border border-[var(--color-status-attention)] px-2 py-1 font-bold uppercase text-[var(--color-status-attention)] outline-none transition-colors hover:bg-[var(--color-status-attention)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-attention)] focus-visible:text-[var(--color-bg-elevated)] disabled:cursor-not-allowed disabled:opacity-50"
+            className={ATTENTION_BUTTON_CLASS}
             disabled={pending || selected === current}
             type="button"
             onClick={() => onConfirm(selected === AUTO_VALUE ? null : selected, force)}

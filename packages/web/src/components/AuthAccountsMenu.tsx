@@ -7,7 +7,12 @@ import { AccountsIcon } from "@/components/icons/AccountsIcon";
 import { Spinner } from "@/components/icons/Spinner";
 import { AuthLoginDialog } from "@/components/AuthLoginDialog";
 import { BusyContent } from "@/components/BusyContent";
-import { DANGER_BUTTON_CLASS, INPUT_CLASS, SECONDARY_BUTTON_CLASS } from "@/design/classes";
+import {
+  CHECKBOX_CLASS,
+  DANGER_BUTTON_CLASS,
+  INPUT_CLASS,
+  SECONDARY_BUTTON_CLASS,
+} from "@/design/classes";
 import { getAgentDisplayName } from "@/lib/agents";
 import {
   AUTH_ACCOUNTS_QUERY_KEY,
@@ -146,7 +151,7 @@ function ProviderSection({
           aria-busy={rotating || undefined}
           aria-label={`Auto-rotate ${name} accounts`}
           checked={pool?.autoRotate ?? false}
-          className="accent-[var(--color-accent)] outline-none focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]"
+          className={CHECKBOX_CLASS}
           disabled={busy}
           type="checkbox"
           onChange={(event) => poolMutation.mutate({ autoRotate: event.target.checked })}
@@ -293,7 +298,9 @@ export function AuthAccountsMenu() {
   return (
     <div
       ref={popover.containerRef}
-      className="relative"
+      // Below sm the wrapper stays static, so the popover anchors to the
+      // full-width footer instead of this trigger and stays on screen.
+      className="sm:relative"
       onBlur={popover.onBlur}
       onMouseEnter={popover.onMouseEnter}
       onMouseLeave={popover.onMouseLeave}
@@ -311,14 +318,18 @@ export function AuthAccountsMenu() {
         <AccountsIcon className="h-4 w-4" />
       </button>
       {popover.open ? (
-        <div className="absolute bottom-full right-0 z-50 mb-1.5 flex max-h-[70vh] w-[min(26rem,calc(100vw-1rem))] flex-col gap-3 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
+        <div
+          className="absolute inset-x-2 bottom-full z-50 mb-1.5 flex max-h-[70vh] flex-col gap-3 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)] sm:inset-x-auto sm:right-0 sm:w-[min(26rem,calc(100vw-1rem))]"
+          data-testid="auth-accounts-popover"
+        >
           {accountsQuery.isPending ? (
             <div
-              className={`flex items-center gap-2 ${NOTE_CLASS} text-[var(--color-text-tertiary)]`}
+              aria-label="Loading accounts"
+              className="flex items-center justify-center py-2 text-[var(--color-text-tertiary)]"
               data-testid="auth-accounts-loading"
+              role="status"
             >
-              <Spinner className="h-3 w-3" strokeWidth={1.5} />
-              Loading accounts…
+              <Spinner className="h-4 w-4" strokeWidth={1.5} />
             </div>
           ) : accountsQuery.isError ? (
             <div className="flex items-center justify-between gap-2">

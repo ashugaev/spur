@@ -136,7 +136,11 @@ export function AuthLoginDialog({ account, login: initialLogin, onClose }: AuthL
             <div>Waiting for sign-in…</div>
           ) : null}
           {errorText ? (
-            <div className="text-[var(--color-status-error)]" data-testid="auth-login-error">
+            <div
+              className="text-[var(--color-status-error)]"
+              data-testid="auth-login-error"
+              role="alert"
+            >
               {errorText}
             </div>
           ) : null}
