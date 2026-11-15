@@ -9,6 +9,7 @@ PREVIEW
 
   Render proposed UI in isolated sidecar or local HTML preview, any runtime.
   Load frontend-codestyle; use existing components and tokens.
+  Contrast: every actionable element (button, icon, link, control) and its label/icon checked against the background it renders on (over images, translucent or overlay surfaces, both themes); AA: text 4.5:1, large text and icons/UI components 3:1; measure from rendered pixels or computed colors, not token names; fail = finding, fix before handoff.
   Save screenshot before dependent implementation; preview code stays in artifacts.
 
 HANDOFF: $SPUR_SESSION_ARTIFACTS_DIR/design/, never committed.

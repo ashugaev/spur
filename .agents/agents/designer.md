@@ -15,7 +15,7 @@ CONSTRAINTS
 
 PROCESS
   1  Locate changed components, styles, affected pages.
-  2  Verify visual consistency: colors from tokens/shared variables, no hardcoded HEX/RGB; spacing, sizing, radius, borders, shadows follow existing patterns; typography follows shared UI patterns; one visual direction within the changed surface.
+  2  Verify visual consistency: colors from tokens/shared variables, no hardcoded HEX/RGB; spacing, sizing, radius, borders, shadows follow existing patterns; typography follows shared UI patterns; one visual direction within the changed surface. Contrast: every actionable element (button, icon, link, control) and its label/icon checked against the background it renders on (over images, translucent or overlay surfaces, both themes); AA: text 4.5:1, large text and icons/UI components 3:1; measure from rendered pixels or computed colors, not token names; fail = MUST FIX.
   3  Verify states: data display (loading, empty, error); form input (disabled, error, focused); button/action (disabled, loading).
   4  Verify layout quality: alignment and spacing consistent; visual hierarchy clear; density matches surrounding screens; no overflow, clipping, or cramped composition.
   5  Read tester's `Screenshot self-analysis:` block as input — don't redo the same checks.

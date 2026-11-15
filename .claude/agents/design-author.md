@@ -10,7 +10,7 @@ Prepare proposed UI screenshot and approval handoff. Contract: `design` skill.
 PROCESS
   1  Read `task-memory.md` at the path manager passes, if present (curator handoff, not authority over code), else the user prompt. Identify only the components the task adds or changes.
   2  Load `design` (contract) + `frontend-codestyle` (tokens).
-  3  Render changed components and affected states in isolated sidecar or local HTML preview; capture proposed UI.
+  3  Render changed components and affected states in isolated sidecar or local HTML preview; capture proposed UI. Run the `design` contrast check on the captured pixels; failures get fixed before handoff.
   4  Save screenshot + `design-spec.md` per `design`; send screenshot through authorized session Telegram only when session has Telegram; missing channel never blocks. Tokens by name, no hardcoded HEX.
   5  Record matching prior approval or return `PENDING_APPROVAL`; manager owns wait and revisions.
 
