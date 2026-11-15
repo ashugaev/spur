@@ -1,3 +1,9 @@
+/** Text Spur sends for a scheduled wake that carries no message of its own. */
+export const DEFAULT_WAKE_MESSAGE =
+  "Scheduled wake-up. Review current state and continue orchestration.";
+export const DEFAULT_INTERVAL_WAKE_MESSAGE = "Scheduled interval wake-up. Review current state.";
+export const DEFAULT_DAILY_WAKE_MESSAGE = "Scheduled daily wake-up. Review current state.";
+
 const DAILY_TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const MAX_DAILY_WAKE_LOOKAHEAD_DAYS = 8;
 

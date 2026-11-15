@@ -20,6 +20,11 @@ import {
   writeSnapshot,
   type SnapshotWriteContext,
 } from "../../src/snapshots.js";
+import {
+  DEFAULT_DAILY_WAKE_MESSAGE,
+  DEFAULT_INTERVAL_WAKE_MESSAGE,
+  DEFAULT_WAKE_MESSAGE,
+} from "../../src/wake-schedule.js";
 import type { ProjectConfig, SessionRecord, TranscriptEntry } from "../../src/types.js";
 import { readWorktreeHead } from "../../src/workspace.js";
 import { createTempDir } from "../helpers/common.js";
@@ -264,6 +269,14 @@ describe("isSpurReminder", () => {
   it("rejects other text", () => {
     expect(isSpurReminder("please fix the bug")).toBe(false);
   });
+
+  it.each([DEFAULT_WAKE_MESSAGE, DEFAULT_INTERVAL_WAKE_MESSAGE, DEFAULT_DAILY_WAKE_MESSAGE])(
+    "matches the default wake message %s through a listed prefix",
+    (message) => {
+      expect(SNAPSHOT_REMINDER_PREFIXES).toContain(message);
+      expect(isSpurReminder(message)).toBe(true);
+    },
+  );
 });
 
 describe("isSpurToolCommand", () => {

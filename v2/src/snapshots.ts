@@ -12,6 +12,11 @@ import {
   writeSync,
 } from "node:fs";
 import { join } from "node:path";
+import {
+  DEFAULT_DAILY_WAKE_MESSAGE,
+  DEFAULT_INTERVAL_WAKE_MESSAGE,
+  DEFAULT_WAKE_MESSAGE,
+} from "./wake-schedule.js";
 import type {
   AgentName,
   ProjectConfig,
@@ -86,12 +91,18 @@ export const DEFAULT_SNAPSHOT_FRESHNESS_MINUTES = 30;
 export const SNAPSHOT_HOOK_TOOL_NAME = "spur-snapshot-hook";
 export const SNAPSHOT_HOOK_TURN_FILE = "snapshot-hook-turn";
 
-/** Text a Spur reminder starts with: ToDo nudges (session-service.ts) and the snapshot request. */
+/**
+ * Text a Spur reminder starts with: ToDo nudges (session-service.ts), the snapshot request, and
+ * the default scheduled wake messages. A wake with its own message is real input.
+ */
 export const SNAPSHOT_REMINDER_PREFIXES: readonly string[] = [
   "Spur ToDo still has open work:",
   "Spur ToDo needs human input:",
   "Spur ToDo is empty.",
   "Spur snapshot is stale:",
+  DEFAULT_WAKE_MESSAGE,
+  DEFAULT_INTERVAL_WAKE_MESSAGE,
+  DEFAULT_DAILY_WAKE_MESSAGE,
 ];
 
 /** RegExp source matching a command that touches the session's Spur tools. The hook script embeds it. */

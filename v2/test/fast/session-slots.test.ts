@@ -32,6 +32,7 @@ import {
 } from "../../src/session-slots.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "../../src/self-destruct.js";
 import { shellEscape } from "../../src/agents/shell-escape.js";
+import { DEFAULT_INTERVAL_WAKE_MESSAGE } from "../../src/wake-schedule.js";
 import {
   SNAPSHOT_HOOK_TOOL_NAME,
   SNAPSHOT_HOOK_TURN_FILE,
@@ -1223,6 +1224,16 @@ describe("snapshot hook tool", () => {
       prompt: "fix the bug",
     });
     expect(turn()).toEqual({ reminder: false, worked: false });
+  });
+
+  it("treats a default scheduled wake prompt as a reminder turn", async () => {
+    const { toolDir, turnPath } = await setup({ snapshotAgoMs: stale });
+    runHook(toolDir, {
+      hook_event_name: "UserPromptSubmit",
+      prompt: DEFAULT_INTERVAL_WAKE_MESSAGE,
+    });
+    expect(JSON.parse(readFileSync(turnPath, "utf8"))).toEqual({ reminder: true, worked: false });
+    expect(runHook(toolDir, { hook_event_name: "Stop" })).toBe("");
   });
 
   it("stays silent through a reminder turn that only runs Spur tools", async () => {

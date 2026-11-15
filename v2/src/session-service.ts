@@ -462,7 +462,13 @@ import {
   type RegistryScanResult,
   type UnconfiguredProjectEntry,
 } from "./registry.js";
-import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
+import {
+  DEFAULT_DAILY_WAKE_MESSAGE,
+  DEFAULT_INTERVAL_WAKE_MESSAGE,
+  DEFAULT_WAKE_MESSAGE,
+  normalizeDailyWakeTimes,
+  resolveNextDailyWakeAt,
+} from "./wake-schedule.js";
 import { reconcileTokenUsage, type ProviderTokenUsageSample } from "./token-usage.js";
 import {
   PreflightBatchClaimedError,
@@ -939,8 +945,6 @@ const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const PR_CHECK_WAITING_LIMIT = 5;
-const DEFAULT_WAKE_MESSAGE = "Scheduled wake-up. Review current state and continue orchestration.";
-const DEFAULT_INTERVAL_WAKE_MESSAGE = "Scheduled interval wake-up. Review current state.";
 
 type MemoryShedTrigger =
   | "available_floor"
@@ -1018,7 +1022,6 @@ function nextCgroupMaxLatched(
 ): boolean {
   return headroomBytes <= emergencyBytes || (latched && headroomBytes <= 2 * emergencyBytes);
 }
-const DEFAULT_DAILY_WAKE_MESSAGE = "Scheduled daily wake-up. Review current state.";
 
 interface StoredImageAttachment {
   id: string;

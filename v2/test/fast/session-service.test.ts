@@ -249,6 +249,7 @@ import { allowsPrAlertBatch } from "../../src/pr-alert-owner.js";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import { createPage } from "../../src/pages.js";
 import { isSpurReminder, snapshotRequestMessage } from "../../src/snapshots.js";
+import { DEFAULT_DAILY_WAKE_MESSAGE, DEFAULT_WAKE_MESSAGE } from "../../src/wake-schedule.js";
 import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as sessionSlotsModule from "../../src/session-slots.js";
 import type * as metadataModule from "../../src/metadata.js";
@@ -4298,6 +4299,23 @@ describe("SessionService", () => {
         expect(send.mock.calls[0]?.[1]).toContain("Spur ToDo still has open work");
         expect(sessions.get(session.id)?.snapshotNudge).toBeUndefined();
         service.dispose();
+      });
+
+      it("treats a text-only reply to a default wake as idle, and tool work after it as work", async () => {
+        const idle = await dueSetup([
+          userEntry("go", 1),
+          userEntry(DEFAULT_WAKE_MESSAGE, 35),
+          textEntry(40),
+        ]);
+        await nudgeAt(idle.internals, idle.sessions, idle.session, new Date(at(40)));
+        expect(idle.send.mock.calls[0]?.[1]).toContain("Spur ToDo still has open work");
+        idle.service.dispose();
+
+        const worked = await dueSetup([userEntry(DEFAULT_DAILY_WAKE_MESSAGE, 35), toolEntry(36)]);
+        worked.send.mockClear();
+        await nudgeAt(worked.internals, worked.sessions, worked.session, new Date(at(40)));
+        expect(worked.send.mock.calls[0]?.[1]).toBe(REQUEST_MESSAGE);
+        worked.service.dispose();
       });
 
       it("counts a non-Spur tool inside a reminder turn", async () => {

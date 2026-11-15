@@ -22,7 +22,8 @@ Request text starts `Spur snapshot is stale:`. Sent when agent work lies more th
 Agent output after the latest snapshot. Transcript file activity alone never counts.
 
 - Turn started by you or a trigger: assistant text, reasoning, tool calls.
-- Turn started by a Spur reminder (ToDo nudge, snapshot request): only tool calls that are not Spur session tools. Text, reasoning and `spur-todo`/`spur-snapshot`/`spur-slots` calls never count.
+- Turn started by a Spur reminder: only tool calls that are not Spur session tools. Text, reasoning and `spur-todo`/`spur-snapshot`/`spur-slots` calls never count.
+- Reminder sources, matched by their opening text: ToDo nudges, the snapshot request, and scheduled wakes (one-off, interval, daily) sent with Spur's default message. A wake with its own message, trigger prompts, GitHub event triggers and `spur send` text are real input.
 - A command mixing real work with a Spur tool call counts as a Spur call.
 - An idle session whose only activity is answering reminders is never asked.
 
