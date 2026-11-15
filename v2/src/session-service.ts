@@ -12459,7 +12459,7 @@ export class SessionService {
   ): Promise<void> {
     assertCurrent();
     binding.store.flushPending();
-    const accounts = this.computeClaudeAccountsView();
+    const accounts = await this.computeClaudeAccountsView();
     const seen = new Set<string>();
     const rows: {
       view: Omit<SessionListItemView, "lifecycle">;
