@@ -13,6 +13,10 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import {
+  CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
+  RATE_LIMIT_REACTIVATION_PROMPT,
+} from "./reactivation-prompts.js";
+import {
   DEFAULT_DAILY_WAKE_MESSAGE,
   DEFAULT_INTERVAL_WAKE_MESSAGE,
   DEFAULT_WAKE_MESSAGE,
@@ -93,7 +97,8 @@ export const SNAPSHOT_HOOK_TURN_FILE = "snapshot-hook-turn";
 
 /**
  * Text a Spur reminder starts with: ToDo nudges (session-service.ts), the snapshot request, and
- * the default scheduled wake messages. A wake with its own message is real input.
+ * the default scheduled wake messages and the rate-limit and server-error continue prompts. A
+ * wake with its own message is real input.
  */
 export const SNAPSHOT_REMINDER_PREFIXES: readonly string[] = [
   "Spur ToDo still has open work:",
@@ -103,6 +108,8 @@ export const SNAPSHOT_REMINDER_PREFIXES: readonly string[] = [
   DEFAULT_WAKE_MESSAGE,
   DEFAULT_INTERVAL_WAKE_MESSAGE,
   DEFAULT_DAILY_WAKE_MESSAGE,
+  RATE_LIMIT_REACTIVATION_PROMPT,
+  CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
 ];
 
 /** RegExp source matching a command that touches the session's Spur tools. The hook script embeds it. */

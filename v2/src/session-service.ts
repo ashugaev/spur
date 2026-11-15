@@ -463,6 +463,10 @@ import {
   type UnconfiguredProjectEntry,
 } from "./registry.js";
 import {
+  CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
+  RATE_LIMIT_REACTIVATION_PROMPT,
+} from "./reactivation-prompts.js";
+import {
   DEFAULT_DAILY_WAKE_MESSAGE,
   DEFAULT_INTERVAL_WAKE_MESSAGE,
   DEFAULT_WAKE_MESSAGE,
@@ -711,10 +715,6 @@ function recoverableRuntimeError(session: SessionRecord): boolean {
 // Not a message prefix (the message starts with "Session <id> ...") — a
 // substring marker matched via .includes() in isForeignAgentProcessMessage.
 const FOREIGN_AGENT_PROCESS_MARKER = "already has a live agent process";
-const RATE_LIMIT_REACTIVATION_PROMPT =
-  "You were rate limited earlier and should be able to continue now. Please resume the task you were working on and pick up from where you left off.";
-const CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT =
-  "Claude hit a temporary server error earlier. Please try to continue the task now.";
 const CLAUDE_SERVER_ERROR_REACTIVATION_MS = 30 * 60 * 1000;
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;

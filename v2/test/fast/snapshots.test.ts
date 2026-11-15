@@ -21,6 +21,10 @@ import {
   type SnapshotWriteContext,
 } from "../../src/snapshots.js";
 import {
+  CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
+  RATE_LIMIT_REACTIVATION_PROMPT,
+} from "../../src/reactivation-prompts.js";
+import {
   DEFAULT_DAILY_WAKE_MESSAGE,
   DEFAULT_INTERVAL_WAKE_MESSAGE,
   DEFAULT_WAKE_MESSAGE,
@@ -270,13 +274,16 @@ describe("isSpurReminder", () => {
     expect(isSpurReminder("please fix the bug")).toBe(false);
   });
 
-  it.each([DEFAULT_WAKE_MESSAGE, DEFAULT_INTERVAL_WAKE_MESSAGE, DEFAULT_DAILY_WAKE_MESSAGE])(
-    "matches the default wake message %s through a listed prefix",
-    (message) => {
-      expect(SNAPSHOT_REMINDER_PREFIXES).toContain(message);
-      expect(isSpurReminder(message)).toBe(true);
-    },
-  );
+  it.each([
+    DEFAULT_WAKE_MESSAGE,
+    DEFAULT_INTERVAL_WAKE_MESSAGE,
+    DEFAULT_DAILY_WAKE_MESSAGE,
+    RATE_LIMIT_REACTIVATION_PROMPT,
+    CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
+  ])("matches the Spur-owned prompt %s through a listed prefix", (message) => {
+    expect(SNAPSHOT_REMINDER_PREFIXES).toContain(message);
+    expect(isSpurReminder(message)).toBe(true);
+  });
 });
 
 describe("isSpurToolCommand", () => {
