@@ -80,6 +80,24 @@ describe("snapshotListeners", () => {
     expect(await snapshotListeners()).toEqual({ ok: false });
   });
 
+  it("bounds both unresponsive listener commands and returns unknown", async () => {
+    vi.useFakeTimers();
+    try {
+      execFileAsyncMock.mockImplementation(() => new Promise(() => {}));
+      const pending = snapshotListeners();
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(await pending).toEqual({ ok: false });
+      expect(execFileAsyncMock).toHaveBeenCalledTimes(2);
+      expect(
+        execFileAsyncMock.mock.calls.every(
+          (call) => (call[2] as { killSignal?: string }).killSignal === "SIGKILL",
+        ),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("attributes a real TCP listener without an HTTP response", async () => {
     const actual = await vi.importActual<typeof childProcessModule>("node:child_process");
     const run = promisify(actual.execFile);
