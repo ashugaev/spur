@@ -1954,6 +1954,10 @@ test.describe("D4b: Merged/closed-PR done button", () => {
 
     let completeAttempts = 0;
     const completeBodies: unknown[] = [];
+    let releaseRetry!: () => void;
+    const pendingRetry = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
     await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
       completeAttempts += 1;
       completeBodies.push(route.request().postDataJSON());
@@ -1979,6 +1983,7 @@ test.describe("D4b: Merged/closed-PR done button", () => {
         });
         return;
       }
+      await pendingRetry;
       current = {
         ...session,
         status: "completed",
@@ -2006,6 +2011,9 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await page.getByRole("button", { name: "Leave Pull Request Open" }).click();
 
     await expect.poll(() => completeAttempts).toBe(2);
+    await expect(page.getByRole("dialog", { name: "Open Pull Request" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: `Mark ${session.id} as done` })).toHaveCount(0);
+    releaseRetry();
     expect(completeBodies).toEqual([
       { scope: "desk", operationId: expect.any(String) },
       { scope: "desk", prAction: "leave_open", operationId: expect.any(String) },

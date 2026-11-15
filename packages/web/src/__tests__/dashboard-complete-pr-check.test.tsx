@@ -516,6 +516,72 @@ describe("Dashboard lifecycle reconciliation", () => {
   const restoreButton = () =>
     screen.queryByRole("button", { name: `Restore session ${source.id}` });
 
+  it.each(["success", "error", "pr-check"] as const)(
+    "dismisses leave-open before pending complete and refresh settle: %s",
+    async (outcome) => {
+      render(<Dashboard />);
+      await clickDone();
+      await act(async () => {
+        post.resolve(new Response(JSON.stringify(openPrActionPayload), { status: 409 }));
+      });
+      await screen.findByRole("dialog", { name: "Open Pull Request" });
+      post = deferredResponse();
+      fireEvent.click(screen.getByRole("button", { name: "Leave Pull Request Open" }));
+      expect(screen.queryByRole("dialog", { name: "Open Pull Request" })).not.toBeInTheDocument();
+      await waitFor(() => expect(posts).toHaveLength(2));
+      expect(doneButton()).not.toBeInTheDocument();
+      const retry = vi
+        .mocked(global.fetch)
+        .mock.calls.filter(([url]) => String(url).endsWith("/complete"))[1];
+      expect(JSON.parse(String(retry[1]?.body))).toEqual({
+        scope: "desk",
+        prAction: "leave_open",
+        operationId: expect.any(String),
+      });
+
+      if (outcome === "success") {
+        current.set(source.id, { ...source, status: "completed" });
+        const refresh = deferredResponse();
+        nextList = refresh;
+        await act(async () => {
+          post.resolve(new Response(JSON.stringify({ completedIds: [source.id] })));
+        });
+        await waitFor(() => expect(nextList).toBeUndefined());
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+        expect(doneButton()).not.toBeInTheDocument();
+        await act(async () => {
+          refresh.resolve(new Response(JSON.stringify(list)));
+        });
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      } else {
+        await act(async () => {
+          post.resolve(
+            new Response(
+              JSON.stringify(
+                outcome === "error"
+                  ? { error: "Leave-open completion failed" }
+                  : prCheckUnavailablePayload,
+              ),
+              { status: outcome === "error" ? 500 : 409 },
+            ),
+          );
+        });
+        if (outcome === "error") {
+          expect(await screen.findByText("Leave-open completion failed")).toBeInTheDocument();
+          expect(doneButton()).toBeInTheDocument();
+          expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+        } else {
+          expect(
+            await screen.findByRole("dialog", { name: "GitHub PR Check Unavailable" }),
+          ).toBeInTheDocument();
+          expect(
+            screen.queryByRole("dialog", { name: "Open Pull Request" }),
+          ).not.toBeInTheDocument();
+        }
+      }
+    },
+  );
+
   it.each(["complete", "restore"] as const)(
     "protects pending %s through three scheduled five-second polls",
     async (action) => {
