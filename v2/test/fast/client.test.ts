@@ -955,15 +955,108 @@ describe("client deadlines", () => {
     await expect(probeDaemon("http://127.0.0.1:4310")).resolves.toEqual({ state: "unreachable" });
   });
 
-  it("ensureServer rejects on an unresponsive initial probe and never spawns", async () => {
-    vi.mocked(fetch).mockImplementation((_input, init) => pendingUntilAbort(init));
+  it.each([true, false])(
+    "ensureServer recovers after an unresponsive initial probe without lifecycle effects (managed=%s)",
+    async (managed) => {
+      if (managed) await installManagedDefaultUnit();
+      const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+      routeFetch((call, init) => (call <= 2 ? pendingUntilAbort(init) : ready()));
+      const { ensureServer } = await loadClientModule();
+      const pending = ensureServer("/tmp/dist/cli.js", managed ? undefined : "/tmp/spur.yaml");
+      const result = track(pending);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(result.state.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(pending).resolves.toBe("http://127.0.0.1:4310");
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(kill).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each([true, false])(
+    "ensureServer bounds an unresponsive initial probe recovery and preserves its error (managed=%s)",
+    async (managed) => {
+      if (managed) await installManagedDefaultUnit();
+      const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+      vi.mocked(fetch).mockImplementation((_input, init) => pendingUntilAbort(init));
+      const { ensureServer } = await loadClientModule();
+      const started = Date.now();
+      const result = track(
+        ensureServer("/tmp/dist/cli.js", managed ? undefined : "/tmp/spur.yaml"),
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(result.state.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(49_999);
+      expect(result.state.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await result.done();
+      expect(result.state.error?.message).toBe(
+        "Spur daemon at http://127.0.0.1:4310 did not answer GET /info within 10s; the process holds the port but is not responding.",
+      );
+      expect(Date.now() - started).toBe(60_000);
+      expect(fetch).toHaveBeenCalledTimes(6);
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(kill).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each(["before", "during"])(
+    "ensureServer recovers when a post-stop probe hangs %s the retry loop",
+    async (position) => {
+      const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+      const incompatibleCall = position === "before" ? 1 : 2;
+      routeFetch((call, init) => {
+        if (call < incompatibleCall) return Promise.resolve(new Response("{}", { status: 503 }));
+        if (call === incompatibleCall)
+          return Promise.resolve(new Response(JSON.stringify(runtimeInfo(-1, 7777))));
+        if (call === incompatibleCall + 1) return Promise.reject(new Error("daemon stopped"));
+        return call <= incompatibleCall + 3 ? pendingUntilAbort(init) : ready();
+      });
+      const { ensureServer } = await loadClientModule();
+      const pending = ensureServer("/tmp/dist/cli.js", "/tmp/spur.yaml");
+      const result = track(pending);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(result.state.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(pending).resolves.toBe("http://127.0.0.1:4310");
+      expect(fetch).toHaveBeenCalledTimes(incompatibleCall + 4);
+      expect(kill).toHaveBeenCalledTimes(1);
+      expect(kill).toHaveBeenCalledWith(7777, "SIGTERM");
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("ensureServer bounds an unresponsive in-loop post-stop recovery and preserves its error", async () => {
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+    routeFetch((call, init) => {
+      if (call === 1) return Promise.resolve(new Response("{}", { status: 503 }));
+      if (call === 2)
+        return Promise.resolve(new Response(JSON.stringify(runtimeInfo(-1, 7777))));
+      if (call === 3) return Promise.reject(new Error("daemon stopped"));
+      return pendingUntilAbort(init);
+    });
     const { ensureServer } = await loadClientModule();
-    const assertion = expect(ensureServer("/tmp/dist/cli.js", "/tmp/spur.yaml")).rejects.toThrow(
-      /did not answer GET \/info within 10s/,
-    );
+    const started = Date.now();
+    const result = track(ensureServer("/tmp/dist/cli.js", "/tmp/spur.yaml"));
     await vi.advanceTimersByTimeAsync(10_000);
-    await assertion;
+    expect(result.state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(39_999);
+    expect(result.state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await result.done();
+    expect(result.state.error?.message).toBe(
+      "Spur daemon at http://127.0.0.1:4310 did not answer GET /info within 10s; the process holds the port but is not responding.",
+    );
+    expect(Date.now() - started).toBe(50_000);
+    expect(fetch).toHaveBeenCalledTimes(8);
+    expect(kill).toHaveBeenCalledTimes(1);
+    expect(kill).toHaveBeenCalledWith(7777, "SIGTERM");
     expect(spawnMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("stopDaemonIfRunning rejects on an unresponsive probe", async () => {
