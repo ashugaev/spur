@@ -56,6 +56,8 @@ import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
 import { IconActionButton } from "@/components/IconActionButton";
 import { IconCloseButton } from "@/components/IconCloseButton";
+import { CheckIcon } from "@/components/icons/CheckIcon";
+import { CloseIcon } from "@/components/icons/CloseIcon";
 import { SendIcon } from "@/components/icons/SendIcon";
 import { Spinner } from "@/components/icons/Spinner";
 import { TrashIcon } from "@/components/icons/TrashIcon";
@@ -1208,6 +1210,14 @@ function ArtifactLightbox({
     finishSwipe(event.pointerId, event.clientX, event.clientY);
   };
 
+  const phoneCopyLabel =
+    copyState === "copied"
+      ? `Copied ${artifact.name}`
+      : copyState === "error"
+        ? `Copy failed for ${artifact.name}`
+        : copyState === "copying"
+          ? `Copying ${artifact.name}`
+          : `Copy ${artifact.name}`;
   const phoneImage = isPhone && artifact.kind === "image";
   const phoneNavButtonClass = `${overlayButtonClass()} disabled:cursor-not-allowed disabled:opacity-40`;
   const headerClassName = !isPhone
@@ -1270,32 +1280,59 @@ function ArtifactLightbox({
                 </>
               ) : null}
               {artifact.kind === "text" && textPreviewState === "ready" && textContent ? (
-                <button
-                  aria-busy={copyState === "copying" || undefined}
-                  aria-label={
-                    copyState === "copying" ? `Copying ${artifact.name}` : `Copy ${artifact.name}`
-                  }
-                  className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
-                  disabled={copyState === "copying"}
-                  onClick={() => void handleCopyText()}
-                  type="button"
-                >
-                  <BusyContent busy={copyState === "copying"}>
-                    <CopyIcon />
-                    {COPY_TEXT_LABELS[copyState]}
-                  </BusyContent>
-                </button>
+                isPhone ? (
+                  <button
+                    aria-busy={copyState === "copying" || undefined}
+                    aria-label={phoneCopyLabel}
+                    className={overlayButtonClass()}
+                    disabled={copyState === "copying"}
+                    onClick={() => void handleCopyText()}
+                    title={phoneCopyLabel}
+                    type="button"
+                  >
+                    <BusyContent busy={copyState === "copying"}>
+                      {copyState === "copied" ? (
+                        <CheckIcon className="h-3.5 w-3.5" />
+                      ) : copyState === "error" ? (
+                        <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
+                      ) : (
+                        <CopyIcon />
+                      )}
+                    </BusyContent>
+                  </button>
+                ) : (
+                  <button
+                    aria-busy={copyState === "copying" || undefined}
+                    aria-label={
+                      copyState === "copying" ? `Copying ${artifact.name}` : `Copy ${artifact.name}`
+                    }
+                    className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                    disabled={copyState === "copying"}
+                    onClick={() => void handleCopyText()}
+                    type="button"
+                  >
+                    <BusyContent busy={copyState === "copying"}>
+                      <CopyIcon />
+                      {COPY_TEXT_LABELS[copyState]}
+                    </BusyContent>
+                  </button>
+                )
               ) : null}
               {html ? (
                 <a
                   aria-label={`Open ${artifact.name} in a new tab`}
-                  className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                  className={
+                    isPhone
+                      ? `${overlayButtonClass()} hover:no-underline`
+                      : "inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                  }
                   href={artifactHref}
                   rel="noreferrer"
                   target="_blank"
+                  title={isPhone ? `Open ${artifact.name} in a new tab` : undefined}
                 >
                   <ArtifactOpenExternalIcon />
-                  Open
+                  {isPhone ? null : "Open"}
                 </a>
               ) : null}
               <a

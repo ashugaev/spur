@@ -5607,6 +5607,46 @@ describe("SessionDetail artifacts", () => {
       expect(closeButton()).toBeInTheDocument();
     });
 
+    it("keeps the phone copy button a fixed icon-only square in every copy state", async () => {
+      const writeText = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("denied"))
+        .mockResolvedValueOnce(undefined);
+      Object.defineProperty(window.navigator, "clipboard", {
+        configurable: true,
+        value: { writeText },
+      });
+      mockPhoneSession([
+        {
+          ...artifactBase,
+          id: "notes.txt",
+          name: "notes.txt",
+          size: 10,
+          mimeType: "text/plain",
+          kind: "text",
+        },
+      ]);
+      await openPhoneArtifact("notes.txt");
+
+      const expectFixedSquare = (button: HTMLElement) => {
+        expect(button).toHaveClass("h-8", "w-8");
+        expect(button).toHaveTextContent("");
+      };
+
+      const idle = await screen.findByRole("button", { name: "Copy notes.txt" });
+      expectFixedSquare(idle);
+
+      fireEvent.click(idle);
+      const failed = await screen.findByRole("button", { name: "Copy failed for notes.txt" });
+      expect(failed).toHaveAttribute("title", "Copy failed for notes.txt");
+      expectFixedSquare(failed);
+
+      fireEvent.click(failed);
+      const copied = await screen.findByRole("button", { name: "Copied notes.txt" });
+      expect(copied).toHaveAttribute("title", "Copied notes.txt");
+      expectFixedSquare(copied);
+    });
+
     it("keeps a zoomed image from flipping on tap", async () => {
       mockPhoneSession(phoneArtifacts);
       const dialog = await openPhoneArtifact("shot.png");

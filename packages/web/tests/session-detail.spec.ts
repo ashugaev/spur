@@ -4260,6 +4260,83 @@ test.describe("S4b: Artifacts section", () => {
     }
   });
 
+  test("320px phone lightbox header keeps every action inside the viewport", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      ...devices["iPhone 13"],
+      viewport: { width: 320, height: 844 },
+    });
+    await installApiRouteGuardsOnContext(context);
+    const page = await context.newPage();
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText: () => Promise.reject(new Error("denied")) },
+      });
+      document.execCommand = () => false;
+    });
+    const names = Array.from({ length: 12 }, (_, index) => `notes-${index + 1}.txt`);
+    const session = makeWorkingSession({
+      id: "detail-s4b-narrow-header",
+      artifacts: names.map((name) => ({
+        id: name,
+        name,
+        size: 64,
+        mimeType: "text/plain; charset=utf-8",
+        kind: "text" as const,
+        origin: "intentional" as const,
+        createdAt: "2026-04-02T10:00:00.000Z",
+        updatedAt: "2026-04-02T10:00:00.000Z",
+      })),
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.route(`**/api/sessions/${session.id}/artifacts/*`, (route) => {
+        void route.fulfill({
+          status: 200,
+          contentType: "text/plain; charset=utf-8",
+          body: "narrow header text",
+        });
+      });
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await page.getByRole("button", { name: "Preview notes-12.txt" }).click({ force: true });
+
+      const dialog = page.getByRole("dialog", { name: "Artifact preview notes-12.txt" });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByText("12 / 12", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("narrow header text")).toBeVisible();
+
+      const expectActionsInViewport = async () => {
+        for (const locator of [
+          dialog.getByRole("button", { name: /^Copy/ }),
+          dialog.getByRole("link", { name: "Download notes-12.txt" }),
+          dialog.getByRole("button", { name: "Close artifact preview" }),
+        ]) {
+          const box = await locator.boundingBox();
+          expect(box).not.toBeNull();
+          if (!box) throw new Error("Header action missing bounds");
+          expect(box.x).toBeGreaterThanOrEqual(0);
+          expect(box.x + box.width).toBeLessThanOrEqual(320);
+          expect(box.width).toBeCloseTo(32, 0);
+        }
+      };
+
+      await expect(dialog.getByRole("button", { name: "Copy notes-12.txt" })).toBeVisible();
+      await expectActionsInViewport();
+
+      await dialog.getByRole("button", { name: "Copy notes-12.txt" }).tap();
+      await expect(
+        dialog.getByRole("button", { name: "Copy failed for notes-12.txt" }),
+      ).toBeVisible();
+      await expectActionsInViewport();
+    } finally {
+      await context.close();
+    }
+  });
+
   test("mobile artifact grid shows two columns with 8px page padding", async ({ browser }) => {
     const context = await browser.newContext({ ...devices["iPhone 13"] });
     await installApiRouteGuardsOnContext(context);
