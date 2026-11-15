@@ -182,6 +182,7 @@ import {
   TEST_ARTIFACTS_ROOT,
   artifactDirForSession,
   TEST_DATA_DIR,
+  TEST_HOME,
   writeTelegramOfferMock,
   readInterfaceConsentMock,
   writeInterfaceConsentMock,
@@ -235,11 +236,13 @@ import {
   closeSync,
   existsSync,
   fstatSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   rmSync,
   statSync,
   utimesSync,
@@ -20896,6 +20899,30 @@ describe("SessionService", () => {
         }),
       );
       if (pool === "empty pool") expect(authProxyGetStateMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("builds the managed Claude home only from the per-test HOME", async () => {
+      expect(homedir()).toBe(TEST_HOME);
+      mkdirSync(join(TEST_HOME, ".claude", "skills"), { recursive: true });
+      writeFileSync(join(TEST_HOME, ".claude", "CLAUDE.md"), "fixture\n");
+      seedManagedAccounts("claude");
+      createSessionStore();
+      mockClaudeJsonlState("waiting");
+      authProxyRegisterSessionMock.mockResolvedValue(registration("claude", "backup"));
+      const service = await createDisposedSessionService();
+      await service.spawn({ project: "api", prompt: "hello", authAccountId: "backup" });
+      const managedHome = join(ensureSessionSlotToolMock(), "managed-claude-home");
+      const links = readdirSync(managedHome).filter((name) =>
+        lstatSync(join(managedHome, name)).isSymbolicLink(),
+      );
+      expect(links.sort()).toEqual(["CLAUDE.md", "skills"]);
+      for (const name of links) {
+        expect(readlinkSync(join(managedHome, name)).startsWith(`${TEST_HOME}/`)).toBe(true);
+      }
+      expect(JSON.parse(readFileSync(join(managedHome, ".claude.json"), "utf8"))).toEqual({
+        hasCompletedOnboarding: true,
+      });
       service.dispose();
     });
 

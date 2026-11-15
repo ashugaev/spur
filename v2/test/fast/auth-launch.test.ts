@@ -6,6 +6,7 @@ import {
   readFileSync,
   readlinkSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -78,6 +79,58 @@ describe("managed native authorization launch", () => {
     expect(JSON.parse(readFileSync(join(claudeConfigDir!, ".claude.json"), "utf8"))).toEqual(
       JSON.parse(onboarding),
     );
+    rmSync(join(home, ".claude.json"));
+    managedAuthLaunch(registration, directory);
+    expect(JSON.parse(readFileSync(join(claudeConfigDir!, ".claude.json"), "utf8"))).toEqual({
+      hasCompletedOnboarding: true,
+    });
+  });
+
+  it("replaces host settings that steer authorization with a sanitized private copy", () => {
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const settingsPath = join(home, ".claude", "settings.json");
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        apiKeyHelper: "/bin/host-key",
+        model: "opus",
+        env: {
+          ANTHROPIC_BASE_URL: "https://gateway",
+          ANTHROPIC_API_KEY: "host-secret",
+          ANTHROPIC_AUTH_TOKEN: "host-secret",
+          ANTHROPIC_CUSTOM_HEADERS: "x: y",
+          CLAUDE_CODE_USE_BEDROCK: "1",
+          CLAUDE_CODE_USE_VERTEX: "1",
+          ANTHROPIC_MODEL: "opus",
+          DISABLE_TELEMETRY: "1",
+        },
+      }),
+    );
+    const directory = mkdtempSync(join(tmpdir(), "spur-auth-launch-"));
+    directories.push(directory);
+    const { claudeConfigDir } = managedAuthLaunch(registration, directory);
+    const managed = join(claudeConfigDir!, "settings.json");
+    expect(lstatSync(managed).isSymbolicLink()).toBe(false);
+    expect(lstatSync(managed).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(managed, "utf8"))).toEqual({
+      model: "opus",
+      env: { ANTHROPIC_MODEL: "opus", DISABLE_TELEMETRY: "1" },
+    });
+    writeFileSync(settingsPath, JSON.stringify({ model: "sonnet" }));
+    managedAuthLaunch(registration, directory);
+    expect(lstatSync(managed).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(managed)).toBe(settingsPath);
+  });
+
+  it("repoints stale links at the current host home", () => {
+    mkdirSync(join(home, ".claude", "skills"), { recursive: true });
+    const directory = mkdtempSync(join(tmpdir(), "spur-auth-launch-"));
+    directories.push(directory);
+    const claudeConfigDir = join(directory, "managed-claude-home");
+    mkdirSync(claudeConfigDir, { recursive: true });
+    symlinkSync(join(directory, "old-home-skills"), join(claudeConfigDir, "skills"));
+    managedAuthLaunch(registration, directory);
+    expect(readlinkSync(join(claudeConfigDir, "skills"))).toBe(join(home, ".claude", "skills"));
   });
 
   it("isolates Claude home and masks inherited provider credentials", () => {

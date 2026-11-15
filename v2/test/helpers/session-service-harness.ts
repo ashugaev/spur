@@ -505,6 +505,8 @@ const ghMock: Mock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
 const artifactDirForSession = (sessionId: string) => resolve(TEST_ARTIFACTS_ROOT, sessionId);
 let TEST_DATA_DIR = resolve(`/tmp/spur-session-service-test-${process.pid}`);
+let TEST_HOME = join(TEST_DATA_DIR, "home");
+let hostHome: string | undefined;
 
 const writeTelegramOfferMock: Mock = vi.fn();
 const readInterfaceConsentMock: Mock = vi.fn();
@@ -1522,6 +1524,11 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   // launch-command assertions. Same reason agents-claude.test.ts clears it.
   delete process.env["SPUR_CLAUDE_BIN"];
   TEST_DATA_DIR = mkdtempSync(join(tmpdir(), "spur-session-service-"));
+  // Managed Claude homes link from ~/.claude; never let a test reach the real host home.
+  hostHome ??= process.env["HOME"];
+  TEST_HOME = join(TEST_DATA_DIR, "home");
+  mkdirSync(TEST_HOME);
+  process.env["HOME"] = TEST_HOME;
   nextUuid = 1;
   vi.mocked(randomUUID).mockReset().mockImplementation(fixtureUuid);
   ({ normalizeSessionPrBinding } = await import("../../src/session-pr.js"));
@@ -2128,6 +2135,8 @@ export async function disposeSessionServiceHarness(): Promise<void> {
   vi.clearAllTimers();
   rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
   rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+  if (hostHome === undefined) delete process.env["HOME"];
+  else process.env["HOME"] = hostHome;
   vi.useRealTimers();
   vi.restoreAllMocks();
 }
@@ -2320,6 +2329,7 @@ export {
   TEST_ARTIFACTS_ROOT,
   artifactDirForSession,
   TEST_DATA_DIR,
+  TEST_HOME,
   writeTelegramOfferMock,
   readInterfaceConsentMock,
   writeInterfaceConsentMock,

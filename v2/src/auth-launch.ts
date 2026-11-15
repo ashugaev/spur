@@ -1,4 +1,13 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { ensureAccountProjectsLink } from "./claude-accounts.js";
@@ -33,27 +42,76 @@ function readJsonObject(path: string): Record<string, unknown> | undefined {
     : undefined;
 }
 
+function lstatOrUndefined(path: string): ReturnType<typeof lstatSync> | undefined {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+// Settings that would replace the proxy endpoint or credentials of a managed session.
+function steersAuthorization(key: string): boolean {
+  return (
+    (key.startsWith("ANTHROPIC_") && !key.endsWith("_MODEL")) ||
+    key.startsWith("CLAUDE_CODE_USE_") ||
+    /^CLAUDE_CODE_SKIP_[A-Z]+_AUTH$/.test(key) ||
+    key === "CLAUDE_CODE_OAUTH_TOKEN" ||
+    key === "AWS_BEARER_TOKEN_BEDROCK"
+  );
+}
+const AUTH_SETTINGS = ["apiKeyHelper", "awsAuthRefresh", "awsCredentialExport"];
+
+/** Host settings without authorization overrides, or undefined when none are present. */
+function sanitizedHostSettings(path: string): Record<string, unknown> | undefined {
+  const settings = readJsonObject(path);
+  if (!settings) return undefined;
+  const env = settings["env"];
+  const envObject =
+    typeof env === "object" && env !== null && !Array.isArray(env)
+      ? (env as Record<string, unknown>)
+      : undefined;
+  const steeredEnv = Object.keys(envObject ?? {}).filter(steersAuthorization);
+  const steeredKeys = AUTH_SETTINGS.filter((key) => key in settings);
+  if (steeredEnv.length === 0 && steeredKeys.length === 0) return undefined;
+  const sanitized = Object.fromEntries(
+    Object.entries(settings).filter(([key]) => !steeredKeys.includes(key)),
+  );
+  if (envObject) {
+    sanitized["env"] = Object.fromEntries(
+      Object.entries(envObject).filter(([key]) => !steeredEnv.includes(key)),
+    );
+  }
+  return sanitized;
+}
+
 function linkHostClaudeConfig(claudeConfigDir: string): void {
   const hostHome = join(homedir(), ".claude");
   for (const name of HOST_CLAUDE_ENTRIES) {
     const target = join(hostHome, name);
     const link = join(claudeConfigDir, name);
-    if (!existsSync(target)) continue;
-    try {
-      lstatSync(link);
+    const existing = lstatOrUndefined(link);
+    const sanitized = name === "settings.json" ? sanitizedHostSettings(target) : undefined;
+    if (sanitized) {
+      if (existing) unlinkSync(link);
+      writeFileSync(link, `${JSON.stringify(sanitized, null, 2)}\n`, { mode: 0o600 });
       continue;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-    symlinkSync(target, link);
+    if (existing?.isSymbolicLink() && readlinkSync(link) === target && existsSync(target)) continue;
+    // Replace only links and the sanitized settings copy; never a directory the agent created.
+    if (existing && (existing.isSymbolicLink() || name === "settings.json")) unlinkSync(link);
+    else if (existing) continue;
+    if (existsSync(target)) symlinkSync(target, link);
   }
   // User-scope MCP servers live in ~/.claude.json next to host account state; copy only them.
   const onboarding = join(claudeConfigDir, ".claude.json");
   const hostServers = readJsonObject(join(homedir(), ".claude.json"))?.["mcpServers"];
+  const { mcpServers: _staleServers, ...managedState } = readJsonObject(onboarding) ?? {};
   writeFileSync(
     onboarding,
     `${JSON.stringify({
-      ...readJsonObject(onboarding),
+      ...managedState,
       hasCompletedOnboarding: true,
       ...(hostServers !== undefined ? { mcpServers: hostServers } : {}),
     })}\n`,
