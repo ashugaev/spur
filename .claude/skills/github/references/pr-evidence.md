@@ -11,9 +11,9 @@ CAPTURE
 
 BEFORE STATE
 
-  Run from repo root on the branch isolated-ui stand. Second command prints anything -> stop. Never git stash, never commit mid-capture.
+  Run from repo root on the branch isolated-ui stand. Second command prints anything -> stop. Never git stash, never commit mid-capture. target = PR base branch, main by default.
 
-  base=$(git merge-base origin/main HEAD)
+  base=$(git merge-base "origin/${target:-main}" HEAD)
   git status --short
   git restore --source="$base" --worktree -- packages/web
 

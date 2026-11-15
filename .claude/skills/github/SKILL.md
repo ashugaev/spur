@@ -92,6 +92,8 @@ PR BODY: copy assets/pr-body.md, keep block order, UPPERCASE label lines, no mar
 
 CREATE OPEN PR
 
+  --attach pair per captured state only. No visible change: no --attach.
+
   gh pr create \
     --title "<type>: <description>" \
     --body-file "$SPUR_SESSION_ARTIFACTS_DIR/pr-body.md" \
