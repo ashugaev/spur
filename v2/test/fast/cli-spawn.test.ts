@@ -3,6 +3,7 @@ import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
 
 const postJsonMock = vi.fn();
 const getJsonMock = vi.fn();
+const patchJsonMock = vi.fn();
 const listProjectsMock = vi.fn();
 const writeStdoutMock = vi.fn();
 
@@ -11,6 +12,7 @@ vi.mock("../../src/client.js", () => ({
   disconnectProjectConfig: vi.fn(),
   getJson: getJsonMock,
   listProjects: listProjectsMock,
+  patchJson: patchJsonMock,
   postJson: postJsonMock,
   postPreflight: vi.fn(),
   restartDaemonIfRunning: vi.fn(),
@@ -56,6 +58,7 @@ describe("spawn", () => {
       .mockReset()
       .mockResolvedValue({ id: "api-1", agent: "claude", status: "spawning" });
     getJsonMock.mockReset().mockResolvedValue({ accounts: [], pools: {} });
+    patchJsonMock.mockReset();
     listProjectsMock.mockReset().mockResolvedValue([{ id: "api" }]);
     writeStdoutMock.mockReset();
   });
@@ -103,6 +106,63 @@ describe("spawn", () => {
       "/tmp/spur.yaml",
     );
     expect(getJsonMock).not.toHaveBeenCalled();
+  });
+
+  it("adds a Codex profile and starts its sign-in", async () => {
+    postJsonMock
+      .mockResolvedValueOnce({ account: { id: "new-work", provider: "codex" } })
+      .mockResolvedValueOnce({ accountId: "new-work", status: "pending", url: "https://login" });
+    await parseCli(["auth", "add", "--agent", "codex", "--label", "Work", "--json"]);
+    expect(postJsonMock.mock.calls.map((call) => call.slice(1, 3))).toEqual([
+      ["/auth-accounts", { provider: "codex", label: "Work" }],
+      ["/auth-accounts/new-work/login", {}],
+    ]);
+  });
+
+  it("rejects an unknown provider before creating a profile", async () => {
+    await expect(parseCli(["auth", "add", "--agent", "cursor", "--json"])).rejects.toThrow();
+    expect(postJsonMock).not.toHaveBeenCalled();
+  });
+
+  it("shows a pool without flags and patches it with flags", async () => {
+    getJsonMock.mockResolvedValue({
+      accounts: [],
+      pools: { codex: { defaultAccountId: "a", defaultGeneration: 0, autoRotate: true } },
+    });
+    await parseCli(["auth", "pool", "codex"]);
+    expect(getJsonMock).toHaveBeenCalledWith(
+      "/tmp/dist/cli.js",
+      "/auth-accounts?agent=codex",
+      "/tmp/spur.yaml",
+    );
+    expect(writeStdoutMock).toHaveBeenCalledWith("codex\tdefault=a\tauto-rotate=on");
+    expect(patchJsonMock).not.toHaveBeenCalled();
+    patchJsonMock.mockResolvedValue({
+      pool: { defaultAccountId: "b", defaultGeneration: 1, autoRotate: false },
+    });
+    await parseCli(["auth", "pool", "claude", "--auto-rotate", "off", "--default", "b"]);
+    expect(patchJsonMock).toHaveBeenCalledExactlyOnceWith(
+      "/tmp/dist/cli.js",
+      "/auth-pools/claude",
+      { autoRotate: false, defaultAccountId: "b" },
+      "/tmp/spur.yaml",
+    );
+    await expect(parseCli(["auth", "pool", "claude", "--auto-rotate", "maybe"])).rejects.toThrow(
+      "--auto-rotate must be on or off",
+    );
+  });
+
+  it("switches a session to a profile or back to Auto", async () => {
+    postJsonMock.mockResolvedValue({
+      id: "api-1",
+      auth: { mode: "auto", effectiveAccountId: "a" },
+    });
+    await parseCli(["auth", "switch", "api-1", "work"]);
+    await parseCli(["auth", "switch", "api-1", "auto"]);
+    expect(postJsonMock.mock.calls.map((call) => call.slice(1, 3))).toEqual([
+      ["/sessions/api-1/switch-auth", { accountId: "work" }],
+      ["/sessions/api-1/switch-auth", { accountId: null }],
+    ]);
   });
 
   it("posts the requested mode to the spawn endpoint", async () => {

@@ -27,7 +27,12 @@ import { emitKeypressEvents } from "node:readline";
 import { createInterface as createPromptInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { AuthLogin } from "./auth-proxy.js";
-import { authProviderSchema, type AuthAccountSummary } from "./auth-accounts.js";
+import {
+  authProviderSchema,
+  type AuthAccountSummary,
+  type AuthPool,
+  type AuthProvider,
+} from "./auth-accounts.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, Option, type Help } from "commander";
@@ -3413,54 +3418,144 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--json", "Start login and print its status without waiting")
     .action(async (accountId: string, options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
-      const path = `/auth-accounts/${encodeURIComponent(accountId)}`;
-      let status = await postJson<AuthLogin>(cliEntrypoint, `${path}/login`, {}, configPath);
-      if (options.json) {
-        printJson(status);
-        return;
-      }
-      const abort = new AbortController();
-      const interrupt = () => abort.abort();
-      process.once("SIGINT", interrupt);
-      const prompt = createPromptInterface({ input: process.stdin, output: process.stdout });
-      const displayed = new Set<string>();
-      let submittedPrompt: string | undefined;
-      try {
-        while (status.status !== "ready") {
-          if (status.status === "failed" || status.status === "sign-in-required") {
-            throw new Error(status.error ?? "Authorization sign-in did not complete");
-          }
-          for (const value of [status.url, status.userCode]) {
-            if (value && !displayed.has(value)) {
-              displayed.add(value);
-              writeStdout(value);
-            }
-          }
-          if (status.prompt && !status.userCode && submittedPrompt !== status.prompt) {
-            const input = await prompt.question(`${status.prompt} `, { signal: abort.signal });
-            submittedPrompt = status.prompt;
-            status = await postJson<AuthLogin>(
-              cliEntrypoint,
-              `${path}/login-input`,
-              { input },
-              configPath,
-            );
-          } else {
-            await sleep(1_000, undefined, { signal: abort.signal });
-            status = await getJson<AuthLogin>(cliEntrypoint, `${path}/login-status`, configPath);
-          }
-        }
-        writeStdout("Authorization ready");
-      } finally {
-        process.removeListener("SIGINT", interrupt);
-        prompt.close();
-        if (status.status !== "ready") {
-          await postJson(cliEntrypoint, `${path}/login-input`, { cancel: true }, configPath).catch(
-            () => {},
-          );
-        }
-      }
+      await runAuthLogin(accountId, options.json === true, configPath);
     });
+  auth
+    .command("add")
+    .description("Add a Claude or Codex authorization profile and sign in to it.")
+    .requiredOption("--agent <name>", "claude or codex")
+    .option("--label <label>", "Profile label")
+    .option("--json", "Start login and print the profile and login status without waiting")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const { account } = await postJson<{ account: AuthAccountSummary }>(
+        cliEntrypoint,
+        "/auth-accounts",
+        {
+          provider: authProviderSchema.parse(options.agent),
+          ...(options.label !== undefined ? { label: options.label } : {}),
+        },
+        configPath,
+      );
+      if (!options.json) writeStdout(`Added ${account.provider} profile ${account.id}`);
+      await runAuthLogin(account.id, options.json === true, configPath, account);
+    });
+  auth
+    .command("pool")
+    .description("Show or change a provider pool's default profile and auto-rotation.")
+    .argument("<agent>", "claude or codex")
+    .option("--auto-rotate <state>", "on or off")
+    .option("--default <accountId>", "Default profile for Auto sessions")
+    .option("--json", "Print raw JSON")
+    .action(async (agent: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const provider = authProviderSchema.parse(agent);
+      if (options.autoRotate !== undefined && !["on", "off"].includes(options.autoRotate)) {
+        throw new Error("--auto-rotate must be on or off");
+      }
+      const update = {
+        ...(options.autoRotate !== undefined ? { autoRotate: options.autoRotate === "on" } : {}),
+        ...(options.default !== undefined ? { defaultAccountId: options.default } : {}),
+      };
+      const pool =
+        Object.keys(update).length > 0
+          ? (
+              await patchJson<{ pool: AuthPool }>(
+                cliEntrypoint,
+                `/auth-pools/${provider}`,
+                update,
+                configPath,
+              )
+            ).pool
+          : ((
+              await getJson<{ pools: Partial<Record<AuthProvider, AuthPool>> }>(
+                cliEntrypoint,
+                `/auth-accounts?agent=${provider}`,
+                configPath,
+              )
+            ).pools[provider] ?? null);
+      if (options.json) printJson({ provider, pool });
+      else if (!pool) writeStdout(`${provider}: no pool; sessions use host authorization`);
+      else
+        writeStdout(
+          `${provider}\tdefault=${pool.defaultAccountId ?? "none"}\tauto-rotate=${pool.autoRotate ? "on" : "off"}`,
+        );
+    });
+  auth
+    .command("switch")
+    .description("Select a session's managed profile, or Auto, for its next request.")
+    .argument("<sessionId>")
+    .argument("<accountId>", "Profile id, or auto")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, accountId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const session = await postJson<SessionView>(
+        cliEntrypoint,
+        `/sessions/${encodeURIComponent(sessionId)}/switch-auth`,
+        { accountId: accountId === "auto" ? null : accountId },
+        configPath,
+      );
+      if (options.json) printJson(session);
+      else
+        writeStdout(
+          `${sessionId}\t${session.auth?.mode ?? "direct"}\t${session.auth?.effectiveAccountId ?? "host"}`,
+        );
+    });
+
+  async function runAuthLogin(
+    accountId: string,
+    json: boolean,
+    configPath: string,
+    account?: AuthAccountSummary,
+  ): Promise<void> {
+    const path = `/auth-accounts/${encodeURIComponent(accountId)}`;
+    let status = await postJson<AuthLogin>(cliEntrypoint, `${path}/login`, {}, configPath);
+    if (json) {
+      printJson(account ? { account, login: status } : status);
+      return;
+    }
+    const abort = new AbortController();
+    const interrupt = () => abort.abort();
+    process.once("SIGINT", interrupt);
+    const prompt = createPromptInterface({ input: process.stdin, output: process.stdout });
+    const displayed = new Set<string>();
+    let submittedPrompt: string | undefined;
+    try {
+      while (status.status !== "ready") {
+        if (status.status === "failed" || status.status === "sign-in-required") {
+          throw new Error(status.error ?? "Authorization sign-in did not complete");
+        }
+        for (const value of [status.url, status.userCode]) {
+          if (value && !displayed.has(value)) {
+            displayed.add(value);
+            writeStdout(value);
+          }
+        }
+        if (status.prompt && !status.userCode && submittedPrompt !== status.prompt) {
+          const input = await prompt.question(`${status.prompt} `, { signal: abort.signal });
+          submittedPrompt = status.prompt;
+          status = await postJson<AuthLogin>(
+            cliEntrypoint,
+            `${path}/login-input`,
+            { input },
+            configPath,
+          );
+        } else {
+          await sleep(1_000, undefined, { signal: abort.signal });
+          status = await getJson<AuthLogin>(cliEntrypoint, `${path}/login-status`, configPath);
+        }
+      }
+      writeStdout("Authorization ready");
+    } finally {
+      process.removeListener("SIGINT", interrupt);
+      prompt.close();
+      if (status.status !== "ready") {
+        await postJson(cliEntrypoint, `${path}/login-input`, { cancel: true }, configPath).catch(
+          () => {},
+        );
+      }
+    }
+  }
 
   program
     .command("spawn")

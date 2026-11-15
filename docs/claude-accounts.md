@@ -3,16 +3,21 @@
 > Scope: use saved Claude/Codex authorization profiles.
 
 Keep profile IDs, labels and provider pool choices outside YAML.
-Discover profiles and sign in through [`spur auth`](commands.md#service-memory-agent-issue-comment-seen-subscribe).
-Create, rename, remove and select provider defaults through [account operations](daemon-api.md).
+CLI: [`spur auth accounts|login|add|pool|switch`](commands.md#service-memory-agent-issue-comment-seen-subscribe).
+HTTP: [account operations](daemon-api.md).
 
 ## Accounts UI
 
-Footer Accounts retains the Claude login terminal.
+Footer Accounts menu: one section per provider, Claude and Codex.
 
-- Add opens managed OAuth sign-in; follow its URL/code prompt.
+- Profiles show label, status and quota cooldown.
+- Set the provider default and toggle Auto-rotation.
+- Add opens managed OAuth sign-in; follow its URL/code prompt. Sign in again for a profile that needs it.
 - Readiness requires completed OAuth and durable registration.
 - Close cancels unfinished sign-in; remove rejects an account used by a live session.
+
+Spawn dialog Auth picker: Auto or a ready profile.
+Session Switch auth: another profile or back to Auto, for the next request.
 
 Legacy Claude labels/IDs remain; sign in again for managed routing.
 Host credentials and existing direct processes remain untouched.

@@ -546,7 +546,7 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "update_auth_pool",
     "PATCH",
     "/auth-pools/{provider}",
-    "Update provider-wide default and quota rotation.",
+    "Update provider-wide default and quota rotation; creates a missing pool.",
     {
       body: body("UpdateAuthPoolRequest", [
         field("defaultAccountId", "string|null", "Ready default account."),
