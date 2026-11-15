@@ -1672,6 +1672,148 @@ describe("github source", () => {
     });
   });
 
+  describe("out of date detection", () => {
+    const outSignal = (extra: Partial<ReviewSignal> = {}): ReviewSignal => ({
+      key: "out_of_date",
+      kind: "out_of_date",
+      text: "PR branch is behind its base branch and must be updated before merge.",
+      ...extra,
+    });
+    const lastSnapshot = (): ReviewSnapshot =>
+      writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+    const outEmits = (emit: ReturnType<typeof vi.fn>) =>
+      emit.mock.calls.filter(([name]) => name === "github:out_of_date");
+    const baseTip = (oid: string) => ({ baseRef: { target: { oid } } });
+    const behind = (head: string, base: string) =>
+      prView({ mergeStateStatus: "BEHIND", headRefOid: head, ...baseTip(base) });
+    const persisted = (signals: ReviewSignal[]) => {
+      readReviewSourceSnapshotsMock.mockReturnValue(
+        new Map([["api-a1b2", storedSnapshot(signals)]]),
+      );
+      listSessionsMock.mockReturnValue([makeSession()]);
+    };
+    const stored = () => outSignal({ revision: "h1", changeKey: "h1" });
+
+    it("emits at the first observation keyed on the head commit", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+      mockLifecyclePoll(behind("h1", "b1"));
+      const emit = vi.fn();
+      const handle = await startLifecycle(emit);
+      expect(outEmits(emit)).toHaveLength(1);
+      expect(lastSnapshot().signals.get("out_of_date")).toMatchObject({
+        changeKey: "h1",
+        revision: "h1",
+      });
+      handle.stop();
+    });
+
+    it("emits nothing for a persisted signal (restart)", async () => {
+      persisted([stored()]);
+      mockLifecyclePoll(behind("h1", "b1"));
+      const emit = vi.fn();
+      const handle = await startLifecycle(emit);
+      expect(outEmits(emit)).toHaveLength(0);
+      handle.stop();
+    });
+
+    it("does not re-emit when only the base moves", async () => {
+      persisted([stored()]);
+      const emit = vi.fn();
+      for (const base of ["b2", "b3"]) {
+        mockLifecyclePoll(behind("h1", base));
+        const handle = await startLifecycle(emit);
+        readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", lastSnapshot()]]));
+        handle.stop();
+      }
+      expect(outEmits(emit)).toHaveLength(0);
+    });
+
+    it("emits once for a new head that is still behind", async () => {
+      persisted([stored()]);
+      mockLifecyclePoll(behind("h2", "b1"));
+      const emit = vi.fn();
+      const handle = await startLifecycle(emit);
+      expect(outEmits(emit)).toHaveLength(1);
+      expect(lastSnapshot().signals.get("out_of_date")?.revision).toBe("h2");
+      handle.stop();
+    });
+
+    it.each([
+      ["DIRTY", "CONFLICTING", "DIRTY"],
+      ["BEHIND", "CONFLICTING", "BEHIND"],
+    ])("conflict wins over out of date (%s)", async (_label, mergeable, mergeStateStatus) => {
+      persisted([]);
+      mockLifecyclePoll(prView({ mergeable, mergeStateStatus, headRefOid: "h1" }));
+      const emit = vi.fn();
+      const handle = await startLifecycle(emit);
+      expect(emit.mock.calls.filter(([name]) => name === "github:merge_conflict")).toHaveLength(1);
+      expect(outEmits(emit)).toHaveLength(0);
+      expect(lastSnapshot().signals.has("out_of_date")).toBe(false);
+      handle.stop();
+    });
+
+    it("holds the prior signal while mergeability is UNKNOWN", async () => {
+      persisted([stored()]);
+      const unknown = { mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" };
+      mockLifecyclePoll(prView({ ...unknown, headRefOid: "h1" }));
+      ghMock.mockResolvedValueOnce(JSON.stringify(unknown));
+      const emit = vi.fn();
+      const first = await startLifecycle(emit);
+      expect(lastSnapshot().signals.get("out_of_date")).toEqual(stored());
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", lastSnapshot()]]));
+      first.stop();
+      mockLifecyclePoll(behind("h1", "b1"));
+      const second = await startLifecycle(emit);
+      expect(outEmits(emit)).toHaveLength(0);
+      second.stop();
+    });
+
+    it("never mints out of date beside a held conflict while UNKNOWN", async () => {
+      persisted([
+        {
+          key: "merge_conflict",
+          kind: "merge_conflict",
+          text: "Merge conflicts are blocking this PR.",
+          revision: "h1:b1",
+          changeKey: "h1:b1",
+        },
+      ]);
+      const view = { mergeable: "UNKNOWN", mergeStateStatus: "BEHIND", headRefOid: "h1" };
+      mockLifecyclePoll(prView({ ...view, ...baseTip("b1") }));
+      ghMock.mockResolvedValueOnce(
+        JSON.stringify({ mergeable: "UNKNOWN", mergeStateStatus: "BEHIND" }),
+      );
+      const emit = vi.fn();
+      const handle = await startLifecycle(emit);
+      expect(outEmits(emit)).toHaveLength(0);
+      expect(lastSnapshot().signals.has("merge_conflict")).toBe(true);
+      expect(lastSnapshot().signals.has("out_of_date")).toBe(false);
+      handle.stop();
+    });
+
+    it("ignores a closed PR", async () => {
+      persisted([]);
+      mockLifecyclePoll(prView({ state: "MERGED", mergeStateStatus: "BEHIND", headRefOid: "h1" }));
+      const emit = vi.fn();
+      const handle = await startLifecycle(emit);
+      expect(outEmits(emit)).toHaveLength(0);
+      expect(lastSnapshot().signals.has("out_of_date")).toBe(false);
+      handle.stop();
+    });
+
+    it("suppresses out of date for a non-owner session", async () => {
+      persisted([]);
+      readPrAlertOwnershipMock.mockReturnValue({ state: "owned", sessionId: "api-helper" });
+      mockLifecyclePoll(behind("h1", "b1"));
+      const emit = vi.fn();
+      const handle = await startLifecycle(emit);
+      expect(outEmits(emit)).toHaveLength(0);
+      expect(lastSnapshot().signals.has("out_of_date")).toBe(false);
+      handle.stop();
+    });
+  });
+
   describe("CI run identity", () => {
     it("carries the head commit and failing check names on ci_failed", async () => {
       readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));

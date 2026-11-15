@@ -1241,6 +1241,17 @@ function collectSignalsFromNode(
       kind: "merge_conflict",
       text: "Merge conflicts are blocking this PR.",
     });
+  } else if (
+    ownsPr &&
+    pr.state === "OPEN" &&
+    !isMergeabilityUnknown(pr) &&
+    normalizeReviewState(pr.mergeStateStatus) === "BEHIND"
+  ) {
+    snapshot.set("out_of_date", {
+      key: "out_of_date",
+      kind: "out_of_date",
+      text: "PR branch is behind its base branch and must be updated before merge.",
+    });
   }
   if (pr.draft === false) {
     snapshot.set("ready_for_review", {
@@ -1335,6 +1346,8 @@ function annotateChangeKeys(
       if (head && base) {
         annotated = { ...signal, changeKey: `${head}:${base}`, revision: `${head}:${base}` };
       }
+    } else if (signal.kind === "out_of_date") {
+      if (head) annotated = { ...signal, changeKey: head, revision: head };
     } else if (signal.kind === "comment") {
       const target = signal.providerThreadTarget;
       const changeKey =

@@ -302,6 +302,7 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
       case "ready_for_review":
       case "approved":
       case "review_requested":
+      case "out_of_date":
         return "until next commit";
     }
   }
@@ -336,7 +337,8 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
       ...(this.providerId === "github" && signal.kind === "comment"
         ? { refreshComment: true }
         : {}),
-      ...(this.providerId === "github" && signal.kind === "merge_conflict"
+      ...(this.providerId === "github" &&
+      (signal.kind === "merge_conflict" || signal.kind === "out_of_date")
         ? { mergeConflict: { prNumber: this.prNumber } }
         : {}),
       ...(signal.kind === "ci_failed" && signal.ciRun
@@ -366,6 +368,11 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
     if (kinds.has("merge_conflict")) {
       lines.push(
         `Resolve the active ${provider.requestLabel} merge conflicts, rerun the relevant validation, and push.`,
+      );
+    }
+    if (kinds.has("out_of_date")) {
+      lines.push(
+        `Merge the latest base branch into the active ${provider.requestLabel} branch (no force-push), push, and confirm CI passes.`,
       );
     }
     if (kinds.has("comment")) {

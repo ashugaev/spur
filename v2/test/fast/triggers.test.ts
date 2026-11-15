@@ -2230,60 +2230,69 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("caps fresh conflict envelopes across controllers while delivering new sibling comments", async () => {
-    const dataDir = mkdtempSync(join(tmpdir(), "spur-conflict-cap-"));
-    const autoPing = new AutoPingService(dataDir);
-    const bus = new EventBus();
-    const get = vi.fn().mockResolvedValue({
-      id: "api-1",
-      state: "stale",
-      status: "stopped",
-      workspaceExists: true,
-      stopReason: "stale_timeout",
-    });
-    const deliver = vi.fn().mockResolvedValue(undefined);
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const deps = {
-      config: { ...config({ event: "github:merge_conflict" }), dataDir } as never,
-      bus,
-      autoPing,
-      sessionService: { get, deliver } as never,
-      logger: { warn: vi.fn() },
-    };
-    let controller = startConfiguredTriggers(deps);
-    try {
-      for (let index = 0; index < 100; index += 1) {
-        const event = mergeConflictEvent();
-        const signals = [
-          ...event.data.signals,
-          { key: `comment:${index}`, kind: "comment" as const, text: `Action ${index}` },
-        ];
-        readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot(signals));
-        bus.emit({ ...event, occurrenceId: `fresh-${index}`, data: { ...event.data, signals } });
-        await vi.advanceTimersByTimeAsync(1);
+  it.each([
+    ["merge_conflict", "Merge conflicts are blocking this PR."],
+    ["out_of_date", "PR branch is behind its base branch and must be updated before merge."],
+  ] as const)(
+    "caps fresh %s envelopes across controllers while delivering new sibling comments",
+    async (kind, signalText) => {
+      const dataDir = mkdtempSync(join(tmpdir(), "spur-conflict-cap-"));
+      const autoPing = new AutoPingService(dataDir);
+      const bus = new EventBus();
+      const get = vi.fn().mockResolvedValue({
+        id: "api-1",
+        state: "stale",
+        status: "stopped",
+        workspaceExists: true,
+        stopReason: "stale_timeout",
+      });
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const deps = {
+        config: { ...config({ event: `github:${kind}` }), dataDir } as never,
+        bus,
+        autoPing,
+        sessionService: { get, deliver } as never,
+        logger: { warn: vi.fn() },
+      };
+      let controller = startConfiguredTriggers(deps);
+      try {
+        for (let index = 0; index < 100; index += 1) {
+          const base = mergeConflictEvent();
+          const event = {
+            ...base,
+            name: `github:${kind}`,
+            data: { ...base.data, signals: [{ key: kind, kind, text: signalText }] },
+          };
+          const signals = [
+            ...event.data.signals,
+            { key: `comment:${index}`, kind: "comment" as const, text: `Action ${index}` },
+          ];
+          readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot(signals));
+          bus.emit({ ...event, occurrenceId: `fresh-${index}`, data: { ...event.data, signals } });
+          await vi.advanceTimersByTimeAsync(1);
+          await controller.stop();
+          controller = startConfiguredTriggers(deps);
+        }
+        expect(deliver).toHaveBeenCalledTimes(100);
+        expect(
+          deliver.mock.calls.filter((call) => String(call[1]).includes(signalText)),
+        ).toHaveLength(1);
+        expect(deliver.mock.calls.at(-1)?.[1]).toContain("Action 99");
+        expect(
+          logSpurEventMock.mock.calls.filter(
+            ([, entry]) =>
+              entry.event === "trigger.send.suppressed" &&
+              entry.details?.reason === "conflict_already_delivered",
+          ).length,
+        ).toBeGreaterThan(0);
+      } finally {
         await controller.stop();
-        controller = startConfiguredTriggers(deps);
+        autoPing.dispose();
+        rmSync(dataDir, { recursive: true, force: true });
       }
-      expect(deliver).toHaveBeenCalledTimes(100);
-      expect(
-        deliver.mock.calls.filter((call) =>
-          String(call[1]).includes("Merge conflicts are blocking"),
-        ),
-      ).toHaveLength(1);
-      expect(deliver.mock.calls.at(-1)?.[1]).toContain("Action 99");
-      expect(
-        logSpurEventMock.mock.calls.filter(
-          ([, entry]) =>
-            entry.event === "trigger.send.suppressed" &&
-            entry.details?.reason === "conflict_already_delivered",
-        ).length,
-      ).toBeGreaterThan(0);
-    } finally {
-      await controller.stop();
-      autoPing.dispose();
-      rmSync(dataDir, { recursive: true, force: true });
-    }
-  });
+    },
+  );
 
   it.each([false])(
     "retains exhausted item tombstones across fresh UUIDs and reloads (CI=%s)",
