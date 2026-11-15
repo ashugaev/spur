@@ -3561,7 +3561,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           sort={artifactListSort}
                         />
                       ) : (
-                        <div className="grid grid-cols-2 gap-2 sm:gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                        <div className="grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-3 2xl:grid-cols-4">
                           {filteredArtifacts.map((artifact) => {
                             const artifactHref = artifactUrl(session.id, artifact.id);
                             const previewState = artifactPreviewStates[artifact.id] ?? "loading";

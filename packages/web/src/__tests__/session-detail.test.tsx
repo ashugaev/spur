@@ -5544,6 +5544,36 @@ describe("SessionDetail artifacts", () => {
       expect(screen.getByRole("dialog", { name: "Artifact preview shot.png" })).toBeInTheDocument();
     });
 
+    it("restores the hidden header after navigation and after close and reopen", async () => {
+      mockPhoneSession(phoneArtifacts);
+      await openPhoneArtifact("shot.png");
+      const closeButton = () => screen.queryByRole("button", { name: "Close artifact preview" });
+
+      stubElementBounds(screen.getByLabelText("Artifact preview surface"), 300, 100);
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 150 });
+      expect(closeButton()).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 250 });
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
+      ).toBeInTheDocument();
+      expect(closeButton()).toBeInTheDocument();
+
+      stubElementBounds(screen.getByLabelText("Artifact preview surface"), 300, 100);
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 150 });
+      expect(closeButton()).not.toBeInTheDocument();
+
+      fireEvent.keyDown(window, { key: "Escape" });
+      await waitFor(() => {
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Preview second.png" }));
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
+      ).toBeInTheDocument();
+      expect(closeButton()).toBeInTheDocument();
+    });
+
     it("keeps a zoomed image from flipping on tap", async () => {
       mockPhoneSession(phoneArtifacts);
       const dialog = await openPhoneArtifact("shot.png");
