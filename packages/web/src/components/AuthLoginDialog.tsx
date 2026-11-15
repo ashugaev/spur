@@ -70,21 +70,23 @@ export function AuthLoginDialog({ account, login: initialLogin, onClose }: AuthL
       setCode("");
       if (isAuthLogin(result)) queryClient.setQueryData(loginKey, result);
     },
+    // Cancel, code input and retry all change account status server-side.
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: AUTH_ACCOUNTS_QUERY_KEY }),
   });
 
   const ready = login.status === "ready";
+  const failed = login.status === "failed";
   useEffect(() => {
-    if (!ready) return;
+    if (!ready && !failed) return;
     void queryClient.invalidateQueries({ queryKey: AUTH_ACCOUNTS_QUERY_KEY });
-    onClose();
-  }, [ready, queryClient, onClose]);
+    if (ready) onClose();
+  }, [ready, failed, queryClient, onClose]);
 
   const busy = actionMutation.isPending;
   // Every dismissal cancels the unfinished sign-in.
   const dismiss = () => actionMutation.mutate({ cancel: true });
   useDialogFocus({ panelRef, initialRef: codeRef, onEscape: dismiss, escapeBlocked: busy });
 
-  const failed = login.status === "failed";
   const errorText =
     actionMutation.error?.message ?? login.error ?? (failed ? "Sign-in failed" : null);
 

@@ -134,6 +134,60 @@ test.describe("Agent accounts menu", () => {
     await expect.poll(() => deletes).toEqual(["DELETE"]);
   });
 
+  test("cancelling sign-in returns the row to sign in required", async ({ page }) => {
+    await mockSessions(page, []);
+    let codexStatus: AuthAccountSummary["status"] = "sign_in_required";
+    await mockAccounts(page, () => ({
+      status: 200,
+      body: {
+        ...ACCOUNTS,
+        accounts: ACCOUNTS.accounts.map((entry) =>
+          entry.id === "codex-new" ? { ...entry, status: codexStatus } : entry,
+        ),
+      },
+    }));
+    await page.route("/api/auth-accounts/codex-new/login", async (route) => {
+      codexStatus = "pending";
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ accountId: "codex-new", status: "pending" }),
+      });
+    });
+    await page.route("/api/auth-accounts/codex-new/login-status", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ accountId: "codex-new", status: codexStatus }),
+      });
+    });
+    const inputs: unknown[] = [];
+    await page.route("/api/auth-accounts/codex-new/login-input", async (route) => {
+      inputs.push(route.request().postDataJSON());
+      codexStatus = "sign_in_required";
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ accountId: "codex-new", status: "sign-in-required" }),
+      });
+    });
+    await page.goto("/");
+    await openMenu(page);
+
+    const row = page.getByTestId("auth-account-codex-new");
+    await row.getByRole("button", { name: "Sign in codex account Fresh" }).click();
+    const dialog = page.getByRole("dialog", { name: /Sign in codex/ });
+    await expect(dialog).toBeVisible();
+    await expect(row).toContainText("signing in");
+    await page.keyboard.press("Escape");
+
+    await expect(dialog).toBeHidden();
+    expect(inputs).toEqual([{ cancel: true }]);
+    // Well under the 30s accounts cache window: the cancel itself refetches.
+    await expect(row).toContainText("sign in required", { timeout: 5_000 });
+    await expect(row).not.toContainText("signing in");
+  });
+
   test("stays inside a 320px viewport", async ({ page }) => {
     await page.setViewportSize({ width: 320, height: 640 });
     await mockSessions(page, []);

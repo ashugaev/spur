@@ -333,6 +333,40 @@ describe("AuthAccountsMenu", () => {
     });
   });
 
+  it("refetches accounts after cancel so the row leaves signing in", async () => {
+    let codexStatus: "pending" | "sign_in_required" = "sign_in_required";
+    routes["GET /api/auth-accounts"] = () => ({
+      payload: {
+        ...ACCOUNTS,
+        accounts: ACCOUNTS.accounts.map((entry) =>
+          entry.id === "codex-new" ? { ...entry, status: codexStatus } : entry,
+        ),
+      },
+    });
+    routes["POST /api/auth-accounts/codex-new/login"] = () => {
+      codexStatus = "pending";
+      return { payload: { accountId: "codex-new", status: "pending" } };
+    };
+    routes["GET /api/auth-accounts/codex-new/login-status"] = () => ({
+      payload: { accountId: "codex-new", status: "pending" },
+    });
+    routes["POST /api/auth-accounts/codex-new/login-input"] = () => {
+      codexStatus = "sign_in_required";
+      return { payload: { accountId: "codex-new", status: "sign-in-required" } };
+    };
+    await openMenu();
+    const row = within(screen.getByTestId("auth-account-codex-new"));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Sign in codex account Fresh" }));
+    const dialog = within(await screen.findByRole("dialog", { name: /Sign in codex/ }));
+    expect(await row.findByText("signing in")).toBeTruthy();
+    fireEvent.click(dialog.getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(await row.findByText("sign in required")).toBeTruthy();
+    expect(row.queryByText("signing in")).toBeNull();
+  });
+
   it("focuses the code field and cancels sign-in on Escape", async () => {
     routes["POST /api/auth-accounts/codex-new/login"] = () => ({
       payload: { accountId: "codex-new", status: "pending" },
