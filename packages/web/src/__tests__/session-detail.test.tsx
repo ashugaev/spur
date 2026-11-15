@@ -5647,6 +5647,30 @@ describe("SessionDetail artifacts", () => {
       expectFixedSquare(copied);
     });
 
+    it("renders the phone Open button for HTML as a 32px icon-only secondary-color square", async () => {
+      mockPhoneSession([
+        {
+          ...artifactBase,
+          id: "report.html",
+          name: "report.html",
+          size: 100,
+          mimeType: "text/html; charset=utf-8",
+          kind: "text",
+        },
+      ]);
+      const dialog = await openPhoneArtifact("report.html");
+
+      const open = within(dialog).getByRole("link", { name: "Open report.html in a new tab" });
+      expect(open).toHaveClass(
+        "h-8",
+        "w-8",
+        "text-[var(--color-text-secondary)]!",
+        "hover:text-[var(--color-text-primary)]!",
+      );
+      expect(open).toHaveTextContent("");
+      expect(open).toHaveAttribute("title", "Open report.html in a new tab");
+    });
+
     it("keeps a zoomed image from flipping on tap", async () => {
       mockPhoneSession(phoneArtifacts);
       const dialog = await openPhoneArtifact("shot.png");

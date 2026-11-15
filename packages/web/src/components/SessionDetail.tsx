@@ -57,7 +57,7 @@ import { ToastViewport } from "@/components/Toast";
 import { IconActionButton } from "@/components/IconActionButton";
 import { IconCloseButton } from "@/components/IconCloseButton";
 import { CheckIcon } from "@/components/icons/CheckIcon";
-import { CloseIcon } from "@/components/icons/CloseIcon";
+import { AlertIcon } from "@/components/icons/AlertIcon";
 import { SendIcon } from "@/components/icons/SendIcon";
 import { Spinner } from "@/components/icons/Spinner";
 import { TrashIcon } from "@/components/icons/TrashIcon";
@@ -1294,7 +1294,7 @@ function ArtifactLightbox({
                       {copyState === "copied" ? (
                         <CheckIcon className="h-3.5 w-3.5" />
                       ) : copyState === "error" ? (
-                        <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
+                        <AlertIcon className="h-3.5 w-3.5" />
                       ) : (
                         <CopyIcon />
                       )}
@@ -1323,7 +1323,7 @@ function ArtifactLightbox({
                   aria-label={`Open ${artifact.name} in a new tab`}
                   className={
                     isPhone
-                      ? `${overlayButtonClass()} hover:no-underline`
+                      ? `${overlayButtonClass()} text-[var(--color-text-secondary)]! hover:text-[var(--color-text-primary)]! hover:no-underline`
                       : "inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
                   }
                   href={artifactHref}
