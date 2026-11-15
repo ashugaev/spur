@@ -28680,6 +28680,7 @@ export class SessionService {
       pr: _recordPr,
       prAlertTransfer: _prAlertTransfer,
       terminalSlotsCaptured: _terminalSlotsCaptured,
+      snapshotNudge: _snapshotNudge,
       rateLimitedAt: _oldLimit,
       rateLimitResetAt: _oldReset,
       ...dashboardSession
@@ -29148,6 +29149,7 @@ export class SessionService {
       pr: _recordPr,
       prAlertTransfer: _prAlertTransfer,
       terminalSlotsCaptured: _terminalSlotsCaptured,
+      snapshotNudge: _snapshotNudge,
       ...sessionWithoutDetailFields
     } = session;
 

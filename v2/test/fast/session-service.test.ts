@@ -4122,6 +4122,23 @@ describe("SessionService", () => {
         service.dispose();
       });
 
+      it("keeps snapshotNudge out of detail, list and dashboard views", async () => {
+        mockClaudeJsonlState("waiting");
+        const { sessions, session, service } = await snapshotSetup();
+        sessions.set(session.id, {
+          ...session,
+          snapshotNudge: { fingerprint: "a".repeat(64), attempts: 1 },
+        });
+
+        expect(await service.get(session.id)).not.toHaveProperty("snapshotNudge");
+        for (const view of ["dashboard", "full"] as const) {
+          const listed = (await service.list({ view })).find((item) => item.id === session.id);
+          expect(listed).toBeDefined();
+          expect(listed).not.toHaveProperty("snapshotNudge");
+        }
+        service.dispose();
+      });
+
       it("bakes freshnessMinutes into session tools for claude only", async () => {
         const config = baseConfig();
         loadConfigMock.mockReturnValue({

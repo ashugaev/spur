@@ -1505,6 +1505,7 @@ export interface SessionView extends Omit<
   | "restoredAt"
   | "errorSource"
   | "terminalSlotsCaptured"
+  | "snapshotNudge"
 > {
   spawnIntent?: Omit<DurableSpawnIntent, "closeoutTakenFrom">;
   lifecycle: SessionLifecycleSnapshot;
@@ -1569,7 +1570,8 @@ export type DashboardOmittedField =
   | "tokenUsage"
   | "preflightTokenUsage"
   | "errorSource"
-  | "terminalSlotsCaptured";
+  | "terminalSlotsCaptured"
+  | "snapshotNudge";
 
 export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
   spawnIntent?: SessionView["spawnIntent"];
