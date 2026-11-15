@@ -31,7 +31,7 @@ export function PagesCatalog({ projectId }: { projectId?: string }) {
   return (
     <div className="flex min-h-dvh flex-col">
       <header className="border-b border-[var(--color-border-default)] bg-[var(--color-bg-base)]">
-        <div className="mx-auto flex min-h-10 max-w-[1500px] items-center gap-2.5 px-4 py-[7px] sm:px-5 lg:px-6">
+        <div className="mx-auto flex min-h-10 max-w-[1500px] items-center gap-2.5 px-2 py-[7px] sm:px-5 lg:px-6">
           <BrandGlyph />
           <a
             href={buildDashboardPath(projectId)}
@@ -51,7 +51,7 @@ export function PagesCatalog({ projectId }: { projectId?: string }) {
           </a>
         </div>
       </header>
-      <main className="mx-auto w-full max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
+      <main className="mx-auto w-full max-w-[1500px] px-2 py-4 sm:px-5 lg:px-6">
         <div className="mb-4 flex flex-wrap items-center gap-3">
           <button
             type="button"

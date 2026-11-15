@@ -4,11 +4,15 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_SNAPSHOT_MAX_BYTES,
-  SNAPSHOT_REQUEST_MESSAGE,
+  SNAPSHOT_REMINDER_PREFIXES,
   SnapshotCorruptError,
   SnapshotTooLargeError,
+  isSpurReminder,
+  isSpurToolCommand,
+  lastAgentWorkMs,
   listSnapshots,
   readSnapshot,
+  snapshotRequestMessage,
   snapshotDir,
   snapshotDue,
   snapshotGateBlock,
@@ -16,7 +20,18 @@ import {
   writeSnapshot,
   type SnapshotWriteContext,
 } from "../../src/snapshots.js";
-import type { ProjectConfig, SessionRecord } from "../../src/types.js";
+import {
+  CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
+  RATE_LIMIT_REACTIVATION_PROMPT,
+} from "../../src/reactivation-prompts.js";
+import {
+  DEFAULT_DAILY_WAKE_MESSAGE,
+  DEFAULT_INTERVAL_WAKE_MESSAGE,
+  DEFAULT_WAKE_MESSAGE,
+  formatDailyWakeMessage,
+  formatIntervalWakeMessage,
+} from "../../src/wake-schedule.js";
+import type { ProjectConfig, SessionRecord, TranscriptEntry } from "../../src/types.js";
 import { readWorktreeHead } from "../../src/workspace.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -187,17 +202,24 @@ describe("snapshot gate", () => {
 
 describe("snapshotSettings", () => {
   it("applies defaults for an unconfigured project", () => {
-    const defaults = { maxBytes: 32768, requireFinal: false, freshnessMinutes: 10 };
+    const defaults = { enabled: true, maxBytes: 32768, requireFinal: false, freshnessMinutes: 30 };
     expect(snapshotSettings(undefined)).toEqual(defaults);
     expect(snapshotSettings({} as ProjectConfig)).toEqual(defaults);
+  });
+
+  it("leaves the final-snapshot gate off when only enabled is false", () => {
+    expect(snapshotSettings({ snapshots: { enabled: false } } as ProjectConfig)).toMatchObject({
+      enabled: false,
+      requireFinal: false,
+    });
   });
 
   it("uses configured values", () => {
     expect(
       snapshotSettings({
-        snapshots: { maxBytes: 100, requireFinal: true, freshnessMinutes: 15 },
+        snapshots: { enabled: false, maxBytes: 100, requireFinal: false, freshnessMinutes: 15 },
       } as ProjectConfig),
-    ).toEqual({ maxBytes: 100, requireFinal: true, freshnessMinutes: 15 });
+    ).toEqual({ enabled: false, maxBytes: 100, requireFinal: false, freshnessMinutes: 15 });
   });
 });
 
@@ -235,11 +257,173 @@ describe("snapshotDue", () => {
   });
 });
 
-describe("SNAPSHOT_REQUEST_MESSAGE", () => {
-  it("pins the snapshot request text", () => {
-    expect(SNAPSHOT_REQUEST_MESSAGE).toBe(
-      'Spur snapshot is stale: work moved on since your latest snapshot. Write one now with "$SPUR_SNAPSHOT_COMMAND" write --file <path> (--file - reads stdin), then continue.',
+describe("snapshotRequestMessage", () => {
+  it("pins the snapshot request text around the given command", () => {
+    const message = snapshotRequestMessage("'/data/session-tools/s1/spur-snapshot'");
+    expect(message).toBe(
+      "Spur snapshot is stale: work moved on since your latest snapshot. Write one now with '/data/session-tools/s1/spur-snapshot' write --file <path> (--file - reads stdin), then continue.",
     );
+    expect(isSpurReminder(message)).toBe(true);
+  });
+});
+
+describe("isSpurReminder", () => {
+  it.each(SNAPSHOT_REMINDER_PREFIXES)("matches %s", (prefix) => {
+    expect(isSpurReminder(`  ${prefix} rest`)).toBe(true);
+  });
+
+  it("rejects other text", () => {
+    expect(isSpurReminder("please fix the bug")).toBe(false);
+  });
+
+  it.each([
+    DEFAULT_WAKE_MESSAGE,
+    RATE_LIMIT_REACTIVATION_PROMPT,
+    CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
+  ])("matches the Spur-owned prompt %s through a listed prefix", (message) => {
+    expect(SNAPSHOT_REMINDER_PREFIXES).toContain(message);
+    expect(isSpurReminder(message)).toBe(true);
+  });
+
+  it("matches formatted interval and daily wakes with the default body only", () => {
+    expect(
+      isSpurReminder(formatIntervalWakeMessage("s1", DEFAULT_INTERVAL_WAKE_MESSAGE, "CI\ngreen")),
+    ).toBe(true);
+    expect(
+      isSpurReminder(formatDailyWakeMessage("s1", DEFAULT_DAILY_WAKE_MESSAGE, "CI green")),
+    ).toBe(true);
+    expect(isSpurReminder(formatIntervalWakeMessage("s1", "Check the deploy", "CI green"))).toBe(
+      false,
+    );
+    expect(isSpurReminder(formatDailyWakeMessage("s1", "Check the deploy", "CI green"))).toBe(
+      false,
+    );
+    expect(isSpurReminder(DEFAULT_INTERVAL_WAKE_MESSAGE)).toBe(false);
+  });
+});
+
+describe("isSpurToolCommand", () => {
+  it.each([
+    '"$SPUR_TODO_COMMAND" list',
+    "'/d/session-tools/x/spur-snapshot' write --file a",
+    "git status && spur-todo hold 1",
+    '"$SPUR_SESSION_TOOL_DIR"/spur-slots show',
+  ])("matches %s", (command) => {
+    expect(isSpurToolCommand(command)).toBe(true);
+  });
+
+  it.each(["git status", "npm test"])("rejects %s", (command) => {
+    expect(isSpurToolCommand(command)).toBe(false);
+  });
+});
+
+describe("lastAgentWorkMs", () => {
+  const floorMs = 1_000_000;
+  const untimedActivityMs = 9_999_999;
+  const at = (offset: number) => floorMs + offset;
+  const run = (entries: TranscriptEntry[], atStart = true) =>
+    lastAgentWorkMs(entries, { untimedActivityMs, floorMs, atStart });
+  const user = (text: string, timestampMs?: number): TranscriptEntry => ({
+    kind: "message",
+    role: "user",
+    text,
+    ...(timestampMs === undefined ? {} : { timestampMs }),
+  });
+  const assistant = (timestampMs?: number): TranscriptEntry => ({
+    kind: "message",
+    role: "assistant",
+    text: "reply",
+    ...(timestampMs === undefined ? {} : { timestampMs }),
+  });
+  const tool = (timestampMs: number, extra: Partial<TranscriptEntry> = {}): TranscriptEntry =>
+    ({ kind: "tool", name: "Bash", timestampMs, ...extra }) as TranscriptEntry;
+  const reminder = "Spur ToDo still has open work:\n- a";
+
+  it("finds no work when everything sits at or below the floor", () => {
+    expect(run([user("go", at(-5)), assistant(at(-4)), tool(at(0))])).toEqual({
+      workMs: null,
+      complete: true,
+    });
+  });
+
+  it("ignores Spur-only tools and reply text in a reminder turn", () => {
+    const entries = [
+      user("go", at(-10)),
+      user(reminder, at(5)),
+      tool(at(6), { spurCall: true }),
+      tool(at(7), { inputSummary: '{"cmd":"spur-todo list"}' }),
+      assistant(at(300)),
+    ];
+    expect(run(entries)).toEqual({ workMs: null, complete: true });
+  });
+
+  it("counts a non-Spur tool in a reminder turn", () => {
+    const entries = [user(reminder, at(5)), tool(at(6), { name: "Edit" }), assistant(at(8))];
+    expect(run(entries)).toEqual({ workMs: at(6), complete: true });
+    expect(
+      run([user(reminder, at(5)), tool(at(6), { inputSummary: '{"cmd":"npm test"}' })]),
+    ).toEqual({ workMs: at(6), complete: true });
+  });
+
+  it("does not count a command mixing work with a Spur call", () => {
+    const mixed = [user(reminder, at(5)), tool(at(6), { spurCall: true })];
+    expect(run(mixed)).toEqual({ workMs: null, complete: true });
+    expect(isSpurToolCommand("npm test && spur-todo list")).toBe(true);
+  });
+
+  it("counts reply text of a non-reminder turn", () => {
+    expect(run([user("do it", at(5)), assistant(at(9))])).toEqual({
+      workMs: at(9),
+      complete: true,
+    });
+  });
+
+  it("asks for a full read when the slice ends mid-turn with only text pending", () => {
+    expect(run([assistant(at(9))], false)).toEqual({ workMs: null, complete: false });
+  });
+
+  it("reports complete null when nothing is pending at the floor", () => {
+    expect(run([assistant(at(-3)), tool(at(0))], false)).toEqual({ workMs: null, complete: true });
+  });
+
+  it("asks for a full read when an untimed slice has no opener, and counts it only at the start", () => {
+    const untimedSpurCall: TranscriptEntry = { kind: "tool", name: "Bash", spurCall: true };
+    const replies = [assistant(), assistant(), untimedSpurCall];
+    expect(run(replies, false)).toEqual({ workMs: null, complete: false });
+    expect(run(replies, true)).toEqual({ workMs: untimedActivityMs, complete: true });
+  });
+
+  it("drops text above the floor when its reminder opener sits below it", () => {
+    expect(run([user(reminder, at(-10)), assistant(at(20))])).toEqual({
+      workMs: null,
+      complete: true,
+    });
+  });
+
+  it("counts text above the floor when its non-reminder opener sits below it", () => {
+    expect(run([user("go", at(-10)), assistant(at(20))])).toEqual({
+      workMs: at(20),
+      complete: true,
+    });
+  });
+
+  it("counts a non-Spur tool above the floor without seeing the opener", () => {
+    expect(run([assistant(at(8)), tool(at(9))], false)).toEqual({ workMs: at(9), complete: true });
+  });
+
+  it("treats entries before the first user message as a non-reminder turn at the start", () => {
+    expect(run([assistant(at(9))], true)).toEqual({ workMs: at(9), complete: true });
+  });
+
+  it("uses the activity instant for an untimed newest non-reminder turn", () => {
+    expect(run([user("go"), assistant()])).toEqual({ workMs: untimedActivityMs, complete: true });
+  });
+
+  it("counts nothing for an untimed newest reminder turn", () => {
+    expect(run([user("go"), assistant(), user(reminder), assistant()])).toEqual({
+      workMs: null,
+      complete: true,
+    });
   });
 });
 
