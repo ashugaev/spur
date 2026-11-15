@@ -18,18 +18,20 @@ import { createTempDir, findFreePort } from "../helpers/common.js";
 import { writeSession } from "../../src/metadata.js";
 import { PageSourceSync } from "../../src/page-source.js";
 import { startServer } from "../../src/server.js";
-import type { CronJobEditDraft } from "../../src/types.js";
+import { SESSION_STATES, type CronJobEditDraft } from "../../src/types.js";
+import { parseTaskStatusRequest } from "../../src/task-status.js";
 
 const source = (name: string) => readFile(new URL(`../../src/${name}`, import.meta.url), "utf8");
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "19eef8aa8701f91a7e10ff2daae19a3019f5cb40583d353690c15a5b5fa8b097",
-  "types.ts": "d6b726c9791e9fba988b509a86baa9cf6af531d6395a87130f7423a74a4297fd",
+  "server.ts": "e82199fb4ac92c06f6162d7791709c0360b3e8dd95d23dd8b736387482d1178e",
+  "types.ts": "f2d789fe72706827600384dc6726b25059f0d927fd9eed063ae968cfb8ccb25e",
   "cron-job-editor.ts": "44d5660bb35b1ea8fb6c9c7faf9979fbc630e033dbb0187252ec5e7198cbee7b",
-  "session-service.ts": "67584a4094e7f79e3262e2f564dd323f589e8561b91add26dca87523281ed54e",
+  "session-service.ts": "1ea7feeec76ce3456161e90e95dc53899f190c86dcc406c301e6e6ba239b5996",
   "session-transitions.ts": "832771b8d95a6722cf67fc05685f2fd5f03e7a60a923c7a438e1b5b3bc0dcbb0",
-  "session-slots.ts": "05c18a105973a34c08de2784422abf383fc9e535b413d5013f09580df691862e",
+  "session-slots.ts": "0b8e8bedbd9a5def3cd5d0d2399092c836b227fee3e84605ac1e20c78c5c834c",
+  "task-status.ts": "98700844f71e5d5edfd628c92653ed3cfcde4ff6c213acd24b9751935034bea1",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "1d06c2d904fa46b95ef8bed971c5767fad76663482f22822f9a541b345f161ff",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -71,9 +73,9 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(108);
+    expect(routes).toHaveLength(110);
     expect(contracts).toEqual(routes);
-    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(108);
+    expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(110);
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("list_sessions")?.query).toContainEqual(
       expect.objectContaining({ name: "link", type: "string[]", required: false }),
@@ -117,6 +119,61 @@ describe("daemon MCP operation contracts", () => {
     expect(parserMutation).not.toBe(server);
     expect(contractFingerprint(parserMutation)).not.toBe(contractFingerprint(server));
     expect(contractFingerprint(`// comment\n${server}`)).toBe(contractFingerprint(server));
+  });
+
+  it("describes the task-status boundary without granting an MCP agent identity", async () => {
+    const read = getDaemonOperation("get_task_status");
+    const write = getDaemonOperation("set_task_status");
+    expect(read).toMatchObject({
+      method: "GET",
+      path: "/sessions/{sessionId}/task-status",
+      pathParams: ["sessionId"],
+      body: null,
+    });
+    expect(write).toMatchObject({
+      method: "POST",
+      path: read?.path,
+      pathParams: ["sessionId"],
+      body: { type: "TaskStatusRequest" },
+    });
+    expect(write?.summary).toContain("403 task_status_forbidden");
+    const types = await source("types.ts");
+    for (const { name } of interfaceFields(types, "TaskStatusView")) {
+      expect(read?.responses[0]?.description).toContain(name);
+      expect(write?.responses[0]?.description).toContain(name);
+    }
+    for (const state of ["completed", "needs_input", "clear"] as const) {
+      expect(write?.body?.fields.find((entry) => entry.name === "state")?.type).toContain(
+        `"${state}"`,
+      );
+      for (const revision of [0, Number.MAX_SAFE_INTEGER]) {
+        const body = { state, revision, agentLaunchId: "current-launch-id" };
+        expect(parseTaskStatusRequest(body)).toEqual(body);
+      }
+    }
+    for (const revision of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, "0", undefined]) {
+      expect(() =>
+        parseTaskStatusRequest({
+          state: "completed",
+          revision,
+          agentLaunchId: "current-launch-id",
+        }),
+      ).toThrow();
+    }
+    for (const state of ["done", "working", "waiting", undefined]) {
+      expect(() =>
+        parseTaskStatusRequest({ state, revision: 0, agentLaunchId: "current-launch-id" }),
+      ).toThrow();
+    }
+    for (const name of ["state", "revision", "agentLaunchId"]) {
+      expect(write?.body?.fields).toContainEqual(expect.objectContaining({ name, required: true }));
+    }
+    for (const id of ["subscribe_session_states", "spawn_session", "spawn_background_session"]) {
+      const stateField = getDaemonOperation(id)?.body?.fields.find(
+        (entry) => entry.name === (id === "subscribe_session_states" ? "states" : "subscriptions"),
+      );
+      for (const state of SESSION_STATES) expect(stateField?.type).toContain(`"${state}"`);
+    }
   });
 
   it("describes accepted spawn identities without changing the 201 response contract", () => {
@@ -253,6 +310,7 @@ describe("daemon MCP operation contracts", () => {
       ["kill_session", "KillSessionRequest"],
       ["save_cron_job_draft", "CronJobEditUpdate"],
       ["write_snapshot", "WriteSnapshotRequest"],
+      ["set_task_status", "TaskStatusRequest"],
     ] as const;
     for (const [id, dto] of mappings) {
       const actual = getDaemonOperation(id)?.body?.fields.map(({ name, required }) => ({
@@ -383,7 +441,7 @@ describe("daemon MCP operation contracts", () => {
         nextOffset?: number;
       } = describeDaemonOperations({ offset, limit: 7 });
       ids.push(...page.operations.map((entry) => entry.operationId));
-      expect(page.total).toBe(108);
+      expect(page.total).toBe(110);
       expect(
         page.operations.every(
           (entry) => Object.keys(entry).sort().join(",") === "method,operationId,path,summary",
@@ -454,6 +512,29 @@ describe("catalog examples at the real daemon router", () => {
     };
     return { server, request, configPath };
   }
+
+  it("reads task status through catalog routing but retains the agent-only mutation guard", async () => {
+    const { server, request } = await fixture();
+    try {
+      const read = await request("get_task_status");
+      expect(read.status).toBe(200);
+      expect(await read.json()).toEqual({ revision: 0 });
+      for (const state of ["completed", "needs_input", "clear"]) {
+        const write = await request("set_task_status", {
+          state,
+          revision: 0,
+          agentLaunchId: "current-launch-id",
+          callerSessionId: "test-contract",
+          "x-spur-caller-session": "test-contract",
+        });
+        expect(write.status).toBe(403);
+        expect(await write.json()).toMatchObject({ code: "task_status_forbidden" });
+      }
+      expect(await (await request("get_task_status")).json()).toEqual({ revision: 0 });
+    } finally {
+      await server.stop();
+    }
+  });
 
   it("writes and reads work snapshots through MCP operator rights", async () => {
     const { server, request } = await fixture();

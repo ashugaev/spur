@@ -5,6 +5,7 @@ import { expect, it, vi } from "vitest";
 import { startServer } from "../../src/server.js";
 import { SessionService } from "../../src/session-service.js";
 import { TaskStatusError } from "../../src/task-status.js";
+import { getDaemonOperation } from "../../src/daemon-contracts.js";
 import { findFreePort } from "../helpers/common.js";
 
 it("task-status routes validate caller/body and preserve stale-write conflict errors", async () => {
@@ -22,11 +23,13 @@ it("task-status routes validate caller/body and preserve stale-write conflict er
     .spyOn(SessionService.prototype, "writeTaskStatus")
     .mockResolvedValue({ revision: 4, state: "needs_input" });
   const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
-  const url = `http://127.0.0.1:${port}/sessions/api-1/task-status`;
+  const mutation = getDaemonOperation("set_task_status");
+  if (!mutation) throw new Error("Missing task-status contract");
+  const url = `http://127.0.0.1:${port}${mutation.path.replace("{sessionId}", "api-1")}`;
   const body = { state: "needs_input", revision: 4, agentLaunchId: "launch-a" };
   const post = (value: unknown, caller?: string) =>
     fetch(url, {
-      method: "POST",
+      method: mutation.method,
       headers: {
         "content-type": "application/json",
         ...(caller ? { "x-spur-caller-session": caller } : {}),
@@ -39,9 +42,25 @@ it("task-status routes validate caller/body and preserve stale-write conflict er
     expect((await post(body)).status).toBe(403);
     expect((await post(body, "other")).status).toBe(403);
     expect((await post({ ...body, revision: -1 }, "api-1")).status).toBe(400);
+    for (const invalid of [
+      { ...body, state: "done" },
+      { ...body, state: "waiting" },
+      { ...body, revision: 0.5 },
+      { ...body, revision: Number.MAX_SAFE_INTEGER + 1 },
+      { ...body, revision: "4" },
+      { ...body, agentLaunchId: " " },
+      { state: "completed", revision: 4 },
+    ])
+      expect((await post(invalid, "api-1")).status).toBe(400);
     expect(write).not.toHaveBeenCalled();
     expect(await (await post(body, "api-1")).json()).toEqual({ revision: 4, state: "needs_input" });
     expect(write).toHaveBeenCalledWith("api-1", body);
+    for (const state of ["completed", "clear"] as const) {
+      const request = { ...body, state };
+      write.mockResolvedValueOnce(state === "clear" ? { revision: 4 } : { revision: 4, state });
+      expect((await post(request, "api-1")).status).toBe(200);
+      expect(write).toHaveBeenLastCalledWith("api-1", request);
+    }
     write.mockRejectedValueOnce(new TaskStatusError("Task changed", 409, "stale_task_status"));
     const stale = await post(body, "api-1");
     expect(stale.status).toBe(409);
