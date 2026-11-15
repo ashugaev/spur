@@ -2714,6 +2714,7 @@ export function Dashboard() {
           : handleCompleteSession(dialog.session, { prAction, retry: true });
       if (prAction === "leave_open") {
         setOpenPrAction((current) => (current === dialog ? null : current));
+        actionDialogs.closeRecover();
       }
       const done = await pending;
       if (done) {
