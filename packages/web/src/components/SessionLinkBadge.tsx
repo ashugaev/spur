@@ -43,10 +43,15 @@ function hoverClassForLink(link: SpurSessionLink): string {
 
 // Merge conflict has its own titled badge. `includeCi` is false when a check
 // card already lists the checks, leaving the review facts for a native title.
-function statusTitle(info: PrInfo, github: boolean, includeCi = true): string | undefined {
+function statusTitle(
+  info: PrInfo,
+  github: boolean,
+  ciRunning: boolean,
+  includeCi = true,
+): string | undefined {
   const facts: string[] = [];
   if (includeCi && info.ciStatus === "success") facts.push("CI passing");
-  if (includeCi && isCiFailingWhileRunning(info)) facts.push("CI failing, checks still running");
+  if (includeCi && ciRunning) facts.push("CI failing, checks still running");
   else if (includeCi && info.ciStatus === "failure") facts.push("CI failing");
   else if (includeCi && info.ciStatus === "pending") facts.push("CI pending");
   if (info.reviewDecision === "approved") facts.push("Review approved");
@@ -74,6 +79,7 @@ export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBa
   const hasStatus = indicator.kind === "review" || indicator.status !== null;
   const github = reviewProvider === "github";
   const checkRows = checkCardRows(prInfo.checks);
+  const ciRunning = isCiFailingWhileRunning(prInfo);
   const labelStyle: CSSProperties | undefined = isPr
     ? (() => {
         const color = prStateColor(prInfo.state);
@@ -100,7 +106,9 @@ export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBa
         <span
           className="text-[10px]"
           style={labelStyle}
-          title={isPr && checkRows.length > 0 ? statusTitle(prInfo, github, false) : undefined}
+          title={
+            isPr && checkRows.length > 0 ? statusTitle(prInfo, github, ciRunning, false) : undefined
+          }
         >
           {extractLinkId(link)}
         </span>
@@ -113,15 +121,12 @@ export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBa
                 onActiveCardChange={setActiveCard}
                 slot={slot}
                 rows={checkRows}
-                fallbackTitle={statusTitle(prInfo, github)}
+                fallbackTitle={statusTitle(prInfo, github, ciRunning)}
               >
                 {indicator.kind === "review" ? (
                   <ReviewDecisionDot decision={indicator.decision} showTitle={false} />
                 ) : (
-                  <CiStatusDot
-                    status={indicator.status}
-                    running={isCiFailingWhileRunning(prInfo)}
-                  />
+                  <CiStatusDot status={indicator.status} running={ciRunning} />
                 )}
               </PrHoverCardTrigger>
             ) : null}
