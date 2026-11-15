@@ -293,6 +293,7 @@ import {
   writeSession,
   observeSessionWrites,
   withSessionWriteGuard,
+  listArchivedSessions,
 } from "./metadata.js";
 import { runSpawnPreflight, type SpawnPreflightResult } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
@@ -609,11 +610,17 @@ import {
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   type TodoMutationRequest,
   type TodoProjection,
+  type LatestSnapshotEntry,
+  type SessionLinkFilter,
+  type TodoItemProjection,
   type WorkSnapshot,
+  type WorkSnapshotFreshness,
   type WorkSnapshotMeta,
+  type WorkSnapshotRead,
 } from "./types.js";
 import {
   ensureTodoLedger,
+  readTodoIfPresent,
   mutateTodo as applyTodoMutation,
   TodoEmptyLedgerError,
   TodoLedgerCorruptError,
@@ -625,7 +632,10 @@ import {
 import {
   listSnapshots,
   readSnapshot as readSnapshotVersion,
+  firstAgentWorkMs,
   lastAgentWorkMs,
+  snapshotAgeSeconds,
+  snapshotDirAt,
   snapshotDue,
   snapshotGateBlock,
   snapshotRequestMessage,
@@ -634,6 +644,8 @@ import {
   SnapshotConflictError,
   SnapshotCorruptError,
   WorkSnapshotRequiredError,
+  type SnapshotListQuery,
+  type SnapshotLocation,
 } from "./snapshots.js";
 import { cursorShowsReadyPrompt } from "./cursor-state.js";
 import { readCursorTokenUsage } from "./cursor-token-usage.js";
@@ -664,11 +676,13 @@ import {
   isGitWorktree,
   readCurrentBranch,
   readWorktreeHead,
+  countCommitsSince,
   removeWorktree,
   workspaceExists,
   probeWorkspace,
   worktreePathFor,
 } from "./workspace.js";
+import { createConcurrencyGate } from "./concurrency-gate.js";
 import { renderSelfMarker } from "./review-providers/github.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 import { getVersion } from "./version.js";
@@ -679,6 +693,8 @@ import { startDeploySwitch } from "./deploy-switch.js";
 import { getReleases } from "./releases-cache.js";
 import { appendUpdateLedgerLine, readUpdateLedger, updateLedgerPath } from "./update-ledger.js";
 
+// Concurrent freshness reads for one by-link snapshot request.
+const SNAPSHOT_READ_CONCURRENCY = 4;
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const STATUS_DETECTION_ERROR_PREFIX = "Session status detection failed: ";
 const REPORTING_DETECTION_ERROR_PREFIX = STATUS_DETECTION_ERROR_PREFIX + "Resource readout ";
@@ -4168,6 +4184,8 @@ export class SessionService {
     string,
     { activityMs: number; floorMs: number; workMs: number | null }
   >();
+  // First agent work after a live session's snapshot, valid for that snapshot version.
+  private readonly firstWorkCache = new Map<string, { version: number; workMs: number }>();
   // Live sessions whose tools this daemon process already rewrote.
   private readonly toolsRefreshed = new Set<string>();
   private readonly toolsRefreshFailedLogged = new Set<string>();
@@ -8187,6 +8205,9 @@ export class SessionService {
     for (const sessionId of this.snapshotWorkCache.keys()) {
       if (!liveIds.has(sessionId)) this.snapshotWorkCache.delete(sessionId);
     }
+    for (const sessionId of this.firstWorkCache.keys()) {
+      if (!liveIds.has(sessionId)) this.firstWorkCache.delete(sessionId);
+    }
     for (const sessionId of this.toolsRefreshed) {
       if (!liveIds.has(sessionId)) this.toolsRefreshed.delete(sessionId);
     }
@@ -10186,7 +10207,7 @@ export class SessionService {
     if (!settings.enabled || activityAt === null) return null;
     let latest;
     try {
-      latest = readSnapshotVersion(this.config.dataDir, session, "latest");
+      latest = readSnapshotVersion(this.config.dataDir, session, "latest", "live");
     } catch (error) {
       // prepareSnapshotRequest logs the corrupt snapshot.
       if (error instanceof SnapshotCorruptError) return activityAt;
@@ -10243,7 +10264,7 @@ export class SessionService {
     if (workAt === null) return null;
     let latest;
     try {
-      latest = readSnapshotVersion(this.config.dataDir, session, "latest");
+      latest = readSnapshotVersion(this.config.dataDir, session, "latest", "live");
     } catch (error) {
       if (!(error instanceof SnapshotCorruptError)) throw error;
       if (this.snapshotCorruptLogged.get(session.id) !== error.version) {
@@ -20484,16 +20505,31 @@ export class SessionService {
     });
   }
 
-  readSnapshots(sessionId: string): WorkSnapshotMeta[] {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-    return listSnapshots(this.config.dataDir, session);
+  // Snapshot reads take no lock and never touch the pane or the record: versions are write-once,
+  // and the owner location is resolved per call (live record first, then the archive).
+  private readSnapshotOwner(sessionId: string): {
+    session: SessionRecord;
+    location: SnapshotLocation;
+  } {
+    const live = readSession(this.config.dataDir, sessionId);
+    if (live) return { session: live, location: "live" };
+    const archived = readArchivedSession(this.config.dataDir, sessionId);
+    if (archived) return { session: archived, location: "archived" };
+    throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
   }
 
-  readSnapshot(sessionId: string, version: number | "latest"): WorkSnapshot {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-    const snapshot = readSnapshotVersion(this.config.dataDir, session, version);
+  readSnapshots(sessionId: string, query: SnapshotListQuery): WorkSnapshotMeta[] {
+    const { session, location } = this.readSnapshotOwner(sessionId);
+    return listSnapshots(this.config.dataDir, session, location, query);
+  }
+
+  async readSnapshot(
+    sessionId: string,
+    version: number | "latest",
+    options: { includeDone: boolean },
+  ): Promise<WorkSnapshotRead> {
+    const { session, location } = this.readSnapshotOwner(sessionId);
+    const snapshot = readSnapshotVersion(this.config.dataDir, session, version, location);
     if (!snapshot) {
       throw new SessionResourceNotFoundError(
         version === "latest"
@@ -20501,7 +20537,203 @@ export class SessionService {
           : `Snapshot ${version} not found for session ${sessionId}`,
       );
     }
-    return snapshot;
+    const read = await this.withFreshness(session, location, snapshot);
+    return options.includeDone ? { ...read, done: this.doneItems(session.id) } : read;
+  }
+
+  /** One entry per session matching every link, its latest snapshot, newest first. */
+  async latestSnapshotsByLink(
+    links: readonly SessionLinkFilter[],
+    options: { includeDone: boolean },
+  ): Promise<LatestSnapshotEntry[]> {
+    const candidates: { session: SessionRecord; location: SnapshotLocation }[] = [
+      ...listSessions(this.config.dataDir).map((session) => ({
+        session,
+        location: "live" as const,
+      })),
+      ...listArchivedSessions(this.config.dataDir, (project, id) =>
+        existsSync(snapshotDirAt(this.config.dataDir, { id, project }, "archived")),
+      ).map((session) => ({ session, location: "archived" as const })),
+    ];
+    const gate = createConcurrencyGate(SNAPSHOT_READ_CONCURRENCY);
+    const entries = await Promise.all(
+      candidates
+        .filter(({ session }) =>
+          matchesSessionLinks(this.displaySlotsForSession(session)?.links ?? [], links),
+        )
+        .map(({ session, location }) =>
+          gate.run(async (): Promise<LatestSnapshotEntry | null> => {
+            const snapshot = readSnapshotVersion(this.config.dataDir, session, "latest", location);
+            if (!snapshot) return null;
+            const read = await this.withFreshness(session, location, snapshot);
+            return {
+              sessionId: session.id,
+              status: session.status,
+              state: this.transitionsBinding?.store.observedState(session.id) ?? null,
+              snapshot: options.includeDone
+                ? { ...read, done: this.tolerantDoneItems(session.id) }
+                : read,
+            };
+          }),
+        ),
+    );
+    return entries
+      .filter((entry): entry is LatestSnapshotEntry => entry !== null)
+      .sort((a, b) => Date.parse(b.snapshot.at) - Date.parse(a.snapshot.at));
+  }
+
+  private doneItems(sessionId: string): TodoItemProjection[] {
+    const projection = readTodoIfPresent(this.config.dataDir, sessionId);
+    return projection?.items.filter((item) => item.status === "completed") ?? [];
+  }
+
+  // A damaged ledger costs its own entry the done list, not the whole response.
+  private tolerantDoneItems(sessionId: string): TodoItemProjection[] | null {
+    try {
+      return this.doneItems(sessionId);
+    } catch (error) {
+      if (error instanceof TodoLedgerCorruptError) return null;
+      throw error;
+    }
+  }
+
+  private async withFreshness(
+    session: SessionRecord,
+    location: SnapshotLocation,
+    snapshot: WorkSnapshot,
+  ): Promise<WorkSnapshotRead> {
+    const freshnessMs =
+      snapshotSettings(this.resolveProjectForSession(session)).freshnessMinutes * 60_000;
+    const [activity, commitsSince] = await Promise.all([
+      this.snapshotActivity(session, location, snapshot, freshnessMs),
+      countCommitsSince(session.worktreePath, snapshot.headSha, snapshot.branch),
+    ]);
+    const freshness: WorkSnapshotFreshness = {
+      ageSeconds: snapshotAgeSeconds(snapshot.at, Date.now()),
+      activitySince:
+        activity.firstWorkMs === null ? null : new Date(activity.firstWorkMs).toISOString(),
+      commitsSince,
+      stale: snapshotDue({
+        latestAt: snapshot.at,
+        sessionCreatedAt: session.createdAt,
+        activityAt: activity.newestWorkMs === null ? null : new Date(activity.newestWorkMs),
+        freshnessMs,
+      }),
+    };
+    return { ...snapshot, freshness };
+  }
+
+  /**
+   * First and newest agent work after the snapshot, by the rule that decides snapshot requests.
+   * Transcript write time gates the entry read; Cursor and OpenCode carry no entry times, so
+   * their transcript write time stands in for the work instant.
+   */
+  private async snapshotActivity(
+    session: SessionRecord,
+    location: SnapshotLocation,
+    snapshot: WorkSnapshot,
+    freshnessMs: number,
+  ): Promise<{ firstWorkMs: number | null; newestWorkMs: number | null }> {
+    const none = { firstWorkMs: null, newestWorkMs: null };
+    const floorMs = Date.parse(snapshot.at);
+    const cached = location === "live" ? this.firstWorkCache.get(session.id) : undefined;
+    const cachedFirstMs = cached?.version === snapshot.version ? cached.workMs : null;
+    // Newest work is never earlier than the first, so a late first work already makes it stale.
+    if (cachedFirstMs !== null && cachedFirstMs - floorMs > freshnessMs) {
+      return { firstWorkMs: cachedFirstMs, newestWorkMs: cachedFirstMs };
+    }
+    let slice: { entries: TranscriptEntry[]; startIndex: number } | null = null;
+    let activityMs: number | null;
+    if (session.agent === "claude" || session.agent === "codex") {
+      const tail = await this.readTranscriptTail(session, location);
+      if (!tail) return none;
+      slice = tail;
+      activityMs = tail.mtimeMs;
+    } else {
+      activityMs = await this.untimedTranscriptActivityMs(session);
+    }
+    if (activityMs === null || activityMs <= floorMs) return none;
+    const untimedActivityMs = activityMs;
+    let fullEntries: Promise<TranscriptEntry[]> | undefined;
+    const scan = async (
+      run: (
+        entries: readonly TranscriptEntry[],
+        atStart: boolean,
+      ) => { workMs: number | null; complete: boolean },
+    ): Promise<number | null> => {
+      if (slice) {
+        const result = run(slice.entries, slice.startIndex === 0);
+        if (result.complete) return result.workMs;
+      }
+      fullEntries ??= this.readFullConversationEntries(session);
+      return run(await fullEntries, true).workMs;
+    };
+    let firstWorkMs = cachedFirstMs;
+    if (firstWorkMs === null) {
+      firstWorkMs = await scan((entries, atStart) =>
+        firstAgentWorkMs(entries, { floorMs, atStart }),
+      );
+      if (firstWorkMs !== null && location === "live") {
+        this.firstWorkCache.set(session.id, { version: snapshot.version, workMs: firstWorkMs });
+      }
+    }
+    const newestWorkMs = await scan((entries, atStart) =>
+      lastAgentWorkMs(entries, { untimedActivityMs, floorMs, atStart }),
+    );
+    return {
+      firstWorkMs: firstWorkMs ?? newestWorkMs,
+      newestWorkMs: newestWorkMs ?? firstWorkMs,
+    };
+  }
+
+  // Live sessions share the incremental reader; archived ones bypass every reader map, which
+  // only eviction at archive time would ever clear.
+  private async readTranscriptTail(
+    session: SessionRecord,
+    location: SnapshotLocation,
+  ): Promise<{ entries: TranscriptEntry[]; startIndex: number; mtimeMs: number } | null> {
+    if (location === "live") {
+      const claude = session.agent === "claude";
+      const tail = await (claude
+        ? this.readConversationSerialized(session)
+        : this.readCodexConversationSerialized(session));
+      // The serialized read leaves its reader in the map; the reader carries the file's write time.
+      const mtimeMs = claude
+        ? this.conversationReaders.get(session.id)?.lastMtimeMs
+        : this.codexConversationReaders.get(session.id)?.cursor.mtimeMs;
+      return tail && mtimeMs !== undefined ? { ...tail, mtimeMs } : null;
+    }
+    if (session.agent === "claude") {
+      const result = await readClaudeConversationTail(
+        session.worktreePath,
+        undefined,
+        session.agentSessionId,
+      );
+      return result && { ...result, mtimeMs: result.reader.lastMtimeMs };
+    }
+    const result = await readCodexConversationTail(this.codexSessionsDir(session.id), undefined);
+    return result && { ...result, mtimeMs: result.reader.cursor.mtimeMs };
+  }
+
+  private async untimedTranscriptActivityMs(session: SessionRecord): Promise<number | null> {
+    if (session.agent === "cursor") {
+      const chatId = await this.cursorTranscriptId(session);
+      const result = chatId
+        ? await readCursorJsonlState(
+            session.worktreePath,
+            undefined,
+            chatId,
+            session.cursorRestoreBoundary ? { after: session.cursorRestoreBoundary } : {},
+          )
+        : null;
+      return result?.reader.lastMtimeMs ?? null;
+    }
+    const { state } = await readOpenCodeStructuredState(
+      session.agentSessionId,
+      session.worktreePath,
+      null,
+    );
+    return state?.activityMs ?? null;
   }
 
   async writeSnapshot(
