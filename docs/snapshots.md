@@ -53,5 +53,5 @@ Config applies at daemon start, spawn, restore and relaunch; a Claude session pi
 
 - Launch prompt text still names `$SPUR_SNAPSHOT_COMMAND`, also with `enabled: false`.
 - Pane check reads the newest 300 transcript entries. Work older than that, with only reminder turns since, is not found.
-- Codex entries without a timestamp never meet the freshness threshold; they only mark turn boundaries.
+- Codex entries without a timestamp count at last activity time in a non-reminder turn, never in a reminder turn.
 - Reminder text is matched by its opening words. A reminder reply that runs a non-Spur tool counts as work; one request per N at most.

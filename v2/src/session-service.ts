@@ -4165,6 +4165,8 @@ export class SessionService {
   >();
   // Live sessions whose tools this daemon process already rewrote.
   private readonly toolsRefreshed = new Set<string>();
+  private readonly toolsRefreshFailedLogged = new Set<string>();
+  private readonly snapshotFailureLogged = new Set<string>();
   private readonly todoNudgeBackoff = new Map<
     string,
     { failures: number; nextRetryAtMs: number }
@@ -8213,6 +8215,12 @@ export class SessionService {
     for (const sessionId of this.toolsRefreshed) {
       if (!liveIds.has(sessionId)) this.toolsRefreshed.delete(sessionId);
     }
+    for (const sessionId of this.toolsRefreshFailedLogged) {
+      if (!liveIds.has(sessionId)) this.toolsRefreshFailedLogged.delete(sessionId);
+    }
+    for (const sessionId of this.snapshotFailureLogged) {
+      if (!liveIds.has(sessionId)) this.snapshotFailureLogged.delete(sessionId);
+    }
     // Keyed `${sessionId}\0${sidecarName}`, unlike every other map here —
     // test only the first \0-split segment against liveIds.
     for (const key of this.sidecarStartConflictState.keys()) {
@@ -9937,7 +9945,12 @@ export class SessionService {
     const lastSuccessful = this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0;
     if (Date.now() - lastSuccessful < 60_000) return;
     try {
-      const workAt = await this.snapshotWorkAt(session, options?.agentActivityAt ?? null);
+      let workAt: Date | null = null;
+      try {
+        workAt = await this.snapshotWorkAt(session, options?.agentActivityAt ?? null);
+      } catch (error) {
+        this.logSnapshotFailureOnce(session, error);
+      }
       await this.withPaneWriteLock(session.tmuxSession, async () => {
         const lifecycleIds = this.lifecycleIdsFor(session);
         const prepared = await this.withSessionLifecycleLocks(lifecycleIds, async () => {
@@ -10046,15 +10059,10 @@ export class SessionService {
       return null;
     session = current;
     const snapshotRequest = this.prepareSnapshotRequest(session, workAt);
-    if (snapshotRequest) {
-      // Rewrites the tools first: an older session may lack the wrapper, and a failed write
-      // must not burn one of the request attempts.
-      const command = shellEscape(
-        join(
-          this.prepareSessionTools(session.id, session.agent, session.project),
-          SNAPSHOT_TOOL_NAME,
-        ),
-      );
+    // Rewrites the tools first: an older session may lack the wrapper, and a failed write
+    // must not burn one of the request attempts. Failure skips the request, not the ToDo nudge.
+    const command = snapshotRequest ? this.snapshotRequestCommand(session) : null;
+    if (snapshotRequest && command !== null) {
       session = { ...session, snapshotNudge: snapshotRequest };
       writeSession(this.config.dataDir, session);
       return {
@@ -10161,6 +10169,33 @@ export class SessionService {
       session,
       message,
     };
+  }
+
+  private snapshotRequestCommand(session: SessionRecord): string | null {
+    try {
+      return shellEscape(
+        join(
+          this.prepareSessionTools(session.id, session.agent, session.project),
+          SNAPSHOT_TOOL_NAME,
+        ),
+      );
+    } catch (error) {
+      this.logSnapshotFailureOnce(session, error);
+      return null;
+    }
+  }
+
+  // Snapshot logic never blocks the ToDo nudge; logged once per session per process.
+  private logSnapshotFailureOnce(session: SessionRecord, error: unknown): void {
+    if (this.snapshotFailureLogged.has(session.id)) return;
+    this.snapshotFailureLogged.add(session.id);
+    this.logEvent("session.snapshot.request_skipped", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Snapshot request skipped for ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
+      details: { kind: "snapshot_failed" },
+    });
   }
 
   /**
@@ -21334,6 +21369,9 @@ export class SessionService {
       this.prepareSessionTools(session.id, session.agent, session.project);
       this.toolsRefreshed.add(session.id);
     } catch (error) {
+      // Retried every sweep; logged once per session per process.
+      if (this.toolsRefreshFailedLogged.has(session.id)) return;
+      this.toolsRefreshFailedLogged.add(session.id);
       this.logEvent("session.tools.refresh_failed", {
         level: "warn",
         sessionId: session.id,

@@ -1269,9 +1269,9 @@ describe("snapshot hook tool", () => {
   });
 
   it("writes a no-op hook tool when snapshots are disabled", async () => {
-    const dataDir = await createTempDir("spur-slots-fast-");
-    tempDirs.push(dataDir);
-    const toolDir = ensureSessionSlotTool({
+    const { dataDir, toolDir } = await setup({ snapshotAgoMs: stale });
+    expect(runHook(toolDir, { hook_event_name: "Stop" })).not.toBe("");
+    ensureSessionSlotTool({
       dataDir,
       sessionId: "api-1",
       configPath: "/tmp/spur.yaml",
@@ -1279,6 +1279,7 @@ describe("snapshot hook tool", () => {
       snapshotHook: { enabled: false },
     });
     expect(runHook(toolDir, { hook_event_name: "Stop" })).toBe("");
+    expect(runHook(toolDir, { hook_event_name: "PostToolUse", tool_name: "Edit" })).toBe("");
   });
 
   it("exits 0 silently on malformed input or unreadable snapshots", async () => {

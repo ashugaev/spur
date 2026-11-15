@@ -4398,7 +4398,7 @@ describe("SessionService", () => {
         service.dispose();
       });
 
-      it("records no attempt when the tool rewrite throws, then sends attempt one", async () => {
+      it("records no attempt and still sends the ToDo nudge when the tool rewrite throws", async () => {
         const { sessions, session, service, internals, send } = await dueSetup([
           userEntry("go", 31),
           toolEntry(32),
@@ -4409,13 +4409,30 @@ describe("SessionService", () => {
 
         await nudgeAt(internals, sessions, session, new Date(at(40)));
         expect(sessions.get(session.id)?.snapshotNudge).toBeUndefined();
-        expect(send).not.toHaveBeenCalled();
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(send.mock.calls[0]?.[1]).toContain("Spur ToDo still has open work");
+        expect(internals.todoNudgeBackoff.has(session.id)).toBe(false);
+        expect(
+          logSpurEventMock.mock.calls.filter(
+            ([, entry]) => entry.event === "session.snapshot.request_skipped",
+          ),
+        ).toHaveLength(1);
 
-        // The failed prep takes the generic nudge backoff; wait it out.
-        internals.todoNudgeBackoff.delete(session.id);
+        vi.setSystemTime(new Date(Date.now() + 61_000));
         await nudgeAt(internals, sessions, session, new Date(at(40) + 1_000));
-        expect(send.mock.calls[0]?.[1]).toBe(REQUEST_MESSAGE);
+        expect(send.mock.calls[1]?.[1]).toBe(REQUEST_MESSAGE);
         expect(sessions.get(session.id)?.snapshotNudge?.attempts).toBe(1);
+        service.dispose();
+      });
+
+      it("still sends the ToDo nudge when the transcript read throws", async () => {
+        const { sessions, session, service, internals, send } = await dueSetup([]);
+        readClaudeConversationTailMock.mockRejectedValue(new Error("EIO"));
+
+        await nudgeAt(internals, sessions, session, new Date(at(40)));
+
+        expect(send.mock.calls[0]?.[1]).toContain("Spur ToDo still has open work");
+        expect(internals.todoNudgeBackoff.has(session.id)).toBe(false);
         service.dispose();
       });
 
