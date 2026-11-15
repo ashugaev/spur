@@ -12,7 +12,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { managedAuthLaunch, publicAuthSession } from "../../src/auth-launch.js";
+import {
+  managedAuthLaunch,
+  publicAuthSession,
+  scrubManagedClaudeHome,
+} from "../../src/auth-launch.js";
 import { buildCodexPlan } from "../../src/agents/codex.js";
 import type { AuthRegistration } from "../../src/auth-proxy.js";
 
@@ -120,6 +124,29 @@ describe("managed native authorization launch", () => {
     managedAuthLaunch(registration, directory);
     expect(lstatSync(managed).isSymbolicLink()).toBe(true);
     expect(readlinkSync(managed)).toBe(settingsPath);
+  });
+
+  it("scrubs host copies from a torn-down managed home and restores them on relaunch", () => {
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(
+      join(home, ".claude", "settings.json"),
+      JSON.stringify({ apiKeyHelper: "/bin/host-key", model: "opus" }),
+    );
+    writeFileSync(join(home, ".claude.json"), JSON.stringify({ mcpServers: { docs: {} } }));
+    const directory = mkdtempSync(join(tmpdir(), "spur-auth-launch-"));
+    directories.push(directory);
+    const { claudeConfigDir } = managedAuthLaunch(registration, directory);
+    scrubManagedClaudeHome(directory);
+    expect(JSON.parse(readFileSync(join(claudeConfigDir!, ".claude.json"), "utf8"))).toEqual({
+      hasCompletedOnboarding: true,
+    });
+    expect(existsSync(join(claudeConfigDir!, "settings.json"))).toBe(false);
+    scrubManagedClaudeHome(join(directory, "never-launched"));
+    managedAuthLaunch(registration, directory);
+    expect(JSON.parse(readFileSync(join(claudeConfigDir!, ".claude.json"), "utf8"))).toEqual({
+      hasCompletedOnboarding: true,
+      mcpServers: { docs: {} },
+    });
   });
 
   it("repoints stale links at the current host home", () => {

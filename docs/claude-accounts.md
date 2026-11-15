@@ -33,7 +33,8 @@ Managed Claude/Codex sessions change account for the next request through
 Direct sessions enter managed routing on explicit restore/respawn.
 
 Managed routing preserves native session context and process identity during account changes.
-Managed Claude links host `~/.claude` user config (`CLAUDE.md`, `settings.json`, skills, agents, commands, plugins, hooks, output styles) and user MCP servers; never host credentials. Host `settings.json` with `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport` or auth/endpoint env (`ANTHROPIC_*` except `*_MODEL`, `CLAUDE_CODE_USE_*`) becomes a private copy without those keys.
+Managed Claude links host `~/.claude` user config (`CLAUDE.md`, `settings.json`, skills, agents, commands, plugins, hooks, output styles) and user MCP servers; never host credentials. Host `settings.json` with `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport` or auth/endpoint env (`ANTHROPIC_*` except `*_MODEL`, `CLAUDE_CODE_USE_*`, `CLAUDE_CODE_SKIP_*_AUTH`, `CLAUDE_CODE_OAUTH_TOKEN`, `AWS_BEARER_TOKEN_BEDROCK`) becomes a private copy without those keys.
+User MCP servers and that settings copy live in owner-only (0600) files under the session tool dir; complete or kill removes them, restore writes them again.
 Codex uses Responses HTTP streaming; provider credentials stay with the local proxy.
 
 ## Auto-rotation

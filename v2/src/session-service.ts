@@ -41,7 +41,7 @@ import {
   type AuthProxyState,
   type AuthRotation,
 } from "./auth-proxy.js";
-import { managedAuthLaunch, publicAuthSession } from "./auth-launch.js";
+import { managedAuthLaunch, publicAuthSession, scrubManagedClaudeHome } from "./auth-launch.js";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setImmediate as yieldToEventLoop, setTimeout as sleep } from "node:timers/promises";
 import {
@@ -7284,6 +7284,12 @@ export class SessionService {
     });
   }
 
+  /** Revokes the routing key and drops host config copies from the session's managed home. */
+  private async revokeManagedAuthorization(sessionId: string): Promise<void> {
+    await this.authProxy.revokeSession(sessionId);
+    scrubManagedClaudeHome(slotToolDir(this.config.dataDir, sessionId));
+  }
+
   /** Persists a companion-reported effective-account change and logs it once. */
   private async recordAuthRotation(rotation: AuthRotation): Promise<void> {
     this.authSnapshot = undefined;
@@ -14425,7 +14431,7 @@ export class SessionService {
             excludePanePids: [],
           });
           if (processes.status === "ok" && processes.pids.length === 0) {
-            await this.authProxy.revokeSession(sessionId);
+            await this.revokeManagedAuthorization(sessionId);
             authorizationRollbackWarning = undefined;
           }
         } catch {
@@ -21384,7 +21390,7 @@ export class SessionService {
         });
         await this.cleanupSessionServices(session);
         if (targetStatus === "completed" && session.auth) {
-          await this.authProxy.revokeSession(session.id);
+          await this.revokeManagedAuthorization(session.id);
         }
       }
       if (targetStatus === "completed") {
@@ -21520,7 +21526,7 @@ export class SessionService {
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
       await this.terminateDetachedSessionProcesses(session);
       await this.cleanupSessionServices(session);
-      if (session.auth) await this.authProxy.revokeSession(session.id);
+      if (session.auth) await this.revokeManagedAuthorization(session.id);
       this.removeSessionArtifacts(session, { preserveStartup: true });
       if (closeoutTakenFrom) {
         this.returnTakenCloseout(sessionId, closeoutTakenFrom);
@@ -23948,7 +23954,7 @@ export class SessionService {
           sessions.push(session);
         }
         for (const session of sessions) {
-          if (session.auth) await this.authProxy.revokeSession(session.id);
+          if (session.auth) await this.revokeManagedAuthorization(session.id);
         }
         await this.authProxy.removeAccount(accountId);
         for (const session of sessions) {

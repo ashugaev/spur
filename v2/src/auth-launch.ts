@@ -13,6 +13,8 @@ import { join } from "node:path";
 import { ensureAccountProjectsLink } from "./claude-accounts.js";
 import type { AuthRegistration, AuthSession } from "./auth-proxy.js";
 
+const MANAGED_CLAUDE_HOME = "managed-claude-home";
+
 // Host ~/.claude user configuration shared by managed homes. Never credentials.
 const HOST_CLAUDE_ENTRIES = [
   "CLAUDE.md",
@@ -119,6 +121,19 @@ function linkHostClaudeConfig(claudeConfigDir: string): void {
   );
 }
 
+/** Drops host copies (user MCP servers, sanitized settings) once a managed session is torn down. */
+export function scrubManagedClaudeHome(sessionToolDir: string): void {
+  const claudeConfigDir = join(sessionToolDir, MANAGED_CLAUDE_HOME);
+  const onboarding = join(claudeConfigDir, ".claude.json");
+  const state = readJsonObject(onboarding);
+  if (state && "mcpServers" in state) {
+    const { mcpServers: _servers, ...rest } = state;
+    writeFileSync(onboarding, `${JSON.stringify(rest)}\n`, { mode: 0o600 });
+  }
+  const settings = join(claudeConfigDir, "settings.json");
+  if (lstatOrUndefined(settings)?.isFile()) unlinkSync(settings);
+}
+
 export function managedAuthLaunch(
   registration: AuthRegistration | undefined,
   sessionToolDir: string,
@@ -130,7 +145,7 @@ export function managedAuthLaunch(
 } {
   if (!registration) return {};
   if (registration.provider === "claude") {
-    const claudeConfigDir = join(sessionToolDir, "managed-claude-home");
+    const claudeConfigDir = join(sessionToolDir, MANAGED_CLAUDE_HOME);
     mkdirSync(claudeConfigDir, { recursive: true });
     linkHostClaudeConfig(claudeConfigDir);
     ensureAccountProjectsLink({ configDir: claudeConfigDir });

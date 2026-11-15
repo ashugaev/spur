@@ -21148,8 +21148,20 @@ describe("SessionService", () => {
       async (method) => {
         const { endpoint: _endpoint, token: _token, ...auth } = registration("claude");
         createSessionStore(runningSession({ auth, worktree: false }));
+        const managedHome = join(TEST_DATA_DIR, "session-tools", "api-1", "managed-claude-home");
+        mkdirSync(managedHome, { recursive: true });
+        writeFileSync(join(managedHome, ".claude.json"), '{"mcpServers":{"docs":{}}}\n');
         const service = await createDisposedSessionService();
+        let copyAtRevoke: string | undefined;
+        authProxyRevokeSessionMock.mockImplementation(async () => {
+          copyAtRevoke = readFileSync(join(managedHome, ".claude.json"), "utf8");
+        });
         await service[method]("api-1", { skipPrCheck: true });
+        expect(copyAtRevoke).toContain("mcpServers");
+        expect(
+          existsSync(join(managedHome, ".claude.json")) &&
+            readFileSync(join(managedHome, ".claude.json"), "utf8").includes("mcpServers"),
+        ).toBe(false);
         expect(killTmuxSessionMock).toHaveBeenCalled();
         expect(authProxyRevokeSessionMock).toHaveBeenCalledExactlyOnceWith("api-1");
         expect(killTmuxSessionMock.mock.invocationCallOrder[0]).toBeLessThan(
