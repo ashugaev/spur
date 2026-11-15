@@ -29,6 +29,7 @@ By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/ins
 - [docs/ci-admission.md](docs/ci-admission.md) — CI runner admission classes and limits
 - [docs/daemon-api.md](docs/daemon-api.md) — daemon HTTP routes
 - [docs/configuration.md](docs/configuration.md) — config layers, fields, sources/triggers, events
+- [docs/snapshots.md](docs/snapshots.md) — work snapshots: when Spur asks, what counts as work, config
 - [docs/dashboard-search.md](docs/dashboard-search.md) — dashboard search fields and desk behavior
 - [docs/web-terminal.md](docs/web-terminal.md) — recent web links in terminal output
 - [docs/claude-accounts.md](docs/claude-accounts.md) — claude account rotation and per-session credential switch

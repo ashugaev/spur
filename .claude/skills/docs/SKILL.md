@@ -40,7 +40,7 @@ GRANULAR: one doc, one topic, one Diataxis mode; split on drift.
 
   Tutorial (first run)          docs/install-from-npm.md
   How-to (one task)             docs/install-from-source.md, docs/voice.md,
-                                 TROUBLESHOOTING.md, SETUP.md
+                                 docs/snapshots.md, TROUBLESHOOTING.md, SETUP.md
   Reference (commands, fields)  docs/commands.md, docs/configuration.md,
                                  docs/daemon-api.md
   Explanation (why)             gitignored planning notes, not shipped
@@ -77,6 +77,8 @@ ONE SOURCE: each topic has one owning doc, everything else links.
     Route names: docs/daemon-api.md only — full payload/status-code contracts
     live in the handler (`v2/src/server.ts`), per daemon-api.md's own scope line.
     A route documented as part of a config field's behavior stays with that field.
+  - Exception: docs/snapshots.md restates snapshot config defaults (#1460);
+    configuration.md stays the field owner.
   - Contradiction: pick the owner, delete the copy, link.
 
 LINK GRAPH: every published doc reachable from the README Docs section, relative links only.

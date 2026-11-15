@@ -10,6 +10,8 @@ function toQuery(queryOrBreakpoint: string | number): string {
 }
 
 export const MOBILE_BREAKPOINT = 767;
+// Byte-equal to the Tailwind sm breakpoint media query, so JS and max-sm: classes agree.
+export const PHONE_QUERY = "(width < 40rem)";
 
 export function useMediaQuery(queryOrBreakpoint: string | number): boolean {
   const query = toQuery(queryOrBreakpoint);

@@ -31,6 +31,7 @@ import { Skeleton } from "@/components/Skeleton";
 import { TagEditor } from "@/components/TagEditor";
 import { WakeControls } from "@/components/WakeControls";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
+import { PHONE_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useTagCatalog } from "@/hooks/useTagCatalog";
 import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
@@ -55,6 +56,8 @@ import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
 import { IconActionButton } from "@/components/IconActionButton";
 import { IconCloseButton } from "@/components/IconCloseButton";
+import { CheckIcon } from "@/components/icons/CheckIcon";
+import { AlertIcon } from "@/components/icons/AlertIcon";
 import { SendIcon } from "@/components/icons/SendIcon";
 import { Spinner } from "@/components/icons/Spinner";
 import { TrashIcon } from "@/components/icons/TrashIcon";
@@ -978,7 +981,7 @@ function ArtifactImageViewer({
         />
       </div>
       <div
-        className="absolute bottom-3 right-3 z-10 flex flex-col gap-1"
+        className="absolute bottom-3 right-3 z-10 hidden flex-col gap-1 sm:flex"
         data-artifact-lightbox-interactive
       >
         <button
@@ -1019,6 +1022,7 @@ function ArtifactLightbox({
   previewState,
   canGoPrevious,
   canGoNext,
+  position,
   onClose,
   onPrevious,
   onNext,
@@ -1030,6 +1034,7 @@ function ArtifactLightbox({
   previewState: ArtifactPreviewState;
   canGoPrevious: boolean;
   canGoNext: boolean;
+  position: { index: number; total: number } | null;
   onClose: () => void;
   onPrevious: () => void;
   onNext: () => void;
@@ -1041,6 +1046,13 @@ function ArtifactLightbox({
   const [copyState, setCopyState] = useState<keyof typeof COPY_TEXT_LABELS>("idle");
   const swipeStartRef = useRef<ArtifactSwipeStart | null>(null);
   const suppressNextPreviewClickRef = useRef(false);
+  const isPhone = useMediaQuery(PHONE_QUERY);
+  const [chromeHidden, setChromeHidden] = useState(false);
+
+  // Header returns on every navigation and on close/reopen.
+  useEffect(() => {
+    setChromeHidden(false);
+  }, [artifact?.id]);
 
   useEffect(() => {
     setTextContent(null);
@@ -1163,6 +1175,17 @@ function ArtifactLightbox({
     }
 
     const bounds = event.currentTarget.getBoundingClientRect();
+    if (isPhone) {
+      const offsetX = event.clientX - bounds.left;
+      if (offsetX < bounds.width / 3) {
+        onPrevious();
+      } else if (offsetX >= (bounds.width * 2) / 3) {
+        onNext();
+      } else if (artifact.kind === "image") {
+        setChromeHidden((hidden) => !hidden);
+      }
+      return;
+    }
     const isLeftHalf = event.clientX < bounds.left + bounds.width / 2;
     if (isLeftHalf) {
       onPrevious();
@@ -1188,85 +1211,172 @@ function ArtifactLightbox({
     finishSwipe(event.pointerId, event.clientX, event.clientY);
   };
 
+  const phoneCopyLabel =
+    copyState === "copied"
+      ? `Copied ${artifact.name}`
+      : copyState === "error"
+        ? `Copy failed for ${artifact.name}`
+        : copyState === "copying"
+          ? `Copying ${artifact.name}`
+          : `Copy ${artifact.name}`;
+  const phoneImage = isPhone && artifact.kind === "image";
+  const phoneNavButtonClass = `${overlayButtonClass()} disabled:cursor-not-allowed disabled:opacity-40`;
+  const headerClassName = !isPhone
+    ? "mb-4 flex items-center justify-between gap-3"
+    : phoneImage
+      ? "absolute inset-x-0 top-0 z-20 flex items-center justify-between gap-2 bg-[var(--color-bg-base)] px-2 pb-1.5 pt-[max(0.375rem,var(--safe-top))]"
+      : "flex items-center justify-between gap-2 border-b border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 pb-1.5 pt-[max(0.375rem,var(--safe-top))]";
+
   return (
     <div
       aria-label={`Artifact preview ${artifact.name}`}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[color:var(--color-modal-backdrop)] p-2 backdrop-blur-sm sm:p-3"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[color:var(--color-modal-backdrop)] p-0 backdrop-blur-sm sm:p-3"
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
       role="dialog"
     >
-      <div className="flex h-full w-full flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:p-5">
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <h2
-              className="truncate text-left font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
-              dir="rtl"
-              title={artifact.name}
-            >
-              <bdi dir="ltr">{artifact.name}</bdi>
-            </h2>
-            <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-              {formatBytes(artifact.size)} · {artifact.kind} ·{" "}
-              {formatRelativeTime(artifact.updatedAt)}
+      <div className="flex h-full w-full flex-col overflow-hidden border-0 border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-0 max-sm:relative sm:border sm:p-5 sm:shadow-[0_20px_60px_var(--color-shadow-modal-lg)]">
+        {phoneImage && chromeHidden ? null : (
+          <div className={headerClassName}>
+            <div className="min-w-0">
+              <h2
+                className="truncate text-left font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+                dir="rtl"
+                title={artifact.name}
+              >
+                <bdi dir="ltr">{artifact.name}</bdi>
+              </h2>
+              <div className="mt-1 hidden text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)] sm:block">
+                {formatBytes(artifact.size)} · {artifact.kind} ·{" "}
+                {formatRelativeTime(artifact.updatedAt)}
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {isPhone && position ? (
+                <span className="whitespace-nowrap font-bold tracking-[0.12em] text-[var(--color-text-secondary)]">
+                  {position.index} / {position.total}
+                </span>
+              ) : null}
+              {isPhone ? (
+                <>
+                  <button
+                    aria-label="Previous artifact"
+                    className={phoneNavButtonClass}
+                    disabled={!canGoPrevious}
+                    onClick={onPrevious}
+                    type="button"
+                  >
+                    <ArtifactPreviousIcon />
+                  </button>
+                  <button
+                    aria-label="Next artifact"
+                    className={phoneNavButtonClass}
+                    disabled={!canGoNext}
+                    onClick={onNext}
+                    type="button"
+                  >
+                    <ArtifactNextIcon />
+                  </button>
+                </>
+              ) : null}
+              {artifact.kind === "text" && textPreviewState === "ready" && textContent ? (
+                isPhone ? (
+                  <button
+                    aria-busy={copyState === "copying" || undefined}
+                    aria-label={phoneCopyLabel}
+                    className={overlayButtonClass()}
+                    disabled={copyState === "copying"}
+                    onClick={() => void handleCopyText()}
+                    title={phoneCopyLabel}
+                    type="button"
+                  >
+                    <BusyContent busy={copyState === "copying"}>
+                      {copyState === "copied" ? (
+                        <CheckIcon className="h-3.5 w-3.5" />
+                      ) : copyState === "error" ? (
+                        <AlertIcon className="h-3.5 w-3.5" />
+                      ) : (
+                        <CopyIcon />
+                      )}
+                    </BusyContent>
+                  </button>
+                ) : (
+                  <button
+                    aria-busy={copyState === "copying" || undefined}
+                    aria-label={
+                      copyState === "copying" ? `Copying ${artifact.name}` : `Copy ${artifact.name}`
+                    }
+                    className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                    disabled={copyState === "copying"}
+                    onClick={() => void handleCopyText()}
+                    type="button"
+                  >
+                    <BusyContent busy={copyState === "copying"}>
+                      <CopyIcon />
+                      {COPY_TEXT_LABELS[copyState]}
+                    </BusyContent>
+                  </button>
+                )
+              ) : null}
+              {html ? (
+                <a
+                  aria-label={`Open ${artifact.name} in a new tab`}
+                  className={
+                    isPhone
+                      ? `${overlayButtonClass()} text-[var(--color-text-secondary)]! hover:text-[var(--color-text-primary)]! hover:no-underline`
+                      : "inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                  }
+                  href={artifactHref}
+                  rel="noreferrer"
+                  target="_blank"
+                  title={isPhone ? `Open ${artifact.name} in a new tab` : undefined}
+                >
+                  <ArtifactOpenExternalIcon />
+                  {isPhone ? null : "Open"}
+                </a>
+              ) : null}
+              <a
+                aria-label={`Download ${artifact.name}`}
+                className={`inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline ${
+                  // The global `a` accent color is unlayered and beats utilities; `!` matches the close button on phone.
+                  isPhone
+                    ? "text-[var(--color-text-secondary)]! hover:text-[var(--color-text-primary)]!"
+                    : ""
+                }`}
+                download={artifactBasename(artifact.name)}
+                href={artifactHref}
+              >
+                <ArtifactDownloadIcon />
+              </a>
+              <IconCloseButton
+                idleTextClass={
+                  isPhone
+                    ? "text-[var(--color-text-secondary)]"
+                    : "text-[var(--color-text-tertiary)]"
+                }
+                label="Close artifact preview"
+                onClick={onClose}
+              />
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            {artifact.kind === "text" && textPreviewState === "ready" && textContent ? (
-              <button
-                aria-busy={copyState === "copying" || undefined}
-                aria-label={
-                  copyState === "copying" ? `Copying ${artifact.name}` : `Copy ${artifact.name}`
-                }
-                className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
-                disabled={copyState === "copying"}
-                onClick={() => void handleCopyText()}
-                type="button"
-              >
-                <BusyContent busy={copyState === "copying"}>
-                  <CopyIcon />
-                  {COPY_TEXT_LABELS[copyState]}
-                </BusyContent>
-              </button>
-            ) : null}
-            {html ? (
-              <a
-                aria-label={`Open ${artifact.name} in a new tab`}
-                className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-                href={artifactHref}
-                rel="noreferrer"
-                target="_blank"
-              >
-                <ArtifactOpenExternalIcon />
-                Open
-              </a>
-            ) : null}
-            <a
-              aria-label={`Download ${artifact.name}`}
-              className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-              download={artifactBasename(artifact.name)}
-              href={artifactHref}
-            >
-              <ArtifactDownloadIcon />
-            </a>
-            <IconCloseButton label="Close artifact preview" onClick={onClose} />
-          </div>
-        </div>
+        )}
 
-        <div className="grid min-h-0 flex-1 grid-cols-[2.5rem_minmax(0,1fr)_2.5rem] items-center gap-2 sm:gap-3">
-          <button
-            aria-label="Previous artifact"
-            className="inline-flex h-10 w-10 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
-            disabled={!canGoPrevious}
-            onClick={onPrevious}
-            type="button"
-          >
-            <ArtifactPreviousIcon />
-          </button>
+        <div className="grid min-h-0 flex-1 grid-cols-1 items-center gap-0 sm:grid-cols-[2.5rem_minmax(0,1fr)_2.5rem] sm:gap-3">
+          {isPhone ? null : (
+            <button
+              aria-label="Previous artifact"
+              className="inline-flex h-10 w-10 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={!canGoPrevious}
+              onClick={onPrevious}
+              type="button"
+            >
+              <ArtifactPreviousIcon />
+            </button>
+          )}
           <div
             aria-label="Artifact preview surface"
-            className="relative flex h-full min-h-0 min-w-0 items-center justify-center self-stretch overflow-auto border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 [touch-action:pan-y] sm:p-4"
+            className="relative flex h-full min-h-0 min-w-0 items-center justify-center self-stretch overflow-auto border-0 border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-0 [touch-action:pan-y] sm:border sm:p-4"
             onClick={handlePreviewClick}
             onPointerCancel={() => {
               swipeStartRef.current = null;
@@ -1363,15 +1473,17 @@ function ArtifactLightbox({
               </div>
             )}
           </div>
-          <button
-            aria-label="Next artifact"
-            className="inline-flex h-10 w-10 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
-            disabled={!canGoNext}
-            onClick={onNext}
-            type="button"
-          >
-            <ArtifactNextIcon />
-          </button>
+          {isPhone ? null : (
+            <button
+              aria-label="Next artifact"
+              className="inline-flex h-10 w-10 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={!canGoNext}
+              onClick={onNext}
+              type="button"
+            >
+              <ArtifactNextIcon />
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -2719,7 +2831,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const tokenBudgetBlocked = session ? isTokenBudgetBlocked(session) : false;
 
   return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-[1500px] flex-col px-4 py-4 sm:px-5 lg:px-6">
+    <main className="mx-auto flex min-h-dvh w-full max-w-[1500px] flex-col px-2 py-4 sm:px-5 lg:px-6">
       <Link
         className="inline-flex items-center gap-2 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
         href={buildDashboardPath(projectId)}
@@ -3508,7 +3620,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           sort={artifactListSort}
                         />
                       ) : (
-                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                        <div className="grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-3 2xl:grid-cols-4">
                           {filteredArtifacts.map((artifact) => {
                             const artifactHref = artifactUrl(session.id, artifact.id);
                             const previewState = artifactPreviewStates[artifact.id] ?? "loading";
@@ -4020,6 +4132,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             artifactHref={selectedArtifactHref}
             canGoNext={canSelectNextArtifact}
             canGoPrevious={canSelectPreviousArtifact}
+            position={
+              selectedArtifactIndex >= 0
+                ? { index: selectedArtifactIndex + 1, total: artifactNavigationOrder.length }
+                : null
+            }
             onClose={() => setSelectedArtifactId(null)}
             onNext={selectNextArtifact}
             onPrevious={selectPreviousArtifact}

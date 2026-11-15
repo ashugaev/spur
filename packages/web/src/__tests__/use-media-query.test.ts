@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
-import { useMediaQuery } from "@/hooks/useMediaQuery";
+import { PHONE_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
 
 type MediaQueryListener = (event: MediaQueryListEvent) => void;
 
@@ -53,6 +53,12 @@ describe("useMediaQuery", () => {
   it("builds a max-width query for a number argument", () => {
     renderHook(() => useMediaQuery(640));
     expect(lastMediaQuery?.media).toBe("(max-width: 640px)");
+  });
+
+  it("pins PHONE_QUERY to the Tailwind sm breakpoint and passes it through", () => {
+    expect(PHONE_QUERY).toBe("(width < 40rem)");
+    renderHook(() => useMediaQuery(PHONE_QUERY));
+    expect(lastMediaQuery?.media).toBe("(width < 40rem)");
   });
 
   it("returns false initially when the query does not match", () => {

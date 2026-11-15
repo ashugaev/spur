@@ -11,6 +11,13 @@ PREVIEW
   Load frontend-codestyle; use existing components and tokens.
   Save screenshot before dependent implementation; preview code stays in artifacts.
 
+CONTRAST: every actionable element (button, icon, link, control) and its label.
+
+  Background: surface it renders on, incl. images, translucent and overlay layers, both themes.
+  AA: text 4.5:1; large text, icons, UI components 3:1.
+  Measure rendered pixels or computed colors, never token names.
+  Fail: fix before handoff.
+
 HANDOFF: $SPUR_SESSION_ARTIFACTS_DIR/design/, never committed.
 
   proposed-ui.png   screenshot of changed components and affected states

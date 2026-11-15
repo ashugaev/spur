@@ -5294,6 +5294,13 @@ describe("SessionDetail artifacts", () => {
       await screen.findByRole("dialog", { name: "Artifact preview shot.png" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
+    expect(screen.queryByText(/^\d+ \/ \d+$/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close artifact preview" })).toHaveClass(
+      "text-[var(--color-text-tertiary)]",
+    );
+    expect(
+      within(screen.getByRole("dialog")).getByRole("link", { name: "Download shot.png" }),
+    ).not.toHaveClass("text-[var(--color-text-secondary)]!");
 
     const previewSurface = screen.getByLabelText("Artifact preview surface");
     stubElementBounds(previewSurface);
@@ -5439,6 +5446,296 @@ describe("SessionDetail artifacts", () => {
     expect(
       await screen.findByRole("dialog", { name: "Artifact preview first.png" }),
     ).toBeInTheDocument();
+  });
+
+  describe("phone viewport", () => {
+    const artifactBase = {
+      origin: "intentional",
+      createdAt: "2026-04-02T10:00:00.000Z",
+      updatedAt: "2026-04-02T10:00:00.000Z",
+    };
+
+    function mockPhoneSession(artifacts: Array<Record<string, unknown>>) {
+      vi.spyOn(window, "matchMedia").mockImplementation(
+        (query: string) =>
+          ({
+            matches: query === "(width < 40rem)",
+            media: query,
+            onchange: null,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+            addListener: vi.fn(),
+            removeListener: vi.fn(),
+            dispatchEvent: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(JSON.stringify(sessionFixture({ artifacts: artifacts as never })), {
+            status: 200,
+          });
+        }
+        if (url === "/api/sessions/api-a1/conversation") {
+          return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+        }
+        return new Response("trace line", { status: 200 });
+      });
+    }
+
+    const phoneArtifacts = [
+      {
+        ...artifactBase,
+        id: "shot.png",
+        name: "shot.png",
+        size: 1200,
+        mimeType: "image/png",
+        kind: "image",
+      },
+      {
+        ...artifactBase,
+        id: "second.png",
+        name: "second.png",
+        size: 1300,
+        mimeType: "image/png",
+        kind: "image",
+      },
+      {
+        ...artifactBase,
+        id: "trace.log",
+        name: "trace.log",
+        size: 3200,
+        mimeType: "application/octet-stream",
+        kind: "download",
+      },
+    ];
+
+    async function openPhoneArtifact(name: string) {
+      render(<SessionDetail sessionId="api-a1" />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: `Preview ${name}` })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: `Preview ${name}` }));
+      return screen.findByRole("dialog", { name: `Artifact preview ${name}` });
+    }
+
+    it("navigates images by tap thirds, toggles the header on center tap, and shows a counter", async () => {
+      mockPhoneSession(phoneArtifacts);
+      await openPhoneArtifact("shot.png");
+
+      const imageSurface = screen.getByLabelText("Artifact preview surface");
+      const headerPrevious = screen.getByRole("button", { name: "Previous artifact" });
+      const headerNext = screen.getByRole("button", { name: "Next artifact" });
+      expect(headerPrevious).toBeDisabled();
+      expect(headerNext).toBeEnabled();
+      expect(imageSurface.contains(headerPrevious)).toBe(false);
+      expect(imageSurface.contains(headerNext)).toBe(false);
+      expect(screen.getByText("1 / 3")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "shot.png" })).toHaveAttribute(
+        "title",
+        "shot.png",
+      );
+      expect(screen.getByRole("button", { name: "Close artifact preview" })).toHaveClass(
+        "text-[var(--color-text-secondary)]",
+      );
+      expect(
+        within(screen.getByRole("dialog")).getByRole("link", { name: "Download shot.png" }),
+      ).toHaveClass("text-[var(--color-text-secondary)]!");
+
+      stubElementBounds(screen.getByLabelText("Artifact preview surface"), 300, 100);
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 150 });
+      expect(
+        screen.queryByRole("button", { name: "Close artifact preview" }),
+      ).not.toBeInTheDocument();
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 150 });
+      expect(screen.getByRole("button", { name: "Close artifact preview" })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 250 });
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
+      ).toBeInTheDocument();
+      expect(screen.getByText("2 / 3")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Close artifact preview" })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 50 });
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview shot.png" }),
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 50 });
+      expect(screen.getByRole("dialog", { name: "Artifact preview shot.png" })).toBeInTheDocument();
+
+      // Header buttons navigate without reaching the surface tap handler (header stays shown).
+      fireEvent.click(screen.getByRole("button", { name: "Next artifact" }));
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
+      ).toBeInTheDocument();
+      expect(screen.getByText("2 / 3")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Previous artifact" }));
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview shot.png" }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Close artifact preview" })).toBeInTheDocument();
+    });
+
+    it("restores the hidden header after navigation and after close and reopen", async () => {
+      mockPhoneSession(phoneArtifacts);
+      await openPhoneArtifact("shot.png");
+      const closeButton = () => screen.queryByRole("button", { name: "Close artifact preview" });
+
+      stubElementBounds(screen.getByLabelText("Artifact preview surface"), 300, 100);
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 150 });
+      expect(closeButton()).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 250 });
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
+      ).toBeInTheDocument();
+      expect(closeButton()).toBeInTheDocument();
+
+      stubElementBounds(screen.getByLabelText("Artifact preview surface"), 300, 100);
+      fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 150 });
+      expect(closeButton()).not.toBeInTheDocument();
+
+      fireEvent.keyDown(window, { key: "Escape" });
+      await waitFor(() => {
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Preview second.png" }));
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
+      ).toBeInTheDocument();
+      expect(closeButton()).toBeInTheDocument();
+    });
+
+    it("keeps the phone copy button a fixed icon-only square in every copy state", async () => {
+      const writeText = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("denied"))
+        .mockResolvedValueOnce(undefined);
+      Object.defineProperty(window.navigator, "clipboard", {
+        configurable: true,
+        value: { writeText },
+      });
+      mockPhoneSession([
+        {
+          ...artifactBase,
+          id: "notes.txt",
+          name: "notes.txt",
+          size: 10,
+          mimeType: "text/plain",
+          kind: "text",
+        },
+      ]);
+      await openPhoneArtifact("notes.txt");
+
+      const expectFixedSquare = (button: HTMLElement) => {
+        expect(button).toHaveClass("h-8", "w-8");
+        expect(button).toHaveTextContent("");
+      };
+
+      const idle = await screen.findByRole("button", { name: "Copy notes.txt" });
+      expectFixedSquare(idle);
+
+      fireEvent.click(idle);
+      const failed = await screen.findByRole("button", { name: "Copy failed for notes.txt" });
+      expect(failed).toHaveAttribute("title", "Copy failed for notes.txt");
+      expectFixedSquare(failed);
+
+      fireEvent.click(failed);
+      const copied = await screen.findByRole("button", { name: "Copied notes.txt" });
+      expect(copied).toHaveAttribute("title", "Copied notes.txt");
+      expectFixedSquare(copied);
+    });
+
+    it("renders the phone Open button for HTML as a 32px icon-only secondary-color square", async () => {
+      mockPhoneSession([
+        {
+          ...artifactBase,
+          id: "report.html",
+          name: "report.html",
+          size: 100,
+          mimeType: "text/html; charset=utf-8",
+          kind: "text",
+        },
+      ]);
+      const dialog = await openPhoneArtifact("report.html");
+
+      const open = within(dialog).getByRole("link", { name: "Open report.html in a new tab" });
+      expect(open).toHaveClass(
+        "h-8",
+        "w-8",
+        "text-[var(--color-text-secondary)]!",
+        "hover:text-[var(--color-text-primary)]!",
+      );
+      expect(open).toHaveTextContent("");
+      expect(open).toHaveAttribute("title", "Open report.html in a new tab");
+    });
+
+    it("keeps a zoomed image from flipping on tap", async () => {
+      mockPhoneSession(phoneArtifacts);
+      const dialog = await openPhoneArtifact("shot.png");
+
+      fireEvent.click(within(dialog).getByRole("button", { name: "Zoom in" }));
+      fireEvent.click(within(dialog).getByRole("img"), { clientX: 250 });
+
+      expect(screen.getByRole("dialog", { name: "Artifact preview shot.png" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Close artifact preview" })).toBeInTheDocument();
+    });
+
+    it("puts previous and next in the header for non-image artifacts", async () => {
+      mockPhoneSession(phoneArtifacts);
+      await openPhoneArtifact("trace.log");
+
+      const previous = screen.getAllByRole("button", { name: "Previous artifact" });
+      expect(previous).toHaveLength(1);
+      expect(
+        screen.getByLabelText("Artifact preview surface").contains(previous[0] as HTMLElement),
+      ).toBe(false);
+      expect(screen.getByText("3 / 3")).toBeInTheDocument();
+
+      const surface = screen.getByLabelText("Artifact preview surface");
+      stubElementBounds(surface, 300, 100);
+      fireEvent.click(surface, { clientX: 150 });
+      expect(
+        screen.getByRole("dialog", { name: "Artifact preview trace.log" }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Close artifact preview" })).toBeInTheDocument();
+
+      fireEvent.click(previous[0] as HTMLElement);
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
+      ).toBeInTheDocument();
+    });
+
+    it("hides the counter when the open artifact sits outside the filter", async () => {
+      mockPhoneSession([
+        {
+          ...artifactBase,
+          id: "agent-output.txt",
+          name: "agent-output.txt",
+          size: 3200,
+          mimeType: "application/octet-stream",
+          kind: "download",
+        },
+        {
+          ...artifactBase,
+          id: "agent-history.jsonl",
+          name: "agent-history.jsonl",
+          size: 2200,
+          mimeType: "application/octet-stream",
+          kind: "download",
+          origin: "automatic",
+        },
+      ]);
+      await openPhoneArtifact("agent-output.txt");
+      expect(screen.getByText("1 / 1")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "System (1)" }));
+      expect(
+        screen.getByRole("dialog", { name: "Artifact preview agent-output.txt" }),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/^\d+ \/ \d+$/)).not.toBeInTheDocument();
+    });
   });
 
   it("keeps selected artifacts open across category changes and closes when the id disappears", async () => {
