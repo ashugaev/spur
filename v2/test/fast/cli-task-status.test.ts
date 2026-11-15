@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
 
 const getJsonMock = vi.fn();
 const postJsonMock = vi.fn();
@@ -25,7 +26,7 @@ vi.mock("../../src/config.js", () => ({
 }));
 vi.mock("../../src/io.js", () => ({ writeStderr: vi.fn(), writeStdout: stdout }));
 vi.mock("../../src/runtime-tmux.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../src/runtime-tmux.js")>()),
+  ...(await importOriginal<typeof RuntimeTmuxModule>()),
   setTmuxSocketName: vi.fn(),
   sidecarTmuxSession: vi.fn(),
   withTmuxSocketArgs: (args: string[]) => args,
