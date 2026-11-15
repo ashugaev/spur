@@ -745,6 +745,34 @@ describe("SessionService", () => {
       }
     });
 
+    it("uses absent latest task fields instead of reviving a stale base declaration", async () => {
+      const { service } = await setup();
+      const internals = service as unknown as {
+        appendQueuedMessage(
+          record: SessionRecord,
+          message: string,
+          awaiting: boolean,
+        ): SessionRecord;
+      };
+      try {
+        const stale = runningSession({
+          agentLaunchId: "launch-a",
+          taskStatusRevision: 99,
+          taskStatus: {
+            state: "completed",
+            revision: 99,
+            agentLaunchId: "launch-a",
+            updatedAt: "2026-11-15T00:00:00Z",
+          },
+        });
+        const accepted = internals.appendQueuedMessage(stale, "new task", true);
+        expect(accepted.taskStatusRevision).toBe(1);
+        expect(accepted).not.toHaveProperty("taskStatus");
+      } finally {
+        service.dispose();
+      }
+    });
+
     it("invalidates on unique queue acceptance, not a duplicate, and separates preaccepted tasks at delivery", async () => {
       const { sessions, service } = await setup();
       const internals = service as unknown as {

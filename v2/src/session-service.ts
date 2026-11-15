@@ -18549,8 +18549,7 @@ export class SessionService {
         ...clearTaskStatus(
           {
             ...acceptedBase,
-            taskStatusRevision: latest.taskStatusRevision,
-            taskStatus: latest.taskStatus,
+            taskStatusRevision: latest.taskStatusRevision ?? 0,
           },
           true,
         ),
