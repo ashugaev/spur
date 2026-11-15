@@ -23836,10 +23836,12 @@ export class SessionService {
       accounts: state.accounts
         .filter((account) => !provider || account.provider === provider)
         .map((account): AuthAccountSummary => {
-          const status =
-            statuses.find((entry) => entry.id === account.id)?.status ?? "sign-in-required";
+          const entry = statuses.find((candidate) => candidate.id === account.id);
+          const status = entry?.status ?? "sign-in-required";
           return {
             ...account,
+            limited: entry?.cooldownUntil !== undefined,
+            ...(entry?.cooldownUntil ? { cooldownUntil: entry.cooldownUntil } : {}),
             authenticated: status === "ready",
             status:
               status === "sign-in-required"
@@ -28224,7 +28226,12 @@ export class SessionService {
         .read()
         .accounts.filter((account) => account.provider === "claude")
         .map(
-          (account): AuthAccountSummary => ({ ...account, authenticated: false, status: "error" }),
+          (account): AuthAccountSummary => ({
+            ...account,
+            authenticated: false,
+            limited: false,
+            status: "error",
+          }),
         );
     }
     return accounts.map((account) => ({

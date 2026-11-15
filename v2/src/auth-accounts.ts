@@ -41,6 +41,9 @@ export type AuthAccountsState = z.infer<typeof storeSchema>;
 export interface AuthAccountSummary extends AuthAccount {
   authenticated: boolean;
   status: "ready" | "sign_in_required" | "pending" | "error";
+  /** True while a shared quota cooldown is active; cooldownUntil is its ISO end. */
+  limited: boolean;
+  cooldownUntil?: string;
 }
 
 /** Runtime labels and pool preferences. Provider credentials belong to the companion. */

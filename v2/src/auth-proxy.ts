@@ -54,6 +54,7 @@ const stateSchema = z.object({
       provider: authProviderSchema,
       status: statusSchema,
       error: z.string().optional(),
+      cooldownUntil: z.string().datetime().optional(),
     }),
   ),
   sessions: z.array(authSessionSchema),

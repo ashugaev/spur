@@ -21486,6 +21486,35 @@ describe("SessionService", () => {
       expect(ensureDefaultAccountMock).not.toHaveBeenCalled();
       service.dispose();
     });
+
+    it("reports active quota cooldown per account", async () => {
+      authAccountsReadMock.mockReturnValue({
+        schema: 1,
+        accounts: ["a", "b"].map((id) => ({
+          id,
+          provider: "codex",
+          createdAt: "2026-03-18T09:00:00.000Z",
+        })),
+        pools: { codex: { defaultAccountId: "a", defaultGeneration: 0, autoRotate: true } },
+      });
+      authProxyGetStateMock.mockResolvedValue({
+        accounts: [
+          { id: "a", provider: "codex", status: "ready", cooldownUntil: "2026-03-18T11:00:00Z" },
+          { id: "b", provider: "codex", status: "ready" },
+        ],
+        sessions: [],
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const { accounts } = await service.listAuthorizationAccounts("codex");
+      expect(
+        accounts.map(({ id, limited, cooldownUntil }) => ({ id, limited, cooldownUntil })),
+      ).toEqual([
+        { id: "a", limited: true, cooldownUntil: "2026-03-18T11:00:00Z" },
+        { id: "b", limited: false, cooldownUntil: undefined },
+      ]);
+      service.dispose();
+    });
   });
 
   describe("claude accounts enrichment", () => {

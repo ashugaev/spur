@@ -118,6 +118,30 @@ func TestAccountRemovalKeepsAdmittedSnapshotCredential(t *testing.T) {
 	}
 }
 
+func TestStateReportsActiveCooldownOnly(t *testing.T) {
+	r := testRouter(t)
+	until := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	r.state.Cooldowns["account-a"] = until
+	r.state.Cooldowns["account-b"] = time.Now().Add(-time.Minute)
+	store := tokenStore(r.dir)
+	var out strings.Builder
+	c := &control{out: &out, router: r, logins: &loginManager{manager: coreauth.NewManager(store, nil, nil), store: store, attempts: map[string]*loginAttempt{}}}
+	c.handle(context.Background(), controlRequest{ID: 1, Method: "getState", Params: json.RawMessage("{}")})
+	var response struct {
+		Result stateSummary `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &response); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, a := range response.Result.Accounts {
+		got[a.ID] = a.CooldownUntil
+	}
+	if got["account-a"] != until.Format(time.RFC3339) || got["account-b"] != "" || got["account-c"] != "" {
+		t.Fatalf("cooldowns: %+v", got)
+	}
+}
+
 func TestAccountRemovalBlocksRacingAdmission(t *testing.T) {
 	r := testRouter(t)
 	store := tokenStore(r.dir)

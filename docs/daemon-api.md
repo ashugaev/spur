@@ -18,14 +18,14 @@
 - `POST /claude-accounts/remove`
 - `POST /claude-accounts/:id/finish-login`
 - `GET /claude-accounts/:id/login-status`
-- `GET /auth-accounts` — provider profiles and pool preferences; `v2/src/server.ts`.
+- `GET /auth-accounts` — provider profiles (status, `limited`, `cooldownUntil`) and pool preferences; `v2/src/server.ts`.
 - `POST /auth-accounts` — create Claude/Codex profile; `v2/src/server.ts`.
 - `PATCH /auth-accounts/:id` — rename profile; `v2/src/server.ts`.
 - `DELETE /auth-accounts/:id` — remove unused profile; `v2/src/server.ts`.
 - `POST /auth-accounts/:id/login` — start OAuth; `v2/src/server.ts`.
 - `POST /auth-accounts/:id/login-input` — submit code or cancel; `v2/src/server.ts`.
 - `GET /auth-accounts/:id/login-status` — durable OAuth readiness; `v2/src/server.ts`.
-- `PATCH /auth-pools/:provider` — default account and quota rotation; `v2/src/server.ts`.
+- `PATCH /auth-pools/:provider` — default account and quota rotation; creates a missing pool; `v2/src/server.ts`.
 - `GET /projects`
 - `GET /projects/cron?project=<id>` — cron sources, bound triggers, owner-file drift, last tick/action from the live event log; `project` optional; `404` unknown project; `v2/src/cron-jobs.ts`.
 - `GET /projects/cron/edit` — disk draft for a Cron spawn trigger; MCP `get_cron_job_draft`; `v2/src/cron-job-editor.ts`.

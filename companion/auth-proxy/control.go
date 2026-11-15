@@ -9,6 +9,7 @@ import (
 	"io"
 	"sort"
 	"sync"
+	"time"
 )
 
 type controlRequest struct {
@@ -60,6 +61,8 @@ type accountStatus struct {
 	Provider provider `json:"provider"`
 	Status   string   `json:"status"`
 	Error    string   `json:"error,omitempty"`
+	// CooldownUntil is set while a shared quota cooldown is active.
+	CooldownUntil string `json:"cooldownUntil,omitempty"`
 }
 type stateSummary struct {
 	Accounts []accountStatus  `json:"accounts"`
@@ -160,7 +163,11 @@ func (c *control) handle(ctx context.Context, req controlRequest) {
 				if status.Status != "pending" && c.logins.ready(a.ID, a.Provider) {
 					status.Status = "ready"
 				}
-				result.Accounts = append(result.Accounts, accountStatus{ID: a.ID, Provider: a.Provider, Status: status.Status, Error: status.Error})
+				entry := accountStatus{ID: a.ID, Provider: a.Provider, Status: status.Status, Error: status.Error}
+				if until := r.state.Cooldowns[a.ID]; until.After(time.Now()) {
+					entry.CooldownUntil = until.UTC().Format(time.RFC3339)
+				}
+				result.Accounts = append(result.Accounts, entry)
 			}
 			for _, b := range r.state.Sessions {
 				result.Sessions = append(result.Sessions, b.Session)
