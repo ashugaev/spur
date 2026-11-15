@@ -1312,6 +1312,30 @@ describe("snapshot hook tool", () => {
     expect(runHook(fresh.toolDir, { hook_event_name: "Stop" })).not.toBe("");
   });
 
+  it("stays silent after a fresh snapshot follows the reminder turn's work, until new work", async () => {
+    // N = 10 min. Work 14 min ago, snapshot v2 written 13 min ago (after the work): the
+    // clock is past v2 + N, but no qualifying work is.
+    const { toolDir } = await setup({
+      snapshotAgoMs: 13 * 60_000,
+      turn: { reminder: true, worked: true, workedAt: Date.now() - 14 * 60_000 },
+    });
+    expect(
+      runHook(toolDir, {
+        hook_event_name: "PostToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "spur-todo list" },
+      }),
+    ).toBe("");
+    expect(runHook(toolDir, { hook_event_name: "Stop" })).toBe("");
+    expect(
+      runHook(toolDir, {
+        hook_event_name: "PostToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "npm test" },
+      }),
+    ).not.toBe("");
+  });
+
   it("writes a no-op hook tool when snapshots are disabled", async () => {
     const { dataDir, toolDir } = await setup({ snapshotAgoMs: stale });
     expect(runHook(toolDir, { hook_event_name: "Stop" })).not.toBe("");
