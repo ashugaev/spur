@@ -6,7 +6,12 @@ import { loadConfig } from "../../src/config.js";
 import { readEventLog } from "../../src/event-log.js";
 import { cronSourceModule } from "../../src/event-sources/cron.js";
 import { startServer } from "../../src/server.js";
-import type { AppConfig, CronJobEditDraft, CronJobEditResult, CronJobsResponse } from "../../src/types.js";
+import type {
+  AppConfig,
+  CronJobEditDraft,
+  CronJobEditResult,
+  CronJobsResponse,
+} from "../../src/types.js";
 import { cleanupTrackedTempDirs, createTempDir, findFreePort } from "../helpers/common.js";
 
 function loadedPrompt(config: AppConfig): string | undefined {
@@ -22,7 +27,9 @@ it("saves cron edits while the original real source drain is pending, then activ
   const port = await findFreePort();
   expect(port).not.toBe(4310);
   let releaseDrain = () => {};
-  const drain = new Promise<void>((resolve) => { releaseDrain = resolve; });
+  const drain = new Promise<void>((resolve) => {
+    releaseDrain = resolve;
+  });
   let originalDrainCompleted = Promise.resolve();
   let sourceStarts = 0;
   let originalStopCalls = 0;
@@ -50,7 +57,7 @@ it("saves cron edits while the original real source drain is pending, then activ
   const runningPrompt = async () => {
     const response = await fetch(`${base}/projects/cron?project=demo`);
     expect(response.status).toBe(200);
-    const body = await response.json() as CronJobsResponse;
+    const body = (await response.json()) as CronJobsResponse;
     const action = body.projects[0]?.sources[0]?.triggers[0]?.action;
     expect(action?.kind).toBe("spawn");
     return action?.kind === "spawn" ? action.blocks[0]?.prompt : undefined;
@@ -58,7 +65,7 @@ it("saves cron edits while the original real source drain is pending, then activ
   const patch = async () => {
     const response = await fetch(editor);
     expect(response.status).toBe(200);
-    const draft = await response.json() as CronJobEditDraft;
+    const draft = (await response.json()) as CronJobEditDraft;
     return fetch(editor, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
@@ -72,14 +79,27 @@ it("saves cron edits while the original real source drain is pending, then activ
   try {
     await mkdir(repoDir, { recursive: true });
     await mkdir(dataDir, { recursive: true });
-    await writeFile(configPath, [
-      "server:", "  host: 127.0.0.1", `  port: ${port}`,
-      `dataDir: ${dataDir}`, `worktreeDir: ${join(root, "worktrees")}`,
-      "projects:", "  demo:", `    path: ${repoDir}`, "    sources:",
-      "      nightly: {type: cron, schedule: '0 0 1 1 *', runOnStart: false}",
-      "    triggers:", "      audit:", "        source: nightly", "        event: cron:tick",
-      "        spawn:", "          prompt: original prompt",
-    ].join("\n"));
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${join(root, "worktrees")}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+        "    sources:",
+        "      nightly: {type: cron, schedule: '0 0 1 1 *', runOnStart: false}",
+        "    triggers:",
+        "      audit:",
+        "        source: nightly",
+        "        event: cron:tick",
+        "        spawn:",
+        "          prompt: original prompt",
+      ].join("\n"),
+    );
     server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
     expect(sourceStarts).toBe(1);
     expect((await fetch(`${base}/info`)).status).toBe(200);
@@ -89,7 +109,7 @@ it("saves cron edits while the original real source drain is pending, then activ
     const started = performance.now();
     const failed = await patch();
     const elapsedMs = performance.now() - started;
-    const failedBody = await failed.json() as CronJobEditResult;
+    const failedBody = (await failed.json()) as CronJobEditResult;
     expect(failed.status).toBe(200);
     expect(failedBody).toMatchObject({ saved: true, activation: "failed" });
     expect(elapsedMs).toBeGreaterThanOrEqual(30_000);
@@ -100,17 +120,29 @@ it("saves cron edits while the original real source drain is pending, then activ
     expect(await runningPrompt()).toBe("original prompt");
     expect(sourceStarts).toBe(1);
     expect(originalStopCalls).toBe(1);
-    const interrupted = readEventLog(dataDir).find((entry) => entry.event === "daemon.reload.interrupted");
+    const interrupted = readEventLog(dataDir).find(
+      (entry) => entry.event === "daemon.reload.interrupted",
+    );
     expect(interrupted?.details).toMatchObject({ state: "pending", recoveryRequired: true });
-    console.log(JSON.stringify({ phase: "pending-drain", status: failed.status, body: failedBody,
-      elapsedMs, sourceStarts, originalStopCalls, diskPrompt: loadedPrompt(loadConfig(configPath)),
-      runtimePrompt: loadedPrompt(server.config), interrupted }));
+    console.log(
+      JSON.stringify({
+        phase: "pending-drain",
+        status: failed.status,
+        body: failedBody,
+        elapsedMs,
+        sourceStarts,
+        originalStopCalls,
+        diskPrompt: loadedPrompt(loadConfig(configPath)),
+        runtimePrompt: loadedPrompt(server.config),
+        interrupted,
+      }),
+    );
 
     releaseDrain();
     await originalDrainCompleted;
     expect(sourceStarts).toBe(1);
     const retried = await patch();
-    const retryBody = await retried.json() as CronJobEditResult;
+    const retryBody = (await retried.json()) as CronJobEditResult;
     expect(retried.status).toBe(200);
     expect(retryBody).toMatchObject({ saved: true, activation: "applied" });
     expect(loadedPrompt(loadConfig(configPath))).toBe("edited prompt");
@@ -118,8 +150,16 @@ it("saves cron edits while the original real source drain is pending, then activ
     expect(await runningPrompt()).toBe("edited prompt");
     expect(sourceStarts).toBe(2);
     expect(originalStopCalls).toBe(1);
-    console.log(JSON.stringify({ phase: "recovered", status: retried.status, body: retryBody,
-      sourceStarts, originalStopCalls, runtimePrompt: loadedPrompt(server.config) }));
+    console.log(
+      JSON.stringify({
+        phase: "recovered",
+        status: retried.status,
+        body: retryBody,
+        sourceStarts,
+        originalStopCalls,
+        runtimePrompt: loadedPrompt(server.config),
+      }),
+    );
   } finally {
     releaseDrain();
     try {
@@ -130,7 +170,10 @@ it("saves cron edits while the original real source drain is pending, then activ
         if (server) {
           const listening = await new Promise<boolean>((resolve, reject) => {
             const socket = createConnection({ host: "127.0.0.1", port });
-            socket.once("connect", () => { socket.destroy(); resolve(true); });
+            socket.once("connect", () => {
+              socket.destroy();
+              resolve(true);
+            });
             socket.once("error", (error: NodeJS.ErrnoException) => {
               if (error.code === "ECONNREFUSED") resolve(false);
               else reject(error);
