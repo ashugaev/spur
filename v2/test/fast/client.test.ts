@@ -1034,8 +1034,7 @@ describe("client deadlines", () => {
     const kill = vi.spyOn(process, "kill").mockReturnValue(true);
     routeFetch((call, init) => {
       if (call === 1) return Promise.resolve(new Response("{}", { status: 503 }));
-      if (call === 2)
-        return Promise.resolve(new Response(JSON.stringify(runtimeInfo(-1, 7777))));
+      if (call === 2) return Promise.resolve(new Response(JSON.stringify(runtimeInfo(-1, 7777))));
       if (call === 3) return Promise.reject(new Error("daemon stopped"));
       return pendingUntilAbort(init);
     });
