@@ -28,6 +28,8 @@ import {
   DEFAULT_DAILY_WAKE_MESSAGE,
   DEFAULT_INTERVAL_WAKE_MESSAGE,
   DEFAULT_WAKE_MESSAGE,
+  formatDailyWakeMessage,
+  formatIntervalWakeMessage,
 } from "../../src/wake-schedule.js";
 import type { ProjectConfig, SessionRecord, TranscriptEntry } from "../../src/types.js";
 import { readWorktreeHead } from "../../src/workspace.js";
@@ -276,13 +278,27 @@ describe("isSpurReminder", () => {
 
   it.each([
     DEFAULT_WAKE_MESSAGE,
-    DEFAULT_INTERVAL_WAKE_MESSAGE,
-    DEFAULT_DAILY_WAKE_MESSAGE,
     RATE_LIMIT_REACTIVATION_PROMPT,
     CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
   ])("matches the Spur-owned prompt %s through a listed prefix", (message) => {
     expect(SNAPSHOT_REMINDER_PREFIXES).toContain(message);
     expect(isSpurReminder(message)).toBe(true);
+  });
+
+  it("matches formatted interval and daily wakes with the default body only", () => {
+    expect(
+      isSpurReminder(formatIntervalWakeMessage("s1", DEFAULT_INTERVAL_WAKE_MESSAGE, "CI\ngreen")),
+    ).toBe(true);
+    expect(
+      isSpurReminder(formatDailyWakeMessage("s1", DEFAULT_DAILY_WAKE_MESSAGE, "CI green")),
+    ).toBe(true);
+    expect(isSpurReminder(formatIntervalWakeMessage("s1", "Check the deploy", "CI green"))).toBe(
+      false,
+    );
+    expect(isSpurReminder(formatDailyWakeMessage("s1", "Check the deploy", "CI green"))).toBe(
+      false,
+    );
+    expect(isSpurReminder(DEFAULT_INTERVAL_WAKE_MESSAGE)).toBe(false);
   });
 });
 

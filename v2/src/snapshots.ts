@@ -16,11 +16,7 @@ import {
   CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
   RATE_LIMIT_REACTIVATION_PROMPT,
 } from "./reactivation-prompts.js";
-import {
-  DEFAULT_DAILY_WAKE_MESSAGE,
-  DEFAULT_INTERVAL_WAKE_MESSAGE,
-  DEFAULT_WAKE_MESSAGE,
-} from "./wake-schedule.js";
+import { DEFAULT_WAKE_FORMAT_PATTERN, DEFAULT_WAKE_MESSAGE } from "./wake-schedule.js";
 import type {
   AgentName,
   ProjectConfig,
@@ -97,8 +93,9 @@ export const SNAPSHOT_HOOK_TURN_FILE = "snapshot-hook-turn";
 
 /**
  * Text a Spur reminder starts with: ToDo nudges (session-service.ts), the snapshot request, and
- * the default scheduled wake messages and the rate-limit and server-error continue prompts. A
- * wake with its own message is real input.
+ * the default one-off wake message and the rate-limit and server-error continue prompts.
+ * Interval and daily wakes arrive wrapped and match DEFAULT_WAKE_FORMAT_PATTERN instead. A wake
+ * with its own message is real input.
  */
 export const SNAPSHOT_REMINDER_PREFIXES: readonly string[] = [
   "Spur ToDo still has open work:",
@@ -106,8 +103,6 @@ export const SNAPSHOT_REMINDER_PREFIXES: readonly string[] = [
   "Spur ToDo is empty.",
   "Spur snapshot is stale:",
   DEFAULT_WAKE_MESSAGE,
-  DEFAULT_INTERVAL_WAKE_MESSAGE,
-  DEFAULT_DAILY_WAKE_MESSAGE,
   RATE_LIMIT_REACTIVATION_PROMPT,
   CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
 ];
@@ -118,9 +113,14 @@ export const SPUR_SESSION_TOOL_PATTERN =
 
 const SPUR_SESSION_TOOL_REGEX = new RegExp(SPUR_SESSION_TOOL_PATTERN);
 
+const DEFAULT_WAKE_FORMAT_REGEX = new RegExp(DEFAULT_WAKE_FORMAT_PATTERN);
+
 export function isSpurReminder(text: string): boolean {
   const trimmed = text.trim();
-  return SNAPSHOT_REMINDER_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+  return (
+    SNAPSHOT_REMINDER_PREFIXES.some((prefix) => trimmed.startsWith(prefix)) ||
+    DEFAULT_WAKE_FORMAT_REGEX.test(trimmed)
+  );
 }
 
 export function isSpurToolCommand(command: string): boolean {

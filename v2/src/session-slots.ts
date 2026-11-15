@@ -22,6 +22,7 @@ import {
   snapshotRequestMessage,
 } from "./snapshots.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "./self-destruct.js";
+import { DEFAULT_WAKE_FORMAT_PATTERN } from "./wake-schedule.js";
 import type {
   AgentName,
   SessionLink,
@@ -377,6 +378,7 @@ import { basename, dirname, join } from "node:path";
 
 const MESSAGE = ${JSON.stringify(message)};
 const REMINDER_PREFIXES = ${JSON.stringify(SNAPSHOT_REMINDER_PREFIXES)};
+const DEFAULT_WAKE_FORMAT = new RegExp(${JSON.stringify(DEFAULT_WAKE_FORMAT_PATTERN)});
 const SPUR_TOOL = new RegExp(${JSON.stringify(SPUR_SESSION_TOOL_PATTERN)});
 const [snapshotDir, freshnessArg, claimPrefix, createdArg, turnFile] = process.argv.slice(2);
 const freshnessMs = Number(freshnessArg);
@@ -454,7 +456,9 @@ function run() {
   const event = payload.hook_event_name;
   if (event === "UserPromptSubmit") {
     const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
-    writeTurn({ reminder: REMINDER_PREFIXES.some((prefix) => prompt.startsWith(prefix)), worked: false });
+    const reminder =
+      REMINDER_PREFIXES.some((prefix) => prompt.startsWith(prefix)) || DEFAULT_WAKE_FORMAT.test(prompt);
+    writeTurn({ reminder, worked: false });
     return;
   }
   if (typeof payload.agent_id === "string" || payload.permission_mode === "plan") return;

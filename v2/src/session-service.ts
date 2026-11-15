@@ -470,6 +470,8 @@ import {
   DEFAULT_DAILY_WAKE_MESSAGE,
   DEFAULT_INTERVAL_WAKE_MESSAGE,
   DEFAULT_WAKE_MESSAGE,
+  formatDailyWakeMessage,
+  formatIntervalWakeMessage,
   normalizeDailyWakeTimes,
   resolveNextDailyWakeAt,
 } from "./wake-schedule.js";
@@ -5642,36 +5644,6 @@ export class SessionService {
     return dueAt;
   }
 
-  private formatIntervalWakeMessage(
-    sessionId: string,
-    message: string,
-    stopCondition: string,
-  ): string {
-    return [
-      "Scheduled interval wake-up.",
-      `Stop condition: ${stopCondition}`,
-      "",
-      message,
-      "",
-      `If the stop condition is satisfied, cancel this interval with \`spur wake ${sessionId} --cancel\`.`,
-    ].join("\n");
-  }
-
-  private formatDailyWakeMessage(
-    sessionId: string,
-    message: string,
-    stopCondition: string,
-  ): string {
-    return [
-      "Scheduled daily wake-up.",
-      `Stop condition: ${stopCondition}`,
-      "",
-      message,
-      "",
-      `If the stop condition is satisfied, cancel this daily wake with \`spur wake ${sessionId} --cancel\`.`,
-    ].join("\n");
-  }
-
   // Gates a recurring wake (interval/daily) on wakeDeliverability before send()
   // is ever attempted. Emits session.wake.suppressed once on the transition into
   // workspace_missing and clears the once-per-session marker on the transition
@@ -5867,7 +5839,7 @@ export class SessionService {
             const nextDueAt = claimedNextDueAt;
             try {
               await this.send(session.id, {
-                message: this.formatIntervalWakeMessage(
+                message: formatIntervalWakeMessage(
                   session.id,
                   intervalWake.message,
                   intervalWake.stopCondition,
@@ -6268,7 +6240,7 @@ export class SessionService {
         if (claimedDailyNextDueAt !== null) {
           try {
             await this.send(session.id, {
-              message: this.formatDailyWakeMessage(
+              message: formatDailyWakeMessage(
                 session.id,
                 dailyWake.message,
                 dailyWake.stopCondition,
@@ -17576,7 +17548,7 @@ export class SessionService {
     });
     try {
       await this.send(session.id, {
-        message: this.formatIntervalWakeMessage(
+        message: formatIntervalWakeMessage(
           session.id,
           intervalWake.message,
           intervalWake.stopCondition,
@@ -17672,11 +17644,7 @@ export class SessionService {
     });
     try {
       await this.send(session.id, {
-        message: this.formatDailyWakeMessage(
-          session.id,
-          dailyWake.message,
-          dailyWake.stopCondition,
-        ),
+        message: formatDailyWakeMessage(session.id, dailyWake.message, dailyWake.stopCondition),
         queue: false,
       });
       this.logEvent("session.wake.daily_sent", {

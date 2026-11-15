@@ -32,7 +32,13 @@ import {
 } from "../../src/session-slots.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "../../src/self-destruct.js";
 import { shellEscape } from "../../src/agents/shell-escape.js";
-import { DEFAULT_INTERVAL_WAKE_MESSAGE } from "../../src/wake-schedule.js";
+import {
+  DEFAULT_DAILY_WAKE_MESSAGE,
+  DEFAULT_INTERVAL_WAKE_MESSAGE,
+  DEFAULT_WAKE_MESSAGE,
+  formatDailyWakeMessage,
+  formatIntervalWakeMessage,
+} from "../../src/wake-schedule.js";
 import {
   SNAPSHOT_HOOK_TOOL_NAME,
   SNAPSHOT_HOOK_TURN_FILE,
@@ -1226,14 +1232,21 @@ describe("snapshot hook tool", () => {
     expect(turn()).toEqual({ reminder: false, worked: false });
   });
 
-  it("treats a default scheduled wake prompt as a reminder turn", async () => {
+  it.each([
+    ["one-off", DEFAULT_WAKE_MESSAGE, true],
+    [
+      "interval",
+      formatIntervalWakeMessage("api-1", DEFAULT_INTERVAL_WAKE_MESSAGE, "CI green"),
+      true,
+    ],
+    ["daily", formatDailyWakeMessage("api-1", DEFAULT_DAILY_WAKE_MESSAGE, "CI green"), true],
+    ["custom interval", formatIntervalWakeMessage("api-1", "Check the deploy", "CI green"), false],
+    ["custom daily", formatDailyWakeMessage("api-1", "Check the deploy", "CI green"), false],
+  ])("classifies the delivered %s wake prompt", async (_name, prompt, reminder) => {
     const { toolDir, turnPath } = await setup({ snapshotAgoMs: stale });
-    runHook(toolDir, {
-      hook_event_name: "UserPromptSubmit",
-      prompt: DEFAULT_INTERVAL_WAKE_MESSAGE,
-    });
-    expect(JSON.parse(readFileSync(turnPath, "utf8"))).toEqual({ reminder: true, worked: false });
-    expect(runHook(toolDir, { hook_event_name: "Stop" })).toBe("");
+    runHook(toolDir, { hook_event_name: "UserPromptSubmit", prompt });
+    expect(JSON.parse(readFileSync(turnPath, "utf8"))).toEqual({ reminder, worked: false });
+    expect(runHook(toolDir, { hook_event_name: "Stop" }) === "").toBe(reminder);
   });
 
   it("stays silent through a reminder turn that only runs Spur tools", async () => {
