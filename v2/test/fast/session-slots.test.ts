@@ -1138,13 +1138,16 @@ describe("snapshot hook tool", () => {
   });
 
   it.skipIf(process.getuid?.() === 0)(
-    "asks anyway when the claim file cannot be created",
+    "stays silent on PostToolUse but still blocks Stop when the claim file cannot be created",
     async () => {
       const { toolDir } = await setup({ snapshotAgoMs: stale });
       chmodSync(toolDir, 0o500);
       try {
-        expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).not.toBe("");
-        expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).not.toBe("");
+        expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).toBe("");
+        expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).toBe("");
+        expect(
+          JSON.parse(runHook(toolDir, { hook_event_name: "Stop", stop_hook_active: false })),
+        ).toMatchObject({ decision: "block" });
       } finally {
         chmodSync(toolDir, 0o755);
       }

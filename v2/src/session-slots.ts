@@ -381,13 +381,13 @@ function readPayload() {
 }
 
 // One request per N/2-aligned window: the first hook to create the window's claim file asks.
-// EEXIST means another hook already asked; any other error asks anyway (unthrottled, never lost).
+// Any claim failure (EEXIST: another hook asked; EACCES, EROFS, ENOSPC) stays silent; Stop and the pane path remain.
 function claimWindow(now) {
   const window = Math.floor(now / (freshnessMs / 2));
   try {
     closeSync(openSync(claimPrefix + "." + window, "wx"));
-  } catch (error) {
-    return !(error && error.code === "EEXIST");
+  } catch {
+    return false;
   }
   try {
     const stem = basename(claimPrefix) + ".";
