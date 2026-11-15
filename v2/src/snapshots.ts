@@ -190,7 +190,11 @@ export function lastAgentWorkMs(
       }
       hasAgentEntry = true;
     }
-    return { workMs: hasAgentEntry ? untimedActivityMs : null, complete: true };
+    if (!hasAgentEntry) return { workMs: null, complete: true };
+    // The newest turn's opener is not in the slice: its type is unknown.
+    return atStart
+      ? { workMs: untimedActivityMs, complete: true }
+      : { workMs: null, complete: false };
   }
   const pending: number[] = [];
   for (let i = entries.length - 1; i >= 0; i--) {

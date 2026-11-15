@@ -386,6 +386,12 @@ describe("lastAgentWorkMs", () => {
     expect(run([assistant(at(-3)), tool(at(0))], false)).toEqual({ workMs: null, complete: true });
   });
 
+  it("asks for a full read when an untimed slice has no opener, and counts it only at the start", () => {
+    const replies = [assistant(), assistant(), tool(0, { spurCall: true, timestampMs: undefined })];
+    expect(run(replies, false)).toEqual({ workMs: null, complete: false });
+    expect(run(replies, true)).toEqual({ workMs: untimedActivityMs, complete: true });
+  });
+
   it("drops text above the floor when its reminder opener sits below it", () => {
     expect(run([user(reminder, at(-10)), assistant(at(20))])).toEqual({
       workMs: null,
