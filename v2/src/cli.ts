@@ -3514,10 +3514,14 @@ export function createProgram(cliEntrypoint: string): Command {
       printJson(account ? { account, login: status } : status);
       return;
     }
+    // Interruption cancels the pending sign-in; the companion bounds an orphaned one at 16 minutes.
     const abort = new AbortController();
     const interrupt = () => abort.abort();
-    process.once("SIGINT", interrupt);
+    const signals = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+    for (const signal of signals) process.once(signal, interrupt);
     const prompt = createPromptInterface({ input: process.stdin, output: process.stdout });
+    // A TTY Ctrl-C reaches readline, not the process, while the interface is open.
+    prompt.on("SIGINT", interrupt);
     const displayed = new Set<string>();
     let submittedPrompt: string | undefined;
     try {
@@ -3547,7 +3551,7 @@ export function createProgram(cliEntrypoint: string): Command {
       }
       writeStdout("Authorization ready");
     } finally {
-      process.removeListener("SIGINT", interrupt);
+      for (const signal of signals) process.removeListener(signal, interrupt);
       prompt.close();
       if (status.status !== "ready") {
         await postJson(cliEntrypoint, `${path}/login-input`, { cancel: true }, configPath).catch(
@@ -5736,7 +5740,11 @@ export async function run(argv = process.argv): Promise<void> {
     await program.parseAsync(argvWithoutStrayHelpFlags(program, argv));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    log.error(message, { output: process.stderr, symbol: brandMark(), withGuide: false });
+    const separator = argv.indexOf("--");
+    const json = (separator === -1 ? argv : argv.slice(0, separator)).includes("--json");
+    // --json callers parse output; errors use the daemon's `{ "error": message }` body shape.
+    if (json) writeStderr(`${JSON.stringify({ error: message })}\n`);
+    else log.error(message, { output: process.stderr, symbol: brandMark(), withGuide: false });
     process.exitCode = 1;
   }
 }

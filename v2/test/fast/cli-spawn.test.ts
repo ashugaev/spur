@@ -6,6 +6,7 @@ const getJsonMock = vi.fn();
 const patchJsonMock = vi.fn();
 const listProjectsMock = vi.fn();
 const writeStdoutMock = vi.fn();
+const writeStderrMock = vi.fn();
 
 vi.mock("../../src/client.js", () => ({
   connectProjectConfig: vi.fn(),
@@ -35,7 +36,7 @@ vi.mock("../../src/config.js", () => ({
 }));
 
 vi.mock("../../src/io.js", () => ({
-  writeStderr: vi.fn(),
+  writeStderr: writeStderrMock,
   writeStdout: writeStdoutMock,
 }));
 
@@ -151,6 +152,48 @@ describe("spawn", () => {
       "--auto-rotate must be on or off",
     );
   });
+
+  it("prints a --json command failure as a JSON error body", async () => {
+    patchJsonMock.mockRejectedValue(new Error("Default authorization account must be ready"));
+    writeStderrMock.mockReset();
+    const { run } = await import("../../src/cli.js");
+    await run(["node", "/tmp/dist/cli.js", "auth", "pool", "claude", "--default", "bad", "--json"]);
+    expect(writeStderrMock).toHaveBeenCalledExactlyOnceWith(
+      '{"error":"Default authorization account must be ready"}\n',
+    );
+    expect(writeStdoutMock).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+    process.exitCode = undefined;
+  });
+
+  it.each(["SIGINT", "SIGTERM"] as const)(
+    "cancels the pending sign-in when the CLI receives %s",
+    async (signal) => {
+      postJsonMock.mockResolvedValue({
+        accountId: "work",
+        status: "pending",
+        url: "https://login",
+      });
+      getJsonMock.mockResolvedValue({ accountId: "work", status: "pending" });
+      const inherited = process.listeners(signal);
+      process.removeAllListeners(signal);
+      try {
+        const login = parseCli(["auth", "login", "work"]);
+        await vi.waitFor(() => expect(process.listenerCount(signal)).toBe(1));
+        process.emit(signal, signal);
+        await expect(login).rejects.toThrow();
+        expect(process.listenerCount(signal)).toBe(0);
+      } finally {
+        for (const listener of inherited) process.on(signal, listener);
+      }
+      expect(postJsonMock).toHaveBeenLastCalledWith(
+        "/tmp/dist/cli.js",
+        "/auth-accounts/work/login-input",
+        { cancel: true },
+        "/tmp/spur.yaml",
+      );
+    },
+  );
 
   it("switches a session to a profile or back to Auto", async () => {
     postJsonMock.mockResolvedValue({
