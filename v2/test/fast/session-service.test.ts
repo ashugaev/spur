@@ -705,8 +705,8 @@ describe("SessionService", () => {
           }),
         ).rejects.toMatchObject({ code: "stale_task_status" });
         await mockTodoLedger({
-          revision: "empty",
-          status: "empty",
+          revision: "",
+          status: "resolved",
           counts: { total: 0, open: 0, held: 0, completed: 0, cancelled: 0 },
           items: [],
           finishOverrides: [],
