@@ -109,7 +109,7 @@ export const SNAPSHOT_REMINDER_PREFIXES: readonly string[] = [
 
 /** RegExp source matching a command that touches the session's Spur tools. The hook script embeds it. */
 export const SPUR_SESSION_TOOL_PATTERN =
-  "SPUR_(?:TODO|SNAPSHOT|SLOT)_COMMAND|SPUR_SESSION_TOOL_DIR|/session-tools/|spur-(?:todo|snapshot|slots)";
+  "SPUR_(?:TODO|SNAPSHOT|SLOT|STATUS)_COMMAND|SPUR_SESSION_TOOL_DIR|/session-tools/|spur-(?:todo|snapshot|slots|status)";
 
 const SPUR_SESSION_TOOL_REGEX = new RegExp(SPUR_SESSION_TOOL_PATTERN);
 

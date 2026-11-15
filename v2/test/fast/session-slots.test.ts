@@ -1272,7 +1272,11 @@ describe("snapshot hook tool", () => {
     expect(runHook(toolDir, { hook_event_name: "Stop" }) === "").toBe(reminder);
   });
 
-  it("stays silent through a reminder turn that only runs Spur tools", async () => {
+  it.each([
+    '"$SPUR_TODO_COMMAND" hold 1 --reason x',
+    '"$SPUR_STATUS_COMMAND" --json',
+    "spur-status needs_input --revision 0",
+  ])("stays silent through a reminder turn that only runs Spur tools: %s", async (command) => {
     const { toolDir, turnPath } = await setup({
       snapshotAgoMs: stale,
       turn: { reminder: true, worked: false },
@@ -1281,7 +1285,7 @@ describe("snapshot hook tool", () => {
       runHook(toolDir, {
         hook_event_name: "PostToolUse",
         tool_name: "Bash",
-        tool_input: { command: '"$SPUR_TODO_COMMAND" hold 1 --reason x' },
+        tool_input: { command },
       }),
     ).toBe("");
     expect(JSON.parse(readFileSync(turnPath, "utf8"))).toEqual({ reminder: true, worked: false });
