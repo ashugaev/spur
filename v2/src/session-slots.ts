@@ -39,7 +39,7 @@ export const SLOT_TOOL_NAME = "spur-slots";
 export const AGENT_STATE_TOOL_NAME = "spur-agent-state";
 const AGENT_STATE_UPDATER_NAME = "spur-agent-state-updater.mjs";
 const SNAPSHOT_HOOK_SCRIPT_NAME = "spur-snapshot-hook.mjs";
-const SNAPSHOT_HOOK_STAMP_NAME = "snapshot-hook-stamp.json";
+const SNAPSHOT_HOOK_CLAIM_PREFIX = "snapshot-hook-claim";
 const SPUR_WRAPPER_NAME = "spur";
 const GIT_WRAPPER_NAME = "git";
 // Every generated git wrapper carries this text; wrappers detect each other by it.
@@ -363,25 +363,13 @@ function shouldWriteAgentStateTools(agent: AgentName | undefined): boolean {
 // Keep the version regex and staleness comparison in step with snapshots.ts.
 function snapshotHookScript(): string {
   return `#!/usr/bin/env node
-import {
-  closeSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
+import { closeSync, openSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 const MESSAGE = ${JSON.stringify(SNAPSHOT_REQUEST_MESSAGE)};
-const LOCK_STALE_MS = 5000;
-const [snapshotDir, freshnessArg, stampPath, createdArg] = process.argv.slice(2);
+const [snapshotDir, freshnessArg, claimPrefix, createdArg] = process.argv.slice(2);
 const freshnessMs = Number(freshnessArg);
 const createdAtMs = Number(createdArg);
-const lockPath = stampPath + ".lock";
 
 function readPayload() {
   try {
@@ -392,52 +380,24 @@ function readPayload() {
   }
 }
 
-function readStamp() {
+// One request per N/2-aligned window: the first hook to create the window's claim file asks.
+// EEXIST means another hook already asked; any other error asks anyway (unthrottled, never lost).
+function claimWindow(now) {
+  const window = Math.floor(now / (freshnessMs / 2));
   try {
-    const parsed = JSON.parse(readFileSync(stampPath, "utf8"));
-    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
+    closeSync(openSync(claimPrefix + "." + window, "wx"));
+  } catch (error) {
+    return !(error && error.code === "EEXIST");
   }
-}
-
-function writeStamp(stamp) {
-  const tmpPath = stampPath + ".tmp." + process.pid;
   try {
-    mkdirSync(dirname(stampPath), { recursive: true });
-    writeFileSync(tmpPath, JSON.stringify(stamp), "utf8");
-    renameSync(tmpPath, stampPath);
-  } catch {}
-}
-
-// Exclusive lock file; null when another hook holds it or on any lock error.
-function acquireLock() {
-  try {
-    mkdirSync(dirname(lockPath), { recursive: true });
-  } catch {}
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      return openSync(lockPath, "wx");
-    } catch (error) {
-      if (!error || error.code !== "EEXIST") return null;
-      try {
-        if (Date.now() - statSync(lockPath).mtimeMs <= LOCK_STALE_MS) return null;
-        unlinkSync(lockPath);
-      } catch {
-        return null;
-      }
+    const stem = basename(claimPrefix) + ".";
+    for (const name of readdirSync(dirname(claimPrefix))) {
+      if (!name.startsWith(stem)) continue;
+      const older = Number(name.slice(stem.length));
+      if (Number.isInteger(older) && older < window) unlinkSync(join(dirname(claimPrefix), name));
     }
-  }
-  return null;
-}
-
-function releaseLock(fd) {
-  try {
-    closeSync(fd);
   } catch {}
-  try {
-    unlinkSync(lockPath);
-  } catch {}
+  return true;
 }
 
 // undefined: unreadable newest snapshot (skip); null: no snapshot yet.
@@ -463,7 +423,7 @@ function latestSnapshotAt() {
 }
 
 function run() {
-  if (!snapshotDir || !stampPath || !(freshnessMs > 0) || Number.isNaN(createdAtMs)) return;
+  if (!snapshotDir || !claimPrefix || !(freshnessMs > 0) || Number.isNaN(createdAtMs)) return;
   const payload = readPayload();
   if (!payload) return;
   if (typeof payload.agent_id === "string" || payload.permission_mode === "plan") return;
@@ -477,20 +437,10 @@ function run() {
     process.stdout.write(JSON.stringify({ decision: "block", reason: MESSAGE }));
     return;
   }
-  const lock = acquireLock();
-  if (lock === null) return;
-  try {
-    const now = Date.now();
-    const stamp = readStamp();
-    const lastRequestAt = typeof stamp.lastRequestAt === "number" ? stamp.lastRequestAt : 0;
-    if (now - lastRequestAt < freshnessMs / 2) return;
-    process.stdout.write(
-      JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: MESSAGE } }),
-    );
-    writeStamp({ lastRequestAt: now });
-  } finally {
-    releaseLock(lock);
-  }
+  if (!claimWindow(Date.now())) return;
+  process.stdout.write(
+    JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: MESSAGE } }),
+  );
 }
 
 try {
@@ -824,7 +774,7 @@ exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UP
       join(toolDir, SNAPSHOT_HOOK_TOOL_NAME),
       `#!/usr/bin/env bash
 set -euo pipefail
-exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_SCRIPT_NAME))} ${shellEscape(snapshotDir(args.dataDir, args.sessionId))} ${args.snapshotHook.freshnessMinutes * 60_000} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_STAMP_NAME))} ${Date.parse(args.snapshotHook.sessionCreatedAt)}
+exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_SCRIPT_NAME))} ${shellEscape(snapshotDir(args.dataDir, args.sessionId))} ${args.snapshotHook.freshnessMinutes * 60_000} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_CLAIM_PREFIX))} ${Date.parse(args.snapshotHook.sessionCreatedAt)}
 `,
       { encoding: "utf8", mode: 0o755 },
     );

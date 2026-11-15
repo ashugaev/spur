@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   closeSync,
   existsSync,
   mkdirSync,
@@ -8,7 +9,6 @@ import {
   rmSync,
   statSync,
   symlinkSync,
-  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { rm } from "node:fs/promises";
@@ -1068,7 +1068,12 @@ describe("snapshot hook tool", () => {
         }),
       );
     }
-    return { dataDir, toolDir, stampPath: join(toolDir, "snapshot-hook-stamp.json") };
+    const claimPath = (windowOffset = 0) =>
+      join(
+        toolDir,
+        `snapshot-hook-claim.${Math.floor(Date.now() / (FRESHNESS_MS / 2)) + windowOffset}`,
+      );
+    return { dataDir, toolDir, claimPath };
   }
 
   function runHook(toolDir: string, payload: Record<string, unknown>): string {
@@ -1117,17 +1122,34 @@ describe("snapshot hook tool", () => {
     expect(runHook(toolDir, { hook_event_name: "Stop", stop_hook_active: false })).toBe("");
   });
 
-  it("throttles a second sequential PostToolUse request to every N/2", async () => {
-    const { toolDir, stampPath } = await setup({ snapshotAgoMs: stale });
+  it("asks at most once per N/2 window and clears older claims in the next window", async () => {
+    const { toolDir, claimPath } = await setup({ snapshotAgoMs: stale });
+    writeFileSync(claimPath(-1), "");
     expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).not.toBe("");
+    expect(existsSync(claimPath())).toBe(true);
+    expect(existsSync(claimPath(-1))).toBe(false);
     expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).toBe("");
-    const stamp = JSON.parse(readFileSync(stampPath, "utf8")) as { lastRequestAt: number };
-    writeFileSync(
-      stampPath,
-      JSON.stringify({ lastRequestAt: stamp.lastRequestAt - FRESHNESS_MS / 2 - 1000 }),
-    );
-    expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).not.toBe("");
   });
+
+  it("stays silent when a concurrent hook already claimed the window", async () => {
+    const { toolDir, claimPath } = await setup({ snapshotAgoMs: stale });
+    writeFileSync(claimPath(), "");
+    expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).toBe("");
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    "asks anyway when the claim file cannot be created",
+    async () => {
+      const { toolDir } = await setup({ snapshotAgoMs: stale });
+      chmodSync(toolDir, 0o500);
+      try {
+        expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).not.toBe("");
+        expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).not.toBe("");
+      } finally {
+        chmodSync(toolDir, 0o755);
+      }
+    },
+  );
 
   it("skips subagent and plan-mode payloads", async () => {
     const { toolDir } = await setup({ snapshotAgoMs: stale });
@@ -1155,19 +1177,6 @@ describe("snapshot hook tool", () => {
     });
     const oldStop = await setup({ createdAgoMs: stale });
     expect(runHook(oldStop.toolDir, { hook_event_name: "Stop" })).not.toBe("");
-  });
-
-  it("stays silent while another hook holds the throttle lock, and reclaims a stale lock", async () => {
-    const { toolDir, stampPath } = await setup({ snapshotAgoMs: stale });
-    const lockPath = `${stampPath}.lock`;
-    writeFileSync(lockPath, "");
-    expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).toBe("");
-    expect(existsSync(lockPath)).toBe(true);
-
-    const past = new Date(Date.now() - 60_000);
-    utimesSync(lockPath, past, past);
-    expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).not.toBe("");
-    expect(existsSync(lockPath)).toBe(false);
   });
 
   it("exits 0 silently on malformed input or unreadable snapshots", async () => {
