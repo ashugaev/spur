@@ -171,13 +171,12 @@ The same pass also runs a detect-only step over one shared process-table snapsho
 
 Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 attempts for unchanged open work/blockers/empty ledger — see [todo](commands.md#todo-snapshot). Pending automatic GitHub/Jira sends: 8 attempts per unchanged item. `ci_failed` pings once per head commit and failing check name, a re-run of the same check on that commit does not ping again, a new head commit does; no reminder loop. `merge_conflict` pings at most once per head+base pair. Failing CI or a conflict present at a PR's first observation pings once; legacy/unclaimed persisted snapshots do not replay it. Explicit owner-return recheck: `v2/src/event-sources/github.ts`.
 
-Snapshot requests: agent worked over `freshnessMinutes` (N) past latest snapshot; sent ahead of ToDo nudges, 3 attempts per snapshot version, own budget; idle sessions get none. Channels: Claude PostToolUse (at most every N/2) and Stop hooks, Codex Stop hook, Cursor/OpenCode while waiting.
+Snapshot requests: agent worked over `freshnessMinutes` (N) past latest snapshot; sent ahead of ToDo nudges, 3 attempts per snapshot version, own budget; idle sessions get none. Channels: Claude PostToolUse (at most every N/2) and Stop hooks; Codex, Cursor, OpenCode while waiting.
 
 - Claude: latest snapshot before a compaction lags the last tool use by at most N + N/2 when the agent complies.
-- Codex: bounded at turn end (Stop) only.
-- Cursor, OpenCode: request at waiting only.
+- Codex, Cursor, OpenCode: request at waiting only.
 
-Hooks pick up a changed N at spawn, restore, relaunch, sidecar start — `v2/src/snapshots.ts`, `v2/src/session-slots.ts`.
+Claude hooks pick up a changed N at spawn, restore, relaunch, sidecar start — `v2/src/snapshots.ts`, `v2/src/session-slots.ts`.
 
 A closeout owner whose `allowedTriggers` drops a send trigger gets one notice per trigger: `trigger.send.blocked_notice` event, Telegram if its topic exists — `v2/src/triggers.ts`, `v2/src/session-service.ts`.
 

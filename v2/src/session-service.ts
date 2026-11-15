@@ -21221,7 +21221,7 @@ export class SessionService {
       ...(projectId ? { projectId } : {}),
       ...(project?.branchNaming ? { branchNamingRegex: project.branchNaming.regex } : {}),
       agent,
-      ...(agent === "claude" || agent === "codex"
+      ...(agent === "claude"
         ? { snapshotFreshnessMinutes: snapshotSettings(project).freshnessMinutes }
         : {}),
     });

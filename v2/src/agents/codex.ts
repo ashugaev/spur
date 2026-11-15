@@ -18,7 +18,6 @@ import { homedir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { shellEscape } from "./shell-escape.js";
-import { SNAPSHOT_HOOK_TOOL_NAME } from "../snapshots.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type { ProviderReasoningEffort, TranscriptEntry, SidecarMcpBinding } from "../types.js";
@@ -197,20 +196,6 @@ function ensureRestrictWritesPreToolUse(groups: HookMatcherGroup[]): HookMatcher
       hooks: [{ type: "command", command: CODEX_RESTRICT_WRITES_DENY_COMMAND }],
     },
     "start",
-  );
-}
-
-function ensureSnapshotStopHook(
-  groups: HookMatcherGroup[],
-  sessionToolDir: string,
-): HookMatcherGroup[] {
-  const command = shellEscape(join(sessionToolDir, SNAPSHOT_HOOK_TOOL_NAME));
-  return ensureHookMatcherGroup(
-    groups,
-    (group) => group.hooks.some((hook) => hook.command === command),
-    {
-      hooks: [{ type: "command", command }],
-    },
   );
 }
 
@@ -936,7 +921,6 @@ export async function ensureCodexHooksConfig(
   if (options?.restrictWrites) {
     next.hooks.PreToolUse = ensureRestrictWritesPreToolUse(next.hooks.PreToolUse);
   }
-  next.hooks.Stop = ensureSnapshotStopHook(next.hooks.Stop, sessionToolDir);
   const sessionConfigPath = join(codexDir, "config.toml");
   const baseConfig = await buildEphemeralCodexConfig(
     trustedProjects,

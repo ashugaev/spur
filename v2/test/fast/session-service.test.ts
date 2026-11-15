@@ -4122,7 +4122,7 @@ describe("SessionService", () => {
         service.dispose();
       });
 
-      it("bakes freshnessMinutes into session tools for claude and codex only", async () => {
+      it("bakes freshnessMinutes into session tools for claude only", async () => {
         const config = baseConfig();
         loadConfigMock.mockReturnValue({
           ...config,
@@ -4146,7 +4146,7 @@ describe("SessionService", () => {
 
         const calls = ensureSessionSlotToolMock.mock.calls.map(([args]) => args);
         expect(calls[0]).toMatchObject({ agent: "claude", snapshotFreshnessMinutes: 7 });
-        expect(calls[1]).toMatchObject({ agent: "codex", snapshotFreshnessMinutes: 7 });
+        expect(calls[1]).not.toHaveProperty("snapshotFreshnessMinutes");
         expect(calls[2]).not.toHaveProperty("snapshotFreshnessMinutes");
         service.dispose();
       });
