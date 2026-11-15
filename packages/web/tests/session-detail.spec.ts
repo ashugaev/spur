@@ -5372,7 +5372,7 @@ test.describe("S6: Terminal modal from detail page", () => {
     expect(padding.bottom).toBe(6);
   });
 
-  test("mobile touch terminal modal has no side padding, border or scrollbar gap", async ({
+  test("mobile touch terminal modal has no outer padding or border and a 6px inner gutter", async ({
     browser,
   }) => {
     const context = await browser.newContext({ ...devices["iPhone 13"] });
@@ -5393,7 +5393,8 @@ test.describe("S6: Terminal modal from detail page", () => {
       await expect(dialog).toHaveCSS("padding-bottom", "8px");
       const root = dialog.getByTestId("direct-terminal-header").locator("..");
       await expect(root).toHaveCSS("border-left-width", "0px");
-      await expect(dialog.getByTestId("direct-terminal-surface")).toHaveCSS("padding-left", "0px");
+      await expect(dialog.getByTestId("direct-terminal-surface")).toHaveCSS("padding-left", "6px");
+      await expect(dialog.getByTestId("direct-terminal-surface")).toHaveCSS("padding-right", "6px");
 
       const screen = dialog.locator(".xterm-screen");
       await expect(screen).toBeVisible();
@@ -5402,8 +5403,11 @@ test.describe("S6: Terminal modal from detail page", () => {
       expect(rootBox).not.toBeNull();
       expect(screenBox).not.toBeNull();
       if (!rootBox || !screenBox) throw new Error("Terminal bounds missing");
-      expect(screenBox.x).toBeCloseTo(0, 0);
-      expect(rootBox.x + rootBox.width - (screenBox.x + screenBox.width)).toBeLessThan(14);
+      // Text sits 6px inside the edge; the reclaimed scrollbar width leaves a 4-14px right gap.
+      expect(screenBox.x).toBeCloseTo(6, 0);
+      const rightGap = rootBox.x + rootBox.width - (screenBox.x + screenBox.width);
+      expect(rightGap).toBeGreaterThanOrEqual(4);
+      expect(rightGap).toBeLessThan(14);
     } finally {
       await context.close();
     }

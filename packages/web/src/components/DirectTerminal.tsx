@@ -978,7 +978,7 @@ export function DirectTerminal({
       </div>
 
       <div
-        className="min-h-0 flex-1 p-0 sm:p-1.5"
+        className="min-h-0 flex-1 px-1.5 py-0 sm:p-1.5"
         data-testid="direct-terminal-surface"
         onPasteCapture={handleTerminalPaste}
       >
