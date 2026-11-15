@@ -70,7 +70,7 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 ## todo, snapshot
 
 `spur todo list|add|complete|cancel|hold|resume --session <id> [<itemId>] [--text <text>] [--reason <reason>] [--human-action <action>]`. `$SPUR_TODO_COMMAND`: session-bound, no `--session`. Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes).
-`spur snapshot write <sessionId> --file <path|-> [--final] [--json]` / `list <sessionId> [--json]` / `show <sessionId> [<version>] [--json]`: each write stores a full Markdown snapshot as the next version, Spur fills metadata; `show` defaults to latest; agents write only their own session. `$SPUR_SNAPSHOT_COMMAND`: session-bound, no `<sessionId>`. Gate: `projects.<id>.snapshots` ([configuration.md](configuration.md#field-reference)); `v2/src/snapshots.ts`.
+`spur snapshot write <sessionId> --file <path|-> [--final] [--json]` / `list <sessionId> [--json]` / `show <sessionId> [<version>] [--json]`: each write stores a full Markdown snapshot as the next version, Spur fills metadata; `show` defaults to latest; agents write only their own session. `$SPUR_SNAPSHOT_COMMAND`: session-bound, no `<sessionId>`. Gate: `projects.<id>.snapshots` ([configuration.md](configuration.md#field-reference)); [snapshots](snapshots.md); `v2/src/snapshots.ts`.
 
 ## auto-ping
 

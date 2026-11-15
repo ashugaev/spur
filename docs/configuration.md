@@ -110,7 +110,7 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - Isolated voice: current daemon-owner readiness precedes private UI receipt; fail-closed discovery without parent helper or production fallback; `v2/src/ports.ts`, [Session tools](commands.md#session-tools-and-environment).
 - Native Telegram call sidecars: `voice-daemon`, `voice-call` require configured integration inputs; direct agent tools and isolated child config: [prototype workflow](telegram-calls.md), `scripts/telegram-call/bridge.py`, `scripts/spur-isolated-daemon.sh`, `spur.yaml`.
 - `projects.<id>.mcp.exclude` (`[]`). See [Suppressing a host MCP server](commands.md#suppressing-a-host-mcp-server).
-- `projects.<id>.snapshots.maxBytes` (`32768`, positive integer, max `131072`): bytes per work snapshot. `projects.<id>.snapshots.requireFinal` (`false`): agent `complete`/`self-destruct` need a `--final` snapshot, agent `handoff` any snapshot, newer than the last ToDo change, else `409 work_snapshot_required`; humans exempt. `projects.<id>.snapshots.freshnessMinutes` (`10`, positive integer): snapshot age that triggers a request, see [Automatic reminders](#automatic-reminders). [snapshot](commands.md#todo-snapshot); `v2/src/snapshots.ts`.
+- `projects.<id>.snapshots.enabled` (`true`): `false` stops snapshot requests (pane and Claude hook); CLI/HTTP writes stay usable; with `requireFinal: true` config load fails naming both keys. `projects.<id>.snapshots.maxBytes` (`32768`, positive integer, max `131072`): bytes per work snapshot. `projects.<id>.snapshots.requireFinal` (`false`): agent `complete`/`self-destruct` need a `--final` snapshot, agent `handoff` any snapshot, newer than the last ToDo change, else `409 work_snapshot_required`; humans exempt. `projects.<id>.snapshots.freshnessMinutes` (`30`, positive integer): snapshot age that triggers a request, see [snapshots](snapshots.md). [snapshot](commands.md#todo-snapshot); `v2/src/snapshots.ts`.
 - `projects.<id>.symlinks` (`[]`), `.branchNaming.regex`, `.spawn.steps`, `.defaultModels` (agent fallbacks: `v2/src/agents/claude.ts`, `cursor.ts`), `.codexArgs`.
 - `projects.<id>.reasoningEffort.{claude,codex,cursor,opencode}`: live launch defaults; explicit session override wins; omitted uses native default; OpenCode permits only selected variant for that model until effort changes or is removed; provider/model constraints in `v2/src/session-service.ts`, YAML validation in `v2/src/config.ts`.
 - `projects.<id>.preflight`/`.preflight.prompt`: branch or sentinel `NO_PROJECT_RULES`; retains structured preview/retry usage. Preflight batches expire after 30 days; spawn claims each batch once.
@@ -171,12 +171,7 @@ The same pass also runs a detect-only step over one shared process-table snapsho
 
 Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 attempts for unchanged open work/blockers/empty ledger — see [todo](commands.md#todo-snapshot). Pending automatic GitHub/Jira sends: 8 attempts per unchanged item. `ci_failed` pings once per head commit and failing check name, a re-run of the same check on that commit does not ping again, a new head commit does; no reminder loop. `merge_conflict` pings at most once per head+base pair. Failing CI or a conflict present at a PR's first observation pings once; legacy/unclaimed persisted snapshots do not replay it. Explicit owner-return recheck: `v2/src/event-sources/github.ts`.
 
-Snapshot requests: agent worked over `freshnessMinutes` (N) past latest snapshot; sent ahead of ToDo nudges, 3 attempts per snapshot version, own budget; idle sessions get none. Channels: Claude PostToolUse (at most once per N/2 window) and Stop hooks; Codex, Cursor, OpenCode while waiting.
-
-- Claude: latest snapshot before a compaction lags the last tool use by at most N + N/2 when the agent complies.
-- Codex, Cursor, OpenCode: request at waiting only.
-
-Claude hooks pick up a changed N at spawn, restore, relaunch, sidecar start — `v2/src/snapshots.ts`, `v2/src/session-slots.ts`.
+Snapshot requests: [snapshots](snapshots.md).
 
 A closeout owner whose `allowedTriggers` drops a send trigger gets one notice per trigger: `trigger.send.blocked_notice` event, Telegram if its topic exists — `v2/src/triggers.ts`, `v2/src/session-service.ts`.
 
