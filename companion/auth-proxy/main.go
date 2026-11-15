@@ -141,6 +141,7 @@ func run(ctx context.Context, cancel context.CancelFunc, dir string, input io.Re
 		return err
 	}
 	c := &control{out: output, router: r, logins: logins}
+	go c.forwardRotations(ctx)
 	controlDone := make(chan error, 1)
 	go func() { controlDone <- c.serve(ctx, input) }()
 	select {

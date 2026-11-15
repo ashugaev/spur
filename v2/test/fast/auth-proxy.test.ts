@@ -49,9 +49,33 @@ describe("authorization proxy private control", () => {
         policy: { cooldownMinutes: 60, maxRotationsPerEpisode: 2 },
       }),
       () => "/fixture/auth-proxy",
+      onRotated,
     );
     return child;
   }
+
+  const onRotated = vi.fn();
+
+  it("forwards companion rotation events without treating them as responses", async () => {
+    childWithControl((request, output, done) => {
+      if (request.method === "getState") {
+        output.write(
+          '{"event":"rotated","sessionId":"s-1","provider":"codex","fromAccountId":"a","toAccountId":"b","generation":3}\n',
+        );
+      }
+      const result = request.method === "configure" ? {} : { accounts: [], sessions: [] };
+      output.write(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
+      done();
+    });
+    await expect(proxy!.getState()).resolves.toEqual({ accounts: [], sessions: [] });
+    expect(onRotated).toHaveBeenCalledExactlyOnceWith({
+      sessionId: "s-1",
+      provider: "codex",
+      fromAccountId: "a",
+      toAccountId: "b",
+      generation: 3,
+    });
+  });
 
   it("BrokenControlPipe rejects pending work without an unhandled stream error", async () => {
     const child = childWithControl((request, output, done) => {

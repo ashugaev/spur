@@ -58,8 +58,17 @@ const stateSchema = z.object({
   ),
   sessions: z.array(authSessionSchema),
 });
+const rotationSchema = z.object({
+  event: z.literal("rotated"),
+  sessionId: z.string(),
+  provider: authProviderSchema,
+  fromAccountId: z.string(),
+  toAccountId: z.string(),
+  generation: z.number().int().nonnegative(),
+});
 const messageSchema = z.union([
   z.object({ event: z.literal("ready"), endpoint: endpointSchema }),
+  rotationSchema,
   z.object({ id: z.number(), ok: z.literal(true), result: z.unknown() }),
   z.object({
     id: z.number(),
@@ -72,6 +81,7 @@ export type AuthSession = z.infer<typeof authSessionSchema>;
 export type AuthRegistration = z.infer<typeof registrationSchema>;
 export type AuthLogin = z.infer<typeof loginSchema>;
 export type AuthProxyState = z.infer<typeof stateSchema>;
+export type AuthRotation = Omit<z.infer<typeof rotationSchema>, "event">;
 
 type AuthControlRequest =
   | {
@@ -134,7 +144,8 @@ export class AuthProxy {
       state: AuthAccountsState;
       policy: { cooldownMinutes: number; maxRotationsPerEpisode: number };
     },
-    private readonly binaryPath: () => string = authProxyBinaryPath,
+    private readonly binaryPath: () => string,
+    private readonly onRotated: (rotation: AuthRotation) => void,
   ) {}
 
   async recover(): Promise<void> {
@@ -203,6 +214,11 @@ export class AuthProxy {
           return;
         }
         const message = parsed.data;
+        if ("event" in message && message.event === "rotated") {
+          const { event: _event, ...rotation } = message;
+          this.onRotated(rotation);
+          return;
+        }
         if ("event" in message) {
           ready = true;
           clearTimeout(timeout);

@@ -194,6 +194,27 @@ func TestAutoLeavesSignInRequiredAccount(t *testing.T) {
 	}
 }
 
+func TestRotationEmitsOneEventPerChange(t *testing.T) {
+	r := testRouter(t)
+	if _, err := r.register("session-a", codex, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	opts := testAdmission(t, r, "session-a")
+	pickForTest(t, r, opts, "account-a", "account-b")
+	if len(r.rotations) != 0 {
+		t.Fatal("unchanged account emitted rotation")
+	}
+	r.OnResult(context.Background(), coreauth.Result{AuthID: authFileID("account-a"), Options: opts, Error: &coreauth.Error{HTTPStatus: 429}})
+	pickForTest(t, r, opts, "account-b")
+	pickForTest(t, r, opts, "account-b")
+	if len(r.rotations) != 1 {
+		t.Fatalf("rotation events: %d", len(r.rotations))
+	}
+	if got := <-r.rotations; got.Event != "rotated" || got.SessionID != "session-a" || got.FromAccountID != "account-a" || got.ToAccountID != "account-b" || got.Generation != 1 {
+		t.Fatalf("rotation event: %+v", got)
+	}
+}
+
 func TestAutoWithoutDefaultPicksReadyAccount(t *testing.T) {
 	r := testRouter(t)
 	pool := r.pools[codex]

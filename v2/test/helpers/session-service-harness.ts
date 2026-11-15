@@ -30,7 +30,7 @@ import type * as claudeModule from "../../src/agents/claude.js";
 import type * as codexModule from "../../src/agents/codex.js";
 import type * as authAccountsModule from "../../src/auth-accounts.js";
 import type { AuthAccountsState } from "../../src/auth-accounts.js";
-import type { AuthRegistration } from "../../src/auth-proxy.js";
+import type { AuthRegistration, AuthRotation } from "../../src/auth-proxy.js";
 import type * as openCodeModule from "../../src/agents/opencode.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
@@ -395,6 +395,7 @@ const authProxyLoginMock: Mock = vi.fn();
 const authProxyLoginStatusMock: Mock = vi.fn();
 const authProxyCancelLoginMock: Mock = vi.fn();
 const authProxyRemoveAccountMock: Mock = vi.fn();
+const authProxyRotationHandler: { current?: (rotation: AuthRotation) => void } = {};
 
 interface TestAccount {
   id: string;
@@ -617,7 +618,16 @@ vi.mock("../../src/auth-accounts.js", async (importOriginal) => ({
 }));
 
 vi.mock("../../src/auth-proxy.js", () => ({
+  authProxyBinaryPath: () => "/fixture/auth-proxy",
   AuthProxy: class {
+    constructor(
+      _dataDir: string,
+      _configuration: unknown,
+      _binaryPath: unknown,
+      onRotated: (rotation: AuthRotation) => void,
+    ) {
+      authProxyRotationHandler.current = onRotated;
+    }
     configure = authProxyConfigureMock;
     getState = authProxyGetStateMock;
     registerSession = authProxyRegisterSessionMock;
@@ -2298,6 +2308,7 @@ export {
   authProxyLoginStatusMock,
   authProxyCancelLoginMock,
   authProxyRemoveAccountMock,
+  authProxyRotationHandler,
   readCursorJsonlStateMock,
   readCursorTokenUsageMock,
   sendDesktopNotificationMock,

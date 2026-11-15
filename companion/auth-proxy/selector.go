@@ -136,11 +136,15 @@ func (r *router) Pick(_ context.Context, requestedProvider, _ string, opts coree
 	}
 	if before != a.Binding.Session.EffectiveAccountID {
 		current, exists := r.state.Sessions[a.SessionID]
-		if exists && current.Session.Generation == a.Binding.Session.Generation {
+		saved := exists && current.Session.Generation == a.Binding.Session.Generation
+		if saved {
 			r.state.Sessions[a.SessionID] = a.Binding
 		}
 		if err := r.persistLocked(); err != nil {
 			return nil, errors.New("could not persist rotation")
+		}
+		if saved {
+			r.noteRotationLocked(a.Binding, current.Session.EffectiveAccountID)
 		}
 	}
 	a.LastAccount = a.Binding.Session.EffectiveAccountID
@@ -241,6 +245,7 @@ func (r *router) middleware(probeKey string) gin.HandlerFunc {
 		}
 		// r.mu serializes admission; concurrent requests of one session proceed in parallel.
 		b := r.state.Sessions[sessionID]
+		before := b.Session.EffectiveAccountID
 		if err := r.rebaseDefaultLocked(&b); err != nil {
 			r.mu.Unlock()
 			c.AbortWithStatus(http.StatusServiceUnavailable)
@@ -263,6 +268,7 @@ func (r *router) middleware(probeKey string) gin.HandlerFunc {
 			c.AbortWithStatus(http.StatusServiceUnavailable)
 			return
 		}
+		r.noteRotationLocked(b, before)
 		requestID, err := randomKey()
 		if err != nil {
 			r.mu.Unlock()

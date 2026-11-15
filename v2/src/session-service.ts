@@ -35,9 +35,11 @@ import {
 } from "./auth-accounts.js";
 import {
   AuthProxy,
+  authProxyBinaryPath,
   type AuthRegistration,
   type AuthLogin,
   type AuthProxyState,
+  type AuthRotation,
 } from "./auth-proxy.js";
 import { managedAuthLaunch, publicAuthSession } from "./auth-launch.js";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
@@ -4218,13 +4220,18 @@ export class SessionService {
       this.config.dataDir,
       () => this.config.authRotation.autoRotateOnRateLimit,
     );
-    this.authProxy = new AuthProxy(this.config.dataDir, () => ({
-      state: this.authAccounts.read(),
-      policy: {
-        cooldownMinutes: this.config.authRotation.cooldownMinutes,
-        maxRotationsPerEpisode: this.config.authRotation.maxRotationsPerEpisode,
-      },
-    }));
+    this.authProxy = new AuthProxy(
+      this.config.dataDir,
+      () => ({
+        state: this.authAccounts.read(),
+        policy: {
+          cooldownMinutes: this.config.authRotation.cooldownMinutes,
+          maxRotationsPerEpisode: this.config.authRotation.maxRotationsPerEpisode,
+        },
+      }),
+      authProxyBinaryPath,
+      (rotation) => void this.recordAuthRotation(rotation),
+    );
     this.preflightUsageStore = new PreflightUsageStore(this.config.dataDir);
     void this.preflightUsageStore.prune();
     // Before any classification: a restart mid-command must already know
@@ -7275,6 +7282,49 @@ export class SessionService {
       provider: agent,
       accountId: accountId ?? null,
     });
+  }
+
+  /** Persists a companion-reported effective-account change and logs it once. */
+  private async recordAuthRotation(rotation: AuthRotation): Promise<void> {
+    this.authSnapshot = undefined;
+    const matches = (
+      record: SessionRecord | null | undefined,
+    ): record is SessionRecord & { auth: NonNullable<SessionRecord["auth"]> } =>
+      record?.auth?.generation === rotation.generation &&
+      record.auth.effectiveAccountId !== rotation.toAccountId;
+    if (!matches(readSession(this.config.dataDir, rotation.sessionId))) return;
+    try {
+      const project = await this.withSessionLifecycleLock(rotation.sessionId, async () => {
+        const current = readSession(this.config.dataDir, rotation.sessionId);
+        if (!matches(current)) return null;
+        writeSession(this.config.dataDir, {
+          ...current,
+          auth: { ...current.auth, effectiveAccountId: rotation.toAccountId },
+          updatedAt: nowIso(),
+        });
+        this.stateCache.delete(rotation.sessionId);
+        return current.project;
+      });
+      if (project === null) return;
+      this.logEvent("session.auth.rotated", {
+        level: "info",
+        sessionId: rotation.sessionId,
+        projectId: project,
+        message: `Switched ${rotation.provider} authorization to another account`,
+        details: {
+          fromAccountId: rotation.fromAccountId,
+          toAccountId: rotation.toAccountId,
+          generation: rotation.generation,
+        },
+      });
+    } catch (error) {
+      this.logEvent("session.auth.rotated", {
+        level: "warn",
+        sessionId: rotation.sessionId,
+        message: "Could not record authorization account change",
+        details: { error: error instanceof Error ? error.message : String(error) },
+      });
+    }
   }
 
   private async hasReadyAuthorizationAccount(

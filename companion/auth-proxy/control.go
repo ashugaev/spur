@@ -98,6 +98,20 @@ func (c *control) write(response controlResponse) {
 	_ = json.NewEncoder(c.out).Encode(response)
 }
 
+// forwardRotations writes queued rotation events until ctx ends.
+func (c *control) forwardRotations(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-c.router.rotations:
+			c.mu.Lock()
+			_ = json.NewEncoder(c.out).Encode(event)
+			c.mu.Unlock()
+		}
+	}
+}
+
 func reply[T resultValue](c *control, id uint64, value T, err error) {
 	if err != nil {
 		c.write(controlResponse{ID: id, Error: &controlError{Code: "auth_unavailable", Message: err.Error()}})

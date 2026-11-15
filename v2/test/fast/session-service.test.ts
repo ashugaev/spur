@@ -170,6 +170,7 @@ import {
   authProxyLoginStatusMock,
   authProxyCancelLoginMock,
   authProxyRemoveAccountMock,
+  authProxyRotationHandler,
   readCursorJsonlStateMock,
   readCursorTokenUsageMock,
   sendDesktopNotificationMock,
@@ -21072,6 +21073,35 @@ describe("SessionService", () => {
       expect(resolveRespawnRequest(original, { agent: "codex" })).not.toHaveProperty(
         "authAccountId",
       );
+    });
+
+    it("records a companion rotation once and ignores stale generations", async () => {
+      const { endpoint: _endpoint, token: _token, ...pinned } = registration("claude");
+      const auth = { ...pinned, mode: "auto" as const, accountId: null };
+      const sessions = createSessionStore(runningSession({ auth }));
+      const service = await createDisposedSessionService();
+      const rotated = {
+        sessionId: "api-1",
+        provider: "claude" as const,
+        fromAccountId: "primary",
+        toAccountId: "backup",
+        generation: 1,
+      };
+      const rotationEvents = () =>
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.auth.rotated");
+      authProxyRotationHandler.current!(rotated);
+      await vi.waitFor(() => expect(rotationEvents()).toHaveLength(1));
+      expect(sessions.get("api-1")?.auth).toEqual({ ...auth, effectiveAccountId: "backup" });
+      authProxyRotationHandler.current!(rotated);
+      authProxyRotationHandler.current!({ ...rotated, toAccountId: "primary", generation: 2 });
+      await vi.advanceTimersByTimeAsync(20);
+      expect(rotationEvents()).toHaveLength(1);
+      expect(rotationEvents()[0]?.[1]).toMatchObject({
+        sessionId: "api-1",
+        details: { fromAccountId: "primary", toAccountId: "backup", generation: 1 },
+      });
+      expect(sessions.get("api-1")?.auth?.effectiveAccountId).toBe("backup");
+      service.dispose();
     });
 
     it("keeps the routing key for a completed marker with live native", async () => {

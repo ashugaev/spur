@@ -70,6 +70,7 @@ describe("native companion control lifecycle", () => {
           policy: { cooldownMinutes: 60, maxRotationsPerEpisode: 2 },
         }),
         () => process.env["SPUR_AUTH_PROXY_TEST_BINARY"] ?? authProxyBinaryPath(),
+        () => {},
       );
       proxies.push(proxy);
       return proxy;

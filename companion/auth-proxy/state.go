@@ -74,6 +74,16 @@ type runtimeState struct {
 	Cooldowns map[string]time.Time `json:"cooldowns"`
 }
 
+// rotation is the unsolicited control event for a changed effective account.
+type rotation struct {
+	Event         string   `json:"event"`
+	SessionID     string   `json:"sessionId"`
+	Provider      provider `json:"provider"`
+	FromAccountID string   `json:"fromAccountId"`
+	ToAccountID   string   `json:"toAccountId"`
+	Generation    uint64   `json:"generation"`
+}
+
 type registration struct {
 	sessionSummary
 	Endpoint string `json:"endpoint"`
@@ -91,6 +101,7 @@ type router struct {
 	configured   bool
 	requests     map[string]*admission
 	removing     map[string]bool
+	rotations    chan rotation
 	readyAccount func(string, provider) bool
 	fatal        error
 }
@@ -115,7 +126,7 @@ func openRouter(dir string) (*router, error) {
 		_ = lock.Close()
 		return nil, errors.New("another auth proxy owns this data directory")
 	}
-	r := &router{dir: dir, lock: lock, accounts: map[string]accountInput{}, pools: map[provider]poolInput{}, requests: map[string]*admission{}, removing: map[string]bool{}}
+	r := &router{dir: dir, lock: lock, accounts: map[string]accountInput{}, pools: map[provider]poolInput{}, requests: map[string]*admission{}, removing: map[string]bool{}, rotations: make(chan rotation, 64)}
 	r.state = runtimeState{Schema: 1, DataDir: dir, Sessions: map[string]binding{}, Cooldowns: map[string]time.Time{}}
 	path := filepath.Join(dir, "auth-proxy-state.json")
 	raw, err := os.ReadFile(path)
@@ -271,6 +282,17 @@ func (r *router) configure(accounts []accountInput, pools []poolInput, p policy)
 	}
 	r.accounts, r.pools, r.policy, r.configured = nextAccounts, nextPools, p, true
 	return nil
+}
+
+// noteRotationLocked queues one event per persisted effective-account change; a full queue drops it.
+func (r *router) noteRotationLocked(b binding, from string) {
+	if from == b.Session.EffectiveAccountID {
+		return
+	}
+	select {
+	case r.rotations <- rotation{Event: "rotated", SessionID: b.Session.SessionID, Provider: b.Session.Provider, FromAccountID: from, ToAccountID: b.Session.EffectiveAccountID, Generation: b.Session.Generation}:
+	default:
+	}
 }
 
 func (r *router) eligibleLocked(id string, p provider) bool {
