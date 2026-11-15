@@ -608,7 +608,10 @@ async function runWorkItemAutoCompleteTrigger(
         });
         continue;
       }
-      if (session.status !== "running" || session.state !== "waiting") {
+      if (
+        session.status !== "running" ||
+        (session.state !== "waiting" && session.state !== "completed")
+      ) {
         continue;
       }
 

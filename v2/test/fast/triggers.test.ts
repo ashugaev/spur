@@ -6488,6 +6488,73 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it.each([
+    { configured: true, retainedPolicy: true, native: "waiting", ageMs: 6 * 60_000, closes: 1 },
+    { configured: false, retainedPolicy: true, native: "waiting", ageMs: 6 * 60_000, closes: 0 },
+    { configured: "absent", retainedPolicy: true, native: "waiting", ageMs: 6 * 60_000, closes: 0 },
+    { configured: true, retainedPolicy: false, native: "waiting", ageMs: 6 * 60_000, closes: 0 },
+    { configured: true, retainedPolicy: true, native: "working", ageMs: 6 * 60_000, closes: 0 },
+    { configured: true, retainedPolicy: true, native: "waiting", ageMs: 10_000, closes: 0 },
+  ] as const)(
+    "applies opt-in auto-completion to projected task status: config=$configured retained=$retainedPolicy native=$native age=$ageMs",
+    async ({ configured, retainedPolicy, native, ageMs, closes }) => {
+      let status: SessionRecord["status"] = "running";
+      const declaration = {
+        agentLaunchId: "launch-a",
+        taskStatusRevision: 0,
+        taskStatus: {
+          state: "completed" as const,
+          revision: 0,
+          agentLaunchId: "launch-a",
+          updatedAt: new Date().toISOString(),
+        },
+      };
+      const get = vi.fn(async () => ({
+        id: "api-9",
+        status,
+        state: projectTaskStatus({ ...declaration, status }, native, native, true, true),
+        runtimeAlive: true,
+        workspaceExists: true,
+      }));
+      const complete = vi.fn(async () => {
+        status = "completed";
+      });
+      const records = useWorkItemLifecycleStore([
+        runningWorkItemLifecycle({
+          autoComplete: retainedPolicy,
+          createdAt: new Date(Date.now() - ageMs).toISOString(),
+        }),
+      ]);
+      const triggerConfig = workItemSpawnConfig({ autoComplete: configured === true });
+      if (configured === "absent") {
+        Reflect.deleteProperty(
+          triggerConfig.projects.api.triggers["pick-up"].spawn,
+          "autoComplete",
+        );
+      }
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const controller = startConfiguredTriggers({
+        config: triggerConfig as never,
+        bus: new EventBus(),
+        sessionService: { get, complete } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        await vi.advanceTimersByTimeAsync(1);
+        expect(complete).toHaveBeenCalledTimes(closes);
+        expect(records.get("acme/api#42")?.state).toBe(closes ? "completed" : "running");
+        if (closes) expect(complete).toHaveBeenCalledWith("api-9", { prAction: "leave_open" });
+        controller.nudgeSession("api-9");
+        controller.nudgeSession("api-9");
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(complete).toHaveBeenCalledTimes(closes);
+        expect(status).toBe(closes ? "completed" : "running");
+      } finally {
+        await controller.stop();
+      }
+    },
+  );
+
   it("auto-completes a waiting work-item session after the minimum age", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-9",
