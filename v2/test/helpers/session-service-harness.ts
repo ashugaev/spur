@@ -35,6 +35,10 @@ import type * as openCodeModule from "../../src/agents/opencode.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
 import type * as metadataModule from "../../src/metadata.js";
+let actualMetadataModule: typeof metadataModule;
+export function sessionMetadataModule(): typeof metadataModule {
+  return actualMetadataModule;
+}
 import type * as sessionPrModule from "../../src/session-pr.js";
 import type * as releasesCacheModule from "../../src/releases-cache.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
@@ -326,6 +330,7 @@ const hasUncommittedChangesMock: Mock = vi.fn();
 const isGitWorktreeMock: Mock = vi.fn();
 const hasUnpushedCommitsMock: Mock = vi.fn();
 const readCurrentBranchMock: Mock = vi.fn();
+const readWorktreeHeadMock: Mock = vi.fn();
 const readBranchDestinationMock: Mock = vi.fn();
 const readRemoteUrlsMock: Mock = vi.fn();
 const removeWorktreeMock: Mock = vi.fn();
@@ -818,7 +823,10 @@ vi.mock("../../src/ids.js", () => ({
 // real triggers.ts against this service; session-service.ts uses none of them.
 vi.mock("../../src/metadata.js", async (importOriginal) => {
   const actual = await importOriginal<typeof metadataModule>();
+  actualMetadataModule = actual;
   return {
+    observeSessionWrites: actual.observeSessionWrites,
+    withSessionWriteGuard: actual.withSessionWriteGuard,
     deletePendingSendBatch: actual.deletePendingSendBatch,
     deletePendingSendBatchConditional: actual.deletePendingSendBatchConditional,
     deletePendingSpawnWork: actual.deletePendingSpawnWork,
@@ -1131,6 +1139,7 @@ vi.mock("../../src/workspace.js", () => ({
   isGitWorktree: isGitWorktreeMock,
   pruneRepoWorktrees: pruneRepoWorktreesMock,
   readCurrentBranch: readCurrentBranchMock,
+  readWorktreeHead: readWorktreeHeadMock,
   readBranchDestination: readBranchDestinationMock,
   readRemoteUrls: readRemoteUrlsMock,
   removeWorktree: removeWorktreeMock,
@@ -1433,7 +1442,7 @@ type SessionServiceInternals = {
     options?: { interrupt?: boolean; freshLaunch?: boolean; interactive?: boolean },
   ): Promise<AgentSendOutcome>;
   writeAgentMessage: SessionServiceInternals["sendAgentMessage"];
-  scheduleTodoNudge(session: SessionRecord): void;
+  scheduleTodoNudge(session: SessionRecord, agentActivityAt: Date | null): void;
   waitForQueuedMessage(sessionId: string): Promise<string>;
   queuedDeliveryAckedAt: Map<string, number>;
   withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
@@ -1465,7 +1474,10 @@ type SessionServiceInternals = {
     message: string,
     options: { entryPoint: "send" | "deliver" | "flush" },
   ): Promise<unknown>;
-  maybeNudgeTodo(session: SessionRecord): Promise<void>;
+  maybeNudgeTodo(
+    session: SessionRecord,
+    options?: { detached?: boolean; agentActivityAt?: Date | null },
+  ): Promise<void>;
   enrichWithClassified(
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
@@ -1495,6 +1507,7 @@ type SessionServiceInternals = {
   lastObservedRunStates: Map<string, SessionState>;
   todoNudgeDisabled: Map<string, { kind: "ledger_corrupt" | "target_gone"; reason: string }>;
   todoNudgeBackoff: Map<string, { failures: number; nextRetryAtMs: number }>;
+  snapshotCorruptLogged: Map<string, number>;
   scheduleHealedSidecarRestart(session: SessionRecord): void;
   sidecarHealTasks: Map<string, Promise<void>>;
   settleSubmitHold(
@@ -1901,7 +1914,12 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   findForeignAgentProcessesForSessionMock.mockReset().mockResolvedValue({ status: "unavailable" });
   killTmuxSessionTreeMock.mockReset().mockResolvedValue(true);
   sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
-  sendInterruptKeysToTmuxMock.mockReset().mockResolvedValue(true);
+  sendInterruptKeysToTmuxMock
+    .mockReset()
+    .mockImplementation(async (_session, _agent, onInterrupt?: () => void) => {
+      onInterrupt?.();
+      return true;
+    });
   sendSensitiveMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
   sendSubmitKeyToTmuxMock.mockReset().mockResolvedValue(undefined);
   sendMenuSelectionKeysMock.mockReset().mockResolvedValue(undefined);
@@ -1927,6 +1945,7 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   hasUnpushedCommitsMock.mockReset().mockResolvedValue(false);
   isGitWorktreeMock.mockReset().mockResolvedValue(true);
   readCurrentBranchMock.mockReset().mockResolvedValue("main");
+  readWorktreeHeadMock.mockReset().mockResolvedValue({ branch: null, headSha: null, dirty: null });
   readBranchDestinationMock
     .mockReset()
     .mockImplementation(async (_path: string, branch: string) => ({
@@ -2262,6 +2281,7 @@ export {
   isGitWorktreeMock,
   hasUnpushedCommitsMock,
   readCurrentBranchMock,
+  readWorktreeHeadMock,
   readBranchDestinationMock,
   removeWorktreeMock,
   pruneRepoWorktreesMock,

@@ -41,7 +41,9 @@ it("registers strict record schemas and forwards typed path/query values through
       pathParams: { type: "object", additionalProperties: { type: "string" } },
       query: {
         type: "object",
-        additionalProperties: { type: ["string", "number", "boolean"] },
+        additionalProperties: expect.objectContaining({
+          anyOf: expect.arrayContaining([{ type: "array", items: { type: "string" } }]),
+        }),
       },
     },
   });
@@ -67,6 +69,18 @@ it("registers strict record schemas and forwards typed path/query values through
     includeCompleted: "false",
   });
   expect(fixture.calls.at(-1)?.path).toBe(`/sessions?${expectedQuery}`);
+  const links = [
+    "board-task=https://example.com/task?a=b",
+    "board-role=https://example.com/role/reviewer",
+  ];
+  for (const [name, args] of [
+    ["list_sessions", { includeCompleted: true, link: links }],
+    ["daemon_request", { operationId: "list_sessions", query: { link: links } }],
+  ] as const) {
+    expect((await call(name, args)).isError).toBeUndefined();
+    const params = new URL(fixture.calls.at(-1)?.path ?? "", "http://localhost").searchParams;
+    expect(params.getAll("link")).toEqual(links);
+  }
   for (const optional of [{}, { pathParams: {}, query: {} }]) {
     expect(
       (await call("daemon_request", { operationId: "list_projects", ...optional })).isError,

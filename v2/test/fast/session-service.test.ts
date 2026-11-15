@@ -257,6 +257,7 @@ import { readPrAlertOwnership, writeWorkspaceState } from "../../src/workspace-s
 import { allowsPrAlertBatch } from "../../src/pr-alert-owner.js";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import { createPage } from "../../src/pages.js";
+import { SNAPSHOT_REQUEST_MESSAGE } from "../../src/snapshots.js";
 import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as sessionSlotsModule from "../../src/session-slots.js";
 import type * as metadataModule from "../../src/metadata.js";
@@ -316,6 +317,11 @@ const TODO_PROMPT = `Spur ToDo:
 - One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.
 - Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.
 - Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.
+
+Spur snapshot:
+- Keep a backward-looking Markdown snapshot of your work: \`"$SPUR_SNAPSHOT_COMMAND" write --file <path>\` (\`--file -\` reads stdin). Each write stores a full new version.
+- Write one after each finished step and before you stop. Suggested sections: Now, Established, Tried, Next, Questions and risks, References.
+- When the project requires it, finishing or self-destruct needs a \`--final\` snapshot written after your last ToDo change; handoff needs any snapshot written after it.
 
 Read associated chat and bot with \`"$SPUR_SESSION_TOOL_DIR/spur" source info --json\`.`;
 const TELEGRAM_PROMPT = [
@@ -855,6 +861,65 @@ describe("SessionService", () => {
       });
       service.dispose();
     });
+
+    it.each(["completed", "killed", "errored"] as const)(
+      "carries effective links and configured tags from a %s source",
+      async (status) => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          tags: [{ name: "feature", description: "feature work", color: "#3fb950" }],
+        });
+        const slotModule = await vi.importActual<typeof sessionSlotsModule>(
+          "../../src/session-slots.js",
+        );
+        applySlotsUpdateMock.mockImplementation(slotModule.applySlotsUpdate);
+        const sessions = createSessionStore();
+        const links = [
+          { label: "board-task", url: "https://example.com/task" },
+          { label: "board-role", url: "https://example.com/role/reviewer" },
+        ];
+        const source = sessionRecord({
+          id: "api-1",
+          status,
+          ...(status !== "errored"
+            ? {
+                terminalSlotsCaptured: true as const,
+                slots: {
+                  links,
+                  tags: ["feature", "unknown-tag"],
+                },
+              }
+            : {}),
+        });
+        sessions.set(source.id, source);
+        if (status === "errored") {
+          writeWorkspaceState(TEST_DATA_DIR, source.id, {
+            slots: {
+              links,
+              tags: ["feature", "unknown-tag"],
+            },
+          });
+        }
+        reserveNextSessionIdMock.mockResolvedValue("api-2");
+        workspaceExistsMock.mockReturnValue(true);
+        mockClaudeJsonlState("waiting");
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const successor = await service.respawn(source.id);
+        expect(successor.slots?.links).toEqual(links);
+        expect(successor.slots?.tags).toEqual(["feature"]);
+        expect(sessions.get(successor.id)?.slots?.tags).toEqual(["feature"]);
+        const discovered = await service.list({
+          links: [
+            { label: "board-task", url: "https://example.com/task" },
+            { label: "board-role", url: "https://example.com/role/reviewer" },
+          ],
+        });
+        expect(discovered.map((row) => row.id)).toContain(successor.id);
+        service.dispose();
+      },
+    );
 
     it("rolls back a proved prelaunch handoff failure while preserving closeout semantics", async () => {
       const config = configurePrAlerts();
@@ -2797,7 +2862,7 @@ describe("SessionService", () => {
     const service = await createDisposedSessionService();
     const claude = await vi.importActual<typeof claudeModule>("../../src/agents/claude.js");
     setupAgentHooksMock.mockImplementationOnce(async () => ({
-      claudeSettingsPath: await claude.ensureClaudeRestrictWritesSettings(setupDir),
+      claudeSettingsPath: await claude.ensureClaudeSettings(setupDir, { restrictWrites: true }),
     }));
     const record = runningSession({ status: "stopped", stopReason: "manual_pause" });
     sessions.set(record.id, record);
@@ -3009,6 +3074,7 @@ describe("SessionService", () => {
         SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
+        SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -3252,6 +3318,296 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    describe("work snapshot gate", () => {
+      const agent = { kind: "agent", agent: "claude", sessionId: "api-1" } as const;
+
+      async function gatedService(requireFinal: boolean, session = runningSession()) {
+        const config = baseConfig();
+        loadConfigMock.mockReturnValue({
+          ...config,
+          projects: { api: { ...config.projects.api, snapshots: { requireFinal } } },
+        });
+        const sessions = createSessionStore();
+        sessions.set(session.id, session);
+        await useRealTodoLedger();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        return { sessions, service };
+      }
+
+      async function resolveOneItem(
+        service: Awaited<ReturnType<typeof createDisposedSessionService>>,
+      ) {
+        const added = await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Ship it", reason: "Session objective" },
+          agent,
+        );
+        const itemId = added.items.at(-1)?.id;
+        if (!itemId) throw new Error("Expected added ToDo item");
+        await service.mutateTodo("api-1", { action: "complete", itemId, reason: "Done" }, agent);
+      }
+
+      it("refuses agent complete without a final snapshot, then allows it after one is written", async () => {
+        const { sessions, service } = await gatedService(true);
+        await resolveOneItem(service);
+
+        await expect(service.complete("api-1", { skipPrCheck: true })).rejects.toMatchObject({
+          code: "work_snapshot_required",
+          sessionIds: ["api-1"],
+          required: "final",
+        });
+        expect(sessions.get("api-1")?.status).toBe("running");
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.complete.failed",
+            level: "warn",
+            details: { kind: "work_snapshot_required" },
+          }),
+        );
+
+        await service.writeSnapshot("api-1", { content: "# Not final", final: false });
+        await expect(service.complete("api-1", { skipPrCheck: true })).rejects.toMatchObject({
+          code: "work_snapshot_required",
+        });
+
+        const meta = await service.writeSnapshot("api-1", { content: "# Done", final: true });
+        expect(meta).toMatchObject({ version: 2, final: true, agent: "claude" });
+        await service.complete("api-1", { skipPrCheck: true });
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
+      it("captures the effective links, including the native PR link, in snapshot metadata", async () => {
+        const { service } = await gatedService(
+          false,
+          runningSession({
+            slots: { links: [{ label: "Doc", url: "https://example.test/doc" }] },
+            pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+          }),
+        );
+
+        const meta = await service.writeSnapshot("api-1", { content: "# Notes", final: false });
+
+        expect(meta.links).toEqual(
+          expect.arrayContaining([
+            { label: "Doc", url: "https://example.test/doc" },
+            expect.objectContaining({ url: "https://github.com/acme/api/pull/42" }),
+          ]),
+        );
+        service.dispose();
+      });
+
+      it("captures owner workspace links and PR for a desk sibling snapshot", async () => {
+        const config = baseConfig();
+        loadConfigMock.mockReturnValue(config);
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ workspaceId: "desk-1" }));
+        sessions.set("api-2", runningSession({ id: "api-2", workspaceId: "desk-1" }));
+        await useRealTodoLedger();
+        writeWorkspaceState(TEST_DATA_DIR, "desk-1", {
+          slots: { links: [{ label: "Doc", url: "https://example.test/doc" }] },
+          pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+        });
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const meta = await service.writeSnapshot("api-2", { content: "# Sibling", final: false });
+
+        expect(meta.links).toEqual(
+          expect.arrayContaining([
+            { label: "Doc", url: "https://example.test/doc" },
+            expect.objectContaining({ url: "https://github.com/acme/api/pull/42" }),
+          ]),
+        );
+        service.dispose();
+      });
+
+      it("refuses again after a ToDo change follows the final snapshot", async () => {
+        const { sessions, service } = await gatedService(true);
+        await resolveOneItem(service);
+        await service.writeSnapshot("api-1", { content: "# Done", final: true });
+        await resolveOneItem(service);
+
+        await expect(service.complete("api-1", { skipPrCheck: true })).rejects.toMatchObject({
+          code: "work_snapshot_required",
+        });
+        expect(sessions.get("api-1")?.status).toBe("running");
+        service.dispose();
+      });
+
+      it("lets a human complete without a snapshot", async () => {
+        const { sessions, service } = await gatedService(true);
+
+        await service.complete(
+          "api-1",
+          { skipPrCheck: true },
+          { todoActor: { kind: "human", origin: "cli" } },
+        );
+
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
+      it("skips the check when requireFinal is false", async () => {
+        const { sessions, service } = await gatedService(false);
+        await resolveOneItem(service);
+
+        await service.complete("api-1", { skipPrCheck: true });
+
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
+      it("reports the ToDo block before the snapshot block", async () => {
+        const { service } = await gatedService(true);
+
+        await expect(service.complete("api-1")).rejects.toMatchObject({
+          code: "todo_ledger_empty",
+        });
+        service.dispose();
+      });
+
+      it("refuses self-destruct without a final snapshot and allows it after one", async () => {
+        const { sessions, service } = await gatedService(true);
+        await resolveOneItem(service);
+
+        await expect(service.selfDestruct("api-1")).rejects.toMatchObject({
+          code: "work_snapshot_required",
+        });
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.self_destruct.failed",
+            level: "warn",
+            details: { kind: "work_snapshot_required" },
+          }),
+        );
+
+        await service.writeSnapshot("api-1", { content: "# Done", final: true });
+        await service.selfDestruct("api-1");
+
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
+      it("refuses a desk complete naming every blocked member and completes none", async () => {
+        const config = baseConfig();
+        loadConfigMock.mockReturnValue({
+          ...config,
+          projects: { api: { ...config.projects.api, snapshots: { requireFinal: true } } },
+        });
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ workspaceId: "desk-1" }));
+        sessions.set("api-2", runningSession({ id: "api-2", workspaceId: "desk-1" }));
+        await useRealTodoLedger();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        for (const sessionId of ["api-1", "api-2"]) {
+          const actor = { kind: "agent", agent: "claude", sessionId } as const;
+          const added = await service.mutateTodo(
+            sessionId,
+            { action: "add", text: "Ship it", reason: "Session objective" },
+            actor,
+          );
+          const itemId = added.items[0]?.id;
+          if (!itemId) throw new Error("Expected added ToDo item");
+          await service.mutateTodo(
+            sessionId,
+            { action: "complete", itemId, reason: "Done" },
+            actor,
+          );
+        }
+        await service.writeSnapshot("api-1", { content: "# Done", final: true });
+
+        await expect(service.completeDesk("api-1", { skipPrCheck: true })).rejects.toMatchObject({
+          code: "work_snapshot_required",
+          sessionIds: ["api-2"],
+        });
+        expect(sessions.get("api-1")?.status).toBe("running");
+        expect(sessions.get("api-2")?.status).toBe("running");
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.desk_complete.failed",
+            level: "warn",
+            details: { kind: "work_snapshot_required" },
+          }),
+        );
+        service.dispose();
+      });
+
+      it("refuses agent handoff without any snapshot, then accepts a non-final one", async () => {
+        mockClaudeJsonlState("waiting");
+        const source = sessionRecord({
+          id: "api-1",
+          status: "running",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        });
+        const { sessions, service } = await gatedService(true, source);
+        workspaceExistsMock.mockReturnValue(true);
+        reserveNextSessionIdMock.mockResolvedValue("api-2");
+        await resolveOneItem(service);
+
+        await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toMatchObject({
+          code: "work_snapshot_required",
+          required: "any",
+        });
+        expect(sessions.get("api-1")?.status).toBe("running");
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.handoff.failed",
+            level: "warn",
+            details: { kind: "work_snapshot_required" },
+          }),
+        );
+
+        await service.writeSnapshot("api-1", { content: "# Handoff notes", final: false });
+        const spawned = await service.handoff("api-1", { agent: "cursor" });
+
+        expect(spawned.id).toBe("api-2");
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
+      it("lets a human hand off without a snapshot", async () => {
+        mockClaudeJsonlState("waiting");
+        const source = sessionRecord({
+          id: "api-1",
+          status: "running",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        });
+        const { sessions, service } = await gatedService(true, source);
+        workspaceExistsMock.mockReturnValue(true);
+        reserveNextSessionIdMock.mockResolvedValue("api-2");
+        await resolveOneItem(service);
+
+        const spawned = await service.handoff(
+          "api-1",
+          { agent: "cursor" },
+          { todoActor: { kind: "human", origin: "cli" } },
+        );
+
+        expect(spawned.id).toBe("api-2");
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
+      it("refuses snapshot writes on a terminal session and for a missing one", async () => {
+        const { service } = await gatedService(false, runningSession({ status: "completed" }));
+
+        await expect(
+          service.writeSnapshot("api-1", { content: "x", final: false }),
+        ).rejects.toMatchObject({ code: "snapshot_conflict" });
+        await expect(
+          service.writeSnapshot("missing", { content: "x", final: false }),
+        ).rejects.toMatchObject({ statusCode: 404 });
+        service.dispose();
+      });
+    });
+
     it("preserves ledger history when a session pauses", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
@@ -3306,6 +3662,28 @@ describe("SessionService", () => {
       expect(views[1]).toMatchObject({ id: session.id, status: "running", state: "waiting" });
       expect(nudge).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: session.id }), {
         detached: true,
+        agentActivityAt: null,
+      });
+    });
+
+    it("passes the raw agent activity time, not the restore-bumped park time, to the sweep nudge", async () => {
+      const activityMs = Date.parse("2026-03-18T10:02:00.000Z");
+      mockClaudeJsonlState("waiting", { lastMtimeMs: activityMs });
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      const session = runningSession({
+        worktree: false,
+        restoredAt: "2026-03-18T10:04:00.000Z",
+      });
+      sessions.set(session.id, session);
+      const nudge = vi.spyOn(internals, "maybeNudgeTodo").mockResolvedValue();
+
+      await internals.pollAttentionStates(false);
+
+      expect(nudge).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: session.id }), {
+        detached: true,
+        agentActivityAt: new Date(activityMs),
       });
     });
 
@@ -3617,7 +3995,7 @@ describe("SessionService", () => {
             releaseUser = resolve;
           }),
       );
-      internals.scheduleTodoNudge(session);
+      internals.scheduleTodoNudge(session, null);
       await vi.advanceTimersByTimeAsync(0);
       expect(send).not.toHaveBeenCalled();
       releaseUser();
@@ -3628,12 +4006,206 @@ describe("SessionService", () => {
 
       // Idle: the reminder starts detached, and a second sweep tick while its
       // ack is outstanding does not start another.
-      internals.scheduleTodoNudge(session);
-      internals.scheduleTodoNudge(session);
+      internals.scheduleTodoNudge(session, null);
+      internals.scheduleTodoNudge(session, null);
       await vi.advanceTimersByTimeAsync(0);
       expect(send).toHaveBeenCalledTimes(1);
       releaseSend();
       await vi.advanceTimersByTimeAsync(0);
+    });
+
+    describe("snapshot requests", () => {
+      const T0 = new Date("2026-03-18T10:05:00.000Z");
+      const minutes = (count: number) => count * 60_000;
+
+      async function snapshotSetup() {
+        const sessions = createSessionStore();
+        const session = runningSession();
+        sessions.set(session.id, session);
+        await useRealTodoLedger();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await service.mutateTodo(
+          session.id,
+          { action: "add", text: "Ship it", reason: "Session objective" },
+          { kind: "agent", agent: "claude", sessionId: session.id },
+        );
+        return {
+          sessions,
+          session,
+          service,
+          internals: sessionServiceInternals(service),
+          send: sendMessageToTmuxMock,
+        };
+      }
+
+      const nudgeAt = (
+        internals: ReturnType<typeof sessionServiceInternals>,
+        sessions: Map<string, SessionRecord>,
+        session: SessionRecord,
+        agentActivityAt: Date | null,
+      ) => internals.maybeNudgeTodo(sessions.get(session.id) ?? session, { agentActivityAt });
+
+      it("sends the snapshot request instead of the ToDo reminder when due", async () => {
+        const { sessions, session, service, internals, send } = await snapshotSetup();
+        vi.setSystemTime(T0);
+        await service.writeSnapshot(session.id, { content: "# Notes", final: false });
+        vi.setSystemTime(new Date(T0.getTime() + minutes(11)));
+
+        await nudgeAt(internals, sessions, session, new Date());
+
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(send.mock.calls[0]?.[1]).toBe(SNAPSHOT_REQUEST_MESSAGE);
+        expect(send.mock.calls[0]?.[1]).not.toContain("Spur ToDo still has open work");
+        expect(sessions.get(session.id)?.snapshotNudge?.attempts).toBe(1);
+        expect(sessions.get(session.id)?.todoNudge).toBeUndefined();
+        service.dispose();
+      });
+
+      it("sends the ToDo reminder for an idle session", async () => {
+        const { sessions, session, service, internals, send } = await snapshotSetup();
+        vi.setSystemTime(T0);
+        await service.writeSnapshot(session.id, { content: "# Notes", final: false });
+        vi.setSystemTime(new Date(T0.getTime() + minutes(60)));
+
+        await nudgeAt(internals, sessions, session, new Date(T0.getTime() + 5_000));
+
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(send.mock.calls[0]?.[1]).toContain("Spur ToDo still has open work");
+        expect(sessions.get(session.id)?.snapshotNudge).toBeUndefined();
+        service.dispose();
+      });
+
+      it("returns to the ToDo reminder once a new snapshot is written", async () => {
+        const { sessions, session, service, internals, send } = await snapshotSetup();
+        vi.setSystemTime(T0);
+        await service.writeSnapshot(session.id, { content: "# One", final: false });
+        vi.setSystemTime(new Date(T0.getTime() + minutes(11)));
+        await nudgeAt(internals, sessions, session, new Date());
+        expect(send.mock.calls[0]?.[1]).toBe(SNAPSHOT_REQUEST_MESSAGE);
+
+        await service.writeSnapshot(session.id, { content: "# Two", final: false });
+        vi.setSystemTime(new Date(Date.now() + 61_000));
+        await nudgeAt(internals, sessions, session, new Date());
+
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1]?.[1]).toContain("Spur ToDo still has open work");
+        service.dispose();
+      });
+
+      it("falls back to the ToDo reminder after three requests on one snapshot version", async () => {
+        const { sessions, session, service, internals, send } = await snapshotSetup();
+        vi.setSystemTime(T0);
+        await service.writeSnapshot(session.id, { content: "# One", final: false });
+        vi.setSystemTime(new Date(T0.getTime() + minutes(11)));
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          await nudgeAt(internals, sessions, session, new Date());
+          vi.setSystemTime(new Date(Date.now() + 61_000));
+        }
+
+        expect(send.mock.calls.map((call) => call[1] === SNAPSHOT_REQUEST_MESSAGE)).toEqual([
+          true,
+          true,
+          true,
+          false,
+        ]);
+        expect(send.mock.calls[3]?.[1]).toContain("Spur ToDo still has open work");
+        expect(sessions.get(session.id)?.snapshotNudge?.attempts).toBe(3);
+        service.dispose();
+      });
+
+      it("leaves the ToDo reminder budget untouched across a snapshot request", async () => {
+        const { sessions, session, service, internals, send } = await snapshotSetup();
+        vi.setSystemTime(T0);
+        await service.writeSnapshot(session.id, { content: "# One", final: false });
+        await nudgeAt(internals, sessions, session, null);
+        const todoNudge = sessions.get(session.id)?.todoNudge;
+        expect(todoNudge?.attempts).toBe(1);
+
+        vi.setSystemTime(new Date(T0.getTime() + minutes(11)));
+        await nudgeAt(internals, sessions, session, new Date());
+
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1]?.[1]).toBe(SNAPSHOT_REQUEST_MESSAGE);
+        expect(sessions.get(session.id)?.todoNudge).toEqual(todoNudge);
+        expect(sessions.get(session.id)?.snapshotNudge?.attempts).toBe(1);
+        service.dispose();
+      });
+
+      it("keeps snapshotNudge out of detail, list and dashboard views", async () => {
+        mockClaudeJsonlState("waiting");
+        const { sessions, session, service } = await snapshotSetup();
+        sessions.set(session.id, {
+          ...session,
+          snapshotNudge: { fingerprint: "a".repeat(64), attempts: 1 },
+        });
+
+        expect(await service.get(session.id)).not.toHaveProperty("snapshotNudge");
+        for (const view of ["dashboard", "full"] as const) {
+          const listed = (await service.list({ view })).find((item) => item.id === session.id);
+          expect(listed).toBeDefined();
+          expect(listed).not.toHaveProperty("snapshotNudge");
+        }
+        service.dispose();
+      });
+
+      it("bakes freshnessMinutes into session tools for claude only", async () => {
+        const config = baseConfig();
+        loadConfigMock.mockReturnValue({
+          ...config,
+          projects: {
+            api: { ...config.projects.api, snapshots: { freshnessMinutes: 7 } },
+          },
+        });
+        createSessionStore();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const prepare = (
+          service as unknown as {
+            prepareSessionTools(id: string, agent: AgentName, project: string): string;
+          }
+        ).prepareSessionTools.bind(service);
+
+        ensureSessionSlotToolMock.mockClear();
+        prepare("api-1", "claude", "api");
+        prepare("api-1", "codex", "api");
+        prepare("api-1", "cursor", "api");
+
+        const calls = ensureSessionSlotToolMock.mock.calls.map(([args]) => args);
+        expect(calls[0]).toMatchObject({
+          agent: "claude",
+          snapshotHook: { freshnessMinutes: 7, sessionCreatedAt: expect.any(String) },
+        });
+        expect(calls[1]).not.toHaveProperty("snapshotHook");
+        expect(calls[2]).not.toHaveProperty("snapshotHook");
+        service.dispose();
+      });
+
+      it("skips a corrupt latest snapshot, logs once, and sends the ToDo reminder", async () => {
+        const { sessions, session, service, internals, send } = await snapshotSetup();
+        vi.setSystemTime(T0);
+        await service.writeSnapshot(session.id, { content: "# One", final: false });
+        writeFileSync(join(TEST_DATA_DIR, "sessions", session.id, "snapshots", "1.json"), "{");
+        vi.setSystemTime(new Date(T0.getTime() + minutes(11)));
+
+        await nudgeAt(internals, sessions, session, new Date());
+        vi.setSystemTime(new Date(Date.now() + 61_000));
+        await nudgeAt(internals, sessions, session, new Date());
+
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls.every((call) => String(call[1]).includes("Spur ToDo"))).toBe(true);
+        expect(internals.todoNudgeBackoff.has(session.id)).toBe(false);
+        const skipped = logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.snapshot.request_skipped",
+        );
+        expect(skipped).toHaveLength(1);
+        expect(skipped[0]?.[1]).toMatchObject({
+          level: "warn",
+          sessionId: session.id,
+          details: { kind: "snapshot_corrupt", version: 1 },
+        });
+        service.dispose();
+      });
     });
 
     it("stands a ToDo reminder down while another write holds the pane", async () => {
@@ -3647,7 +4219,7 @@ describe("SessionService", () => {
       const send = sendMessageToTmuxMock;
       internals.paneWriteLocks.set(session.tmuxSession, new Promise<void>(() => {}));
 
-      internals.scheduleTodoNudge(session);
+      internals.scheduleTodoNudge(session, null);
       await vi.advanceTimersByTimeAsync(0);
 
       expect(send).not.toHaveBeenCalled();
@@ -3671,7 +4243,7 @@ describe("SessionService", () => {
       const internals = sessionServiceInternals(service);
       const send = sendMessageToTmuxMock;
 
-      internals.scheduleTodoNudge(session);
+      internals.scheduleTodoNudge(session, null);
       service.dispose();
       await vi.advanceTimersByTimeAsync(0);
 
@@ -7378,6 +7950,32 @@ describe("SessionService", () => {
     },
   );
 
+  it("writes the slot snapshot before terminal cleanup can erase workspace state", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1" }));
+    const { writeWorkspaceState, deleteWorkspaceState } = await loadWorkspaceStoreModule();
+    writeWorkspaceState(TEST_DATA_DIR, "api-1", {
+      slots: { links: [{ label: "board-task", url: "https://example.com/task" }] },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const cleanup = service as unknown as { removeSessionArtifacts: () => never };
+    vi.spyOn(cleanup, "removeSessionArtifacts").mockImplementation(() => {
+      deleteWorkspaceState(TEST_DATA_DIR, "api-1");
+      throw new Error("cleanup failed");
+    });
+
+    await expect(service.complete("api-1", { skipPrCheck: true })).rejects.toThrow(
+      "cleanup failed",
+    );
+    expect(sessions.get("api-1")?.terminalSlotsCaptured).toBe(true);
+    expect(sessions.get("api-1")?.slots?.links).toEqual([
+      { label: "board-task", url: "https://example.com/task" },
+    ]);
+    expect((await service.get("api-1")).slots?.links).toEqual(sessions.get("api-1")?.slots?.links);
+    service.dispose();
+  });
+
   it.each(["complete", "kill"] as const)(
     "canonical Telegram late native creation cannot overwrite %s",
     async (action) => {
@@ -10462,6 +11060,7 @@ describe("SessionService", () => {
         SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
+        SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -10508,6 +11107,7 @@ describe("SessionService", () => {
       configPath: customConfig,
       projectId: "api",
       agent: "claude",
+      snapshotHook: { freshnessMinutes: 10, sessionCreatedAt: expect.any(String) },
     });
   });
 
@@ -15111,6 +15711,294 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  describe("interrupt send guard", () => {
+    const immediate = { queue: false, interrupt: true } as const;
+
+    it.each(["working", "waiting"] as const)(
+      "reports actual delivery for a %s agent",
+      async (state) => {
+        mockClaudeJsonlState(state);
+        const sessions = createSessionStore(
+          runningSession({
+            queuedMessages: { messages: ["older"], awaitingPrompt: true },
+          }),
+        );
+        const service = await createDisposedSessionService();
+        const sent = await service.send("api-1", { message: "correction", ...immediate });
+        expect(sent.sendOutcome).toEqual({ kind: "sent", interrupted: state === "working" });
+        expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(state === "working" ? 1 : 0);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "correction", {
+          agent: "claude",
+        });
+        expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["older"]);
+        expect(sessions.get("api-1")).not.toHaveProperty("sendOutcome");
+      },
+    );
+
+    it.each([4_999, 5_000])(
+      "suppresses only arrivals before the 5000ms boundary: %s",
+      async (elapsed) => {
+        mockClaudeJsonlState("working");
+        const sessions = createSessionStore(
+          runningSession({
+            queuedMessages: { messages: ["older"], awaitingPrompt: true },
+          }),
+        );
+        const service = await createDisposedSessionService();
+        const start = Date.now();
+        await service.send("api-1", { message: "first", ...immediate });
+        vi.setSystemTime(start + elapsed);
+        const sent = await service.send("api-1", { message: "second", ...immediate });
+        const guarded = elapsed < 5_000;
+        expect(sent.sendOutcome).toEqual(
+          guarded
+            ? { kind: "queued", reason: "interrupt_guard" }
+            : { kind: "sent", interrupted: true },
+        );
+        expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(guarded ? 1 : 2);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(guarded ? 1 : 2);
+        expect(sessions.get("api-1")?.queuedMessages).toEqual({
+          messages: guarded ? ["older", "second"] : ["older"],
+          awaitingPrompt: true,
+        });
+        expect(sessions.get("api-1")).not.toHaveProperty("sendOutcome");
+      },
+    );
+
+    it("does not extend the window for guarded duplicates and isolates sessions", async () => {
+      mockClaudeJsonlState("working");
+      const sessions = createSessionStore(runningSession(), runningSession({ id: "api-2" }));
+      const service = await createDisposedSessionService();
+      const start = Date.now();
+      await service.send("api-1", { message: "first", ...immediate });
+      vi.setSystemTime(start + 4_999);
+      await service.send("api-1", { message: "second", ...immediate });
+      await service.send("api-1", { message: "second", ...immediate });
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["second"]);
+      expect(
+        (await service.send("api-2", { message: "independent", ...immediate })).sendOutcome,
+      ).toEqual({ kind: "sent", interrupted: true });
+      vi.setSystemTime(start + 5_000);
+      expect((await service.send("api-1", { message: "third", ...immediate })).sendOutcome).toEqual(
+        { kind: "sent", interrupted: true },
+      );
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(3);
+    });
+
+    it("uses arrival time when a first acknowledgement holds the pane lock past the window", async () => {
+      mockClaudeJsonlState("working");
+      createAgentSubmitAckBindingMock.mockResolvedValue({
+        scan: async () => ({ found: true, lastScannedFile: "/x.jsonl" }),
+      });
+      createSessionStore(runningSession());
+      const service = await createDisposedSessionService();
+      let releaseAck: () => void = () => {};
+      let enteredAck: () => void = () => {};
+      const ackEntered = new Promise<void>((resolve) => {
+        enteredAck = resolve;
+      });
+      const ackGate = new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementationOnce(
+        async () => {
+          enteredAck();
+          await ackGate;
+          return { found: true, lastScannedFile: "/x.jsonl" };
+        },
+      );
+      const first = service.send("api-1", { message: "first", ...immediate });
+      await ackEntered;
+      const second = service.send("api-1", { message: "second", ...immediate });
+      vi.setSystemTime(Date.now() + 10_000);
+      releaseAck();
+      await first;
+      expect((await second).sendOutcome).toEqual({ kind: "queued", reason: "interrupt_guard" });
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("queues a concurrent guarded repeat after ack timeout without clearing the submit hold", async () => {
+      mockClaudeJsonlState("working");
+      createAgentSubmitAckBindingMock.mockResolvedValue({
+        scan: async () => ({ found: false, lastScannedFile: "/x.jsonl" }),
+      });
+      const sessions = createSessionStore(
+        runningSession({
+          queuedMessages: { messages: ["older"], awaitingPrompt: true },
+        }),
+      );
+      const service = await createDisposedSessionService();
+      const { SubmitAckTimeoutError, LaunchPromptPendingError } =
+        await import("../../src/session-service.js");
+      let releaseAck: () => void = () => {};
+      let enteredAck: () => void = () => {};
+      const ackEntered = new Promise<void>((resolve) => {
+        enteredAck = resolve;
+      });
+      const ackGate = new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementationOnce(
+        async () => {
+          enteredAck();
+          await ackGate;
+          throw new SubmitAckTimeoutError({
+            sessionId: "api-1",
+            agent: "claude",
+            elapsedMs: 10_000,
+            lastScannedFile: "/x.jsonl",
+            processAlive: true,
+            probeUnresponsive: false,
+          });
+        },
+      );
+      const first = service.send("api-1", { message: "first", ...immediate });
+      await ackEntered;
+      const second = service.send("api-1", { message: "second", ...immediate });
+      vi.setSystemTime(Date.now() + 10_000);
+      releaseAck();
+      const firstView = await first;
+      expect(firstView.submitUnconfirmedAt).toBeDefined();
+      const heldTyped = sessions.get("api-1")?.queuedMessageTyped;
+      expect((await second).sendOutcome).toEqual({ kind: "queued", reason: "interrupt_guard" });
+      expect(sessions.get("api-1")).toMatchObject({
+        submitUnconfirmedAt: firstView.submitUnconfirmedAt,
+        queuedMessageTyped: heldTyped,
+        queuedMessages: { messages: ["older", "second"], awaitingPrompt: true },
+      });
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      await expect(
+        service.send("api-1", { message: "outside window", ...immediate }),
+      ).rejects.toBeInstanceOf(LaunchPromptPendingError);
+    });
+
+    it("does not guard or stamp waiting delivery between busy candidates", async () => {
+      mockClaudeJsonlState("waiting");
+      createSessionStore(runningSession());
+      const service = await createDisposedSessionService();
+      await service.send("api-1", { message: "waiting first", ...immediate });
+      mockClaudeJsonlState("working");
+      const start = Date.now();
+      expect((await service.send("api-1", { message: "busy", ...immediate })).sendOutcome).toEqual({
+        kind: "sent",
+        interrupted: true,
+      });
+      vi.setSystemTime(start + 4_999);
+      mockClaudeJsonlState("waiting");
+      expect(
+        (await service.send("api-1", { message: "waiting again", ...immediate })).sendOutcome,
+      ).toEqual({ kind: "sent", interrupted: false });
+      vi.setSystemTime(start + 5_000);
+      mockClaudeJsonlState("working");
+      expect(
+        (await service.send("api-1", { message: "busy again", ...immediate })).sendOutcome,
+      ).toEqual({ kind: "sent", interrupted: true });
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("retains suppression after keys landed but paste failed", async () => {
+      mockClaudeJsonlState("working");
+      createSessionStore(runningSession());
+      const service = await createDisposedSessionService();
+      sendMessageToTmuxMock.mockRejectedValueOnce(new Error("paste failed"));
+      await expect(service.send("api-1", { message: "first", ...immediate })).rejects.toThrow(
+        "paste failed",
+      );
+      expect(
+        (await service.send("api-1", { message: "second", ...immediate })).sendOutcome,
+      ).toEqual({ kind: "queued", reason: "interrupt_guard" });
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not stamp when key authorization fails", async () => {
+      mockClaudeJsonlState("working");
+      createSessionStore(runningSession());
+      const service = await createDisposedSessionService();
+      const matches = vi.spyOn(sessionServiceInternals(service), "paneGenerationMatches");
+      matches.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+      await expect(service.send("api-1", { message: "denied", ...immediate })).rejects.toThrow(
+        /changed/,
+      );
+      expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      matches.mockResolvedValue(true);
+      expect(
+        (await service.send("api-1", { message: "allowed", ...immediate })).sendOutcome,
+      ).toEqual({ kind: "sent", interrupted: true });
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects a guard queue write after the pane generation changes", async () => {
+      mockClaudeJsonlState("working");
+      const sessions = createSessionStore(runningSession());
+      const service = await createDisposedSessionService();
+      await service.send("api-1", { message: "first", ...immediate });
+      const matches = vi.spyOn(sessionServiceInternals(service), "paneGenerationMatches");
+      matches.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+      await expect(service.send("api-1", { message: "stale", ...immediate })).rejects.toThrow(
+        /changed/,
+      );
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).not.toContain("stale");
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps ordinary sends and immediate noninterrupt delivery outside the guard", async () => {
+      mockClaudeJsonlState("working");
+      createSessionStore(runningSession());
+      const service = await createDisposedSessionService();
+      const ordinary = await service.send("api-1", { message: "plain", interrupt: true });
+      expect(ordinary.sendOutcome).toBeUndefined();
+      expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      const direct = await service.send("api-1", { message: "direct", queue: false });
+      expect(direct.sendOutcome).toBeUndefined();
+      await service.send("api-1", { message: "interrupt", ...immediate });
+      const after = await service.send("api-1", { message: "direct again", queue: false });
+      expect(after.sendOutcome).toBeUndefined();
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(3);
+    });
+
+    it("preserves head queuing and reports no_interrupt for a busy no-key agent", async () => {
+      agentInterruptKeysMock.mockReturnValue([]);
+      mockClaudeJsonlState("working");
+      const sessions = createSessionStore(
+        runningSession({
+          queuedMessages: { messages: ["older"], awaitingPrompt: true },
+        }),
+      );
+      const service = await createDisposedSessionService();
+      const sent = await service.send("api-1", { message: "now", ...immediate });
+      expect(sent.sendOutcome).toEqual({ kind: "queued", reason: "no_interrupt" });
+      expect(sent.queuedAheadReason).toBe("no_interrupt");
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["now", "older"]);
+      expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      agentInterruptKeysMock.mockReturnValue(["C-c"]);
+      expect(
+        (await service.send("api-1", { message: "with keys", ...immediate })).sendOutcome,
+      ).toEqual({ kind: "sent", interrupted: true });
+    });
+
+    it("keeps flush and trigger delivery outside the explicit send guard", async () => {
+      mockClaudeJsonlState("working");
+      createSessionStore(
+        runningSession({
+          queuedMessages: { messages: ["flush me"], awaitingPrompt: true },
+        }),
+      );
+      const service = await createDisposedSessionService();
+      await service.flushQueuedMessage("api-1", "flush me");
+      await service.deliver("api-1", "trigger before", { interrupt: true });
+      expect(
+        (await service.send("api-1", { message: "explicit", ...immediate })).sendOutcome,
+      ).toEqual({ kind: "sent", interrupted: true });
+      await service.deliver("api-1", "trigger after", { interrupt: true });
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(4);
+    });
+  });
+
   it.each([
     ["working", true],
     ["waiting", false],
@@ -15301,7 +16189,11 @@ describe("SessionService", () => {
           }
 
           expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1", 200, { fresh: true });
-          expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith("api-1", "codex");
+          expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith(
+            "api-1",
+            "codex",
+            ...(entryPoint === "send now" ? [expect.any(Function)] : []),
+          );
           expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledBefore(sendMessageToTmuxMock);
           expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "flush me", {
             agent: "codex",
@@ -15626,7 +16518,11 @@ describe("SessionService", () => {
     });
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith("api-1", "claude");
+    expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith(
+      "api-1",
+      "claude",
+      expect.any(Function),
+    );
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "send immediately", {
       agent: "claude",
     });
@@ -15673,7 +16569,11 @@ describe("SessionService", () => {
       service.send("api-1", { message: "send immediately", queue: false, interrupt: true }),
     ).rejects.toThrow("exited after the interrupt; message not sent");
 
-    expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith("api-1", "claude");
+    expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith(
+      "api-1",
+      "claude",
+      expect.any(Function),
+    );
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
     expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
   });
@@ -19735,9 +20635,15 @@ describe("SessionService", () => {
           sessionId: "api-1",
         }),
       );
-      await expect(service.send("api-1", { message: "again", queue: false })).rejects.toThrow(
-        /has not confirmed the last prompt/,
+      const refusal = await service.send("api-1", { message: "again", queue: false }).then(
+        () => null,
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
       );
+      expect(refusal).toMatch(
+        /has not confirmed the last prompt: api-1\. Waiting for its transcript ack/,
+      );
+      expect(refusal).toMatch(/Pause and restore the session/);
+      expect(refusal).not.toMatch(/Submit it first/);
       await service.send("api-1", { message: "queued", queue: true });
       const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
       await realTimers.setTimeout(1_500);
@@ -19754,6 +20660,22 @@ describe("SessionService", () => {
         vi.setSystemTime(new Date(now));
         expect(typedMessages()).toEqual(["now", "queued"]);
       });
+    });
+
+    it("refuses a send on a launch hold without promising the Retry/Dismiss ceiling", async () => {
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:03:00.000Z") });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ submitUnconfirmedAt: "2026-03-18T10:04:00.000Z" }));
+      const service = await liveService();
+
+      const refusal = await service.send("api-1", { message: "again", queue: false }).then(
+        () => null,
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      );
+      expect(refusal).toMatch(/has not confirmed the last prompt: api-1\./);
+      expect(refusal).toMatch(/Waiting for its transcript activity\. Pause and restore/);
+      expect(refusal).not.toMatch(/Retry\/Dismiss/);
+      service.dispose();
     });
 
     it("stamps an unacked Send now's hold at the paste, so the interrupted turn's own record never clears it", async () => {
@@ -20455,7 +21377,10 @@ describe("SessionService", () => {
       await expectRequeuedOnBoot(sessions);
       expect(resumeAgentSubmitAckBindingMock).toHaveBeenCalledWith(
         "claude",
-        expect.objectContaining({ worktreePath: "/tmp/spur-worktrees/api/api-1" }),
+        expect.objectContaining({
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          ackNotBeforeMs: Date.parse("2026-03-18T10:04:00.000Z"),
+        }),
         restartBaseline,
       );
       expect(scan).toHaveBeenCalledWith("typed");
@@ -25263,6 +26188,7 @@ describe("SessionService", () => {
       "api-1",
       runningSession({
         agent: "codex",
+        createdAt: now.toISOString(),
         queuedMessages: { messages: ["please continue"], awaitingPrompt: false },
       }),
     );
@@ -35268,6 +36194,11 @@ describe("SessionService", () => {
         prompt: "Ship the feature",
         originalTaskPrompt: "Ship it",
         agentLaunchId: "launch-generation-1",
+        claudeStatusOwner: {
+          agentLaunchId: "launch-generation-1",
+          agentSessionId: "native-1",
+          pid: 4242,
+        },
         restoredAt: "2026-03-18T10:00:00.000Z",
       }),
     );
@@ -35290,11 +36221,13 @@ describe("SessionService", () => {
       expect(listed[0]).not.toHaveProperty(field);
     }
     expect(listed[0]).not.toHaveProperty("agentLaunchId");
+    expect(listed[0]).not.toHaveProperty("claudeStatusOwner");
     expect(listed[0]).not.toHaveProperty("restoredAt");
     expect(listSessionArtifactsMock).not.toHaveBeenCalled();
 
     const detail = await service.get("api-1");
     expect(detail).not.toHaveProperty("agentLaunchId");
+    expect(detail).not.toHaveProperty("claudeStatusOwner");
     expect(detail).not.toHaveProperty("restoredAt");
     expect(detail.artifacts).toEqual([]);
     expect(detail.launchCommand).toBe("claude --dangerously-skip-permissions");
@@ -35395,6 +36328,11 @@ describe("SessionService", () => {
         },
       ],
       agentLaunchId: "launch-generation-1",
+      claudeStatusOwner: {
+        agentLaunchId: "launch-generation-1",
+        agentSessionId: "native-1",
+        pid: 4242,
+      },
     });
     sessions.set("api-2", {
       id: "api-2",
@@ -35454,6 +36392,7 @@ describe("SessionService", () => {
     expect(listed[0]).not.toHaveProperty("allowedTriggers");
     expect(listed[0]).not.toHaveProperty("agentSessionId");
     expect(listed[0]).not.toHaveProperty("agentLaunchId");
+    expect(listed[0]).not.toHaveProperty("claudeStatusOwner");
     expect(listed[0]).not.toHaveProperty("branchSource");
     // The strip must not overreach into what the listing renders.
     expect(listed[0]).toMatchObject({ project: "api", prompt: "Ship the feature" });
@@ -39004,6 +39943,161 @@ describe("SessionService", () => {
     expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.title).toBe("Shared");
   });
 
+  it("keeps an empty completed snapshot when a sibling adds links", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1" }));
+    sessions.set("api-2", sessionRecord({ id: "api-2", workspaceId: "api-1" }));
+    const { readWorkspaceState, writeWorkspaceState, deleteWorkspaceState } =
+      await loadWorkspaceStoreModule();
+    writeWorkspaceState(TEST_DATA_DIR, "api-1", {});
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-1", { skipPrCheck: true });
+    expect(sessions.get("api-1")?.terminalSlotsCaptured).toBe(true);
+    expect(sessions.get("api-1")?.slots).toBeUndefined();
+    writeWorkspaceState(TEST_DATA_DIR, "api-1", {
+      slots: { links: [{ label: "board-task", url: "https://example.com/task" }] },
+    });
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.links).toHaveLength(1);
+    for (const removeWorkspace of [false, true]) {
+      if (removeWorkspace) deleteWorkspaceState(TEST_DATA_DIR, "api-1");
+      const full = await service.get("api-1");
+      expect(full.slots?.links ?? []).toEqual([]);
+      expect(full).not.toHaveProperty("terminalSlotsCaptured");
+      for (const view of ["full", "dashboard"] as const) {
+        const completed = (await service.list({ view, includeCompleted: true })).find(
+          (row) => row.id === "api-1",
+        );
+        expect(completed?.slots?.links ?? []).toEqual([]);
+        expect(completed).not.toHaveProperty("terminalSlotsCaptured");
+      }
+    }
+    service.dispose();
+  });
+
+  it.each(["complete", "kill"] as const)(
+    "keeps each member's nonempty links after %s and workspace deletion",
+    async (action) => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1" }));
+      sessions.set("api-2", sessionRecord({ id: "api-2", workspaceId: "api-1" }));
+      const { writeWorkspaceState, deleteWorkspaceState } = await loadWorkspaceStoreModule();
+      writeWorkspaceState(TEST_DATA_DIR, "api-1", {
+        slots: { links: [{ label: "board-task", url: "https://example.com/task/1" }] },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      if (action === "kill") await service.kill("api-1", { force: true, skipPrCheck: true });
+      else await service.complete("api-1", { skipPrCheck: true });
+      writeWorkspaceState(TEST_DATA_DIR, "api-1", {
+        slots: {
+          links: [
+            { label: "board-task", url: "https://example.com/task/2" },
+            { label: "board-role", url: "https://example.com/role/reviewer" },
+          ],
+        },
+      });
+      await service.complete("api-2", { skipPrCheck: true });
+      deleteWorkspaceState(TEST_DATA_DIR, "api-1");
+      sessions.set(
+        "api-3",
+        sessionRecord({
+          id: "api-3",
+          status: "completed",
+          terminalSlotsCaptured: true,
+          slots: { links: [{ label: "board-task", url: "https://example.com/task/2" }] },
+        }),
+      );
+
+      expect((await service.get("api-1")).slots?.links).toEqual([
+        { label: "board-task", url: "https://example.com/task/1" },
+      ]);
+      expect((await service.get("api-2")).slots?.links).toEqual([
+        { label: "board-task", url: "https://example.com/task/2" },
+        { label: "board-role", url: "https://example.com/role/reviewer" },
+      ]);
+      const listed = await service.list({ includeCompleted: true });
+      expect(listed.find((view) => view.id === "api-1") !== undefined).toBe(action === "complete");
+      expect(listed.find((view) => view.id === "api-2")?.slots?.links[0]?.url).toBe(
+        "https://example.com/task/2",
+      );
+      for (const view of ["full", "dashboard"] as const) {
+        const filtered = await service.list({
+          includeCompleted: true,
+          view,
+          links: [
+            { label: "board-task", url: "https://example.com/task/2" },
+            { label: "board-role", url: "https://example.com/role/reviewer" },
+          ],
+        });
+        expect(filtered.map((row) => row.id)).toEqual(["api-2"]);
+        expect(
+          (
+            await service.list({ includeCompleted: true, view, links: [{ label: "board-role" }] })
+          ).map((row) => row.id),
+        ).toEqual(["api-2"]);
+      }
+      service.dispose();
+    },
+  );
+
+  it.each(["complete", "kill"] as const)(
+    "keeps a %s anchor snapshot when a live sibling updates workspace links",
+    async (action) => {
+      const slotModule = await vi.importActual<typeof sessionSlotsModule>(
+        "../../src/session-slots.js",
+      );
+      applySlotsUpdateMock.mockImplementation(slotModule.applySlotsUpdate);
+      const sessions = createSessionStore();
+      const pr = {
+        repo: "org/repo",
+        number: 42,
+        url: "https://github.com/org/repo/pull/42",
+      };
+      sessions.set("api-1", sessionRecord({ id: "api-1", pr }));
+      sessions.set("api-2", sessionRecord({ id: "api-2", workspaceId: "api-1" }));
+      const original = { label: "board-task", url: "https://example.com/task/1" };
+      const updated = { label: "board-task", url: "https://example.com/task/2" };
+      const { writeWorkspaceState, readWorkspaceState } = await loadWorkspaceStoreModule();
+      writeWorkspaceState(TEST_DATA_DIR, "api-1", { slots: { links: [original] }, pr });
+      reserveNextSessionIdMock.mockResolvedValue("api-3");
+      workspaceExistsMock.mockReturnValue(true);
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      if (action === "kill") await service.kill("api-1", { force: true, skipPrCheck: true });
+      else await service.complete("api-1", { skipPrCheck: true });
+      await service.updateSlots("api-2", { links: [updated], unlinkLabels: ["pr"] });
+
+      expect(sessions.get("api-1")?.slots?.links).toEqual([original]);
+      expect(sessions.get("api-1")?.pr).toEqual(pr);
+      expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.links).toEqual([updated]);
+      expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.pr).toBeUndefined();
+      expect((await service.get("api-1")).slots?.links).toEqual([
+        original,
+        { label: "pr", url: pr.url },
+      ]);
+      expect((await service.get("api-2")).slots?.links).toEqual([updated]);
+      const oldMatches = await service.list({
+        includeCompleted: true,
+        links: [{ label: original.label, url: original.url }],
+      });
+      expect(oldMatches.map((row) => row.id).includes("api-1")).toBe(action === "complete");
+      expect(
+        (await service.list({ links: [{ label: updated.label, url: updated.url }] })).map(
+          (row) => row.id,
+        ),
+      ).toContain("api-2");
+
+      const successor = await service.respawn("api-1");
+      expect(successor.slots?.links).toEqual([original, { label: "pr", url: pr.url }]);
+      service.dispose();
+    },
+  );
+
   it("keeps the shared artifacts dir for a desk member parked stopped by a handoff, which holds no sidecar", async () => {
     const store = createSessionStore();
     const base = {
@@ -41517,6 +42611,7 @@ describe("SessionService", () => {
         SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
+        SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -48085,6 +49180,7 @@ describe("SessionService", () => {
         SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
+        SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -48703,6 +49799,7 @@ describe("SessionService", () => {
         SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
+        SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -50126,6 +51223,7 @@ describe("SessionService", () => {
         SPUR_SESSION_WORK_DIR: join(artifactDirForSession("api-1"), ".spur-work"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
+        SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -68581,7 +69679,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("clears serverErrorAt while stabilizeState still damps the displayed state to error", async () => {
+    it("clears serverErrorAt and immediately exits the displayed error state", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession({ agentSessionId: "native-1" }));
       mockServerError();
@@ -68603,7 +69701,7 @@ describe("SessionService", () => {
 
       const secondView = await service.get("api-1");
 
-      expect(secondView.state).toBe("error");
+      expect(secondView.state).toBe("waiting");
       expect(sessions.get("api-1")?.serverErrorAt).toBeUndefined();
       service.dispose();
     });
@@ -69694,6 +70792,7 @@ describe("SessionService", () => {
       lastSuccessfulTodoNudgeAt: Map<string, number>;
       todoNudgeDisabled: Map<string, { kind: "ledger_corrupt" | "target_gone"; reason: string }>;
       todoNudgeBackoff: Map<string, { failures: number; nextRetryAtMs: number }>;
+      snapshotCorruptLogged: Map<string, number>;
       attentionMonitorRunning: boolean;
       dashboardLoopRunning: boolean;
       dashboardCacheReady: Promise<void> | null;
@@ -69845,6 +70944,7 @@ describe("SessionService", () => {
         internals.lastSuccessfulTodoNudgeAt.set(id, Date.now());
         internals.todoNudgeDisabled.set(id, { kind: "ledger_corrupt", reason: "seed" });
         internals.todoNudgeBackoff.set(id, { failures: 1, nextRetryAtMs: Date.now() });
+        internals.snapshotCorruptLogged.set(id, 1);
       }
 
       // api-1 stays running (non-terminal). api-2 completes. api-3 was
@@ -69877,6 +70977,7 @@ describe("SessionService", () => {
         ["lastSuccessfulTodoNudgeAt", internals.lastSuccessfulTodoNudgeAt],
         ["todoNudgeDisabled", internals.todoNudgeDisabled],
         ["todoNudgeBackoff", internals.todoNudgeBackoff],
+        ["snapshotCorruptLogged", internals.snapshotCorruptLogged],
       ];
       for (const [name, map] of allPrunedMaps) {
         expect(map.has("api-2"), `${name} should drop the completed id`).toBe(false);
@@ -79011,6 +80112,10 @@ describe("SessionService", () => {
         expect(record?.queuedMessages?.messages ?? []).not.toContain("typed");
         expect(eventsNamed("session.message.requeued")).toHaveLength(0);
         expect(eventsNamed("session.submit.released")).toHaveLength(1);
+        expect(eventsNamed("session.submit.released")[0]?.details).toEqual({
+          messageLength: 5,
+          reason: "requeue_exhausted",
+        });
         // Never silent: the failure stays on the record for the view.
         expect(record?.submitFailedMessage).toEqual({ message: "typed", at: expect.any(String) });
         expect((await service.get("api-1")).submitFailedMessage?.message).toBe("typed");
@@ -79018,6 +80123,362 @@ describe("SessionService", () => {
         service.dispose();
       },
     );
+
+    describe("claude session-id rotation and hold ceiling", () => {
+      const beforeHold = Date.parse(PENDING_LAUNCH_AT) - 1_000;
+
+      function jsonlFor(id: string) {
+        return {
+          state: "waiting",
+          reader: {
+            filePath: `/t/${id}.jsonl`,
+            lastOffset: 0,
+            lastMtimeMs: id === "ses_2" ? afterHold : beforeHold,
+            tailRecords: [],
+          },
+        };
+      }
+
+      // The pane's claude reports `reported.id` from `reported.pid`.
+      function mockPaneStatus(reported: { id: string; pid: number }, extra: object = {}) {
+        readClaudeSessionStatusMock.mockImplementation(async () => ({
+          state: "waiting",
+          status: "idle",
+          filePath: "/s/4242.json",
+          updatedMs: afterHold,
+          sessionId: reported.id,
+          pid: reported.pid,
+          kind: "interactive",
+          paneOwned: true,
+          ...extra,
+        }));
+      }
+
+      function mockRotationScan() {
+        const contexts: unknown[] = [];
+        const scan = vi.fn().mockResolvedValue({ found: true, lastScannedFile: null });
+        resumeAgentSubmitAckBindingMock.mockImplementation(
+          async (_agent: string, ctx: unknown, baseline: unknown) => {
+            contexts.push(ctx);
+            return { baseline, scan };
+          },
+        );
+        return contexts;
+      }
+
+      async function rotationFixture(transcriptForNewId: boolean | "rejects") {
+        const sessions = createSessionStore();
+        seedSendHold(sessions, "claude");
+        mockAgentActivity("claude", beforeHold);
+        readClaudeJsonlStateMock.mockImplementation(async (_w: string, _r: unknown, id: string) => {
+          if (id === "ses_2" && transcriptForNewId === "rejects") throw new Error("read failed");
+          return id === "ses_2" && !transcriptForNewId ? null : jsonlFor(id);
+        });
+        const reported = { id: "ses_1", pid: 4242 };
+        mockPaneStatus(reported);
+        const service = await deferredService();
+        await service.get("api-1");
+        reported.id = "ses_2";
+        return { sessions, service };
+      }
+
+      it("rebinds the id after /clear and settles the hold by ack in the same tick", async () => {
+        const { sessions, service } = await rotationFixture(true);
+        const contexts = mockRotationScan();
+
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.agentSessionId).toBe("ses_2");
+        expect(record?.submitUnconfirmedAt).toBeUndefined();
+        expect(record).not.toHaveProperty("queuedMessageTyped");
+        expect(eventsNamed("session.submit.confirmed")).toEqual([
+          expect.objectContaining({ details: { evidence: "ack" } }),
+        ]);
+        expect(eventsNamed("session.agent_session_id.rotated")).toEqual([
+          expect.objectContaining({
+            details: {
+              agent: "claude",
+              pid: 4242,
+              previousAgentSessionId: "ses_1",
+              agentSessionId: "ses_2",
+              transcriptFound: true,
+            },
+          }),
+        ]);
+        expect(readClaudeJsonlStateMock).toHaveBeenCalledWith(
+          record?.worktreePath,
+          undefined,
+          "ses_2",
+        );
+        expect(contexts).toEqual([
+          expect.objectContaining({
+            agentSessionId: "ses_2",
+            ackNotBeforeMs: Date.parse(PENDING_LAUNCH_AT),
+          }),
+        ]);
+        expect(record?.claudeStatusOwner).toEqual({
+          agentLaunchId: "held-launch",
+          agentSessionId: "ses_2",
+          pid: 4242,
+        });
+        expect(
+          logSpurEventMock.mock.calls.filter(([, entry]) =>
+            String((entry as { event: string }).event).startsWith("session.server_error"),
+          ),
+        ).toHaveLength(0);
+        expect(tmuxTexts()).not.toContain("typed");
+        service.dispose();
+      });
+
+      it("never reuses a reader cached under the old id after a rotation", async () => {
+        const { sessions, service } = await rotationFixture(true);
+        mockRotationScan();
+        await service.get("api-1");
+        expect(sessions.get("api-1")?.agentSessionId).toBe("ses_2");
+
+        // A classify that started before the rotation re-pins its old reader.
+        (
+          service as unknown as {
+            claudeJsonlReaders: Map<string, { agentSessionId: string; reader: unknown }>;
+          }
+        ).claudeJsonlReaders.set("api-1", {
+          agentSessionId: "ses_1",
+          reader: jsonlFor("ses_1").reader,
+        });
+        await service.get("api-1");
+        const lastCall = readClaudeJsonlStateMock.mock.calls.at(-1);
+        expect(lastCall?.[1]).toBeUndefined();
+        expect(lastCall?.[2]).toBe("ses_2");
+        expect(sessions.get("api-1")?.agentSessionId).toBe("ses_2");
+        service.dispose();
+      });
+
+      it("rebinds with no new transcript yet: jsonl-derived fields reset, hold stays", async () => {
+        const { sessions, service } = await rotationFixture(false);
+        mockHoldAckScan(false);
+
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.agentSessionId).toBe("ses_2");
+        expect(record?.submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+        expect(eventsNamed("session.submit.confirmed")).toHaveLength(0);
+        expect(eventsNamed("session.submit.released")).toHaveLength(0);
+        expect(eventsNamed("session.agent_session_id.rotated")).toEqual([
+          expect.objectContaining({
+            details: expect.objectContaining({ transcriptFound: false }),
+          }),
+        ]);
+        service.dispose();
+      });
+
+      // A daemon restart: the owner came from the record, not from a tick.
+      async function persistedOwnerFixture(
+        owner: Partial<NonNullable<SessionRecord["claudeStatusOwner"]>>,
+      ) {
+        const sessions = createSessionStore();
+        seedSendHold(sessions, "claude", {
+          claudeStatusOwner: {
+            agentLaunchId: "held-launch",
+            agentSessionId: "ses_1",
+            pid: 4242,
+            procStart: "777",
+            ...owner,
+          },
+        });
+        mockAgentActivity("claude", beforeHold);
+        readClaudeJsonlStateMock.mockImplementation(async (_w: string, _r: unknown, id: string) =>
+          jsonlFor(id),
+        );
+        mockPaneStatus({ id: "ses_2", pid: 4242 }, { procStart: "777" });
+        const contexts = mockRotationScan();
+        return { sessions, service: await deferredService(), contexts };
+      }
+
+      it("rotates on the first tick after a restart from the persisted owner", async () => {
+        const { sessions, service } = await persistedOwnerFixture({});
+
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.agentSessionId).toBe("ses_2");
+        expect(record?.claudeStatusOwner).toEqual({
+          agentLaunchId: "held-launch",
+          agentSessionId: "ses_2",
+          pid: 4242,
+          procStart: "777",
+        });
+        expect(record?.submitUnconfirmedAt).toBeUndefined();
+        expect(eventsNamed("session.submit.confirmed")).toEqual([
+          expect.objectContaining({ details: { evidence: "ack" } }),
+        ]);
+        expect(eventsNamed("session.agent_session_id.rotated")).toHaveLength(1);
+        service.dispose();
+      });
+
+      it.each([
+        ["a reused pid (different procStart)", { procStart: "778" }],
+        ["an owner from an older launch", { agentLaunchId: "old-launch" }],
+      ])("does not rotate from a persisted owner with %s", async (_label, owner) => {
+        const { sessions, service } = await persistedOwnerFixture(owner);
+
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.agentSessionId).toBe("ses_1");
+        expect(record?.submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+        expect(eventsNamed("session.agent_session_id.rotated")).toHaveLength(0);
+        service.dispose();
+      });
+
+      it("writes the owner once while the observation is unchanged", async () => {
+        const sessions = createSessionStore();
+        seedSendHold(sessions, "claude");
+        mockAgentActivity("claude", beforeHold);
+        readClaudeJsonlStateMock.mockImplementation(async (_w: string, _r: unknown, id: string) =>
+          jsonlFor(id),
+        );
+        mockPaneStatus({ id: "ses_1", pid: 4242 }, { procStart: "777" });
+        const service = await deferredService();
+        const persist = vi.spyOn(
+          service as unknown as { persistClaudeStatusOwner: () => unknown },
+          "persistClaudeStatusOwner",
+        );
+
+        await service.get("api-1");
+        await service.get("api-1");
+        await service.get("api-1");
+        expect(sessions.get("api-1")?.claudeStatusOwner).toEqual({
+          agentLaunchId: "held-launch",
+          agentSessionId: "ses_1",
+          pid: 4242,
+          procStart: "777",
+        });
+        // A concurrent classify may still hold the pre-write record and call
+        // the helper; only one call writes.
+        expect(persist.mock.results.filter((result) => result.value !== undefined)).toHaveLength(1);
+        service.dispose();
+      });
+
+      it("still logs the rotation when the new transcript read rejects", async () => {
+        const { sessions, service } = await rotationFixture("rejects");
+        mockHoldAckScan(false);
+
+        await service.get("api-1");
+        expect(sessions.get("api-1")?.agentSessionId).toBe("ses_2");
+        expect(eventsNamed("session.agent_session_id.rotated")).toEqual([
+          expect.objectContaining({
+            details: expect.objectContaining({ transcriptFound: false }),
+          }),
+        ]);
+        service.dispose();
+      });
+
+      it.each([
+        ["a different pid", { id: "ses_2", pid: 5555 }, {}, true],
+        ["a non-interactive kind", { id: "ses_2", pid: 4242 }, { kind: undefined }, true],
+        [
+          "a status file the pane does not own",
+          { id: "ses_2", pid: 4242 },
+          { paneOwned: undefined },
+          true,
+        ],
+        ["no prior observation", { id: "ses_2", pid: 4242 }, {}, false],
+      ])("does not rebind on %s", async (_label, second, extra, observeFirst) => {
+        const sessions = createSessionStore();
+        seedSendHold(sessions, "claude");
+        mockAgentActivity("claude", beforeHold);
+        readClaudeJsonlStateMock.mockImplementation(async (_w: string, _r: unknown, id: string) =>
+          jsonlFor(id),
+        );
+        mockHoldAckScan(true);
+        const service = await deferredService();
+        if (observeFirst) {
+          mockPaneStatus({ id: "ses_1", pid: 4242 }, extra);
+          await service.get("api-1");
+        }
+        mockPaneStatus(second, extra);
+
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.agentSessionId).toBe("ses_1");
+        expect(record?.submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+        expect(eventsNamed("session.agent_session_id.rotated")).toHaveLength(0);
+        expect(readClaudeJsonlStateMock.mock.calls.some((call) => call[2] === "ses_2")).toBe(false);
+        service.dispose();
+      });
+
+      async function ceilingFixture(
+        state: "waiting" | "working",
+        options: { acked?: boolean; extra?: Partial<SessionRecord> } = {},
+      ) {
+        const sessions = createSessionStore();
+        seedSendHold(sessions, "claude", { ...options.extra });
+        mockAgentActivity("claude", beforeHold, state);
+        mockHoldAckScan(options.acked ?? false);
+        const { SUBMIT_HOLD_CEILING_MS } = await loadSessionServiceModule();
+        vi.setSystemTime(Date.parse(PENDING_LAUNCH_AT) + SUBMIT_HOLD_CEILING_MS + 1_000);
+        return { sessions, service: await deferredService() };
+      }
+
+      it("releases a typed hold past the ceiling to Retry/Dismiss without typing it again", async () => {
+        const { sessions, service } = await ceilingFixture("waiting");
+
+        await service.get("api-1");
+        await service.get("api-1");
+        expect(resumeAgentSubmitAckBindingMock).toHaveBeenCalledWith(
+          "claude",
+          expect.objectContaining({ ackNotBeforeMs: Date.parse(PENDING_LAUNCH_AT) }),
+          expect.anything(),
+        );
+        const record = sessions.get("api-1");
+        expect(record?.submitUnconfirmedAt).toBeUndefined();
+        expect(record).not.toHaveProperty("queuedMessageTyped");
+        expect(record?.submitFailedMessage).toEqual({ message: "typed", at: expect.any(String) });
+        expect(record?.queuedMessages?.messages).toEqual(["later"]);
+        expect(eventsNamed("session.submit.released")).toEqual([
+          expect.objectContaining({ details: { messageLength: 5, reason: "ceiling" } }),
+        ]);
+        expect(eventsNamed("session.message.requeued")).toHaveLength(0);
+        expect(tmuxTexts()).not.toContain("typed");
+        service.dispose();
+      });
+
+      it("releases a typed hold with no ack baseline past the ceiling", async () => {
+        const { sessions, service } = await ceilingFixture("waiting", {
+          extra: { queuedMessageTyped: { message: "typed", typedAt: PENDING_LAUNCH_AT } },
+        });
+
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.submitUnconfirmedAt).toBeUndefined();
+        expect(record?.submitFailedMessage).toEqual({ message: "typed", at: expect.any(String) });
+        expect(eventsNamed("session.submit.released")).toEqual([
+          expect.objectContaining({ details: { messageLength: 5, reason: "ceiling" } }),
+        ]);
+        expect(eventsNamed("session.submit.confirmed")).toHaveLength(0);
+        service.dispose();
+      });
+
+      it("confirms by ack, not releases, when the ack lands in the ceiling tick", async () => {
+        const { sessions, service } = await ceilingFixture("waiting", { acked: true });
+
+        await service.get("api-1");
+        expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+        expect(sessions.get("api-1")).not.toHaveProperty("submitFailedMessage");
+        expect(eventsNamed("session.submit.confirmed")).toEqual([
+          expect.objectContaining({ details: { evidence: "ack" } }),
+        ]);
+        expect(eventsNamed("session.submit.released")).toHaveLength(0);
+        service.dispose();
+      });
+
+      it("does not release past the ceiling while the agent is working", async () => {
+        const { sessions, service } = await ceilingFixture("working");
+
+        await service.get("api-1");
+        expect(sessions.get("api-1")?.submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+        expect(eventsNamed("session.submit.released")).toHaveLength(0);
+        service.dispose();
+      });
+    });
 
     it("a recovered trigger deliver() re-pastes its digest at most once, then releases", async () => {
       const sessions = createSessionStore();
@@ -79517,7 +80978,11 @@ describe("SessionService", () => {
 
       sendInterruptKeysToTmuxMock.mockResolvedValue(true);
       await service.send("api-1", { message: "now", queue: false, interrupt: true });
-      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith("api-1", "claude");
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        "claude",
+        expect.any(Function),
+      );
       expect(sendInterruptKeysToTmuxMock.mock.invocationCallOrder[0]).toBeLessThan(
         sendMessageToTmuxMock.mock.invocationCallOrder[0] ?? 0,
       );

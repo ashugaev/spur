@@ -177,6 +177,7 @@ import {
   type SessionMemoryRecordResponse,
   type SessionGcStatus,
   type SessionState,
+  type SessionTransitionsResponse,
   type SessionStateSubscription,
   type SessionStateSubscriptionListResponse,
   type SessionStateSubscriptionRecordResponse,
@@ -202,6 +203,9 @@ import {
   type HandoffSessionRequest,
   type TodoMutationRequest,
   type TodoProjection,
+  type WorkSnapshot,
+  type WorkSnapshotMeta,
+  type WriteSnapshotRequest,
 } from "./types.js";
 import { getVersion } from "./version.js";
 import {
@@ -687,8 +691,16 @@ function moveSelection(
 async function loadRawSessions(
   cliEntrypoint: string,
   configPath?: string,
+  filters?: { all?: boolean; links?: string[] },
 ): Promise<SessionListItemView[]> {
-  return getJson<SessionListItemView[]>(cliEntrypoint, "/sessions", configPath);
+  const query = new URLSearchParams();
+  if (filters?.all) query.set("includeCompleted", "1");
+  for (const link of filters?.links ?? []) query.append("link", link);
+  return getJson<SessionListItemView[]>(
+    cliEntrypoint,
+    query.size ? `/sessions?${query}` : "/sessions",
+    configPath,
+  );
 }
 
 function visibleSessionsForHumanList(sessions: SessionListItemView[]): SessionListItemView[] {
@@ -3708,7 +3720,12 @@ export function createProgram(cliEntrypoint: string): Command {
     .alias("ls")
     .description("Show sessions; on a TTY, open the live selector.")
     .option("--json", "Print raw JSON")
+    .option("--all", "Include completed sessions in JSON output")
+    .option("--link <label[=url]>", "Filter JSON output by link", collectOptionValue, [])
     .action(async (options, command) => {
+      if (!options.json && (options.all || options.link.length > 0)) {
+        throw new Error("list --all and --link require --json");
+      }
       const parentProgram = command.parent as Command;
       const explicitConfigPath = getConfigPath(parentProgram);
       const instance = prepareInstanceConfig(parentProgram);
@@ -3729,7 +3746,11 @@ export function createProgram(cliEntrypoint: string): Command {
         await outputResult({
           json: true,
           label: "loading sessions",
-          action: () => loadRawSessions(cliEntrypoint, configPath),
+          action: () =>
+            loadRawSessions(cliEntrypoint, configPath, {
+              all: Boolean(options.all),
+              links: options.link,
+            }),
           render: () => "",
         });
         return;
@@ -3742,6 +3763,48 @@ export function createProgram(cliEntrypoint: string): Command {
         loadHumanListData(cliEntrypoint, configPath),
       );
       writeStdout(renderSessionDashboard(data));
+    });
+
+  program
+    .command("transitions")
+    .description("Poll retained session lifecycle transitions.")
+    .option("--since <cursor>", "Resume after an opaque cursor")
+    .option(
+      "--link <label[=url]>",
+      "Filter by event-time link; repeated filters use AND",
+      collectOptionValue,
+      [],
+    )
+    .option("--limit <n>", "Maximum matching entries (1..1000; default 200)")
+    .option("--kinds <kinds>", "Comma-separated status,state; omit for lifecycle events")
+    .option("--json", "Print the response envelope")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const query = new URLSearchParams();
+      if (options.since !== undefined) query.set("since", options.since);
+      if (options.limit !== undefined) query.set("limit", options.limit);
+      if (options.kinds !== undefined) query.set("kinds", options.kinds);
+      for (const link of options.link) query.append("link", link);
+      const suffix = query.size > 0 ? `?${query.toString()}` : "";
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading transitions",
+        action: () =>
+          getJson<SessionTransitionsResponse>(
+            cliEntrypoint,
+            `/sessions/transitions${suffix}`,
+            configPath,
+          ),
+        render: (result) =>
+          [
+            ...result.entries.map(
+              (entry) =>
+                `${entry.at} ${entry.sessionId} ${entry.kind} ${entry.from ?? "∅"} -> ${entry.to}`,
+            ),
+            `nextCursor: ${result.nextCursor}`,
+            `hasMore: ${result.hasMore}`,
+          ].join("\n"),
+      });
     });
 
   program
@@ -3889,10 +3952,15 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Send a follow-up message to a session.")
     .argument("<sessionId>", "Session id")
     .argument("<message...>", "Message to send")
+    .option("--interrupt", "Interrupt active work; kills the tool call in flight")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, messageParts: string[], options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
       const payload: SendMessageRequest = { message: messageParts.join(" ") };
+      if (options.interrupt) {
+        payload.queue = false;
+        payload.interrupt = true;
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "sending message",
@@ -3900,12 +3968,23 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/send`, payload, configPath),
         success: (session) => {
           const pending = queuedMessageCount(session);
+          const outcome = options.interrupt ? session.sendOutcome : undefined;
           const line =
-            pending > 0
-              ? `Queued message for ${session.id} (${pending} pending).`
-              : session.submitUnconfirmedAt
-                ? `Sent message to ${session.id}; the agent has not confirmed it yet.`
-                : `Delivered message to ${session.id}.`;
+            outcome?.kind === "queued"
+              ? outcome.reason === "interrupt_guard"
+                ? `Queued message for ${session.id} (${pending} pending); interrupt guard suppressed a repeat.`
+                : `Queued message for ${session.id} at the head; the agent has no interrupt key.`
+              : outcome?.kind === "sent"
+                ? session.submitUnconfirmedAt
+                  ? `Sent message to ${session.id}${outcome.interrupted ? " after interrupting the turn" : " without interrupting"}; the agent has not confirmed it yet.`
+                  : outcome.interrupted
+                    ? `Interrupted turn and delivered message to ${session.id}.`
+                    : `Delivered message to ${session.id} without interrupting.`
+                : pending > 0
+                  ? `Queued message for ${session.id} (${pending} pending).`
+                  : session.submitUnconfirmedAt
+                    ? `Sent message to ${session.id}; the agent has not confirmed it yet.`
+                    : `Delivered message to ${session.id}.`;
           const failed = session.submitFailedMessage;
           return failed
             ? `${line}\nAgent did not confirm: "${failed.message}". Retry or dismiss it in the web view.`
@@ -4138,6 +4217,77 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         request: { action: "resume", itemId },
         configPath: prepareInstanceConfig(command.parent?.parent as Command).configPath,
+      });
+    });
+
+  const snapshotCommand = program
+    .command("snapshot")
+    .description("Write, list or show a session's work snapshots.");
+  const snapshotsPath = (sessionId: string): string =>
+    `/sessions/${encodeURIComponent(sessionId)}/snapshots`;
+  snapshotCommand
+    .command("write")
+    .argument("<sessionId>", "Session id")
+    .requiredOption("--file <path>", "Markdown file; - reads stdin")
+    .option("--final", "Mark as the final snapshot")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const filePath = (options.file as string).trim();
+      const request: WriteSnapshotRequest = {
+        content: readFileSync(filePath === "-" ? 0 : filePath, "utf-8"),
+        ...(options.final ? { final: true } : {}),
+      };
+      await outputResult({
+        json: Boolean(options.json),
+        label: "writing snapshot",
+        action: () =>
+          postJson<WorkSnapshotMeta>(cliEntrypoint, snapshotsPath(sessionId), request, configPath),
+        render: (meta) =>
+          `Wrote snapshot ${meta.version} for ${meta.sessionId}${meta.final ? " (final)" : ""}.`,
+      });
+    });
+  snapshotCommand
+    .command("list")
+    .argument("<sessionId>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading snapshots",
+        action: () =>
+          getJson<WorkSnapshotMeta[]>(cliEntrypoint, snapshotsPath(sessionId), configPath),
+        render: (snapshots) =>
+          snapshots
+            .map(
+              (meta) =>
+                `${meta.version}\t${meta.at}\t${meta.trigger}\t${meta.branch ?? "-"}\t${meta.headSha?.slice(0, 8) ?? "-"}`,
+            )
+            .join("\n"),
+      });
+    });
+  snapshotCommand
+    .command("show")
+    .argument("<sessionId>", "Session id")
+    .argument("[version]", "Snapshot version; defaults to the latest")
+    .option("--json", "Print the full snapshot as JSON")
+    .action(async (sessionId: string, versionArg: string | undefined, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const version = versionArg?.trim() ?? "latest";
+      if (version !== "latest" && !/^[1-9][0-9]*$/.test(version)) {
+        throw new Error("version must be a positive integer");
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading snapshot",
+        action: () =>
+          getJson<WorkSnapshot>(
+            cliEntrypoint,
+            `${snapshotsPath(sessionId)}/${version}`,
+            configPath,
+          ),
+        render: (snapshot) => snapshot.content,
       });
     });
 

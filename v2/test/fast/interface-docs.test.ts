@@ -19,6 +19,27 @@ describe("published interface contracts", () => {
       await readRepoFile(".agents/skills/spur/SKILL.md"),
     );
   });
+  it("documents the work snapshot surface", async () => {
+    const [commands, configuration, daemonApi, skill] = await Promise.all([
+      readRepoFile("docs/commands.md"),
+      readRepoFile("docs/configuration.md"),
+      readRepoFile("docs/daemon-api.md"),
+      readRepoFile(".claude/skills/spur/SKILL.md"),
+    ]);
+    expect(commands).toContain("SPUR_SNAPSHOT_COMMAND");
+    expect(commands).toContain("spur snapshot write");
+    expect(configuration).toContain("projects.<id>.snapshots.maxBytes");
+    expect(configuration).toContain("projects.<id>.snapshots.requireFinal");
+    expect(configuration).toContain("projects.<id>.snapshots.freshnessMinutes");
+    for (const route of [
+      "GET /sessions/:id/snapshots",
+      "POST /sessions/:id/snapshots",
+      "GET /sessions/:id/snapshots/:version",
+    ])
+      expect(daemonApi).toContain(`\`${route}\``);
+    expect(daemonApi).toContain("work_snapshot_required");
+    expect(skill).toContain("SPUR_SNAPSHOT_COMMAND");
+  });
   it("documents launcher-owned isolated UI discovery environment", async () => {
     const commands = await readRepoFile("docs/commands.md");
     expect(commands).toContain("SPUR_ISOLATED_CONFIG");

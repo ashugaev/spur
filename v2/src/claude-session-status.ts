@@ -15,6 +15,9 @@ export interface ClaudeSessionStatusRecord {
   sessionId?: string;
   waitingFor?: string;
   pid?: number;
+  kind?: string;
+  // Process start time (jiffies) as written by claude; tells a reused pid apart.
+  procStart?: string;
   // Set only by the ancestry probe; a UUID/cwd match cannot establish it.
   paneOwned?: true;
 }
@@ -113,6 +116,8 @@ function extractCandidate(
   const sessionId = readString(parsed["sessionId"]);
   const waitingFor = readWaitingFor(parsed);
   const pid = readPid(parsed["pid"]);
+  const kind = readString(parsed["kind"]);
+  const procStart = readString(parsed["procStart"]);
   const statusUpdatedMs =
     readTimestampMs(parsed["statusUpdatedAt"]) ?? readTimestampMs(parsed["statusUpdated"]);
   return {
@@ -124,6 +129,8 @@ function extractCandidate(
     ...(sessionId ? { sessionId } : {}),
     ...(waitingFor !== undefined ? { waitingFor } : {}),
     ...(pid !== undefined ? { pid } : {}),
+    ...(kind ? { kind } : {}),
+    ...(procStart ? { procStart } : {}),
   };
 }
 

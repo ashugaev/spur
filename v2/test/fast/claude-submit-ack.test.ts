@@ -279,6 +279,76 @@ describe("scanClaudeJsonlForMessage", () => {
     expect(miss).toEqual({ found: false, scannedFile: rotatedFile });
   });
 
+  describe("ackNotBeforeMs floor on a re-resolved file", () => {
+    const notBeforeMs = Date.parse("2026-03-18T10:04:00.000Z");
+    const at = (offsetMs: number) => new Date(notBeforeMs + offsetMs).toISOString();
+
+    async function rotatedFixture(entries: Array<Record<string, unknown>>) {
+      const baselineFile = await makeJsonl("baseline.jsonl", [
+        { type: "user", message: { role: "user", content: "old" } },
+      ]);
+      const rotatedFile = await makeJsonl("rotated.jsonl", entries);
+      findLatestSessionFileMock.mockResolvedValue(rotatedFile);
+      return { baseline: { file: baselineFile, size: 0 }, rotatedFile };
+    }
+    const user = (content: string, timestamp?: string) => ({
+      type: "user",
+      message: { role: "user", content },
+      ...(timestamp ? { timestamp } : {}),
+    });
+
+    it("ignores an identical earlier prompt", async () => {
+      const { baseline, rotatedFile } = await rotatedFixture([user("same", at(-60_000))]);
+      const result = await scanClaudeJsonlForResult(baseline, "same", "/tmp/worktree", undefined, {
+        notBeforeMs,
+      });
+      expect(result).toEqual({ found: false, scannedFile: rotatedFile });
+    });
+
+    it("accepts the prompt recorded just after the send", async () => {
+      const { baseline, rotatedFile } = await rotatedFixture([
+        user("same", at(-60_000)),
+        user("same", at(400)),
+      ]);
+      const result = await scanClaudeJsonlForResult(baseline, "same", "/tmp/worktree", undefined, {
+        notBeforeMs,
+      });
+      expect(result).toEqual({ found: true, scannedFile: rotatedFile });
+    });
+
+    it("fails closed on an entry with no timestamp", async () => {
+      const { baseline } = await rotatedFixture([user("same")]);
+      const result = await scanClaudeJsonlForResult(baseline, "same", "/tmp/worktree", undefined, {
+        notBeforeMs,
+      });
+      expect(result.found).toBe(false);
+    });
+
+    it("does not apply the floor to the baseline file", async () => {
+      const baselineFile = await makeJsonl("baseline.jsonl", [user("old")]);
+      const size = (await stat(baselineFile)).size;
+      await appendJsonl(baselineFile, [user("same")]);
+      const result = await scanClaudeJsonlForResult(
+        { file: baselineFile, size },
+        "same",
+        "/tmp/worktree",
+        undefined,
+        { notBeforeMs },
+      );
+      expect(result).toEqual({ found: true, scannedFile: baselineFile });
+    });
+
+    it("accepts a queue-operation enqueue after the floor", async () => {
+      const { baseline } = await rotatedFixture([
+        { type: "queue-operation", operation: "enqueue", content: "same", timestamp: at(400) },
+      ]);
+      const result = await scanClaudeJsonlForResult(baseline, "same", "/tmp/worktree", undefined, {
+        notBeforeMs,
+      });
+      expect(result.found).toBe(true);
+    });
+  });
+
   it("reports the baseline file on a baseline hit and when no other file resolves", async () => {
     const baselineFile = await makeJsonl("baseline.jsonl", [
       { type: "user", message: { role: "user", content: "here" } },

@@ -65,6 +65,8 @@ import {
   writeTelegramBindings,
   writeTelegramReplyTarget,
   writeSession,
+  observeSessionWrites,
+  withSessionWriteGuard,
   updatePendingSendBatchConditional,
 } from "../../src/metadata.js";
 import { appendEventLog, readEventLog } from "../../src/event-log.js";
@@ -1408,6 +1410,59 @@ describe("session workspaceId normalization", () => {
     updatedAt: "2026-03-18T10:01:00.000Z",
   };
 
+  it("publishes normalized reset metadata after commit and unregisters synchronous observers", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = {
+      ...legacyBase,
+      id: "api-1",
+      tmuxSession: "api-1",
+      rateLimitedAt: "2026-03-18T10:00:00.000Z",
+      rateLimitResetAt: "2026-03-18T12:00:00+01:00",
+    };
+    const seen: SessionRecord[] = [];
+    const unregister = observeSessionWrites(dataDir, (current) => {
+      expect(readSession(dataDir, current.id)).toEqual(current);
+      seen.push(current);
+    });
+    try {
+      writeSession(dataDir, record);
+      expect(readSession(dataDir, record.id)?.rateLimitResetAt).toBe("2026-03-18T11:00:00.000Z");
+      writeSession(dataDir, { ...record, status: "completed" });
+      expect(readSession(dataDir, record.id)).not.toHaveProperty("rateLimitedAt");
+      expect(readSession(dataDir, record.id)).not.toHaveProperty("rateLimitResetAt");
+      expect(seen.map((session) => session.status)).toEqual(["running", "completed"]);
+    } finally {
+      unregister();
+    }
+    writeSession(dataDir, record);
+    expect(seen).toHaveLength(2);
+  });
+
+  it("propagates observer failure after committed status and fences async stale writes before commit", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = { ...legacyBase, id: "api-1", tmuxSession: "api-1" };
+    const unregister = observeSessionWrites(dataDir, () => {
+      throw new Error("journal failed");
+    });
+    expect(() => writeSession(dataDir, record)).toThrow("journal failed");
+    expect(readSession(dataDir, record.id)?.status).toBe("running");
+    unregister();
+    let current = true;
+    await expect(
+      withSessionWriteGuard(
+        () => {
+          if (!current) throw new Error("reloaded");
+        },
+        async () => {
+          await Promise.resolve();
+          current = false;
+          writeSession(dataDir, { ...record, status: "completed" });
+        },
+      ),
+    ).rejects.toThrow("reloaded");
+    expect(readSession(dataDir, record.id)?.status).toBe("running");
+  });
+
   it("survives a write/read round-trip", async () => {
     // Guards the whitelist trap: normalizeSessionRecord drops any field it
     // does not list, and its own default would then silently re-derive
@@ -1421,6 +1476,24 @@ describe("session workspaceId normalization", () => {
     });
 
     expect(readSession(dataDir, "api-2")?.workspaceId).toBe("api-1");
+  });
+
+  it("keeps a captured empty terminal slot state distinct from legacy records", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = {
+      ...legacyBase,
+      id: "api-1",
+      tmuxSession: "api-1",
+      status: "completed",
+      terminalSlotsCaptured: true,
+      slots: { links: [] },
+    };
+    writeSession(dataDir, record);
+    expect(readSession(dataDir, record.id)).toMatchObject({ terminalSlotsCaptured: true });
+    expect(readSession(dataDir, record.id)).not.toHaveProperty("slots");
+
+    writeSession(dataDir, { ...record, terminalSlotsCaptured: false } as unknown as SessionRecord);
+    expect(readSession(dataDir, record.id)).not.toHaveProperty("terminalSlotsCaptured");
   });
 
   it("persists a rate-limit clear fence and drops malformed provenance", async () => {
@@ -1438,6 +1511,33 @@ describe("session workspaceId normalization", () => {
       rateLimitClearFence: { ...fence, sourceOrdinals: { "/transcript.jsonl": -1 } },
     });
     expect(readSession(dataDir, record.id)?.rateLimitClearFence).toBeUndefined();
+  });
+
+  it("persists the claude status owner and drops a malformed one", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = { ...legacyBase, id: "api-2", tmuxSession: "api-2" };
+    const owner = {
+      agentLaunchId: "launch-1",
+      agentSessionId: "ses_1",
+      pid: 4242,
+      procStart: "777",
+    };
+    writeSession(dataDir, { ...record, claudeStatusOwner: owner });
+    expect(readSession(dataDir, record.id)?.claudeStatusOwner).toEqual(owner);
+    const { procStart: _procStart, ...withoutProcStart } = owner;
+    writeSession(dataDir, { ...record, claudeStatusOwner: withoutProcStart });
+    expect(readSession(dataDir, record.id)?.claudeStatusOwner).toEqual(withoutProcStart);
+    for (const malformed of [
+      { ...owner, pid: 0 },
+      { ...owner, agentLaunchId: 7 },
+      { ...owner, procStart: "" },
+    ]) {
+      writeSession(dataDir, {
+        ...record,
+        claudeStatusOwner: malformed as unknown as NonNullable<SessionRecord["claudeStatusOwner"]>,
+      });
+      expect(readSession(dataDir, record.id)?.claudeStatusOwner).toBeUndefined();
+    }
   });
 
   it("persists the restore idle baseline and accepts legacy records without one", async () => {
@@ -1545,6 +1645,27 @@ describe("session workspaceId normalization", () => {
       );
     },
   );
+
+  it("round-trips snapshotNudge and drops a malformed fingerprint", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-2",
+      tmuxSession: "api-2",
+      snapshotNudge: { fingerprint: "b".repeat(64), attempts: 2 },
+    });
+    expect(readSession(dataDir, "api-2")?.snapshotNudge).toEqual({
+      fingerprint: "b".repeat(64),
+      attempts: 2,
+    });
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-3",
+      tmuxSession: "api-3",
+      snapshotNudge: { fingerprint: "invalid", attempts: 1 },
+    });
+    expect(readSession(dataDir, "api-3")?.snapshotNudge).toBeUndefined();
+  });
 
   it("drops a malformed ToDo reminder fingerprint", async () => {
     const dataDir = await newDataDir();

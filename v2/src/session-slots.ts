@@ -13,10 +13,12 @@ import { fileURLToPath } from "node:url";
 import { agentStateStrategy } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { spurInstallLockPath } from "./install-lock.js";
+import { SNAPSHOT_HOOK_TOOL_NAME, SNAPSHOT_REQUEST_MESSAGE, snapshotDir } from "./snapshots.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "./self-destruct.js";
 import type {
   AgentName,
   SessionLink,
+  SessionLinkFilter,
   SessionSlots,
   SessionSlotsUpdateResult,
   TagDefinition,
@@ -36,12 +38,15 @@ const INSTALL_LOCK_WAIT_SECONDS = 90;
 export const SLOT_TOOL_NAME = "spur-slots";
 export const AGENT_STATE_TOOL_NAME = "spur-agent-state";
 const AGENT_STATE_UPDATER_NAME = "spur-agent-state-updater.mjs";
+const SNAPSHOT_HOOK_SCRIPT_NAME = "spur-snapshot-hook.mjs";
+const SNAPSHOT_HOOK_CLAIM_PREFIX = "snapshot-hook-claim";
 const SPUR_WRAPPER_NAME = "spur";
 const GIT_WRAPPER_NAME = "git";
 // Every generated git wrapper carries this text; wrappers detect each other by it.
 const GIT_WRAPPER_SIGNATURE = "Spur git wrapper could not find git";
 const BRANCH_TOOL_NAME = "spur-branch";
 export const TODO_TOOL_NAME = "spur-todo";
+export const SNAPSHOT_TOOL_NAME = "spur-snapshot";
 export const MANUAL_TITLE_LOCK_MESSAGE =
   "title editing unavailable because title was set manually; do not attempt title edits again.";
 
@@ -109,6 +114,26 @@ export function normalizeSlotUrl(url: string): string {
   } catch {
     throw new Error(`Invalid slot link URL: ${trimmed}`);
   }
+}
+
+export function parseSessionLinkFilters(raw: string[]): SessionLinkFilter[] {
+  return raw.map((value) => {
+    const separator = value.indexOf("=");
+    const label = normalizeSlotLabel(separator < 0 ? value : value.slice(0, separator));
+    return separator < 0 ? { label } : { label, url: normalizeSlotUrl(value.slice(separator + 1)) };
+  });
+}
+
+export function matchesSessionLinks(
+  links: readonly SessionLink[],
+  filters: readonly SessionLinkFilter[] = [],
+): boolean {
+  return filters.every((filter) =>
+    links.some(
+      (link) =>
+        link.label === filter.label && (filter.url === undefined || link.url === filter.url),
+    ),
+  );
 }
 
 function normalizeTitle(title: string): string {
@@ -333,6 +358,97 @@ function shouldWriteAgentStateTools(agent: AgentName | undefined): boolean {
   return agentStateStrategy(agent) === "hook";
 }
 
+// Standalone like the agent-state updater: runs from the session tool dir, never imports Spur modules.
+// Every failure path exits 0 with empty stdout; the only output is one hook JSON object.
+// Keep the version regex and staleness comparison in step with snapshots.ts.
+function snapshotHookScript(): string {
+  return `#!/usr/bin/env node
+import { closeSync, openSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+
+const MESSAGE = ${JSON.stringify(SNAPSHOT_REQUEST_MESSAGE)};
+const [snapshotDir, freshnessArg, claimPrefix, createdArg] = process.argv.slice(2);
+const freshnessMs = Number(freshnessArg);
+const createdAtMs = Number(createdArg);
+
+function readPayload() {
+  try {
+    const parsed = JSON.parse(readFileSync(0, "utf8"));
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// One request per N/2-aligned window: the first hook to create the window's claim file asks.
+// Any claim failure (EEXIST: another hook asked; EACCES, EROFS, ENOSPC) stays silent; Stop and the pane path remain.
+function claimWindow(now) {
+  const window = Math.floor(now / (freshnessMs / 2));
+  try {
+    closeSync(openSync(claimPrefix + "." + window, "wx"));
+  } catch {
+    return false;
+  }
+  try {
+    const stem = basename(claimPrefix) + ".";
+    for (const name of readdirSync(dirname(claimPrefix))) {
+      if (!name.startsWith(stem)) continue;
+      const older = Number(name.slice(stem.length));
+      if (Number.isInteger(older) && older < window) unlinkSync(join(dirname(claimPrefix), name));
+    }
+  } catch {}
+  return true;
+}
+
+// undefined: unreadable newest snapshot (skip); null: no snapshot yet.
+function latestSnapshotAt() {
+  let names;
+  try {
+    names = readdirSync(snapshotDir);
+  } catch (error) {
+    return error && error.code === "ENOENT" ? null : undefined;
+  }
+  let newest = 0;
+  for (const name of names) {
+    const match = /^([1-9][0-9]*)\\.json$/.exec(name);
+    if (match && Number(match[1]) > newest) newest = Number(match[1]);
+  }
+  if (newest === 0) return null;
+  try {
+    const at = Date.parse(JSON.parse(readFileSync(join(snapshotDir, newest + ".json"), "utf8")).at);
+    return Number.isNaN(at) ? undefined : at;
+  } catch {
+    return undefined;
+  }
+}
+
+function run() {
+  if (!snapshotDir || !claimPrefix || !(freshnessMs > 0) || Number.isNaN(createdAtMs)) return;
+  const payload = readPayload();
+  if (!payload) return;
+  if (typeof payload.agent_id === "string" || payload.permission_mode === "plan") return;
+  const event = payload.hook_event_name;
+  if (event !== "PostToolUse" && event !== "Stop") return;
+  if (event === "Stop" && payload.stop_hook_active === true) return;
+  const latestAt = latestSnapshotAt();
+  if (latestAt === undefined) return;
+  if (Date.now() - (latestAt ?? createdAtMs) <= freshnessMs) return;
+  if (event === "Stop") {
+    process.stdout.write(JSON.stringify({ decision: "block", reason: MESSAGE }));
+    return;
+  }
+  if (!claimWindow(Date.now())) return;
+  process.stdout.write(
+    JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: MESSAGE } }),
+  );
+}
+
+try {
+  run();
+} catch {}
+`;
+}
+
 // Tool wrappers are re-written while the owner agent may be live; truncate-then-write
 // would let a concurrent exec read a partial script. Same-dir temp + rename is atomic.
 function writeToolFileAtomic(
@@ -359,6 +475,7 @@ export function ensureSessionSlotTool(args: {
   branchNamingRegex?: string;
   agent?: AgentName;
   installLockPath?: string;
+  snapshotHook?: { freshnessMinutes: number; sessionCreatedAt: string };
 }): string {
   const toolDir = slotToolDir(args.dataDir, args.sessionId);
   const stateFilePath = join(args.dataDir, "session-agent-state", `${args.sessionId}.json`);
@@ -399,6 +516,23 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" self-destruct ${shellEscape(args.session
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
 exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" todo "$@" --session ${shellEscape(args.sessionId)}
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  writeToolFileAtomic(
+    join(toolDir, SNAPSHOT_TOOL_NAME),
+    `#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+action="\${1-}"
+case "$action" in
+  write|list|show) shift ;;
+  *)
+    echo "Usage: ${SNAPSHOT_TOOL_NAME} write|list|show [options]" >&2
+    exit 2
+    ;;
+esac
+exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" snapshot "$action" ${shellEscape(args.sessionId)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );
@@ -627,6 +761,20 @@ try {
       `#!/usr/bin/env bash
 set -euo pipefail
 exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UPDATER_NAME))} ${shellEscape(stateFilePath)}
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+  }
+  if (args.snapshotHook) {
+    writeToolFileAtomic(join(toolDir, SNAPSHOT_HOOK_SCRIPT_NAME), snapshotHookScript(), {
+      encoding: "utf8",
+      mode: 0o755,
+    });
+    writeToolFileAtomic(
+      join(toolDir, SNAPSHOT_HOOK_TOOL_NAME),
+      `#!/usr/bin/env bash
+set -euo pipefail
+exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_SCRIPT_NAME))} ${shellEscape(snapshotDir(args.dataDir, args.sessionId))} ${args.snapshotHook.freshnessMinutes * 60_000} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_CLAIM_PREFIX))} ${Date.parse(args.snapshotHook.sessionCreatedAt)}
 `,
       { encoding: "utf8", mode: 0o755 },
     );

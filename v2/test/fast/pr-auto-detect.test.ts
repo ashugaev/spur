@@ -3,6 +3,7 @@ import type * as claudeJsonlStateModule from "../../src/claude-jsonl-state.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as prLookupModule from "../../src/pr-lookup.js";
 import type * as RuntimeTmuxModule from "../../src/runtime-tmux.js";
+import type * as sessionSlotsModule from "../../src/session-slots.js";
 import type { AppConfig, ProjectConfig, SessionRecord, SessionSlots } from "../../src/types.js";
 
 const { existsSyncMock } = vi.hoisted(() => ({
@@ -92,6 +93,7 @@ vi.mock("../../src/ids.js", () => ({
   reserveNextSessionId: vi.fn(),
 }));
 vi.mock("../../src/metadata.js", () => ({
+  observeSessionWrites: vi.fn(() => vi.fn()),
   deleteServiceInstance: vi.fn(),
   deleteServiceInstancesForSession: vi.fn(),
   deleteServiceSourceStatesForService: vi.fn(),
@@ -103,6 +105,14 @@ vi.mock("../../src/metadata.js", () => ({
   readSession: readSessionMock,
   writeServiceInstance: vi.fn(),
   writeSession: writeSessionMock,
+}));
+// PR discovery uses fake filesystem probes; journal storage has its own tests.
+vi.mock("../../src/session-transitions.js", () => ({
+  SessionTransitions: class {
+    observeStatus = vi.fn();
+    observeState = vi.fn();
+    observedState = vi.fn();
+  },
 }));
 // node:fs is stubbed below (existsSync always true, mkdirSync/writeFileSync
 // no-ops) for the rest of this suite's needs, which breaks
@@ -160,7 +170,8 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => ({
   tmuxSessionExists: tmuxSessionExistsMock,
   waitForTmuxReady: vi.fn(),
 }));
-vi.mock("../../src/session-slots.js", () => ({
+vi.mock("../../src/session-slots.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof sessionSlotsModule>()),
   AGENT_STATE_TOOL_NAME: "spur-agent-state",
   SLOT_TOOL_NAME: "spur-slots",
   applySlotsUpdate: applySlotsUpdateMock,

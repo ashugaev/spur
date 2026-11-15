@@ -146,6 +146,54 @@ describe("readClaudeSessionStatus", () => {
     });
   });
 
+  it("exposes the status file kind only when present", async () => {
+    const sessionsDir = await makeSessionsDir();
+    await writeStatus(sessionsDir, "a.json", {
+      cwd: "/tmp/kind-a",
+      pid: 300,
+      kind: "interactive",
+      status: "idle",
+      updatedAt: "2026-03-18T10:00:00.000Z",
+    });
+    await writeStatus(sessionsDir, "b.json", {
+      cwd: "/tmp/kind-b",
+      pid: 301,
+      status: "idle",
+      updatedAt: "2026-03-18T10:00:00.000Z",
+    });
+
+    const withKind = await readClaudeSessionStatus("/tmp/kind-a", undefined, sessionsDir);
+    const withoutKind = await readClaudeSessionStatus("/tmp/kind-b", undefined, sessionsDir);
+
+    expect(withKind?.kind).toBe("interactive");
+    expect(withoutKind).not.toBeNull();
+    expect(withoutKind).not.toHaveProperty("kind");
+  });
+
+  it("exposes procStart only when it is a string", async () => {
+    const sessionsDir = await makeSessionsDir();
+    await writeStatus(sessionsDir, "a.json", {
+      cwd: "/tmp/proc-a",
+      pid: 300,
+      procStart: "301955434",
+      status: "idle",
+      updatedAt: "2026-03-18T10:00:00.000Z",
+    });
+    await writeStatus(sessionsDir, "b.json", {
+      cwd: "/tmp/proc-b",
+      pid: 301,
+      status: "idle",
+      updatedAt: "2026-03-18T10:00:00.000Z",
+    });
+
+    const withStart = await readClaudeSessionStatus("/tmp/proc-a", undefined, sessionsDir);
+    const withoutStart = await readClaudeSessionStatus("/tmp/proc-b", undefined, sessionsDir);
+
+    expect(withStart?.procStart).toBe("301955434");
+    expect(withoutStart).not.toBeNull();
+    expect(withoutStart).not.toHaveProperty("procStart");
+  });
+
   it("ignores a stranger's status file that shares the workspace when a pane pid is known", async () => {
     const sessionsDir = await makeSessionsDir();
     // Idle process actually in this session's pane.
