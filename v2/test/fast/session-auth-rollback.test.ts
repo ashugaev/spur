@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AuthRegistration } from "../../src/auth-proxy.js";
 import {
@@ -9,17 +11,20 @@ import {
   createSessionStore,
   createWorktreeMock,
   disposeSessionServiceHarness,
+  isolateSessionSlotTool,
   findForeignAgentProcessesForSessionMock,
   isProcessRunningInTmuxMock,
   loadSessionServiceModule,
   logSpurEventMock,
   resetSessionServiceHarness,
+  TEST_DATA_DIR,
   tmuxSessionExistsMock,
 } from "../helpers/session-service-harness.js";
 
 describe("managed foreground authorization rollback", () => {
   beforeEach(async () => {
     await resetSessionServiceHarness(() => []);
+    isolateSessionSlotTool();
     authAccountsReadMock.mockReturnValue({
       schema: 1,
       accounts: [{ id: "backup", provider: "claude", createdAt: "2026-03-18T09:00:00.000Z" }],
@@ -101,6 +106,10 @@ describe("managed foreground authorization rollback", () => {
       sessionId: "api-1",
       accountId: "backup",
     });
+    // Guard: managed home is created under the per-test dir, never the shared /tmp/spur-tools.
+    expect(existsSync(join(TEST_DATA_DIR, "session-tools", "api-1", "managed-claude-home"))).toBe(
+      true,
+    );
   });
 
   it("keeps a newer persisted binding instead of replacing it with the initial registration", async () => {

@@ -4,6 +4,7 @@ import {
   type TestAccount,
   resetSessionServiceHarness,
   disposeSessionServiceHarness,
+  isolateSessionSlotTool,
   upsertConfigRegistryPathMock,
   addUnconfiguredProjectMock,
   removeUnconfiguredProjectMock,
@@ -5559,6 +5560,7 @@ describe("SessionService", () => {
   });
 
   it("binds the launch to the requested claude account and persists the account id", async () => {
+    isolateSessionSlotTool();
     mockClaudeJsonlState("waiting");
     testAccounts = [
       {
@@ -5574,9 +5576,15 @@ describe("SessionService", () => {
     await service.spawn({ project: "api", prompt: "hello", claudeAccountId: "acc-2" });
 
     const launchCall = buildAgentLaunchPlanMock.mock.calls.at(-1);
-    expect(launchCall?.[2]).toMatchObject({
-      claudeConfigDir: "/tmp/spur-tools/api-1/managed-claude-home",
-    });
+    const managedHome = join(TEST_DATA_DIR, "session-tools", "api-1", "managed-claude-home");
+    expect(launchCall?.[2]).toMatchObject({ claudeConfigDir: managedHome });
+    // Guard: the managed home is materialized under the per-test dir, never the shared /tmp/spur-tools.
+    expect(existsSync(managedHome)).toBe(true);
+    expect(
+      ensureSessionSlotToolMock.mock.results.every(({ value }) =>
+        String(value).startsWith(TEST_DATA_DIR),
+      ),
+    ).toBe(true);
     expect(authProxyRegisterSessionMock).toHaveBeenCalledWith({
       sessionId: "api-1",
       provider: "claude",
@@ -21746,6 +21754,8 @@ describe("SessionService", () => {
   });
 
   describe("managed authorization lifecycle", () => {
+    beforeEach(isolateSessionSlotTool);
+
     function registration(provider: "claude" | "codex", accountId = "primary"): AuthRegistration {
       return {
         sessionId: "api-1",
@@ -21837,7 +21847,7 @@ describe("SessionService", () => {
       authProxyRegisterSessionMock.mockResolvedValue(registration("claude", "backup"));
       const service = await createDisposedSessionService();
       await service.spawn({ project: "api", prompt: "hello", authAccountId: "backup" });
-      const managedHome = join(ensureSessionSlotToolMock(), "managed-claude-home");
+      const managedHome = join(TEST_DATA_DIR, "session-tools", "api-1", "managed-claude-home");
       const links = readdirSync(managedHome).filter((name) =>
         lstatSync(join(managedHome, name)).isSymbolicLink(),
       );
@@ -27856,6 +27866,7 @@ describe("SessionService", () => {
     );
 
     it("recreates accepted work with the same identity, queued input, account and launch payload", async () => {
+      isolateSessionSlotTool();
       mockTimerPromisesSleepWithFakeTimers();
       mockClaudeJsonlState("waiting");
       durableConfig();
@@ -27961,7 +27972,7 @@ describe("SessionService", () => {
       expect(buildAgentLaunchPlanMock.mock.calls.at(-1)?.[2]).toMatchObject({
         model: "sonnet",
         reasoningEffort: "high",
-        claudeConfigDir: `/tmp/spur-tools/${accepted.id}/managed-claude-home`,
+        claudeConfigDir: join(TEST_DATA_DIR, "session-tools", accepted.id, "managed-claude-home"),
       });
       expect(authProxyRegisterSessionMock).toHaveBeenCalledTimes(2);
       expect(
@@ -29277,6 +29288,7 @@ describe("SessionService", () => {
     it.each(["background", "foreground HTTP"] as const)(
       "preserves selected Claude account through %s resource acceptance and launch",
       async (caller) => {
+        isolateSessionSlotTool();
         mockClaudeJsonlState("waiting");
         loadConfigMock.mockReturnValue(queueConfig());
         const sessions = createSessionStore();
@@ -29336,7 +29348,7 @@ describe("SessionService", () => {
         });
         expect(buildAgentLaunchPlanMock.mock.calls.at(-1)?.[2]).toMatchObject({
           model: "opus",
-          claudeConfigDir: `/tmp/spur-tools/${accepted.id}/managed-claude-home`,
+          claudeConfigDir: join(TEST_DATA_DIR, "session-tools", accepted.id, "managed-claude-home"),
         });
         expect(
           authProxyRegisterSessionMock.mock.calls.every(

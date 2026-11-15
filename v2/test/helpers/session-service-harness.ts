@@ -2143,6 +2143,16 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   });
 }
 
+// Tests whose launch really writes under the slot tool dir (managed Claude home) must call this,
+// or they write to the host-shared /tmp/spur-tools, which another OS user may own.
+export function isolateSessionSlotTool(): void {
+  ensureSessionSlotToolMock.mockImplementation(({ sessionId }: { sessionId: string }) => {
+    const dir = join(TEST_DATA_DIR, "session-tools", sessionId);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  });
+}
+
 // afterEach body: drain and dispose every SessionService the test built.
 export async function disposeSessionServiceHarness(): Promise<void> {
   for (const service of activeSessionServices.splice(0)) {
