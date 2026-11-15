@@ -52,6 +52,32 @@ async function mockPr(page: Page, info: PrInfo) {
 test.describe("PR hover cards", () => {
   test.use({ viewport: { width: 1280, height: 800 } });
 
+  test("CI icon is a red clock while failed checks run, a cross once finished", async ({
+    page,
+  }) => {
+    await mockPr(page, infoWith(fiveChecks));
+    await page.goto("/");
+    const badge = page.locator(`a[href='${prUrl}']`).first();
+    const running = badge.getByRole("img", {
+      name: "CI failing, checks still running",
+      exact: true,
+    });
+    await expect(running).toBeVisible();
+    await expect(running).toHaveAttribute("stroke", "var(--color-status-error)");
+    await expect(badge.getByRole("group").first()).toHaveAttribute(
+      "aria-label",
+      /^CI failing, checks still running/,
+    );
+
+    await mockPr(page, infoWith(fiveChecks.filter((c) => c.state !== "pending")));
+    await page.reload();
+    const finished = page
+      .locator(`a[href='${prUrl}']`)
+      .first()
+      .getByRole("img", { name: "CI failing", exact: true });
+    await expect(finished).toBeVisible();
+  });
+
   test("CI card lists checks failed, pending, passed with no totals", async ({ page }) => {
     await mockPr(page, infoWith(fiveChecks));
     await page.goto("/");

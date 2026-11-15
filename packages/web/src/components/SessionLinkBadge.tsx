@@ -27,7 +27,7 @@ import {
   usePrInfo,
 } from "@/lib/link-icons";
 import type { SpurSessionLink } from "@/lib/types";
-import { prStatusIndicator } from "@/lib/pr-status-shape";
+import { isCiFailingWhileRunning, prStatusIndicator } from "@/lib/pr-status-shape";
 
 interface SessionLinkBadgeProps {
   link: SpurSessionLink;
@@ -46,8 +46,9 @@ function hoverClassForLink(link: SpurSessionLink): string {
 function statusTitle(info: PrInfo, github: boolean, includeCi = true): string | undefined {
   const facts: string[] = [];
   if (includeCi && info.ciStatus === "success") facts.push("CI passing");
-  if (includeCi && info.ciStatus === "failure") facts.push("CI failing");
-  if (includeCi && info.ciStatus === "pending") facts.push("CI pending");
+  if (includeCi && isCiFailingWhileRunning(info)) facts.push("CI failing, checks still running");
+  else if (includeCi && info.ciStatus === "failure") facts.push("CI failing");
+  else if (includeCi && info.ciStatus === "pending") facts.push("CI pending");
   if (info.reviewDecision === "approved") facts.push("Review approved");
   if (info.reviewDecision === "changes_requested") facts.push("Changes requested");
   if (info.reviewDecision === "review_required") {
@@ -117,7 +118,10 @@ export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBa
                 {indicator.kind === "review" ? (
                   <ReviewDecisionDot decision={indicator.decision} showTitle={false} />
                 ) : (
-                  <CiStatusDot status={indicator.status} />
+                  <CiStatusDot
+                    status={indicator.status}
+                    running={isCiFailingWhileRunning(prInfo)}
+                  />
                 )}
               </PrHoverCardTrigger>
             ) : null}
