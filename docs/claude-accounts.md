@@ -28,6 +28,7 @@ Managed Claude/Codex sessions change account for the next request through
 Direct sessions enter managed routing on explicit restore/respawn.
 
 Managed routing preserves native session context and process identity during account changes.
+Managed Claude links host `~/.claude` user config (`CLAUDE.md`, `settings.json`, skills, agents, commands, plugins, hooks, output styles) and user MCP servers; never host credentials.
 Codex uses Responses HTTP streaming; provider credentials stay with the local proxy.
 
 ## Auto-rotation
