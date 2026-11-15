@@ -638,7 +638,7 @@ describe("SessionDetail voice input", () => {
     expect(within(nav).queryByRole("link", { name: /codex.*api-b2/i })).not.toBeInTheDocument();
     expect(within(nav).queryByRole("link", { name: /cursor.*api-c3/i })).not.toBeInTheDocument();
 
-    fireEvent.click(within(nav).getByRole("button", { name: "Show completed desk agents" }));
+    fireEvent.click(within(nav).getByRole("button", { name: "Show closed desk agents" }));
 
     expect(within(nav).getByRole("link", { name: /codex.*api-b2/i })).toBeInTheDocument();
     expect(within(nav).queryByRole("link", { name: /cursor.*api-c3/i })).not.toBeInTheDocument();
@@ -7526,10 +7526,47 @@ describe("SessionDetail display state", () => {
     await expectStateBadge("error");
   });
 
-  it("shows killed state when session is killed (does not override to working)", async () => {
+  it("shows closed when the lifecycle is killed despite native working", async () => {
     stubFetch({ status: "killed", state: "killed" }, "working");
     render(<SessionDetail sessionId="api-a1" />);
-    await expectStateBadge("killed");
+    await expectStateBadge("closed");
+  });
+
+  it("keeps a completed task live with its artifacts and close action", async () => {
+    stubFetch(
+      {
+        state: "completed",
+        artifacts: [
+          {
+            id: "proof.txt",
+            name: "proof.txt",
+            size: 8,
+            mimeType: "text/plain",
+            kind: "text",
+            origin: "intentional",
+            createdAt: "2026-01-02T10:00:00.000Z",
+            updatedAt: "2026-01-02T10:00:00.000Z",
+          },
+        ],
+      },
+      "waiting",
+    );
+    render(<SessionDetail sessionId="api-a1" />);
+    await expectStateBadge("completed");
+    expect(screen.getByRole("button", { name: "Close Session" })).toHaveAttribute(
+      "title",
+      "Stop the agent and services, delete artifacts, remove the worktree",
+    );
+    expect(screen.getByPlaceholderText("Message...")).toBeEnabled();
+    expect(screen.getByText("proof.txt")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reopen" })).not.toBeInTheDocument();
+  });
+
+  it("shows closed after lifecycle completion", async () => {
+    stubFetch({ status: "completed", state: "stopped", runtimeAlive: false }, "waiting");
+    render(<SessionDetail sessionId="api-a1" />);
+    await expectStateBadge("closed");
+    expect(screen.getByRole("button", { name: "Reopen" })).toBeInTheDocument();
   });
 
   it("shows stopped state when session is stopped (does not override to working)", async () => {
@@ -7538,11 +7575,14 @@ describe("SessionDetail display state", () => {
     await expectStateBadge("stopped");
   });
 
-  it("overrides to working when session state is waiting and claude conversation reports working", async () => {
-    stubFetch({ status: "running", state: "waiting" }, "working");
-    render(<SessionDetail sessionId="api-a1" />);
-    await expectStateBadge("working");
-  });
+  it.each(["waiting", "completed"] as const)(
+    "overrides %s when claude conversation reports working",
+    async (state) => {
+      stubFetch({ status: "running", state }, "working");
+      render(<SessionDetail sessionId="api-a1" />);
+      await expectStateBadge("working");
+    },
+  );
 
   it("shows working when session state is working and claude conversation reports working", async () => {
     stubFetch({ status: "running", state: "working" }, "working");
@@ -8797,7 +8837,7 @@ describe("SessionDetail GitHub PR check unavailable", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Complete" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Close Session" }));
 
     await waitFor(() => {
       expect(
@@ -8909,7 +8949,7 @@ describe("SessionDetail lifecycle operation", () => {
       await advance();
       expect(screen.getByText("Invalid session lifecycle snapshot")).toBeInTheDocument();
       expect(screen.queryByRole("heading", { name: "Fix auth" })).not.toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "Complete" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Close Session" })).not.toBeInTheDocument();
       current = sessionFixture();
       // The rejected read is a failed poll: the next one backs off to 2x the 4s base.
       await advance(8_000);
@@ -9109,12 +9149,18 @@ describe("SessionDetail lifecycle operation", () => {
       render(<SessionDetail sessionId="api-a1" />);
       await advance();
       const button = screen.getByRole("button", {
-        name: action === "complete" ? "Complete" : "Reopen",
+        name: action === "complete" ? "Close Session" : "Reopen",
       });
       fireEvent.click(button);
       fireEvent.click(button);
       await advance();
       expect(posts).toBe(1);
+      if (action === "complete") {
+        expect(screen.getByRole("button", { name: "Closing session" })).toHaveAttribute(
+          "aria-busy",
+          "true",
+        );
+      }
       current = { ...current, lifecycle: receipt(operationId, "pending", 1, action) };
       await advance(12_000);
       expect(posts).toBe(1);

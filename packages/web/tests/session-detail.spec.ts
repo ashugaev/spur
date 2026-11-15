@@ -508,7 +508,7 @@ test.describe("S1: Session detail header", () => {
     );
     await expect(nav.getByRole("link", { name: /cursor.*detail-s1-desk-killed/i })).toHaveCount(0);
 
-    await nav.getByRole("button", { name: "Show completed desk agents" }).click();
+    await nav.getByRole("button", { name: "Show closed desk agents" }).click();
 
     await expect(nav.getByRole("link", { name: /claude.*detail-s1-desk-complete/i })).toBeVisible();
     await expect(nav.getByRole("link", { name: /cursor.*detail-s1-desk-killed/i })).toHaveCount(0);
@@ -1248,12 +1248,47 @@ test.describe("S2: Actions bar", () => {
     await expect(page.getByRole("button", { name: /^pause$/i })).toBeVisible();
   });
 
-  test("Complete button visible when session is completable", async ({ page }) => {
+  test("completed task retains artifacts and messaging until Close Session", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-task-completed",
+      state: "completed",
+      artifacts: [
+        {
+          id: "proof.zip",
+          name: "proof.zip",
+          size: 12,
+          mimeType: "application/zip",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-01-02T10:00:00.000Z",
+          updatedAt: "2026-01-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "waiting");
+    await page.goto(`/sessions/${session.id}`);
+    await expect(page.locator("header").getByText("completed", { exact: true })).toBeVisible();
+    await expect(page.getByText("proof.zip", { exact: true })).toBeVisible();
+    await expect(page.getByPlaceholder("Message...")).toBeEnabled();
+    await expect(page.getByRole("button", { name: /^close session$/i })).toHaveAttribute(
+      "title",
+      "Stop the agent and services, delete artifacts, remove the worktree",
+    );
+    session.status = "completed";
+    session.state = "stopped";
+    session.runtimeAlive = false;
+    await page.reload();
+    await expect(page.locator("header").getByText("closed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^reopen$/i })).toBeVisible();
+  });
+
+  test("Close Session button visible when session is closable", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s2-3" });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await expect(page.getByRole("button", { name: /^complete$/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^close session$/i })).toBeVisible();
   });
 
   test("Kill button visible when session not completed/killed", async ({ page }) => {
@@ -1582,7 +1617,7 @@ test.describe("S2: Actions bar", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^complete$/i }).click();
+    await page.getByRole("button", { name: /^close session$/i }).click();
 
     const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
     await expect(dialog).toBeVisible();
@@ -1622,7 +1657,7 @@ test.describe("S2: Actions bar", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^complete$/i }).click();
+    await page.getByRole("button", { name: /^close session$/i }).click();
 
     const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
     await expect(dialog).toBeVisible();
@@ -1650,7 +1685,7 @@ test.describe("S2: Actions bar", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^complete$/i }).click();
+    await page.getByRole("button", { name: /^close session$/i }).click();
 
     const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
     await expect(dialog).toBeVisible();
@@ -1717,7 +1752,7 @@ test.describe("S2: Actions bar", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^complete$/i }).click();
+    await page.getByRole("button", { name: /^close session$/i }).click();
 
     const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
     await expect(dialog).toBeVisible();
@@ -4932,7 +4967,7 @@ test.describe("S5: Runtime sidebar", () => {
         await expect(control).toBeVisible();
         await expect(control).toBeDisabled();
       }
-      for (const name of ["Continue anyway", "Restore", "Complete"]) {
+      for (const name of ["Continue anyway", "Restore", "Close Session"]) {
         await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
       }
       await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();

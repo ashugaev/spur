@@ -1700,6 +1700,59 @@ describe("session workspaceId normalization", () => {
   );
 });
 
+describe("task-status persistence", () => {
+  const base: SessionRecord = {
+    id: "api-1",
+    project: "api",
+    agent: "claude",
+    prompt: "ship it",
+    branch: "feature/task-status",
+    worktree: true,
+    worktreePath: "/tmp/worktree",
+    tmuxSession: "api-1",
+    launchCommand: "claude",
+    status: "running",
+    agentLaunchId: "launch-a",
+    createdAt: "2026-11-15T00:00:00Z",
+    updatedAt: "2026-11-15T00:00:00Z",
+  };
+  it("round-trips a declaration across cache reloads and drops it on a new launch", async () => {
+    const dataDir = await newDataDir();
+    const taskStatus = {
+      state: "completed",
+      revision: 2,
+      agentLaunchId: "launch-a",
+      updatedAt: "2026-11-15T00:00:00Z",
+    } as const;
+    writeSession(dataDir, { ...base, taskStatusRevision: 2, taskStatus });
+    expect(readSession(dataDir, base.id)).toMatchObject({ taskStatusRevision: 2, taskStatus });
+    writeSession(dataDir, {
+      ...base,
+      agentLaunchId: "launch-b",
+      taskStatusRevision: 2,
+      taskStatus,
+    });
+    expect(readSession(dataDir, base.id)?.taskStatus).toBeUndefined();
+  });
+  it("accepts legacy absence and omits malformed optional values", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, base);
+    expect(readSession(dataDir, base.id)?.taskStatusRevision).toBeUndefined();
+    writeSession(dataDir, {
+      ...base,
+      taskStatusRevision: -1,
+      taskStatus: {
+        state: "completed",
+        revision: 0,
+        agentLaunchId: "launch-a",
+        updatedAt: "invalid",
+      },
+    });
+    expect(readSession(dataDir, base.id)?.taskStatus).toBeUndefined();
+    expect(readSession(dataDir, base.id)?.taskStatusRevision).toBeUndefined();
+  });
+});
+
 describe("staleSidecars", () => {
   const base = {
     project: "api",

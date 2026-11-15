@@ -29,6 +29,7 @@ import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, Option, type Help } from "commander";
 import { registerReviewApp } from "./review-app.js";
 import { registerReviewGate } from "./review-gate.js";
+import { parseTaskStatusRequest } from "./task-status.js";
 import {
   connectProjectConfig,
   deleteJson,
@@ -197,6 +198,7 @@ import {
   type WorkSnapshot,
   type WorkSnapshotMeta,
   type WriteSnapshotRequest,
+  type TaskStatusView,
 } from "./types.js";
 import { getVersion } from "./version.js";
 import {
@@ -3931,6 +3933,33 @@ export function createProgram(cliEntrypoint: string): Command {
         success: (session) => `Completed ${session.id}.`,
         render: renderSessionCard,
       });
+    });
+
+  program
+    .command("task-status")
+    .description("Read or declare the current task outcome without closing its session.")
+    .argument("[state]", "Task outcome: completed, needs_input, or clear")
+    .requiredOption("--session <id>", "Session id")
+    .option("--revision <integer>", "Revision retained at task start")
+    .option("--json", "Print raw JSON")
+    .action(async (state: string | undefined, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const path = `/sessions/${encodeURIComponent(options.session as string)}/task-status`;
+      const view =
+        state === undefined
+          ? await getJson<TaskStatusView>(cliEntrypoint, path, configPath)
+          : await postJson<TaskStatusView>(
+              cliEntrypoint,
+              path,
+              parseTaskStatusRequest({
+                state,
+                revision: options.revision === undefined ? undefined : Number(options.revision),
+                agentLaunchId: process.env["SPUR_AGENT_LAUNCH_ID"],
+              }),
+              configPath,
+            );
+      if (options.json) printJson(view);
+      else writeStdout(`revision ${view.revision}${view.state ? ` ${view.state}` : ""}\n`);
     });
 
   const todoCommand = program

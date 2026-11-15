@@ -56,6 +56,24 @@ function runtimeInfo(overrides: Partial<RuntimeInfo> = {}): RuntimeInfo {
 }
 
 describe("cli-view.describeSession", () => {
+  it("distinguishes a completed task from a closed session in the session list", () => {
+    const render = (item: SessionView) =>
+      renderInteractiveSessionList({
+        info: runtimeInfo(),
+        sessions: [item],
+        selectedSessionId: item.id,
+        selectedDetail: item,
+        detailLoading: false,
+        totalSessions: 1,
+        windowStart: 0,
+        maxDetailLines: 2,
+      });
+    const live = render(session({ state: "completed" }));
+    expect(live).toContain("Completed");
+    const closed = render(session({ state: "stopped", status: "completed", runtimeAlive: false }));
+    expect(closed).toContain("Closed");
+  });
+
   it("labels shared workspaces without implying a broken worktree", () => {
     expect(
       describeSession(

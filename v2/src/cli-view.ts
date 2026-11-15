@@ -192,7 +192,7 @@ function rowLabel(session: SessionListItemView): string {
     return "Paused";
   }
   if (session.status === "completed") {
-    return "Completed";
+    return "Closed";
   }
   return stateLabel(session.state);
 }
@@ -203,6 +203,8 @@ function stateLabel(state: SessionState): string {
       return "Working";
     case "waiting":
       return "Waiting";
+    case "completed":
+      return "Completed";
     case "needs_input":
       return "Needs Input";
     case "rate_limited":

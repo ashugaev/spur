@@ -678,7 +678,7 @@ describe("Dashboard", () => {
     expect(screen.queryByText("Send message")).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText("Message...")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Complete" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Close Session" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Kill" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Details" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Fix auth" })).toHaveAttribute(

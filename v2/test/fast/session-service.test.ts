@@ -592,6 +592,250 @@ async function useRealTodoLedger(): Promise<void> {
 }
 
 describe("SessionService", () => {
+  describe("task-status", () => {
+    async function setup() {
+      mockClaudeJsonlState("waiting");
+      workspaceExistsMock.mockReturnValue(true);
+      const sessions = createSessionStore(runningSession({ agentLaunchId: "launch-a" }));
+      const service = await createDisposedSessionService();
+      return { sessions, service };
+    }
+
+    it.each(["completed", "needs_input"] as const)(
+      "accepts a direct reply after %s and retires its declaration",
+      async (state) => {
+        const { service } = await setup();
+        try {
+          await service.writeTaskStatus("api-1", { state, revision: 0, agentLaunchId: "launch-a" });
+          await service.send("api-1", { message: "continue this task", queue: false });
+          expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toEqual([
+            "continue this task",
+          ]);
+          expect(await service.readTaskStatus("api-1")).toEqual({ revision: 1 });
+          await expect(
+            service.writeTaskStatus("api-1", {
+              state: "completed",
+              revision: 0,
+              agentLaunchId: "launch-a",
+            }),
+          ).rejects.toMatchObject({ code: "stale_task_status" });
+          expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        } finally {
+          service.dispose();
+        }
+      },
+    );
+
+    it("declares completed across views without stopping runtime or removing artifacts", async () => {
+      const { sessions, service } = await setup();
+      try {
+        const before = sessions.get("api-1");
+        expect(await service.readTaskStatus("api-1")).toEqual({ revision: 0 });
+        expect((await service.get("api-1")).state).toBe("waiting");
+        expect(
+          await service.writeTaskStatus("api-1", {
+            state: "completed",
+            revision: 0,
+            agentLaunchId: "launch-a",
+          }),
+        ).toEqual({ revision: 0, state: "completed" });
+        const detail = await service.get("api-1");
+        expect(detail).toMatchObject({
+          status: "running",
+          state: "completed",
+          runtimeAlive: true,
+          workspaceExists: true,
+        });
+        expect(detail).not.toHaveProperty("taskStatus");
+        expect(detail).not.toHaveProperty("taskStatusRevision");
+        expect((await service.list({ view: "dashboard" }))[0]?.state).toBe("completed");
+        expect((await service.list())[0]?.state).toBe("completed");
+        expect(sessions.get("api-1")).toMatchObject({
+          status: before?.status,
+          worktreePath: before?.worktreePath,
+          agentLaunchId: "launch-a",
+        });
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(removeWorktreeMock).not.toHaveBeenCalled();
+        expect(
+          logSpurEventMock.mock.calls.some(
+            ([, event]) =>
+              event.event === "session.state.transition" &&
+              event.details?.toState === "completed" &&
+              event.details?.source === "task_status",
+          ),
+        ).toBe(true);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("hides completed during raw working inside the waiting hold and restores it after the helper tail", async () => {
+      const { service } = await setup();
+      try {
+        await service.writeTaskStatus("api-1", {
+          state: "completed",
+          revision: 0,
+          agentLaunchId: "launch-a",
+        });
+        mockClaudeJsonlState("working");
+        expect((await service.get("api-1")).state).toBe("working");
+        mockClaudeJsonlState("waiting");
+        expect((await service.get("api-1")).state).toBe("completed");
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("rejects stale launch/revision and refuses completed with open or empty work", async () => {
+      const { service } = await setup();
+      try {
+        await expect(
+          service.writeTaskStatus("api-1", {
+            state: "completed",
+            revision: 1,
+            agentLaunchId: "launch-a",
+          }),
+        ).rejects.toMatchObject({ code: "stale_task_status" });
+        await expect(
+          service.writeTaskStatus("api-1", {
+            state: "completed",
+            revision: 0,
+            agentLaunchId: "old",
+          }),
+        ).rejects.toMatchObject({ code: "stale_task_status" });
+        await mockTodoLedger({
+          revision: "empty",
+          status: "empty",
+          counts: { total: 0, open: 0, held: 0, completed: 0, cancelled: 0 },
+          items: [],
+          finishOverrides: [],
+        });
+        await expect(
+          service.writeTaskStatus("api-1", {
+            state: "completed",
+            revision: 0,
+            agentLaunchId: "launch-a",
+          }),
+        ).rejects.toMatchObject({ code: "todo_ledger_empty" });
+        await mockTodoLedger(heldProjection("held", "answer"));
+        await expect(
+          service.writeTaskStatus("api-1", {
+            state: "completed",
+            revision: 0,
+            agentLaunchId: "launch-a",
+          }),
+        ).rejects.toMatchObject({ code: "todo_open_work" });
+        await expect(
+          service.writeTaskStatus("api-1", {
+            state: "needs_input",
+            revision: 0,
+            agentLaunchId: "launch-a",
+          }),
+        ).resolves.toMatchObject({ state: "needs_input" });
+        await expect(
+          service.writeTaskStatus("api-1", {
+            state: "clear",
+            revision: 0,
+            agentLaunchId: "launch-a",
+          }),
+        ).resolves.toEqual({ revision: 0 });
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("invalidates on unique queue acceptance, not a duplicate, and separates preaccepted tasks at delivery", async () => {
+      const { sessions, service } = await setup();
+      const internals = service as unknown as {
+        appendQueuedMessage(
+          record: SessionRecord,
+          message: string,
+          awaiting: boolean,
+        ): SessionRecord;
+        runDeliveryTransaction(
+          id: string,
+          message: string,
+          intent: { kind: "queued-drain"; message: string },
+          options: { recoverOnLiveAckTimeout: boolean },
+        ): Promise<unknown>;
+      };
+      try {
+        await service.writeTaskStatus("api-1", {
+          state: "completed",
+          revision: 0,
+          agentLaunchId: "launch-a",
+        });
+        const first = internals.appendQueuedMessage(sessions.get("api-1")!, "task A", true);
+        expect(first.taskStatusRevision).toBe(1);
+        expect(first.taskStatus).toBeUndefined();
+        expect(internals.appendQueuedMessage(first, "task A", true).taskStatusRevision).toBe(1);
+        const second = internals.appendQueuedMessage(first, "task B", true);
+        expect(second.taskStatusRevision).toBe(2);
+        await internals.runDeliveryTransaction(
+          "api-1",
+          "task A",
+          { kind: "queued-drain", message: "task A" },
+          { recoverOnLiveAckTimeout: true },
+        );
+        const tokenA = (await service.readTaskStatus("api-1")).revision;
+        expect(tokenA).toBe(3);
+        await service.writeTaskStatus("api-1", {
+          state: "needs_input",
+          revision: tokenA,
+          agentLaunchId: "launch-a",
+        });
+        await internals.runDeliveryTransaction(
+          "api-1",
+          "task B",
+          { kind: "queued-drain", message: "task B" },
+          { recoverOnLiveAckTimeout: true },
+        );
+        const tokenB = (await service.readTaskStatus("api-1")).revision;
+        expect(tokenB).toBe(4);
+        await expect(
+          service.writeTaskStatus("api-1", {
+            state: "completed",
+            revision: tokenA,
+            agentLaunchId: "launch-a",
+          }),
+        ).rejects.toMatchObject({ code: "stale_task_status" });
+        await expect(
+          service.writeTaskStatus("api-1", {
+            state: "completed",
+            revision: tokenB,
+            agentLaunchId: "launch-a",
+          }),
+        ).resolves.toMatchObject({ state: "completed" });
+        expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toEqual([
+          "task A",
+          "task B",
+        ]);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("clears declaration when the agent reopens its ledger without invalidating its task token", async () => {
+      const { service } = await setup();
+      try {
+        await service.writeTaskStatus("api-1", {
+          state: "completed",
+          revision: 0,
+          agentLaunchId: "launch-a",
+        });
+        await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "more", reason: "new work" },
+          { kind: "agent", sessionId: "api-1", agent: "claude" },
+        );
+        expect(await service.readTaskStatus("api-1")).toEqual({ revision: 0 });
+      } finally {
+        service.dispose();
+      }
+    });
+  });
+
   describe("explicit PR alert owner", () => {
     function configurePrAlerts() {
       const config = {
@@ -3093,6 +3337,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
+        SPUR_STATUS_COMMAND: "/tmp/spur-tools/api-1/spur-status",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -11069,6 +11314,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
+        SPUR_STATUS_COMMAND: "/tmp/spur-tools/api-1/spur-status",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -42404,6 +42650,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
+        SPUR_STATUS_COMMAND: "/tmp/spur-tools/api-1/spur-status",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -48973,6 +49220,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
+        SPUR_STATUS_COMMAND: "/tmp/spur-tools/api-1/spur-status",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -49592,6 +49840,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
+        SPUR_STATUS_COMMAND: "/tmp/spur-tools/api-1/spur-status",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -51016,6 +51265,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_SNAPSHOT_COMMAND: "/tmp/spur-tools/api-1/spur-snapshot",
+        SPUR_STATUS_COMMAND: "/tmp/spur-tools/api-1/spur-status",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),

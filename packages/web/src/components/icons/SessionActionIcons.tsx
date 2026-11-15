@@ -44,10 +44,11 @@ export function RestoreIcon({ className = "h-3.5 w-3.5" }: { className?: string 
   );
 }
 
-export function CheckIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
+export function CloseSessionIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
   return (
     <StrokeIcon className={className}>
-      <path d="m3 8.5 3 3 7-7" />
+      <rect x="2.5" y="2.5" width="11" height="11" />
+      <path d="m5.5 5.5 5 5m0-5-5 5" />
     </StrokeIcon>
   );
 }

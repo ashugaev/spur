@@ -97,7 +97,7 @@ test.describe("Lifecycle reconciliation", () => {
     });
     await page.clock.install();
     await page.goto("/");
-    const done = page.getByRole("button", { name: `Mark ${session.id} as done` });
+    const done = page.getByRole("button", { name: `Close session ${session.id}` });
     await done.click();
     const before = polls;
     for (let index = 0; index < 3; index += 1) {
@@ -277,7 +277,7 @@ test.describe("Lifecycle reconciliation", () => {
     });
     await page.clock.install();
     await page.goto("/");
-    const done = page.getByRole("button", { name: `Mark ${old.id} as done` });
+    const done = page.getByRole("button", { name: `Close session ${old.id}` });
     await done.click();
     await expect.poll(() => polls).toBeGreaterThanOrEqual(2);
     await expect(done).toHaveCount(0);
@@ -1201,14 +1201,14 @@ test.describe("D2: Filters modal status counts are correct", () => {
     await expectStatusCount(page, "Stopped", 1);
   });
 
-  test("Completed shows 1 with one completed session", async ({ page }) => {
+  test("Closed shows 1 with one closed session", async ({ page }) => {
     const session = makeCompletedSession({ prompt: "Completed session" });
     await mockSessions(page, [session]);
     await page.goto("/");
-    await expectStatusCount(page, "Completed", 1);
+    await expectStatusCount(page, "Closed", 1);
   });
 
-  test("Completed count updates after polling when a session finishes", async ({ page }) => {
+  test("Closed count updates after polling when a session closes", async ({ page }) => {
     const working = makeWorkingSession({
       id: "wk-complete-1",
       prompt: "Completes after poll",
@@ -1218,7 +1218,7 @@ test.describe("D2: Filters modal status counts are correct", () => {
     await page.goto("/");
 
     await expect(page.getByText("Completes after poll")).toBeVisible();
-    await expectStatusCount(page, "Completed", 0);
+    await expectStatusCount(page, "Closed", 0);
 
     sessions = [
       {
@@ -1232,10 +1232,10 @@ test.describe("D2: Filters modal status counts are correct", () => {
 
     await page.waitForTimeout(5500);
 
-    await expectStatusCount(page, "Completed", 1);
+    await expectStatusCount(page, "Closed", 1);
     await expect(page.getByText("Completes after poll")).not.toBeVisible();
 
-    await selectStatus(page, "Completed");
+    await selectStatus(page, "Closed");
     await expect(page.getByText("Completes after poll")).toBeVisible();
   });
 
@@ -1273,7 +1273,7 @@ test.describe("D2: Filters modal status counts are correct", () => {
     await expect(page.getByText("Working session two")).toBeVisible();
   });
 
-  test("clicking Completed filters to only completed sessions", async ({ page }) => {
+  test("clicking Closed filters to only closed sessions", async ({ page }) => {
     const working = makeWorkingSession({ id: "wk-done-1", prompt: "Working still active" });
     const completed = makeCompletedSession({
       id: "done-only-1",
@@ -1285,14 +1285,14 @@ test.describe("D2: Filters modal status counts are correct", () => {
     await expect(page.getByText("Working still active")).toBeVisible();
     await expect(page.getByText("Completed and archived")).not.toBeVisible();
 
-    await selectStatus(page, "Completed");
+    await selectStatus(page, "Closed");
 
     await expect(page.getByText("Completed and archived")).toBeVisible();
     await expect(page.getByText("Working still active")).not.toBeVisible();
-    await expect(page.locator("section").getByText("Completed").first()).toBeVisible();
+    await expect(page.locator("section").getByText("Closed").first()).toBeVisible();
   });
 
-  test("clicking Completed again returns to current sessions", async ({ page }) => {
+  test("clicking Closed again returns to current sessions", async ({ page }) => {
     const working = makeWorkingSession({ id: "wk-done-2", prompt: "Working returns" });
     const completed = makeCompletedSession({
       id: "done-only-2",
@@ -1301,10 +1301,10 @@ test.describe("D2: Filters modal status counts are correct", () => {
     await mockSessions(page, [working, completed]);
     await page.goto("/");
 
-    await selectStatus(page, "Completed");
+    await selectStatus(page, "Closed");
     await expect(page.getByText("Completed hides again")).toBeVisible();
 
-    await selectStatus(page, "Completed");
+    await selectStatus(page, "Closed");
 
     await expect(page.getByText("Working returns")).toBeVisible();
     await expect(page.getByText("Completed hides again")).not.toBeVisible();
@@ -1833,6 +1833,33 @@ test.describe("D4: Terminal button state", () => {
 
 // D4b: Merged/closed-PR done button
 test.describe("D4b: Merged/closed-PR done button", () => {
+  test("completed tasks stay live while closed sessions have a separate filter", async ({
+    page,
+  }) => {
+    const completed = makeWorkingSession({
+      id: "task-completed",
+      state: "completed",
+      prompt: "Completed task stays live",
+    });
+    const closed = makeCompletedSession({ id: "session-closed", prompt: "Closed session history" });
+    await mockSessions(page, [completed, closed]);
+    await page.goto("/");
+    await expect(page.getByText("Completed task stays live")).toBeVisible();
+    await expect(page.getByText("Closed session history")).not.toBeVisible();
+    await expect(page.locator("section").getByText("Completed", { exact: true })).toBeVisible();
+    await expectStatusCount(page, "Completed", 1);
+    await expectStatusCount(page, "Closed", 1);
+    await page.getByRole("button", { name: "Actions for task-completed" }).click();
+    await expect(page.getByRole("menuitem", { name: "Close Session" })).toHaveAttribute(
+      "title",
+      "Stop the agent and services, delete artifacts, remove the worktree",
+    );
+    await page.keyboard.press("Escape");
+    await selectStatus(page, "Closed");
+    await expect(page.getByText("Closed session history")).toBeVisible();
+    await expect(page.getByText("Completed task stays live")).not.toBeVisible();
+  });
+
   test("done button visible when PR is merged and session is completable", async ({ page }) => {
     const session = makeSessionWithPR({
       id: "done-btn-1",
@@ -1845,9 +1872,9 @@ test.describe("D4b: Merged/closed-PR done button", () => {
 
     await page.goto("/");
 
-    // The done button has aria-label "Mark <id> as done"
+    // Closing the session remains separate from task completion.
     const doneBtn = page.getByRole("button", {
-      name: new RegExp(`Mark ${session.id} as done`, "i"),
+      name: new RegExp(`Close session ${session.id}`, "i"),
     });
     await expect(doneBtn).toBeVisible({ timeout: 8000 });
   });
@@ -1864,9 +1891,9 @@ test.describe("D4b: Merged/closed-PR done button", () => {
 
     await page.goto("/");
 
-    // The done button has aria-label "Mark <id> as done"
+    // Closing the session remains separate from task completion.
     const doneBtn = page.getByRole("button", {
-      name: new RegExp(`Mark ${session.id} as done`, "i"),
+      name: new RegExp(`Close session ${session.id}`, "i"),
     });
     await expect(doneBtn).toBeVisible({ timeout: 8000 });
   });
@@ -1915,13 +1942,15 @@ test.describe("D4b: Merged/closed-PR done button", () => {
 
     await page.goto("/");
 
-    await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
+    await page
+      .getByRole("button", { name: new RegExp(`Close session ${session.id}`, "i") })
+      .click();
 
     await expect.poll(() => completeRequestSeen).toBe(true);
     await expect(page.getByText("Optimistic done row")).not.toBeVisible();
-    await expectStatusCount(page, "Completed", 1);
+    await expectStatusCount(page, "Closed", 1);
 
-    await selectStatus(page, "Completed");
+    await selectStatus(page, "Closed");
     await expect(page.getByText("Optimistic done row")).toBeVisible();
 
     releaseComplete();
@@ -1995,7 +2024,9 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     });
 
     await page.goto("/");
-    await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
+    await page
+      .getByRole("button", { name: new RegExp(`Close session ${session.id}`, "i") })
+      .click();
 
     await expect(page.getByRole("dialog", { name: "Open Pull Request" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Leave Pull Request Open" })).toBeVisible();
@@ -2069,14 +2100,14 @@ test.describe("D4b: Merged/closed-PR done button", () => {
       });
     });
     page.on("dialog", async (dialog) => {
-      expect(dialog.message()).toBe(
-        "Complete this desk? 1 subagent on this checkout will be ended.",
-      );
+      expect(dialog.message()).toBe("Close this desk? 1 subagent on this checkout will be ended.");
       await dialog.accept();
     });
 
     await page.goto("/");
-    await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
+    await page
+      .getByRole("button", { name: new RegExp(`Close session ${session.id}`, "i") })
+      .click();
 
     await expect
       .poll(() => completeBody)
@@ -2121,7 +2152,7 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await mergeBtn.click();
     await expect(
       page.getByRole("button", {
-        name: new RegExp(`Mark ${session.id} as done`, "i"),
+        name: new RegExp(`Close session ${session.id}`, "i"),
       }),
     ).toBeVisible();
   });
@@ -2279,7 +2310,7 @@ test.describe("D6: Attention zone sections", () => {
     await mockSessions(page, sessions);
     await page.goto("/");
 
-    // AttentionZone labels: "Errors", "Needs Input", "Working", "Waiting", "Stopped", "Completed"
+    // AttentionZone labels include task Completed and terminal Closed separately.
     await expect(page.getByText("Errors").first()).toBeVisible();
     await expect(page.getByText("Needs Input").first()).toBeVisible();
     await expect(page.getByText("Working").first()).toBeVisible();
@@ -2395,7 +2426,7 @@ test.describe("D6: Attention zone sections", () => {
 
     await expect(page.getByText("Visible session")).toBeVisible();
     await expect(page.getByText("Done zone session")).not.toBeVisible();
-    await expect(page.locator("section").getByText("Completed").first()).not.toBeVisible();
+    await expect(page.locator("section").getByText("Closed").first()).not.toBeVisible();
   });
 
   test("zone count is shown", async ({ page }) => {

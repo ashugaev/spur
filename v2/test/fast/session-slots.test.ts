@@ -29,6 +29,7 @@ import {
   withSessionSlotInstructions,
   SNAPSHOT_TOOL_NAME,
   TODO_TOOL_NAME,
+  TASK_STATUS_TOOL_NAME,
 } from "../../src/session-slots.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "../../src/self-destruct.js";
 import { SNAPSHOT_HOOK_TOOL_NAME, SNAPSHOT_REQUEST_MESSAGE } from "../../src/snapshots.js";
@@ -285,7 +286,29 @@ describe("session slots", () => {
     expect(prompt).toContain("--link pr=https://...");
     expect(prompt).toContain("Use `spur service logs` to inspect service and sidecar logs");
     expect(prompt).toContain("spur agent-issue log");
+    expect(prompt).toContain("SPUR_STATUS_COMMAND");
+    expect(prompt).toContain("--revision <retained-revision>");
     expect(withSessionSlotInstructions(prompt)).toBe(prompt);
+  });
+
+  it("generates a session-bound task-status helper without changing hook tools", async () => {
+    const dataDir = await createTempDir("spur-task-status-tool-");
+    tempDirs.push(dataDir);
+    ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-1",
+      configPath: "/tmp/config.yaml",
+      agent: "codex",
+    });
+    const helper = readFileSync(
+      join(dataDir, "session-tools", "api-1", TASK_STATUS_TOOL_NAME),
+      "utf8",
+    );
+    expect(helper).toContain("task-status --session 'api-1' \"$@\"");
+    expect(helper).not.toContain("session-agent-state");
+    expect(withSessionSlotInstructions("Already has SPUR_SLOT_COMMAND")).toContain(
+      "SPUR_STATUS_COMMAND",
+    );
   });
 
   it("still injects helper instructions when the prompt asks for a tag by name without naming the CLI", () => {

@@ -51,6 +51,7 @@ import { aggregateTokenUsage } from "./token-usage.js";
 import { normalizePreflightTotals } from "./preflight-usage-store.js";
 import { parseArtifactRelativePath } from "./session-artifacts.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
+import { isTaskStatusRevision, normalizeTaskStatus } from "./task-status.js";
 
 export function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
@@ -1557,6 +1558,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { triggerBirthKey: normalizedSession.triggerBirthKey, triggerBirthRequest: birthRequest }
       : {};
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
+  const declaration = normalizeTaskStatus(normalizedSession.taskStatus);
+  const taskStatus =
+    declaration?.agentLaunchId === normalizedSession.agentLaunchId ? declaration : undefined;
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
   const sidecarLaunches: Record<string, string> = {};
   if (isRecord(normalizedSession.sidecarLaunches)) {
@@ -1635,6 +1639,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
     ...(normalizedSession.agentLaunchId ? { agentLaunchId: normalizedSession.agentLaunchId } : {}),
+    ...(isTaskStatusRevision(normalizedSession.taskStatusRevision)
+      ? { taskStatusRevision: normalizedSession.taskStatusRevision }
+      : {}),
+    ...(taskStatus ? { taskStatus } : {}),
     ...(normalizedSession.cursorRestoreBoundary &&
     typeof normalizedSession.cursorRestoreBoundary.filePath === "string" &&
     Number.isSafeInteger(normalizedSession.cursorRestoreBoundary.offset) &&

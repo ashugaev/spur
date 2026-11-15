@@ -486,6 +486,7 @@ const STATUS_LANE_ICONS: Record<AttentionLevel, ReactNode> = {
   respond: <IconChat />,
   working: <IconBolt />,
   pending: <IconClock />,
+  completed: <IconCheck />,
   stopped: <IconStop />,
   done: <IconCheck />,
 };
@@ -1573,6 +1574,7 @@ export function Dashboard() {
       respond: [],
       working: [],
       pending: [],
+      completed: [],
       stopped: [],
       done: [],
     };
@@ -1591,6 +1593,7 @@ export function Dashboard() {
       respond: grouped.respond.length,
       working: grouped.working.length,
       pending: grouped.pending.length,
+      completed: grouped.completed.length,
       stopped: grouped.stopped.length,
       done: grouped.done.length,
     }),
@@ -2630,7 +2633,7 @@ export function Dashboard() {
     // A dialog retry is the same Done click the user already confirmed.
     if (!options?.retry && activeSubagentCount > 0 && typeof window !== "undefined") {
       const ok = window.confirm(
-        `Complete this desk? ${activeSubagentCount} subagent${
+        `Close this desk? ${activeSubagentCount} subagent${
           activeSubagentCount === 1 ? "" : "s"
         } on this checkout will be ended.`,
       );
@@ -2687,14 +2690,14 @@ export function Dashboard() {
           setPrCheckUnavailable({ action: "complete", session, payload });
           return false;
         }
-        throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
+        throw new Error(responseErrorMessage(payload, "Failed to close Spur session"));
       }
       await reconcileAttempt(owner);
       return lifecycleRef.current.isCurrent(owner);
     } catch (completeError) {
       await reconcileAttempt(owner);
       if (!lifecycleRef.current.isCurrent(owner)) return false;
-      showErrorToast(errorMessage(completeError, "Failed to complete Spur session"));
+      showErrorToast(errorMessage(completeError, "Failed to close Spur session"));
       throw completeError;
     } finally {
       if (lifecycleRef.current.isCurrent(owner)) {
