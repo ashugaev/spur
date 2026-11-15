@@ -1209,6 +1209,33 @@ describe("parseConversationBatch", () => {
     expect(messages[1]).toMatchObject({ role: "assistant", text: "hi" });
   });
 
+  it("flags Bash calls that touch Spur session tools without keeping the input", () => {
+    const bash = (command: string) => ({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "x", name: "Bash", input: { command } }],
+      },
+    });
+    const tools = parseConversationBatch(
+      jsonl(
+        bash('"$SPUR_TODO_COMMAND" list'),
+        bash("git status && spur-todo hold 1"),
+        bash("git status"),
+        {
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "y", name: "Edit", input: { command: "spur-todo" } }],
+          },
+        },
+      ),
+      NOW,
+    ).entries.filter((entry) => entry.kind === "tool");
+    expect(tools.map((tool) => "spurCall" in tool)).toEqual([true, true, false, false]);
+    expect(tools.some((tool) => "inputSummary" in tool)).toBe(false);
+  });
+
   it("excludes tool_result-only user messages", () => {
     const lines = jsonl({
       type: "user",

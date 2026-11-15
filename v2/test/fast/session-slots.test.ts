@@ -31,7 +31,19 @@ import {
   TODO_TOOL_NAME,
 } from "../../src/session-slots.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "../../src/self-destruct.js";
-import { SNAPSHOT_HOOK_TOOL_NAME, SNAPSHOT_REQUEST_MESSAGE } from "../../src/snapshots.js";
+import { shellEscape } from "../../src/agents/shell-escape.js";
+import {
+  DEFAULT_DAILY_WAKE_MESSAGE,
+  DEFAULT_INTERVAL_WAKE_MESSAGE,
+  DEFAULT_WAKE_MESSAGE,
+  formatDailyWakeMessage,
+  formatIntervalWakeMessage,
+} from "../../src/wake-schedule.js";
+import {
+  SNAPSHOT_HOOK_TOOL_NAME,
+  SNAPSHOT_HOOK_TURN_FILE,
+  snapshotRequestMessage,
+} from "../../src/snapshots.js";
 import { createTempDir, findFreePort } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -1044,7 +1056,13 @@ describe("removeSessionSlotTool", () => {
 describe("snapshot hook tool", () => {
   const FRESHNESS_MS = 10 * 60_000;
 
-  async function setup(options: { snapshotAgoMs?: number; createdAgoMs?: number } = {}) {
+  async function setup(
+    options: {
+      snapshotAgoMs?: number;
+      createdAgoMs?: number;
+      turn?: { reminder: boolean; worked: boolean; workedAt?: number } | null;
+    } = {},
+  ) {
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
     const toolDir = ensureSessionSlotTool({
@@ -1053,10 +1071,16 @@ describe("snapshot hook tool", () => {
       configPath: "/tmp/spur.yaml",
       agent: "claude",
       snapshotHook: {
+        enabled: true,
         freshnessMinutes: 10,
         sessionCreatedAt: new Date(Date.now() - (options.createdAgoMs ?? 0)).toISOString(),
       },
     });
+    const turnPath = join(toolDir, SNAPSHOT_HOOK_TURN_FILE);
+    const message = snapshotRequestMessage(shellEscape(join(toolDir, "spur-snapshot")));
+    if (options.turn !== null) {
+      writeFileSync(turnPath, JSON.stringify(options.turn ?? { reminder: false, worked: false }));
+    }
     if (options.snapshotAgoMs !== undefined) {
       const dir = join(dataDir, "sessions", "api-1", "snapshots");
       mkdirSync(dir, { recursive: true });
@@ -1073,7 +1097,7 @@ describe("snapshot hook tool", () => {
         toolDir,
         `snapshot-hook-claim.${Math.floor(Date.now() / (FRESHNESS_MS / 2)) + windowOffset}`,
       );
-    return { dataDir, toolDir, claimPath };
+    return { dataDir, toolDir, claimPath, message, turnPath };
   }
 
   function runHook(toolDir: string, payload: Record<string, unknown>): string {
@@ -1106,14 +1130,16 @@ describe("snapshot hook tool", () => {
   });
 
   it("asks mid-turn through PostToolUse additionalContext when the snapshot is stale", async () => {
-    const { toolDir } = await setup({ snapshotAgoMs: stale });
+    const { toolDir, message } = await setup({ snapshotAgoMs: stale });
     const output = runHook(toolDir, { hook_event_name: "PostToolUse", tool_name: "Bash" });
     expect(JSON.parse(output)).toEqual({
       hookSpecificOutput: {
         hookEventName: "PostToolUse",
-        additionalContext: SNAPSHOT_REQUEST_MESSAGE,
+        additionalContext: message,
       },
     });
+    expect(message).toContain(shellEscape(join(toolDir, "spur-snapshot")));
+    expect(existsSync(join(toolDir, "spur-snapshot"))).toBe(true);
   });
 
   it("stays silent when the snapshot is fresh", async () => {
@@ -1162,10 +1188,10 @@ describe("snapshot hook tool", () => {
   });
 
   it("blocks Stop once when stale and never while stop_hook_active", async () => {
-    const { toolDir } = await setup({ snapshotAgoMs: stale });
+    const { toolDir, message } = await setup({ snapshotAgoMs: stale });
     expect(
       JSON.parse(runHook(toolDir, { hook_event_name: "Stop", stop_hook_active: false })),
-    ).toEqual({ decision: "block", reason: SNAPSHOT_REQUEST_MESSAGE });
+    ).toEqual({ decision: "block", reason: message });
     expect(runHook(toolDir, { hook_event_name: "Stop", stop_hook_active: true })).toBe("");
   });
 
@@ -1176,10 +1202,152 @@ describe("snapshot hook tool", () => {
 
     const old = await setup({ createdAgoMs: stale });
     expect(JSON.parse(runHook(old.toolDir, { hook_event_name: "PostToolUse" }))).toMatchObject({
-      hookSpecificOutput: { additionalContext: SNAPSHOT_REQUEST_MESSAGE },
+      hookSpecificOutput: { additionalContext: old.message },
     });
     const oldStop = await setup({ createdAgoMs: stale });
     expect(runHook(oldStop.toolDir, { hook_event_name: "Stop" })).not.toBe("");
+  });
+
+  it("stays silent without a turn file", async () => {
+    const { toolDir } = await setup({ snapshotAgoMs: stale, turn: null });
+    expect(runHook(toolDir, { hook_event_name: "PostToolUse", tool_name: "Edit" })).toBe("");
+    expect(runHook(toolDir, { hook_event_name: "Stop" })).toBe("");
+  });
+
+  it("writes the turn file on UserPromptSubmit, also in plan mode, without output", async () => {
+    const { toolDir, turnPath } = await setup({ snapshotAgoMs: stale });
+    const turn = () => JSON.parse(readFileSync(turnPath, "utf8"));
+    expect(
+      runHook(toolDir, {
+        hook_event_name: "UserPromptSubmit",
+        prompt: "Spur ToDo is empty. Record the step",
+      }),
+    ).toBe("");
+    expect(turn()).toEqual({ reminder: true, worked: false });
+    runHook(toolDir, {
+      hook_event_name: "UserPromptSubmit",
+      permission_mode: "plan",
+      prompt: "fix the bug",
+    });
+    expect(turn()).toEqual({ reminder: false, worked: false });
+  });
+
+  it.each([
+    ["one-off", DEFAULT_WAKE_MESSAGE, true],
+    [
+      "interval",
+      formatIntervalWakeMessage("api-1", DEFAULT_INTERVAL_WAKE_MESSAGE, "CI green"),
+      true,
+    ],
+    ["daily", formatDailyWakeMessage("api-1", DEFAULT_DAILY_WAKE_MESSAGE, "CI green"), true],
+    ["custom interval", formatIntervalWakeMessage("api-1", "Check the deploy", "CI green"), false],
+    ["custom daily", formatDailyWakeMessage("api-1", "Check the deploy", "CI green"), false],
+  ])("classifies the delivered %s wake prompt", async (_name, prompt, reminder) => {
+    const { toolDir, turnPath } = await setup({ snapshotAgoMs: stale });
+    runHook(toolDir, { hook_event_name: "UserPromptSubmit", prompt });
+    expect(JSON.parse(readFileSync(turnPath, "utf8"))).toEqual({ reminder, worked: false });
+    expect(runHook(toolDir, { hook_event_name: "Stop" }) === "").toBe(reminder);
+  });
+
+  it("stays silent through a reminder turn that only runs Spur tools", async () => {
+    const { toolDir, turnPath } = await setup({
+      snapshotAgoMs: stale,
+      turn: { reminder: true, worked: false },
+    });
+    expect(
+      runHook(toolDir, {
+        hook_event_name: "PostToolUse",
+        tool_name: "Bash",
+        tool_input: { command: '"$SPUR_TODO_COMMAND" hold 1 --reason x' },
+      }),
+    ).toBe("");
+    expect(JSON.parse(readFileSync(turnPath, "utf8"))).toEqual({ reminder: true, worked: false });
+    expect(runHook(toolDir, { hook_event_name: "Stop" })).toBe("");
+    expect(
+      runHook(toolDir, {
+        hook_event_name: "PostToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "npm test && spur-todo list" },
+      }),
+    ).toBe("");
+  });
+
+  it("asks after a non-Spur tool in a reminder turn", async () => {
+    const edit = await setup({ snapshotAgoMs: stale, turn: { reminder: true, worked: false } });
+    expect(
+      JSON.parse(runHook(edit.toolDir, { hook_event_name: "PostToolUse", tool_name: "Edit" })),
+    ).toMatchObject({ hookSpecificOutput: { additionalContext: edit.message } });
+    expect(JSON.parse(readFileSync(edit.turnPath, "utf8"))).toEqual({
+      reminder: true,
+      worked: true,
+      workedAt: expect.any(Number),
+    });
+    const bash = await setup({ snapshotAgoMs: stale, turn: { reminder: true, worked: false } });
+    expect(
+      runHook(bash.toolDir, {
+        hook_event_name: "PostToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "npm test" },
+      }),
+    ).not.toBe("");
+    expect(runHook(bash.toolDir, { hook_event_name: "Stop" })).not.toBe("");
+  });
+
+  it("stays silent when the reminder turn's last work predates the freshness cutoff", async () => {
+    // Snapshot 11 min ago, N = 10 min: floor is 1 min ago; work 2 min ago does not qualify.
+    const old = { reminder: true, worked: true, workedAt: Date.now() - 2 * 60_000 };
+    const { toolDir } = await setup({ snapshotAgoMs: stale, turn: old });
+    expect(runHook(toolDir, { hook_event_name: "Stop" })).toBe("");
+    expect(
+      runHook(toolDir, {
+        hook_event_name: "PostToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "spur-todo list" },
+      }),
+    ).toBe("");
+    const fresh = await setup({
+      snapshotAgoMs: stale,
+      turn: { reminder: true, worked: true, workedAt: Date.now() - 30_000 },
+    });
+    expect(runHook(fresh.toolDir, { hook_event_name: "Stop" })).not.toBe("");
+  });
+
+  it("stays silent after a fresh snapshot follows the reminder turn's work, until new work", async () => {
+    // N = 10 min. Work 14 min ago, snapshot v2 written 13 min ago (after the work): the
+    // clock is past v2 + N, but no qualifying work is.
+    const { toolDir } = await setup({
+      snapshotAgoMs: 13 * 60_000,
+      turn: { reminder: true, worked: true, workedAt: Date.now() - 14 * 60_000 },
+    });
+    expect(
+      runHook(toolDir, {
+        hook_event_name: "PostToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "spur-todo list" },
+      }),
+    ).toBe("");
+    expect(runHook(toolDir, { hook_event_name: "Stop" })).toBe("");
+    expect(
+      runHook(toolDir, {
+        hook_event_name: "PostToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "npm test" },
+      }),
+    ).not.toBe("");
+  });
+
+  it("writes a no-op hook tool when snapshots are disabled", async () => {
+    const { dataDir, toolDir } = await setup({ snapshotAgoMs: stale });
+    expect(runHook(toolDir, { hook_event_name: "Stop" })).not.toBe("");
+    ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-1",
+      configPath: "/tmp/spur.yaml",
+      agent: "claude",
+      snapshotHook: { enabled: false },
+    });
+    expect(runHook(toolDir, { hook_event_name: "Stop" })).toBe("");
+    expect(runHook(toolDir, { hook_event_name: "PostToolUse", tool_name: "Edit" })).toBe("");
   });
 
   it("exits 0 silently on malformed input or unreadable snapshots", async () => {

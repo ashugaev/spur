@@ -1478,23 +1478,32 @@ function parseProjectSnapshots(
   const label = `projects.${projectId}.snapshots`;
   const raw = asObject(value, label);
   const extraKeys = Object.keys(raw).filter(
-    (key) => key !== "maxBytes" && key !== "requireFinal" && key !== "freshnessMinutes",
+    (key) =>
+      key !== "enabled" &&
+      key !== "maxBytes" &&
+      key !== "requireFinal" &&
+      key !== "freshnessMinutes",
   );
   if (extraKeys.length > 0) {
     throw new Error(
-      `${label} only supports "maxBytes", "requireFinal" and "freshnessMinutes" (got: ${extraKeys.join(", ")})`,
+      `${label} only supports "enabled", "maxBytes", "requireFinal" and "freshnessMinutes" (got: ${extraKeys.join(", ")})`,
     );
   }
+  const enabled = asOptionalBoolean(raw["enabled"], `${label}.enabled`);
   const maxBytes = asOptionalPositiveInteger(raw["maxBytes"], `${label}.maxBytes`);
   if (maxBytes !== undefined && maxBytes > MAX_SNAPSHOT_BYTES_CEILING) {
     throw new Error(`${label}.maxBytes must be at most ${MAX_SNAPSHOT_BYTES_CEILING}`);
   }
   const requireFinal = asOptionalBoolean(raw["requireFinal"], `${label}.requireFinal`);
+  if (enabled === false && requireFinal === true) {
+    throw new Error(`${label}.requireFinal cannot be true when ${label}.enabled is false`);
+  }
   const freshnessMinutes = asOptionalPositiveInteger(
     raw["freshnessMinutes"],
     `${label}.freshnessMinutes`,
   );
   return {
+    ...(enabled !== undefined ? { enabled } : {}),
     ...(maxBytes !== undefined ? { maxBytes } : {}),
     ...(requireFinal !== undefined ? { requireFinal } : {}),
     ...(freshnessMinutes !== undefined ? { freshnessMinutes } : {}),

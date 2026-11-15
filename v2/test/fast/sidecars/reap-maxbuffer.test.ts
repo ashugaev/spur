@@ -51,4 +51,21 @@ describe("snapshotProcesses maxBuffer", () => {
     expect(snapshot.ok).toBe(false);
     expect(snapshot.byPid.size).toBe(0);
   });
+
+  it("returns unknown when ps never closes and ignores a later rejection", async () => {
+    vi.useFakeTimers();
+    try {
+      let reject!: (error: Error) => void;
+      execFileAsyncMock.mockImplementation(() => new Promise((_, fail) => (reject = fail)));
+      const { snapshotProcesses } = await import("../../../src/sidecars/reap.js");
+      const pending = snapshotProcesses();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect((await pending).ok).toBe(false);
+      expect(execFileAsyncMock.mock.calls[0]?.[2]).toMatchObject({ killSignal: "SIGKILL" });
+      reject(new Error("late close"));
+      await Promise.resolve();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

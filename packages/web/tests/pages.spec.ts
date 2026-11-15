@@ -190,3 +190,18 @@ test("Pages keeps loading distinct from an empty list", async ({ page }) => {
   release();
   await expect(page.getByText("No pages yet.")).toBeVisible();
 });
+
+for (const [width, padding] of [
+  [1280, "24px"],
+  [390, "8px"],
+] as const) {
+  test(`Pages catalog shell uses ${padding} side padding at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await mockSessions(page, []);
+    await page.route("**/api/pages", (route) => route.fulfill({ json: { pages: [] } }));
+    await page.goto("/pages");
+    await expect(page.getByText("No pages yet.", { exact: true })).toBeVisible();
+    await expect(page.locator("main")).toHaveCSS("padding-left", padding);
+    await expect(page.locator("header > div").first()).toHaveCSS("padding-left", padding);
+  });
+}

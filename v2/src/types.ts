@@ -886,6 +886,7 @@ export interface ProjectConfig {
 }
 
 export interface ProjectSnapshotsConfig {
+  enabled?: boolean;
   maxBytes?: number;
   requireFinal?: boolean;
   freshnessMinutes?: number;
@@ -2297,6 +2298,8 @@ export type TranscriptEntry =
       inputSummary?: string;
       output?: string;
       timestampMs?: number;
+      /** Claude Bash call that touches the session's Spur tools; its input is not kept otherwise. */
+      spurCall?: true;
     }
   | { kind: "reasoning"; text: string; timestampMs?: number }
   | {
