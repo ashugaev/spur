@@ -5295,6 +5295,12 @@ describe("SessionDetail artifacts", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
     expect(screen.queryByText(/^\d+ \/ \d+$/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close artifact preview" })).toHaveClass(
+      "text-[var(--color-text-tertiary)]",
+    );
+    expect(
+      within(screen.getByRole("dialog")).getByRole("link", { name: "Download shot.png" }),
+    ).not.toHaveClass("text-[var(--color-text-secondary)]!");
 
     const previewSurface = screen.getByLabelText("Artifact preview surface");
     stubElementBounds(previewSurface);
@@ -5520,6 +5526,12 @@ describe("SessionDetail artifacts", () => {
       expect(screen.queryByRole("button", { name: "Previous artifact" })).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Next artifact" })).not.toBeInTheDocument();
       expect(screen.getByText("1 / 3")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Close artifact preview" })).toHaveClass(
+        "text-[var(--color-text-secondary)]",
+      );
+      expect(
+        within(screen.getByRole("dialog")).getByRole("link", { name: "Download shot.png" }),
+      ).toHaveClass("text-[var(--color-text-secondary)]!");
 
       stubElementBounds(screen.getByLabelText("Artifact preview surface"), 300, 100);
       fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 150 });

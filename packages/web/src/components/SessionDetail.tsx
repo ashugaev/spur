@@ -1300,13 +1300,26 @@ function ArtifactLightbox({
               ) : null}
               <a
                 aria-label={`Download ${artifact.name}`}
-                className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                className={`inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline ${
+                  // The global `a` accent color is unlayered and beats utilities; `!` matches the close button on phone.
+                  isPhone
+                    ? "text-[var(--color-text-secondary)]! hover:text-[var(--color-text-primary)]!"
+                    : ""
+                }`}
                 download={artifactBasename(artifact.name)}
                 href={artifactHref}
               >
                 <ArtifactDownloadIcon />
               </a>
-              <IconCloseButton label="Close artifact preview" onClick={onClose} />
+              <IconCloseButton
+                idleTextClass={
+                  isPhone
+                    ? "text-[var(--color-text-secondary)]"
+                    : "text-[var(--color-text-tertiary)]"
+                }
+                label="Close artifact preview"
+                onClick={onClose}
+              />
             </div>
           </div>
         )}
