@@ -554,13 +554,13 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
   if (probe.state === "ready") {
     return baseUrl;
   }
-  if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
+  let unresponsiveRecovery = probe.state === "unresponsive";
   let handledIncompatible = false;
   if (probe.state === "incompatible") {
     await stopIncompatibleDaemon(baseUrl, probe.pid);
     handledIncompatible = true;
     probe = await probeDaemon(baseUrl);
-    if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
+    unresponsiveRecovery = probe.state === "unresponsive";
   }
   if (probe.state === "unreachable") {
     spawnDaemon(cliEntrypoint, resolvedConfigPath, "autostart");
@@ -581,7 +581,7 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
       handledIncompatible = true;
       probe = await probeDaemon(baseUrl);
       if (probe.state === "ready") return baseUrl;
-      if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
+      if (probe.state === "unresponsive") unresponsiveRecovery = true;
       if (probe.state === "unreachable") {
         spawnDaemon(cliEntrypoint, resolvedConfigPath, "autostart");
       }
@@ -589,6 +589,7 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
   }
 
   if (managed) throw managedTimeoutError(probe, baseUrl, resolvedConfigPath);
+  if (unresponsiveRecovery) throw unresponsiveDaemonError(baseUrl);
   throw new Error(`Timed out waiting for daemon at ${baseUrl}`);
 }
 

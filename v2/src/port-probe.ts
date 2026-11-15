@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { createServer } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
+import { observationDeadline } from "./observation-deadline.js";
 
 const execFileAsync = promisify(execFile);
 const CLEAR_PORT_TIMEOUT_MS = 2_000;
@@ -33,10 +34,14 @@ async function execFileTriState(
   args: string[],
 ): Promise<{ ok: true; stdout: string } | { ok: false }> {
   try {
-    const { stdout } = await execFileAsync(file, args, {
-      timeout: LISTENER_LOOKUP_TIMEOUT_MS,
-      maxBuffer: 4 * 1024 * 1024,
-    });
+    const { stdout } = await observationDeadline(
+      execFileAsync(file, args, {
+        timeout: LISTENER_LOOKUP_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+        maxBuffer: 4 * 1024 * 1024,
+      }),
+      LISTENER_LOOKUP_TIMEOUT_MS,
+    );
     return { ok: true, stdout: stdout.toString() };
   } catch {
     return { ok: false };
