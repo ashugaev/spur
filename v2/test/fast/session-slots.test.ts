@@ -1060,7 +1060,7 @@ describe("snapshot hook tool", () => {
     options: {
       snapshotAgoMs?: number;
       createdAgoMs?: number;
-      turn?: { reminder: boolean; worked: boolean } | null;
+      turn?: { reminder: boolean; worked: boolean; workedAt?: number } | null;
     } = {},
   ) {
     const dataDir = await createTempDir("spur-slots-fast-");
@@ -1280,6 +1280,7 @@ describe("snapshot hook tool", () => {
     expect(JSON.parse(readFileSync(edit.turnPath, "utf8"))).toEqual({
       reminder: true,
       worked: true,
+      workedAt: expect.any(Number),
     });
     const bash = await setup({ snapshotAgoMs: stale, turn: { reminder: true, worked: false } });
     expect(
@@ -1290,6 +1291,25 @@ describe("snapshot hook tool", () => {
       }),
     ).not.toBe("");
     expect(runHook(bash.toolDir, { hook_event_name: "Stop" })).not.toBe("");
+  });
+
+  it("stays silent when the reminder turn's last work predates the freshness cutoff", async () => {
+    // Snapshot 11 min ago, N = 10 min: floor is 1 min ago; work 2 min ago does not qualify.
+    const old = { reminder: true, worked: true, workedAt: Date.now() - 2 * 60_000 };
+    const { toolDir } = await setup({ snapshotAgoMs: stale, turn: old });
+    expect(runHook(toolDir, { hook_event_name: "Stop" })).toBe("");
+    expect(
+      runHook(toolDir, {
+        hook_event_name: "PostToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "spur-todo list" },
+      }),
+    ).toBe("");
+    const fresh = await setup({
+      snapshotAgoMs: stale,
+      turn: { reminder: true, worked: true, workedAt: Date.now() - 30_000 },
+    });
+    expect(runHook(fresh.toolDir, { hook_event_name: "Stop" })).not.toBe("");
   });
 
   it("writes a no-op hook tool when snapshots are disabled", async () => {

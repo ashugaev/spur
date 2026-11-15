@@ -439,7 +439,11 @@ function readTurn() {
   try {
     const turn = JSON.parse(readFileSync(turnFile, "utf8"));
     if (turn === null || typeof turn !== "object") return null;
-    return { reminder: turn.reminder === true, worked: turn.worked === true };
+    return {
+      reminder: turn.reminder === true,
+      worked: turn.worked === true,
+      workedAt: Number.isFinite(turn.workedAt) ? turn.workedAt : 0,
+    };
   } catch {
     return null;
   }
@@ -466,16 +470,20 @@ function run() {
   if (event === "Stop" && payload.stop_hook_active === true) return;
   const turn = readTurn();
   if (!turn) return;
-  if (event === "PostToolUse" && turn.reminder && !turn.worked) {
+  if (event === "PostToolUse" && turn.reminder) {
     const command = payload.tool_input && payload.tool_input.command;
     if (payload.tool_name === "Bash" && typeof command === "string" && SPUR_TOOL.test(command)) return;
-    writeTurn({ reminder: true, worked: true });
     turn.worked = true;
+    turn.workedAt = Date.now();
+    writeTurn({ reminder: true, worked: true, workedAt: turn.workedAt });
   }
   if (turn.reminder && !turn.worked) return;
   const latestAt = latestSnapshotAt();
   if (latestAt === undefined) return;
-  if (Date.now() - (latestAt ?? createdAtMs) <= freshnessMs) return;
+  const floor = (latestAt ?? createdAtMs) + freshnessMs;
+  if (Date.now() <= floor) return;
+  // Reminder turn: only a non-Spur call past the floor is work, as in the pane classifier.
+  if (turn.reminder && turn.workedAt <= floor) return;
   if (event === "Stop") {
     process.stdout.write(JSON.stringify({ decision: "block", reason: MESSAGE }));
     return;
