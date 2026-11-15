@@ -4748,6 +4748,16 @@ describe("SessionService", () => {
           service.dispose();
         });
 
+        it("keeps the cached first work when the transcript tail is gone", async () => {
+          const { read, service } = await readSetup();
+          tail([userEntry("go", 0), textEntry(5)], 6);
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(5), stale: false });
+          readClaudeConversationTailMock.mockResolvedValue(null);
+
+          expect((await read()).freshness).toMatchObject({ activitySince: iso(5), stale: false });
+          service.dispose();
+        });
+
         it("rereads for a newer snapshot version", async () => {
           const { read, service, session } = await readSetup();
           tail([userEntry("go", 0), toolEntry(31)], 32);

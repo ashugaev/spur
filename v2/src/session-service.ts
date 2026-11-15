@@ -20646,7 +20646,7 @@ export class SessionService {
     let activityMs: number | null;
     if (session.agent === "claude" || session.agent === "codex") {
       const tail = await this.readTranscriptTail(session, location);
-      if (!tail) return none;
+      if (!tail) return { firstWorkMs: cachedFirstMs, newestWorkMs: cachedFirstMs };
       slice = tail;
       activityMs = tail.mtimeMs;
     } else {

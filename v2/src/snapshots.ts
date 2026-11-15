@@ -366,7 +366,7 @@ export interface SnapshotListQuery {
   after?: number;
 }
 
-export const MAX_SNAPSHOT_LIST_LIMIT = 100;
+const MAX_SNAPSHOT_LIST_LIMIT = 100;
 
 function singleParam(params: URLSearchParams, key: string): string | undefined {
   const values = params.getAll(key);

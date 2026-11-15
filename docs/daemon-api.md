@@ -70,7 +70,7 @@
 - `GET /sessions/:id/snapshots` — metadata; `order=asc|desc` (default asc), `limit` 1..100, exclusive `before`/`after` versions; archived too; `400 invalid_snapshot_request|404|500 snapshot_corrupt`; `v2/src/snapshots.ts`
 - `POST /sessions/:id/snapshots` — `{content, final?}`; caller header, when set, must equal `:id`; `400|404|409 snapshot_conflict|413 snapshot_too_large`. See [snapshot](commands.md#todo-snapshot)
 - `GET /sessions/:id/snapshots/:version` — positive integer or `latest`; adds `freshness`; `includeDone=1` adds `done`; archived too, no wake; `400|404|500 snapshot_corrupt|500 todo_ledger_corrupt`. See [snapshots](snapshots.md#read)
-- `GET /snapshots/latest` — repeatable `link=label[=url]` (required, AND), `includeDone=1`; per matching session incl. completed, archived; `400 invalid_snapshot_request`. See [snapshots](snapshots.md#read)
+- `GET /snapshots/latest` — repeatable `link=label[=url]` (required, AND), `includeDone=1`; per matching session incl. completed, archived; `400 invalid_snapshot_request`, `500 snapshot_corrupt`. See [snapshots](snapshots.md#read)
 - `GET /sessions/:id/auto-ping-suppressions` — `?all=1` adds `history`. See [auto-ping](commands.md#auto-ping)
 - `POST /sessions/:id/auto-ping-suppressions/mute` — `{handle, mode: until_change|for|forever, durationMs?, reason?}`; `400|403|404`. See [auto-ping](commands.md#auto-ping)
 - `POST /sessions/:id/auto-ping-suppressions/resume` — exactly one of `{handle}` or `{suppressionId}`; `400|403|404`. See [auto-ping](commands.md#auto-ping)
