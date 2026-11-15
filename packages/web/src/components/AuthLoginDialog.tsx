@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BusyContent } from "@/components/BusyContent";
 import { IconCloseButton } from "@/components/IconCloseButton";
+import { INPUT_CLASS, SECONDARY_BUTTON_CLASS } from "@/design/classes";
+import { useDialogFocus } from "@/hooks/useDialogFocus";
 import {
   AUTH_ACCOUNTS_QUERY_KEY,
   authAccountName,
@@ -22,16 +24,18 @@ interface AuthLoginDialogProps {
   onClose: () => void;
 }
 
-const BUTTON_CLASS =
-  "border border-[var(--color-border-default)] px-3 py-1 font-bold uppercase text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50";
+type LoginAction = { input: string } | { cancel: true } | { retry: true };
 
 export function AuthLoginDialog({ account, login: initialLogin, onClose }: AuthLoginDialogProps) {
   const queryClient = useQueryClient();
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const codeRef = useRef<HTMLInputElement | null>(null);
   const [code, setCode] = useState("");
   const loginPath = `/api/auth-accounts/${encodeURIComponent(account.id)}`;
+  const loginKey = ["auth-account-login", account.id];
 
   const statusQuery = useQuery<AuthLogin>({
-    queryKey: ["auth-account-login", account.id],
+    queryKey: loginKey,
     queryFn: async ({ signal }) => {
       const response = await fetch(`${loginPath}/login-status`, { signal });
       const payload = await readResponsePayload(response);
@@ -48,16 +52,23 @@ export function AuthLoginDialog({ account, login: initialLogin, onClose }: AuthL
   });
   const login = statusQuery.data;
 
-  const inputMutation = useMutation<unknown, Error, { input: string } | { cancel: true }>({
-    mutationFn: (body) =>
-      postAuthJson(`${loginPath}/login-input`, "POST", body, "Failed to submit sign-in input"),
-    onSuccess: (result, body) => {
-      if ("cancel" in body) {
+  const actionMutation = useMutation<unknown, Error, LoginAction>({
+    mutationFn: (action) =>
+      "retry" in action
+        ? postAuthJson(`${loginPath}/login`, "POST", undefined, "Failed to start sign-in")
+        : postAuthJson(
+            `${loginPath}/login-input`,
+            "POST",
+            action,
+            "Failed to submit sign-in input",
+          ),
+    onSuccess: (result, action) => {
+      if ("cancel" in action) {
         onClose();
         return;
       }
       setCode("");
-      if (isAuthLogin(result)) queryClient.setQueryData(["auth-account-login", account.id], result);
+      if (isAuthLogin(result)) queryClient.setQueryData(loginKey, result);
     },
   });
 
@@ -68,8 +79,14 @@ export function AuthLoginDialog({ account, login: initialLogin, onClose }: AuthL
     onClose();
   }, [ready, queryClient, onClose]);
 
-  const errorText = inputMutation.error?.message ?? login.error ?? null;
-  const busy = inputMutation.isPending;
+  const busy = actionMutation.isPending;
+  // Every dismissal cancels the unfinished sign-in.
+  const dismiss = () => actionMutation.mutate({ cancel: true });
+  useDialogFocus({ panelRef, initialRef: codeRef, onEscape: dismiss, escapeBlocked: busy });
+
+  const failed = login.status === "failed";
+  const errorText =
+    actionMutation.error?.message ?? login.error ?? (failed ? "Sign-in failed" : null);
 
   return (
     <div
@@ -78,12 +95,18 @@ export function AuthLoginDialog({ account, login: initialLogin, onClose }: AuthL
       className="fixed inset-0 z-[60] flex items-center justify-center bg-[var(--color-modal-backdrop)]"
       role="dialog"
     >
-      <div className="w-[min(26rem,calc(100vw-2rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-[0_8px_24px_var(--color-shadow-modal-sm)]">
+      <div
+        ref={panelRef}
+        className="w-[min(26rem,calc(100vw-2rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-[0_8px_24px_var(--color-shadow-modal-sm)]"
+      >
         <div className="mb-3 flex items-center justify-between gap-3">
-          <h2 className="font-bold text-[var(--color-text-primary)]" id="auth-login-dialog-title">
+          <h2
+            className="font-bold uppercase text-[var(--color-text-primary)]"
+            id="auth-login-dialog-title"
+          >
             Sign in {getAgentDisplayName(account.provider)} · {authAccountName(account)}
           </h2>
-          <IconCloseButton label="Close sign-in" onClick={onClose} disabled={busy} />
+          <IconCloseButton label="Close sign-in" onClick={dismiss} disabled={busy} />
         </div>
         <div className="flex flex-col gap-2 normal-case tracking-normal text-[var(--color-text-secondary)]">
           {login.url ? (
@@ -119,30 +142,46 @@ export function AuthLoginDialog({ account, login: initialLogin, onClose }: AuthL
           ) : null}
         </div>
         <form
-          className="mt-3 flex items-center gap-2"
+          className="mt-3 flex flex-wrap items-center gap-2"
           onSubmit={(event) => {
             event.preventDefault();
             const input = code.trim();
-            if (input) inputMutation.mutate({ input });
+            if (input) actionMutation.mutate({ input });
           }}
         >
           <input
+            ref={codeRef}
             aria-label="Authorization code"
-            className="min-w-0 flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1 normal-case tracking-normal text-[var(--color-text-primary)] outline-none focus-visible:border-[var(--color-accent)]"
+            className={`min-w-0 flex-1 normal-case tracking-normal ${INPUT_CLASS}`}
             disabled={busy}
             placeholder="Paste code if asked"
             type="text"
             value={code}
             onChange={(event) => setCode(event.target.value)}
           />
-          <button className={BUTTON_CLASS} disabled={busy || !code.trim()} type="submit">
-            <BusyContent busy={busy}>Submit</BusyContent>
-          </button>
+          {failed ? (
+            <button
+              className={SECONDARY_BUTTON_CLASS}
+              disabled={busy}
+              type="button"
+              onClick={() => actionMutation.mutate({ retry: true })}
+            >
+              <BusyContent busy={busy}>Retry</BusyContent>
+            </button>
+          ) : (
+            <button
+              className={SECONDARY_BUTTON_CLASS}
+              disabled={busy || !code.trim()}
+              type="submit"
+            >
+              <BusyContent busy={busy}>Submit</BusyContent>
+            </button>
+          )}
           <button
-            className={BUTTON_CLASS}
+            className={SECONDARY_BUTTON_CLASS}
             disabled={busy}
             type="button"
-            onClick={() => inputMutation.mutate({ cancel: true })}
+            onClick={dismiss}
           >
             Cancel
           </button>

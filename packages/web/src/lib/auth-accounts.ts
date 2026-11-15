@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { formatClockTime } from "@/lib/format";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import type {
   AuthAccountStatus,
@@ -39,6 +40,25 @@ export const AUTH_STATUS_LABEL: Record<AuthAccountStatus, string> = {
   pending: "signing in",
   error: "error",
 };
+
+/** "limited", or "limited<joiner>until 14:05" while cooling; null when not limited. */
+export function authLimitLabel(
+  account: Pick<AuthAccountSummary, "limited" | "cooldownUntil">,
+  joiner = " ",
+): string | null {
+  if (!account.limited) return null;
+  return account.cooldownUntil
+    ? `limited${joiner}until ${formatClockTime(account.cooldownUntil)}`
+    : "limited";
+}
+
+/** Option text for pickers: label plus status or limit suffix. */
+export function authAccountOptionLabel(account: AuthAccountSummary): string {
+  const suffix = account.authenticated
+    ? authLimitLabel(account)
+    : AUTH_STATUS_LABEL[account.status];
+  return suffix ? `${authAccountName(account)} (${suffix})` : authAccountName(account);
+}
 
 /** One shared cache of every managed account and pool, filtered per caller. */
 export function useAuthAccounts(enabled = true) {

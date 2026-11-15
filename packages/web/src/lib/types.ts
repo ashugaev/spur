@@ -261,6 +261,10 @@ export interface AuthAccountSummary {
   createdAt: string;
   authenticated: boolean;
   status: AuthAccountStatus;
+  /** True while a shared quota cooldown is active. */
+  limited: boolean;
+  /** ISO end of the cooldown; present only while cooling. */
+  cooldownUntil?: string;
 }
 
 export interface AuthPool {

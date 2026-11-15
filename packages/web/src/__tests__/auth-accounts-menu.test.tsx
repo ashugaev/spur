@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthAccountSelect } from "@/components/AuthAccountSelect";
 import { AuthAccountsMenu } from "@/components/AuthAccountsMenu";
 import { SwitchAuthDialog } from "@/components/SwitchAuthDialog";
+import { formatClockTime } from "@/lib/format";
 import type { AuthAccountsResponse, AuthLogin, SpurSessionAuth } from "@/lib/types";
+
+const COOLDOWN_UNTIL = "2026-01-01T14:05:00.000Z";
+const UNTIL = formatClockTime(COOLDOWN_UNTIL);
 
 const ACCOUNTS: AuthAccountsResponse = {
   accounts: [
@@ -16,6 +20,7 @@ const ACCOUNTS: AuthAccountsResponse = {
       createdAt: "2026-01-01T00:00:00.000Z",
       authenticated: true,
       status: "ready",
+      limited: false,
     },
     {
       id: "claude-home",
@@ -24,6 +29,8 @@ const ACCOUNTS: AuthAccountsResponse = {
       createdAt: "2026-01-01T00:00:00.000Z",
       authenticated: true,
       status: "ready",
+      limited: true,
+      cooldownUntil: COOLDOWN_UNTIL,
     },
     {
       id: "codex-new",
@@ -32,6 +39,7 @@ const ACCOUNTS: AuthAccountsResponse = {
       createdAt: "2026-01-01T00:00:00.000Z",
       authenticated: false,
       status: "sign_in_required",
+      limited: false,
     },
   ],
   pools: {
@@ -47,6 +55,8 @@ interface Call {
 
 let calls: Call[];
 let routes: Record<string, (call: Call) => { status?: number; payload: unknown }>;
+// Holds every response until resolved; null answers immediately.
+let gate: Promise<void> | null;
 
 function render(ui: ReactElement) {
   const client = new QueryClient({
@@ -60,6 +70,7 @@ function render(ui: ReactElement) {
 
 beforeEach(() => {
   calls = [];
+  gate = null;
   routes = { "GET /api/auth-accounts": () => ({ payload: ACCOUNTS }) };
   vi.stubGlobal(
     "fetch",
@@ -68,6 +79,7 @@ beforeEach(() => {
       const method = init?.method ?? "GET";
       const call = { url, method, body: init?.body ? JSON.parse(String(init.body)) : undefined };
       calls.push(call);
+      if (gate) await gate;
       const handler = routes[`${method} ${url}`];
       const { status = 200, payload } = handler
         ? handler(call)
@@ -99,8 +111,13 @@ describe("AuthAccountsMenu", () => {
     expect(
       within(screen.getByTestId("auth-account-claude-work")).getByText("default"),
     ).toBeTruthy();
+    const home = within(screen.getByTestId("auth-account-claude-home"));
+    expect(home.queryByText("default")).toBeNull();
+    expect(home.getByText(`limited · until ${UNTIL}`).className).toContain(
+      "--color-status-attention",
+    );
     expect(
-      within(screen.getByTestId("auth-account-claude-home")).queryByText("default"),
+      within(screen.getByTestId("auth-account-claude-work")).queryByText(/limited/),
     ).toBeNull();
     expect((claude.getByLabelText("Auto-rotate claude accounts") as HTMLInputElement).checked).toBe(
       true,
@@ -150,16 +167,83 @@ describe("AuthAccountsMenu", () => {
     );
   });
 
-  it("removes an account and shows the daemon conflict", async () => {
+  it("shows a loading row while accounts load, not an empty pool", async () => {
+    let release: () => void = () => undefined;
+    gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    render(<AuthAccountsMenu />);
+    fireEvent.click(screen.getByRole("button", { name: "Manage agent accounts" }));
+
+    expect(await screen.findByTestId("auth-accounts-loading")).toBeTruthy();
+    expect(screen.queryByText("0 ready")).toBeNull();
+    expect(screen.queryByTestId("auth-section-claude")).toBeNull();
+    release();
+    expect(await screen.findByTestId("auth-section-claude")).toBeTruthy();
+  });
+
+  it("hides sections on a load failure and retries", async () => {
+    let failing = true;
+    routes["GET /api/auth-accounts"] = () =>
+      failing ? { status: 502, payload: { error: "daemon down" } } : { payload: ACCOUNTS };
+    render(<AuthAccountsMenu />);
+    fireEvent.click(screen.getByRole("button", { name: "Manage agent accounts" }));
+
+    expect((await screen.findByRole("alert")).textContent).toBe("daemon down");
+    expect(screen.queryByTestId("auth-section-claude")).toBeNull();
+    failing = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByTestId("auth-section-claude")).toBeTruthy();
+  });
+
+  it("removes an account only after confirmation", async () => {
     routes["DELETE /api/auth-accounts/claude-home"] = () => ({
-      status: 409,
-      payload: { error: "Cannot remove account claude-home: in use by a running session" },
+      payload: { removed: "claude-home" },
     });
     const claude = await openMenu();
 
     fireEvent.click(await claude.findByRole("button", { name: "Remove claude account Home" }));
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    fireEvent.click(claude.getByRole("button", { name: "Keep" }));
+    expect(claude.queryByRole("button", { name: /Confirm remove/ })).toBeNull();
 
+    fireEvent.click(claude.getByRole("button", { name: "Remove claude account Home" }));
+    fireEvent.click(claude.getByRole("button", { name: "Confirm remove claude account Home" }));
+
+    await waitFor(() =>
+      expect(calls).toContainEqual({
+        url: "/api/auth-accounts/claude-home",
+        method: "DELETE",
+        body: undefined,
+      }),
+    );
+  });
+
+  it("shows the daemon conflict, then clears it when the next action starts", async () => {
+    routes["DELETE /api/auth-accounts/claude-home"] = () => ({
+      status: 409,
+      payload: { error: "Cannot remove account claude-home: in use by a running session" },
+    });
+    routes["PATCH /api/auth-pools/claude"] = () => ({ payload: { pool: {} } });
+    const claude = await openMenu();
+
+    fireEvent.click(await claude.findByRole("button", { name: "Remove claude account Home" }));
+    fireEvent.click(claude.getByRole("button", { name: "Confirm remove claude account Home" }));
     expect(await claude.findByText(/in use by a running session/)).toBeTruthy();
+
+    await waitFor(() =>
+      expect(
+        (
+          claude.getByRole("button", {
+            name: "Make claude account Home default",
+          }) as HTMLButtonElement
+        ).disabled,
+      ).toBe(false),
+    );
+    fireEvent.click(claude.getByRole("button", { name: "Make claude account Home default" }));
+
+    await waitFor(() => expect(claude.queryByText(/in use by a running session/)).toBeNull());
   });
 
   it("adds a Codex account, starts sign-in, and shows the URL and device code", async () => {
@@ -248,14 +332,69 @@ describe("AuthAccountsMenu", () => {
       body: { cancel: true },
     });
   });
+
+  it("focuses the code field and cancels sign-in on Escape", async () => {
+    routes["POST /api/auth-accounts/codex-new/login"] = () => ({
+      payload: { accountId: "codex-new", status: "pending" },
+    });
+    routes["GET /api/auth-accounts/codex-new/login-status"] = () => ({
+      payload: { accountId: "codex-new", status: "pending" },
+    });
+    routes["POST /api/auth-accounts/codex-new/login-input"] = () => ({
+      payload: { accountId: "codex-new", status: "sign-in-required" },
+    });
+    await openMenu();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Sign in codex account Fresh" }));
+    const dialog = within(await screen.findByRole("dialog", { name: /Sign in codex/ }));
+    expect(document.activeElement).toBe(dialog.getByLabelText("Authorization code"));
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(calls).toContainEqual({
+      url: "/api/auth-accounts/codex-new/login-input",
+      method: "POST",
+      body: { cancel: true },
+    });
+  });
+
+  it("reports a failed sign-in without detail and restarts it on Retry", async () => {
+    let started = 0;
+    routes["POST /api/auth-accounts/codex-new/login"] = () => {
+      started += 1;
+      return {
+        payload:
+          started === 1
+            ? { accountId: "codex-new", status: "failed" }
+            : { accountId: "codex-new", status: "pending", userCode: "NEW-CODE" },
+      };
+    };
+    routes["GET /api/auth-accounts/codex-new/login-status"] = () => ({
+      payload: { accountId: "codex-new", status: started === 1 ? "failed" : "pending" },
+    });
+    await openMenu();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Sign in codex account Fresh" }));
+    const dialog = within(await screen.findByRole("dialog", { name: /Sign in codex/ }));
+    expect((await dialog.findByTestId("auth-login-error")).textContent).toBe("Sign-in failed");
+    fireEvent.click(dialog.getByRole("button", { name: "Retry" }));
+
+    expect((await dialog.findByTestId("auth-login-user-code")).textContent).toBe("NEW-CODE");
+    expect(dialog.queryByTestId("auth-login-error")).toBeNull();
+  });
 });
 
 describe("AuthAccountSelect", () => {
+  async function loadedSelect(): Promise<HTMLSelectElement> {
+    await screen.findByRole("option", { name: "Auth · Auto" });
+    return screen.getByLabelText("Spawn auth") as HTMLSelectElement;
+  }
+
   it("offers Auto plus provider accounts and disables accounts that need sign-in", async () => {
     const onChange = vi.fn();
     render(<AuthAccountSelect agent="codex" onChange={onChange} value={null} />);
 
-    const select = (await screen.findByLabelText("Spawn auth")) as HTMLSelectElement;
+    const select = await loadedSelect();
     const options = Array.from(select.options).map((option) => [option.text, option.disabled]);
     expect(options).toEqual([
       ["Auth · Auto", false],
@@ -263,11 +402,43 @@ describe("AuthAccountSelect", () => {
     ]);
   });
 
+  it("labels a limited account with its cooldown end and keeps it selectable", async () => {
+    render(<AuthAccountSelect agent="claude" onChange={vi.fn()} value={null} />);
+
+    const select = await loadedSelect();
+    expect(Array.from(select.options).map((option) => [option.text, option.disabled])).toEqual([
+      ["Auth · Auto", false],
+      ["Auth · Work", false],
+      [`Auth · Home (limited until ${UNTIL})`, false],
+    ]);
+  });
+
+  it("shows a disabled placeholder while loading and after a load failure", async () => {
+    let release: () => void = () => undefined;
+    gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    routes["GET /api/auth-accounts"] = () => ({ status: 502, payload: { error: "down" } });
+    render(<AuthAccountSelect agent="claude" onChange={vi.fn()} value={null} />);
+
+    const loading = screen.getByLabelText("Spawn auth") as HTMLSelectElement;
+    expect(loading.disabled).toBe(true);
+    expect(loading.options[0]?.text).toBe("Auth · Loading…");
+    release();
+
+    await waitFor(() =>
+      expect((screen.getByLabelText("Spawn auth") as HTMLSelectElement).options[0]?.text).toBe(
+        "Auth · unavailable",
+      ),
+    );
+    expect((screen.getByLabelText("Spawn auth") as HTMLSelectElement).disabled).toBe(true);
+  });
+
   it("maps a pick to the account id and Auto to null", async () => {
     const onChange = vi.fn();
     render(<AuthAccountSelect agent="claude" onChange={onChange} value="claude-work" />);
 
-    const select = await screen.findByLabelText("Spawn auth");
+    const select = await loadedSelect();
     fireEvent.change(select, { target: { value: "claude-home" } });
     fireEvent.change(select, { target: { value: "" } });
 
@@ -281,8 +452,8 @@ describe("AuthAccountSelect", () => {
     const { container } = render(
       <AuthAccountSelect agent="codex" onChange={vi.fn()} value={null} />,
     );
-    await waitFor(() => expect(calls.length).toBe(1));
-    expect(container.querySelector("select")).toBeNull();
+    await waitFor(() => expect(container.querySelector("select")).toBeNull());
+    expect(calls.length).toBe(1);
   });
 
   it("never queries accounts for an unmanaged agent", () => {
@@ -303,6 +474,53 @@ describe("SwitchAuthDialog", () => {
     effectiveAccountId: "claude-work",
     generation: 1,
   };
+
+  it("shows loading text until accounts arrive", async () => {
+    let release: () => void = () => undefined;
+    gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    render(
+      <SwitchAuthDialog
+        auth={auth}
+        errorMessage={null}
+        onCancel={vi.fn()}
+        onConfirm={vi.fn()}
+        status="idle"
+      />,
+    );
+
+    expect(screen.getByTestId("switch-auth-loading").textContent).toBe("Loading accounts…");
+    release();
+    await waitFor(() => expect(screen.queryByTestId("switch-auth-loading")).toBeNull());
+  });
+
+  it("cancels on Escape unless a switch is pending", () => {
+    const onCancel = vi.fn();
+    const { rerender } = render(
+      <SwitchAuthDialog
+        auth={auth}
+        errorMessage={null}
+        onCancel={onCancel}
+        onConfirm={vi.fn()}
+        status="pending"
+      />,
+    );
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onCancel).not.toHaveBeenCalled();
+
+    rerender(
+      <SwitchAuthDialog
+        auth={auth}
+        errorMessage={null}
+        onCancel={onCancel}
+        onConfirm={vi.fn()}
+        status="idle"
+      />,
+    );
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
 
   it("shows the effective account and switches a pinned session back to Auto", async () => {
     const onConfirm = vi.fn();
@@ -344,8 +562,9 @@ describe("SwitchAuthDialog", () => {
     expect(Array.from(select.options).map((option) => option.text)).toEqual([
       "Auto",
       "Work",
-      "Home",
+      `Home (limited until ${UNTIL})`,
     ]);
+    expect(screen.queryByTestId("switch-auth-loading")).toBeNull();
     fireEvent.change(select, { target: { value: "claude-home" } });
     fireEvent.click(screen.getByRole("button", { name: "Switch" }));
 
