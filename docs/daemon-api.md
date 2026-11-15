@@ -1,6 +1,5 @@
 # Daemon HTTP API
 
-> Scope: route names only, one method + full path per line, every line `git grep`-able verbatim. Payload/status-code contracts: `v2/src/server.ts`. CLI usage: [commands.md](commands.md). Default `127.0.0.1:4310`.
 - `GET /info` — `lifecycleInstanceId`, runtime `buildId`: process/build identity; `v2/src/session-lifecycle.ts`, `v2/src/build-identity.ts`.
 - `GET /headroom`
 - `GET /usage` — quota windows per Claude account and Codex, per-source error entries, token totals today/7d/30d; provider request timeout 5s; MCP `get_usage`; `v2/src/usage-report.ts`.
@@ -32,6 +31,7 @@
 - `GET /projects/:id/branches/exists?name=<branch>`
 - `POST /projects/:id/preflight-batches`
 - `POST /projects/:id/preflight` — same `409` as `POST /sessions/background` when `preflightBatchId` is already claimed.
+
 ## Session routes
 
 - `GET /sessions` — array; `includeCompleted=1|true` adds completed; repeated `link=<label[=URL]>` uses AND (`label`: any URL, `URL`: normalized; invalid: 400); optional `rateLimitResetAt` ISO UTC, unknown omitted/cleared on limit exit; attention entry/exit immediate on fresh classification across GET/list, working/waiting hold retained; `sidecars[].url` ready endpoint, `sidecars[].ports[].listening` host TCP listener true|false|null; `x-spur-lifecycle-instance-id` header, per-row `lifecycle`; `v2/src/server.ts`, `v2/src/session-lifecycle.ts`; no `503` on lifecycle churn, moving row carries last build and receipt.

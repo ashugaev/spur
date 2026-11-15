@@ -14,6 +14,7 @@ Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|
 `$SPUR_AGENT_LAUNCH_ID`: opaque, fresh per agent process generation; agent config cannot override; never persist/reuse; additional live-pane orphan cleanup requires readable exact `$SPUR_SESSION` and attempted-launch markers; missing/mismatched/unreadable markers skipped, baseline matched descendants unchanged — `v2/src/agent-processes.ts`, `v2/src/session-service.ts`. Agent panes also get `DISABLE_AUTO_UPDATE=true` (suppresses the oh-my-zsh update prompt); agent `env` config overrides it.
 
 ## doctor
+
 Read-only host/config/daemon health check; `--scaffold` writes local `spur.yaml`; `spur-*-persistence` requires persistent enablement of installed required services; `v2/src/host-install.ts`.
 
 ## gc
@@ -21,6 +22,7 @@ Read-only host/config/daemon health check; `--scaffold` writes local `spur.yaml`
 `spur gc [--execute] [--older-than <days>] [--statuses <list>] [--project <id>] [--limit <n>] [--no-sizes] [--json]` reclaims stale worktrees, archives terminal session records. `--limit` caps groups that act and listed blocked groups; execution probes at most 2x `--limit` groups. Group actions: `reclaim`, `archive`, `partial`, `blocked`. `--older-than` is the minimum age of a record; worktree removal needs every group member eligible; otherwise `partial` archives only eligible records (`archiveSessionIds` in `--json`) and keeps ineligible records, desk anchors they reference, and one record per existing worktree. A dirty, unpushed or open-PR worktree degrades `reclaim` to `partial` with a keeper record. Defaults: `sessionGc.*` ([configuration.md#field-reference](configuration.md#field-reference)).
 
 ## disk
+
 `spur disk [--json]` reports disk usage, writes `<dataDir>/disk-budget.json` ([disk budget](configuration.md#disk-budget)).
 
 ## usage
@@ -49,7 +51,6 @@ Read-only host/config/daemon health check; `--scaffold` writes local `spur.yaml`
 ## spawn
 
 `spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--model <id>] [--reasoning-effort <level>] [--mode <name>] [--plan] [--restrict-writes] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <text>]] [--json]`
-
 Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `projects.<id>.tokenBudget`. `--subscribe-state`/`--subscribe-message` require `--subscribe-to`. [Modes](configuration.md#modes); [resource queue](configuration.md#admission-control).
 
 ## shepherd, wake
