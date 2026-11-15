@@ -37,6 +37,13 @@ test.describe("R1: Mobile viewport", () => {
     await expect(page.getByRole("img", { name: "Spur" })).toBeVisible();
   });
 
+  test("dashboard header bar and main use 8px side padding", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession({ id: "mob-pad" })]);
+    await page.goto("/");
+    await expect(page.locator("main")).toHaveCSS("padding-left", "8px");
+    await expect(page.locator("header > div").first()).toHaveCSS("padding-left", "8px");
+  });
+
   test("Spawn Session button visible on mobile", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
@@ -545,6 +552,12 @@ test.describe("R3: Desktop viewport (1280px)", () => {
     await expect(page.getByRole("button", { name: /Project filter:/ })).toBeVisible();
     await expect(page.getByRole("button", { name: "Filters" })).toBeVisible();
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
+  });
+
+  test("dashboard header bar and main keep 24px side padding", async ({ page }) => {
+    await gotoMocked(page, "/", [makeWorkingSession({ id: "desktop-pad" })]);
+    await expect(page.locator("main")).toHaveCSS("padding-left", "24px");
+    await expect(page.locator("header > div").first()).toHaveCSS("padding-left", "24px");
   });
 
   test("session row renders with project column at sm", async ({ page }) => {

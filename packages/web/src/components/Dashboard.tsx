@@ -2873,7 +2873,7 @@ export function Dashboard() {
     <TagsContext.Provider value={tagsContextValue}>
       <div className="flex min-h-dvh flex-col">
         <header className="sticky top-0 z-40 border-b border-[var(--color-border-default)] bg-[var(--color-bg-base)]">
-          <div className="mx-auto flex min-h-10 max-w-[1500px] items-center gap-2.5 px-4 py-[7px] sm:px-5 lg:px-6">
+          <div className="mx-auto flex min-h-10 max-w-[1500px] items-center gap-2.5 px-2 py-[7px] sm:px-5 lg:px-6">
             <BrandGlyph />
             <span className="inline-flex min-w-0">
               <ProjectMenu
@@ -3067,7 +3067,7 @@ export function Dashboard() {
           />
         ) : null}
 
-        <main className="mx-auto flex w-full max-w-[1500px] flex-1 flex-col px-4 py-4 pb-8 sm:px-5 lg:px-6">
+        <main className="mx-auto flex w-full max-w-[1500px] flex-1 flex-col px-2 py-4 pb-8 sm:px-5 lg:px-6">
           {newProjectOpen ? (
             <NewProjectModal
               displayName={newProjectDisplayName}
