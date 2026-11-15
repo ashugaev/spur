@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { toCursorProjectPath } from "../../src/cursor-jsonl-state.js";
 import { cursorDeliveryInput, isCursorDeliveryId } from "../../src/agents/cursor-submit-ack.js";
+import { withSessionSlotInstructions } from "../../src/session-slots.js";
 import { readEventLog, sessionEventLogPath, type SpurLogEntry } from "../../src/event-log.js";
 import { readSession, writeSession } from "../../src/metadata.js";
 import { listProcesses, readProcessEnvValue } from "../../src/process-tree.js";
@@ -1923,8 +1924,11 @@ projects:
         const deliveredPrompt = submittedText?.split("\n\nSession metadata:\n")[0];
         const deliveryId = deliveredPrompt?.match(/^\[Spur delivery: ([^\]]+)\]\n\n/)?.[1];
         if (!isCursorDeliveryId(deliveryId)) throw new Error("Missing valid Cursor delivery ID");
+        const expectedPrompt = withSessionSlotInstructions("runtime preflight prompt for cursor");
+        const metadataStart = expectedPrompt.indexOf("\n\nSession metadata:\n");
+        expect(metadataStart).toBeGreaterThan(0);
         expect(deliveredPrompt).toBe(
-          cursorDeliveryInput(deliveryId, "runtime preflight prompt for cursor"),
+          cursorDeliveryInput(deliveryId, expectedPrompt.slice(0, metadataStart)),
         );
       }
     },
