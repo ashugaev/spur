@@ -28,11 +28,25 @@ type admission struct {
 func authFileID(id string) string    { return id + ".json" }
 func profileID(authID string) string { return strings.TrimSuffix(authID, ".json") }
 
-// nextEligibleLocked returns the least-loaded eligible account, oldest first on ties.
-func (r *router) nextEligibleLocked(p provider, exclude string, candidates map[string]bool) string {
+// refreshAdmissionLocked adopts the saved binding while the admission still tracks it, so parallel
+// requests of one session share rotation and episode state. A manual switch or default change
+// (new generation) keeps the admitted snapshot. Reports whether the admission tracks saved state.
+func (r *router) refreshAdmissionLocked(a *admission) bool {
+	saved, exists := r.state.Sessions[a.SessionID]
+	if !exists || saved.Session.Generation != a.Binding.Session.Generation || saved.DefaultGeneration != a.Binding.DefaultGeneration {
+		return false
+	}
+	a.Binding = saved
+	return true
+}
+
+// nextEligibleLocked returns the eligible account least used by other sessions, oldest first on ties.
+func (r *router) nextEligibleLocked(p provider, sessionID, exclude string, candidates map[string]bool) string {
 	load := map[string]int{}
-	for _, s := range r.state.Sessions {
-		load[s.Session.EffectiveAccountID]++
+	for id, s := range r.state.Sessions {
+		if id != sessionID {
+			load[s.Session.EffectiveAccountID]++
+		}
 	}
 	accounts := make([]accountInput, 0, len(r.accounts))
 	for id, a := range r.accounts {
@@ -64,7 +78,7 @@ func (r *router) rotateLocked(b *binding, candidates map[string]bool) error {
 			return errors.New("selected account requires sign in")
 		}
 		// Auto leaves an account that needs sign-in without spending quota budget.
-		next := r.nextEligibleLocked(p, current, candidates)
+		next := r.nextEligibleLocked(p, b.Session.SessionID, current, candidates)
 		if next == "" {
 			return errors.New("no account is ready; sign in to an account")
 		}
@@ -82,7 +96,7 @@ func (r *router) rotateLocked(b *binding, candidates map[string]bool) error {
 	if !auto || !r.pools[p].AutoRotate || b.Episode.Rotations >= r.policy.MaxRotationsPerEpisode {
 		return errors.New("account quota exhausted; rotation unavailable")
 	}
-	next := r.nextEligibleLocked(p, current, candidates)
+	next := r.nextEligibleLocked(p, b.Session.SessionID, current, candidates)
 	if next == "" {
 		return errors.New("no account is ready outside the shared cooldown")
 	}
@@ -130,21 +144,21 @@ func (r *router) Pick(_ context.Context, requestedProvider, _ string, opts coree
 			available[profileID(auth.ID)] = true
 		}
 	}
+	// A parallel request may already have rotated this session; adopt that account when eligible.
+	tracked := r.refreshAdmissionLocked(a)
 	before := a.Binding.Session.EffectiveAccountID
 	if err := r.rotateLocked(&a.Binding, available); err != nil {
 		return nil, err
 	}
 	if before != a.Binding.Session.EffectiveAccountID {
-		current, exists := r.state.Sessions[a.SessionID]
-		saved := exists && current.Session.Generation == a.Binding.Session.Generation
-		if saved {
+		if tracked {
 			r.state.Sessions[a.SessionID] = a.Binding
 		}
 		if err := r.persistLocked(); err != nil {
 			return nil, errors.New("could not persist rotation")
 		}
-		if saved {
-			r.noteRotationLocked(a.Binding, current.Session.EffectiveAccountID)
+		if tracked {
+			r.noteRotationLocked(a.Binding, before)
 		}
 	}
 	a.LastAccount = a.Binding.Session.EffectiveAccountID
@@ -188,15 +202,12 @@ func (r *router) OnResult(_ context.Context, result coreauth.Result) {
 			r.state.Cooldowns[id] = until
 			changed = true
 		}
-		if a != nil && a.LastAccount == id {
-			if !a.Binding.Episode.Open {
-				a.Binding.Episode.Open = true
-				a.Binding.Episode.Epoch++
-			}
-			if current, exists := r.state.Sessions[a.SessionID]; exists && current.Session.Generation == a.Binding.Session.Generation {
-				r.state.Sessions[a.SessionID] = a.Binding
-				changed = true
-			}
+		// Skip a quota on an account a parallel request already rotated away from.
+		if a != nil && a.LastAccount == id && r.refreshAdmissionLocked(a) && a.Binding.Session.EffectiveAccountID == id && !a.Binding.Episode.Open {
+			a.Binding.Episode.Open = true
+			a.Binding.Episode.Epoch++
+			r.state.Sessions[a.SessionID] = a.Binding
+			changed = true
 		}
 	}
 	if a != nil && profileID(result.AuthID) == a.LastAccount && result.Success && result.CompletedResponse {

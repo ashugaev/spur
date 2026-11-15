@@ -215,6 +215,36 @@ func TestRotationEmitsOneEventPerChange(t *testing.T) {
 	}
 }
 
+func TestParallelQuotaRotatesSessionOnce(t *testing.T) {
+	r := testRouter(t)
+	if _, err := r.register("session-a", codex, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	first, second := testAdmission(t, r, "session-a"), testAdmission(t, r, "session-a")
+	r.mu.Lock()
+	r.requests["parallel"] = r.requests["session-a"]
+	r.requests["session-a"] = &admission{SessionID: "session-a", Binding: r.state.Sessions["session-a"]}
+	r.mu.Unlock()
+	first.Headers.Set(requestHeader, "parallel")
+	pickForTest(t, r, first, "account-a", "account-b", "account-c")
+	pickForTest(t, r, second, "account-a", "account-b", "account-c")
+	quota := &coreauth.Error{HTTPStatus: 429}
+	r.OnResult(context.Background(), coreauth.Result{AuthID: authFileID("account-a"), Options: first, Error: quota})
+	r.OnResult(context.Background(), coreauth.Result{AuthID: authFileID("account-a"), Options: second, Error: quota})
+	all := []string{"account-a", "account-b", "account-c"}
+	if got := pickForTest(t, r, first, all...).ID; got != authFileID("account-b") {
+		t.Fatalf("first retry: %s", got)
+	}
+	r.OnResult(context.Background(), coreauth.Result{AuthID: authFileID("account-a"), Options: second, Error: quota})
+	if got := pickForTest(t, r, second, all...).ID; got != authFileID("account-b") {
+		t.Fatalf("second retry did not adopt the parallel rotation: %s", got)
+	}
+	saved := r.state.Sessions["session-a"]
+	if saved.Session.EffectiveAccountID != "account-b" || saved.Episode.Rotations != 1 || len(r.rotations) != 1 {
+		t.Fatalf("parallel quota rotated more than once: %+v events=%d", saved, len(r.rotations))
+	}
+}
+
 func TestAutoWithoutDefaultPicksReadyAccount(t *testing.T) {
 	r := testRouter(t)
 	pool := r.pools[codex]
