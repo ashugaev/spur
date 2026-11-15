@@ -3019,7 +3019,10 @@ describe("listArchivedSessions", () => {
   it("runs the include predicate before parsing the file", async () => {
     const dataDir = await newDataDir();
     archiveRecords(dataDir, ["api-1", "api-2"]);
-    writeFileSync(join(dataDir, "sessions-archive", "api", "api-2.json"), "not json", "utf-8");
+    // Parsing a directory throws EISDIR, a plain Error that is not skipped as invalid metadata.
+    const excluded = join(dataDir, "sessions-archive", "api", "api-2.json");
+    await rm(excluded);
+    mkdirSync(excluded);
     const seen: string[] = [];
 
     const sessions = listArchivedSessions(dataDir, (project, id) => {
