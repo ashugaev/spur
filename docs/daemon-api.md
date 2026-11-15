@@ -69,9 +69,10 @@
 - `POST /sessions/:id/switch-auth` — 404 unless `authRotation.switchAuth: true`
 - `GET /sessions/:id/todo`
 - `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo-snapshot)
-- `GET /sessions/:id/snapshots` — metadata, ascending by version; `404|500 snapshot_corrupt`; `v2/src/snapshots.ts`
+- `GET /sessions/:id/snapshots` — metadata, oldest first, all versions; each at most once: `order=asc|desc`, `limit` 1..100, `before`/`after` exclusive version bounds; archived sessions too; `400 invalid_snapshot_request|404|500 snapshot_corrupt`; `v2/src/snapshots.ts`
 - `POST /sessions/:id/snapshots` — `{content, final?}`; caller header, when set, must equal `:id`; `400|404|409 snapshot_conflict|413 snapshot_too_large`. See [snapshot](commands.md#todo-snapshot)
-- `GET /sessions/:id/snapshots/:version` — positive integer or `latest`; `400|404|500 snapshot_corrupt`
+- `GET /sessions/:id/snapshots/:version` — positive integer or `latest`; adds `freshness`, `includeDone=1` adds `done`; archived sessions too; no lock, no wake; `400|404|500 snapshot_corrupt|500 todo_ledger_corrupt`. See [snapshots](snapshots.md#read)
+- `GET /snapshots/latest` — repeatable `link=label[=url]` (required, all match), `includeDone=1`; `[{sessionId, status, state, snapshot}]` per matching session, newest first, live, completed and archived; `400 invalid_snapshot_request`. See [snapshots](snapshots.md#read)
 - `GET /sessions/:id/auto-ping-suppressions` — `?all=1` adds `history`. See [auto-ping](commands.md#auto-ping)
 - `POST /sessions/:id/auto-ping-suppressions/mute` — `{handle, mode: until_change|for|forever, durationMs?, reason?}`; `400|403|404`. See [auto-ping](commands.md#auto-ping)
 - `POST /sessions/:id/auto-ping-suppressions/resume` — exactly one of `{handle}` or `{suppressionId}`; `400|403|404`. See [auto-ping](commands.md#auto-ping)
