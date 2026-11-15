@@ -1136,6 +1136,7 @@ export function Dashboard() {
   const [spawnPinnedProjectId, setSpawnPinnedProjectId] = useState<string | null>(null);
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
+  const [spawnAuthAccountId, setSpawnAuthAccountId] = useState<string | null>(null);
   const [spawnModel, setSpawnModel] = useState<string | null>(null);
   const [spawnReasoningIntent, setSpawnReasoningIntent] = useState<ReasoningIntent>(
     initialReasoningIntent(false),
@@ -1736,6 +1737,7 @@ export function Dashboard() {
     setSpawnProjectId(nextProjectId);
     setSpawnPrompt(draft?.prompt ?? "");
     setSpawnAgent(draft?.agent ?? "claude");
+    setSpawnAuthAccountId(null);
     setSpawnModel(draft?.model ?? null);
     setSpawnReasoningIntent(draft?.reasoningIntent ?? initialReasoningIntent(false));
     setSpawnSessionMode(draft?.sessionMode ?? null);
@@ -2157,6 +2159,7 @@ export function Dashboard() {
         workspaceMode: spawnWorkspaceMode,
         defaultBranch: spawnDefaultBranch,
         preflightBatchId: spawnPreflightBatchIdRef.current,
+        authAccountId: spawnAuthAccountId,
       });
 
       const read = lifecycleRef.current.beginRead();
@@ -3171,6 +3174,7 @@ export function Dashboard() {
                       },
                     }
                   : {}),
+                auth: { value: spawnAuthAccountId, onChange: setSpawnAuthAccountId },
                 branch: {
                   value: spawnBranch,
                   onChange: (next) => {
@@ -3318,6 +3322,7 @@ export function Dashboard() {
               onAddFiles={addSpawnFiles}
               onAgentChange={(next) => {
                 setSpawnAgent(next);
+                setSpawnAuthAccountId(null);
                 setSpawnModel(null);
                 setSpawnReasoningIntent(initialReasoningIntent(false));
               }}

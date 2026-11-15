@@ -21,6 +21,7 @@ interface SpawnBody {
   bootstrap?: boolean;
   slots?: { links?: Array<{ label: string; url: string }> };
   preflightBatchId?: string;
+  authAccountId?: string;
 }
 
 export async function POST(request: NextRequest) {
@@ -57,6 +58,7 @@ export async function POST(request: NextRequest) {
     if (body.reasoningEffort !== undefined) payload.reasoningEffort = body.reasoningEffort;
     if (body.preflightBatchId?.trim()) payload.preflightBatchId = body.preflightBatchId.trim();
     if (body.mode?.trim()) payload.mode = body.mode.trim();
+    if (body.authAccountId?.trim()) payload.authAccountId = body.authAccountId.trim();
     if (body.branch?.trim()) payload.branch = body.branch.trim();
     if (body.planMode === true) payload.planMode = true;
     if (body.selfDestruct) payload.selfDestruct = body.selfDestruct;

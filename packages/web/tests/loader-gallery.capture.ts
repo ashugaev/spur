@@ -560,19 +560,17 @@ test("account add spinner", async ({ browser }) => {
     surface: "Account and confirmation-dialog actions / Spinner",
     prepare: async (page) => {
       await mockSessions(page, []);
-      await page.route(
-        "/api/claude-accounts",
-        (route) =>
-          void route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify({ accounts: [] }),
-          }),
-      );
-      await page.route("/api/claude-accounts/add", () => {});
+      await page.route("/api/auth-accounts", (route) => {
+        if (route.request().method() === "POST") return;
+        void route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ accounts: [], pools: {} }),
+        });
+      });
       await page.goto("/");
-      await page.getByRole("button", { name: "Manage Claude accounts" }).click();
-      await page.getByTestId("add-account").click();
+      await page.getByRole("button", { name: "Manage agent accounts" }).click();
+      await page.getByTestId("add-account-claude").click();
       await expect(page.getByRole("button", { name: "Adding account" })).toBeVisible();
     },
   });

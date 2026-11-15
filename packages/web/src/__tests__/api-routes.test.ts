@@ -102,7 +102,12 @@ import { GET as getSessionConversation } from "@/app/api/sessions/[id]/conversat
 import { DELETE as deleteProject, PATCH as updateProject } from "@/app/api/projects/[id]/route";
 import { POST as createProject } from "@/app/api/projects/route";
 import { POST as switchAuth } from "@/app/api/sessions/[id]/switch-auth/route";
-import { GET as listClaudeAccounts } from "@/app/api/claude-accounts/route";
+import { GET as listAuthAccounts, POST as addAuthAccount } from "@/app/api/auth-accounts/route";
+import { DELETE as removeAuthAccount } from "@/app/api/auth-accounts/[id]/route";
+import { POST as startAuthLogin } from "@/app/api/auth-accounts/[id]/login/route";
+import { POST as submitAuthLoginInput } from "@/app/api/auth-accounts/[id]/login-input/route";
+import { GET as readAuthLoginStatus } from "@/app/api/auth-accounts/[id]/login-status/route";
+import { PATCH as updateAuthPool } from "@/app/api/auth-pools/[provider]/route";
 import { GET as getSpawnDefaults } from "@/app/api/projects/[id]/spawn-defaults/route";
 import { GET as getCronJobs } from "@/app/api/cron/route";
 import { GET as getUsage } from "@/app/api/usage/route";
@@ -590,6 +595,28 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(201);
     const body = JSON.parse(String(mockedSpurRequestJson.mock.calls[0]?.[1]?.body));
     expect(body).not.toHaveProperty("mode");
+  });
+
+  it.each([
+    ["acc-1", "acc-1"],
+    [undefined, undefined],
+  ])("POST /api/spawn forwards authAccountId %s", async (sent, forwarded) => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId: "api",
+          prompt: "Do work",
+          agent: "codex",
+          authAccountId: sent,
+        }),
+      }),
+    );
+
+    const body = JSON.parse(String(mockedSpurRequestJson.mock.calls[0]?.[1]?.body));
+    expect(body.authAccountId).toBe(forwarded);
   });
 
   it("POST /api/spawn forwards reuseWorkspaceSessionId with overrides", async () => {
@@ -4719,13 +4746,11 @@ describe("Spur web API routes", () => {
     });
   });
 
-  // ── Claude account rotation ────────────────────────────────────────────
+  // ── Authorization account rotation ─────────────────────────────────────
 
-  describe("Claude account rotation", () => {
+  describe("Authorization account rotation", () => {
     it("POST /api/sessions/:id/switch-auth forwards accountId to the daemon", async () => {
-      mockedSpurRequestJson.mockResolvedValue(
-        sessionFixture({ id: "api-a1", activeClaudeAccountId: "acc-2" }),
-      );
+      mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-a1" }));
 
       const response = await switchAuth(
         new Request("http://localhost:3000/api/sessions/api-a1/switch-auth", {
@@ -4772,29 +4797,181 @@ describe("Spur web API routes", () => {
       expect(mockedSpurRequestJson).not.toHaveBeenCalled();
     });
 
-    it("GET /api/claude-accounts maps the daemon accounts shape", async () => {
-      const accounts = [
-        { id: "acc-1", label: "Work", authenticated: true, lastUsedAt: "2026-07-01T00:00:00.000Z" },
-        { id: "acc-2", authenticated: false },
-      ];
-      mockedSpurRequestJson.mockResolvedValue({ accounts });
+    it("POST /api/sessions/:id/switch-auth forwards accountId null as Auto", async () => {
+      mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 
-      const response = await listClaudeAccounts();
-      const payload = (await response.json()) as { accounts: unknown[] };
+      const response = await switchAuth(
+        new Request("http://localhost:3000/api/sessions/api-a1/switch-auth", {
+          method: "POST",
+          body: JSON.stringify({ accountId: null }),
+        }),
+        { params: Promise.resolve({ id: "api-a1" }) },
+      );
 
       expect(response.status).toBe(200);
-      expect(mockedSpurRequestJson).toHaveBeenCalledWith("/claude-accounts");
-      expect(payload.accounts).toEqual(accounts);
+      const body = JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body);
+      expect(body).toEqual({ accountId: null });
     });
 
-    it("GET /api/claude-accounts returns 502 when the daemon fails", async () => {
+    it("POST /api/sessions/:id/switch-auth keeps the daemon 409 status", async () => {
+      mockedSpurRequestJson.mockRejectedValue(
+        new SpurDaemonError("Direct authorization cannot switch in place", 409),
+      );
+
+      const response = await switchAuth(
+        new Request("http://localhost:3000/api/sessions/api-a1/switch-auth", {
+          method: "POST",
+          body: JSON.stringify({ accountId: "acc-2" }),
+        }),
+        { params: Promise.resolve({ id: "api-a1" }) },
+      );
+
+      expect(response.status).toBe(409);
+    });
+
+    it("GET /api/auth-accounts returns accounts and pools", async () => {
+      const result = {
+        accounts: [
+          {
+            id: "acc-1",
+            provider: "codex",
+            label: "Work",
+            createdAt: "2026-07-01T00:00:00.000Z",
+            authenticated: true,
+            status: "ready",
+          },
+        ],
+        pools: { codex: { defaultAccountId: "acc-1", defaultGeneration: 0, autoRotate: true } },
+      };
+      mockedSpurRequestJson.mockResolvedValue(result);
+
+      const response = await listAuthAccounts();
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith("/auth-accounts");
+      expect(await response.json()).toEqual(result);
+    });
+
+    it("GET /api/auth-accounts returns 502 when the daemon is unreachable", async () => {
       mockedSpurRequestJson.mockRejectedValue(new Error("daemon down"));
 
-      const response = await listClaudeAccounts();
-      const payload = (await response.json()) as { error: string };
+      const response = await listAuthAccounts();
 
       expect(response.status).toBe(502);
-      expect(payload.error).toBe("daemon down");
+      expect(((await response.json()) as { error: string }).error).toBe("daemon down");
+    });
+
+    it("POST /api/auth-accounts forwards provider and trimmed label with 201", async () => {
+      mockedSpurRequestJson.mockResolvedValue({ account: { id: "acc-9" } });
+
+      const response = await addAuthAccount(
+        new Request("http://localhost:3000/api/auth-accounts", {
+          method: "POST",
+          body: JSON.stringify({ provider: "codex", label: "  Work  " }),
+        }),
+      );
+
+      expect(response.status).toBe(201);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+        "/auth-accounts",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ provider: "codex", label: "Work" }),
+        }),
+      );
+    });
+
+    it("DELETE /api/auth-accounts/:id keeps the daemon in-use 409", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("in use", 409));
+
+      const response = await removeAuthAccount(
+        new Request("http://localhost:3000/api/auth-accounts/acc-1", { method: "DELETE" }),
+        { params: Promise.resolve({ id: "acc-1" }) },
+      );
+
+      expect(response.status).toBe(409);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith("/auth-accounts/acc-1", {
+        method: "DELETE",
+      });
+    });
+
+    it("POST /api/auth-accounts/:id/login starts sign-in", async () => {
+      const login = { accountId: "acc-1", status: "pending", url: "https://example.test/auth" };
+      mockedSpurRequestJson.mockResolvedValue(login);
+
+      const response = await startAuthLogin(
+        new Request("http://localhost:3000/api/auth-accounts/acc-1/login", { method: "POST" }),
+        { params: Promise.resolve({ id: "acc-1" }) },
+      );
+
+      expect(await response.json()).toEqual(login);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+        "/auth-accounts/acc-1/login",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+
+    it("GET /api/auth-accounts/:id/login-status reads sign-in state", async () => {
+      mockedSpurRequestJson.mockResolvedValue({ accountId: "acc-1", status: "ready" });
+
+      const response = await readAuthLoginStatus(
+        new Request("http://localhost:3000/api/auth-accounts/acc-1/login-status"),
+        { params: Promise.resolve({ id: "acc-1" }) },
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith("/auth-accounts/acc-1/login-status");
+    });
+
+    it.each([
+      [{ input: "  code-1  " }, { input: "code-1" }],
+      [{ cancel: true }, { cancel: true }],
+    ])("POST /api/auth-accounts/:id/login-input forwards %j", async (sent, forwarded) => {
+      mockedSpurRequestJson.mockResolvedValue({ accountId: "acc-1", status: "pending" });
+
+      await submitAuthLoginInput(
+        new Request("http://localhost:3000/api/auth-accounts/acc-1/login-input", {
+          method: "POST",
+          body: JSON.stringify(sent),
+        }),
+        { params: Promise.resolve({ id: "acc-1" }) },
+      );
+
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+        "/auth-accounts/acc-1/login-input",
+        expect.objectContaining({ body: JSON.stringify(forwarded) }),
+      );
+    });
+
+    it("POST /api/auth-accounts/:id/login-input rejects an empty body", async () => {
+      const response = await submitAuthLoginInput(
+        new Request("http://localhost:3000/api/auth-accounts/acc-1/login-input", {
+          method: "POST",
+          body: JSON.stringify({ input: "  " }),
+        }),
+        { params: Promise.resolve({ id: "acc-1" }) },
+      );
+
+      expect(response.status).toBe(400);
+      expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+    });
+
+    it("PATCH /api/auth-pools/:provider forwards only supplied fields", async () => {
+      mockedSpurRequestJson.mockResolvedValue({ pool: { autoRotate: false } });
+
+      const response = await updateAuthPool(
+        new Request("http://localhost:3000/api/auth-pools/claude", {
+          method: "PATCH",
+          body: JSON.stringify({ autoRotate: false }),
+        }),
+        { params: Promise.resolve({ provider: "claude" }) },
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+        "/auth-pools/claude",
+        expect.objectContaining({ method: "PATCH", body: JSON.stringify({ autoRotate: false }) }),
+      );
     });
 
     // ── GET /api/projects/:id/spawn-defaults ──────────────────────────────

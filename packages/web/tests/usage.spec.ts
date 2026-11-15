@@ -77,11 +77,11 @@ async function mockUsage(page: Page, respond: () => MockResponse): Promise<strin
   page.on("requestfinished", (request) => {
     if (new URL(request.url()).pathname === "/api/usage") finished.push(request.url());
   });
-  await page.route("**/api/claude-accounts", async (route) => {
+  await page.route("**/api/auth-accounts", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ accounts: [] }),
+      body: JSON.stringify({ accounts: [], pools: {} }),
     });
   });
   await page.route("**/api/usage", async (route) => {

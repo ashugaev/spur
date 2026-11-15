@@ -2,27 +2,25 @@
 
 import { useEffect, useRef, useState } from "react";
 import { BusyContent } from "@/components/BusyContent";
-import type { SpurClaudeAccount } from "@/lib/types";
+import { getAgentDisplayName } from "@/lib/agents";
+import { authAccountName, useAuthAccounts } from "@/lib/auth-accounts";
+import type { SpurSessionAuth } from "@/lib/types";
 
 interface SwitchAuthDialogProps {
-  accounts: SpurClaudeAccount[];
-  activeAccountId: string | null;
+  auth: SpurSessionAuth;
   status: "idle" | "pending" | "error";
   errorMessage: string | null;
-  onConfirm: (accountId: string, force: boolean) => void;
+  /** `null` selects Auto. */
+  onConfirm: (accountId: string | null, force: boolean) => void;
   onCancel: () => void;
 }
 
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
-
-function accountLabel(account: SpurClaudeAccount): string {
-  return account.label?.trim() || account.id.slice(0, 8);
-}
+const AUTO_VALUE = "";
 
 export function SwitchAuthDialog({
-  accounts,
-  activeAccountId,
+  auth,
   status,
   errorMessage,
   onConfirm,
@@ -30,10 +28,16 @@ export function SwitchAuthDialog({
 }: SwitchAuthDialogProps) {
   const cancelRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const [selected, setSelected] = useState(
-    () => accounts.find((account) => account.id !== activeAccountId)?.id ?? accounts[0]?.id ?? "",
+  const accountsQuery = useAuthAccounts();
+  const providerAccounts = (accountsQuery.data?.accounts ?? []).filter(
+    (account) => account.provider === auth.provider,
   );
+  const accounts = providerAccounts.filter((account) => account.authenticated);
+  const effective = providerAccounts.find((account) => account.id === auth.effectiveAccountId);
+  const current = auth.mode === "pinned" ? (auth.accountId ?? AUTO_VALUE) : AUTO_VALUE;
+  const [selected, setSelected] = useState(current);
   const [force, setForce] = useState(false);
+  const providerName = getAgentDisplayName(auth.provider);
 
   useEffect(() => {
     cancelRef.current?.focus();
@@ -96,11 +100,15 @@ export function SwitchAuthDialog({
           className="mb-2 font-bold text-[var(--color-text-primary)]"
           id="switch-auth-dialog-title"
         >
-          Switch Claude account
+          Switch {providerName} account
         </h2>
-        <p className="mb-3 normal-case tracking-normal text-[var(--color-text-secondary)]">
-          Session-home sessions swap credentials in place — no restart. Legacy sessions (not yet
-          launched against a session home) may relaunch once to migrate.
+        <p
+          className="mb-3 normal-case tracking-normal text-[var(--color-text-secondary)]"
+          data-testid="switch-auth-current"
+        >
+          {`Now: ${effective ? authAccountName(effective) : auth.effectiveAccountId.slice(0, 8)} (${
+            auth.mode === "auto" ? "Auto" : "pinned"
+          }). Next request uses the new account.`}
         </p>
         <label className="mb-3 block normal-case tracking-normal text-[var(--color-text-secondary)]">
           Account
@@ -111,14 +119,19 @@ export function SwitchAuthDialog({
             value={selected}
             onChange={(event) => setSelected(event.target.value)}
           >
+            <option value={AUTO_VALUE}>Auto</option>
             {accounts.map((account) => (
               <option key={account.id} value={account.id}>
-                {accountLabel(account)}
-                {account.id === activeAccountId ? " (current)" : ""}
+                {authAccountName(account)}
               </option>
             ))}
           </select>
         </label>
+        {accountsQuery.isError ? (
+          <p className="mb-3 normal-case tracking-normal text-[var(--color-status-error)]">
+            {accountsQuery.error.message}
+          </p>
+        ) : null}
         <label className="mb-3 flex items-center gap-2 normal-case tracking-normal text-[var(--color-text-secondary)]">
           <input
             checked={force}
@@ -150,9 +163,9 @@ export function SwitchAuthDialog({
             aria-busy={status === "pending" || undefined}
             aria-label={status === "pending" ? "Switching account" : undefined}
             className="border border-[var(--color-status-attention)] px-3 py-1 font-bold text-[var(--color-status-attention)] outline-none transition-colors hover:bg-[var(--color-status-attention)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-attention)] focus-visible:text-[var(--color-bg-elevated)] disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={status === "pending" || !selected}
+            disabled={status === "pending" || selected === current}
             type="button"
-            onClick={() => onConfirm(selected, force)}
+            onClick={() => onConfirm(selected === AUTO_VALUE ? null : selected, force)}
           >
             <BusyContent busy={status === "pending"}>Switch</BusyContent>
           </button>

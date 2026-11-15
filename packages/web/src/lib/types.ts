@@ -250,14 +250,48 @@ export type SpurSessionTitleSource = "manual" | "agent";
 export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
 export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
-export interface SpurClaudeAccount {
+export type AuthProvider = "claude" | "codex";
+
+export type AuthAccountStatus = "ready" | "sign_in_required" | "pending" | "error";
+
+export interface AuthAccountSummary {
   id: string;
+  provider: AuthProvider;
   label?: string;
+  createdAt: string;
   authenticated: boolean;
+  status: AuthAccountStatus;
 }
 
-export interface ClaudeAccountSummary extends SpurClaudeAccount {
-  lastUsedAt?: string;
+export interface AuthPool {
+  defaultAccountId: string | null;
+  defaultGeneration: number;
+  autoRotate: boolean;
+}
+
+export interface AuthAccountsResponse {
+  accounts: AuthAccountSummary[];
+  pools: Partial<Record<AuthProvider, AuthPool>>;
+}
+
+/** Daemon login state; `url`/`userCode`/`prompt` drive the sign-in step. */
+export interface AuthLogin {
+  accountId: string;
+  status: "ready" | "sign-in-required" | "pending" | "failed";
+  url?: string;
+  userCode?: string;
+  prompt?: string;
+  error?: string;
+}
+
+/** Managed authorization binding of one session. */
+export interface SpurSessionAuth {
+  sessionId: string;
+  provider: AuthProvider;
+  mode: "auto" | "pinned";
+  accountId: string | null;
+  effectiveAccountId: string;
+  generation: number;
 }
 
 export interface SpurSessionArtifact {
@@ -641,8 +675,7 @@ export interface SpurSessionView {
   workspaceId?: string;
   deskId?: string;
   deskGroupMembers?: SessionDeskMember[];
-  claudeAccounts?: SpurClaudeAccount[];
-  activeClaudeAccountId?: string;
+  auth?: SpurSessionAuth;
   error?: string;
   selfDestruct?: {
     enabled: boolean;
@@ -1071,8 +1104,7 @@ export interface DashboardSession {
   deskId?: string;
   deskKey: string;
   deskGroupMembers?: SessionDeskMember[];
-  claudeAccounts?: SpurClaudeAccount[];
-  activeClaudeAccountId?: string;
+  auth?: SpurSessionAuth;
   error?: string;
   selfDestruct?: {
     enabled: boolean;
@@ -1165,10 +1197,7 @@ export function toDashboardSession(
     deskKey: session.workspaceId?.trim() || session.deskId?.trim() || session.id,
     deskId: session.deskId,
     deskGroupMembers: session.deskGroupMembers,
-    ...(session.claudeAccounts ? { claudeAccounts: session.claudeAccounts } : {}),
-    ...(session.activeClaudeAccountId
-      ? { activeClaudeAccountId: session.activeClaudeAccountId }
-      : {}),
+    ...(session.auth ? { auth: session.auth } : {}),
     error: session.error,
     ...(session.selfDestruct ? { selfDestruct: session.selfDestruct } : {}),
     ...(session.tokenUsageView ? { tokenUsageView: session.tokenUsageView } : {}),
@@ -1243,11 +1272,9 @@ export function canRespawn(session: DashboardSession): boolean {
   );
 }
 
+/** Only a managed (proxy-bound) session can switch accounts in place. */
 export function canSwitchAuth(session: DashboardSession): boolean {
-  return (
-    session.agent === "claude" &&
-    (session.claudeAccounts?.some((account) => account.authenticated) ?? false)
-  );
+  return session.auth !== undefined;
 }
 
 export function canUseDeskCheckout(session: DashboardSession): boolean {
