@@ -363,12 +363,25 @@ function shouldWriteAgentStateTools(agent: AgentName | undefined): boolean {
 // Keep the version regex and staleness comparison in step with snapshots.ts.
 function snapshotHookScript(): string {
   return `#!/usr/bin/env node
-import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 
 const MESSAGE = ${JSON.stringify(SNAPSHOT_REQUEST_MESSAGE)};
-const [snapshotDir, freshnessArg, stampPath] = process.argv.slice(2);
+const LOCK_STALE_MS = 5000;
+const [snapshotDir, freshnessArg, stampPath, createdArg] = process.argv.slice(2);
 const freshnessMs = Number(freshnessArg);
+const createdAtMs = Number(createdArg);
+const lockPath = stampPath + ".lock";
 
 function readPayload() {
   try {
@@ -397,6 +410,36 @@ function writeStamp(stamp) {
   } catch {}
 }
 
+// Exclusive lock file; null when another hook holds it or on any lock error.
+function acquireLock() {
+  try {
+    mkdirSync(dirname(lockPath), { recursive: true });
+  } catch {}
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return openSync(lockPath, "wx");
+    } catch (error) {
+      if (!error || error.code !== "EEXIST") return null;
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs <= LOCK_STALE_MS) return null;
+        unlinkSync(lockPath);
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+function releaseLock(fd) {
+  try {
+    closeSync(fd);
+  } catch {}
+  try {
+    unlinkSync(lockPath);
+  } catch {}
+}
+
 // undefined: unreadable newest snapshot (skip); null: no snapshot yet.
 function latestSnapshotAt() {
   let names;
@@ -420,7 +463,7 @@ function latestSnapshotAt() {
 }
 
 function run() {
-  if (!snapshotDir || !stampPath || !(freshnessMs > 0)) return;
+  if (!snapshotDir || !stampPath || !(freshnessMs > 0) || Number.isNaN(createdAtMs)) return;
   const payload = readPayload();
   if (!payload) return;
   if (typeof payload.agent_id === "string" || payload.permission_mode === "plan") return;
@@ -429,25 +472,25 @@ function run() {
   if (event === "Stop" && payload.stop_hook_active === true) return;
   const latestAt = latestSnapshotAt();
   if (latestAt === undefined) return;
-  const now = Date.now();
-  const stamp = readStamp();
-  const firstSeenAt = typeof stamp.firstSeenAt === "number" ? stamp.firstSeenAt : undefined;
-  const baseline = latestAt ?? firstSeenAt;
-  if (baseline === undefined) {
-    writeStamp({ ...stamp, firstSeenAt: now });
-    return;
-  }
-  if (now - baseline <= freshnessMs) return;
+  if (Date.now() - (latestAt ?? createdAtMs) <= freshnessMs) return;
   if (event === "Stop") {
     process.stdout.write(JSON.stringify({ decision: "block", reason: MESSAGE }));
     return;
   }
-  const lastRequestAt = typeof stamp.lastRequestAt === "number" ? stamp.lastRequestAt : 0;
-  if (now - lastRequestAt < freshnessMs / 2) return;
-  process.stdout.write(
-    JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: MESSAGE } }),
-  );
-  writeStamp({ ...stamp, lastRequestAt: now });
+  const lock = acquireLock();
+  if (lock === null) return;
+  try {
+    const now = Date.now();
+    const stamp = readStamp();
+    const lastRequestAt = typeof stamp.lastRequestAt === "number" ? stamp.lastRequestAt : 0;
+    if (now - lastRequestAt < freshnessMs / 2) return;
+    process.stdout.write(
+      JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: MESSAGE } }),
+    );
+    writeStamp({ lastRequestAt: now });
+  } finally {
+    releaseLock(lock);
+  }
 }
 
 try {
@@ -482,7 +525,7 @@ export function ensureSessionSlotTool(args: {
   branchNamingRegex?: string;
   agent?: AgentName;
   installLockPath?: string;
-  snapshotFreshnessMinutes?: number;
+  snapshotHook?: { freshnessMinutes: number; sessionCreatedAt: string };
 }): string {
   const toolDir = slotToolDir(args.dataDir, args.sessionId);
   const stateFilePath = join(args.dataDir, "session-agent-state", `${args.sessionId}.json`);
@@ -772,7 +815,7 @@ exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UP
       { encoding: "utf8", mode: 0o755 },
     );
   }
-  if (args.snapshotFreshnessMinutes !== undefined) {
+  if (args.snapshotHook) {
     writeToolFileAtomic(join(toolDir, SNAPSHOT_HOOK_SCRIPT_NAME), snapshotHookScript(), {
       encoding: "utf8",
       mode: 0o755,
@@ -781,7 +824,7 @@ exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UP
       join(toolDir, SNAPSHOT_HOOK_TOOL_NAME),
       `#!/usr/bin/env bash
 set -euo pipefail
-exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_SCRIPT_NAME))} ${shellEscape(snapshotDir(args.dataDir, args.sessionId))} ${args.snapshotFreshnessMinutes * 60_000} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_STAMP_NAME))}
+exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_SCRIPT_NAME))} ${shellEscape(snapshotDir(args.dataDir, args.sessionId))} ${args.snapshotHook.freshnessMinutes * 60_000} ${shellEscape(join(toolDir, SNAPSHOT_HOOK_STAMP_NAME))} ${Date.parse(args.snapshotHook.sessionCreatedAt)}
 `,
       { encoding: "utf8", mode: 0o755 },
     );

@@ -8,6 +8,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { rm } from "node:fs/promises";
@@ -1043,7 +1044,7 @@ describe("removeSessionSlotTool", () => {
 describe("snapshot hook tool", () => {
   const FRESHNESS_MS = 10 * 60_000;
 
-  async function setup(options: { snapshotAgoMs?: number } = {}) {
+  async function setup(options: { snapshotAgoMs?: number; createdAgoMs?: number } = {}) {
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
     const toolDir = ensureSessionSlotTool({
@@ -1051,7 +1052,10 @@ describe("snapshot hook tool", () => {
       sessionId: "api-1",
       configPath: "/tmp/spur.yaml",
       agent: "claude",
-      snapshotFreshnessMinutes: 10,
+      snapshotHook: {
+        freshnessMinutes: 10,
+        sessionCreatedAt: new Date(Date.now() - (options.createdAgoMs ?? 0)).toISOString(),
+      },
     });
     if (options.snapshotAgoMs !== undefined) {
       const dir = join(dataDir, "sessions", "api-1", "snapshots");
@@ -1077,7 +1081,7 @@ describe("snapshot hook tool", () => {
 
   const stale = FRESHNESS_MS + 60_000;
 
-  it("writes no hook files without snapshotFreshnessMinutes", async () => {
+  it("writes no hook files without snapshotHook", async () => {
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
     const toolDir = ensureSessionSlotTool({
@@ -1140,13 +1144,30 @@ describe("snapshot hook tool", () => {
     expect(runHook(toolDir, { hook_event_name: "Stop", stop_hook_active: true })).toBe("");
   });
 
-  it("stamps firstSeenAt and stays silent on the first call without a snapshot", async () => {
-    const { toolDir, stampPath } = await setup();
+  it("measures from session start when no snapshot exists", async () => {
+    const fresh = await setup({ createdAgoMs: 60_000 });
+    expect(runHook(fresh.toolDir, { hook_event_name: "PostToolUse" })).toBe("");
+    expect(runHook(fresh.toolDir, { hook_event_name: "Stop" })).toBe("");
+
+    const old = await setup({ createdAgoMs: stale });
+    expect(JSON.parse(runHook(old.toolDir, { hook_event_name: "PostToolUse" }))).toMatchObject({
+      hookSpecificOutput: { additionalContext: SNAPSHOT_REQUEST_MESSAGE },
+    });
+    const oldStop = await setup({ createdAgoMs: stale });
+    expect(runHook(oldStop.toolDir, { hook_event_name: "Stop" })).not.toBe("");
+  });
+
+  it("stays silent while another hook holds the throttle lock, and reclaims a stale lock", async () => {
+    const { toolDir, stampPath } = await setup({ snapshotAgoMs: stale });
+    const lockPath = `${stampPath}.lock`;
+    writeFileSync(lockPath, "");
     expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).toBe("");
-    const stamp = JSON.parse(readFileSync(stampPath, "utf8")) as { firstSeenAt: number };
-    expect(typeof stamp.firstSeenAt).toBe("number");
-    writeFileSync(stampPath, JSON.stringify({ firstSeenAt: Date.now() - stale }));
-    expect(runHook(toolDir, { hook_event_name: "Stop" })).not.toBe("");
+    expect(existsSync(lockPath)).toBe(true);
+
+    const past = new Date(Date.now() - 60_000);
+    utimesSync(lockPath, past, past);
+    expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).not.toBe("");
+    expect(existsSync(lockPath)).toBe(false);
   });
 
   it("exits 0 silently on malformed input or unreadable snapshots", async () => {

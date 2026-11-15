@@ -4145,9 +4145,12 @@ describe("SessionService", () => {
         prepare("api-1", "cursor", "api");
 
         const calls = ensureSessionSlotToolMock.mock.calls.map(([args]) => args);
-        expect(calls[0]).toMatchObject({ agent: "claude", snapshotFreshnessMinutes: 7 });
-        expect(calls[1]).not.toHaveProperty("snapshotFreshnessMinutes");
-        expect(calls[2]).not.toHaveProperty("snapshotFreshnessMinutes");
+        expect(calls[0]).toMatchObject({
+          agent: "claude",
+          snapshotHook: { freshnessMinutes: 7, sessionCreatedAt: expect.any(String) },
+        });
+        expect(calls[1]).not.toHaveProperty("snapshotHook");
+        expect(calls[2]).not.toHaveProperty("snapshotHook");
         service.dispose();
       });
 
@@ -11067,7 +11070,7 @@ describe("SessionService", () => {
       configPath: customConfig,
       projectId: "api",
       agent: "claude",
-      snapshotFreshnessMinutes: 10,
+      snapshotHook: { freshnessMinutes: 10, sessionCreatedAt: expect.any(String) },
     });
   });
 

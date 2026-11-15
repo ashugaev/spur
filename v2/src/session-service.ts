@@ -21222,7 +21222,14 @@ export class SessionService {
       ...(project?.branchNaming ? { branchNamingRegex: project.branchNaming.regex } : {}),
       agent,
       ...(agent === "claude"
-        ? { snapshotFreshnessMinutes: snapshotSettings(project).freshnessMinutes }
+        ? {
+            snapshotHook: {
+              freshnessMinutes: snapshotSettings(project).freshnessMinutes,
+              // Absent at spawn: the record is written after tool prep, so now is the start.
+              sessionCreatedAt:
+                readSession(this.config.dataDir, sessionId)?.createdAt ?? new Date().toISOString(),
+            },
+          }
         : {}),
     });
   }
