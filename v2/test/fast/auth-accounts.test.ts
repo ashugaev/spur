@@ -20,11 +20,31 @@ describe("managed authorization accounts", () => {
     const claude = accounts.add("claude", "Primary");
     const codex = accounts.add("codex", "Work");
     accounts.updatePool("claude", { autoRotate: true });
-    accounts.remove(claude.id);
+    accounts.remove(claude.id, () => true);
     expect(accounts.read().pools).toEqual({
       claude: { defaultAccountId: null, defaultGeneration: 1, autoRotate: true },
       codex: { defaultAccountId: codex.id, defaultGeneration: 0, autoRotate: false },
     });
+  });
+
+  it("moves a removed default to the first ready account", () => {
+    const first = accounts.add("claude");
+    const unready = accounts.add("claude");
+    const ready = accounts.add("claude");
+    accounts.remove(first.id, (id) => id === ready.id);
+    expect(accounts.read().pools.claude?.defaultAccountId).toBe(ready.id);
+    accounts.remove(ready.id, (id) => id !== unready.id);
+    expect(accounts.read().pools.claude?.defaultAccountId).toBeNull();
+  });
+
+  it("creates a missing pool on update so its preferences can be set before accounts", () => {
+    const seeded = new AuthAccounts(dataDir, () => true);
+    expect(seeded.updatePool("codex", { autoRotate: false })).toEqual({
+      defaultAccountId: null,
+      defaultGeneration: 0,
+      autoRotate: false,
+    });
+    expect(seeded.updatePool("claude", {})).toMatchObject({ autoRotate: true });
   });
 
   it("increments default generation only for an explicit changed default", () => {

@@ -20,8 +20,8 @@ Host credentials and existing direct processes remain untouched.
 ## Per-session switch
 
 Select a profile with [`spawn --auth-account`](commands.md#spawn).
-An explicit profile stays pinned; omission uses Auto when a managed pool exists.
-An empty or unready managed pool rejects launch instead of using host authorization.
+An explicit profile stays pinned; omission uses Auto when the provider pool has a ready account.
+Omission with no ready account launches with host authorization.
 
 Managed Claude/Codex sessions change account for the next request through
 [switch-auth](daemon-api.md#session-routes); current requests retain their account.
@@ -34,6 +34,7 @@ Codex uses Responses HTTP streaming; provider credentials stay with the local pr
 
 Each provider pool owns its default and Auto-rotation choice.
 Auto retains its account after success; quota triggers failover when enabled.
+Auto leaves an account that needs sign-in for a ready one; failover prefers the least-used ready account.
 Pinned sessions never fail over.
 
 Cooldowns apply across sessions. Episode limits survive retries and restarts;

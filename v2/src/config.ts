@@ -260,6 +260,14 @@ function asNonNegativeNumber(value: unknown, label: string): number | undefined 
   return value;
 }
 
+function asNonNegativeInteger(value: unknown, label: string): number | undefined {
+  const number = asNonNegativeNumber(value, label);
+  if (number !== undefined && !Number.isInteger(number)) {
+    throw new Error(`${label} must be a non-negative integer`);
+  }
+  return number;
+}
+
 function asPortNumber(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0 || value > 65_535) {
     throw new Error(`${label} must be an integer between 1 and 65535`);
@@ -2048,7 +2056,7 @@ function parseTags(value: unknown): TagDefinition[] {
 }
 
 const DEFAULT_AUTH_ROTATION: AppConfig["authRotation"] = {
-  autoRotateOnRateLimit: false,
+  autoRotateOnRateLimit: true,
   cooldownMinutes: 60,
   maxRotationsPerEpisode: 2,
   switchAuth: false,
@@ -2076,10 +2084,10 @@ function parseAuthRotation(value: unknown): AppConfig["authRotation"] {
       asOptionalBoolean(root["autoRotateOnRateLimit"], "authRotation.autoRotateOnRateLimit") ??
       DEFAULT_AUTH_ROTATION.autoRotateOnRateLimit,
     cooldownMinutes:
-      asNonNegativeNumber(root["cooldownMinutes"], "authRotation.cooldownMinutes") ??
+      asNonNegativeInteger(root["cooldownMinutes"], "authRotation.cooldownMinutes") ??
       DEFAULT_AUTH_ROTATION.cooldownMinutes,
     maxRotationsPerEpisode:
-      asNonNegativeNumber(root["maxRotationsPerEpisode"], "authRotation.maxRotationsPerEpisode") ??
+      asNonNegativeInteger(root["maxRotationsPerEpisode"], "authRotation.maxRotationsPerEpisode") ??
       DEFAULT_AUTH_ROTATION.maxRotationsPerEpisode,
     switchAuth:
       asOptionalBoolean(root["switchAuth"], "authRotation.switchAuth") ??

@@ -20842,6 +20842,10 @@ describe("SessionService", () => {
           [provider]: { defaultAccountId: "primary", defaultGeneration: 0, autoRotate: true },
         },
       });
+      authProxyGetStateMock.mockResolvedValue({
+        accounts: ["primary", "backup"].map((id) => ({ id, provider, status: "ready" })),
+        sessions: [],
+      });
     }
 
     it("keeps native direct launch when no managed pool exists", async () => {
@@ -20855,32 +20859,44 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it.each(["spawn", "spawnInBackground"] as const)(
-      "%s rejects a configured zero-ready pool before pane or worktree creation",
-      async (method) => {
-        createSessionStore();
-        authAccountsReadMock.mockReturnValue({
-          schema: 1,
-          accounts: [],
-          pools: { claude: { defaultAccountId: null, defaultGeneration: 0, autoRotate: true } },
+    it.each([
+      ["spawn", "empty pool"],
+      ["spawnInBackground", "empty pool"],
+      ["spawn", "sign-in-required accounts"],
+      ["spawnInBackground", "sign-in-required accounts"],
+      ["spawn", "unavailable proxy"],
+    ] as const)("%s with %s launches with host authorization", async (method, pool) => {
+      const sessions = createSessionStore();
+      mockClaudeJsonlState("waiting");
+      authAccountsReadMock.mockReturnValue({
+        schema: 1,
+        accounts:
+          pool === "empty pool"
+            ? []
+            : [{ id: "legacy", provider: "claude", createdAt: "2026-03-18T09:00:00.000Z" }],
+        pools: { claude: { defaultAccountId: null, defaultGeneration: 0, autoRotate: true } },
+      });
+      if (pool === "unavailable proxy") {
+        authProxyGetStateMock.mockRejectedValue(new Error("proxy binary missing"));
+      } else {
+        authProxyGetStateMock.mockResolvedValue({
+          accounts: [{ id: "legacy", provider: "claude", status: "sign-in-required" }],
+          sessions: [],
         });
-        authProxyRegisterSessionMock.mockRejectedValue(
-          new Error("No ready authorization accounts"),
-        );
-        const service = await createDisposedSessionService();
-        await expect(service[method]({ project: "api", prompt: "hello" })).rejects.toThrow(
-          /No ready authorization accounts/,
-        );
-        expect(authProxyRegisterSessionMock).toHaveBeenCalledWith({
-          sessionId: "api-1",
-          provider: "claude",
-          accountId: null,
-        });
-        expect(createTmuxSessionMock).not.toHaveBeenCalled();
-        expect(createWorktreeMock).not.toHaveBeenCalled();
-        service.dispose();
-      },
-    );
+      }
+      const service = await createDisposedSessionService();
+      await service[method]({ project: "api", prompt: "hello" });
+      await vi.waitFor(() => expect(createTmuxSessionMock).toHaveBeenCalled());
+      expect(authProxyRegisterSessionMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.auth).toBeUndefined();
+      expect(createTmuxSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.not.objectContaining({ ANTHROPIC_AUTH_TOKEN: expect.anything() }),
+        }),
+      );
+      if (pool === "empty pool") expect(authProxyGetStateMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
 
     it.each(["claude", "codex"] as const)(
       "launches %s with a pinned profile and persists no routing secret",
@@ -21302,7 +21318,7 @@ describe("SessionService", () => {
 
       expect(sessions.get("api-1")?.claudeAccountId).toBeUndefined();
       expect(authProxyRemoveAccountMock).toHaveBeenCalledWith("acc-1");
-      expect(authAccountsRemoveMock).toHaveBeenCalledWith("acc-1");
+      expect(authAccountsRemoveMock).toHaveBeenCalledWith("acc-1", expect.any(Function));
       service.dispose();
     });
 
@@ -21313,10 +21329,20 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
+      authProxyGetStateMock.mockResolvedValue({
+        accounts: [
+          { id: "acc-1", provider: "claude", status: "ready" },
+          { id: "acc-2", provider: "claude", status: "sign-in-required" },
+          { id: "acc-3", provider: "claude", status: "ready" },
+        ],
+        sessions: [],
+      });
+
       await service.removeClaudeAccount("acc-1");
 
       expect(authProxyRemoveAccountMock).toHaveBeenCalledWith("acc-1");
-      expect(authAccountsRemoveMock).toHaveBeenCalledWith("acc-1");
+      const isReady = authAccountsRemoveMock.mock.calls[0]?.[1] as (id: string) => boolean;
+      expect(["acc-2", "acc-3"].map(isReady)).toEqual([false, true]);
       service.dispose();
     });
   });

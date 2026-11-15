@@ -134,7 +134,8 @@ export class AuthAccounts {
     return account;
   }
 
-  remove(id: string): void {
+  /** Removes an account; a removed default moves to the first ready account of the provider. */
+  remove(id: string, isReady: (accountId: string) => boolean): void {
     const state = this.read();
     const account = state.accounts.find((entry) => entry.id === id);
     if (!account) throw new AuthorizationError(`Unknown authorization account: ${id}`, 404);
@@ -142,7 +143,8 @@ export class AuthAccounts {
     const pool = state.pools[account.provider];
     if (pool?.defaultAccountId === id) {
       pool.defaultAccountId =
-        state.accounts.find((entry) => entry.provider === account.provider)?.id ?? null;
+        state.accounts.find((entry) => entry.provider === account.provider && isReady(entry.id))
+          ?.id ?? null;
       pool.defaultGeneration += 1;
     }
     this.write(state);
@@ -153,8 +155,11 @@ export class AuthAccounts {
     update: { defaultAccountId?: string | null; autoRotate?: boolean },
   ): AuthPool {
     const state = this.read();
-    const pool = state.pools[provider];
-    if (!pool) throw new AuthorizationError(`No managed authorization pool for ${provider}`, 404);
+    const pool = (state.pools[provider] ??= {
+      defaultAccountId: null,
+      defaultGeneration: 0,
+      autoRotate: this.initialAutoRotate(),
+    });
     if (update.defaultAccountId !== undefined) {
       if (
         update.defaultAccountId !== null &&

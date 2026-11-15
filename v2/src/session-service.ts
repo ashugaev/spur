@@ -7235,6 +7235,7 @@ export class SessionService {
     agent: AgentName,
     project: ProjectConfig,
     accountId: string | null | undefined,
+    managedBinding: boolean,
   ): Promise<AuthRegistration | undefined> {
     if (agent !== "claude" && agent !== "codex") {
       if (accountId !== undefined && accountId !== null) {
@@ -7262,12 +7263,37 @@ export class SessionService {
       if (!account || account.provider !== agent) {
         throw new AuthorizationError(`Unknown ${agent} authorization account: ${accountId}`, 400);
       }
+    } else if (!managedBinding && !(await this.hasReadyAuthorizationAccount(sessionId, agent))) {
+      // No ready managed account: launch with host authorization, as before managed pools.
+      return undefined;
     }
     return this.authProxy.registerSession({
       sessionId,
       provider: agent,
       accountId: accountId ?? null,
     });
+  }
+
+  private async hasReadyAuthorizationAccount(
+    sessionId: string,
+    provider: AuthProvider,
+  ): Promise<boolean> {
+    if (!this.authAccounts.read().accounts.some((account) => account.provider === provider)) {
+      return false;
+    }
+    try {
+      return (await this.readAuthorizationState()).accounts.some(
+        (account) => account.provider === provider && account.status === "ready",
+      );
+    } catch (error) {
+      this.logEvent("session.auth.direct", {
+        level: "warn",
+        sessionId,
+        message: `Managed ${provider} authorization unavailable; launching with host authorization`,
+        details: { error: error instanceof Error ? error.message : String(error) },
+      });
+      return false;
+    }
   }
 
   private resolveClaudeAuthPlanOptions(
@@ -13792,6 +13818,7 @@ export class SessionService {
         agent,
         project,
         requestedAuthAccount(request, agent),
+        false,
       );
       preflightTokenUsage = preflightBatchId
         ? await this.preflightUsageStore.claim(preflightBatchId, request.project, sessionId)
@@ -15285,6 +15312,7 @@ export class SessionService {
         agent,
         project,
         requestedAuthAccount(request, agent),
+        false,
       );
       const preflightBatchId = await this.preflightUsageStore.resolve(
         request.project,
@@ -15835,6 +15863,7 @@ export class SessionService {
         prepared.placeholder.auth
           ? prepared.placeholder.auth.accountId
           : requestedAuthAccount(request, agent),
+        prepared.placeholder.auth !== undefined,
       );
       const managedLaunch = managedAuthLaunch(authRegistration, sessionToolDir, project.codexArgs);
       const hookSetup = await setupSessionAgentHooks({
@@ -22039,6 +22068,7 @@ export class SessionService {
           session.agent,
           project,
           session.auth.accountId,
+          true,
         )
       : undefined;
     const managedLaunch = managedAuthLaunch(authRegistration, sessionToolDir, project.codexArgs);
@@ -22856,6 +22886,7 @@ export class SessionService {
         current.agent,
         restoreProjectConfig,
         current.auth ? current.auth.accountId : current.claudeAccountId,
+        current.auth !== undefined,
       );
       const managedLaunch = managedAuthLaunch(
         authRegistration,
@@ -23802,7 +23833,11 @@ export class SessionService {
   }
 
   async removeAuthorizationAccount(accountId: string): Promise<void> {
-    const bindings = (await this.authProxy.getState()).sessions;
+    const proxyState = await this.authProxy.getState();
+    const bindings = proxyState.sessions;
+    const readyIds = new Set(
+      proxyState.accounts.filter((entry) => entry.status === "ready").map((entry) => entry.id),
+    );
     const boundIds = new Set(
       bindings
         .filter(
@@ -23865,7 +23900,7 @@ export class SessionService {
           const { auth: _auth, claudeAccountId: _legacyAccountId, ...base } = session;
           writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
         }
-        this.authAccounts.remove(accountId);
+        this.authAccounts.remove(accountId, (id) => readyIds.has(id));
         await this.authProxy.configure();
         this.authSnapshot = undefined;
       },

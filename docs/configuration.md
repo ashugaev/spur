@@ -86,8 +86,8 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `SPUR_CLAUDE_BIN`/`SPUR_CODEX_BIN`/`SPUR_CURSOR_BIN`/`SPUR_OPENCODE_BIN`: process env, per-agent executable override.
 - `SPUR_{CLAUDE,CODEX,CURSOR,OPENCODE}_PANE_CHILD_FALLBACK` (`auto|off`, default `auto`): process env; `off` disables per-agent fallback daemon-wide; requires every wrapper launch name-matchable throughout agent lifetime — `v2/src/agents/executable.ts`.
 - `tags.<name>.{description,color}`: `description` required, instance only.
-- `authRotation.autoRotateOnRateLimit` (`false`, instance only): seeds new provider pools; existing pool choices persist independently; `v2/src/config.ts`, `v2/src/auth-accounts.ts`.
-- `authRotation.{cooldownMinutes 60, maxRotationsPerEpisode 2}` (instance only): shared account cooldown and session episode limits; `v2/src/config.ts`, `v2/src/auth-proxy.ts`.
+- `authRotation.autoRotateOnRateLimit` (`true`, instance only): seeds new provider pools; existing pool choices persist independently; a pool with no ready account launches with host authorization; `v2/src/config.ts`, `v2/src/auth-accounts.ts`.
+- `authRotation.{cooldownMinutes 60, maxRotationsPerEpisode 2}` (non-negative integers, instance only): shared account cooldown and session episode limits; `v2/src/config.ts`, `v2/src/auth-proxy.ts`.
 - `authRotation.switchAuth` (`false`, instance only): legacy Claude session-switch UI only; managed switching stays available; `v2/src/session-service.ts`, [accounts](claude-accounts.md).
 - `diskRetention.warnFreeGb` (`10`, instance only, drives `doctor`'s `home-disk-headroom`).
 - `rateLimitReactivation.afterHours` (`0`, instance only).
