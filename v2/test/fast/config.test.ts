@@ -5175,7 +5175,7 @@ projects:
       retain: 3
 `);
     expect(() => loadConfig(unknown)).toThrow(
-      'projects.api.snapshots only supports "maxBytes", "requireFinal" and "freshnessMinutes" (got: retain)',
+      'projects.api.snapshots only supports "enabled", "maxBytes", "requireFinal" and "freshnessMinutes" (got: retain)',
     );
     const bad = await writeConfig(`
 projects:
@@ -5185,6 +5185,39 @@ projects:
       requireFinal: "yes"
 `);
     expect(() => loadConfig(bad)).toThrow("projects.api.snapshots.requireFinal must be a boolean");
+  });
+
+  it("parses snapshots.enabled and rejects a non-boolean", async () => {
+    const off = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    snapshots:
+      enabled: false
+`);
+    expect(loadConfig(off).projects["api"]?.snapshots).toEqual({ enabled: false });
+    const bad = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    snapshots:
+      enabled: "no"
+`);
+    expect(() => loadConfig(bad)).toThrow("projects.api.snapshots.enabled must be a boolean");
+  });
+
+  it("rejects snapshots.enabled false with requireFinal true, naming both keys", async () => {
+    const conflict = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    snapshots:
+      enabled: false
+      requireFinal: true
+`);
+    expect(() => loadConfig(conflict)).toThrow(
+      "projects.api.snapshots.requireFinal cannot be true when projects.api.snapshots.enabled is false",
+    );
   });
 
   it("rejects a non-array mcp.exclude", async () => {

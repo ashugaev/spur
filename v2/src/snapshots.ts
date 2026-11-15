@@ -17,6 +17,7 @@ import type {
   ProjectConfig,
   SessionLink,
   SessionRecord,
+  TranscriptEntry,
   WorkSnapshot,
   WorkSnapshotMeta,
   WorkSnapshotTrigger,
@@ -81,17 +82,45 @@ export class WorkSnapshotRequiredError extends Error {
   }
 }
 
-export const DEFAULT_SNAPSHOT_FRESHNESS_MINUTES = 10;
+export const DEFAULT_SNAPSHOT_FRESHNESS_MINUTES = 30;
 export const SNAPSHOT_HOOK_TOOL_NAME = "spur-snapshot-hook";
-export const SNAPSHOT_REQUEST_MESSAGE =
-  'Spur snapshot is stale: work moved on since your latest snapshot. Write one now with "$SPUR_SNAPSHOT_COMMAND" write --file <path> (--file - reads stdin), then continue.';
+export const SNAPSHOT_HOOK_TURN_FILE = "snapshot-hook-turn";
+
+/** Text a Spur reminder starts with: ToDo nudges (session-service.ts) and the snapshot request. */
+export const SNAPSHOT_REMINDER_PREFIXES: readonly string[] = [
+  "Spur ToDo still has open work:",
+  "Spur ToDo needs human input:",
+  "Spur ToDo is empty.",
+  "Spur snapshot is stale:",
+];
+
+/** RegExp source matching a command that touches the session's Spur tools. The hook script embeds it. */
+export const SPUR_SESSION_TOOL_PATTERN =
+  "SPUR_(?:TODO|SNAPSHOT|SLOT)_COMMAND|SPUR_SESSION_TOOL_DIR|/session-tools/|spur-(?:todo|snapshot|slots)";
+
+const SPUR_SESSION_TOOL_REGEX = new RegExp(SPUR_SESSION_TOOL_PATTERN);
+
+export function isSpurReminder(text: string): boolean {
+  const trimmed = text.trim();
+  return SNAPSHOT_REMINDER_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+}
+
+export function isSpurToolCommand(command: string): boolean {
+  return SPUR_SESSION_TOOL_REGEX.test(command);
+}
+
+export function snapshotRequestMessage(command: string): string {
+  return `Spur snapshot is stale: work moved on since your latest snapshot. Write one now with ${command} write --file <path> (--file - reads stdin), then continue.`;
+}
 
 export function snapshotSettings(project: ProjectConfig | undefined): {
+  enabled: boolean;
   maxBytes: number;
   requireFinal: boolean;
   freshnessMinutes: number;
 } {
   return {
+    enabled: project?.snapshots?.enabled ?? true,
     maxBytes: project?.snapshots?.maxBytes ?? DEFAULT_SNAPSHOT_MAX_BYTES,
     requireFinal: project?.snapshots?.requireFinal ?? false,
     freshnessMinutes: project?.snapshots?.freshnessMinutes ?? DEFAULT_SNAPSHOT_FRESHNESS_MINUTES,
@@ -108,6 +137,69 @@ export function snapshotDue(input: {
   if (input.activityAt === null) return false;
   const baseline = Date.parse(input.latestAt ?? input.sessionCreatedAt);
   return input.activityAt.getTime() - baseline > input.freshnessMs;
+}
+
+function isSpurToolEntry(entry: Extract<TranscriptEntry, { kind: "tool" }>): boolean {
+  return (
+    entry.spurCall === true ||
+    (entry.inputSummary !== undefined && isSpurToolCommand(entry.inputSummary))
+  );
+}
+
+/**
+ * Newest agent work above floorMs, walking entries backward. A user message opens a turn; in a
+ * Spur-reminder turn only non-Spur tool calls count, never text, reasoning or Spur calls.
+ * workMs is null when nothing counts; complete is false when the slice ended before the answer
+ * was known (caller reads the full transcript). Entries without a timestamp (Cursor, OpenCode,
+ * rare Codex lines) never meet the floor: they count as untimedActivityMs once their opener is
+ * known, and a wholly untimed slice only counts its newest turn.
+ */
+export function lastAgentWorkMs(
+  entries: readonly TranscriptEntry[],
+  options: { untimedActivityMs: number; floorMs: number; atStart: boolean },
+): { workMs: number | null; complete: boolean } {
+  const { untimedActivityMs, floorMs, atStart } = options;
+  if (entries.length > 0 && entries.every((entry) => entry.timestampMs === undefined)) {
+    let hasAgentEntry = false;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (entry === undefined) continue;
+      if (entry.kind === "message" && entry.role === "user") {
+        return {
+          workMs: hasAgentEntry && !isSpurReminder(entry.text) ? untimedActivityMs : null,
+          complete: true,
+        };
+      }
+      hasAgentEntry = true;
+    }
+    return { workMs: hasAgentEntry ? untimedActivityMs : null, complete: true };
+  }
+  const pending: number[] = [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry === undefined) continue;
+    const ts = entry.timestampMs;
+    if (entry.kind === "message" && entry.role === "user") {
+      if (!isSpurReminder(entry.text) && pending.length > 0) {
+        return { workMs: Math.max(...pending), complete: true };
+      }
+      pending.length = 0;
+    } else if (ts === undefined) {
+      pending.push(untimedActivityMs);
+      continue;
+    } else if (ts > floorMs) {
+      if (entry.kind === "tool" && !isSpurToolEntry(entry)) return { workMs: ts, complete: true };
+      pending.push(ts);
+      continue;
+    }
+    if (pending.length === 0 && ts !== undefined && ts <= floorMs) {
+      return { workMs: null, complete: true };
+    }
+  }
+  if (pending.length === 0) return { workMs: null, complete: true };
+  return atStart
+    ? { workMs: Math.max(...pending), complete: true }
+    : { workMs: null, complete: false };
 }
 
 export function snapshotDir(dataDir: string, sessionId: string, project?: string): string {

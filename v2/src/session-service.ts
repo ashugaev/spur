@@ -613,11 +613,12 @@ import {
 import {
   listSnapshots,
   readSnapshot as readSnapshotVersion,
+  lastAgentWorkMs,
   snapshotDue,
   snapshotGateBlock,
+  snapshotRequestMessage,
   snapshotSettings,
   writeSnapshot as storeSnapshot,
-  SNAPSHOT_REQUEST_MESSAGE,
   SnapshotConflictError,
   SnapshotCorruptError,
   WorkSnapshotRequiredError,
@@ -4157,6 +4158,13 @@ export class SessionService {
   >();
   // Latest corrupt snapshot version already logged per session.
   private readonly snapshotCorruptLogged = new Map<string, number>();
+  // Last agent-work answer per session, valid while the activity instant is unchanged.
+  private readonly snapshotWorkCache = new Map<
+    string,
+    { activityMs: number; floorMs: number; workMs: number | null }
+  >();
+  // Live sessions whose tools this daemon process already rewrote.
+  private readonly toolsRefreshed = new Set<string>();
   private readonly todoNudgeBackoff = new Map<
     string,
     { failures: number; nextRetryAtMs: number }
@@ -8034,6 +8042,7 @@ export class SessionService {
       this.prCheckGitSpentMs = 0;
       for (const session of liveSessions) {
         if (this.isDeliveryStopped()) return;
+        this.refreshSessionToolsOnce(session);
         try {
           this.warnIfTokenBudgetUnenforced(session);
           const { view, classified, detectionOnlyError } = await this.enrichWithClassified(
@@ -8197,6 +8206,12 @@ export class SessionService {
     }
     for (const sessionId of this.snapshotCorruptLogged.keys()) {
       if (!liveIds.has(sessionId)) this.snapshotCorruptLogged.delete(sessionId);
+    }
+    for (const sessionId of this.snapshotWorkCache.keys()) {
+      if (!liveIds.has(sessionId)) this.snapshotWorkCache.delete(sessionId);
+    }
+    for (const sessionId of this.toolsRefreshed) {
+      if (!liveIds.has(sessionId)) this.toolsRefreshed.delete(sessionId);
     }
     // Keyed `${sessionId}\0${sidecarName}`, unlike every other map here —
     // test only the first \0-split segment against liveIds.
@@ -9922,11 +9937,12 @@ export class SessionService {
     const lastSuccessful = this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0;
     if (Date.now() - lastSuccessful < 60_000) return;
     try {
+      const workAt = await this.snapshotWorkAt(session, options?.agentActivityAt ?? null);
       await this.withPaneWriteLock(session.tmuxSession, async () => {
         const lifecycleIds = this.lifecycleIdsFor(session);
         const prepared = await this.withSessionLifecycleLocks(lifecycleIds, async () => {
           if (options?.detached && this.deliveryStopped) return null;
-          return this.maybeNudgeTodoLocked(session, lifecycleIds, options?.agentActivityAt ?? null);
+          return this.maybeNudgeTodoLocked(session, lifecycleIds, workAt);
         });
         if (!prepared) return;
 
@@ -10006,7 +10022,7 @@ export class SessionService {
   private async maybeNudgeTodoLocked(
     session: SessionRecord,
     lifecycleIds: string[],
-    agentActivityAt: Date | null,
+    workAt: Date | null,
   ): Promise<PreparedTodoNudge | null> {
     const current = readSession(this.config.dataDir, session.id);
     if (
@@ -10029,8 +10045,16 @@ export class SessionService {
     )
       return null;
     session = current;
-    const snapshotRequest = this.prepareSnapshotRequest(session, agentActivityAt);
+    const snapshotRequest = this.prepareSnapshotRequest(session, workAt);
     if (snapshotRequest) {
+      // Rewrites the tools first: an older session may lack the wrapper, and a failed write
+      // must not burn one of the request attempts.
+      const command = shellEscape(
+        join(
+          this.prepareSessionTools(session.id, session.agent, session.project),
+          SNAPSHOT_TOOL_NAME,
+        ),
+      );
       session = { ...session, snapshotNudge: snapshotRequest };
       writeSession(this.config.dataDir, session);
       return {
@@ -10042,7 +10066,7 @@ export class SessionService {
         slot: "snapshotNudge",
         ...snapshotRequest,
         session,
-        message: SNAPSHOT_REQUEST_MESSAGE,
+        message: snapshotRequestMessage(command),
       };
     }
     const projection = ensureTodoLedger(this.config.dataDir, session);
@@ -10139,12 +10163,74 @@ export class SessionService {
     };
   }
 
+  /**
+   * Instant of the newest agent work that makes a snapshot due, else null. Transcript mtime
+   * (activityAt) only bounds it: Spur's own reminders and the agent's replies bump the mtime
+   * without being work, so due sessions read their transcript entries.
+   */
+  private async snapshotWorkAt(
+    session: SessionRecord,
+    activityAt: Date | null,
+  ): Promise<Date | null> {
+    const settings = snapshotSettings(this.resolveProjectForSession(session));
+    if (!settings.enabled || activityAt === null) return null;
+    let latest;
+    try {
+      latest = readSnapshotVersion(this.config.dataDir, session, "latest");
+    } catch (error) {
+      // prepareSnapshotRequest logs the corrupt snapshot.
+      if (error instanceof SnapshotCorruptError) return activityAt;
+      throw error;
+    }
+    const freshnessMs = settings.freshnessMinutes * 60_000;
+    if (
+      !snapshotDue({
+        latestAt: latest?.at ?? null,
+        sessionCreatedAt: session.createdAt,
+        activityAt,
+        freshnessMs,
+      })
+    ) {
+      return null;
+    }
+    const floorMs = Date.parse(latest?.at ?? session.createdAt) + freshnessMs;
+    const activityMs = activityAt.getTime();
+    const cached = this.snapshotWorkCache.get(session.id);
+    if (cached?.activityMs === activityMs && cached.floorMs === floorMs) {
+      return cached.workMs === null ? null : new Date(cached.workMs);
+    }
+    const options = { untimedActivityMs: activityMs, floorMs };
+    let result: { workMs: number | null; complete: boolean } = { workMs: null, complete: true };
+    if (session.agent === "claude" || session.agent === "codex") {
+      const tail =
+        session.agent === "claude"
+          ? await this.readConversationSerialized(session)
+          : await this.readCodexConversationSerialized(session);
+      if (tail) {
+        result = lastAgentWorkMs(tail.entries, { ...options, atStart: tail.startIndex === 0 });
+        if (!result.complete) {
+          result = lastAgentWorkMs(await this.readFullConversationEntries(session), {
+            ...options,
+            atStart: true,
+          });
+        }
+      }
+    } else {
+      result = lastAgentWorkMs(await this.readFullConversationEntries(session), {
+        ...options,
+        atStart: true,
+      });
+    }
+    this.snapshotWorkCache.set(session.id, { activityMs, floorMs, workMs: result.workMs });
+    return result.workMs === null ? null : new Date(result.workMs);
+  }
+
   /** Next snapshotNudge slot value when a snapshot request is due and budgeted, else null. */
   private prepareSnapshotRequest(
     session: SessionRecord,
-    agentActivityAt: Date | null,
+    workAt: Date | null,
   ): { fingerprint: string; attempts: number } | null {
-    if (agentActivityAt === null) return null;
+    if (workAt === null) return null;
     let latest;
     try {
       latest = readSnapshotVersion(this.config.dataDir, session, "latest");
@@ -10168,7 +10254,7 @@ export class SessionService {
       !snapshotDue({
         latestAt: latest?.at ?? null,
         sessionCreatedAt: session.createdAt,
-        activityAt: agentActivityAt,
+        activityAt: workAt,
         freshnessMs,
       })
     ) {
@@ -12665,6 +12751,18 @@ export class SessionService {
     return artifact;
   }
 
+  private async readFullConversationEntries(session: SessionRecord): Promise<TranscriptEntry[]> {
+    const result = await readAgentConversation(session.agent, {
+      worktreePath: session.worktreePath,
+      ...(session.agent === "codex" ? { codexSessionsDir: this.codexSessionsDir(session.id) } : {}),
+      ...(session.agent === "cursor"
+        ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
+        : {}),
+      ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+    });
+    return result ?? [];
+  }
+
   async getConversation(
     sessionId: string,
     options?: { from?: number; preserveEnd?: boolean },
@@ -12674,18 +12772,8 @@ export class SessionService {
     const durationMs = Date.now() - new Date(session.createdAt).getTime();
     const from = options?.from;
 
-    const readFullEntries = async (): Promise<TranscriptEntry[]> => {
-      return readAgentConversation(session.agent, {
-        worktreePath: session.worktreePath,
-        ...(session.agent === "codex"
-          ? { codexSessionsDir: this.codexSessionsDir(session.id) }
-          : {}),
-        ...(session.agent === "cursor"
-          ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
-          : {}),
-        ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
-      }).then((result) => result ?? []);
-    };
+    const readFullEntries = (): Promise<TranscriptEntry[]> =>
+      this.readFullConversationEntries(session);
 
     if (session.agent === "claude") {
       // Classification always comes from the tail reader, on every request
@@ -21223,15 +21311,36 @@ export class SessionService {
       agent,
       ...(agent === "claude"
         ? {
-            snapshotHook: {
-              freshnessMinutes: snapshotSettings(project).freshnessMinutes,
-              // Absent at spawn: the record is written after tool prep, so now is the start.
-              sessionCreatedAt:
-                readSession(this.config.dataDir, sessionId)?.createdAt ?? new Date().toISOString(),
-            },
+            snapshotHook: snapshotSettings(project).enabled
+              ? {
+                  enabled: true as const,
+                  freshnessMinutes: snapshotSettings(project).freshnessMinutes,
+                  // Absent at spawn: the record is written after tool prep, so now is the start.
+                  sessionCreatedAt:
+                    readSession(this.config.dataDir, sessionId)?.createdAt ??
+                    new Date().toISOString(),
+                }
+              : { enabled: false as const },
           }
         : {}),
     });
+  }
+
+  // Sessions started by an older Spur keep old tools (and, for Claude, an old hook) until
+  // something rewrites them; rewrite each live session's tools once per daemon process.
+  private refreshSessionToolsOnce(session: SessionRecord): void {
+    if (this.toolsRefreshed.has(session.id)) return;
+    try {
+      this.prepareSessionTools(session.id, session.agent, session.project);
+      this.toolsRefreshed.add(session.id);
+    } catch (error) {
+      this.logEvent("session.tools.refresh_failed", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Session tool refresh failed for ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
   }
 
   // Session GC archives records without removeSessionArtifacts, so the

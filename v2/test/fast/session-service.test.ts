@@ -248,7 +248,7 @@ import { readPrAlertOwnership, writeWorkspaceState } from "../../src/workspace-s
 import { allowsPrAlertBatch } from "../../src/pr-alert-owner.js";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import { createPage } from "../../src/pages.js";
-import { SNAPSHOT_REQUEST_MESSAGE } from "../../src/snapshots.js";
+import { isSpurReminder, snapshotRequestMessage } from "../../src/snapshots.js";
 import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as sessionSlotsModule from "../../src/session-slots.js";
 import type * as metadataModule from "../../src/metadata.js";
@@ -293,6 +293,7 @@ import {
   type SpawnSessionRequest,
   type StateSource,
   type TodoProjection,
+  type TranscriptEntry,
 } from "../../src/types.js";
 import type { SessionLifecycleRegister } from "../../src/session-lifecycle.js";
 import type { ProviderTokenUsageSample } from "../../src/token-usage.js";
@@ -3705,6 +3706,65 @@ describe("SessionService", () => {
       });
     });
 
+    describe("session tool refresh", () => {
+      async function sweepSetup() {
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
+        const session = runningSession({ worktree: false });
+        sessions.set(session.id, session);
+        vi.spyOn(internals, "maybeNudgeTodo").mockResolvedValue();
+        ensureSessionSlotToolMock.mockClear();
+        return { sessions, session, internals };
+      }
+
+      it("rewrites a live session's tools once across sweeps", async () => {
+        const { internals } = await sweepSetup();
+
+        await internals.pollAttentionStates(false);
+        await internals.pollAttentionStates(false);
+
+        expect(ensureSessionSlotToolMock).toHaveBeenCalledTimes(1);
+      });
+
+      it("rewrites again after the session leaves the live set and returns", async () => {
+        const { sessions, session, internals } = await sweepSetup();
+
+        await internals.pollAttentionStates(false);
+        sessions.set(session.id, { ...session, status: "completed" });
+        await internals.pollAttentionStates(false);
+        sessions.set(session.id, session);
+        await internals.pollAttentionStates(false);
+
+        expect(ensureSessionSlotToolMock).toHaveBeenCalledTimes(2);
+      });
+
+      it("rewrites again in a new service instance", async () => {
+        const { internals } = await sweepSetup();
+        await internals.pollAttentionStates(false);
+        const second = sessionServiceInternals(await createDisposedSessionService());
+        vi.spyOn(second, "maybeNudgeTodo").mockResolvedValue();
+
+        await second.pollAttentionStates(false);
+
+        expect(ensureSessionSlotToolMock).toHaveBeenCalledTimes(2);
+      });
+
+      it("retries on the next sweep after a failed rewrite", async () => {
+        const { internals } = await sweepSetup();
+        ensureSessionSlotToolMock.mockImplementationOnce(() => {
+          throw new Error("disk full");
+        });
+
+        await internals.pollAttentionStates(false);
+        await internals.pollAttentionStates(false);
+        await internals.pollAttentionStates(false);
+
+        expect(ensureSessionSlotToolMock).toHaveBeenCalledTimes(2);
+      });
+    });
+
     it("suppresses ToDo reads and delivery until the exact restore warmup deadline", async () => {
       const sessions = createSessionStore();
       await useRealTodoLedger();
@@ -4035,8 +4095,44 @@ describe("SessionService", () => {
     describe("snapshot requests", () => {
       const T0 = new Date("2026-03-18T10:05:00.000Z");
       const minutes = (count: number) => count * 60_000;
+      // The harness tool dir is /tmp/spur-tools/api-1.
+      const REQUEST_MESSAGE = snapshotRequestMessage("'/tmp/spur-tools/api-1/spur-snapshot'");
+      const reminderText = "Spur ToDo still has open work:\n- t1: Ship it";
+      const at = (offsetMinutes: number) => T0.getTime() + minutes(offsetMinutes);
+      const userEntry = (text: string, offsetMinutes: number): TranscriptEntry => ({
+        kind: "message",
+        role: "user",
+        text,
+        timestampMs: at(offsetMinutes),
+      });
+      const toolEntry = (
+        offsetMinutes: number,
+        extra: { name?: string; spurCall?: true } = {},
+      ): TranscriptEntry => ({
+        kind: "tool",
+        name: extra.name ?? "Edit",
+        timestampMs: at(offsetMinutes),
+        ...(extra.spurCall ? { spurCall: true as const } : {}),
+      });
+      const textEntry = (offsetMinutes: number): TranscriptEntry => ({
+        kind: "message",
+        role: "assistant",
+        text: "done",
+        timestampMs: at(offsetMinutes),
+      });
+      const claudeTail = (entries: TranscriptEntry[], startIndex = 0) =>
+        readClaudeConversationTailMock.mockResolvedValue({
+          entries,
+          state: "waiting",
+          totalEntries: startIndex + entries.length,
+          startIndex,
+          hasMore: false,
+          reader: {},
+        });
 
       async function snapshotSetup() {
+        // Default transcript: real work 31 minutes after the T0 snapshot.
+        claudeTail([userEntry("go", 1), toolEntry(31)]);
         const sessions = createSessionStore();
         const session = runningSession();
         sessions.set(session.id, session);
@@ -4068,12 +4164,12 @@ describe("SessionService", () => {
         const { sessions, session, service, internals, send } = await snapshotSetup();
         vi.setSystemTime(T0);
         await service.writeSnapshot(session.id, { content: "# Notes", final: false });
-        vi.setSystemTime(new Date(T0.getTime() + minutes(11)));
+        vi.setSystemTime(new Date(T0.getTime() + minutes(31)));
 
         await nudgeAt(internals, sessions, session, new Date());
 
         expect(send).toHaveBeenCalledTimes(1);
-        expect(send.mock.calls[0]?.[1]).toBe(SNAPSHOT_REQUEST_MESSAGE);
+        expect(send.mock.calls[0]?.[1]).toBe(REQUEST_MESSAGE);
         expect(send.mock.calls[0]?.[1]).not.toContain("Spur ToDo still has open work");
         expect(sessions.get(session.id)?.snapshotNudge?.attempts).toBe(1);
         expect(sessions.get(session.id)?.todoNudge).toBeUndefined();
@@ -4098,9 +4194,9 @@ describe("SessionService", () => {
         const { sessions, session, service, internals, send } = await snapshotSetup();
         vi.setSystemTime(T0);
         await service.writeSnapshot(session.id, { content: "# One", final: false });
-        vi.setSystemTime(new Date(T0.getTime() + minutes(11)));
+        vi.setSystemTime(new Date(T0.getTime() + minutes(31)));
         await nudgeAt(internals, sessions, session, new Date());
-        expect(send.mock.calls[0]?.[1]).toBe(SNAPSHOT_REQUEST_MESSAGE);
+        expect(send.mock.calls[0]?.[1]).toBe(REQUEST_MESSAGE);
 
         await service.writeSnapshot(session.id, { content: "# Two", final: false });
         vi.setSystemTime(new Date(Date.now() + 61_000));
@@ -4115,13 +4211,13 @@ describe("SessionService", () => {
         const { sessions, session, service, internals, send } = await snapshotSetup();
         vi.setSystemTime(T0);
         await service.writeSnapshot(session.id, { content: "# One", final: false });
-        vi.setSystemTime(new Date(T0.getTime() + minutes(11)));
+        vi.setSystemTime(new Date(T0.getTime() + minutes(31)));
         for (let attempt = 0; attempt < 4; attempt += 1) {
           await nudgeAt(internals, sessions, session, new Date());
           vi.setSystemTime(new Date(Date.now() + 61_000));
         }
 
-        expect(send.mock.calls.map((call) => call[1] === SNAPSHOT_REQUEST_MESSAGE)).toEqual([
+        expect(send.mock.calls.map((call) => call[1] === REQUEST_MESSAGE)).toEqual([
           true,
           true,
           true,
@@ -4140,13 +4236,193 @@ describe("SessionService", () => {
         const todoNudge = sessions.get(session.id)?.todoNudge;
         expect(todoNudge?.attempts).toBe(1);
 
-        vi.setSystemTime(new Date(T0.getTime() + minutes(11)));
+        vi.setSystemTime(new Date(T0.getTime() + minutes(31)));
         await nudgeAt(internals, sessions, session, new Date());
 
         expect(send).toHaveBeenCalledTimes(2);
-        expect(send.mock.calls[1]?.[1]).toBe(SNAPSHOT_REQUEST_MESSAGE);
+        expect(send.mock.calls[1]?.[1]).toBe(REQUEST_MESSAGE);
         expect(sessions.get(session.id)?.todoNudge).toEqual(todoNudge);
         expect(sessions.get(session.id)?.snapshotNudge?.attempts).toBe(1);
+        service.dispose();
+      });
+
+      async function dueSetup(entries: TranscriptEntry[], startIndex = 0) {
+        const setup = await snapshotSetup();
+        vi.setSystemTime(T0);
+        await setup.service.writeSnapshot(setup.session.id, { content: "# Notes", final: false });
+        claudeTail(entries, startIndex);
+        vi.setSystemTime(new Date(at(40)));
+        return setup;
+      }
+
+      it("sends no request when no agent work follows the snapshot", async () => {
+        const { sessions, session, service, internals, send } = await dueSetup([
+          userEntry("go", 1),
+          toolEntry(2),
+        ]);
+
+        await nudgeAt(internals, sessions, session, new Date(at(40)));
+
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(send.mock.calls[0]?.[1]).toContain("Spur ToDo still has open work");
+        expect(sessions.get(session.id)?.snapshotNudge).toBeUndefined();
+        service.dispose();
+      });
+
+      it("ignores a ToDo reminder turn that only runs Spur tools and replies", async () => {
+        const { sessions, session, service, internals, send } = await dueSetup([
+          userEntry("go", 1),
+          toolEntry(2),
+          userEntry(reminderText, 35),
+          toolEntry(36, { name: "Bash", spurCall: true }),
+          textEntry(40),
+        ]);
+
+        await nudgeAt(internals, sessions, session, new Date(at(40)));
+
+        expect(send.mock.calls[0]?.[1]).toContain("Spur ToDo still has open work");
+        expect(sessions.get(session.id)?.snapshotNudge).toBeUndefined();
+        service.dispose();
+      });
+
+      it("counts a non-Spur tool inside a reminder turn", async () => {
+        const { sessions, session, service, internals, send } = await dueSetup([
+          userEntry(reminderText, 35),
+          toolEntry(36),
+        ]);
+
+        await nudgeAt(internals, sessions, session, new Date(at(40)));
+
+        expect(send.mock.calls[0]?.[1]).toBe(REQUEST_MESSAGE);
+        service.dispose();
+      });
+
+      it("sends exactly one request with the literal wrapper path and holds 60 seconds", async () => {
+        const { sessions, session, service, internals, send } = await dueSetup([
+          userEntry("go", 31),
+          toolEntry(32),
+        ]);
+        ensureSessionSlotToolMock.mockClear();
+
+        await nudgeAt(internals, sessions, session, new Date(at(40)));
+        await nudgeAt(internals, sessions, session, new Date(at(40) + 1_000));
+
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(String(send.mock.calls[0]?.[1])).toContain(
+          "'/tmp/spur-tools/api-1/spur-snapshot' write",
+        );
+        expect(ensureSessionSlotToolMock).toHaveBeenCalled();
+        service.dispose();
+      });
+
+      it("classifies codex reminder turns from the tool arguments", async () => {
+        const codexTail = (inputSummary: string) =>
+          readCodexConversationTailMock.mockResolvedValue({
+            entries: [
+              userEntry(reminderText, 35),
+              { kind: "tool", name: "exec_command", inputSummary, timestampMs: at(36) },
+            ],
+            totalEntries: 2,
+            startIndex: 0,
+            reader: {},
+          });
+        for (const [inputSummary, requested] of [
+          ['{"cmd":"spur-todo list"}', false],
+          ['{"cmd":"npm test"}', true],
+        ] as const) {
+          const { sessions, session, service, internals, send } = await dueSetup([]);
+          sessions.set(session.id, { ...session, agent: "codex" });
+          codexTail(inputSummary);
+          send.mockClear();
+          await nudgeAt(internals, sessions, session, new Date(at(40)));
+          expect(send.mock.calls[0]?.[1] === REQUEST_MESSAGE).toBe(requested);
+          service.dispose();
+        }
+      });
+
+      it("sends no request and reads nothing when snapshots are disabled", async () => {
+        const config = baseConfig();
+        loadConfigMock.mockReturnValue({
+          ...config,
+          projects: { api: { ...config.projects.api, snapshots: { enabled: false } } },
+        });
+        const { sessions, session, service, internals, send } = await dueSetup([
+          userEntry("go", 31),
+          toolEntry(32),
+        ]);
+        readClaudeConversationTailMock.mockClear();
+
+        await nudgeAt(internals, sessions, session, new Date(at(40)));
+
+        expect(send.mock.calls[0]?.[1]).toContain("Spur ToDo still has open work");
+        expect(readClaudeConversationTailMock).not.toHaveBeenCalled();
+        service.dispose();
+      });
+
+      it("reads the transcript once while the activity instant is unchanged", async () => {
+        const { sessions, session, service, internals } = await dueSetup([
+          userEntry("go", 1),
+          toolEntry(2),
+        ]);
+        readClaudeConversationTailMock.mockClear();
+
+        await nudgeAt(internals, sessions, session, new Date(at(40)));
+        vi.setSystemTime(new Date(Date.now() + 61_000));
+        await nudgeAt(internals, sessions, session, new Date(at(40)));
+
+        expect(readClaudeConversationTailMock).toHaveBeenCalledTimes(1);
+        service.dispose();
+      });
+
+      it("falls back to one full read when the tail ends mid-turn above the floor", async () => {
+        const { sessions, session, service, internals, send } = await dueSetup([textEntry(38)], 5);
+        readAgentConversationMock.mockResolvedValue([userEntry(reminderText, 35), textEntry(38)]);
+
+        await nudgeAt(internals, sessions, session, new Date(at(40)));
+
+        expect(readAgentConversationMock).toHaveBeenCalledTimes(1);
+        expect(send.mock.calls[0]?.[1]).toContain("Spur ToDo still has open work");
+        service.dispose();
+      });
+
+      it("skips the full read when a non-Spur tool above the floor decides the tail", async () => {
+        const { sessions, session, service, internals, send } = await dueSetup(
+          [textEntry(37), toolEntry(38)],
+          5,
+        );
+
+        await nudgeAt(internals, sessions, session, new Date(at(40)));
+
+        expect(readAgentConversationMock).not.toHaveBeenCalled();
+        expect(send.mock.calls[0]?.[1]).toBe(REQUEST_MESSAGE);
+        service.dispose();
+      });
+
+      it("records no attempt when the tool rewrite throws, then sends attempt one", async () => {
+        const { sessions, session, service, internals, send } = await dueSetup([
+          userEntry("go", 31),
+          toolEntry(32),
+        ]);
+        ensureSessionSlotToolMock.mockImplementationOnce(() => {
+          throw new Error("disk full");
+        });
+
+        await nudgeAt(internals, sessions, session, new Date(at(40)));
+        expect(sessions.get(session.id)?.snapshotNudge).toBeUndefined();
+        expect(send).not.toHaveBeenCalled();
+
+        // The failed prep takes the generic nudge backoff; wait it out.
+        internals.todoNudgeBackoff.delete(session.id);
+        await nudgeAt(internals, sessions, session, new Date(at(40) + 1_000));
+        expect(send.mock.calls[0]?.[1]).toBe(REQUEST_MESSAGE);
+        expect(sessions.get(session.id)?.snapshotNudge?.attempts).toBe(1);
+        service.dispose();
+      });
+
+      it("starts every ToDo nudge text with a Spur reminder prefix", async () => {
+        const { sessions, session, service, internals, send } = await snapshotSetup();
+        await nudgeAt(internals, sessions, session, null);
+        expect(isSpurReminder(String(send.mock.calls[0]?.[1]))).toBe(true);
         service.dispose();
       });
 
@@ -4192,7 +4468,11 @@ describe("SessionService", () => {
         const calls = ensureSessionSlotToolMock.mock.calls.map(([args]) => args);
         expect(calls[0]).toMatchObject({
           agent: "claude",
-          snapshotHook: { freshnessMinutes: 7, sessionCreatedAt: expect.any(String) },
+          snapshotHook: {
+            enabled: true,
+            freshnessMinutes: 7,
+            sessionCreatedAt: expect.any(String),
+          },
         });
         expect(calls[1]).not.toHaveProperty("snapshotHook");
         expect(calls[2]).not.toHaveProperty("snapshotHook");
@@ -4204,7 +4484,7 @@ describe("SessionService", () => {
         vi.setSystemTime(T0);
         await service.writeSnapshot(session.id, { content: "# One", final: false });
         writeFileSync(join(TEST_DATA_DIR, "sessions", session.id, "snapshots", "1.json"), "{");
-        vi.setSystemTime(new Date(T0.getTime() + minutes(11)));
+        vi.setSystemTime(new Date(T0.getTime() + minutes(31)));
 
         await nudgeAt(internals, sessions, session, new Date());
         vi.setSystemTime(new Date(Date.now() + 61_000));
@@ -11115,7 +11395,11 @@ describe("SessionService", () => {
       configPath: customConfig,
       projectId: "api",
       agent: "claude",
-      snapshotHook: { freshnessMinutes: 10, sessionCreatedAt: expect.any(String) },
+      snapshotHook: {
+        enabled: true,
+        freshnessMinutes: 30,
+        sessionCreatedAt: expect.any(String),
+      },
     });
   });
 

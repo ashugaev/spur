@@ -3,7 +3,7 @@ import { readdir, stat, mkdir, writeFile, mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { shellEscape } from "./shell-escape.js";
-import { SNAPSHOT_HOOK_TOOL_NAME } from "../snapshots.js";
+import { SNAPSHOT_HOOK_TOOL_NAME, SNAPSHOT_HOOK_TURN_FILE } from "../snapshots.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type { AgentModel } from "./models.js";
@@ -236,6 +236,7 @@ export async function ensureClaudeSettings(
                 ],
               }
             : {}),
+          UserPromptSubmit: [snapshotHook],
           PostToolUse: [snapshotHook],
           Stop: [snapshotHook],
         },
@@ -243,6 +244,12 @@ export async function ensureClaudeSettings(
       null,
       2,
     ) + "\n",
+    "utf8",
+  );
+  // A new Claude process starts a work turn, whatever turn the previous process died in.
+  await writeFile(
+    join(sessionToolDir, SNAPSHOT_HOOK_TURN_FILE),
+    JSON.stringify({ reminder: false, worked: false }),
     "utf8",
   );
   return settingsPath;
