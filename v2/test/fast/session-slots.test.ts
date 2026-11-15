@@ -1089,6 +1089,13 @@ describe("snapshot hook tool", () => {
     expect(existsSync(join(toolDir, "spur-snapshot-hook.mjs"))).toBe(false);
   });
 
+  it("emits a version-file regex with an escaped dot", async () => {
+    const { toolDir } = await setup();
+    expect(readFileSync(join(toolDir, "spur-snapshot-hook.mjs"), "utf8")).toContain(
+      String.raw`/^([1-9][0-9]*)\.json$/`,
+    );
+  });
+
   it("asks mid-turn through PostToolUse additionalContext when the snapshot is stale", async () => {
     const { toolDir } = await setup({ snapshotAgoMs: stale });
     const output = runHook(toolDir, { hook_event_name: "PostToolUse", tool_name: "Bash" });

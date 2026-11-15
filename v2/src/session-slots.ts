@@ -407,7 +407,7 @@ function latestSnapshotAt() {
   }
   let newest = 0;
   for (const name of names) {
-    const match = /^([1-9][0-9]*)\.json$/.exec(name);
+    const match = /^([1-9][0-9]*)\\.json$/.exec(name);
     if (match && Number(match[1]) > newest) newest = Number(match[1]);
   }
   if (newest === 0) return null;
