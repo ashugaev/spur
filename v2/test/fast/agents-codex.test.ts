@@ -53,6 +53,7 @@ import { resolveWorktreePathCandidates } from "../../src/agents/worktree-path.js
 import { buildAgentResumePlan } from "../../src/agents/index.js";
 import {
   codexCommand,
+  codexArgsSelectProvider,
   buildCodexPlan,
   buildCodexResumePlan,
   buildCodexRestorePlan,
@@ -117,12 +118,48 @@ describe("codexHookHomePath", () => {
   });
 });
 
+const HIDE_NUDGE = "-c 'notice.hide_rate_limit_model_nudge=true'";
+const DEFAULT_FLAGS = `--enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust ${HIDE_NUDGE}`;
+
+describe("codex rate-limit model nudge override", () => {
+  it.each([false, true])(
+    "hides the nudge on launch and resume (restrictWrites=%s)",
+    (restrictWrites) => {
+      for (const command of [
+        buildCodexPlan("prompt", { restrictWrites }).launchCommand,
+        buildCodexPlan("prompt", { restrictWrites, startupImagePaths: ["/tmp/a.png"] })
+          .launchCommand,
+        buildCodexResumePlan("thread-1", "codex", { restrictWrites }).launchCommand,
+        buildAgentResumePlan("codex", "thread-1", "codex", { restrictWrites }).launchCommand,
+      ]) {
+        expect(command.match(/notice\.hide_rate_limit_model_nudge=true/g)).toHaveLength(1);
+        expect(command).toContain(HIDE_NUDGE);
+      }
+    },
+  );
+
+  it("places the override before user codexArgs so user config wins", () => {
+    const codexArgs = ["-c", "notice.hide_rate_limit_model_nudge=false"];
+    for (const command of [
+      buildCodexPlan("prompt", { codexArgs }).launchCommand,
+      buildCodexResumePlan("thread-1", "codex", { codexArgs }).launchCommand,
+    ]) {
+      expect(command.indexOf(HIDE_NUDGE)).toBeGreaterThan(-1);
+      expect(command.indexOf(HIDE_NUDGE)).toBeLessThan(
+        command.indexOf("'-c' 'notice.hide_rate_limit_model_nudge=false'"),
+      );
+    }
+  });
+
+  it("does not count as a provider selection", () => {
+    expect(codexArgsSelectProvider(["-c", "notice.hide_rate_limit_model_nudge=true"])).toBe(false);
+  });
+});
+
 describe("buildCodexPlan", () => {
   it("returns default plan with no options", () => {
     const plan = buildCodexPlan("do something");
-    expect(plan.launchCommand).toBe(
-      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
-    );
+    expect(plan.launchCommand).toBe(`codex ${DEFAULT_FLAGS}`);
     expect(plan.initialMessage).toBe("do something");
     expect(plan.readyMarkers).toEqual(["OpenAI Codex", "›"]);
   });
@@ -186,7 +223,7 @@ describe("buildCodexPlan", () => {
       startupImagePaths: ["/tmp/one.png", "/tmp/two.webp"],
     });
     expect(plan.launchCommand).toBe(
-      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --image '/tmp/one.png' --image '/tmp/two.webp' -- 'describe this'",
+      `codex ${DEFAULT_FLAGS} --image '/tmp/one.png' --image '/tmp/two.webp' -- 'describe this'`,
     );
     expect(plan.initialMessage).toBe("");
   });
@@ -195,7 +232,7 @@ describe("buildCodexPlan", () => {
     const prompt = "--describe, this\nimage's content";
     const plan = buildCodexPlan(prompt, { startupImagePaths: ["/tmp/one.png"] });
     expect(plan.launchCommand).toBe(
-      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --image '/tmp/one.png' -- '--describe, this\nimage'\\''s content'",
+      `codex ${DEFAULT_FLAGS} --image '/tmp/one.png' -- '--describe, this\nimage'\\''s content'`,
     );
     expect(plan.initialMessage).toBe("");
   });
@@ -204,25 +241,21 @@ describe("buildCodexPlan", () => {
     const prompt = "\n\nMode: manager. Load the manager skill.";
     const plan = buildCodexPlan(prompt, { startupImagePaths: ["/tmp/one.png"] });
     expect(plan.launchCommand).toBe(
-      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --image '/tmp/one.png' -- '\n\nMode: manager. Load the manager skill.'",
+      `codex ${DEFAULT_FLAGS} --image '/tmp/one.png' -- '\n\nMode: manager. Load the manager skill.'`,
     );
     expect(plan.initialMessage).toBe("");
   });
 
   it.each(["", " \n\t "])("leaves genuinely empty planner input %j image-only", (prompt) => {
     const plan = buildCodexPlan(prompt, { startupImagePaths: ["/tmp/one.png"] });
-    expect(plan.launchCommand).toBe(
-      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --image '/tmp/one.png'",
-    );
+    expect(plan.launchCommand).toBe(`codex ${DEFAULT_FLAGS} --image '/tmp/one.png'`);
     expect(plan.initialMessage).toBe("");
   });
 
   it("preserves tmux prompt delivery when startup image paths are empty", () => {
     const prompt = "--describe, this\nimage's content";
     const plan = buildCodexPlan(prompt, { startupImagePaths: [] });
-    expect(plan.launchCommand).toBe(
-      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
-    );
+    expect(plan.launchCommand).toBe(`codex ${DEFAULT_FLAGS}`);
     expect(plan.initialMessage).toBe(prompt);
   });
 
@@ -458,6 +491,24 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     const commands = sessionStart.flatMap((g) => g.hooks.map((h) => h.command));
     expect(commands).toContain("echo hello");
     expect(commands).toContain(SPUR_COMMAND);
+  });
+
+  it("leaves the snapshot hook out of every Codex event group", async () => {
+    mockReadFile.mockImplementation(async (filePath: unknown) => {
+      if (typeof filePath === "string" && filePath.endsWith("hooks.json")) {
+        throw new Error("ENOENT");
+      }
+      return "";
+    });
+
+    await ensureCodexHooksConfig("/session/tool");
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("hooks.json"),
+    );
+    expect(requireValue(writeCall, "expected hooks.json write")[1] as string).not.toContain(
+      "spur-snapshot-hook",
+    );
   });
 
   it("handles invalid JSON in hooks.json by returning a fresh document", async () => {

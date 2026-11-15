@@ -31,6 +31,11 @@ import type * as codexModule from "../../src/agents/codex.js";
 import type * as openCodeModule from "../../src/agents/opencode.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
+import type * as metadataModule from "../../src/metadata.js";
+let actualMetadataModule: typeof metadataModule;
+export function sessionMetadataModule(): typeof metadataModule {
+  return actualMetadataModule;
+}
 import type * as sessionPrModule from "../../src/session-pr.js";
 import type * as releasesCacheModule from "../../src/releases-cache.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
@@ -322,6 +327,7 @@ const hasUncommittedChangesMock: Mock = vi.fn();
 const isGitWorktreeMock: Mock = vi.fn();
 const hasUnpushedCommitsMock: Mock = vi.fn();
 const readCurrentBranchMock: Mock = vi.fn();
+const readWorktreeHeadMock: Mock = vi.fn();
 const readBranchDestinationMock: Mock = vi.fn();
 const readRemoteUrlsMock: Mock = vi.fn();
 const removeWorktreeMock: Mock = vi.fn();
@@ -694,48 +700,70 @@ vi.mock("../../src/ids.js", () => ({
   reserveNextSessionId: reserveNextSessionIdMock,
 }));
 
-vi.mock("../../src/metadata.js", () => ({
-  readInterfaceConsent: readInterfaceConsentMock,
-  writeInterfaceConsent: writeInterfaceConsentMock,
-  writeTelegramOffer: writeTelegramOfferMock,
-  retireTelegramLegacyState: vi.fn(),
-  telegramBindingKey: (chatId: number, messageThreadId?: number) =>
-    `${chatId}:${messageThreadId ?? "main"}`,
-  archiveSessions: archiveSessionsMock,
-  clearGitHubPollDisabledSession: clearGitHubPollDisabledSessionMock,
-  listGitHubPollDisabledSourceIds: (...args: unknown[]): string[] =>
-    (listGitHubPollDisabledSourceIdsMock(...args) as string[] | undefined) ?? [],
-  deleteRuntimeLogCursorsForSession: deleteRuntimeLogCursorsForSessionMock,
-  deleteServiceInstance: deleteServiceInstanceMock,
-  deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
-  deleteServiceSourceStatesForService: deleteServiceSourceStatesForServiceMock,
-  deleteServiceSourceStatesForSession: deleteServiceSourceStatesForSessionMock,
-  deleteTelegramSourceStateForSession: deleteTelegramSourceStateForSessionMock,
-  deleteTelegramReplyTarget: deleteTelegramReplyTargetMock,
-  hasPendingTelegramSend: hasPendingTelegramSendMock,
-  pendingTriggerSendWorkIds: pendingTriggerSendWorkIdsMock,
-  listActiveServiceProblems: listActiveServiceProblemsMock,
-  listServiceInstances: listServiceInstancesMock,
-  listServiceInstancesForSession: listServiceInstancesForSessionMock,
-  listSessions: listSessionsMock,
-  readAvailableBacklogItems: readAvailableBacklogItemsMock,
-  readServiceInstance: readServiceInstanceMock,
-  readSession: readSessionMock,
-  readTelegramBindings: readTelegramBindingsMock,
-  readTelegramReplyTarget: readTelegramReplyTargetMock,
-  readArchivedSession: readArchivedSessionMock,
-  listTelegramTopicSessionIds: listTelegramTopicSessionIdsMock,
-  readTelegramTopicGcClock: readTelegramTopicGcClockMock,
-  writeTelegramTopicGcClock: writeTelegramTopicGcClockMock,
-  readTelegramTopicGcFailures: readTelegramTopicGcFailuresMock,
-  writeTelegramTopicGcFailures: writeTelegramTopicGcFailuresMock,
-  recordTelegramMessages: recordTelegramMessagesMock,
-  requestGitHubMergeConflictRestoreReplay: requestGitHubMergeConflictRestoreReplayMock,
-  writeTelegramBindings: writeTelegramBindingsMock,
-  writeTelegramReplyTarget: writeTelegramReplyTargetMock,
-  writeServiceInstance: writeServiceInstanceMock,
-  writeSession: writeSessionMock,
-}));
+// Real trigger-store and snapshot functions ride along for tests that run the
+// real triggers.ts against this service; session-service.ts uses none of them.
+vi.mock("../../src/metadata.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof metadataModule>();
+  actualMetadataModule = actual;
+  return {
+    observeSessionWrites: actual.observeSessionWrites,
+    withSessionWriteGuard: actual.withSessionWriteGuard,
+    deletePendingSendBatch: actual.deletePendingSendBatch,
+    deletePendingSendBatchConditional: actual.deletePendingSendBatchConditional,
+    deletePendingSpawnWork: actual.deletePendingSpawnWork,
+    deleteWorkItemLifecycle: actual.deleteWorkItemLifecycle,
+    readGitHubSourceSnapshot: actual.readGitHubSourceSnapshot,
+    readPendingSendBatch: actual.readPendingSendBatch,
+    readPendingSendBatches: actual.readPendingSendBatches,
+    readPendingSpawnWork: actual.readPendingSpawnWork,
+    readReviewSourceSnapshot: actual.readReviewSourceSnapshot,
+    readWorkItemLifecycles: actual.readWorkItemLifecycles,
+    recordPendingSendBatch: actual.recordPendingSendBatch,
+    recordWorkItemLifecycle: actual.recordWorkItemLifecycle,
+    updatePendingSendBatchConditional: actual.updatePendingSendBatchConditional,
+    writePendingSpawnWork: actual.writePendingSpawnWork,
+    readInterfaceConsent: readInterfaceConsentMock,
+    writeInterfaceConsent: writeInterfaceConsentMock,
+    writeTelegramOffer: writeTelegramOfferMock,
+    retireTelegramLegacyState: vi.fn(),
+    telegramBindingKey: (chatId: number, messageThreadId?: number) =>
+      `${chatId}:${messageThreadId ?? "main"}`,
+    archiveSessions: archiveSessionsMock,
+    clearGitHubPollDisabledSession: clearGitHubPollDisabledSessionMock,
+    listGitHubPollDisabledSourceIds: (...args: unknown[]): string[] =>
+      (listGitHubPollDisabledSourceIdsMock(...args) as string[] | undefined) ?? [],
+    deleteRuntimeLogCursorsForSession: deleteRuntimeLogCursorsForSessionMock,
+    deleteServiceInstance: deleteServiceInstanceMock,
+    deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
+    deleteServiceSourceStatesForService: deleteServiceSourceStatesForServiceMock,
+    deleteServiceSourceStatesForSession: deleteServiceSourceStatesForSessionMock,
+    deleteTelegramSourceStateForSession: deleteTelegramSourceStateForSessionMock,
+    deleteTelegramReplyTarget: deleteTelegramReplyTargetMock,
+    hasPendingTelegramSend: hasPendingTelegramSendMock,
+    pendingTriggerSendWorkIds: pendingTriggerSendWorkIdsMock,
+    listActiveServiceProblems: listActiveServiceProblemsMock,
+    listServiceInstances: listServiceInstancesMock,
+    listServiceInstancesForSession: listServiceInstancesForSessionMock,
+    listSessions: listSessionsMock,
+    readAvailableBacklogItems: readAvailableBacklogItemsMock,
+    readServiceInstance: readServiceInstanceMock,
+    readSession: readSessionMock,
+    readTelegramBindings: readTelegramBindingsMock,
+    readTelegramReplyTarget: readTelegramReplyTargetMock,
+    readArchivedSession: readArchivedSessionMock,
+    listTelegramTopicSessionIds: listTelegramTopicSessionIdsMock,
+    readTelegramTopicGcClock: readTelegramTopicGcClockMock,
+    writeTelegramTopicGcClock: writeTelegramTopicGcClockMock,
+    readTelegramTopicGcFailures: readTelegramTopicGcFailuresMock,
+    writeTelegramTopicGcFailures: writeTelegramTopicGcFailuresMock,
+    recordTelegramMessages: recordTelegramMessagesMock,
+    requestGitHubMergeConflictRestoreReplay: requestGitHubMergeConflictRestoreReplayMock,
+    writeTelegramBindings: writeTelegramBindingsMock,
+    writeTelegramReplyTarget: writeTelegramReplyTargetMock,
+    writeServiceInstance: writeServiceInstanceMock,
+    writeSession: writeSessionMock,
+  };
+});
 
 vi.mock("../../src/review-interface-consent.js", async (importOriginal) => ({
   ...(await importOriginal<typeof interfaceConsentModule>()),
@@ -991,6 +1019,7 @@ vi.mock("../../src/workspace.js", () => ({
   isGitWorktree: isGitWorktreeMock,
   pruneRepoWorktrees: pruneRepoWorktreesMock,
   readCurrentBranch: readCurrentBranchMock,
+  readWorktreeHead: readWorktreeHeadMock,
   readBranchDestination: readBranchDestinationMock,
   readRemoteUrls: readRemoteUrlsMock,
   removeWorktree: removeWorktreeMock,
@@ -1279,6 +1308,7 @@ type SessionServiceInternals = {
     windowMs: number,
   ): Promise<{ found: boolean; lastScannedFile: string | null }>;
   paneGenerationMatches(session: SessionRecord, expected: unknown): Promise<boolean>;
+  retainLaunchedError(session: SessionRecord, error: unknown): Promise<SessionRecord>;
   sendAgentMessage(
     session: {
       id: string;
@@ -1292,7 +1322,7 @@ type SessionServiceInternals = {
     options?: { interrupt?: boolean; freshLaunch?: boolean; interactive?: boolean },
   ): Promise<AgentSendOutcome>;
   writeAgentMessage: SessionServiceInternals["sendAgentMessage"];
-  scheduleTodoNudge(session: SessionRecord): void;
+  scheduleTodoNudge(session: SessionRecord, agentActivityAt: Date | null): void;
   waitForQueuedMessage(sessionId: string): Promise<string>;
   queuedDeliveryAckedAt: Map<string, number>;
   withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
@@ -1323,7 +1353,10 @@ type SessionServiceInternals = {
     message: string,
     options: { entryPoint: "send" | "deliver" | "flush" },
   ): Promise<unknown>;
-  maybeNudgeTodo(session: SessionRecord): Promise<void>;
+  maybeNudgeTodo(
+    session: SessionRecord,
+    options?: { detached?: boolean; agentActivityAt?: Date | null },
+  ): Promise<void>;
   enrichWithClassified(
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
@@ -1353,6 +1386,7 @@ type SessionServiceInternals = {
   lastObservedRunStates: Map<string, SessionState>;
   todoNudgeDisabled: Map<string, { kind: "ledger_corrupt" | "target_gone"; reason: string }>;
   todoNudgeBackoff: Map<string, { failures: number; nextRetryAtMs: number }>;
+  snapshotCorruptLogged: Map<string, number>;
   scheduleHealedSidecarRestart(session: SessionRecord): void;
   sidecarHealTasks: Map<string, Promise<void>>;
   settleSubmitHold(
@@ -1753,7 +1787,12 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   findForeignAgentProcessesForSessionMock.mockReset().mockResolvedValue({ status: "unavailable" });
   killTmuxSessionTreeMock.mockReset().mockResolvedValue(true);
   sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
-  sendInterruptKeysToTmuxMock.mockReset().mockResolvedValue(true);
+  sendInterruptKeysToTmuxMock
+    .mockReset()
+    .mockImplementation(async (_session, _agent, onInterrupt?: () => void) => {
+      onInterrupt?.();
+      return true;
+    });
   sendSensitiveMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
   sendSubmitKeyToTmuxMock.mockReset().mockResolvedValue(undefined);
   sendMenuSelectionKeysMock.mockReset().mockResolvedValue(undefined);
@@ -1779,6 +1818,7 @@ export async function resetSessionServiceHarness(accounts: () => TestAccount[]):
   hasUnpushedCommitsMock.mockReset().mockResolvedValue(false);
   isGitWorktreeMock.mockReset().mockResolvedValue(true);
   readCurrentBranchMock.mockReset().mockResolvedValue("main");
+  readWorktreeHeadMock.mockReset().mockResolvedValue({ branch: null, headSha: null, dirty: null });
   readBranchDestinationMock
     .mockReset()
     .mockImplementation(async (_path: string, branch: string) => ({
@@ -2112,6 +2152,7 @@ export {
   isGitWorktreeMock,
   hasUnpushedCommitsMock,
   readCurrentBranchMock,
+  readWorktreeHeadMock,
   readBranchDestinationMock,
   removeWorktreeMock,
   pruneRepoWorktreesMock,

@@ -16,16 +16,19 @@ WHAT SPUR IS
 INTERFACES
 
   CLI: `spur --help`, then `spur <command> --help`.
+  Default to plain `spur send`; use `--interrupt` only to correct course, start message with instruction to check working state before continuing; cost and guard: docs/commands.md#send-queue.
   `$SPUR_SESSION_TOOL_DIR` holds the session-bound wrappers; `ls "$SPUR_SESSION_TOOL_DIR"` enumerates them. Call each as `"$SPUR_SESSION_TOOL_DIR/<tool>"`, never bare.
   Session variables: `env | grep '^SPUR_'`.
   Agent launch identity contract: `docs/commands.md#session-tools-and-environment`.
   Manual-wake response fields: `docs/daemon-api.md`.
   Automatic reminder limits: `docs/configuration.md#automatic-reminders`.
   Edit scheduled jobs through footer Cron viewer or MCP; config behavior: docs/configuration.md; operations: docs/daemon-api.md.
-  Spur ToDo: ledger starts empty, no code path seeds an item; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses an agent's own completion, self-destruct, and handoff — `todo_ledger_empty`/`todo_open_work` (409); a human `complete`/`handoff` from the CLI or UI is never blocked. Contract: `docs/commands.md#todo`.
+  Spur ToDo: ledger starts empty, no code path seeds an item; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses an agent's own completion, self-destruct, and handoff — `todo_ledger_empty`/`todo_open_work` (409); a human `complete`/`handoff` from the CLI or UI is never blocked. Contract: `docs/commands.md#todo-snapshot`.
+  Work snapshots: `"$SPUR_SNAPSHOT_COMMAND" write --file <path|-> [--final]` stores full Markdown snapshot as next version; with `projects.<id>.snapshots.requireFinal`, agent complete/self-destruct need `--final` snapshot, handoff any snapshot, newer than last ToDo change — `work_snapshot_required` (409). Agent working over `projects.<id>.snapshots.freshnessMinutes` past latest snapshot gets snapshot request, ahead of ToDo reminders. Contract: `docs/commands.md#todo-snapshot`.
   Telegram: bot DM for commands/spawn; agent communication in assigned forum topics; completion deletes owned topics. Source identity: `docs/commands.md#source`; attachments/binding: `docs/configuration.md#telegram-binding`; sends: `docs/commands.md#source-reply`.
   Native Telegram calls to sandbox Shepherd: docs/telegram-calls.md.
   Provider quota windows and session token totals: `spur usage`; docs/commands.md#usage.
+  Manual rate-limit clear: docs/commands.md#usage; docs/daemon-api.md#session-routes.
   Mute unwanted auto-pings with `spur auto-ping mute <handle>`, handle from the ping footer. `--for <dur>` and `--forever` need `--reason`. Modes and resume: `docs/commands.md#auto-ping`; API: `docs/daemon-api.md`.
 
 SAFETY
@@ -48,13 +51,14 @@ DOCS
 
   Doc index: https://raw.githubusercontent.com/ashugaev/spur/main/README.md
   Any path under `docs/` resolves as https://raw.githubusercontent.com/ashugaev/spur/main/<path>
-  Commands, session tools and variables: docs/commands.md
+  Commands, session tools/variables, list/feed links: docs/commands.md
   Cursor send correlation and retained acknowledgement baselines: docs/commands.md, docs/daemon-api.md.
   Review feedback, recovery, package checks: docs/commands.md
-  Routes, PR reviewer metadata, bounded conversation pages, pre-flight batches, lifecycle receipts, terminal restart, restore cancellation: docs/daemon-api.md
+  Routes, session transitions/reset times, PR reviewer metadata, bounded conversation pages, pre-flight batches, lifecycle receipts, terminal restart, restore cancellation: docs/daemon-api.md
   Config, admission, trigger-spawn retry, reviewer App/consent, pane-child fallback, OpenCode heartbeat: docs/configuration.md; events: docs/configuration.md#events
   GitHub PR feedback attribution, ownership and custom markers: docs/configuration.md#field-reference
   Native PR alert ownership: docs/configuration.md#pr-alert-ownership.
+  Closeout takeover and blocked-trigger notices: docs/commands.md, docs/configuration.md.
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
   Full-access MCP: Pages source binding, backend controls/logs, cached attached PR status; setup: docs/mcp.md

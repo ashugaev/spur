@@ -35,8 +35,9 @@ Check installation, linger and logs in [npm install](install-from-npm.md) or [so
 ## Discover and operate
 
 - `describe_operations`: paged daemon operation catalog, fields, defaults and examples.
-- `daemon_request`: invoke a catalog `operationId`, supplying path parameters, query and body.
-- `list_projects`, `list_sessions`, `get_session`, `get_conversation`: discovery and inspection.
+- `daemon_request`: invoke `operationId` with path parameters, query and body; query accepts scalar or `string[]` values (repeated keys).
+- `list_projects`, `list_sessions`, `get_session`, `get_conversation`: discovery and inspection; `list_sessions.link: string[]` sends repeated [session link filters](daemon-api.md#session-routes).
+- `daemon_request(operationId: "list_session_transitions")`: cursor polling with event-time links; discover query fields with `describe_operations`; [feed contract](daemon-api.md#session-routes).
 - `spawn_session`: full spawn request; background by default, `background: false` selects interactive spawn.
 - `send_message`: full daemon send request.
 - `wait_session`: wait for a new answer, question or terminal state, using the `after` cursor from spawn/send.
@@ -45,7 +46,7 @@ Check installation, linger and logs in [npm install](install-from-npm.md) or [so
 - `read_daemon_logs`: bounded live daemon event journal.
 - `get_session_pr_status`: existing extracted status for an attached PR, cache only.
 
-The catalog covers every daemon route: session lifecycle, queues, questions, logs, artifacts, services, subscriptions, source replies, ToDo, memory, [Pages/source binding](daemon-api.md#page-routes), projects, models, accounts, sidecars, shepherd and deployments.
+The catalog covers every daemon route: session lifecycle, queues, questions, logs, artifacts, services, subscriptions, source replies, ToDo, work snapshots, memory, [Pages/source binding](daemon-api.md#store-routes-page-routes), projects, models, accounts, sidecars, shepherd and deployments.
 No project filter or read-only mode: connected callers can change/delete projects and sessions, run commands, switch versions and invoke every daemon operation.
 Grant access only to callers trusted as the host's operator.
 Agent execution has the daemon user's filesystem and shell rights.

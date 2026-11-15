@@ -6,6 +6,7 @@ import { writeSession } from "../../src/metadata.js";
 import {
   __resetUsageCacheForTest,
   buildUsageReport,
+  readFreshSessionQuota,
   parseClaudeUsage,
   parseCodexUsage,
   type UsageReportDeps,
@@ -339,10 +340,18 @@ describe("buildUsageReport quotas", () => {
       JSON.stringify([{ id: "b", configDir: accountDir, createdAt: "2026-01-01T00:00:00Z" }]),
     );
     writeSession(s.dataDir, session("sess-2", { claudeAccountId: "b" }));
+    writeSession(s.dataDir, session("sess-3", { claudeAccountId: "b" }));
     const fetchMock = vi.fn(async () => json(CLAUDE_BODY));
     await buildUsageReport(s.deps(fetchMock as unknown as typeof fetch));
     const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
     expect(init.headers).toMatchObject({ Authorization: "Bearer dated-token" });
+    await readFreshSessionQuota(s.deps(fetchMock as unknown as typeof fetch), {
+      id: "sess-3",
+      agent: "claude",
+      claudeAccountId: "b",
+    });
+    const freshInit = (fetchMock.mock.calls[1] as unknown as [string, RequestInit])[1];
+    expect(freshInit.headers).toMatchObject({ Authorization: "Bearer dated-token" });
   });
 
   it("caches within 180 s, shares in-flight requests, holds 429 per Retry-After", async () => {
@@ -368,6 +377,18 @@ describe("buildUsageReport quotas", () => {
     expect(limited).toHaveBeenCalledTimes(1);
     await buildUsageReport({ ...s.deps(lf), nowMs: NOW + 601_000 });
     expect(limited).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads a fresh bound account quota without the settled usage cache", async () => {
+    const s = await setup();
+    await writeClaudeCreds(join(s.home, ".claude"), FUTURE);
+    const fetchMock = vi.fn(async () => json(CLAUDE_BODY));
+    const deps = s.deps(fetchMock as unknown as typeof fetch);
+    await buildUsageReport(deps);
+    const result = await readFreshSessionQuota(deps, { id: "sess-1", agent: "claude" });
+    expect(result).toMatchObject({ provider: "claude", source: "default", status: "ok" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(await readFreshSessionQuota(deps, { id: "sess-1", agent: "cursor" })).toBeNull();
   });
 });
 
