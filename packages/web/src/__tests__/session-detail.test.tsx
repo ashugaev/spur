@@ -5523,9 +5523,18 @@ describe("SessionDetail artifacts", () => {
       mockPhoneSession(phoneArtifacts);
       await openPhoneArtifact("shot.png");
 
-      expect(screen.queryByRole("button", { name: "Previous artifact" })).not.toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "Next artifact" })).not.toBeInTheDocument();
+      const imageSurface = screen.getByLabelText("Artifact preview surface");
+      const headerPrevious = screen.getByRole("button", { name: "Previous artifact" });
+      const headerNext = screen.getByRole("button", { name: "Next artifact" });
+      expect(headerPrevious).toBeDisabled();
+      expect(headerNext).toBeEnabled();
+      expect(imageSurface.contains(headerPrevious)).toBe(false);
+      expect(imageSurface.contains(headerNext)).toBe(false);
       expect(screen.getByText("1 / 3")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "shot.png" })).toHaveAttribute(
+        "title",
+        "shot.png",
+      );
       expect(screen.getByRole("button", { name: "Close artifact preview" })).toHaveClass(
         "text-[var(--color-text-secondary)]",
       );
@@ -5554,6 +5563,18 @@ describe("SessionDetail artifacts", () => {
       ).toBeInTheDocument();
       fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 50 });
       expect(screen.getByRole("dialog", { name: "Artifact preview shot.png" })).toBeInTheDocument();
+
+      // Header buttons navigate without reaching the surface tap handler (header stays shown).
+      fireEvent.click(screen.getByRole("button", { name: "Next artifact" }));
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
+      ).toBeInTheDocument();
+      expect(screen.getByText("2 / 3")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Previous artifact" }));
+      expect(
+        await screen.findByRole("dialog", { name: "Artifact preview shot.png" }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Close artifact preview" })).toBeInTheDocument();
     });
 
     it("restores the hidden header after navigation and after close and reopen", async () => {

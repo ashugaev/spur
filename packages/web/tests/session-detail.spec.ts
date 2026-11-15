@@ -3998,8 +3998,8 @@ test.describe("S4b: Artifacts section", () => {
 
       const firstDialog = page.getByRole("dialog", { name: "Artifact preview first.png" });
       await expect(firstDialog).toBeVisible();
-      await expect(firstDialog.getByRole("button", { name: "Previous artifact" })).toHaveCount(0);
-      await expect(firstDialog.getByRole("button", { name: "Next artifact" })).toHaveCount(0);
+      await expect(firstDialog.getByRole("button", { name: "Previous artifact" })).toHaveCount(1);
+      await expect(firstDialog.getByRole("button", { name: "Next artifact" })).toHaveCount(1);
       const firstSurface = firstDialog.getByLabel("Artifact preview surface");
       await expect(firstSurface).toHaveCSS("touch-action", "pan-y");
       const firstSurfaceBox = await firstSurface.boundingBox();
@@ -4194,8 +4194,20 @@ test.describe("S4b: Artifacts section", () => {
       expect(portraitBox?.width).toBeCloseTo(viewportWidth, 0);
 
       await expect(firstDialog.getByRole("button", { name: "Zoom in" })).toBeHidden();
-      await expect(firstDialog.getByRole("button", { name: "Previous artifact" })).toHaveCount(0);
-      await expect(firstDialog.getByRole("button", { name: "Next artifact" })).toHaveCount(0);
+      // Header prev/next exist; no side arrow columns, so the surface spans the viewport.
+      const headerPrevious = firstDialog.getByRole("button", { name: "Previous artifact" });
+      const headerNext = firstDialog.getByRole("button", { name: "Next artifact" });
+      await expect(headerPrevious).toHaveCount(1);
+      await expect(headerNext).toHaveCount(1);
+      await expect(headerPrevious).toBeDisabled();
+      await expect(headerNext).toBeEnabled();
+      const headerNextBox = await headerNext.boundingBox();
+      expect(headerNextBox?.y).toBeLessThan(80);
+      const imageSurfaceBox = await firstDialog
+        .getByLabel("Artifact preview surface")
+        .boundingBox();
+      expect(imageSurfaceBox?.x).toBeCloseTo(0, 0);
+      expect(imageSurfaceBox?.width).toBeCloseTo(viewportWidth, 0);
       await expect(firstDialog.getByText("1 / 2", { exact: true })).toBeVisible();
       await expect(firstDialog.getByText(/ · image · /)).not.toBeVisible();
       await expect(
@@ -4235,6 +4247,14 @@ test.describe("S4b: Artifacts section", () => {
       ).toBeVisible();
       const landscapeBox = await secondDialog.getByAltText("landscape.svg").boundingBox();
       expect(landscapeBox?.width).toBeCloseTo(viewportWidth, 0);
+
+      await expect(secondDialog.getByRole("button", { name: "Next artifact" })).toBeDisabled();
+      await secondDialog.getByRole("button", { name: "Previous artifact" }).tap();
+      await expect(firstDialog).toBeVisible();
+      await expect(firstDialog.getByText("1 / 2", { exact: true })).toBeVisible();
+      await firstDialog.getByRole("button", { name: "Next artifact" }).tap();
+      await expect(secondDialog).toBeVisible();
+      await expect(secondDialog.getByText("2 / 2", { exact: true })).toBeVisible();
     } finally {
       await context.close();
     }

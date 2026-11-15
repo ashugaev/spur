@@ -1247,7 +1247,7 @@ function ArtifactLightbox({
                   {position.index} / {position.total}
                 </span>
               ) : null}
-              {isPhone && artifact.kind !== "image" ? (
+              {isPhone ? (
                 <>
                   <button
                     aria-label="Previous artifact"
