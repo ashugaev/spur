@@ -12,6 +12,7 @@ import type {
 } from "../../src/review-providers/types.js";
 import { EventBus } from "../../src/event-bus.js";
 import { normalizeSlotLinks } from "../../src/session-slots.js";
+import { projectTaskStatus } from "../../src/task-status.js";
 import type {
   AutoPingRouteDescriptor,
   PersistedPendingBatch,
@@ -20,6 +21,7 @@ import type {
   ReviewSnapshot,
   SendBatchRetryEntry,
   SessionRecord,
+  SessionState,
   WorkItemLifecycleRecord,
 } from "../../src/types.js";
 
@@ -4730,6 +4732,64 @@ describe("startConfiguredTriggers", () => {
       await controller.stop();
     }
   });
+
+  it.each(["github", "service"] as const)(
+    "delivers %s feedback once when native waiting projects a declared completed task",
+    async (source) => {
+      const declaration = {
+        status: "running" as const,
+        agentLaunchId: "launch-a",
+        taskStatusRevision: 0,
+        taskStatus: {
+          state: "completed" as const,
+          revision: 0,
+          agentLaunchId: "launch-a",
+          updatedAt: new Date().toISOString(),
+        },
+      };
+      let nativeState: SessionState = "working";
+      const get = vi.fn(async () => ({
+        id: "api-1",
+        status: declaration.status,
+        state: projectTaskStatus(declaration, nativeState, nativeState, true, true),
+        runtimeAlive: true,
+        workspaceExists: true,
+        lastActivityAt: staleActivity(),
+      }));
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: (source === "github" ? config() : serviceConfig()) as never,
+        bus,
+        sessionService: { get, deliver } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        bus.emit(source === "github" ? githubEvent() : serviceEvent());
+        await advanceSendWindow();
+        expect(deliver).not.toHaveBeenCalled();
+        expect(readPendingSendBatchesMock().size).toBe(1);
+
+        nativeState = "waiting";
+        expect((await get()).state).toBe("completed");
+        controller.nudgeSession("api-1");
+        await vi.advanceTimersByTimeAsync(1);
+        expect(deliver).toHaveBeenCalledTimes(1);
+        expect(deliver).toHaveBeenCalledWith("api-1", expect.any(String), { interrupt: false });
+        expect(readPendingSendBatchesMock().size).toBe(0);
+
+        controller.nudgeSession("api-1");
+        controller.nudgeSession("api-1");
+        await advanceSendWindow();
+        expect(deliver).toHaveBeenCalledTimes(1);
+        expect(readPendingSendBatchesMock().size).toBe(0);
+      } finally {
+        await controller.stop();
+      }
+    },
+  );
 
   it("delivers service alerts with the list log-view hint for the bound session", async () => {
     const getMock = vi.fn().mockResolvedValue({
