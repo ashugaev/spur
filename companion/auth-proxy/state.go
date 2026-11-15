@@ -90,7 +90,6 @@ type router struct {
 	policy       policy
 	configured   bool
 	requests     map[string]*admission
-	sessionLocks map[string]*sync.Mutex
 	removing     map[string]bool
 	readyAccount func(string, provider) bool
 	fatal        error
@@ -116,7 +115,7 @@ func openRouter(dir string) (*router, error) {
 		_ = lock.Close()
 		return nil, errors.New("another auth proxy owns this data directory")
 	}
-	r := &router{dir: dir, lock: lock, accounts: map[string]accountInput{}, pools: map[provider]poolInput{}, requests: map[string]*admission{}, sessionLocks: map[string]*sync.Mutex{}, removing: map[string]bool{}}
+	r := &router{dir: dir, lock: lock, accounts: map[string]accountInput{}, pools: map[provider]poolInput{}, requests: map[string]*admission{}, removing: map[string]bool{}}
 	r.state = runtimeState{Schema: 1, DataDir: dir, Sessions: map[string]binding{}, Cooldowns: map[string]time.Time{}}
 	path := filepath.Join(dir, "auth-proxy-state.json")
 	raw, err := os.ReadFile(path)
@@ -298,12 +297,11 @@ func (r *router) register(sessionID string, p provider, accountID *string, chang
 		return registration{}, errors.New("saved authorization differs; switch it explicitly")
 	}
 	if !same || change {
-		id := accountID
-		if id == nil {
-			id = pool.DefaultAccountID
-		}
-		if id == nil {
-			return registration{}, errors.New("provider default account is not set")
+		effective := ""
+		if accountID != nil {
+			effective = *accountID
+		} else if pool.DefaultAccountID != nil {
+			effective = *pool.DefaultAccountID
 		}
 		if !exists {
 			token, err := randomKey()
@@ -312,7 +310,7 @@ func (r *router) register(sessionID string, p provider, accountID *string, chang
 			}
 			b.Token = token
 		}
-		b.Session = sessionSummary{SessionID: sessionID, Provider: p, Mode: mode, AccountID: accountID, EffectiveAccountID: *id, Generation: b.Session.Generation + 1}
+		b.Session = sessionSummary{SessionID: sessionID, Provider: p, Mode: mode, AccountID: accountID, EffectiveAccountID: effective, Generation: b.Session.Generation + 1}
 		b.DefaultGeneration, b.Episode = pool.DefaultGeneration, episode{}
 	}
 	if err := r.rebaseDefaultLocked(&b); err != nil {

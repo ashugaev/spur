@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -167,5 +169,115 @@ func TestManagedPoolZeroReadyAndExclusiveOwner(t *testing.T) {
 	}
 	if _, err := openRouter(r.dir); err == nil {
 		t.Fatal("second process adopted owned state")
+	}
+}
+
+func TestAutoLeavesSignInRequiredAccount(t *testing.T) {
+	r := testRouter(t)
+	if _, err := r.register("session-a", codex, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	pin := "account-a"
+	if _, err := r.register("pinned", codex, &pin, false); err != nil {
+		t.Fatal(err)
+	}
+	r.readyAccount = func(id string, p provider) bool { return id == "account-b" && p == codex }
+	opts := testAdmission(t, r, "session-a")
+	if got := pickForTest(t, r, opts, "account-a", "account-b").ID; got != authFileID("account-b") {
+		t.Fatalf("auto stayed on sign-in-required account: %s", got)
+	}
+	if saved := r.state.Sessions["session-a"]; saved.Session.EffectiveAccountID != "account-b" || saved.Episode.Rotations != 0 {
+		t.Fatalf("sign-in fallback not persisted or spent quota budget: %+v", saved)
+	}
+	if _, err := r.Pick(context.Background(), string(codex), "fixture-model", testAdmission(t, r, "pinned"), []*coreauth.Auth{{ID: authFileID("account-a"), Provider: "codex"}, {ID: authFileID("account-b"), Provider: "codex"}}); err == nil {
+		t.Fatal("pin failed over to another account")
+	}
+}
+
+func TestAutoWithoutDefaultPicksReadyAccount(t *testing.T) {
+	r := testRouter(t)
+	pool := r.pools[codex]
+	pool.DefaultAccountID = nil
+	if err := r.configure([]accountInput{r.accounts["account-a"], r.accounts["account-b"]}, []poolInput{pool}, r.policy); err != nil {
+		t.Fatal(err)
+	}
+	r.readyAccount = func(id string, p provider) bool { return id == "account-b" }
+	reg, err := r.register("session-a", codex, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reg.EffectiveAccountID != "account-b" {
+		t.Fatalf("auto did not resolve a ready account: %s", reg.EffectiveAccountID)
+	}
+}
+
+func TestAutoRotatesWhenSDKWithholdsCurrent(t *testing.T) {
+	r := testRouter(t)
+	if _, err := r.register("session-a", codex, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	opts := testAdmission(t, r, "session-a")
+	if got := pickForTest(t, r, opts, "account-b").ID; got != authFileID("account-b") {
+		t.Fatalf("auto did not rotate past withheld account: %s", got)
+	}
+	pin := "account-a"
+	if _, err := r.register("pinned", codex, &pin, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Pick(context.Background(), string(codex), "fixture-model", testAdmission(t, r, "pinned"), []*coreauth.Auth{{ID: authFileID("account-b"), Provider: "codex"}}); err == nil {
+		t.Fatal("pin rotated past withheld account")
+	}
+}
+
+func TestAutoRotationSpreadsAcrossLeastLoaded(t *testing.T) {
+	r := testRouter(t)
+	for _, id := range []string{"session-a", "session-b"} {
+		if _, err := r.register(id, codex, nil, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.state.Cooldowns["account-a"] = time.Now().Add(time.Hour)
+	first := testAdmission(t, r, "session-a")
+	pickForTest(t, r, first, "account-a", "account-b", "account-c")
+	second := testAdmission(t, r, "session-b")
+	pickForTest(t, r, second, "account-a", "account-b", "account-c")
+	if a, b := r.state.Sessions["session-a"].Session.EffectiveAccountID, r.state.Sessions["session-b"].Session.EffectiveAccountID; a == b {
+		t.Fatalf("both sessions rotated to %s", a)
+	}
+}
+
+func TestSessionRequestsAreNotSerialized(t *testing.T) {
+	r := testRouter(t)
+	reg, err := r.register("session-a", codex, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gin.SetMode(gin.ReleaseMode)
+	entered, release := make(chan struct{}, 2), make(chan struct{})
+	engine := gin.New()
+	engine.Use(r.middleware("probe"))
+	engine.POST("/v1/responses", func(c *gin.Context) {
+		entered <- struct{}{}
+		<-release
+		c.Status(http.StatusOK)
+	})
+	server := httptest.NewServer(engine)
+	defer server.Close()
+	defer close(release)
+	for range 2 {
+		go func() {
+			req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", nil)
+			req.Header.Set("Authorization", "Bearer "+reg.Token)
+			if resp, err := http.DefaultClient.Do(req); err == nil {
+				_ = resp.Body.Close()
+			}
+		}()
+	}
+	for i := range 2 {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("request %d blocked behind an in-flight request of the same session", i+1)
+		}
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -29,34 +28,62 @@ type admission struct {
 func authFileID(id string) string    { return id + ".json" }
 func profileID(authID string) string { return strings.TrimSuffix(authID, ".json") }
 
-func (r *router) rotateLocked(b *binding, candidates map[string]bool) error {
-	current := b.Session.EffectiveAccountID
-	p := b.Session.Provider
-	if r.removing[current] || r.accounts[current].Provider != p || r.readyAccount == nil || !r.readyAccount(current, p) {
-		return errors.New("selected account requires sign in")
-	}
-	if !r.state.Cooldowns[current].After(time.Now()) {
-		if candidates == nil || candidates[current] {
-			return nil
-		}
-		return errors.New("selected account is unavailable for this request")
-	}
-	if b.Session.Mode == "pinned" || !r.pools[p].AutoRotate || b.Episode.Rotations >= r.policy.MaxRotationsPerEpisode {
-		return errors.New("account quota exhausted; rotation unavailable")
+// nextEligibleLocked returns the least-loaded eligible account, oldest first on ties.
+func (r *router) nextEligibleLocked(p provider, exclude string, candidates map[string]bool) string {
+	load := map[string]int{}
+	for _, s := range r.state.Sessions {
+		load[s.Session.EffectiveAccountID]++
 	}
 	accounts := make([]accountInput, 0, len(r.accounts))
 	for id, a := range r.accounts {
-		if id != current && r.eligibleLocked(id, p) && (candidates == nil || candidates[id]) {
+		if id != exclude && r.eligibleLocked(id, p) && (candidates == nil || candidates[id]) {
 			accounts = append(accounts, a)
 		}
 	}
+	if len(accounts) == 0 {
+		return ""
+	}
 	sort.Slice(accounts, func(i, j int) bool {
+		if li, lj := load[accounts[i].ID], load[accounts[j].ID]; li != lj {
+			return li < lj
+		}
 		if accounts[i].CreatedAt == accounts[j].CreatedAt {
 			return accounts[i].ID < accounts[j].ID
 		}
 		return accounts[i].CreatedAt < accounts[j].CreatedAt
 	})
-	if len(accounts) == 0 {
+	return accounts[0].ID
+}
+
+func (r *router) rotateLocked(b *binding, candidates map[string]bool) error {
+	current := b.Session.EffectiveAccountID
+	p := b.Session.Provider
+	auto := b.Session.Mode == "auto"
+	if current == "" || r.removing[current] || r.accounts[current].Provider != p || r.readyAccount == nil || !r.readyAccount(current, p) {
+		if !auto {
+			return errors.New("selected account requires sign in")
+		}
+		// Auto leaves an account that needs sign-in without spending quota budget.
+		next := r.nextEligibleLocked(p, current, candidates)
+		if next == "" {
+			return errors.New("no account is ready; sign in to an account")
+		}
+		b.Session.EffectiveAccountID = next
+		return nil
+	}
+	cooled := r.state.Cooldowns[current].After(time.Now())
+	if !cooled && (candidates == nil || candidates[current]) {
+		return nil
+	}
+	if !cooled && !auto {
+		return errors.New("selected account is unavailable for this request")
+	}
+	// Auto treats an account the SDK withheld from candidates as cooling.
+	if !auto || !r.pools[p].AutoRotate || b.Episode.Rotations >= r.policy.MaxRotationsPerEpisode {
+		return errors.New("account quota exhausted; rotation unavailable")
+	}
+	next := r.nextEligibleLocked(p, current, candidates)
+	if next == "" {
 		return errors.New("no account is ready outside the shared cooldown")
 	}
 	if !b.Episode.Open {
@@ -64,7 +91,7 @@ func (r *router) rotateLocked(b *binding, candidates map[string]bool) error {
 		b.Episode.Epoch++
 	}
 	b.Episode.Rotations++
-	b.Session.EffectiveAccountID = accounts[0].ID
+	b.Session.EffectiveAccountID = next
 	return nil
 }
 
@@ -74,10 +101,9 @@ func (r *router) rebaseDefaultLocked(b *binding) error {
 		return errors.New("managed provider pool does not exist")
 	}
 	if b.Session.Mode == "auto" && b.DefaultGeneration != pool.DefaultGeneration {
-		if pool.DefaultAccountID == nil {
-			return errors.New("provider default account is not set")
+		if pool.DefaultAccountID != nil {
+			b.Session.EffectiveAccountID = *pool.DefaultAccountID
 		}
-		b.Session.EffectiveAccountID = *pool.DefaultAccountID
 		b.DefaultGeneration = pool.DefaultGeneration
 	}
 	return nil
@@ -213,25 +239,8 @@ func (r *router) middleware(probeKey string) gin.HandlerFunc {
 			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
-		lock := r.sessionLocks[sessionID]
-		if lock == nil {
-			lock = &sync.Mutex{}
-			r.sessionLocks[sessionID] = lock
-		}
-		r.mu.Unlock()
-		lock.Lock()
-		defer lock.Unlock()
-		if c.Request.Context().Err() != nil {
-			c.AbortWithStatus(http.StatusRequestTimeout)
-			return
-		}
-		r.mu.Lock()
-		b, exists := r.state.Sessions[sessionID]
-		if !exists || subtle.ConstantTimeCompare([]byte(b.Token), []byte(token)) != 1 || r.fatal != nil {
-			r.mu.Unlock()
-			c.AbortWithStatus(http.StatusUnauthorized)
-			return
-		}
+		// r.mu serializes admission; concurrent requests of one session proceed in parallel.
+		b := r.state.Sessions[sessionID]
 		if err := r.rebaseDefaultLocked(&b); err != nil {
 			r.mu.Unlock()
 			c.AbortWithStatus(http.StatusServiceUnavailable)
