@@ -66403,6 +66403,65 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    const managedAuth = {
+      sessionId: "api-1",
+      provider: "claude" as const,
+      mode: "auto" as const,
+      accountId: null,
+      effectiveAccountId: "account-a",
+      generation: 1,
+    };
+
+    it("requires force for a managed session instead of reading host quota", async () => {
+      const sessions = createSessionStore();
+      const limited = runningSession({
+        auth: managedAuth,
+        rateLimitedAt: "2026-03-18T10:00:00.000Z",
+      });
+      sessions.set("api-1", limited);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.clearRateLimit("api-1", false, "cli")).rejects.toThrow("use --force");
+      expect(sessions.get("api-1")).toEqual(limited);
+      service.dispose();
+    });
+
+    it("rejects a managed effective-account rotation during quota lookup", async () => {
+      const sessions = createSessionStore();
+      const limited = runningSession({
+        agentLaunchId: "launch-1",
+        auth: managedAuth,
+        rateLimitedAt: "2026-03-18T10:00:00.000Z",
+      });
+      sessions.set("api-1", limited);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      let finishQuota!: (value: unknown) => void;
+      const quota = new Promise<unknown>((resolve) => {
+        finishQuota = resolve;
+      });
+      (service as unknown as { freshQuotaForClear: () => Promise<unknown> }).freshQuotaForClear =
+        () => quota;
+
+      const clearing = service.clearRateLimit("api-1", false, "cli");
+      const rotated = { ...limited, auth: { ...managedAuth, effectiveAccountId: "account-b" } };
+      sessions.set("api-1", rotated);
+      finishQuota({
+        provider: "claude",
+        source: "account-a",
+        label: "account-a",
+        fetchedAt: "2026-03-18T10:05:00.000Z",
+        status: "ok",
+        plan: null,
+        windows: [{ label: "5h", usedPercent: 10, remainingPercent: 90, resetsAt: null }],
+      });
+
+      await expect(clearing).rejects.toThrow("Session/account changed; retry clear");
+      expect(sessions.get("api-1")).toEqual(rotated);
+      service.dispose();
+    });
+
     it("refuses clear when the structured reader is unavailable before old evidence reappears", async () => {
       const sessions = createSessionStore();
       const limited = runningSession({ rateLimitedAt: "2026-03-18T10:00:00.000Z" });

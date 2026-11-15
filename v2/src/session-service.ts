@@ -7054,6 +7054,8 @@ export class SessionService {
   }
 
   private async freshQuotaForClear(session: SessionRecord): Promise<QuotaSourceResult | null> {
+    // Host credentials do not describe a managed session's proxy account; clear needs --force.
+    if (session.auth) return null;
     const nowMs = Date.now();
     const todayStart = new Date(nowMs);
     todayStart.setHours(0, 0, 0, 0);
@@ -7106,7 +7108,8 @@ export class SessionService {
         current.agentSessionId !== initial.agentSessionId ||
         (current.agent === "claude" &&
           (current.claudeAccountId ?? "default") !== (initial.claudeAccountId ?? "default")) ||
-        (current.auth?.accountId ?? null) !== (initial.auth?.accountId ?? null)
+        (current.auth?.accountId ?? null) !== (initial.auth?.accountId ?? null) ||
+        (current.auth?.effectiveAccountId ?? null) !== (initial.auth?.effectiveAccountId ?? null)
       )
         throw new RateLimitClearError(`Session/account changed; retry clear`);
       let release!: () => void;
