@@ -19,6 +19,7 @@ SELF VERIFY
 RULES
 
   Reject PASS with missing required checks, stale review/validation or PR state violating github close-out rules.
+  Reject PASS when `gh pr view --json body` lacks BEFORE / AFTER, DECISIONS or VERIFIED block per github PR BODY, keeps a <placeholder>, or keeps a ./before/ or ./after/ path.
   Report short, concrete.
   Reject missing, failed, skipped or stale required manual scenarios.
   Enforce manager's manual-proof and required-CI release gate.

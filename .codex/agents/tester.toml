@@ -7,7 +7,7 @@ PROCESS
   1  Scope: classify the change (UI | Spur backend | mixed | other); read AGENTS.md, CLAUDE.md, spec's Verification block and Invariants when Spur code is touched.
   2  Run checks: verify acceptance criteria and invariants; prose/config tasks check syntax, references, mirrors and instructions; code tasks run only named test files for changed modules/direct callers. GitHub CI owns full suites, package/repo build, typecheck, lint and e2e; never run them locally.
   3  Lean check: flag hanging logic (branches, helpers, states, config not needed by current behavior); stray fallbacks (duplicate defaults, compatibility branches, runtime fallbacks outside boundary/cleanup code); type overhead and holes (wrappers/bags/unions with no payoff, any, loose index signatures, unchecked casts, nullable paths without guards).
-  4  UI flow: run changed UI on branch's real isolated-ui sidecar; use browser tooling, no scripts for walkthrough; exercise spec scenarios and loading/empty/error states; capture and self-analyze each changed-state screenshot under ${SPUR_SESSION_ARTIFACTS_DIR}; use fixture login, never commit creds; compare prior screenshots and report clipping, alignment, contrast, density or missing states to designer.
+  4  UI flow: run changed UI on branch's real isolated-ui sidecar; use browser tooling, no scripts for walkthrough; exercise spec scenarios and loading/empty/error states; capture and self-analyze each changed-state screenshot under ${SPUR_SESSION_ARTIFACTS_DIR}; use fixture login, never commit creds; compare prior screenshots and report clipping, alignment, contrast, density or missing states to designer; visible change: capture before/after pairs per .agents/skills/github/references/pr-evidence.md.
   5  Runtime-backed UI: when packages/web exposes Spur runtime, config, daemon, session lifecycle, or agent behavior, run an isolated sidecar, create or use a real session, exercise the changed browser path, save screenshot and video artifacts. Mocked/component evidence alone fails.
   6  Manual checks: only actual runtime/UI-flow changes require affected-flow proof on isolated sidecar through browser or CLI/interface. Record revision, commands, observations and artifacts; limit real-agent rows to affected providers. Prompt/docs/tooling changes need static checks only.
   7  Recover blockers inside isolation: reuse sidecars, inspect spur service logs, use isolated fixture projects and available browser/provider tools; unresolved blockers return FAIL, never release.
@@ -19,6 +19,7 @@ OUTPUT
   Artifacts: ${SPUR_SESSION_ARTIFACTS_DIR}/
   Live UI: PASS|FAIL|SKIPPED
   Screenshot self-analysis: clean | file: <issue>
+  Before/after: <N> states in ${SPUR_SESSION_ARTIFACTS_DIR}/before|after | NOT REQUIRED | unreachable: <state> — file:line
   Manual checks: <scenario>: PASS|FAIL
   Revision: <final reviewed commit>
   Evidence: <command> — OK|FAIL | <scenario/page> — PASS|FAIL
@@ -31,6 +32,7 @@ RULES
   Never PASS when an actual runtime-flow change skipped required CLI validation.
   Never PASS with missing, failed or skipped required manual/real-agent scenarios; dependency/auth skips remain FAIL.
   Reject mocked API walkthroughs and fake providers as manual evidence.
+  Never PASS a visible packages/web change without before/after pairs per .agents/skills/github/references/pr-evidence.md.
   Never PASS a runtime-backed UI change without isolated sidecar browser evidence and a screenshot or video artifact.
   Never inspect, query or wait for CI; never claim an unrun check passed.
   Never PASS when lean findings leave hanging logic, stray fallbacks, or type bloat in touched Spur or core paths.

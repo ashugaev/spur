@@ -63,17 +63,22 @@ CLOSE-OUT GATE, mandatory after any code change
   2  Uncommitted files -> route to developer for commit. Never auto-commit here.
   3  Implementation diff from branch base empty -> SKIPPED.
   4  git push -u origin "$(git branch --show-current)"
-  5  gh pr view succeeds -> mark drafts ready; confirm OPEN, non-draft; comment HEAD SHA. Fails -> CREATE OPEN PR.
-  6  Problem parked out of scope during the task -> file it per ISSUE REPORTING below.
-  7  Return the PR url, plus any issue url filed at step 6.
+  5  Write "$SPUR_SESSION_ARTIFACTS_DIR/pr-body.md" per PR BODY.
+  6  gh pr view succeeds -> mark drafts ready; gh pr edit with --body-file and --attach per references/pr-evidence.md; confirm OPEN, non-draft; comment HEAD SHA. Fails -> CREATE OPEN PR.
+  7  Problem parked out of scope during the task -> file it per ISSUE REPORTING below.
+  8  Return the PR url, plus any issue url filed at step 7.
 
 PR TITLE: <type>: <description>. Types incl. style, no version bump. AO_ISSUE_ID set, prefix: <ISSUE-ID>: <type>: <description>.
 
-PR BODY: plain language, what got fixed and why. Two to four lines, no headings.
+PR BODY: blocks in template order, UPPERCASE label lines, no markdown headings.
 
-  Banned: file paths, symbol names, code, diff stats, test checklist, reasoning, design talk.
+  Summary: two to three plain lines, effect for the user and why needed.
+  BEFORE / AFTER, mandatory: visible packages/web change -> one row per changed state, capture and upload per references/pr-evidence.md; otherwise line `No visible change.`
+  DECISIONS, mandatory: material non-obvious choices from final spec Proposed design when present, implemented diff, and developer output manager passes; no spec -> diff. 1-4 rows, one sentence per cell. Scope cut or partial handling counts. None -> line `None — <reason, e.g. follows existing pattern>`. Never invent a rejected alternative.
+  VERIFIED: one line, what proved the change. No checklist.
+  Real issue number exists -> last line `Closes #<n>`.
+  Banned everywhere: file paths, symbol names, code, diff stats, test checklist, operator detail. Reasoning and design talk only inside DECISIONS.
   Reader wants the effect, not the diff. Detail belongs in the diff and the commits.
-  Closes line only when a real issue number exists.
 
   Bad:   Dropped the Default sentinel in resolveAgentLaunchModel, added 3 vitest cases.
   Good:  Spawn dropdown now shows the model that launches. Before, it showed
@@ -81,17 +86,32 @@ PR BODY: plain language, what got fixed and why. Two to four lines, no headings.
 
 CREATE OPEN PR
 
-  git push -u origin HEAD
-
   gh pr create \
     --title "<type>: <description>" \
-    --body "$(cat <<'EOF'
-<what changed, one or two sentences>
+    --body-file "$SPUR_SESSION_ARTIFACTS_DIR/pr-body.md" \
+    --attach "$SPUR_SESSION_ARTIFACTS_DIR/before/01-<state>.png" \
+    --attach "$SPUR_SESSION_ARTIFACTS_DIR/after/01-<state>.png"
+
+  pr-body.md template:
+
+<what changed for the user, one or two sentences>
 <why it was needed, one sentence>
 
-Closes #<issue-number>
-EOF
-)"
+BEFORE / AFTER
+
+| State | Before <base sha> | After <head sha> |
+|---|---|---|
+| <state> | ![<state> before](./before/01-<state>.png) | ![<state> after](./after/01-<state>.png) |
+
+DECISIONS
+
+| Decision | Alternative | Why |
+|---|---|---|
+| <choice> | <rejected option> | <one sentence> |
+
+VERIFIED
+
+<what proved it, one line>
 
 ISSUE REPORTING, for a problem outside the current request
 
