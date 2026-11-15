@@ -387,7 +387,8 @@ describe("lastAgentWorkMs", () => {
   });
 
   it("asks for a full read when an untimed slice has no opener, and counts it only at the start", () => {
-    const replies = [assistant(), assistant(), tool(0, { spurCall: true, timestampMs: undefined })];
+    const untimedSpurCall: TranscriptEntry = { kind: "tool", name: "Bash", spurCall: true };
+    const replies = [assistant(), assistant(), untimedSpurCall];
     expect(run(replies, false)).toEqual({ workMs: null, complete: false });
     expect(run(replies, true)).toEqual({ workMs: untimedActivityMs, complete: true });
   });
