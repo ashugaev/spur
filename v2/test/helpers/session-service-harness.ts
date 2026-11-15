@@ -1322,7 +1322,7 @@ type SessionServiceInternals = {
     options?: { interrupt?: boolean; freshLaunch?: boolean; interactive?: boolean },
   ): Promise<AgentSendOutcome>;
   writeAgentMessage: SessionServiceInternals["sendAgentMessage"];
-  scheduleTodoNudge(session: SessionRecord): void;
+  scheduleTodoNudge(session: SessionRecord, agentActivityAt: Date | null): void;
   waitForQueuedMessage(sessionId: string): Promise<string>;
   queuedDeliveryAckedAt: Map<string, number>;
   withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
@@ -1353,7 +1353,10 @@ type SessionServiceInternals = {
     message: string,
     options: { entryPoint: "send" | "deliver" | "flush" },
   ): Promise<unknown>;
-  maybeNudgeTodo(session: SessionRecord): Promise<void>;
+  maybeNudgeTodo(
+    session: SessionRecord,
+    options?: { detached?: boolean; agentActivityAt?: Date | null },
+  ): Promise<void>;
   enrichWithClassified(
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
@@ -1383,6 +1386,7 @@ type SessionServiceInternals = {
   lastObservedRunStates: Map<string, SessionState>;
   todoNudgeDisabled: Map<string, { kind: "ledger_corrupt" | "target_gone"; reason: string }>;
   todoNudgeBackoff: Map<string, { failures: number; nextRetryAtMs: number }>;
+  snapshotCorruptLogged: Map<string, number>;
   scheduleHealedSidecarRestart(session: SessionRecord): void;
   sidecarHealTasks: Map<string, Promise<void>>;
   settleSubmitHold(

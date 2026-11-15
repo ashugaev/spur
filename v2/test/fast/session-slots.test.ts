@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   closeSync,
   existsSync,
   mkdirSync,
@@ -30,6 +31,7 @@ import {
   TODO_TOOL_NAME,
 } from "../../src/session-slots.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "../../src/self-destruct.js";
+import { SNAPSHOT_HOOK_TOOL_NAME, SNAPSHOT_REQUEST_MESSAGE } from "../../src/snapshots.js";
 import { createTempDir, findFreePort } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -1036,5 +1038,159 @@ describe("removeSessionSlotTool", () => {
     tempDirs.push(dataDir);
 
     expect(() => removeSessionSlotTool(dataDir, "api-1", ["codex-home"])).not.toThrow();
+  });
+});
+
+describe("snapshot hook tool", () => {
+  const FRESHNESS_MS = 10 * 60_000;
+
+  async function setup(options: { snapshotAgoMs?: number; createdAgoMs?: number } = {}) {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-1",
+      configPath: "/tmp/spur.yaml",
+      agent: "claude",
+      snapshotHook: {
+        freshnessMinutes: 10,
+        sessionCreatedAt: new Date(Date.now() - (options.createdAgoMs ?? 0)).toISOString(),
+      },
+    });
+    if (options.snapshotAgoMs !== undefined) {
+      const dir = join(dataDir, "sessions", "api-1", "snapshots");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "1.json"),
+        JSON.stringify({
+          version: 1,
+          at: new Date(Date.now() - options.snapshotAgoMs).toISOString(),
+        }),
+      );
+    }
+    const claimPath = (windowOffset = 0) =>
+      join(
+        toolDir,
+        `snapshot-hook-claim.${Math.floor(Date.now() / (FRESHNESS_MS / 2)) + windowOffset}`,
+      );
+    return { dataDir, toolDir, claimPath };
+  }
+
+  function runHook(toolDir: string, payload: Record<string, unknown>): string {
+    return execFileSync(join(toolDir, SNAPSHOT_HOOK_TOOL_NAME), {
+      env: { ...process.env },
+      input: JSON.stringify(payload),
+      encoding: "utf8",
+    });
+  }
+
+  const stale = FRESHNESS_MS + 60_000;
+
+  it("writes no hook files without snapshotHook", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-1",
+      configPath: "/tmp/spur.yaml",
+    });
+    expect(existsSync(join(toolDir, SNAPSHOT_HOOK_TOOL_NAME))).toBe(false);
+    expect(existsSync(join(toolDir, "spur-snapshot-hook.mjs"))).toBe(false);
+  });
+
+  it("emits a version-file regex with an escaped dot", async () => {
+    const { toolDir } = await setup();
+    expect(readFileSync(join(toolDir, "spur-snapshot-hook.mjs"), "utf8")).toContain(
+      String.raw`/^([1-9][0-9]*)\.json$/`,
+    );
+  });
+
+  it("asks mid-turn through PostToolUse additionalContext when the snapshot is stale", async () => {
+    const { toolDir } = await setup({ snapshotAgoMs: stale });
+    const output = runHook(toolDir, { hook_event_name: "PostToolUse", tool_name: "Bash" });
+    expect(JSON.parse(output)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "PostToolUse",
+        additionalContext: SNAPSHOT_REQUEST_MESSAGE,
+      },
+    });
+  });
+
+  it("stays silent when the snapshot is fresh", async () => {
+    const { toolDir } = await setup({ snapshotAgoMs: 60_000 });
+    expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).toBe("");
+    expect(runHook(toolDir, { hook_event_name: "Stop", stop_hook_active: false })).toBe("");
+  });
+
+  it("asks at most once per N/2 window and clears older claims in the next window", async () => {
+    const { toolDir, claimPath } = await setup({ snapshotAgoMs: stale });
+    writeFileSync(claimPath(-1), "");
+    expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).not.toBe("");
+    expect(existsSync(claimPath())).toBe(true);
+    expect(existsSync(claimPath(-1))).toBe(false);
+    expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).toBe("");
+  });
+
+  it("stays silent when a concurrent hook already claimed the window", async () => {
+    const { toolDir, claimPath } = await setup({ snapshotAgoMs: stale });
+    writeFileSync(claimPath(), "");
+    expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).toBe("");
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    "stays silent on PostToolUse but still blocks Stop when the claim file cannot be created",
+    async () => {
+      const { toolDir } = await setup({ snapshotAgoMs: stale });
+      chmodSync(toolDir, 0o500);
+      try {
+        expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).toBe("");
+        expect(runHook(toolDir, { hook_event_name: "PostToolUse" })).toBe("");
+        expect(
+          JSON.parse(runHook(toolDir, { hook_event_name: "Stop", stop_hook_active: false })),
+        ).toMatchObject({ decision: "block" });
+      } finally {
+        chmodSync(toolDir, 0o755);
+      }
+    },
+  );
+
+  it("skips subagent and plan-mode payloads", async () => {
+    const { toolDir } = await setup({ snapshotAgoMs: stale });
+    expect(runHook(toolDir, { hook_event_name: "PostToolUse", agent_id: "sub-1" })).toBe("");
+    expect(runHook(toolDir, { hook_event_name: "Stop", agent_id: "sub-1" })).toBe("");
+    expect(runHook(toolDir, { hook_event_name: "Stop", permission_mode: "plan" })).toBe("");
+  });
+
+  it("blocks Stop once when stale and never while stop_hook_active", async () => {
+    const { toolDir } = await setup({ snapshotAgoMs: stale });
+    expect(
+      JSON.parse(runHook(toolDir, { hook_event_name: "Stop", stop_hook_active: false })),
+    ).toEqual({ decision: "block", reason: SNAPSHOT_REQUEST_MESSAGE });
+    expect(runHook(toolDir, { hook_event_name: "Stop", stop_hook_active: true })).toBe("");
+  });
+
+  it("measures from session start when no snapshot exists", async () => {
+    const fresh = await setup({ createdAgoMs: 60_000 });
+    expect(runHook(fresh.toolDir, { hook_event_name: "PostToolUse" })).toBe("");
+    expect(runHook(fresh.toolDir, { hook_event_name: "Stop" })).toBe("");
+
+    const old = await setup({ createdAgoMs: stale });
+    expect(JSON.parse(runHook(old.toolDir, { hook_event_name: "PostToolUse" }))).toMatchObject({
+      hookSpecificOutput: { additionalContext: SNAPSHOT_REQUEST_MESSAGE },
+    });
+    const oldStop = await setup({ createdAgoMs: stale });
+    expect(runHook(oldStop.toolDir, { hook_event_name: "Stop" })).not.toBe("");
+  });
+
+  it("exits 0 silently on malformed input or unreadable snapshots", async () => {
+    const { dataDir, toolDir } = await setup({ snapshotAgoMs: stale });
+    const result = spawnSync(join(toolDir, SNAPSHOT_HOOK_TOOL_NAME), {
+      input: "not json",
+      encoding: "utf8",
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("");
+    writeFileSync(join(dataDir, "sessions", "api-1", "snapshots", "1.json"), "{");
+    expect(runHook(toolDir, { hook_event_name: "Stop" })).toBe("");
   });
 });

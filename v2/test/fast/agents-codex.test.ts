@@ -493,6 +493,24 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     expect(commands).toContain(SPUR_COMMAND);
   });
 
+  it("leaves the snapshot hook out of every Codex event group", async () => {
+    mockReadFile.mockImplementation(async (filePath: unknown) => {
+      if (typeof filePath === "string" && filePath.endsWith("hooks.json")) {
+        throw new Error("ENOENT");
+      }
+      return "";
+    });
+
+    await ensureCodexHooksConfig("/session/tool");
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("hooks.json"),
+    );
+    expect(requireValue(writeCall, "expected hooks.json write")[1] as string).not.toContain(
+      "spur-snapshot-hook",
+    );
+  });
+
   it("handles invalid JSON in hooks.json by returning a fresh document", async () => {
     mockReadFile.mockImplementation(async (filePath: unknown) => {
       if (typeof filePath === "string" && filePath.endsWith("hooks.json")) {

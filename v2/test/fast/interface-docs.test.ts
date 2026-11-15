@@ -30,6 +30,7 @@ describe("published interface contracts", () => {
     expect(commands).toContain("spur snapshot write");
     expect(configuration).toContain("projects.<id>.snapshots.maxBytes");
     expect(configuration).toContain("projects.<id>.snapshots.requireFinal");
+    expect(configuration).toContain("projects.<id>.snapshots.freshnessMinutes");
     for (const route of [
       "GET /sessions/:id/snapshots",
       "POST /sessions/:id/snapshots",

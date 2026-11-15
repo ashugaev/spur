@@ -4,11 +4,13 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_SNAPSHOT_MAX_BYTES,
+  SNAPSHOT_REQUEST_MESSAGE,
   SnapshotCorruptError,
   SnapshotTooLargeError,
   listSnapshots,
   readSnapshot,
   snapshotDir,
+  snapshotDue,
   snapshotGateBlock,
   snapshotSettings,
   writeSnapshot,
@@ -185,14 +187,59 @@ describe("snapshot gate", () => {
 
 describe("snapshotSettings", () => {
   it("applies defaults for an unconfigured project", () => {
-    expect(snapshotSettings(undefined)).toEqual({ maxBytes: 32768, requireFinal: false });
-    expect(snapshotSettings({} as ProjectConfig)).toEqual({ maxBytes: 32768, requireFinal: false });
+    const defaults = { maxBytes: 32768, requireFinal: false, freshnessMinutes: 10 };
+    expect(snapshotSettings(undefined)).toEqual(defaults);
+    expect(snapshotSettings({} as ProjectConfig)).toEqual(defaults);
   });
 
   it("uses configured values", () => {
     expect(
-      snapshotSettings({ snapshots: { maxBytes: 100, requireFinal: true } } as ProjectConfig),
-    ).toEqual({ maxBytes: 100, requireFinal: true });
+      snapshotSettings({
+        snapshots: { maxBytes: 100, requireFinal: true, freshnessMinutes: 15 },
+      } as ProjectConfig),
+    ).toEqual({ maxBytes: 100, requireFinal: true, freshnessMinutes: 15 });
+  });
+});
+
+describe("snapshotDue", () => {
+  const latestAt = "2026-01-01T00:00:00.000Z";
+  const created = "2025-12-31T00:00:00.000Z";
+  const base = Date.parse(latestAt);
+  const freshnessMs = 10 * 60_000;
+
+  it("is never due without an activity signal", () => {
+    expect(
+      snapshotDue({ latestAt, sessionCreatedAt: created, activityAt: null, freshnessMs }),
+    ).toBe(false);
+  });
+
+  it("is not due when activity stays within freshness of the latest snapshot", () => {
+    const activityAt = new Date(base + freshnessMs);
+    expect(snapshotDue({ latestAt, sessionCreatedAt: created, activityAt, freshnessMs })).toBe(
+      false,
+    );
+  });
+
+  it("is due when activity runs past freshness after the latest snapshot", () => {
+    const activityAt = new Date(base + freshnessMs + 1);
+    expect(snapshotDue({ latestAt, sessionCreatedAt: created, activityAt, freshnessMs })).toBe(
+      true,
+    );
+  });
+
+  it("uses session creation when no snapshot exists", () => {
+    const activityAt = new Date(Date.parse(created) + freshnessMs + 1);
+    expect(
+      snapshotDue({ latestAt: null, sessionCreatedAt: created, activityAt, freshnessMs }),
+    ).toBe(true);
+  });
+});
+
+describe("SNAPSHOT_REQUEST_MESSAGE", () => {
+  it("pins the snapshot request text", () => {
+    expect(SNAPSHOT_REQUEST_MESSAGE).toBe(
+      'Spur snapshot is stale: work moved on since your latest snapshot. Write one now with "$SPUR_SNAPSHOT_COMMAND" write --file <path> (--file - reads stdin), then continue.',
+    );
   });
 });
 

@@ -7,7 +7,7 @@ import {
   buildClaudeRestorePlan,
   buildClaudeResumePlan,
   claudeCommand,
-  ensureClaudeRestrictWritesSettings,
+  ensureClaudeSettings,
   findClaudeSessionId,
 } from "./claude.js";
 import { captureClaudeSubmitBaseline, scanClaudeJsonlForMessage } from "./claude-submit-ack.js";
@@ -479,9 +479,9 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       claudeConfigDir,
     }) => {
       const result: { claudeSettingsPath?: string; claudeMcpConfigPath?: string } = {};
-      if (restrictWrites) {
-        result.claudeSettingsPath = await ensureClaudeRestrictWritesSettings(sessionToolDir);
-      }
+      result.claudeSettingsPath = await ensureClaudeSettings(sessionToolDir, {
+        restrictWrites: restrictWrites ?? false,
+      });
       // Either an MCP sidecar to inject or a host server to suppress makes the
       // generated file authoritative (--strict-mcp-config). With neither, stay
       // out of the way and let Claude resolve MCP servers itself.

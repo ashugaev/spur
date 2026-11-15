@@ -887,6 +887,7 @@ export interface ProjectConfig {
 export interface ProjectSnapshotsConfig {
   maxBytes?: number;
   requireFinal?: boolean;
+  freshnessMinutes?: number;
 }
 
 export type ProviderReasoningEffort =
@@ -1372,6 +1373,7 @@ export interface SessionRecord {
   serverErrorAt?: string;
   serverErrorReactivationAttempts?: number;
   todoNudge?: { fingerprint: string; attempts: number };
+  snapshotNudge?: { fingerprint: string; attempts: number };
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
   /** Internal provenance for a retained session error; absent on legacy records. */
@@ -1503,6 +1505,7 @@ export interface SessionView extends Omit<
   | "restoredAt"
   | "errorSource"
   | "terminalSlotsCaptured"
+  | "snapshotNudge"
 > {
   spawnIntent?: Omit<DurableSpawnIntent, "closeoutTakenFrom">;
   lifecycle: SessionLifecycleSnapshot;
@@ -1567,7 +1570,8 @@ export type DashboardOmittedField =
   | "tokenUsage"
   | "preflightTokenUsage"
   | "errorSource"
-  | "terminalSlotsCaptured";
+  | "terminalSlotsCaptured"
+  | "snapshotNudge";
 
 export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
   spawnIntent?: SessionView["spawnIntent"];

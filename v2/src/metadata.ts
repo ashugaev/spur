@@ -1750,6 +1750,14 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     normalizedSession.todoNudge.attempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
       ? { todoNudge: normalizedSession.todoNudge }
       : {}),
+    ...(normalizedSession.snapshotNudge &&
+    typeof normalizedSession.snapshotNudge.fingerprint === "string" &&
+    /^[a-f0-9]{64}$/.test(normalizedSession.snapshotNudge.fingerprint) &&
+    Number.isInteger(normalizedSession.snapshotNudge.attempts) &&
+    normalizedSession.snapshotNudge.attempts >= 0 &&
+    normalizedSession.snapshotNudge.attempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
+      ? { snapshotNudge: normalizedSession.snapshotNudge }
+      : {}),
     ...(normalizedSession.claudeAccountId
       ? { claudeAccountId: normalizedSession.claudeAccountId }
       : {}),

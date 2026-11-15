@@ -248,6 +248,7 @@ import { readPrAlertOwnership, writeWorkspaceState } from "../../src/workspace-s
 import { allowsPrAlertBatch } from "../../src/pr-alert-owner.js";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import { createPage } from "../../src/pages.js";
+import { SNAPSHOT_REQUEST_MESSAGE } from "../../src/snapshots.js";
 import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as sessionSlotsModule from "../../src/session-slots.js";
 import type * as metadataModule from "../../src/metadata.js";
@@ -2851,7 +2852,7 @@ describe("SessionService", () => {
     const service = await createDisposedSessionService();
     const claude = await vi.importActual<typeof claudeModule>("../../src/agents/claude.js");
     setupAgentHooksMock.mockImplementationOnce(async () => ({
-      claudeSettingsPath: await claude.ensureClaudeRestrictWritesSettings(setupDir),
+      claudeSettingsPath: await claude.ensureClaudeSettings(setupDir, { restrictWrites: true }),
     }));
     const record = runningSession({ status: "stopped", stopReason: "manual_pause" });
     sessions.set(record.id, record);
@@ -3651,6 +3652,28 @@ describe("SessionService", () => {
       expect(views[1]).toMatchObject({ id: session.id, status: "running", state: "waiting" });
       expect(nudge).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: session.id }), {
         detached: true,
+        agentActivityAt: null,
+      });
+    });
+
+    it("passes the raw agent activity time, not the restore-bumped park time, to the sweep nudge", async () => {
+      const activityMs = Date.parse("2026-03-18T10:02:00.000Z");
+      mockClaudeJsonlState("waiting", { lastMtimeMs: activityMs });
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      const session = runningSession({
+        worktree: false,
+        restoredAt: "2026-03-18T10:04:00.000Z",
+      });
+      sessions.set(session.id, session);
+      const nudge = vi.spyOn(internals, "maybeNudgeTodo").mockResolvedValue();
+
+      await internals.pollAttentionStates(false);
+
+      expect(nudge).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: session.id }), {
+        detached: true,
+        agentActivityAt: new Date(activityMs),
       });
     });
 
@@ -3962,7 +3985,7 @@ describe("SessionService", () => {
             releaseUser = resolve;
           }),
       );
-      internals.scheduleTodoNudge(session);
+      internals.scheduleTodoNudge(session, null);
       await vi.advanceTimersByTimeAsync(0);
       expect(send).not.toHaveBeenCalled();
       releaseUser();
@@ -3973,12 +3996,206 @@ describe("SessionService", () => {
 
       // Idle: the reminder starts detached, and a second sweep tick while its
       // ack is outstanding does not start another.
-      internals.scheduleTodoNudge(session);
-      internals.scheduleTodoNudge(session);
+      internals.scheduleTodoNudge(session, null);
+      internals.scheduleTodoNudge(session, null);
       await vi.advanceTimersByTimeAsync(0);
       expect(send).toHaveBeenCalledTimes(1);
       releaseSend();
       await vi.advanceTimersByTimeAsync(0);
+    });
+
+    describe("snapshot requests", () => {
+      const T0 = new Date("2026-03-18T10:05:00.000Z");
+      const minutes = (count: number) => count * 60_000;
+
+      async function snapshotSetup() {
+        const sessions = createSessionStore();
+        const session = runningSession();
+        sessions.set(session.id, session);
+        await useRealTodoLedger();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await service.mutateTodo(
+          session.id,
+          { action: "add", text: "Ship it", reason: "Session objective" },
+          { kind: "agent", agent: "claude", sessionId: session.id },
+        );
+        return {
+          sessions,
+          session,
+          service,
+          internals: sessionServiceInternals(service),
+          send: sendMessageToTmuxMock,
+        };
+      }
+
+      const nudgeAt = (
+        internals: ReturnType<typeof sessionServiceInternals>,
+        sessions: Map<string, SessionRecord>,
+        session: SessionRecord,
+        agentActivityAt: Date | null,
+      ) => internals.maybeNudgeTodo(sessions.get(session.id) ?? session, { agentActivityAt });
+
+      it("sends the snapshot request instead of the ToDo reminder when due", async () => {
+        const { sessions, session, service, internals, send } = await snapshotSetup();
+        vi.setSystemTime(T0);
+        await service.writeSnapshot(session.id, { content: "# Notes", final: false });
+        vi.setSystemTime(new Date(T0.getTime() + minutes(11)));
+
+        await nudgeAt(internals, sessions, session, new Date());
+
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(send.mock.calls[0]?.[1]).toBe(SNAPSHOT_REQUEST_MESSAGE);
+        expect(send.mock.calls[0]?.[1]).not.toContain("Spur ToDo still has open work");
+        expect(sessions.get(session.id)?.snapshotNudge?.attempts).toBe(1);
+        expect(sessions.get(session.id)?.todoNudge).toBeUndefined();
+        service.dispose();
+      });
+
+      it("sends the ToDo reminder for an idle session", async () => {
+        const { sessions, session, service, internals, send } = await snapshotSetup();
+        vi.setSystemTime(T0);
+        await service.writeSnapshot(session.id, { content: "# Notes", final: false });
+        vi.setSystemTime(new Date(T0.getTime() + minutes(60)));
+
+        await nudgeAt(internals, sessions, session, new Date(T0.getTime() + 5_000));
+
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(send.mock.calls[0]?.[1]).toContain("Spur ToDo still has open work");
+        expect(sessions.get(session.id)?.snapshotNudge).toBeUndefined();
+        service.dispose();
+      });
+
+      it("returns to the ToDo reminder once a new snapshot is written", async () => {
+        const { sessions, session, service, internals, send } = await snapshotSetup();
+        vi.setSystemTime(T0);
+        await service.writeSnapshot(session.id, { content: "# One", final: false });
+        vi.setSystemTime(new Date(T0.getTime() + minutes(11)));
+        await nudgeAt(internals, sessions, session, new Date());
+        expect(send.mock.calls[0]?.[1]).toBe(SNAPSHOT_REQUEST_MESSAGE);
+
+        await service.writeSnapshot(session.id, { content: "# Two", final: false });
+        vi.setSystemTime(new Date(Date.now() + 61_000));
+        await nudgeAt(internals, sessions, session, new Date());
+
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1]?.[1]).toContain("Spur ToDo still has open work");
+        service.dispose();
+      });
+
+      it("falls back to the ToDo reminder after three requests on one snapshot version", async () => {
+        const { sessions, session, service, internals, send } = await snapshotSetup();
+        vi.setSystemTime(T0);
+        await service.writeSnapshot(session.id, { content: "# One", final: false });
+        vi.setSystemTime(new Date(T0.getTime() + minutes(11)));
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          await nudgeAt(internals, sessions, session, new Date());
+          vi.setSystemTime(new Date(Date.now() + 61_000));
+        }
+
+        expect(send.mock.calls.map((call) => call[1] === SNAPSHOT_REQUEST_MESSAGE)).toEqual([
+          true,
+          true,
+          true,
+          false,
+        ]);
+        expect(send.mock.calls[3]?.[1]).toContain("Spur ToDo still has open work");
+        expect(sessions.get(session.id)?.snapshotNudge?.attempts).toBe(3);
+        service.dispose();
+      });
+
+      it("leaves the ToDo reminder budget untouched across a snapshot request", async () => {
+        const { sessions, session, service, internals, send } = await snapshotSetup();
+        vi.setSystemTime(T0);
+        await service.writeSnapshot(session.id, { content: "# One", final: false });
+        await nudgeAt(internals, sessions, session, null);
+        const todoNudge = sessions.get(session.id)?.todoNudge;
+        expect(todoNudge?.attempts).toBe(1);
+
+        vi.setSystemTime(new Date(T0.getTime() + minutes(11)));
+        await nudgeAt(internals, sessions, session, new Date());
+
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1]?.[1]).toBe(SNAPSHOT_REQUEST_MESSAGE);
+        expect(sessions.get(session.id)?.todoNudge).toEqual(todoNudge);
+        expect(sessions.get(session.id)?.snapshotNudge?.attempts).toBe(1);
+        service.dispose();
+      });
+
+      it("keeps snapshotNudge out of detail, list and dashboard views", async () => {
+        mockClaudeJsonlState("waiting");
+        const { sessions, session, service } = await snapshotSetup();
+        sessions.set(session.id, {
+          ...session,
+          snapshotNudge: { fingerprint: "a".repeat(64), attempts: 1 },
+        });
+
+        expect(await service.get(session.id)).not.toHaveProperty("snapshotNudge");
+        for (const view of ["dashboard", "full"] as const) {
+          const listed = (await service.list({ view })).find((item) => item.id === session.id);
+          expect(listed).toBeDefined();
+          expect(listed).not.toHaveProperty("snapshotNudge");
+        }
+        service.dispose();
+      });
+
+      it("bakes freshnessMinutes into session tools for claude only", async () => {
+        const config = baseConfig();
+        loadConfigMock.mockReturnValue({
+          ...config,
+          projects: {
+            api: { ...config.projects.api, snapshots: { freshnessMinutes: 7 } },
+          },
+        });
+        createSessionStore();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const prepare = (
+          service as unknown as {
+            prepareSessionTools(id: string, agent: AgentName, project: string): string;
+          }
+        ).prepareSessionTools.bind(service);
+
+        ensureSessionSlotToolMock.mockClear();
+        prepare("api-1", "claude", "api");
+        prepare("api-1", "codex", "api");
+        prepare("api-1", "cursor", "api");
+
+        const calls = ensureSessionSlotToolMock.mock.calls.map(([args]) => args);
+        expect(calls[0]).toMatchObject({
+          agent: "claude",
+          snapshotHook: { freshnessMinutes: 7, sessionCreatedAt: expect.any(String) },
+        });
+        expect(calls[1]).not.toHaveProperty("snapshotHook");
+        expect(calls[2]).not.toHaveProperty("snapshotHook");
+        service.dispose();
+      });
+
+      it("skips a corrupt latest snapshot, logs once, and sends the ToDo reminder", async () => {
+        const { sessions, session, service, internals, send } = await snapshotSetup();
+        vi.setSystemTime(T0);
+        await service.writeSnapshot(session.id, { content: "# One", final: false });
+        writeFileSync(join(TEST_DATA_DIR, "sessions", session.id, "snapshots", "1.json"), "{");
+        vi.setSystemTime(new Date(T0.getTime() + minutes(11)));
+
+        await nudgeAt(internals, sessions, session, new Date());
+        vi.setSystemTime(new Date(Date.now() + 61_000));
+        await nudgeAt(internals, sessions, session, new Date());
+
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls.every((call) => String(call[1]).includes("Spur ToDo"))).toBe(true);
+        expect(internals.todoNudgeBackoff.has(session.id)).toBe(false);
+        const skipped = logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.snapshot.request_skipped",
+        );
+        expect(skipped).toHaveLength(1);
+        expect(skipped[0]?.[1]).toMatchObject({
+          level: "warn",
+          sessionId: session.id,
+          details: { kind: "snapshot_corrupt", version: 1 },
+        });
+        service.dispose();
+      });
     });
 
     it("stands a ToDo reminder down while another write holds the pane", async () => {
@@ -3992,7 +4209,7 @@ describe("SessionService", () => {
       const send = sendMessageToTmuxMock;
       internals.paneWriteLocks.set(session.tmuxSession, new Promise<void>(() => {}));
 
-      internals.scheduleTodoNudge(session);
+      internals.scheduleTodoNudge(session, null);
       await vi.advanceTimersByTimeAsync(0);
 
       expect(send).not.toHaveBeenCalled();
@@ -4016,7 +4233,7 @@ describe("SessionService", () => {
       const internals = sessionServiceInternals(service);
       const send = sendMessageToTmuxMock;
 
-      internals.scheduleTodoNudge(session);
+      internals.scheduleTodoNudge(session, null);
       service.dispose();
       await vi.advanceTimersByTimeAsync(0);
 
@@ -10870,6 +11087,7 @@ describe("SessionService", () => {
       configPath: customConfig,
       projectId: "api",
       agent: "claude",
+      snapshotHook: { freshnessMinutes: 10, sessionCreatedAt: expect.any(String) },
     });
   });
 
@@ -25810,6 +26028,7 @@ describe("SessionService", () => {
       "api-1",
       runningSession({
         agent: "codex",
+        createdAt: now.toISOString(),
         queuedMessages: { messages: ["please continue"], awaitingPrompt: false },
       }),
     );
@@ -70414,6 +70633,7 @@ describe("SessionService", () => {
       lastSuccessfulTodoNudgeAt: Map<string, number>;
       todoNudgeDisabled: Map<string, { kind: "ledger_corrupt" | "target_gone"; reason: string }>;
       todoNudgeBackoff: Map<string, { failures: number; nextRetryAtMs: number }>;
+      snapshotCorruptLogged: Map<string, number>;
       attentionMonitorRunning: boolean;
       dashboardLoopRunning: boolean;
       dashboardCacheReady: Promise<void> | null;
@@ -70566,6 +70786,7 @@ describe("SessionService", () => {
         internals.lastSuccessfulTodoNudgeAt.set(id, Date.now());
         internals.todoNudgeDisabled.set(id, { kind: "ledger_corrupt", reason: "seed" });
         internals.todoNudgeBackoff.set(id, { failures: 1, nextRetryAtMs: Date.now() });
+        internals.snapshotCorruptLogged.set(id, 1);
       }
 
       // api-1 stays running (non-terminal). api-2 completes. api-3 was
@@ -70599,6 +70820,7 @@ describe("SessionService", () => {
         ["lastSuccessfulTodoNudgeAt", internals.lastSuccessfulTodoNudgeAt],
         ["todoNudgeDisabled", internals.todoNudgeDisabled],
         ["todoNudgeBackoff", internals.todoNudgeBackoff],
+        ["snapshotCorruptLogged", internals.snapshotCorruptLogged],
       ];
       for (const [name, map] of allPrunedMaps) {
         expect(map.has("api-2"), `${name} should drop the completed id`).toBe(false);
