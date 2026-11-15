@@ -196,6 +196,13 @@ describe("snapshotSettings", () => {
     expect(snapshotSettings({} as ProjectConfig)).toEqual(defaults);
   });
 
+  it("leaves the final-snapshot gate off when only enabled is false", () => {
+    expect(snapshotSettings({ snapshots: { enabled: false } } as ProjectConfig)).toMatchObject({
+      enabled: false,
+      requireFinal: false,
+    });
+  });
+
   it("uses configured values", () => {
     expect(
       snapshotSettings({

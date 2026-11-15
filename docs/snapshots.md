@@ -35,10 +35,10 @@ Providers:
 
 Per project, `projects.<id>.snapshots` ([configuration](configuration.md#field-reference)); defaults from `v2/src/snapshots.ts`:
 
-- `enabled` (`true`): `false` stops pane and Claude hook requests. CLI and HTTP snapshot writes stay usable.
+- `enabled` (`true`): `false` stops pane and Claude hook requests and the `requireFinal` gate. CLI and HTTP snapshot writes stay usable. `enabled: false` alone is valid.
 - `freshnessMinutes` (`30`): N.
 - `maxBytes` (`32768`, max `131072`): bytes per snapshot.
-- `requireFinal` (`false`): agent `complete`/`self-destruct` need a `--final` snapshot, `handoff` any, else `409 work_snapshot_required`. `requireFinal: true` with `enabled: false` fails config load, error names both keys.
+- `requireFinal` (`false`): agent `complete`/`self-destruct` need a `--final` snapshot, `handoff` any, else `409 work_snapshot_required`. An explicit `requireFinal: true` with `enabled: false` fails config load, error names both keys.
 
 ```yaml
 projects:

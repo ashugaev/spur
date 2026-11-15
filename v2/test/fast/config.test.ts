@@ -5220,6 +5220,21 @@ projects:
     );
   });
 
+  it("accepts snapshots.enabled false with an explicit requireFinal false", async () => {
+    const off = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    snapshots:
+      enabled: false
+      requireFinal: false
+`);
+    expect(loadConfig(off).projects["api"]?.snapshots).toEqual({
+      enabled: false,
+      requireFinal: false,
+    });
+  });
+
   it("rejects a non-array mcp.exclude", async () => {
     const configPath = await writeConfig(`
 projects:

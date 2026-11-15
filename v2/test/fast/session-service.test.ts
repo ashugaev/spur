@@ -3340,11 +3340,16 @@ describe("SessionService", () => {
     describe("work snapshot gate", () => {
       const agent = { kind: "agent", agent: "claude", sessionId: "api-1" } as const;
 
-      async function gatedService(requireFinal: boolean, session = runningSession()) {
+      async function gatedService(requireFinal: boolean | "disabled", session = runningSession()) {
         const config = baseConfig();
         loadConfigMock.mockReturnValue({
           ...config,
-          projects: { api: { ...config.projects.api, snapshots: { requireFinal } } },
+          projects: {
+            api: {
+              ...config.projects.api,
+              snapshots: requireFinal === "disabled" ? { enabled: false } : { requireFinal },
+            },
+          },
         });
         const sessions = createSessionStore();
         sessions.set(session.id, session);
@@ -3471,6 +3476,16 @@ describe("SessionService", () => {
 
       it("skips the check when requireFinal is false", async () => {
         const { sessions, service } = await gatedService(false);
+        await resolveOneItem(service);
+
+        await service.complete("api-1", { skipPrCheck: true });
+
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
+      it("skips the check when snapshots are disabled", async () => {
+        const { sessions, service } = await gatedService("disabled");
         await resolveOneItem(service);
 
         await service.complete("api-1", { skipPrCheck: true });
