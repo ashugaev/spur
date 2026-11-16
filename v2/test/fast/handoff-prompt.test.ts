@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { extractBareUserTask, renderHandoffPrompt } from "../../src/handoff-prompt.js";
+import {
+  extractBareUserTask,
+  HANDOFF_SNAPSHOT_INLINE_MAX_BYTES,
+  renderHandoffPrompt,
+} from "../../src/handoff-prompt.js";
 import { withSelfDestructInstructions } from "../../src/self-destruct.js";
 import { withSharedMemoryInstructions } from "../../src/shared-memory.js";
 import { renderShepherdPrompt } from "../../src/shepherd.js";
@@ -182,5 +186,114 @@ describe("renderHandoffPrompt", () => {
     expect(prompt).toContain("This is not a new task.");
     expect(prompt).toContain("Original task (as originally requested):");
     expect(prompt.split("You continue in the same workspace").length - 1).toBe(1);
+  });
+});
+
+describe("renderHandoffPrompt snapshot and inherited ToDo", () => {
+  const base = {
+    sourceSessionId: "api-1",
+    sourceAgent: "codex" as const,
+    branch: "api-1",
+    worktreePath: "/tmp/worktrees/api/api-1",
+    originalPrompt: "Ship feature",
+    links: [],
+  };
+  const snapshot = {
+    version: 3,
+    at: "2026-11-01T10:00:00.000Z",
+    ageMinutes: 42,
+    commitsSince: 2,
+    stale: true,
+    content: "Done: parser. Next: wire CLI.",
+    headSha: "abc1234",
+  };
+
+  it("renders inherited ToDo, snapshot freshness and delta pointers", () => {
+    const prompt = renderHandoffPrompt({
+      ...base,
+      inheritedTodo: [
+        {
+          itemId: "new-1",
+          text: "Wire CLI",
+          addedReason: "r",
+          from: { sessionId: "api-1", itemId: "old-1" },
+        },
+        {
+          itemId: "new-2",
+          text: "Get approval",
+          addedReason: "r",
+          from: { sessionId: "api-1", itemId: "old-2" },
+          hold: { reason: "wait", blocker: { kind: "human", requiredAction: "Approve" } },
+        },
+        {
+          itemId: "new-3",
+          text: "Wait CI",
+          addedReason: "r",
+          from: { sessionId: "api-1", itemId: "old-3" },
+          hold: { reason: "wait", blocker: { kind: "external" } },
+        },
+      ],
+      snapshot,
+    });
+    expect(prompt).toContain("Inherited ToDo (moved from api-1; use these ids):");
+    expect(prompt).toContain("- new-1 open: Wire CLI");
+    expect(prompt).toContain("- new-2 held (human: Approve): Get approval");
+    expect(prompt).toContain("- new-3 held (external): Wait CI");
+    expect(prompt).toContain(
+      "Latest snapshot v3 at 2026-11-01T10:00:00.000Z (age 42 min, 2 commits since, stale yes):",
+    );
+    expect(prompt).toContain("Done: parser. Next: wire CLI.");
+    expect(prompt).toContain("- git log --oneline abc1234..HEAD");
+    expect(prompt).toContain("- git diff abc1234");
+    expect(prompt).toContain("agent-history-api-1-*.jsonl at or after 2026-11-01T10:00:00.000Z");
+    expect(prompt.indexOf("Inherited ToDo")).toBeLessThan(prompt.indexOf("Bring the work"));
+  });
+
+  it("omits git pointers without a head sha and reports unknown commit counts", () => {
+    const prompt = renderHandoffPrompt({
+      ...base,
+      snapshot: { ...snapshot, headSha: null, commitsSince: null, stale: false },
+    });
+    expect(prompt).toContain("unknown commits since, stale no");
+    expect(prompt).not.toContain("git log --oneline");
+    expect(prompt).not.toContain("git diff");
+  });
+
+  it("points to spur snapshot show for a snapshot over the inline cap", () => {
+    const content = "x".repeat(HANDOFF_SNAPSHOT_INLINE_MAX_BYTES + 1);
+    const prompt = renderHandoffPrompt({ ...base, snapshot: { ...snapshot, content } });
+    expect(prompt).not.toContain(content);
+    expect(prompt).toContain("Read it: spur snapshot show api-1 3");
+  });
+
+  it("renders the no-snapshot line", () => {
+    const prompt = renderHandoffPrompt(base);
+    expect(prompt).toContain(
+      "No work snapshot: reconstruct state from git log, git diff and agent-history-api-1-*.jsonl",
+    );
+    expect(prompt).not.toContain("Inherited ToDo");
+  });
+
+  it("renders the unreadable-snapshot note", () => {
+    const prompt = renderHandoffPrompt({ ...base, snapshotUnreadable: "bad checksum" });
+    expect(prompt).toContain("No work snapshot (latest snapshot unreadable: bad checksum):");
+  });
+
+  it.each([
+    [
+      "Inherited ToDo",
+      {
+        inheritedTodo: [
+          { itemId: "n", text: "t", addedReason: "r", from: { sessionId: "api-1", itemId: "o" } },
+        ],
+      },
+    ],
+    ["Latest snapshot v", { snapshot }],
+    ["Since snapshot:", { snapshot }],
+    ["No work snapshot", {}],
+  ])("extractBareUserTask stops at the %s header", (_header, extra) => {
+    const prompt = renderHandoffPrompt({ ...base, ...extra });
+    expect(prompt).toContain(_header);
+    expect(extractBareUserTask(prompt)).toBe("Ship feature");
   });
 });

@@ -1,3 +1,4 @@
+import type { HandoffTodoItem } from "./todo.js";
 import type { AgentName, SessionLink, SessionPrBinding } from "./types.js";
 import { HANDOFF_SCREENSHOT_NAME } from "./handoff-screenshot.js";
 import { renderShepherdPrompt } from "./shepherd.js";
@@ -14,7 +15,7 @@ const SPUR_TRAILING_SECTION_MARKERS = [
 ] as const;
 
 const HANDOFF_TASK_STOP_PATTERN =
-  "Session title:|Tags:|Links:|Open PR:|Remaining pipeline steps:|A terminal screenshot|Bring the work to production|Additional handoff notes:";
+  "Session title:|Tags:|Links:|Open PR:|Remaining pipeline steps:|A terminal screenshot|Inherited ToDo|Latest snapshot v|Since snapshot:|No work snapshot|Bring the work to production|Additional handoff notes:";
 
 const HANDOFF_TASK_RE = new RegExp(
   `Original task \\(as originally requested\\):\\n([\\s\\S]*?)(?:\\n\\n(?:${HANDOFF_TASK_STOP_PATTERN})|$)`,
@@ -126,6 +127,53 @@ export interface HandoffPromptContext {
   remainingPipelineSteps?: string[];
   notes?: string;
   terminalScreenshot?: boolean;
+  inheritedTodo?: HandoffTodoItem[];
+  snapshot?: HandoffPromptSnapshot;
+  /** Set when the latest snapshot exists but could not be read. */
+  snapshotUnreadable?: string;
+}
+
+export interface HandoffPromptSnapshot {
+  version: number;
+  at: string;
+  ageMinutes: number;
+  commitsSince: number | null;
+  stale: boolean;
+  content: string;
+  headSha: string | null;
+}
+
+export const HANDOFF_SNAPSHOT_INLINE_MAX_BYTES = 16384;
+
+function renderSnapshotLines(ctx: HandoffPromptContext): string[] {
+  const src = ctx.sourceSessionId;
+  const reconstruct = `reconstruct state from git log, git diff and agent-history-${src}-*.jsonl captures in $SPUR_SESSION_ARTIFACTS_DIR.`;
+  const snapshot = ctx.snapshot;
+  if (!snapshot) {
+    return [
+      "",
+      ctx.snapshotUnreadable
+        ? `No work snapshot (latest snapshot unreadable: ${ctx.snapshotUnreadable}): ${reconstruct}`
+        : `No work snapshot: ${reconstruct}`,
+    ];
+  }
+  const commits = snapshot.commitsSince === null ? "unknown" : String(snapshot.commitsSince);
+  const lines = [
+    "",
+    `Latest snapshot v${snapshot.version} at ${snapshot.at} (age ${snapshot.ageMinutes} min, ${commits} commits since, stale ${snapshot.stale ? "yes" : "no"}):`,
+    Buffer.byteLength(snapshot.content) <= HANDOFF_SNAPSHOT_INLINE_MAX_BYTES
+      ? snapshot.content
+      : `Read it: spur snapshot show ${src} ${snapshot.version}`,
+    "",
+    "Since snapshot:",
+  ];
+  if (snapshot.headSha) {
+    lines.push(`- git log --oneline ${snapshot.headSha}..HEAD`, `- git diff ${snapshot.headSha}`);
+  }
+  lines.push(
+    `- Transcript captures: agent-history-${src}-*.jsonl at or after ${snapshot.at} in $SPUR_SESSION_ARTIFACTS_DIR`,
+  );
+  return lines;
 }
 
 export function renderHandoffPrompt(ctx: HandoffPromptContext): string {
@@ -173,6 +221,21 @@ export function renderHandoffPrompt(ctx: HandoffPromptContext): string {
       `A terminal screenshot from the source session is attached as ${HANDOFF_SCREENSHOT_NAME}.`,
     );
   }
+
+  if (ctx.inheritedTodo?.length) {
+    lines.push("", `Inherited ToDo (moved from ${ctx.sourceSessionId}; use these ids):`);
+    for (const item of ctx.inheritedTodo) {
+      const blocker = item.hold?.blocker;
+      const state = !blocker
+        ? "open"
+        : blocker.kind === "human"
+          ? `held (human: ${blocker.requiredAction})`
+          : "held (external)";
+      lines.push(`- ${item.itemId} ${state}: ${item.text}`);
+    }
+  }
+
+  lines.push(...renderSnapshotLines(ctx));
 
   lines.push(
     "",
