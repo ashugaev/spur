@@ -13,6 +13,7 @@ export type SpurSessionStatus =
 export type SpurSessionState =
   | "working"
   | "waiting"
+  | "completed"
   | "needs_input"
   | "rate_limited"
   | "stale"
@@ -1052,6 +1053,7 @@ export type AttentionLevel =
   | "respond"
   | "working"
   | "pending"
+  | "completed"
   | "stopped"
   | "done";
 
@@ -1061,6 +1063,7 @@ export const ATTENTION_ZONE_ORDER: AttentionLevel[] = [
   "respond",
   "working",
   "pending",
+  "completed",
   "stopped",
   "done",
 ];
@@ -1080,12 +1083,17 @@ export const ATTENTION_LANE_META: Record<AttentionLevel, AttentionLaneMeta> = {
   respond: { label: "Needs Input", color: "var(--color-status-error)" },
   working: { label: "Working", color: "var(--color-status-working)" },
   pending: { label: "Waiting", color: "var(--color-status-attention)" },
+  completed: { label: "Completed", color: "var(--color-status-ready)" },
   stopped: {
     label: "Stopped",
     color: "var(--color-text-tertiary)",
     dividerColor: "var(--color-border-subtle)",
   },
-  done: { label: "Completed", color: "var(--color-status-ready)" },
+  done: {
+    label: "Closed",
+    color: "var(--color-text-tertiary)",
+    dividerColor: "var(--color-border-subtle)",
+  },
 };
 
 export function worstAttentionLevel(levels: readonly AttentionLevel[]): AttentionLevel {
@@ -1436,6 +1444,10 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
 
   if (session.state === "waiting") {
     return "pending";
+  }
+
+  if (session.state === "completed") {
+    return "completed";
   }
 
   return "working";

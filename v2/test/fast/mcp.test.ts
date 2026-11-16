@@ -168,6 +168,59 @@ it("exposes all projects, raw conversation and complete operator requests withou
     expect(request.headers["x-spur-caller-session"]).toBeUndefined();
   }
 });
+it("routes task-status catalog operations without synthesizing an agent caller from process or body", async () => {
+  const { fixture, call } = await setup();
+  vi.stubEnv("SPUR_SESSION", session.id);
+  vi.stubEnv("SPUR_AGENT_LAUNCH_ID", "current-launch-id");
+  const path = `/sessions/${session.id}/task-status`;
+  fixture.state.override = (actualPath, method) =>
+    actualPath !== path
+      ? undefined
+      : method === "GET"
+        ? { status: 200, value: { revision: 4, state: "completed" } }
+        : { status: 403, value: { code: "task_status_forbidden", error: "Agent caller required" } };
+  expect(
+    (
+      await call("daemon_request", {
+        operationId: "get_task_status",
+        pathParams: { sessionId: session.id },
+      })
+    ).structuredContent,
+  ).toMatchObject({ ok: true, status: 200, body: { revision: 4, state: "completed" } });
+  expect(fixture.calls.at(-1)).toMatchObject({ path, method: "GET" });
+  const body = {
+    state: "needs_input",
+    revision: 4,
+    agentLaunchId: "current-launch-id",
+    callerSessionId: session.id,
+  };
+  expect(
+    (
+      await call("daemon_request", {
+        operationId: "set_task_status",
+        pathParams: { sessionId: session.id },
+        body,
+      })
+    ).structuredContent,
+  ).toMatchObject({ ok: false, status: 403, body: { code: "task_status_forbidden" } });
+  const sent = fixture.calls.at(-1);
+  expect(sent).toMatchObject({ path, method: "POST", body });
+  expect(sent?.headers["x-spur-origin"]).toBe("mcp");
+  expect(sent?.headers["x-spur-caller-session"]).toBeUndefined();
+  const before = fixture.calls.length;
+  expect(
+    (
+      await call("daemon_request", {
+        operationId: "set_task_status",
+        pathParams: { sessionId: session.id },
+        body,
+        callerSessionId: session.id,
+      })
+    ).isError,
+  ).toBe(true);
+  expect(fixture.calls).toHaveLength(before);
+});
+
 it("preserves daemon status/message and never follows redirects or replays mutations", async () => {
   const { fixture, call } = await setup();
   for (const status of [400, 403, 404, 409, 500, 302]) {

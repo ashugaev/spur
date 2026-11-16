@@ -3,6 +3,18 @@ import { describe, expect, it } from "vitest";
 import { ActivityDot } from "@/components/ActivityDot";
 
 describe("ActivityDot", () => {
+  it("renders completed tasks with a ready badge without pulsing", () => {
+    const { container } = render(<ActivityDot activity="completed" />);
+    expect(screen.getByText("completed")).toHaveStyle({ color: "var(--color-status-ready)" });
+    expect(container.firstChild).toHaveStyle({ background: "var(--color-dot-bg-ready)" });
+    expect(container.querySelector(".dot-pulse")).toBeNull();
+  });
+
+  it("renders closed sessions with an inactive badge", () => {
+    const { container } = render(<ActivityDot activity="closed" />);
+    expect(screen.getByText("closed")).toBeInTheDocument();
+    expect(container.firstChild).toHaveStyle({ background: "var(--color-dot-bg-inactive)" });
+  });
   it("renders a distinct budget limited label", () => {
     render(<ActivityDot activity="budget_limited" />);
     expect(screen.getByText("BUDGET LIMITED")).toBeInTheDocument();

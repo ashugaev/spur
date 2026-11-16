@@ -70,25 +70,18 @@ CLOSE-OUT GATE, mandatory after any code change
 
 PR TITLE: <type>: <description>. Types incl. style, no version bump. AO_ISSUE_ID set, prefix: <ISSUE-ID>: <type>: <description>.
 
-PR BODY: copy assets/pr-body.md, keep block order, UPPERCASE label lines, no markdown headings.
+PR BODY: fill assets/pr-body.md; template owns block order and presentation.
 
-  Summary: two to three plain lines, effect for the user and why needed.
-  BEFORE / AFTER, mandatory: visible packages/web change -> one row per changed state.
-    Capture and upload per references/pr-evidence.md.
-    No visible change -> line `No visible change.`
-  DECISIONS, mandatory: material non-obvious choices, 1-4 rows, one sentence per cell.
-    Sources: final spec Proposed design when present, implemented diff, developer output manager passes. No spec -> diff.
-    Scope cut or partial handling counts.
-    None -> line `None — <reason, e.g. follows existing pattern>`.
-    Never invent a rejected alternative.
-  VERIFIED: one line, what proved the change. No checklist.
-  Real issue number exists -> last line `Closes #<n>`.
-  Banned everywhere: file paths, symbol names, code, diff stats, test checklist, operator detail.
-  Reasoning and design talk only inside DECISIONS.
-
-  Bad:   Dropped the Default sentinel in resolveAgentLaunchModel, added 3 vitest cases.
-  Good:  Spawn dropdown now shows the model that launches. Before, it showed
-         one model and started another.
+  Lead with user effect; config keys/defaults/aliases and compatibility stay compact.
+  CORE: important module labels and decisive logic, never touched-file inventory.
+  FLOW: application interaction, not implementation chronology.
+  PROMPTS: context plus literal source diff against PR base; new blocks have additions only. No change -> explicit no-change bullet, omit diff.
+  Visible packages/web change -> collapsed evidence table, one row per changed state; capture/upload per references/pr-evidence.md. No visible change -> no-change bullet.
+  DECISIONS: 1-4 material tradeoff rows in template's columns, one concise sentence/cell; include scope cuts, never invent alternatives. None -> reason bullet instead of table.
+  Verification reports proved results/revision, never test checklists or unrun checks.
+  Real issue number exists -> last bullet `- Closes #<n>`.
+  Module identifiers only in CORE; exact prompt code only in PROMPTS. Elsewhere ban code/symbols; everywhere ban file paths, diff stats, operator detail and secrets.
+  Remove authoring placeholders before publication.
 
 CREATE OPEN PR
 

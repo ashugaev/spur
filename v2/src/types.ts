@@ -20,6 +20,7 @@ export type SessionStatus = (typeof SESSION_STATUSES)[number];
 export const SESSION_STATES = [
   "working",
   "waiting",
+  "completed",
   "needs_input",
   "rate_limited",
   "stale",
@@ -37,7 +38,31 @@ export function isStaleParked(session: Pick<SessionRecord, "status" | "stopReaso
   return session.status === "stopped" && session.stopReason === "stale_timeout";
 }
 
-export type StateSource = "jsonl" | "codex_stale" | "hook" | "claude_status" | "status";
+export type StateSource =
+  | "jsonl"
+  | "codex_stale"
+  | "hook"
+  | "claude_status"
+  | "status"
+  | "task_status";
+
+export interface TaskStatusDeclaration {
+  state: "completed" | "needs_input";
+  revision: number;
+  agentLaunchId: string;
+  updatedAt: string;
+}
+
+export interface TaskStatusView {
+  revision: number;
+  state?: TaskStatusDeclaration["state"];
+}
+
+export interface TaskStatusRequest {
+  state: TaskStatusDeclaration["state"] | "clear";
+  revision: number;
+  agentLaunchId: string;
+}
 
 export interface SessionStateTransition {
   state: SessionState;
@@ -271,7 +296,7 @@ export interface AvailableBacklogItem {
 export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
 
 interface WorkItemLifecycleBase extends WorkItemEventData {
-  autoComplete: boolean;
+  autoClose: boolean;
   createdAt: string;
 }
 
@@ -606,7 +631,7 @@ export interface TriggerSpawnBlockConfig {
 
 export interface TriggerSpawnConfig {
   blocks: TriggerSpawnBlockConfig[];
-  autoComplete?: boolean;
+  autoClose?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
 }
@@ -1296,6 +1321,8 @@ export interface SessionRecord {
   launchCommand: string;
   /** Opaque identity shared only by one agent launch and its process tree. */
   agentLaunchId?: string;
+  taskStatusRevision?: number;
+  taskStatus?: TaskStatusDeclaration;
   status: SessionStatus;
   /** "memory_shed" is written only by the critical memory shed's session stop. */
   stopReason?: "manual_pause" | "stale_timeout" | "memory_shed" | "token_budget" | "runtime_lost";
@@ -1496,6 +1523,8 @@ export interface SessionView extends Omit<
   | "prAlertTransfer"
   | "agentLaunchId"
   | "claudeStatusOwner"
+  | "taskStatusRevision"
+  | "taskStatus"
   | "triggerBirthKey"
   | "triggerBirthRequest"
   | "blockedTriggerNotices"
@@ -1565,6 +1594,8 @@ export type DashboardOmittedField =
   | "agentSessionId"
   | "agentLaunchId"
   | "claudeStatusOwner"
+  | "taskStatusRevision"
+  | "taskStatus"
   | "triggerBirthKey"
   | "triggerBirthRequest"
   | "blockedTriggerNotices"

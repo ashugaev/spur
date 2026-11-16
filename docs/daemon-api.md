@@ -70,7 +70,7 @@
 - `POST /sessions/:id/opened`
 - `POST /sessions/:id/pause`
 - `POST /sessions/:id/rate-limit/clear` — rejects MCP origin and caller-session header; optional `force`; `v2/src/server.ts`.
-- `POST /sessions/:id/complete` — optional correlation `operationId`, group `completedIds`/outcomes, lifecycle 409/503, agent `409 work_snapshot_required`; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
+- `POST /sessions/:id/complete` — closes session; optional correlation `operationId`, group `completedIds`/outcomes, lifecycle 409/503, agent `409 work_snapshot_required`; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/self-destruct` — `409 work_snapshot_required`
 - `POST /sessions/:id/kill`
 - `POST /sessions/:id/restore` — optional `operationId`; `restart` defaults false, replaces running terminal; settled receipt, lifecycle 409/503, 20-minute deadline 504, disconnect cancellation; `v2/src/server.ts`.
@@ -87,6 +87,8 @@
 - `GET /sessions/:id/auto-ping-suppressions` — `?all=1` adds `history`. See [auto-ping](commands.md#auto-ping)
 - `POST /sessions/:id/auto-ping-suppressions/mute` — `{handle, mode: until_change|for|forever, durationMs?, reason?}`; `400|403|404`. See [auto-ping](commands.md#auto-ping)
 - `POST /sessions/:id/auto-ping-suppressions/resume` — exactly one of `{handle}` or `{suppressionId}`; `400|403|404`. See [auto-ping](commands.md#auto-ping)
+- `GET /sessions/:id/task-status` — task revision and declaration; `v2/src/server.ts`.
+- `POST /sessions/:id/task-status` — agent declaration, `403` caller / `409 stale_task_status` or ToDo conflict; `v2/src/server.ts`, `v2/src/task-status.ts`.
 - `POST /sessions/:id/queue/remove` — `{"message": "<exact queued text>"}`. See [send, queue](commands.md#send-queue)
 - `POST /sessions/:id/queue/flush`
 - `POST /sessions/:id/wake`

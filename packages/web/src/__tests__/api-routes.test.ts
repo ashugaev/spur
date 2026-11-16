@@ -1618,7 +1618,23 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "Invalid close scope" });
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
     expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/complete describes an untyped proxy failure as closing", async () => {
+    mockedSpurRequest.mockRejectedValue("connection failed");
+    const response = await completeSession(
+      new NextRequest("http://localhost/api/sessions/api-a1/complete", { method: "POST" }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({ error: "Failed to close Spur session" });
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/complete",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({}) }),
+    );
   });
 
   it.each(["high", null, undefined])(

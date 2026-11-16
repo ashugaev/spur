@@ -21,7 +21,9 @@ INTERFACES
   Session variables: `env | grep '^SPUR_'`.
   Agent launch identity contract: `docs/commands.md#session-tools-and-environment`.
   Manual-wake response fields: `docs/daemon-api.md`.
+  Task outcomes, session-preserving completion: `docs/commands.md#todo-snapshot`.
   Automatic reminder limits: `docs/configuration.md#automatic-reminders`.
+  Trigger auto-close policy and deprecated config alias: `docs/configuration.md#field-reference`.
   Edit scheduled jobs through footer Cron viewer or MCP; config behavior: docs/configuration.md; operations: docs/daemon-api.md.
   Spur ToDo: ledger starts empty, no code path seeds an item; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses an agent's own completion, self-destruct, and handoff — `todo_ledger_empty`/`todo_open_work` (409); a human `complete`/`handoff` from the CLI or UI is never blocked. Contract: `docs/commands.md#todo-snapshot`.
   Work snapshots: `"$SPUR_SNAPSHOT_COMMAND" write --file <path|-> [--final]` stores full Markdown snapshot as next version; with `projects.<id>.snapshots.requireFinal`, agent complete/self-destruct need `--final` snapshot, handoff any snapshot, newer than last ToDo change — `work_snapshot_required` (409). Agent working over `projects.<id>.snapshots.freshnessMinutes` past latest snapshot gets snapshot request, ahead of ToDo reminders; `projects.<id>.snapshots.enabled: false` stops requests. Read any session's, archived too: `spur snapshot show|list|latest --link`; carries freshness, never wakes. Contract: `docs/commands.md#todo-snapshot`, `docs/snapshots.md`.

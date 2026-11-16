@@ -67,6 +67,19 @@ const onCompleteSession = vi.fn().mockResolvedValue(undefined);
 const onSessionAction = vi.fn().mockResolvedValue(undefined);
 
 describe("SessionRow actions menu", () => {
+  it("keeps completed tasks open and dispatches the existing close action", async () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "none" });
+    const session = makeSession({ state: "completed" });
+    openMenu(session);
+    expect(screen.getByRole("button", { name: "Open web terminal for api-a1" })).toBeEnabled();
+    const close = screen.getByRole("menuitem", { name: "Close Session" });
+    expect(close).toHaveAttribute(
+      "title",
+      "Stop the agent and services, delete artifacts, remove the worktree",
+    );
+    fireEvent.click(close);
+    await waitFor(() => expect(onSessionAction).toHaveBeenCalledWith(session, "complete"));
+  });
   beforeEach(() => {
     useSessionLinkPrInfoMock.mockReturnValue({ state: "none" });
     onSessionAction.mockReset();
@@ -89,7 +102,7 @@ describe("SessionRow actions menu", () => {
   it.each([
     [
       { status: "running", runtimeAlive: true },
-      ["Desk agent", "Handoff", "Pause", "Restart session", "Complete", "Kill"],
+      ["Desk agent", "Handoff", "Pause", "Restart session", "Close Session", "Kill"],
     ],
     [
       {
@@ -105,15 +118,15 @@ describe("SessionRow actions menu", () => {
           generation: 0,
         },
       },
-      ["Desk agent", "Handoff", "Pause", "Restart session", "Complete", "Kill"],
+      ["Desk agent", "Handoff", "Pause", "Restart session", "Close Session", "Kill"],
     ],
     [
       { status: "running", runtimeAlive: true, workspaceExists: false },
-      ["Pause", "Restart session", "Recover", "Complete", "Kill"],
+      ["Pause", "Restart session", "Recover", "Close Session", "Kill"],
     ],
     [
       { status: "stopped", state: "stopped", runtimeAlive: false },
-      ["Desk agent", "Handoff", "Restore", "Complete", "Kill"],
+      ["Desk agent", "Handoff", "Restore", "Close Session", "Kill"],
     ],
     [
       {
@@ -130,7 +143,7 @@ describe("SessionRow actions menu", () => {
           exhausted: true,
         },
       },
-      ["Desk agent", "Continue anyway", "Complete", "Kill"],
+      ["Desk agent", "Continue anyway", "Close Session", "Kill"],
     ],
     [
       { status: "completed", state: "stopped", runtimeAlive: false },
@@ -307,7 +320,7 @@ describe("SessionRow", () => {
     );
 
     expect(screen.getAllByRole("link")).toHaveLength(3);
-    expect(screen.getByRole("button", { name: "Mark api-a1 as done" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close session api-a1" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /WEBDEV-4617/i })).toHaveAttribute(
       "href",
       "https://jira.example.com/browse/WEBDEV-4617",
@@ -339,7 +352,7 @@ describe("SessionRow", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Mark api-a1 as done" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close session api-a1" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Merge PR for api-a1" })).not.toBeInTheDocument();
   });
 
@@ -370,7 +383,7 @@ describe("SessionRow", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Mark api-a1 as done" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close session api-a1" })).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Restore session api-a1" }),
     ).not.toBeInTheDocument();
@@ -869,7 +882,7 @@ describe("SessionRow", () => {
       fetchedAt: Date.now(),
     });
 
-    for (const state of ["working", "waiting", "stale", "stopped", "error"] as const) {
+    for (const state of ["working", "waiting", "completed", "stale", "stopped", "error"] as const) {
       const { unmount } = render(
         <SessionRow
           session={makeSession({ state, hasUnseenAttention: false })}
@@ -934,7 +947,7 @@ describe("SessionRow", () => {
       />,
     );
 
-    const doneButton = screen.getByRole("button", { name: "Mark api-a1 as done" });
+    const doneButton = screen.getByRole("button", { name: "Close session api-a1" });
     fireEvent.click(doneButton);
 
     expect(doneButton).toBeDisabled();
