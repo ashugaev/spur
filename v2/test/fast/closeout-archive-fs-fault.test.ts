@@ -13,6 +13,7 @@ const FAULT_DIR = "fault-root";
 const hooks = vi.hoisted(() => ({
   beforeOpen: null as null | { match: string; run: () => void },
   fakeSize: null as null | number,
+  procFails: false,
 }));
 
 function unknownDirent(name: string): NodeFs.Dirent {
@@ -41,6 +42,13 @@ vi.mock("node:fs", async (importOriginal) => {
       }
       return (actual.openSync as (...a: unknown[]) => number)(...args);
     }) as typeof NodeFs.openSync,
+    readlinkSync: ((...args: unknown[]) => {
+      const path = args[0];
+      if (hooks.procFails && typeof path === "string" && path.startsWith("/proc/self/fd/")) {
+        throw new Error("simulated missing /proc");
+      }
+      return (actual.readlinkSync as (...a: unknown[]) => unknown)(...args);
+    }) as typeof NodeFs.readlinkSync,
     fstatSync: ((...args: unknown[]) => {
       const stat = (actual.fstatSync as (...a: unknown[]) => NodeFs.Stats)(...args);
       if (hooks.fakeSize === null) return stat;
@@ -63,6 +71,7 @@ let base = "";
 afterEach(() => {
   hooks.beforeOpen = null;
   hooks.fakeSize = null;
+  hooks.procFails = false;
   rmSync(base, { recursive: true, force: true });
 });
 
@@ -161,6 +170,40 @@ describe("closeout archive with unknown dirent types", () => {
     expect(manifest.files).toEqual([]);
     expect(manifest.skipped).toEqual([
       { root: "artifacts", path: "f.txt", bytes: 11, reason: "max_bytes" },
+    ]);
+  });
+
+  it("without /proc, the dev/ino fallback copies an unmoved file", () => {
+    base = mkdtempSync(join(tmpdir(), "closeout-fault-"));
+    const root = join(base, "root");
+    mkdirSync(join(root, "sub"), { recursive: true });
+    writeFileSync(join(root, "sub", "f.txt"), "inside");
+    hooks.procFails = true;
+    const manifest = archive(root, ["artifacts:**"]);
+    expect(manifest.files.map((file) => file.path)).toEqual(["sub/f.txt"]);
+    expect(manifest.skipped).toEqual([]);
+  });
+
+  it("without /proc, the fallback rejects a swapped ancestor", () => {
+    base = mkdtempSync(join(tmpdir(), "closeout-fault-"));
+    const root = join(base, "root");
+    const outside = join(base, "outside");
+    mkdirSync(join(root, "sub"), { recursive: true });
+    mkdirSync(outside);
+    writeFileSync(join(root, "sub", "f.txt"), "inside");
+    writeFileSync(join(outside, "f.txt"), "secret");
+    hooks.procFails = true;
+    hooks.beforeOpen = {
+      match: "sub/f.txt",
+      run: () => {
+        renameSync(join(root, "sub"), join(root, "sub-moved"));
+        symlinkSync(outside, join(root, "sub"));
+      },
+    };
+    const manifest = archive(root, ["artifacts:sub/**"]);
+    expect(manifest.files).toEqual([]);
+    expect(manifest.skipped).toEqual([
+      { root: "artifacts", path: "sub/f.txt", bytes: 6, reason: "changed" },
     ]);
   });
 });

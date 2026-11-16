@@ -236,11 +236,11 @@ type BoundedRead =
 
 const READ_CHUNK_BYTES = 65536;
 
-/** True when the opened fd is the file at the expected canonical path (ancestors not swapped). */
-function fdIsAt(fd: number, source: string, expected: string, opened: Stats): boolean {
+/** True when the opened fd is the file at `source`, a canonical path (ancestors not swapped). */
+function fdIsAt(fd: number, source: string, opened: Stats): boolean {
   if (process.platform === "linux") {
     try {
-      return readlinkSync(`/proc/self/fd/${fd}`) === expected;
+      return readlinkSync(`/proc/self/fd/${fd}`) === source;
     } catch {
       // /proc unavailable: use the portable check below.
     }
@@ -248,7 +248,7 @@ function fdIsAt(fd: number, source: string, expected: string, opened: Stats): bo
   try {
     const at = lstatSync(source);
     return (
-      realpathSync(dirname(source)) === dirname(expected) &&
+      realpathSync(dirname(source)) === dirname(source) &&
       at.dev === opened.dev &&
       at.ino === opened.ino
     );
@@ -259,14 +259,14 @@ function fdIsAt(fd: number, source: string, expected: string, opened: Stats): bo
 
 /**
  * Opens without blocking (a FIFO would hang the daemon) or following the leaf, checks the fd
- * is the file at `expected`, and reads at most budget + 1 bytes.
+ * is the file at `source`, and reads at most budget + 1 bytes.
  */
-function readBounded(source: string, expected: string, budget: number): BoundedRead {
+function readBounded(source: string, budget: number): BoundedRead {
   const fd = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile()) return { kind: "skip", reason: "unreadable", bytes: stat.size };
-    if (!fdIsAt(fd, source, expected, stat)) {
+    if (!fdIsAt(fd, source, stat)) {
       return { kind: "skip", reason: "changed", bytes: stat.size };
     }
     if (stat.size > budget) return { kind: "skip", reason: "max_bytes", bytes: stat.size };
@@ -422,7 +422,7 @@ function buildArchive(
     const source = join(rootDir, ...candidate.path.split("/"));
     let read: BoundedRead;
     try {
-      read = readBounded(source, source, remaining);
+      read = readBounded(source, remaining);
     } catch {
       read = { kind: "skip", reason: "unreadable", bytes: fileSizeHint(source) };
     }
