@@ -259,6 +259,7 @@ import {
 } from "../../src/wake-schedule.js";
 import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as sessionSlotsModule from "../../src/session-slots.js";
+import type { DetachedSweepOutcome } from "../../src/agent-processes.js";
 import type * as metadataModule from "../../src/metadata.js";
 import type { InterfaceConsent } from "../../src/review-interface-consent.js";
 import type { TelegramPhoto } from "../../src/telegram-source-state.js";
@@ -83175,9 +83176,9 @@ describe("SessionService", () => {
               }),
             ],
           ]);
-          const [{ toolDirFor, tmuxServerPid }] = listDetachedSessionOwnersMock.mock.calls[0] ?? [];
-          expect(toolDirFor?.("api-1")).toBe(toolDir("api-1"));
-          expect(tmuxServerPid).toBe(4844);
+          const discovery = listDetachedSessionOwnersMock.mock.calls[0]?.[0];
+          expect(discovery?.toolDirFor("api-1")).toBe(toolDir("api-1"));
+          expect(discovery?.tmuxServerPid).toBe(4844);
         } finally {
           service.dispose();
         }
@@ -83196,7 +83197,7 @@ describe("SessionService", () => {
         }
       });
 
-      it.each(["running", "stopped", "errored", "waiting", "absent"] as const)(
+      it.each(["running", "stopped", "errored", "paused", "absent"] as const)(
         "periodic sweep spares non-terminal and unknown owners (%s)",
         async (status) => {
           const sessions = createSessionStore();
@@ -83303,10 +83304,10 @@ describe("SessionService", () => {
         }
       });
 
-      it.each([
+      it.each<[string, DetachedSweepOutcome, string]>([
         ["survivors", { status: "survivors", pids: [77], matched: 1 }, "survivors"],
         ["unavailable", { status: "unavailable" }, "capture_unavailable"],
-      ] as const)("owner %s repeats log once until clear", async (_label, outcome, suffix) => {
+      ])("owner %s repeats log once until clear", async (_label, outcome, suffix) => {
         const sessions = createSessionStore();
         sessions.set("api-1", record("api-1", "completed"));
         owners("api-1");
