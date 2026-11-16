@@ -540,7 +540,61 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
     "login_auth_account",
     "POST",
     "/auth-accounts/{accountId}/login",
-    "Start provider OAuth sign-in.",
+    "Start provider sign-in; Claude oauth, Codex device (default) or browser.",
+    {
+      body: body("StartAuthAccountLoginRequest", [
+        field(
+          "method",
+          '"oauth"|"device"|"browser"',
+          "Sign-in method; default oauth for Claude, device for Codex; other provider combinations: 400.",
+        ),
+      ]),
+      examples: [{ body: { method: "browser" } }],
+    },
+  ),
+  operation(
+    "set_auth_account_api_key",
+    "POST",
+    "/auth-accounts/{accountId}/api-key",
+    "Rename the account and sign in with a provider API key; saved only after a test request succeeds.",
+    {
+      body: body("SetAuthAccountApiKeyRequest", [
+        field("label", "string", "Non-blank display label.", true),
+        field("apiKey", "string", "Provider API key; never returned or logged.", true),
+      ]),
+      examples: [{ body: { label: "Work key", apiKey: "<api-key>" } }],
+    },
+  ),
+  operation(
+    "list_auth_alerts",
+    "GET",
+    "/auth-alerts",
+    "Broken managed-account and host sign-ins; one row per breakage.",
+  ),
+  operation(
+    "start_auth_terminal_login",
+    "POST",
+    "/auth-terminal-logins",
+    "Start a native CLI sign-in in a tmux terminal for an account or the host; a repeat for the same target restarts.",
+    {
+      body: body("StartAuthTerminalLoginRequest", [
+        field("accountId", "string", "Managed account; excludes host."),
+        field("host", '"claude"|"codex"', "Host login; excludes accountId."),
+      ]),
+      examples: [{ body: { accountId: "example-accountId" } }, { body: { host: "codex" } }],
+    },
+  ),
+  operation(
+    "get_auth_terminal_login",
+    "GET",
+    "/auth-terminal-logins/{id}",
+    "Read terminal sign-in status; 404 unknown id.",
+  ),
+  operation(
+    "stop_auth_terminal_login",
+    "DELETE",
+    "/auth-terminal-logins/{id}",
+    "Stop a terminal sign-in and delete its throwaway home.",
   ),
   operation(
     "get_auth_account_login",
