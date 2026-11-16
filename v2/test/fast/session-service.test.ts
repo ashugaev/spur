@@ -58658,7 +58658,7 @@ describe("SessionService", () => {
       await expectResourceWait(service, competing);
     });
 
-    it("serializes add-first against handoff before side effects", async () => {
+    it("moves only open items on handoff; completed items stay behind", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
       const source = sessionRecord({
@@ -58698,6 +58698,10 @@ describe("SessionService", () => {
       const successor = await service.readTodo("api-2");
       expect(successor.items.map((item) => [item.text, item.status])).toEqual([
         ["Late requested work", "open"],
+      ]);
+      expect((await service.readTodo(source.id)).items.map((item) => item.status)).toEqual([
+        "completed",
+        "cancelled",
       ]);
       service.dispose();
     });
@@ -58861,6 +58865,59 @@ describe("SessionService", () => {
         service.dispose();
       });
 
+      async function expectRolledBack(service: Awaited<ReturnType<typeof seedHandoff>>["service"]) {
+        const successor = await service.readTodo("api-2");
+        expect(successor.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        expect(successor.items[0]?.latestTransition?.reason).toMatch(
+          /failed; item stays open in api-1/,
+        );
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["open", "held"]);
+      }
+
+      it("rolls back successor copies when a launched successor is retained after a failure", async () => {
+        const { service } = await seedHandoff();
+        waitForTmuxReadyMock.mockRejectedValueOnce(new Error("agent never became ready"));
+
+        await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+          "agent never became ready",
+        );
+
+        await expectRolledBack(service);
+        service.dispose();
+      });
+
+      it("rolls back successor copies when the successor is killed while spawning", async () => {
+        const { sessions, service } = await seedHandoff();
+        waitForTmuxReadyMock.mockImplementationOnce(async () => {
+          const successor = sessions.get("api-2");
+          if (!successor) throw new Error("Expected successor placeholder");
+          sessions.set("api-2", {
+            ...successor,
+            status: "killed",
+            spawnReceipt: { version: 1, acceptedAt: "2026-03-18T10:00:00.000Z" },
+          });
+        });
+
+        await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow();
+
+        await expectRolledBack(service);
+        service.dispose();
+      });
+
+      it("rolls back successor copies when the spawn receipt is unavailable after spawn", async () => {
+        const { service } = await seedHandoff();
+        const internals = sessionServiceInternals(service);
+        vi.spyOn(internals.foregroundSpawnReceipts, "get").mockReturnValue(undefined);
+
+        await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+          /receipt unavailable for api-2/,
+        );
+
+        await expectRolledBack(service);
+        service.dispose();
+      });
+
       it("keeps successor copies when completing the source fails after the commit", async () => {
         const { service } = await seedHandoff();
         const internals = service as unknown as {
@@ -58946,22 +59003,29 @@ describe("SessionService", () => {
         service.dispose();
       });
 
-      it("agent hands off a stopped session with an empty ledger", async () => {
-        const { sessions, service } = await seedHandoff(
-          { status: "stopped", stopReason: "manual_pause" },
-          { items: false, requireFinal: true },
-        );
+      it.each([
+        ["stopped", { status: "stopped", stopReason: "manual_pause" }],
+        ["paused", { status: "paused" }],
+        ["server erroring", { status: "running", serverErrorAt: "2026-03-18T10:02:00.000Z" }],
+      ] as Array<[string, Partial<SessionRecord>]>)(
+        "agent hands off a %s session with an empty ledger",
+        async (_label, overrides) => {
+          const { sessions, service } = await seedHandoff(overrides, {
+            items: false,
+            requireFinal: true,
+          });
 
-        const response = await service.handoff(
-          "api-1",
-          { agent: "cursor" },
-          { todoActor: otherAgent },
-        );
+          const response = await service.handoff(
+            "api-1",
+            { agent: "cursor" },
+            { todoActor: otherAgent },
+          );
 
-        expect(response.id).toBe("api-2");
-        expect(sessions.get("api-1")?.status).toBe("completed");
-        service.dispose();
-      });
+          expect(response.id).toBe("api-2");
+          expect(sessions.get("api-1")?.status).toBe("completed");
+          service.dispose();
+        },
+      );
 
       it("agent hands off an errored session with an existing workspace", async () => {
         const { sessions, service } = await seedHandoff(
@@ -58977,6 +59041,10 @@ describe("SessionService", () => {
 
         expect(response.id).toBe("api-2");
         expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+        expect(deleteServiceInstancesForSessionMock).toHaveBeenCalledWith(
+          expect.anything(),
+          "api-1",
+        );
         expect(sessions.get("api-1")?.status).toBe("completed");
         service.dispose();
       });
@@ -59352,8 +59420,15 @@ describe("SessionService", () => {
         counter += 1;
         return `api-${counter}`;
       });
+      workspaceExistsMock.mockReturnValue(true);
+      await useRealTodoLedger();
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await service.mutateTodo(
+        "api-1",
+        { action: "add", text: "Chained work", reason: "Why" },
+        { kind: "agent", agent: "claude", sessionId: "api-1" },
+      );
 
       const first = await service.handoff("api-1", { agent: "claude" });
       expect(first.id).toBe("api-2");
@@ -59368,6 +59443,9 @@ describe("SessionService", () => {
       expect(secondPrompt).toContain("ORIGINAL USER TASK: build the export endpoint");
       expect(secondPrompt.split("Task handoff from").length - 1).toBe(1);
       expect(secondPrompt.split("You continue in the same workspace").length - 1).toBe(1);
+      expect(secondPrompt.split("Inherited ToDo (moved from").length - 1).toBe(1);
+      expect(secondPrompt).toContain("Inherited ToDo (moved from api-2;");
+      expect((await service.readTodo("api-3")).items.map((item) => item.status)).toEqual(["open"]);
       expect(sessions.get("api-3")?.originalTaskPrompt).toBe(
         "ORIGINAL USER TASK: build the export endpoint",
       );
