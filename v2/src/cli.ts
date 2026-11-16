@@ -786,19 +786,14 @@ function replaceListedSession(
   return sortSessionsForList(sessions.map((entry) => (entry.id === updated.id ? updated : entry)));
 }
 
-function postSessionAction(
+function postSessionAction<T extends SessionView = SessionView>(
   cliEntrypoint: string,
   sessionId: string,
   action: "pause" | "complete" | "kill" | "reopen" | "restore",
   configPath?: string,
   body: object = {},
-): Promise<CompleteSessionResult> {
-  return postJson<CompleteSessionResult>(
-    cliEntrypoint,
-    `/sessions/${sessionId}/${action}`,
-    body,
-    configPath,
-  );
+): Promise<T> {
+  return postJson<T>(cliEntrypoint, `/sessions/${sessionId}/${action}`, body, configPath);
 }
 
 function resolveAutoPingSessionId(explicitSession: string | undefined): string {
@@ -3940,7 +3935,14 @@ export function createProgram(cliEntrypoint: string): Command {
       await outputResult({
         json: Boolean(options.json),
         label: "closing session",
-        action: () => postSessionAction(cliEntrypoint, sessionId, "complete", configPath, body),
+        action: () =>
+          postSessionAction<CompleteSessionResult>(
+            cliEntrypoint,
+            sessionId,
+            "complete",
+            configPath,
+            body,
+          ),
         success: (session) => `Closed ${session.id}.`,
         render: (session) =>
           session.closeout

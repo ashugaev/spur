@@ -40199,6 +40199,44 @@ describe("SessionService", () => {
       expect(result.closeout).toEqual({ unverified: 2 });
     });
 
+    it("omits the summary when a reopened session completes with closeout disabled", async () => {
+      vi.mocked(writeCloseoutArchive).mockImplementationOnce((input) => {
+        const manifest = {
+          version: 1,
+          sessionId: input.sessionId,
+          project: input.project,
+          completedAt: new Date().toISOString(),
+          links: [],
+          snapshotVersion: null,
+          headSha: null,
+          files: [],
+          skipped: [
+            { root: "work" as const, path: "a.md", bytes: 1, reason: "unverified" as const },
+          ],
+          missingRoots: [],
+        };
+        const dir = join(input.sessionDir, "closeout", "1");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
+        return manifest;
+      });
+      const { service, result } = await completeWith(ownWorktreeSession());
+      expect(result.closeout).toEqual({ unverified: 1 });
+
+      const internals = service as unknown as {
+        config: { projects: Record<string, { closeout?: { enabled: boolean } }> };
+      };
+      (internals.config.projects["api"] as { closeout?: { enabled: boolean } }).closeout = {
+        enabled: false,
+      };
+      const reopened = readSessionMock(TEST_DATA_DIR, "api-1") as SessionRecord;
+      writeSessionMock(TEST_DATA_DIR, { ...reopened, status: "running" });
+      vi.setSystemTime(Date.now() + 1000);
+      const again = await service.complete("api-1");
+      expect(again.closeout).toBeUndefined();
+      expect(existsSync(join(TEST_DATA_DIR, "sessions", "api-1", "closeout", "2"))).toBe(false);
+    });
+
     it("omits the closeout summary when nothing is unverified", async () => {
       const { result } = await completeWith(ownWorktreeSession());
       expect(result.closeout).toBeUndefined();
