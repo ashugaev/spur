@@ -194,8 +194,9 @@ import {
   type HandoffSessionRequest,
   type TodoMutationRequest,
   type TodoProjection,
-  type WorkSnapshot,
+  type LatestSnapshotEntry,
   type WorkSnapshotMeta,
+  type WorkSnapshotRead,
   type WriteSnapshotRequest,
 } from "./types.js";
 import { getVersion } from "./version.js";
@@ -4036,7 +4037,7 @@ export function createProgram(cliEntrypoint: string): Command {
 
   const snapshotCommand = program
     .command("snapshot")
-    .description("Write, list or show a session's work snapshots.");
+    .description("Write, list, show or find work snapshots by link.");
   const snapshotsPath = (sessionId: string): string =>
     `/sessions/${encodeURIComponent(sessionId)}/snapshots`;
   snapshotCommand
@@ -4061,17 +4062,36 @@ export function createProgram(cliEntrypoint: string): Command {
           `Wrote snapshot ${meta.version} for ${meta.sessionId}${meta.final ? " (final)" : ""}.`,
       });
     });
+  const snapshotFreshnessLine = (snapshot: WorkSnapshotRead): string => {
+    const { freshness } = snapshot;
+    return `v${snapshot.version} ${snapshot.at} age ${freshness.ageSeconds}s stale ${freshness.stale ? "yes" : "no"} commits ${freshness.commitsSince ?? "?"} activity ${freshness.activitySince ?? "none"}`;
+  };
+  const snapshotDoneLines = (done: WorkSnapshotRead["done"]): string[] =>
+    done === undefined
+      ? []
+      : done === null
+        ? ["done: unreadable ledger"]
+        : done.map((item) => `done: ${item.text}`);
   snapshotCommand
     .command("list")
     .argument("<sessionId>", "Session id")
+    .option("--limit <n>", "Maximum versions (1..100); default all")
+    .option("--before <version>", "Only versions below this one")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const query = new URLSearchParams({ order: "desc" });
+      if (options.limit !== undefined) query.set("limit", options.limit);
+      if (options.before !== undefined) query.set("before", options.before);
       await outputResult({
         json: Boolean(options.json),
         label: "loading snapshots",
         action: () =>
-          getJson<WorkSnapshotMeta[]>(cliEntrypoint, snapshotsPath(sessionId), configPath),
+          getJson<WorkSnapshotMeta[]>(
+            cliEntrypoint,
+            `${snapshotsPath(sessionId)}?${query.toString()}`,
+            configPath,
+          ),
         render: (snapshots) =>
           snapshots
             .map(
@@ -4085,7 +4105,8 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("show")
     .argument("<sessionId>", "Session id")
     .argument("[version]", "Snapshot version; defaults to the latest")
-    .option("--json", "Print the full snapshot as JSON")
+    .option("--include-done", "List the completed ToDo items")
+    .option("--json", "Print the full snapshot with freshness as JSON")
     .action(async (sessionId: string, versionArg: string | undefined, options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       const version = versionArg?.trim() ?? "latest";
@@ -4096,12 +4117,53 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "loading snapshot",
         action: () =>
-          getJson<WorkSnapshot>(
+          getJson<WorkSnapshotRead>(
             cliEntrypoint,
-            `${snapshotsPath(sessionId)}/${version}`,
+            `${snapshotsPath(sessionId)}/${version}${options.includeDone ? "?includeDone=1" : ""}`,
             configPath,
           ),
-        render: (snapshot) => snapshot.content,
+        // Freshness goes to stderr so stdout stays the stored content.
+        render: (snapshot) => {
+          writeStderr(
+            [snapshotFreshnessLine(snapshot), ...snapshotDoneLines(snapshot.done)].join("\n"),
+          );
+          return snapshot.content;
+        },
+      });
+    });
+  snapshotCommand
+    .command("latest")
+    .description("Latest snapshot of every session whose links match.")
+    .option("--link <label[=url]>", "Session link; repeat to require all", collectOptionValue, [])
+    .option("--include-done", "List the completed ToDo items")
+    .option("--json", "Print the entries as JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      if (options.link.length === 0) throw new Error("snapshot latest requires --link");
+      const query = new URLSearchParams();
+      for (const link of options.link) query.append("link", link);
+      if (options.includeDone) query.set("includeDone", "1");
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading snapshots",
+        action: () =>
+          getJson<LatestSnapshotEntry[]>(
+            cliEntrypoint,
+            `/snapshots/latest?${query.toString()}`,
+            configPath,
+          ),
+        render: (entries) =>
+          entries
+            .map((entry) =>
+              [
+                `## ${entry.sessionId} (${entry.status}, ${entry.state ?? "-"})`,
+                snapshotFreshnessLine(entry.snapshot),
+                ...snapshotDoneLines(entry.snapshot.done),
+                "",
+                entry.snapshot.content,
+              ].join("\n"),
+            )
+            .join("\n"),
       });
     });
 

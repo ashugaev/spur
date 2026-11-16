@@ -1956,6 +1956,31 @@ export interface WorkSnapshot extends WorkSnapshotMeta {
   content: string;
 }
 
+export interface WorkSnapshotFreshness {
+  /** Whole seconds since the snapshot, never negative. */
+  ageSeconds: number;
+  /** ISO instant of the agent's first own work after `at`; null when none. */
+  activitySince: string | null;
+  /** Commits on HEAD after the snapshot's headSha; null when not countable. */
+  commitsSince: number | null;
+  /** The agent worked more than freshnessMinutes after `at`. */
+  stale: boolean;
+}
+
+export interface WorkSnapshotRead extends WorkSnapshot {
+  freshness: WorkSnapshotFreshness;
+  /** Completed ToDo items; present only when requested. Null: ledger unreadable. */
+  done?: TodoItemProjection[] | null;
+}
+
+export interface LatestSnapshotEntry {
+  sessionId: string;
+  status: SessionStatus;
+  /** Last observed state, not re-checked; null when never observed. */
+  state: SessionState | null;
+  snapshot: WorkSnapshotRead;
+}
+
 export interface WriteSnapshotRequest {
   content: string;
   final?: boolean;

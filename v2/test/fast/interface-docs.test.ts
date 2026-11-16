@@ -33,6 +33,7 @@ describe("published interface contracts", () => {
       ]);
     expect(commands).toContain("SPUR_SNAPSHOT_COMMAND");
     expect(commands).toContain("spur snapshot write");
+    expect(commands).toContain("latest --link");
     expect(snapshots).toContain("spur snapshot write");
     expect(snapshots).toContain("freshnessMinutes");
     expect(readme).toContain("docs/snapshots.md");
@@ -47,6 +48,7 @@ describe("published interface contracts", () => {
       "GET /sessions/:id/snapshots",
       "POST /sessions/:id/snapshots",
       "GET /sessions/:id/snapshots/:version",
+      "GET /snapshots/latest",
     ])
       expect(daemonApi).toContain(`\`${route}\``);
     expect(daemonApi).toContain("work_snapshot_required");

@@ -1,7 +1,5 @@
 # Daemon HTTP API
 
-> Scope: route names only, one method + full path per line, every line `git grep`-able verbatim. Payload/status-code contracts: `v2/src/server.ts`. CLI usage: [commands.md](commands.md). Default `127.0.0.1:4310`.
-
 - `GET /info` — `lifecycleInstanceId`, runtime `buildId`: process/build identity; `v2/src/session-lifecycle.ts`, `v2/src/build-identity.ts`.
 - `GET /headroom`
 - `GET /usage` — quota windows per Claude account and Codex, per-source error entries, token totals today/7d/30d; provider request timeout 5s; MCP `get_usage`; `v2/src/usage-report.ts`.
@@ -69,9 +67,10 @@
 - `POST /sessions/:id/switch-auth` — 404 unless `authRotation.switchAuth: true`
 - `GET /sessions/:id/todo`
 - `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo-snapshot)
-- `GET /sessions/:id/snapshots` — metadata, ascending by version; `404|500 snapshot_corrupt`; `v2/src/snapshots.ts`
+- `GET /sessions/:id/snapshots` — metadata; `order=asc|desc` (default asc), `limit` 1..100, exclusive `before`/`after` versions; archived too; `400 invalid_snapshot_request|404|500 snapshot_corrupt`; `v2/src/snapshots.ts`
 - `POST /sessions/:id/snapshots` — `{content, final?}`; caller header, when set, must equal `:id`; `400|404|409 snapshot_conflict|413 snapshot_too_large`. See [snapshot](commands.md#todo-snapshot)
-- `GET /sessions/:id/snapshots/:version` — positive integer or `latest`; `400|404|500 snapshot_corrupt`
+- `GET /sessions/:id/snapshots/:version` — positive integer or `latest`; adds `freshness`; `includeDone=1` adds `done`; archived too, no wake; `400|404|500 snapshot_corrupt|500 todo_ledger_corrupt`. See [snapshots](snapshots.md#read)
+- `GET /snapshots/latest` — repeatable `link=label[=url]` (required, AND), `includeDone=1`; per matching session incl. completed, archived; `400 invalid_snapshot_request`, `500 snapshot_corrupt`. See [snapshots](snapshots.md#read)
 - `GET /sessions/:id/auto-ping-suppressions` — `?all=1` adds `history`. See [auto-ping](commands.md#auto-ping)
 - `POST /sessions/:id/auto-ping-suppressions/mute` — `{handle, mode: until_change|for|forever, durationMs?, reason?}`; `400|403|404`. See [auto-ping](commands.md#auto-ping)
 - `POST /sessions/:id/auto-ping-suppressions/resume` — exactly one of `{handle}` or `{suppressionId}`; `400|403|404`. See [auto-ping](commands.md#auto-ping)
