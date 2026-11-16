@@ -907,6 +907,7 @@ export interface ProjectConfig {
   tokenBudgetWarnOnly?: boolean;
   staleAfterMinutes?: number;
   snapshots?: ProjectSnapshotsConfig;
+  closeout?: ProjectCloseoutConfig;
 }
 
 export interface ProjectSnapshotsConfig {
@@ -914,6 +915,40 @@ export interface ProjectSnapshotsConfig {
   maxBytes?: number;
   requireFinal?: boolean;
   freshnessMinutes?: number;
+}
+
+export type CloseoutRoot = "artifacts" | "work" | "workspace";
+
+export interface ProjectCloseoutConfig {
+  enabled?: boolean;
+  include?: string[];
+  maxBytes?: number;
+  retentionDays?: number;
+}
+
+export interface CloseoutManifest {
+  sessionId: string;
+  project: string;
+  completedAt: string;
+  links: SessionLink[];
+  snapshotVersion: number | null;
+  headSha: string | null;
+  files: { root: CloseoutRoot; path: string; bytes: number; sha256: string }[];
+  skipped: {
+    root: CloseoutRoot;
+    path: string;
+    bytes: number;
+    reason: "max_bytes" | "unreadable";
+  }[];
+  missingRoots: CloseoutRoot[];
+  error?: string;
+  expiredAt?: string;
+}
+
+export interface CloseoutEntry {
+  sessionId: string;
+  status: SessionStatus;
+  manifest: CloseoutManifest;
 }
 
 export type ProviderReasoningEffort =
