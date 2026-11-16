@@ -1,7 +1,9 @@
 // Faked node:fs readdirSync result: a Dirent whose is*() are all false (DT_UNKNOWN), which this
 // host's filesystem cannot produce on demand. Matched by directory name; other calls pass through.
 import type * as NodeFs from "node:fs";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -143,21 +145,19 @@ describe("closeout archive with unknown dirent types", () => {
 
   it("does not hang on a file replaced by a FIFO before open", () => {
     base = mkdtempSync(join(tmpdir(), "closeout-fault-"));
-    const root = join(base, "root");
-    mkdirSync(root);
-    writeFileSync(join(root, "f.txt"), "data");
-    hooks.beforeOpen = {
-      match: "f.txt",
-      run: () => {
-        rmSync(join(root, "f.txt"));
-        execFileSync("mkfifo", [join(root, "f.txt")]);
-      },
-    };
-    const manifest = archive(root, ["artifacts:**"]);
-    expect(manifest.files).toEqual([]);
-    expect(manifest.skipped).toEqual([
-      { root: "artifacts", path: "f.txt", bytes: 0, reason: "unreadable" },
-    ]);
+    const require = createRequire(new URL("../../../packages/web/package.json", import.meta.url));
+    const probe = fileURLToPath(new URL("../fixtures/closeout-fifo-probe.ts", import.meta.url));
+    // Parent-enforced timeout: a blocking open would hang a same-process sync archive for good.
+    const result = spawnSync(process.execPath, ["--import", require.resolve("tsx"), probe, base], {
+      encoding: "utf8",
+      timeout: 20_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      files: [],
+      skipped: [{ root: "artifacts", path: "f.txt", bytes: 0, reason: "unreadable" }],
+    });
   });
 
   it("skips a file that grew past the budget after its size was read", () => {
@@ -173,37 +173,16 @@ describe("closeout archive with unknown dirent types", () => {
     ]);
   });
 
-  it("without /proc, the dev/ino fallback copies an unmoved file", () => {
+  it("without /proc, files are listed as unverified and never read", () => {
     base = mkdtempSync(join(tmpdir(), "closeout-fault-"));
     const root = join(base, "root");
     mkdirSync(join(root, "sub"), { recursive: true });
     writeFileSync(join(root, "sub", "f.txt"), "inside");
     hooks.procFails = true;
     const manifest = archive(root, ["artifacts:**"]);
-    expect(manifest.files.map((file) => file.path)).toEqual(["sub/f.txt"]);
-    expect(manifest.skipped).toEqual([]);
-  });
-
-  it("without /proc, the fallback rejects a swapped ancestor", () => {
-    base = mkdtempSync(join(tmpdir(), "closeout-fault-"));
-    const root = join(base, "root");
-    const outside = join(base, "outside");
-    mkdirSync(join(root, "sub"), { recursive: true });
-    mkdirSync(outside);
-    writeFileSync(join(root, "sub", "f.txt"), "inside");
-    writeFileSync(join(outside, "f.txt"), "secret");
-    hooks.procFails = true;
-    hooks.beforeOpen = {
-      match: "sub/f.txt",
-      run: () => {
-        renameSync(join(root, "sub"), join(root, "sub-moved"));
-        symlinkSync(outside, join(root, "sub"));
-      },
-    };
-    const manifest = archive(root, ["artifacts:sub/**"]);
     expect(manifest.files).toEqual([]);
     expect(manifest.skipped).toEqual([
-      { root: "artifacts", path: "sub/f.txt", bytes: 6, reason: "changed" },
+      { root: "artifacts", path: "sub/f.txt", bytes: 6, reason: "unverified" },
     ]);
   });
 });

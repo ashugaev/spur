@@ -179,6 +179,25 @@ describe("closeout archive", () => {
     expect(second.files).toEqual([]);
   });
 
+  it("resolves work only through a validated artifacts root", async () => {
+    const other = join(base, "other-session-artifacts");
+    put(join(other, ".spur-work", "secret.md"), "s");
+    put(join(other, "pub.txt"), "p");
+    const linked = join(base, "linked-artifacts");
+    symlinkSync(other, linked);
+    const viaLink = await write({ roots: { artifacts: linked, work: join(linked, ".spur-work") } });
+    expect(viaLink.files).toEqual([]);
+    expect(viaLink.missingRoots).toEqual(["artifacts", "work"]);
+
+    const real = join(base, "real-artifacts");
+    put(join(real, "a.txt"), "a");
+    mkdirSync(real, { recursive: true });
+    symlinkSync(join(other, ".spur-work"), join(real, ".spur-work"));
+    const linkedWork = await write({ roots: { artifacts: real, work: join(real, ".spur-work") } });
+    expect(paths(linkedWork)).toEqual(["artifacts/a.txt"]);
+    expect(linkedWork.missingRoots).toEqual(["work"]);
+  });
+
   it("lists only named roots as missing", async () => {
     expect((await write()).missingRoots).toEqual([]);
     expect((await write({ include: ["workspace:docs/**"] })).missingRoots).toEqual(["workspace"]);

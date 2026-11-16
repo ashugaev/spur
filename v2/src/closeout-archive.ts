@@ -10,7 +10,6 @@ import {
   openSync,
   readSync,
   readlinkSync,
-  type Stats,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -18,7 +17,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, matchesGlob, sep } from "node:path";
+import { dirname, join, matchesGlob, relative, sep } from "node:path";
 import { AGENT_HISTORY_ARTIFACT_PREFIX } from "./agent-history-delta.js";
 import type {
   CloseoutManifest,
@@ -149,6 +148,30 @@ function realRoot(root: string | null): string | null {
   }
 }
 
+/**
+ * A root nested in another root (work inside artifacts) resolves only through the parent's
+ * validated real path, so a symlinked parent never lends its target to the child.
+ */
+function nestedRoot(
+  parentRaw: string | null,
+  parentReal: string | null,
+  child: string | null,
+): string | null {
+  if (child === null) return null;
+  if (parentRaw === null || !child.startsWith(parentRaw + sep)) return realRoot(child);
+  if (parentReal === null) return null;
+  const segments = relative(parentRaw, child).split(sep);
+  try {
+    for (let depth = 1; depth <= segments.length; depth += 1) {
+      const stat = lstatSync(join(parentReal, ...segments.slice(0, depth)));
+      if (stat.isSymbolicLink() || !stat.isDirectory()) return null;
+    }
+  } catch {
+    return null;
+  }
+  return join(parentReal, ...segments);
+}
+
 /** Carries what the walk collected before the entry budget ran out. */
 class WalkBudgetError extends Error {
   constructor(readonly found: Candidate[]) {
@@ -232,28 +255,20 @@ function isForeignOrExcludedCapture(candidate: Candidate, sessionId: string): bo
 
 type BoundedRead =
   | { kind: "ok"; data: Buffer }
-  | { kind: "skip"; reason: "max_bytes" | "unreadable" | "changed"; bytes: number };
+  | { kind: "skip"; reason: "max_bytes" | "unreadable" | "changed" | "unverified"; bytes: number };
 
 const READ_CHUNK_BYTES = 65536;
 
-/** True when the opened fd is the file at `source`, a canonical path (ancestors not swapped). */
-function fdIsAt(fd: number, source: string, opened: Stats): boolean {
-  if (process.platform === "linux") {
-    try {
-      return readlinkSync(`/proc/self/fd/${fd}`) === source;
-    } catch {
-      // /proc unavailable: use the portable check below.
-    }
-  }
+/**
+ * "ok" when the opened fd is the file at `source` (a canonical path, so no ancestor was swapped),
+ * "changed" when it is elsewhere, "unverified" when the platform cannot say (no /proc).
+ */
+function verifyFd(fd: number, source: string): "ok" | "changed" | "unverified" {
+  if (process.platform !== "linux") return "unverified";
   try {
-    const at = lstatSync(source);
-    return (
-      realpathSync(dirname(source)) === dirname(source) &&
-      at.dev === opened.dev &&
-      at.ino === opened.ino
-    );
+    return readlinkSync(`/proc/self/fd/${fd}`) === source ? "ok" : "changed";
   } catch {
-    return false;
+    return "unverified";
   }
 }
 
@@ -266,9 +281,8 @@ function readBounded(source: string, budget: number): BoundedRead {
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile()) return { kind: "skip", reason: "unreadable", bytes: stat.size };
-    if (!fdIsAt(fd, source, stat)) {
-      return { kind: "skip", reason: "changed", bytes: stat.size };
-    }
+    const verdict = verifyFd(fd, source);
+    if (verdict !== "ok") return { kind: "skip", reason: verdict, bytes: stat.size };
     if (stat.size > budget) return { kind: "skip", reason: "max_bytes", bytes: stat.size };
     const chunks: Buffer[] = [];
     let total = 0;
@@ -379,7 +393,9 @@ function buildArchive(
   problems: string[],
 ): void {
   const roots = {} as Record<CloseoutRoot, string | null>;
-  for (const root of CLOSEOUT_ROOTS) roots[root] = realRoot(input.roots[root]);
+  roots.artifacts = realRoot(input.roots.artifacts);
+  roots.work = nestedRoot(input.roots.artifacts, roots.artifacts, input.roots.work);
+  roots.workspace = realRoot(input.roots.workspace);
   const patterns = input.include.map(parsePattern);
   const named = new Set(patterns.map((pattern) => pattern.root));
   manifest.missingRoots = CLOSEOUT_ROOTS.filter((root) => named.has(root) && roots[root] === null);
