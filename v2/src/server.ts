@@ -165,6 +165,8 @@ import {
   TodoOpenWorkError,
   TodoTransitionConflictError,
 } from "./todo.js";
+import { CloseoutCorruptError } from "./closeout-archive.js";
+import { parseArtifactRelativePath } from "./session-artifacts.js";
 import {
   InvalidSnapshotRequestError,
   SnapshotConflictError,
@@ -2510,6 +2512,66 @@ export async function startServer(
         return;
       }
 
+      const closeoutMatch = path.match(/^\/sessions\/([^/]+)\/closeout$/);
+      if (method === "GET" && closeoutMatch?.[1]) {
+        sendJson(response, 200, service.readCloseout(decodeURIComponent(closeoutMatch[1])));
+        return;
+      }
+
+      const closeoutFileMatch = path.match(/^\/sessions\/([^/]+)\/closeout\/files\/(.+)$/);
+      if (method === "GET" && closeoutFileMatch?.[1] && closeoutFileMatch[2]) {
+        let sessionId: string;
+        let relativePath: string | null;
+        try {
+          sessionId = decodeURIComponent(closeoutFileMatch[1]);
+          relativePath = parseArtifactRelativePath(
+            closeoutFileMatch[2]
+              .split("/")
+              .map((segment) => decodeURIComponent(segment))
+              .join("/"),
+          );
+        } catch {
+          sendError(response, 404, `Closeout file not found: ${closeoutFileMatch[2]}`);
+          return;
+        }
+        if (relativePath === null) {
+          sendError(response, 404, `Closeout file not found: ${closeoutFileMatch[2]}`);
+          return;
+        }
+        const file = service.readCloseoutFile(sessionId, relativePath);
+        response.writeHead(200, {
+          "content-type": "application/octet-stream",
+          "content-length": String(file.size),
+          "content-disposition": `attachment; filename="${encodeURIComponent(basename(file.name))}"`,
+          "x-content-type-options": "nosniff",
+          "cache-control": "no-store",
+        });
+        const stream = createReadStream(file.path);
+        stream.on("error", () => {
+          if (!response.headersSent) {
+            sendError(response, 500, "Failed to read closeout file");
+          } else {
+            response.destroy();
+          }
+        });
+        stream.pipe(response);
+        return;
+      }
+
+      if (method === "GET" && path === "/closeouts") {
+        let links: SessionLinkFilter[];
+        try {
+          links = parseSessionLinkFilters(url.searchParams.getAll("link"));
+        } catch (parseError) {
+          throw new InvalidSnapshotRequestError(
+            parseError instanceof Error ? parseError.message : "Invalid link",
+          );
+        }
+        if (links.length === 0) throw new InvalidSnapshotRequestError("link is required");
+        sendJson(response, 200, service.closeoutsByLink(links));
+        return;
+      }
+
       if (method === "GET" && path === "/snapshots/latest") {
         let links: SessionLinkFilter[];
         try {
@@ -3195,6 +3257,14 @@ export async function startServer(
             actualBytes: error.actualBytes,
             error: error.message,
           },
+        });
+        return;
+      }
+      if (error instanceof CloseoutCorruptError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: { code: error.code, sessionId: error.sessionId, error: error.message },
         });
         return;
       }

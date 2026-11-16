@@ -9,6 +9,14 @@ import {
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { getBuildId } from "./build-identity.js";
 import {
+  closeoutDirAt,
+  closeoutSettings,
+  expireCloseout,
+  readCloseoutManifest,
+  resolveCloseoutFile,
+  writeCloseoutArchive,
+} from "./closeout-archive.js";
+import {
   consentPolicy,
   proposeConsent,
   presentConsent,
@@ -378,6 +386,8 @@ import {
   isImageArtifactPath,
   listSessionArtifacts,
   readSessionArtifact,
+  SESSION_WORK_DIR,
+  sessionArtifactsDir,
   setSessionArtifactOrigin,
   setSessionArtifactUserAdded,
   type SessionArtifactFile,
@@ -615,7 +625,10 @@ import {
   type TodoMutationRequest,
   type TodoProjection,
   type LatestSnapshotEntry,
+  type SessionLink,
   type SessionLinkFilter,
+  type CloseoutEntry,
+  type CloseoutManifest,
   type TodoItemProjection,
   type WorkSnapshot,
   type WorkSnapshotFreshness,
@@ -919,6 +932,7 @@ const REAP_INTERVAL_MS = 5 * 60 * 1000;
 // this.config on every tick, so a config-only reload takes effect without a
 // daemon restart).
 const SESSION_GC_TICK_MS = 5 * 60_000;
+const CLOSEOUT_RETENTION_INTERVAL_MS = 60 * 60_000;
 const TELEGRAM_TOPIC_GC_INTERVAL_MS = 24 * 60 * 60_000;
 const TELEGRAM_TOPIC_GC_MAX_SESSIONS = 20;
 const TELEGRAM_TOPIC_GC_MAX_FAILED_SWEEPS = 3;
@@ -4033,6 +4047,7 @@ export class SessionService {
   private lastDiskBudgetSweepAt = Date.now();
   // Same construction-time seed and same reason as lastSessionGcSweepAt.
   private lastArtifactRetentionSweepAt = Date.now();
+  private lastCloseoutRetentionSweepAt = Date.now();
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
   private scheduledWakeMonitorRunning = false;
   private readonly scheduledWakeClaims = new Map<string, ScheduledWakeClaim>();
@@ -8858,6 +8873,7 @@ export class SessionService {
       void this.runSessionGcSweep();
       void this.runDiskBudgetSweep();
       this.runArtifactRetentionSweep();
+      this.runCloseoutRetentionSweep();
       void this.runTelegramTopicGcSweep();
     }, SESSION_GC_TICK_MS);
     this.sessionGcTimer.unref();
@@ -20594,19 +20610,191 @@ export class SessionService {
     request: CompleteSessionRequest = {},
     options?: { retainInList?: boolean; todoActor?: TodoActor },
   ): Promise<SessionView> {
+    const closeoutHeadSha = await this.readCloseoutHead(sessionId);
     return this.runLifecycle("complete", [sessionId], request.operationId, () =>
       this.withWorkspaceLifecycleLocks(sessionId, () =>
-        this.applyManualStatusLocked(sessionId, "completed", request, options),
+        this.applyManualStatusLocked(sessionId, "completed", request, {
+          ...options,
+          closeoutHeadSha,
+        }),
       ),
     );
   }
 
   async readTodo(sessionId: string): Promise<TodoProjection> {
+    if (
+      !readSession(this.config.dataDir, sessionId) &&
+      readArchivedSession(this.config.dataDir, sessionId)
+    ) {
+      const archived = readTodoIfPresent(this.config.dataDir, sessionId);
+      if (!archived) {
+        throw new SessionResourceNotFoundError(`Session ${sessionId} has no ToDo ledger`);
+      }
+      return archived;
+    }
     return this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const session = readSession(this.config.dataDir, sessionId);
       if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       return ensureTodoLedger(this.config.dataDir, session);
     });
+  }
+
+  // Own worktree only: a worktree:false record points at the shared main checkout. Read outside
+  // the lifecycle lock, like writeSnapshot: git timeouts must not block complete.
+  private async readCloseoutHead(sessionId: string): Promise<string | null> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session || !this.closeoutOwnWorktree(session)) return null;
+    if (!closeoutSettings(this.config.projects[session.project]).enabled) return null;
+    return (await readWorktreeHead(session.worktreePath)).headSha;
+  }
+
+  private closeoutOwnWorktree(session: SessionRecord): boolean {
+    return session.worktree && session.worktreePath.trim().length > 0;
+  }
+
+  // Never throws: complete must not fail or change result because the archive failed.
+  private async archiveCloseout(
+    session: SessionRecord,
+    links: SessionLink[],
+    headSha: string | null | undefined,
+  ): Promise<void> {
+    try {
+      const settings = closeoutSettings(this.resolveProjectForSession(session));
+      if (!settings.enabled) return;
+      const artifacts = sessionArtifactsDir(this.config.dataDir, workspaceIdOf(session));
+      const manifest = await writeCloseoutArchive({
+        sessionDir: join(this.config.dataDir, "sessions", session.id),
+        sessionId: session.id,
+        project: session.project,
+        completedAt: nowIso(),
+        links,
+        snapshotVersion:
+          readSnapshotVersion(this.config.dataDir, session, "latest", "live")?.version ?? null,
+        headSha: headSha ?? null,
+        roots: {
+          artifacts,
+          work: join(artifacts, SESSION_WORK_DIR),
+          workspace: this.closeoutOwnWorktree(session) ? session.worktreePath : null,
+        },
+        include: settings.include,
+        maxBytes: settings.maxBytes,
+      });
+      if (manifest.error) this.logCloseoutArchiveFailure(session, manifest.error);
+    } catch (error) {
+      this.logCloseoutArchiveFailure(
+        session,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  private logCloseoutArchiveFailure(session: SessionRecord, error: string): void {
+    this.logEvent("session.closeout_archive.failed", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Closeout archive failed for ${session.id}: ${error}`,
+      details: { error },
+    });
+  }
+
+  readCloseout(sessionId: string): CloseoutManifest {
+    const { session, location } = this.readSnapshotOwner(sessionId);
+    const manifest = readCloseoutManifest(
+      closeoutDirAt(this.config.dataDir, session, location),
+      sessionId,
+    );
+    if (!manifest) {
+      throw new SessionResourceNotFoundError(`Session ${sessionId} has no closeout archive`);
+    }
+    return manifest;
+  }
+
+  readCloseoutFile(
+    sessionId: string,
+    rootAndPath: string,
+  ): { path: string; size: number; name: string } {
+    const { session, location } = this.readSnapshotOwner(sessionId);
+    const file = resolveCloseoutFile(
+      closeoutDirAt(this.config.dataDir, session, location),
+      rootAndPath,
+    );
+    if (!file) {
+      throw new SessionResourceNotFoundError(
+        `Closeout file not found for ${sessionId}: ${rootAndPath}`,
+      );
+    }
+    return file;
+  }
+
+  /** One entry per session matching every link that has an archive, newest first. */
+  closeoutsByLink(links: readonly SessionLinkFilter[]): CloseoutEntry[] {
+    const candidates: { session: SessionRecord; location: SnapshotLocation }[] = [
+      ...listSessions(this.config.dataDir).map((session) => ({
+        session,
+        location: "live" as const,
+      })),
+      ...listArchivedSessions(this.config.dataDir, (project, id) =>
+        existsSync(closeoutDirAt(this.config.dataDir, { id, project }, "archived")),
+      ).map((session) => ({ session, location: "archived" as const })),
+    ];
+    const entries: CloseoutEntry[] = [];
+    for (const { session, location } of candidates) {
+      if (!matchesSessionLinks(this.displaySlotsForSession(session)?.links ?? [], links)) continue;
+      const manifest = readCloseoutManifest(
+        closeoutDirAt(this.config.dataDir, session, location),
+        session.id,
+      );
+      if (manifest) entries.push({ sessionId: session.id, status: session.status, manifest });
+    }
+    return entries.sort(
+      (a, b) => Date.parse(b.manifest.completedAt) - Date.parse(a.manifest.completedAt),
+    );
+  }
+
+  // Rides the session-gc tick like the artifact retention sweep, throttled to hourly. Only
+  // projects with closeout.retentionDays set are touched.
+  private runCloseoutRetentionSweep(): void {
+    if (Date.now() - this.lastCloseoutRetentionSweepAt < CLOSEOUT_RETENTION_INTERVAL_MS) return;
+    this.lastCloseoutRetentionSweepAt = Date.now();
+    const retained = (project: string): number | null =>
+      closeoutSettings(this.config.projects[project]).retentionDays;
+    const candidates: { session: SessionRecord; location: SnapshotLocation }[] = [
+      ...listSessions(this.config.dataDir).map((session) => ({
+        session,
+        location: "live" as const,
+      })),
+      ...listArchivedSessions(this.config.dataDir, (project, id) =>
+        existsSync(closeoutDirAt(this.config.dataDir, { id, project }, "archived")),
+      ).map((session) => ({ session, location: "archived" as const })),
+    ];
+    let expired = 0;
+    let errors = 0;
+    for (const { session, location } of candidates) {
+      const days = retained(session.project);
+      if (days === null) continue;
+      try {
+        if (
+          expireCloseout(
+            closeoutDirAt(this.config.dataDir, session, location),
+            session.id,
+            days,
+            Date.now(),
+          )
+        ) {
+          expired += 1;
+        }
+      } catch {
+        errors += 1;
+      }
+    }
+    if (expired > 0 || errors > 0) {
+      this.logEvent("session.closeout_archive.expired", {
+        level: "info",
+        message: `Closeout retention expired ${expired} archive(s), ${errors} error(s)`,
+        details: { expired, errors },
+      });
+    }
   }
 
   async readTaskStatus(sessionId: string): Promise<TaskStatusView> {
@@ -20960,6 +21148,7 @@ export class SessionService {
   }
 
   async selfDestruct(sessionId: string): Promise<SessionView> {
+    const closeoutHeadSha = await this.readCloseoutHead(sessionId);
     return this.runLifecycle("complete", [sessionId], undefined, () =>
       this.withWorkspaceLifecycleLocks(sessionId, () => {
         const session = readSession(this.config.dataDir, sessionId);
@@ -20972,7 +21161,7 @@ export class SessionService {
           {
             prAction: "leave_open",
           },
-          { eventAction: "self_destruct" },
+          { eventAction: "self_destruct", closeoutHeadSha },
         );
       }),
     );
@@ -20988,6 +21177,10 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const candidates = this.listDeskSessions(session);
+    const closeoutHeads = new Map<string, string | null>();
+    for (const candidate of candidates) {
+      closeoutHeads.set(candidate.id, await this.readCloseoutHead(candidate.id));
+    }
 
     const work = () =>
       this.withSessionLifecycleLocks(
@@ -21060,6 +21253,7 @@ export class SessionService {
             await this.applyManualStatusLocked(candidate.id, "completed", request, {
               ...(options?.todoActor ? { todoActor: options.todoActor } : {}),
               eventAction: "desk_complete",
+              closeoutHeadSha: closeoutHeads.get(candidate.id) ?? null,
             });
             completedIds.push(candidate.id);
           }
@@ -22193,6 +22387,7 @@ export class SessionService {
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
       restoreOperation?: RestoreOperationContext;
+      closeoutHeadSha?: string | null;
     },
   ): Promise<void>;
   private async applyManualStatusLocked(
@@ -22207,6 +22402,7 @@ export class SessionService {
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
       restoreOperation?: RestoreOperationContext;
+      closeoutHeadSha?: string | null;
     },
   ): Promise<SessionView>;
   private async applyManualStatusLocked(
@@ -22221,6 +22417,7 @@ export class SessionService {
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
       restoreOperation?: RestoreOperationContext;
+      closeoutHeadSha?: string | null;
     },
   ): Promise<SessionView | void> {
     const reopenClaim = this.reopensInFlight.get(sessionId);
@@ -22330,6 +22527,7 @@ export class SessionService {
       }
       if (targetStatus === "completed") {
         terminalSlots = this.captureTerminalSlots(session);
+        await this.archiveCloseout(session, terminalSlots?.links ?? [], options?.closeoutHeadSha);
         const { ranCleanup } = this.removeSessionArtifacts(session, {
           preserveAgentHistory: true,
         });
@@ -25422,6 +25620,7 @@ export class SessionService {
           this.displaySlotsForSession(source)?.links ?? [],
           spawned.id,
         );
+      const closeoutHeadSha = await this.readCloseoutHead(sessionId);
       const finalized = await this.withPaneWriteLock(receipt.generation.tmuxSession, () =>
         this.withSessionLifecycleLocks(
           [...prepared.lifecycleIds, spawned.id],
@@ -25490,6 +25689,7 @@ export class SessionService {
                   retainInList: true,
                   eventAction: "handoff",
                   handoffDetails: prepared.handoffDetails,
+                  closeoutHeadSha,
                 },
               );
               const latest = readSession(this.config.dataDir, spawned.id);

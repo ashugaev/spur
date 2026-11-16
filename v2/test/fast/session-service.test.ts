@@ -249,6 +249,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { resolveBootstrapConfigReferencePath } from "../../src/bootstrap-prompt.js";
 import { readPrAlertOwnership, writeWorkspaceState } from "../../src/workspace-store.js";
+import { writeCloseoutArchive } from "../../src/closeout-archive.js";
 import { allowsPrAlertBatch } from "../../src/pr-alert-owner.js";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import { createPage } from "../../src/pages.js";
@@ -602,6 +603,11 @@ async function useRealTodoLedger(): Promise<void> {
   const actual = await vi.importActual<typeof todoModule>("../../src/todo.js");
   vi.mocked(mocked.ensureTodoLedger).mockImplementation(actual.ensureTodoLedger);
 }
+
+vi.mock("../../src/closeout-archive.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/closeout-archive.js")>();
+  return { ...actual, writeCloseoutArchive: vi.fn(actual.writeCloseoutArchive) };
+});
 
 describe("SessionService", () => {
   describe("task-status", () => {
@@ -39903,6 +39909,244 @@ describe("SessionService", () => {
         sessionId: "api-1",
       }),
     );
+  });
+
+  describe("closeout archive", () => {
+    const closeoutJson = (id: string) =>
+      join(TEST_DATA_DIR, "sessions", id, "closeout", "closeout.json");
+
+    function ownWorktreeSession(overrides: Partial<SessionRecord> = {}) {
+      return sessionRecord({
+        id: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        ...overrides,
+      });
+    }
+
+    async function completeWith(session: SessionRecord, closeout?: Record<string, unknown>) {
+      if (closeout) {
+        const config = baseConfig();
+        loadConfigMock.mockReturnValue({
+          ...config,
+          projects: { api: { ...config.projects.api, closeout } },
+        });
+      }
+      createSessionStore(session);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValueOnce(true).mockReturnValue(false);
+      const workDir = join(TEST_ARTIFACTS_ROOT, session.id, ".spur-work");
+      mkdirSync(workDir, { recursive: true });
+      writeFileSync(join(workDir, "notes.md"), "keep me");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      const locked = vi.spyOn(
+        service as unknown as { applyManualStatusLocked: (...args: unknown[]) => Promise<unknown> },
+        "applyManualStatusLocked",
+      );
+      const headCallsAtEntry: number[] = [];
+      locked.mockImplementation(async function (this: unknown, ...args: unknown[]) {
+        headCallsAtEntry.push(readWorktreeHeadMock.mock.calls.length);
+        return (
+          Object.getPrototypeOf(service) as {
+            applyManualStatusLocked: (...a: unknown[]) => Promise<unknown>;
+          }
+        ).applyManualStatusLocked.apply(service, args);
+      });
+      const result = await service.complete(session.id);
+      return { service, result, locked, headCallsAtEntry };
+    }
+
+    it("copies .spur-work before the artifacts dir is removed and records head and snapshot", async () => {
+      readWorktreeHeadMock.mockResolvedValue({
+        branch: "api-1",
+        headSha: "cafe1234",
+        dirty: false,
+      });
+      const { result, locked, headCallsAtEntry } = await completeWith(ownWorktreeSession());
+
+      expect(result.status).toBe("completed");
+      const manifest = JSON.parse(readFileSync(closeoutJson("api-1"), "utf8"));
+      expect(manifest).toMatchObject({
+        sessionId: "api-1",
+        project: "api",
+        headSha: "cafe1234",
+        snapshotVersion: null,
+        files: [{ root: "work", path: "notes.md", bytes: 7 }],
+      });
+      expect(
+        readFileSync(
+          join(TEST_DATA_DIR, "sessions", "api-1", "closeout", "files", "work", "notes.md"),
+          "utf8",
+        ),
+      ).toBe("keep me");
+      expect(existsSync(join(TEST_ARTIFACTS_ROOT, "api-1"))).toBe(false);
+      // Head read before the lifecycle lock section: once, with the worktree path, and none under it.
+      expect(readWorktreeHeadMock).toHaveBeenCalledTimes(1);
+      expect(readWorktreeHeadMock).toHaveBeenCalledWith("/tmp/spur-worktrees/api/api-1");
+      expect(headCallsAtEntry).toEqual([1]);
+      expect(locked.mock.calls[0]?.[3]).toMatchObject({ closeoutHeadSha: "cafe1234" });
+      expect(readWorktreeHeadMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("reads each head before entering the locked section for selfDestruct and completeDesk", async () => {
+      readWorktreeHeadMock.mockResolvedValue({ branch: "x", headSha: "feed0001", dirty: false });
+      createSessionStore(
+        ownWorktreeSession({ workspaceId: "desk-1" }),
+        ownWorktreeSession({ id: "api-2", workspaceId: "desk-1" }),
+      );
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      const original = (
+        Object.getPrototypeOf(service) as {
+          applyManualStatusLocked: (...a: unknown[]) => Promise<unknown>;
+        }
+      ).applyManualStatusLocked;
+      const entries: { options: unknown; headCalls: number }[] = [];
+      vi.spyOn(
+        service as unknown as { applyManualStatusLocked: (...args: unknown[]) => Promise<unknown> },
+        "applyManualStatusLocked",
+      ).mockImplementation(async (...args: unknown[]) => {
+        entries.push({ options: args[3], headCalls: readWorktreeHeadMock.mock.calls.length });
+        return original.apply(service, args);
+      });
+
+      await service.selfDestruct("api-1");
+      expect(entries).toEqual([
+        { options: expect.objectContaining({ closeoutHeadSha: "feed0001" }), headCalls: 1 },
+      ]);
+
+      await service.completeDesk(
+        "api-2",
+        { skipPrCheck: true },
+        {
+          todoActor: { kind: "human", origin: "cli" },
+        },
+      );
+      expect(entries.at(-1)).toEqual({
+        options: expect.objectContaining({ closeoutHeadSha: "feed0001" }),
+        headCalls: 3,
+      });
+      expect(readWorktreeHeadMock).toHaveBeenCalledTimes(3);
+    });
+
+    it("records no head for a worktree:false session and never reads the project checkout", async () => {
+      const { locked } = await completeWith(sessionRecord({ id: "api-1" }));
+
+      expect(JSON.parse(readFileSync(closeoutJson("api-1"), "utf8")).headSha).toBeNull();
+      expect(readWorktreeHeadMock).not.toHaveBeenCalledWith("/repo/api");
+      expect(locked.mock.calls[0]?.[3]).toMatchObject({ closeoutHeadSha: null });
+    });
+
+    it("writes no closeout dir when closeout.enabled is false", async () => {
+      await completeWith(ownWorktreeSession(), { enabled: false });
+
+      expect(existsSync(join(TEST_DATA_DIR, "sessions", "api-1", "closeout"))).toBe(false);
+      expect(readWorktreeHeadMock).not.toHaveBeenCalled();
+    });
+
+    it("writes no closeout dir on kill", async () => {
+      createSessionStore(ownWorktreeSession());
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+
+      await service.kill("api-1", { force: true, skipPrCheck: true });
+
+      expect(existsSync(join(TEST_DATA_DIR, "sessions", "api-1", "closeout"))).toBe(false);
+    });
+
+    it("still completes and logs session.closeout_archive.failed when the archive throws", async () => {
+      vi.mocked(writeCloseoutArchive).mockRejectedValueOnce(new Error("disk full"));
+      const { result } = await completeWith(ownWorktreeSession());
+
+      expect(result.status).toBe("completed");
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.closeout_archive.failed",
+          level: "warn",
+          sessionId: "api-1",
+          details: { error: "disk full" },
+        }),
+      );
+      expect(existsSync(join(TEST_ARTIFACTS_ROOT, "api-1"))).toBe(false);
+    });
+
+    it("expires old live and archived closeouts of a project with retentionDays only", async () => {
+      const config = baseConfig();
+      loadConfigMock.mockReturnValue({
+        ...config,
+        projects: {
+          api: { ...config.projects.api, closeout: { retentionDays: 1 } },
+          web: { ...config.projects.api, path: "/repo/web", sessionPrefix: "web", closeout: {} },
+        },
+      });
+      const old = "2020-01-01T00:00:00.000Z";
+      const manifestFor = (id: string, project: string) =>
+        JSON.stringify({
+          sessionId: id,
+          project,
+          completedAt: old,
+          links: [],
+          snapshotVersion: null,
+          headSha: null,
+          files: [],
+          skipped: [],
+          missingRoots: [],
+        });
+      const place = (root: string, id: string, project: string) => {
+        const dir = join(root, "closeout");
+        mkdirSync(join(dir, "files"), { recursive: true });
+        writeFileSync(join(dir, "files", "x"), "x");
+        writeFileSync(join(dir, "closeout.json"), manifestFor(id, project));
+        return dir;
+      };
+      createSessionStore(
+        sessionRecord({ id: "api-1", status: "completed" }),
+        sessionRecord({ id: "web-1", project: "web", status: "completed" }),
+      );
+      const liveApi = place(join(TEST_DATA_DIR, "sessions", "api-1"), "api-1", "api");
+      const liveWeb = place(join(TEST_DATA_DIR, "sessions", "web-1"), "web-1", "web");
+      const archivedRoot = join(TEST_DATA_DIR, "sessions-archive", "api");
+      mkdirSync(archivedRoot, { recursive: true });
+      writeFileSync(
+        join(archivedRoot, "api-2.json"),
+        JSON.stringify(sessionRecord({ id: "api-2", status: "completed" })),
+      );
+      const archivedApi = place(join(archivedRoot, "api-2"), "api-2", "api");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      const internals = service as unknown as {
+        lastCloseoutRetentionSweepAt: number;
+        runCloseoutRetentionSweep: () => void;
+      };
+      internals.lastCloseoutRetentionSweepAt = 0;
+      internals.runCloseoutRetentionSweep();
+
+      expect(existsSync(join(liveApi, "files"))).toBe(false);
+      expect(existsSync(join(archivedApi, "files"))).toBe(false);
+      expect(
+        JSON.parse(readFileSync(join(liveApi, "closeout.json"), "utf8")).expiredAt,
+      ).toBeTruthy();
+      expect(existsSync(join(liveWeb, "files", "x"))).toBe(true);
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.closeout_archive.expired",
+          details: { expired: 2, errors: 0 },
+        }),
+      );
+    });
   });
 
   it("clears startupAttachmentIds after completing a solo session whose artifacts dir was deleted", async () => {
