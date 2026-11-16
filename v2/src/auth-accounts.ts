@@ -44,6 +44,8 @@ export interface AuthAccountSummary extends AuthAccount {
   /** True while a shared quota cooldown is active; cooldownUntil is its ISO end. */
   limited: boolean;
   cooldownUntil?: string;
+  /** Kind of the registered credential, when the companion reports one. */
+  credential?: "oauth" | "api_key";
 }
 
 /** Runtime labels and pool preferences. Provider credentials belong to the companion. */

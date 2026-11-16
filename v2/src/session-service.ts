@@ -38,6 +38,7 @@ import {
   authProxyBinaryPath,
   type AuthRegistration,
   type AuthLogin,
+  type AuthLoginMethod,
   type AuthProxyState,
   type AuthRotation,
 } from "./auth-proxy.js";
@@ -24563,6 +24564,7 @@ export class SessionService {
             ...account,
             limited: entry?.cooldownUntil !== undefined,
             ...(entry?.cooldownUntil ? { cooldownUntil: entry.cooldownUntil } : {}),
+            ...(entry?.credential ? { credential: entry.credential } : {}),
             authenticated: status === "ready",
             status:
               status === "sign-in-required"
@@ -24683,11 +24685,36 @@ export class SessionService {
     );
   }
 
-  startAuthorizationLogin(accountId: string): Promise<AuthLogin> {
+  startAuthorizationLogin(accountId: string, method?: AuthLoginMethod): Promise<AuthLogin> {
     this.authSnapshot = undefined;
+    const account = this.requireAuthorizationAccount(accountId);
+    const allowed: AuthLoginMethod[] =
+      account.provider === "claude" ? ["oauth"] : ["device", "browser"];
+    const chosen = method ?? allowed[0]!;
+    if (!allowed.includes(chosen)) {
+      throw new AuthorizationError(
+        `Sign-in method ${chosen} is not available for ${account.provider}`,
+        400,
+      );
+    }
+    return this.authProxy.login(accountId, account.provider, chosen);
+  }
+
+  async setAuthorizationApiKey(
+    accountId: string,
+    label: string,
+    apiKey: string,
+  ): Promise<AuthLogin> {
+    this.authSnapshot = undefined;
+    const account = this.requireAuthorizationAccount(accountId);
+    this.authAccounts.rename(accountId, label);
+    return this.authProxy.setApiKey(accountId, account.provider, apiKey);
+  }
+
+  private requireAuthorizationAccount(accountId: string) {
     const account = this.authAccounts.read().accounts.find((entry) => entry.id === accountId);
     if (!account) throw new AuthorizationError(`Unknown authorization account: ${accountId}`, 404);
-    return this.authProxy.login(accountId, account.provider);
+    return account;
   }
 
   authorizationLoginInput(accountId: string, input: string | null): Promise<AuthLogin> {

@@ -7,6 +7,9 @@ import { z } from "zod";
 import { AuthorizationError, authProviderSchema, type AuthAccountsState } from "./auth-accounts.js";
 
 const statusSchema = z.enum(["ready", "sign-in-required", "pending", "failed"]);
+const loginStatusSchema = z.enum(["ready", "sign-in-required", "pending", "failed", "busy"]);
+export const authLoginMethodSchema = z.enum(["oauth", "device", "browser"]);
+export type AuthLoginMethod = z.infer<typeof authLoginMethodSchema>;
 const endpointSchema = z
   .string()
   .url()
@@ -41,7 +44,12 @@ const registrationSchema = authSessionSchema.extend({
 });
 const loginSchema = z.object({
   accountId: z.string(),
-  status: statusSchema,
+  status: loginStatusSchema,
+  method: z.enum(["oauth", "device", "browser", "api_key", "import"]).optional(),
+  stage: z.enum(["authorize", "submitted", "verifying"]).optional(),
+  errorCode: z
+    .enum(["input_rejected", "expired", "key_rejected", "not_confirmed", "identity", "failed"])
+    .optional(),
   url: z.string().optional(),
   userCode: z.string().optional(),
   prompt: z.string().optional(),
@@ -55,6 +63,8 @@ const stateSchema = z.object({
       status: statusSchema,
       error: z.string().optional(),
       cooldownUntil: z.string().datetime().optional(),
+      credential: z.enum(["oauth", "api_key"]).optional(),
+      brokenAt: z.string().datetime().optional(),
     }),
   ),
   sessions: z.array(authSessionSchema),
@@ -105,7 +115,15 @@ type AuthControlRequest =
     }
   | { method: "switchSession"; params: { sessionId: string; accountId: string | null } }
   | { method: "revokeSession"; params: { sessionId: string } }
-  | { method: "login"; params: { accountId: string; provider: "claude" | "codex" } }
+  | {
+      method: "login";
+      params: { accountId: string; provider: "claude" | "codex"; method: AuthLoginMethod };
+    }
+  | {
+      method: "setApiKey";
+      params: { accountId: string; provider: "claude" | "codex"; apiKey: string };
+    }
+  | { method: "importNativeLogin"; params: { accountId: string; provider: "claude" | "codex" } }
   | { method: "loginInput"; params: { accountId: string; input: string } }
   | { method: "loginStatus" | "cancelLogin" | "removeAccount"; params: { accountId: string } };
 
@@ -189,7 +207,10 @@ export class AuthProxy {
         child.kill();
       }, 30_000);
       const lines = createInterface({ input: child.stdout });
-      child.stderr.resume();
+      let stderrTail = "";
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderrTail = (stderrTail + chunk.toString()).slice(-512);
+      });
       child.once("error", () => {
         clearTimeout(timeout);
         reject(new Error("Managed authorization proxy unavailable; rebuild or reinstall Spur"));
@@ -236,7 +257,15 @@ export class AuthProxy {
       child.once("close", () => {
         clearTimeout(timeout);
         lines.close();
-        if (!ready) reject(new Error("Managed authorization proxy failed to start"));
+        if (!ready) {
+          reject(
+            new Error(
+              stderrTail.includes("auth proxy state unavailable")
+                ? "Managed authorization proxy state is unreadable or from an older build; remove auth-proxy-state.json from the Spur data directory and retry"
+                : "Managed authorization proxy failed to start",
+            ),
+          );
+        }
         if (this.child !== child) return;
         this.child = undefined;
         this.starting = undefined;
@@ -322,8 +351,26 @@ export class AuthProxy {
     await this.execute({ method: "revokeSession", params: { sessionId } }, z.object({}));
   }
 
-  login(accountId: string, provider: "claude" | "codex"): Promise<AuthLogin> {
-    return this.execute({ method: "login", params: { accountId, provider } }, loginSchema);
+  login(
+    accountId: string,
+    provider: "claude" | "codex",
+    method: AuthLoginMethod,
+  ): Promise<AuthLogin> {
+    return this.execute({ method: "login", params: { accountId, provider, method } }, loginSchema);
+  }
+
+  setApiKey(accountId: string, provider: "claude" | "codex", apiKey: string): Promise<AuthLogin> {
+    return this.execute(
+      { method: "setApiKey", params: { accountId, provider, apiKey } },
+      loginSchema,
+    );
+  }
+
+  importNativeLogin(accountId: string, provider: "claude" | "codex"): Promise<AuthLogin> {
+    return this.execute(
+      { method: "importNativeLogin", params: { accountId, provider } },
+      loginSchema,
+    );
   }
 
   loginInput(accountId: string, input: string): Promise<AuthLogin> {

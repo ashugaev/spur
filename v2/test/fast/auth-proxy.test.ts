@@ -118,4 +118,102 @@ describe("authorization proxy private control", () => {
     });
     await expect(proxy!.getState()).rejects.toThrow();
   });
+
+  const reply = (
+    output: PassThrough,
+    request: { id: number; method: string },
+    result: unknown,
+  ): void => {
+    const value = request.method === "configure" ? {} : result;
+    output.write(`${JSON.stringify({ id: request.id, ok: true, result: value })}\n`);
+  };
+
+  it("parses method, stage, errorCode, busy and brokenAt; rejects unknown values", async () => {
+    let next: unknown;
+    childWithControl((request, output, done) => {
+      reply(output, request, next);
+      done();
+    });
+    next = {
+      accountId: "a",
+      status: "failed",
+      method: "api_key",
+      stage: "verifying",
+      errorCode: "key_rejected",
+      error: "Rejected",
+    };
+    await expect(proxy!.loginStatus("a")).resolves.toEqual(next);
+    next = { accountId: "a", status: "busy" };
+    await expect(proxy!.importNativeLogin("a", "claude")).resolves.toEqual(next);
+    next = {
+      accounts: [
+        {
+          id: "a",
+          provider: "codex",
+          status: "sign-in-required",
+          credential: "api_key",
+          brokenAt: "2026-11-16T10:00:00Z",
+        },
+      ],
+      sessions: [],
+    };
+    await expect(proxy!.getState()).resolves.toEqual(next);
+    for (const bad of [
+      { accountId: "a", status: "ready", errorCode: "boom" },
+      { accountId: "a", status: "ready", stage: "done" },
+      { accountId: "a", status: "ready", method: "magic" },
+      { accountId: "a", status: "waiting" },
+    ]) {
+      next = bad;
+      await expect(proxy!.loginStatus("a")).rejects.toThrow();
+    }
+    next = {
+      accounts: [{ id: "a", provider: "claude", status: "busy" }],
+      sessions: [],
+    };
+    await expect(proxy!.getState()).rejects.toThrow();
+  });
+
+  it("sends login method, setApiKey and importNativeLogin as typed requests", async () => {
+    const sent: unknown[] = [];
+    childWithControl((request, output, done) => {
+      if (request.method !== "configure") sent.push(request);
+      reply(output, request, { accountId: "a", status: "pending" });
+      done();
+    });
+    await proxy!.login("a", "codex", "browser");
+    await proxy!.setApiKey("a", "claude", "sk-fixture-key");
+    await proxy!.importNativeLogin("a", "codex");
+    expect(sent).toEqual([
+      {
+        id: expect.any(Number),
+        method: "login",
+        params: { accountId: "a", provider: "codex", method: "browser" },
+      },
+      {
+        id: expect.any(Number),
+        method: "setApiKey",
+        params: { accountId: "a", provider: "claude", apiKey: "sk-fixture-key" },
+      },
+      {
+        id: expect.any(Number),
+        method: "importNativeLogin",
+        params: { accountId: "a", provider: "codex" },
+      },
+    ]);
+  });
+
+  it("names the schema-1 state file when the companion refuses to start", async () => {
+    const child = childWithControl(() => {});
+    vi.mocked(spawn).mockImplementation(() => {
+      queueMicrotask(() => {
+        child.stderr.write(
+          "Spur auth proxy stopped: auth proxy state unavailable: invalid auth proxy state identity or schema\n",
+        );
+        child.emit("close", 1);
+      });
+      return child as unknown as ReturnType<typeof spawn>;
+    });
+    await expect(proxy!.getState()).rejects.toThrow("remove auth-proxy-state.json");
+  });
 });
