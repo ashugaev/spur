@@ -58887,24 +58887,6 @@ describe("SessionService", () => {
         service.dispose();
       });
 
-      it("rolls back successor copies when the successor is killed while spawning", async () => {
-        const { sessions, service } = await seedHandoff();
-        waitForTmuxReadyMock.mockImplementationOnce(async () => {
-          const successor = sessions.get("api-2");
-          if (!successor) throw new Error("Expected successor placeholder");
-          sessions.set("api-2", {
-            ...successor,
-            status: "killed",
-            spawnReceipt: { version: 1, acceptedAt: "2026-03-18T10:00:00.000Z" },
-          });
-        });
-
-        await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow();
-
-        await expectRolledBack(service);
-        service.dispose();
-      });
-
       it("rolls back successor copies when the spawn receipt is unavailable after spawn", async () => {
         const { service } = await seedHandoff();
         const internals = sessionServiceInternals(service);

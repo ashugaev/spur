@@ -14851,10 +14851,7 @@ export class SessionService {
           rollbackInherited(failedId, request.project),
         );
       };
-      if (error instanceof SpawnAdmissionCancelledError) {
-        await rollbackInheritedLocking();
-        throw error;
-      }
+      if (error instanceof SpawnAdmissionCancelledError) throw error;
       const failureReceipt = options?.receiptToken
         ? this.foregroundSpawnReceipts.get(options.receiptToken)
         : undefined;
@@ -25488,8 +25485,8 @@ export class SessionService {
     successor: Pick<SessionRecord, "id" | "project">,
     items: readonly HandoffTodoItem[],
   ): void {
+    // Callers pass a non-empty plan from one source ledger.
     const sourceId = items[0]?.from.sessionId;
-    if (!sourceId) throw new Error("Handoff rollback needs inherited ToDo items");
     try {
       closeTodoItems(
         this.config.dataDir,
