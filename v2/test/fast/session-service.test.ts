@@ -3919,6 +3919,53 @@ describe("SessionService", () => {
         service.dispose();
       });
 
+      it("reads the closeout head before the locked section on handoff", async () => {
+        mockClaudeJsonlState("waiting");
+        readWorktreeHeadMock.mockResolvedValue({ branch: "x", headSha: "beef0002", dirty: false });
+        const source = sessionRecord({
+          id: "api-1",
+          status: "running",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        });
+        const { service } = await gatedService(false, source);
+        workspaceExistsMock.mockReturnValue(true);
+        reserveNextSessionIdMock.mockResolvedValue("api-2");
+        await resolveOneItem(service);
+        const original = (
+          Object.getPrototypeOf(service) as {
+            applyManualStatusLocked: (...a: unknown[]) => Promise<unknown>;
+          }
+        ).applyManualStatusLocked;
+        const seen: { options: unknown; before: number; after: number }[] = [];
+        vi.spyOn(
+          service as unknown as {
+            applyManualStatusLocked: (...args: unknown[]) => Promise<unknown>;
+          },
+          "applyManualStatusLocked",
+        ).mockImplementation(async (...args: unknown[]) => {
+          const before = readWorktreeHeadMock.mock.calls.length;
+          const result = await original.apply(service, args);
+          seen.push({ options: args[3], before, after: readWorktreeHeadMock.mock.calls.length });
+          return result;
+        });
+
+        await service.handoff(
+          "api-1",
+          { agent: "cursor" },
+          { todoActor: { kind: "human", origin: "cli" } },
+        );
+
+        const handoffCall = seen.find(
+          (entry) => (entry.options as { eventAction?: string }).eventAction === "handoff",
+        );
+        expect(handoffCall?.options).toMatchObject({ closeoutHeadSha: "beef0002" });
+        expect(readWorktreeHeadMock).toHaveBeenCalledWith("/tmp/spur-worktrees/api/api-1");
+        expect(handoffCall?.before).toBeGreaterThan(0);
+        expect(handoffCall?.after).toBe(handoffCall?.before);
+        service.dispose();
+      });
+
       it("refuses snapshot writes on a terminal session and for a missing one", async () => {
         const { service } = await gatedService(false, runningSession({ status: "completed" }));
 
@@ -39912,6 +39959,7 @@ describe("SessionService", () => {
   });
 
   describe("closeout archive", () => {
+    const LINK_URL = "https://example.test/pr/1";
     const closeoutJson = (id: string) =>
       join(TEST_DATA_DIR, "sessions", id, "closeout", "closeout.json");
 
@@ -39965,7 +40013,11 @@ describe("SessionService", () => {
         headSha: "cafe1234",
         dirty: false,
       });
-      const { result, locked, headCallsAtEntry } = await completeWith(ownWorktreeSession());
+      mkdirSync(TEST_ARTIFACTS_ROOT + "/api-1", { recursive: true });
+      writeFileSync(join(TEST_ARTIFACTS_ROOT, "api-1", "report.txt"), "rep");
+      const { result, locked, headCallsAtEntry } = await completeWith(
+        ownWorktreeSession({ slots: { links: [{ label: "board-worker", url: LINK_URL }] } }),
+      );
 
       expect(result.status).toBe("completed");
       const manifest = JSON.parse(readFileSync(closeoutJson("api-1"), "utf8"));
@@ -39974,7 +40026,11 @@ describe("SessionService", () => {
         project: "api",
         headSha: "cafe1234",
         snapshotVersion: null,
-        files: [{ root: "work", path: "notes.md", bytes: 7 }],
+        links: [{ label: "board-worker", url: LINK_URL }],
+        files: [
+          { root: "work", path: "notes.md", bytes: 7 },
+          { root: "artifacts", path: "report.txt", bytes: 3 },
+        ],
       });
       expect(
         readFileSync(
@@ -40080,6 +40136,44 @@ describe("SessionService", () => {
         }),
       );
       expect(existsSync(join(TEST_ARTIFACTS_ROOT, "api-1"))).toBe(false);
+    });
+
+    it("throttles the retention sweep to once per hour", async () => {
+      const config = baseConfig();
+      loadConfigMock.mockReturnValue({
+        ...config,
+        projects: { api: { ...config.projects.api, closeout: { retentionDays: 1 } } },
+      });
+      createSessionStore(sessionRecord({ id: "api-1", status: "completed" }));
+      const dir = join(TEST_DATA_DIR, "sessions", "api-1", "closeout");
+      mkdirSync(join(dir, "files"), { recursive: true });
+      writeFileSync(
+        join(dir, "closeout.json"),
+        JSON.stringify({
+          sessionId: "api-1",
+          project: "api",
+          completedAt: "2020-01-01T00:00:00.000Z",
+          links: [],
+          snapshotVersion: null,
+          headSha: null,
+          files: [],
+          skipped: [],
+          missingRoots: [],
+        }),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      const internals = service as unknown as {
+        lastCloseoutRetentionSweepAt: number;
+        runCloseoutRetentionSweep: () => void;
+      };
+      internals.runCloseoutRetentionSweep();
+      expect(existsSync(join(dir, "files"))).toBe(true);
+      internals.lastCloseoutRetentionSweepAt = Date.now() - 61 * 60_000;
+      internals.runCloseoutRetentionSweep();
+      expect(existsSync(join(dir, "files"))).toBe(false);
     });
 
     it("expires old live and archived closeouts of a project with retentionDays only", async () => {

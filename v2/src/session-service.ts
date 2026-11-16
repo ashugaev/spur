@@ -20655,7 +20655,7 @@ export class SessionService {
       if (
         session &&
         this.closeoutOwnWorktree(session) &&
-        closeoutSettings(this.config.projects[session.project]).enabled
+        this.closeoutSettingsFor(session).enabled
       ) {
         reads.push(
           readWorktreeHead(session.worktreePath).then((head) => {
@@ -20667,19 +20667,24 @@ export class SessionService {
     return reads.length === 0 ? run(heads) : Promise.all(reads).then(() => run(heads));
   }
 
+  private closeoutSettingsFor(session: SessionRecord): ReturnType<typeof closeoutSettings> {
+    return closeoutSettings(this.resolveProjectForSession(session));
+  }
+
   private closeoutOwnWorktree(session: SessionRecord): boolean {
     return session.worktree && session.worktreePath.trim().length > 0;
   }
 
   // Never throws: complete must not fail or change result because the archive failed. Sync on
-  // purpose: no yield between terminal-slot capture and artifact removal.
+  // purpose: one yield here delays complete's record write, so a queued durable spawn registers its
+  // admission waiter first and nothing drains it (only the 1s shed tick and spawns do).
   private archiveCloseout(
     session: SessionRecord,
     links: SessionLink[],
     headSha: string | null | undefined,
   ): void {
     try {
-      const settings = closeoutSettings(this.resolveProjectForSession(session));
+      const settings = this.closeoutSettingsFor(session);
       if (!settings.enabled) return;
       const artifacts = sessionArtifactsDir(this.config.dataDir, workspaceIdOf(session));
       const manifest = writeCloseoutArchive({
@@ -20777,8 +20782,6 @@ export class SessionService {
   private runCloseoutRetentionSweep(): void {
     if (Date.now() - this.lastCloseoutRetentionSweepAt < CLOSEOUT_RETENTION_INTERVAL_MS) return;
     this.lastCloseoutRetentionSweepAt = Date.now();
-    const retained = (project: string): number | null =>
-      closeoutSettings(this.config.projects[project]).retentionDays;
     const candidates: { session: SessionRecord; location: SnapshotLocation }[] = [
       ...listSessions(this.config.dataDir).map((session) => ({
         session,
@@ -20791,9 +20794,9 @@ export class SessionService {
     let expired = 0;
     let errors = 0;
     for (const { session, location } of candidates) {
-      const days = retained(session.project);
-      if (days === null) continue;
       try {
+        const days = this.closeoutSettingsFor(session).retentionDays;
+        if (days === null) continue;
         if (
           expireCloseout(
             closeoutDirAt(this.config.dataDir, session, location),
