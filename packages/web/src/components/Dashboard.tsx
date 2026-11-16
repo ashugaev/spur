@@ -11,6 +11,7 @@ import {
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
+import { AuthAlertsBanner } from "@/components/AuthAlertsBanner";
 import type { SessionRowAction } from "@/components/SessionRow";
 import { useSessionActionDialogs } from "@/components/SessionActionDialogs";
 import { BusyContent } from "@/components/BusyContent";
@@ -3370,6 +3371,8 @@ export function Dashboard() {
           ) : null}
 
           {loading ? <CenteredLoader className="flex-1" label="Loading dashboard" /> : null}
+
+          <AuthAlertsBanner />
 
           {!loading && !hasVisibleSessions && !hasVisibleBacklog ? (
             <section className="mt-5">
