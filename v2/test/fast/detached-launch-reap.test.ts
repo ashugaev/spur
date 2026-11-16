@@ -2,7 +2,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { isPidAlive } from "../../src/process-tree.js";
-import { terminateDetachedSessionProcesses } from "../../src/agent-processes.js";
+import {
+  listDetachedSessionOwners,
+  terminateDetachedSessionProcesses,
+} from "../../src/agent-processes.js";
 
 // Real /proc boundary: detached (setsid) children carrying Spur markers.
 // Only children this test spawned are ever signalled; markers use random ids.
@@ -71,10 +74,53 @@ describe.runIf(process.platform === "linux")(
         { hupGraceMs: 2_000, termGraceMs: 2_000, killGraceMs: 2_000 },
       );
 
-      expect(outcome).toEqual({ status: "clear" });
+      expect(outcome).toEqual({ status: "clear", matched: 1 });
       expect(await waitDead(targetPid as number)).toBe(true);
       expect(await isPidAlive(sidecar.pid as number)).toBe(true);
       expect(await isPidAlive(otherInstance.pid as number)).toBe(true);
+    });
+
+    it("lists owners under this tool dir root", async () => {
+      const sessionId = `spur-${rand()}`;
+      const root = `/tmp/${rand()}/session-tools`;
+      const foreignId = `spur-${rand()}`;
+      const emptyId = `spur-${rand()}`;
+      const noSessionId = `spur-${rand()}`;
+      const children = [
+        spawnDetached({
+          SPUR_SESSION: sessionId,
+          SPUR_SESSION_TOOL_DIR: `${root}/${sessionId}`,
+          SPUR_AGENT_LAUNCH_ID: rand(),
+        }),
+        spawnDetached({
+          SPUR_SESSION: foreignId,
+          SPUR_SESSION_TOOL_DIR: `/tmp/${rand()}/session-tools/${foreignId}`,
+          SPUR_AGENT_LAUNCH_ID: rand(),
+        }),
+        spawnDetached({
+          SPUR_SESSION: emptyId,
+          SPUR_SESSION_TOOL_DIR: `${root}/${emptyId}`,
+          SPUR_AGENT_LAUNCH_ID: "",
+        }),
+        spawnDetached({
+          SPUR_SESSION_TOOL_DIR: `${root}/${noSessionId}`,
+          SPUR_AGENT_LAUNCH_ID: rand(),
+        }),
+      ];
+      spawned.push(...children);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      const result = await listDetachedSessionOwners({
+        toolDirFor: (id) => `${root}/${id}`,
+        tmuxServerPid: null,
+      });
+
+      expect(result.status).toBe("ok");
+      const ids = result.status === "ok" ? result.sessionIds : [];
+      expect(ids).toContain(sessionId);
+      expect(ids).not.toContain(foreignId);
+      expect(ids).not.toContain(emptyId);
+      expect(ids).not.toContain(noSessionId);
     });
   },
 );
