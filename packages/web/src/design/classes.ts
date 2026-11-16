@@ -12,6 +12,8 @@ const BUTTON_BASE_CLASS =
 
 export const SECONDARY_BUTTON_CLASS = `${BUTTON_BASE_CLASS} border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]`;
 
+export const PRIMARY_BUTTON_CLASS = `${BUTTON_BASE_CLASS} border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] hover:bg-[var(--color-accent-hover)] hover:border-[var(--color-accent-hover)]`;
+
 export const DANGER_BUTTON_CLASS = `${BUTTON_BASE_CLASS} border-[var(--color-status-error)] text-[var(--color-status-error)] hover:bg-[var(--color-status-error)] hover:text-[var(--color-bg-elevated)]`;
 
 export const ATTENTION_BUTTON_CLASS = `${BUTTON_BASE_CLASS} border-[var(--color-status-attention)] text-[var(--color-status-attention)] hover:bg-[var(--color-status-attention)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-attention)] focus-visible:text-[var(--color-bg-elevated)]`;

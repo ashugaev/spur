@@ -246,7 +246,7 @@ describe("AuthAccountsMenu", () => {
     await waitFor(() => expect(claude.queryByText(/in use by a running session/)).toBeNull());
   });
 
-  it("adds a Codex account, starts sign-in, and shows the URL and device code", async () => {
+  it("adds a Codex account, opens the method picker without starting sign-in, then shows the device code", async () => {
     const login: AuthLogin = {
       accountId: "codex-2",
       status: "pending",
@@ -273,16 +273,41 @@ describe("AuthAccountsMenu", () => {
       method: "POST",
       body: { provider: "codex", label: "Team" },
     });
+    expect(dialog.getByRole("radiogroup", { name: "Sign-in method" })).toBeTruthy();
+    expect(calls.some((call) => call.url.endsWith("/login"))).toBe(false);
+
+    fireEvent.click(dialog.getByRole("button", { name: "Continue" }));
+
+    expect((await dialog.findByTestId("auth-login-user-code")).textContent).toBe("ABCD-1234");
     expect(dialog.getByTestId("auth-login-url").getAttribute("href")).toBe(
       "https://auth.example.test/device",
     );
-    expect(dialog.getByTestId("auth-login-user-code").textContent).toBe("ABCD-1234");
+    expect(calls).toContainEqual({
+      url: "/api/auth-accounts/codex-2/login",
+      method: "POST",
+      body: { method: "device" },
+    });
   });
 
-  it("submits a pasted code, then closes once sign-in is ready", async () => {
+  it("opens the picker on Sign in without posting /login", async () => {
+    await openMenu();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Sign in codex account Fresh" }));
+
+    const dialog = within(await screen.findByRole("dialog", { name: /Sign in codex/ }));
+    expect(dialog.getAllByRole("radio")).toHaveLength(3);
+    expect(calls.some((call) => call.method === "POST")).toBe(false);
+  });
+
+  it("submits a pasted URL, then shows verified once sign-in is ready", async () => {
     let status: AuthLogin["status"] = "pending";
     routes["POST /api/auth-accounts/codex-new/login"] = () => ({
-      payload: { accountId: "codex-new", status: "pending", prompt: "Paste the code" },
+      payload: {
+        accountId: "codex-new",
+        status: "pending",
+        stage: "authorize",
+        url: "https://auth.example.test/authorize",
+      },
     });
     routes["POST /api/auth-accounts/codex-new/login-input"] = () => {
       status = "ready";
@@ -295,27 +320,24 @@ describe("AuthAccountsMenu", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Sign in codex account Fresh" }));
     const dialog = within(await screen.findByRole("dialog", { name: /Sign in codex/ }));
-    expect(dialog.getByText("Paste the code")).toBeTruthy();
-    fireEvent.change(dialog.getByLabelText("Authorization code"), {
-      target: { value: " code-xyz " },
+    fireEvent.click(dialog.getByRole("radio", { name: /Browser/ }));
+    fireEvent.click(dialog.getByRole("button", { name: "Continue" }));
+    fireEvent.change(await dialog.findByLabelText("Returned URL or code"), {
+      target: { value: " http://localhost:1455/auth/callback?code=x&state=y " },
     });
     fireEvent.click(dialog.getByRole("button", { name: "Submit" }));
 
+    expect(await dialog.findByText(/Signed in · verified/)).toBeTruthy();
+    fireEvent.click(dialog.getByRole("button", { name: "Done" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(calls).toContainEqual({
       url: "/api/auth-accounts/codex-new/login-input",
       method: "POST",
-      body: { input: "code-xyz" },
+      body: { input: "http://localhost:1455/auth/callback?code=x&state=y" },
     });
   });
 
   it("cancels sign-in through login-input", async () => {
-    routes["POST /api/auth-accounts/codex-new/login"] = () => ({
-      payload: { accountId: "codex-new", status: "pending" },
-    });
-    routes["GET /api/auth-accounts/codex-new/login-status"] = () => ({
-      payload: { accountId: "codex-new", status: "pending" },
-    });
     routes["POST /api/auth-accounts/codex-new/login-input"] = () => ({
       payload: { accountId: "codex-new", status: "sign-in-required" },
     });
@@ -359,6 +381,7 @@ describe("AuthAccountsMenu", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Sign in codex account Fresh" }));
     const dialog = within(await screen.findByRole("dialog", { name: /Sign in codex/ }));
+    fireEvent.click(dialog.getByRole("button", { name: "Continue" }));
     expect(await row.findByText("signing in")).toBeTruthy();
     fireEvent.click(dialog.getByRole("button", { name: "Cancel" }));
 
@@ -367,13 +390,7 @@ describe("AuthAccountsMenu", () => {
     expect(row.queryByText("signing in")).toBeNull();
   });
 
-  it("focuses the code field and cancels sign-in on Escape", async () => {
-    routes["POST /api/auth-accounts/codex-new/login"] = () => ({
-      payload: { accountId: "codex-new", status: "pending" },
-    });
-    routes["GET /api/auth-accounts/codex-new/login-status"] = () => ({
-      payload: { accountId: "codex-new", status: "pending" },
-    });
+  it("focuses the selected method and cancels sign-in on Escape", async () => {
     routes["POST /api/auth-accounts/codex-new/login-input"] = () => ({
       payload: { accountId: "codex-new", status: "sign-in-required" },
     });
@@ -381,7 +398,7 @@ describe("AuthAccountsMenu", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Sign in codex account Fresh" }));
     const dialog = within(await screen.findByRole("dialog", { name: /Sign in codex/ }));
-    expect(document.activeElement).toBe(dialog.getByLabelText("Authorization code"));
+    expect(document.activeElement).toBe(dialog.getByRole("radio", { name: /Device code/ }));
     fireEvent.keyDown(window, { key: "Escape" });
 
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -392,7 +409,7 @@ describe("AuthAccountsMenu", () => {
     });
   });
 
-  it("reports a failed sign-in without detail and restarts it on Retry", async () => {
+  it("reports a failed sign-in and restarts it on Try again", async () => {
     let started = 0;
     routes["POST /api/auth-accounts/codex-new/login"] = () => {
       started += 1;
@@ -404,14 +421,15 @@ describe("AuthAccountsMenu", () => {
       };
     };
     routes["GET /api/auth-accounts/codex-new/login-status"] = () => ({
-      payload: { accountId: "codex-new", status: started === 1 ? "failed" : "pending" },
+      payload: { accountId: "codex-new", status: "pending", userCode: "NEW-CODE" },
     });
     await openMenu();
 
     fireEvent.click(await screen.findByRole("button", { name: "Sign in codex account Fresh" }));
     const dialog = within(await screen.findByRole("dialog", { name: /Sign in codex/ }));
-    expect((await dialog.findByTestId("auth-login-error")).textContent).toBe("Sign-in failed");
-    fireEvent.click(dialog.getByRole("button", { name: "Retry" }));
+    fireEvent.click(dialog.getByRole("button", { name: "Continue" }));
+    expect((await dialog.findByTestId("auth-login-error")).textContent).toContain("Sign-in failed");
+    fireEvent.click(dialog.getByRole("button", { name: "Try again" }));
 
     expect((await dialog.findByTestId("auth-login-user-code")).textContent).toBe("NEW-CODE");
     expect(dialog.queryByTestId("auth-login-error")).toBeNull();

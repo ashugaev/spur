@@ -5,7 +5,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { AccountsIcon } from "@/components/icons/AccountsIcon";
 import { Spinner } from "@/components/icons/Spinner";
-import { AuthLoginDialog } from "@/components/AuthLoginDialog";
+import { AuthSignInFlow } from "@/components/AuthSignInFlow";
 import { BusyContent } from "@/components/BusyContent";
 import {
   CHECKBOX_CLASS,
@@ -20,16 +20,10 @@ import {
   AUTH_STATUS_LABEL,
   authAccountName,
   authLimitLabel,
-  isAuthLogin,
   postAuthJson,
   useAuthAccounts,
 } from "@/lib/auth-accounts";
-import type { AuthAccountSummary, AuthLogin, AuthPool, AuthProvider } from "@/lib/types";
-
-interface LoginState {
-  account: AuthAccountSummary;
-  login: AuthLogin;
-}
+import type { AuthAccountSummary, AuthPool, AuthProvider } from "@/lib/types";
 
 const STATUS_COLOR: Record<AuthAccountSummary["status"], string> = {
   ready: "text-[var(--color-status-ready)]",
@@ -49,7 +43,7 @@ function ProviderSection({
   provider: AuthProvider;
   accounts: AuthAccountSummary[];
   pool: AuthPool | undefined;
-  onSignIn: (state: LoginState) => void;
+  onSignIn: (account: AuthAccountSummary) => void;
 }) {
   const queryClient = useQueryClient();
   const [label, setLabel] = useState("");
@@ -94,22 +88,6 @@ function ProviderSection({
     },
   });
 
-  const signInMutation = useMutation<LoginState, Error, AuthAccountSummary>({
-    mutationFn: async (account) => {
-      const login = await postAuthJson(
-        `/api/auth-accounts/${encodeURIComponent(account.id)}/login`,
-        "POST",
-        undefined,
-        "Failed to start sign-in",
-      );
-      if (!isAuthLogin(login)) throw new Error("Failed to start sign-in");
-      return { account, login };
-    },
-    ...errorHandlers,
-    onSuccess: onSignIn,
-    onSettled: () => void refresh(),
-  });
-
   const addMutation = useMutation<AuthAccountSummary, Error, string>({
     mutationFn: async (nextLabel) => {
       const result = (await postAuthJson(
@@ -124,7 +102,7 @@ function ProviderSection({
     ...errorHandlers,
     onSuccess: (account) => {
       setLabel("");
-      signInMutation.mutate(account);
+      onSignIn(account);
     },
     onSettled: () => void refresh(),
   });
@@ -132,11 +110,7 @@ function ProviderSection({
   const readyCount = accounts.filter((account) => account.authenticated).length;
   const defaultId = pool?.defaultAccountId ?? null;
   const rotating = poolMutation.isPending && "autoRotate" in (poolMutation.variables ?? {});
-  const busy =
-    poolMutation.isPending ||
-    removeMutation.isPending ||
-    signInMutation.isPending ||
-    addMutation.isPending;
+  const busy = poolMutation.isPending || removeMutation.isPending || addMutation.isPending;
 
   return (
     <section className="flex flex-col gap-1.5" data-testid={`auth-section-${provider}`}>
@@ -185,6 +159,9 @@ function ProviderSection({
                     </span>
                     {limit ? (
                       <span className="text-[var(--color-status-attention)]">{limit}</span>
+                    ) : null}
+                    {account.credential === "api_key" ? (
+                      <span className="uppercase text-[var(--color-text-tertiary)]">api key</span>
                     ) : null}
                     {isDefault ? (
                       <span className="uppercase text-[var(--color-text-tertiary)]">default</span>
@@ -235,7 +212,7 @@ function ProviderSection({
                           className={SECONDARY_BUTTON_CLASS}
                           disabled={busy}
                           type="button"
-                          onClick={() => signInMutation.mutate(account)}
+                          onClick={() => onSignIn(account)}
                         >
                           Sign in
                         </button>
@@ -291,9 +268,9 @@ function ProviderSection({
 /** Footer menu over every managed provider account and its global pool. */
 export function AuthAccountsMenu() {
   const popover = useFooterPopover();
-  const [login, setLogin] = useState<LoginState | null>(null);
-  const accountsQuery = useAuthAccounts(popover.open || login !== null);
-  const closeLogin = useCallback(() => setLogin(null), []);
+  const [signIn, setSignIn] = useState<AuthAccountSummary | null>(null);
+  const accountsQuery = useAuthAccounts(popover.open || signIn !== null);
+  const closeSignIn = useCallback(() => setSignIn(null), []);
 
   return (
     <div
@@ -355,14 +332,14 @@ export function AuthAccountsMenu() {
                 )}
                 pool={accountsQuery.data.pools[provider]}
                 provider={provider}
-                onSignIn={setLogin}
+                onSignIn={setSignIn}
               />
             ))
           )}
         </div>
       ) : null}
-      {login ? (
-        <AuthLoginDialog account={login.account} login={login.login} onClose={closeLogin} />
+      {signIn ? (
+        <AuthSignInFlow target={{ kind: "account", account: signIn }} onClose={closeSignIn} />
       ) : null}
     </div>
   );
