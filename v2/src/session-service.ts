@@ -14830,7 +14830,6 @@ export class SessionService {
     } catch (error) {
       // Handoff copies must not outlive a failed successor: the source keeps the open items.
       const inheritedItems = options?.inheritedTodo;
-      const inheritedSourceId = options?.replacingSessionId;
       const failedLifecycleIds = (failedId: string): string[] =>
         this.lifecycleIdsFor({
           id: failedId,
@@ -14841,13 +14840,9 @@ export class SessionService {
         });
       let rolledBack = false;
       const rollbackInherited = (failedId: string, failedProject: string): void => {
-        if (!inheritedWritten || rolledBack || !inheritedItems || !inheritedSourceId) return;
+        if (!inheritedWritten || rolledBack || !inheritedItems) return;
         rolledBack = true;
-        this.rollbackInheritedTodoLocked(
-          { id: failedId, project: failedProject },
-          inheritedItems,
-          inheritedSourceId,
-        );
+        this.rollbackInheritedTodoLocked({ id: failedId, project: failedProject }, inheritedItems);
       };
       const rollbackInheritedLocking = async (): Promise<void> => {
         if (!inheritedWritten || !sessionId) return;
@@ -25306,7 +25301,6 @@ export class SessionService {
       this.rollbackInheritedTodoLocked(
         { id: successorId, project: prepared.sourceProject },
         prepared.inheritedTodo,
-        sessionId,
       );
     };
     try {
@@ -25493,8 +25487,9 @@ export class SessionService {
   private rollbackInheritedTodoLocked(
     successor: Pick<SessionRecord, "id" | "project">,
     items: readonly HandoffTodoItem[],
-    sourceId: string,
   ): void {
+    const sourceId = items[0]?.from.sessionId;
+    if (!sourceId) throw new Error("Handoff rollback needs inherited ToDo items");
     try {
       closeTodoItems(
         this.config.dataDir,

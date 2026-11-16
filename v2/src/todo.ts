@@ -475,13 +475,16 @@ export function planHandoffTodo(projection: TodoProjection, sourceId: string): H
   for (const item of projection.items) {
     if (item.status !== "open" && item.status !== "held") continue;
     const transition = item.latestTransition;
+    if (item.status === "held" && (transition?.type !== "held" || !transition.reason)) {
+      throw new TodoLedgerCorruptError(sourceId, `Held item ${item.id} has no hold transition`);
+    }
     planned.push({
       itemId: randomUUID(),
       text: item.text,
       addedReason: item.added.reason,
       from: { sessionId: sourceId, itemId: item.id },
-      ...(item.status === "held" && transition?.type === "held" && transition.blocker
-        ? { hold: { reason: transition.reason ?? "", blocker: transition.blocker } }
+      ...(transition?.type === "held" && transition.blocker && transition.reason
+        ? { hold: { reason: transition.reason, blocker: transition.blocker } }
         : {}),
     });
   }
