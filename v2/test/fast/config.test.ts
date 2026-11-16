@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { totalmem } from "node:os";
 import { join } from "node:path";
@@ -27,6 +27,7 @@ import {
 } from "../../src/event-log.js";
 import { resolveBootstrapConfigReferencePath } from "../../src/bootstrap-prompt.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
+import { writeCloseoutArchive } from "../../src/closeout-archive.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -5217,6 +5218,42 @@ projects:
       ${line}
 `);
     expect(() => loadConfig(configPath)).toThrow(message);
+  });
+
+  it.each([
+    ["@(report.md|notes.md)", ["report.md"]],
+    ["+(report).md", ["report.md"]],
+    ["!(private).md", ["report.md"]],
+  ])("accepts closeout include %s and the archive selects it", async (glob, expected) => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    closeout:
+      include: ["artifacts:${glob}"]
+`);
+    const include = loadConfig(configPath).projects["api"]?.closeout?.include ?? [];
+    expect(include).toEqual([`artifacts:${glob}`]);
+    const root = await createTempDir("spur-closeout-glob-");
+    const artifacts = join(root, "artifacts");
+    mkdirSync(artifacts, { recursive: true });
+    for (const name of ["report.md", "private.md"]) writeFileSync(join(artifacts, name), name);
+    const sessionDir = join(root, "sessions", "s1");
+    mkdirSync(sessionDir, { recursive: true });
+    const manifest = writeCloseoutArchive({
+      sessionDir,
+      sessionId: "s1",
+      project: "api",
+      completedAt: "2026-01-01T00:00:00.000Z",
+      links: [],
+      snapshotVersion: null,
+      headSha: null,
+      roots: { artifacts, work: null, workspace: null },
+      include,
+      maxBytes: 1000,
+    });
+    expect(manifest.files.map((file) => file.path)).toEqual(expected);
+    expect(manifest.error).toBeUndefined();
   });
 
   it("leaves snapshots unset and parses projects.<id>.snapshots", async () => {

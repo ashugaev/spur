@@ -35,7 +35,8 @@ const MANIFEST_FILE = "manifest.json";
 const FILES_DIR = "files";
 const TMP_PREFIX = ".tmp-";
 export const CLOSEOUT_VERSION = /^[1-9][0-9]*$/;
-const GLOB_MAGIC = /[*?[\]{}]/;
+// Every character matchesGlob treats as syntax, extglob prefixes and alternation included.
+const GLOB_MAGIC = /[*?[\]{}()!+@|]/;
 const DAY_MS = 86_400_000;
 
 export class CloseoutCorruptError extends Error {
