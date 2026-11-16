@@ -205,6 +205,7 @@ import {
   extractBareUserTask,
   renderHandoffPrompt,
   wrapShepherdSpawnPrompt,
+  type HandoffPromptSnapshot,
 } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import {
@@ -620,7 +621,6 @@ import {
   type WorkSnapshotMeta,
   type WorkSnapshotRead,
 } from "./types.js";
-import type { HandoffPromptSnapshot } from "./handoff-prompt.js";
 import {
   closeTodoItems,
   ensureTodoLedger,
@@ -25419,7 +25419,8 @@ export class SessionService {
         movedTodoItems: prepared.inheritedTodo.length,
       };
     } catch (error) {
-      if (successorId && !sourceCommitted && !rolledBack && prepared.inheritedTodo.length > 0) {
+      // rollbackCopies re-checks sourceCommitted and rolledBack; they are set inside closures.
+      if (successorId && prepared.inheritedTodo.length > 0) {
         const failedSuccessorId = successorId;
         await this.withSessionLifecycleLocks(
           [...prepared.lifecycleIds, failedSuccessorId],
