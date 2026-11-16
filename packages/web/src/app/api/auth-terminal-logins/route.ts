@@ -1,17 +1,15 @@
 import { NextResponse } from "next/server";
+import { readRequestRecord } from "@/lib/json-payload";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
 import { spurErrorResponse } from "@/lib/spur-error-response";
 import type { TerminalLogin } from "@/lib/types";
 
 export async function POST(request: Request) {
-  const body = (await request.json().catch(() => ({}))) as {
-    accountId?: unknown;
-    host?: unknown;
-  };
+  const body = await readRequestRecord(request);
   const target =
-    typeof body.accountId === "string" && body.accountId
+    typeof body?.accountId === "string" && body.accountId
       ? { accountId: body.accountId }
-      : typeof body.host === "string" && body.host
+      : typeof body?.host === "string" && body.host
         ? { host: body.host }
         : null;
   if (!target) {

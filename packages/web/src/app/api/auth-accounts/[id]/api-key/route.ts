@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readRequestRecord } from "@/lib/json-payload";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
 import { spurErrorResponse } from "@/lib/spur-error-response";
 import type { AuthLogin } from "@/lib/types";
@@ -9,9 +10,9 @@ interface RouteContext {
 
 export async function POST(request: Request, context: RouteContext) {
   const { id } = await context.params;
-  const body = (await request.json().catch(() => ({}))) as { label?: unknown; apiKey?: unknown };
-  const label = typeof body.label === "string" ? body.label.trim() : "";
-  if (!label || typeof body.apiKey !== "string" || !body.apiKey) {
+  const body = await readRequestRecord(request);
+  const label = typeof body?.label === "string" ? body.label.trim() : "";
+  if (!body || !label || typeof body.apiKey !== "string" || !body.apiKey) {
     return NextResponse.json({ error: "Supply a label and an apiKey" }, { status: 400 });
   }
   try {

@@ -13,7 +13,7 @@ interface OpenFlow {
 }
 
 function flowTarget(alert: AuthAlert): SignInTarget {
-  return alert.kind === "managed" && alert.accountId
+  return alert.kind === "managed"
     ? {
         kind: "account",
         account: { id: alert.accountId, provider: alert.provider, label: alert.label },

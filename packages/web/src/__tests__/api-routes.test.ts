@@ -5015,6 +5015,31 @@ describe("Spur web API routes", () => {
       },
     );
 
+    it.each(["null", "[]", "7", '"text"'])(
+      "sign-in routes answer 400, not 500, for the JSON body %s",
+      async (raw) => {
+        const post = (url: string) =>
+          new Request(url, {
+            method: "POST",
+            body: raw,
+            headers: { "content-type": "text/plain" },
+          });
+        const params = { params: Promise.resolve({ id: "acc-1" }) };
+
+        const responses = [
+          await saveAuthApiKey(
+            post("http://localhost:3000/api/auth-accounts/acc-1/api-key"),
+            params,
+          ),
+          await startTerminalLogin(post("http://localhost:3000/api/auth-terminal-logins")),
+          await startAuthLogin(post("http://localhost:3000/api/auth-accounts/acc-1/login"), params),
+        ];
+
+        expect(responses.map((response) => response.status)).toEqual([400, 400, 400]);
+        expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+      },
+    );
+
     it("GET /api/auth-alerts proxies the daemon alerts", async () => {
       mockedSpurRequestJson.mockResolvedValue({ alerts: [] });
 

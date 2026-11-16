@@ -301,15 +301,16 @@ export type AuthLoginErrorCode =
   | "failed";
 
 /** One broken managed account or host login from GET /auth-alerts. */
-export interface AuthAlert {
+interface AuthAlertBase {
   id: string;
-  kind: "managed" | "host";
   provider: AuthProvider;
-  accountId?: string;
   label: string;
   since: string;
-  sessionsWaiting?: number;
 }
+
+export type AuthAlert =
+  | (AuthAlertBase & { kind: "managed"; accountId: string; sessionsWaiting?: number })
+  | (AuthAlertBase & { kind: "host" });
 
 export interface AuthAlertsResponse {
   alerts: AuthAlert[];
