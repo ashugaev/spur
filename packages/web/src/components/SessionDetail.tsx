@@ -2920,12 +2920,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 ) : null}
                 {promptView.selfDestructLabel ? (
                   <div>
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                        Self-destruct
+                    <div className="flex items-center justify-between gap-2 [&>button]:text-[var(--color-text-secondary)] [&>button]:opacity-100">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+                        Auto-close conditions
                       </div>
                       <PromptSectionCopyButton
-                        label="Self-destruct"
+                        label="Auto-close conditions"
                         value={`Close this session when ${promptView.selfDestructLabel}.`}
                         onCopy={copyLabeledValue}
                       />

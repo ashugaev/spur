@@ -11,6 +11,7 @@ import { useState, type ReactElement, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SessionDetail } from "@/components/SessionDetail";
 import type { SpurSessionView } from "@/lib/types";
+import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
 
 // SessionDetail now reads the tag catalog via react-query (useTagCatalog), so
 // every render needs a QueryClientProvider. Wrap through the render `wrapper`
@@ -2040,6 +2041,43 @@ describe("SessionDetail voice input", () => {
     expect(writeText).toHaveBeenCalledWith(fullPrompt);
     expect(await screen.findByText("Task copied")).toBeInTheDocument();
   });
+
+  it.each([undefined, "tests pass"])(
+    "shows and copies auto-close conditions: %s",
+    async (conditions) => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText },
+      });
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(
+            JSON.stringify(
+              sessionFixture({
+                selfDestruct: { enabled: true, ...(conditions ? { conditions } : {}) },
+              }),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+      const copy = await screen.findByRole("button", { name: "Copy auto-close conditions" });
+      expect(screen.getByText("Auto-close conditions", { exact: true })).toBeInTheDocument();
+      expect(copy).toHaveAttribute("title", "Copy auto-close conditions");
+      const text = `Close this session when ${conditions ?? DEFAULT_SELF_DESTRUCT_CONDITION}.`;
+      expect(screen.getByText(text)).toBeInTheDocument();
+      fireEvent.click(copy);
+      expect(writeText).toHaveBeenCalledWith(text);
+      expect(await screen.findByText("Auto-close conditions copied")).toBeInTheDocument();
+    },
+  );
 
   it("falls back to execCommand copy when navigator.clipboard is unavailable", async () => {
     const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");

@@ -3297,8 +3297,8 @@ export function Dashboard() {
                 ),
                 selfDestructSlot: spawnSelfDestruct ? (
                   <textarea
-                    aria-label="Self-destruct conditions"
-                    className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
+                    aria-label="Auto-close conditions"
+                    className={`min-h-20 w-full resize-y [--color-input-border:var(--color-text-secondary)] [--color-input-placeholder:var(--color-text-secondary)] ${INPUT_CLASS}`}
                     onChange={(event) => {
                       setSpawnSelfDestructConditions(event.target.value);
                     }}

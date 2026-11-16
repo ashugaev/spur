@@ -692,14 +692,14 @@ async function fillSpawnForm(
   }
 
   if (selfDestruct !== undefined) {
-    const checkbox = page.getByRole("checkbox", { name: "Self-destruct" });
+    const checkbox = page.getByRole("checkbox", { name: "Auto-close session" });
     if ((await checkbox.isChecked()) !== selfDestruct) {
       await checkbox.click();
     }
   }
 
   if (selfDestructConditions !== undefined) {
-    await page.getByLabel("Self-destruct conditions").fill(selfDestructConditions);
+    await page.getByLabel("Auto-close conditions").fill(selfDestructConditions);
   }
 
   if (steps) {
@@ -3034,7 +3034,7 @@ test.describe("D7: Spawn modal", () => {
     // Branch input
     await expect(page.getByLabel("branch name")).toBeVisible();
     await expect(page.getByRole("checkbox", { name: "Plan" })).toBeVisible();
-    await expect(page.getByRole("checkbox", { name: "Self-destruct" })).toBeVisible();
+    await expect(page.getByRole("checkbox", { name: "Auto-close session" })).toBeVisible();
   });
 
   test("OpenCode selection exposes its discovered models", async ({ page }) => {
@@ -4222,8 +4222,8 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByLabel("branch name")).toHaveValue("");
     await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("worktree");
     await expect(page.getByRole("checkbox", { name: "Plan" })).not.toBeChecked();
-    await expect(page.getByRole("checkbox", { name: "Self-destruct" })).not.toBeChecked();
-    await expect(page.getByLabel("Self-destruct conditions")).toHaveCount(0);
+    await expect(page.getByRole("checkbox", { name: "Auto-close session" })).not.toBeChecked();
+    await expect(page.getByLabel("Auto-close conditions")).toHaveCount(0);
     await expect(page.getByLabel(/step 1/i)).toHaveCount(0);
     await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveValue(
       "other-project",
@@ -4260,7 +4260,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
       selfDestruct: true,
     });
 
-    const conditionsField = page.getByLabel("Self-destruct conditions");
+    const conditionsField = page.getByLabel("Auto-close conditions");
     await expect(conditionsField).toHaveValue("");
     await expect(conditionsField).toHaveAttribute(
       "placeholder",

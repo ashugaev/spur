@@ -19,7 +19,7 @@ async function readCompleteBody(request: NextRequest): Promise<CompleteBody> {
   if (!raw) return {};
   const scope = raw["scope"];
   if (scope !== undefined && scope !== "session" && scope !== "desk") {
-    throw new Error("Invalid complete scope");
+    throw new Error("Invalid close scope");
   }
   const prAction = raw["prAction"];
   if (prAction !== undefined && !isOpenPrAction(prAction)) {
@@ -47,7 +47,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     );
     return NextResponse.json(await readResponsePayload(response), { status: response.status });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to complete Spur session";
+    const message = error instanceof Error ? error.message : "Failed to close Spur session";
     const status =
       message.startsWith("Invalid ") || message === "Expected an object body" ? 400 : 502;
     return NextResponse.json({ error: message }, { status });
