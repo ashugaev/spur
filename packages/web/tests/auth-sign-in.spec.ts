@@ -203,7 +203,7 @@ test.describe("Sign-in alerts and dialogs", () => {
     await dialog.getByRole("button", { name: "Continue in terminal" }).click();
 
     await expect(page.getByRole("dialog", { name: "alek@x.com" })).toBeVisible();
-    expect(order).toEqual(["cancel", 'terminal {"accountId":"claude-work"}']);
+    await expect.poll(() => order).toEqual(["cancel", 'terminal {"accountId":"claude-work"}']);
   });
 
   test("S10 a terminal that exits without verification shows neutral Not signed in", async ({
