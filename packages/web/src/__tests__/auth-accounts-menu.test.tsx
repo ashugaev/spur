@@ -270,6 +270,38 @@ describe("AuthAccountsMenu", () => {
     );
   });
 
+  it("moves focus into the confirm row and back to the trash button, keeping the popover open", async () => {
+    const claude = await openMenu();
+    const popover = screen.getByTestId("auth-accounts-popover");
+    const trash = claude.getByRole("button", { name: "Remove home@x.com" });
+    trash.focus();
+
+    fireEvent.click(trash);
+    // The browser blurs the unmounted trash button with no related target.
+    fireEvent.focusOut(popover, { relatedTarget: null });
+
+    const cancel = claude.getByRole("button", { name: "Cancel" });
+    expect(document.activeElement).toBe(cancel);
+    expect(screen.queryByTestId("auth-accounts-popover")).toBeTruthy();
+
+    fireEvent.click(cancel);
+    fireEvent.focusOut(popover, { relatedTarget: null });
+
+    expect(screen.queryByTestId("auth-accounts-popover")).toBeTruthy();
+    expect(document.activeElement).toBe(claude.getByRole("button", { name: "Remove home@x.com" }));
+  });
+
+  it("still closes the popover when focus leaves it for elsewhere", async () => {
+    await openMenu();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    fireEvent.focusOut(screen.getByTestId("auth-accounts-popover"), {
+      relatedTarget: document.body,
+    });
+
+    await waitFor(() => expect(screen.queryByTestId("auth-accounts-popover")).toBeNull());
+  });
+
   it("shows the daemon conflict, then clears it when the next action starts", async () => {
     routes["DELETE /api/auth-accounts/claude-home"] = () => ({
       status: 409,
@@ -723,6 +755,25 @@ describe("SwitchAuthDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Switch" }));
 
     expect(onConfirm).toHaveBeenCalledWith(null, false);
+  });
+
+  it("always lists the pinned account, even without an identity, checked and disabled when signed out", async () => {
+    routes["GET /api/auth-accounts"] = () => ({
+      payload: {
+        ...ACCOUNTS,
+        accounts: [WORK, { ...FRESH, provider: "claude", id: "claude-new" }],
+      },
+    });
+    render(
+      dialog({ auth: { ...auth, accountId: "claude-new", effectiveAccountId: "claude-new" } }),
+    );
+
+    const row = (await screen.findByRole("radio", {
+      name: /New Claude account/,
+    })) as HTMLInputElement;
+    expect(row.checked).toBe(true);
+    expect(row.disabled).toBe(true);
+    expect(screen.getByText("signed out")).toBeTruthy();
   });
 
   it("pins an Auto session to another account and passes the interrupt choice as force", async () => {

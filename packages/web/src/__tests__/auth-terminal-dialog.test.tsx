@@ -11,13 +11,16 @@ vi.mock("@/components/DirectTerminal", () => ({
     sessionId,
     agentInputEnabled,
     hideHeader,
+    keyBar,
   }: {
     sessionId: string;
     agentInputEnabled?: boolean;
     hideHeader?: boolean;
+    keyBar?: boolean;
   }) => (
     <div
       data-hide-header={String(hideHeader)}
+      data-key-bar={String(keyBar)}
       data-input={String(agentInputEnabled)}
       data-testid="direct-terminal"
     >
@@ -222,6 +225,26 @@ describe("AuthTerminalDialog", () => {
     expect((await screen.findByTestId("direct-terminal")).getAttribute("data-hide-header")).toBe(
       "true",
     );
+  });
+
+  it("asks the embedded terminal for the phone key bar", async () => {
+    reply("POST /api/auth-terminal-logins", "running");
+    render();
+
+    expect((await screen.findByTestId("direct-terminal")).getAttribute("data-key-bar")).toBe(
+      "true",
+    );
+  });
+
+  it("keeps the status and Close on one footer row", async () => {
+    reply("POST /api/auth-terminal-logins", "not_signed_in", "exited");
+    render();
+
+    const status = await screen.findByTestId("auth-terminal-status");
+    const row = status.parentElement;
+    expect(row?.className).toContain("justify-between");
+    expect(row?.contains(screen.getByRole("button", { name: "Close" }))).toBe(true);
+    expect(row?.contains(screen.getByRole("button", { name: "Restart terminal" }))).toBe(true);
   });
 
   it("starts a host terminal for the provider", async () => {

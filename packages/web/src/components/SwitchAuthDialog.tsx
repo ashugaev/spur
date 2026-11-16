@@ -26,6 +26,8 @@ interface SwitchAuthDialogProps {
 }
 
 const AUTO_VALUE = "";
+// The row carries the focus ring; the radio inside it stays outline-free.
+const RADIO_CLASS = "accent-[var(--color-accent)] outline-none";
 const ROW_CLASS =
   "flex cursor-pointer items-center gap-2 border-b border-[var(--color-border-subtle)] px-2.5 py-2 last:border-b-0 has-[:checked]:bg-[var(--color-hover-overlay)] has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-60 has-[:focus-visible]:outline has-[:focus-visible]:outline-1 has-[:focus-visible]:outline-[var(--color-accent)]";
 
@@ -55,7 +57,10 @@ export function SwitchAuthDialog({
   const providerAccounts = (accountsQuery.data?.accounts ?? []).filter(
     (account) => account.provider === auth.provider,
   );
-  const identified = providerAccounts.filter((account) => account.identity !== undefined);
+  // The pinned account always has a row, so the dialog never hides what the session runs on.
+  const identified = providerAccounts.filter(
+    (account) => account.identity !== undefined || account.id === auth.accountId,
+  );
   const resolvedAuto = autoAccount(
     providerAccounts,
     accountsQuery.data?.pools[auth.provider],
@@ -114,7 +119,7 @@ export function SwitchAuthDialog({
           <label className={ROW_CLASS}>
             <input
               checked={selected === AUTO_VALUE}
-              className={CHECKBOX_CLASS}
+              className={RADIO_CLASS}
               disabled={pending}
               name="switch-auth-account"
               type="radio"
@@ -141,7 +146,7 @@ export function SwitchAuthDialog({
               <label key={account.id} className={ROW_CLASS}>
                 <input
                   checked={selected === account.id}
-                  className={CHECKBOX_CLASS}
+                  className={RADIO_CLASS}
                   disabled={pending || signedOut}
                   name="switch-auth-account"
                   type="radio"

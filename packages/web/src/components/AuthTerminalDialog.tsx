@@ -226,89 +226,92 @@ export function AuthTerminalDialog({
               agent={provider}
               agentInputEnabled={false}
               hideHeader
+              keyBar
               sessionId={login.tmuxSession}
             />
           </div>
         ) : null}
 
-        <div
-          aria-live="polite"
-          className="flex items-start gap-2 py-1 normal-case tracking-normal text-[var(--color-text-secondary)]"
-          data-testid="auth-terminal-status"
-          role="status"
-        >
-          {startError !== null ? (
-            <span className="text-[var(--color-status-error)]">{startError}</span>
-          ) : restarting ? (
-            <WaitLine live={false}>Opening terminal…</WaitLine>
-          ) : status === "ready" ? (
-            <span className="flex min-w-0 items-center gap-2 font-bold text-[var(--color-status-ready)]">
-              <CheckIcon className="h-3 w-3 shrink-0" />
-              <span className="truncate" title={identityLine}>
-                Signed in as {identityLine}
+        <div className="mt-1 flex items-start justify-between gap-3">
+          <div
+            aria-live="polite"
+            className="flex min-w-0 flex-1 items-start gap-2 py-1 normal-case tracking-normal text-[var(--color-text-secondary)] [overflow-wrap:anywhere]"
+            data-testid="auth-terminal-status"
+            role="status"
+          >
+            {startError !== null ? (
+              <span className="text-[var(--color-status-error)]">{startError}</span>
+            ) : restarting ? (
+              <WaitLine live={false}>Opening terminal…</WaitLine>
+            ) : status === "ready" ? (
+              <span className="flex min-w-0 items-center gap-2 font-bold text-[var(--color-status-ready)]">
+                <CheckIcon className="h-3 w-3 shrink-0" />
+                <span className="truncate" title={identityLine}>
+                  Signed in as {identityLine}
+                </span>
               </span>
-            </span>
-          ) : ended ? (
-            <>
-              <span
-                aria-hidden="true"
-                className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full border border-[var(--color-text-secondary)]"
-              />
-              <span>
-                <span className="font-bold text-[var(--color-text-primary)]">Not signed in</span>
-                <br />
-                {(login?.reason && NOT_SIGNED_IN_NOTE[login.reason]) ??
-                  "Terminal ended. Account still signed out."}
+            ) : ended ? (
+              <>
+                <span
+                  aria-hidden="true"
+                  className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full border border-[var(--color-text-secondary)]"
+                />
+                <span>
+                  <span className="font-bold text-[var(--color-text-primary)]">Not signed in</span>
+                  <br />
+                  {(login?.reason && NOT_SIGNED_IN_NOTE[login.reason]) ??
+                    "Terminal ended. Account still signed out."}
+                </span>
+              </>
+            ) : status === "verifying" ? (
+              <WaitLine live={false}>Verifying sign-in…</WaitLine>
+            ) : (
+              <span className="flex flex-col gap-1">
+                <WaitLine live={false}>
+                  {login ? "Waiting for sign-in…" : "Opening terminal…"}
+                </WaitLine>
+                {login?.reason && RUNNING_NOTE[login.reason] ? (
+                  <span>{RUNNING_NOTE[login.reason]}</span>
+                ) : null}
               </span>
-            </>
-          ) : status === "verifying" ? (
-            <WaitLine live={false}>Verifying sign-in…</WaitLine>
-          ) : (
-            <span className="flex flex-col gap-1">
-              <WaitLine live={false}>
-                {login ? "Waiting for sign-in…" : "Opening terminal…"}
-              </WaitLine>
-              {login?.reason && RUNNING_NOTE[login.reason] ? (
-                <span>{RUNNING_NOTE[login.reason]}</span>
-              ) : null}
-            </span>
-          )}
-        </div>
+            )}
+          </div>
 
-        <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-          {status === "ready" ? (
-            <button
-              ref={closeRef}
-              className={PRIMARY_BUTTON_CLASS}
-              disabled={closing}
-              type="button"
-              onClick={close}
-            >
-              Done
-            </button>
-          ) : (
-            <>
+          <div className="flex shrink-0 items-center gap-2">
+            {status === "ready" ? (
               <button
                 ref={closeRef}
-                className={SECONDARY_BUTTON_CLASS}
+                className={PRIMARY_BUTTON_CLASS}
                 disabled={closing}
                 type="button"
                 onClick={close}
               >
-                Close
+                Done
               </button>
-              {ended || startError !== null ? (
+            ) : (
+              <>
                 <button
-                  className={PRIMARY_BUTTON_CLASS}
-                  disabled={closing || restarting}
+                  ref={closeRef}
+                  className={SECONDARY_BUTTON_CLASS}
+                  disabled={closing}
                   type="button"
-                  onClick={() => void start()}
+                  onClick={close}
                 >
-                  <BusyContent busy={restarting}>Restart terminal</BusyContent>
+                  Close
                 </button>
-              ) : null}
-            </>
-          )}
+                {ended || startError !== null ? (
+                  <button
+                    className={PRIMARY_BUTTON_CLASS}
+                    disabled={closing || restarting}
+                    type="button"
+                    onClick={() => void start()}
+                  >
+                    <BusyContent busy={restarting}>Restart terminal</BusyContent>
+                  </button>
+                ) : null}
+              </>
+            )}
+          </div>
         </div>
       </div>
     </div>

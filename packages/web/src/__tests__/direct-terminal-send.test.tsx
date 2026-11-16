@@ -268,3 +268,44 @@ describe("DirectTerminal controls safe-area", () => {
     );
   });
 });
+
+describe("DirectTerminal key bar", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    MockWebSocket.mockClear();
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  it("is absent unless asked for", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="no-key-bar" />);
+    });
+
+    expect(screen.queryByTestId("terminal-key-bar")).toBeNull();
+  });
+
+  it("sends Esc, up, down and Enter to the terminal and is hidden from sm up", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+    await act(async () => {
+      render(<DirectTerminal agent="claude" keyBar sessionId="key-bar" />);
+    });
+    await waitFor(() => expect(MockWebSocket).toHaveBeenCalledTimes(1));
+    const socket = MockWebSocket.mock.results[0]?.value as { send: ReturnType<typeof vi.fn> };
+    await waitFor(() => expect((socket as unknown as { readyState: number }).readyState).toBe(1));
+    const bar = within(screen.getByTestId("terminal-key-bar"));
+    expect(screen.getByTestId("terminal-key-bar").className).toContain("sm:hidden");
+    socket.send.mockClear();
+
+    for (const name of ["Escape", "Arrow Up", "Arrow Down", "Enter"]) {
+      fireEvent.click(bar.getByRole("button", { name }));
+    }
+
+    expect(socket.send.mock.calls.map((call) => call[0])).toEqual([
+      "\x1b",
+      "\x1b[A",
+      "\x1b[B",
+      "\r",
+    ]);
+  });
+});

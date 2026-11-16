@@ -54,6 +54,8 @@ interface DirectTerminalProps {
   onClose?: () => void;
   /** Embedded in a dialog that already carries a title and close button. */
   hideHeader?: boolean;
+  /** Phone-only Esc, up, down and Enter keys under the terminal, for native CLI prompts. */
+  keyBar?: boolean;
 }
 
 interface TerminalLocation {
@@ -75,6 +77,13 @@ const TERMINAL_ARROW_CONTROLS = [
   { label: "Arrow Up", iconPath: "M5 15l7-7 7 7", sequence: "\x1b[A" },
   { label: "Arrow Down", iconPath: "M19 9l-7 7-7-7", sequence: "\x1b[B" },
   { label: "Arrow Right", iconPath: "M9 5l7 7-7 7", sequence: "\x1b[C" },
+] as const;
+
+const TERMINAL_KEY_BAR = [
+  { label: "Esc", name: "Escape", sequence: "\x1b" },
+  { label: "↑", name: "Arrow Up", sequence: "\x1b[A" },
+  { label: "↓", name: "Arrow Down", sequence: "\x1b[B" },
+  { label: "Enter", name: "Enter", sequence: "\r" },
 ] as const;
 
 function isRetryableClose(code: number): boolean {
@@ -233,6 +242,7 @@ export function DirectTerminal({
   title,
   onClose,
   hideHeader = false,
+  keyBar = false,
 }: DirectTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const terminalInstanceRef = useRef<TerminalType | null>(null);
@@ -991,6 +1001,26 @@ export function DirectTerminal({
             (DEFAULT_SCROLL_BAR_WIDTH); the negative margin hands that width back to the terminal. */}
         <div ref={terminalRef} className="h-full min-h-0 max-sm:pointer-coarse:-mr-3.5" />
       </div>
+      {keyBar ? (
+        <div
+          aria-label="Terminal keys"
+          className="flex gap-1 border-t border-[var(--color-border-subtle)] p-1.5 sm:hidden"
+          data-testid="terminal-key-bar"
+          role="group"
+        >
+          {TERMINAL_KEY_BAR.map((key) => (
+            <button
+              aria-label={key.name}
+              className="h-8 flex-1 border border-[var(--color-border-default)] font-mono text-[10px] uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] active:bg-[var(--color-hover-overlay)]"
+              key={key.name}
+              onClick={() => sendTerminalInput(key.sequence)}
+              type="button"
+            >
+              {key.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
       {(voice.voiceError ?? submitError) ? (
         <div className="border-t border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">
           {voice.voiceError ?? submitError}

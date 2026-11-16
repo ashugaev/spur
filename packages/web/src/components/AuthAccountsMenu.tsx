@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { type MutableRefObject, useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { AccountsIcon } from "@/components/icons/AccountsIcon";
@@ -32,14 +32,36 @@ function ProviderSection({
   accounts,
   pool,
   onSignIn,
+  focusHandoff,
 }: {
   provider: AuthProvider;
   accounts: AuthAccountSummary[];
   pool: AuthPool | undefined;
   onSignIn: (request: SignInRequest) => void;
+  /** Set while this section moves focus itself, so the unmounting element's blur never closes the popover. */
+  focusHandoff: MutableRefObject<boolean>;
 }) {
   const queryClient = useQueryClient();
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const trashRefs = useRef(new Map<string, HTMLButtonElement>());
+  const restoreTrashId = useRef<string | null>(null);
+  // Focus enters the confirm row when it opens and returns to the row's trash button when cancelled.
+  const swapRow = (confirmId: string | null) => {
+    focusHandoff.current = true;
+    setConfirmRemoveId(confirmId);
+    window.setTimeout(() => {
+      focusHandoff.current = false;
+    }, 0);
+  };
+  useEffect(() => {
+    if (confirmRemoveId) {
+      cancelRef.current?.focus();
+    } else if (restoreTrashId.current) {
+      trashRefs.current.get(restoreTrashId.current)?.focus();
+      restoreTrashId.current = null;
+    }
+  }, [confirmRemoveId]);
   // One error per section: each action clears it on start, sets it on failure.
   const [lastError, setLastError] = useState<string | null>(null);
   const name = authProviderName(provider);
@@ -159,10 +181,14 @@ function ProviderSection({
                   </span>
                   <span className="flex shrink-0 items-center gap-1.5">
                     <button
+                      ref={cancelRef}
                       className={SECONDARY_BUTTON_CLASS}
                       disabled={removing}
                       type="button"
-                      onClick={() => setConfirmRemoveId(null)}
+                      onClick={() => {
+                        restoreTrashId.current = account.id;
+                        swapRow(null);
+                      }}
                     >
                       Cancel
                     </button>
@@ -184,9 +210,9 @@ function ProviderSection({
               <li key={account.id} className={ROW_CLASS} data-testid={`auth-account-${account.id}`}>
                 <span className="flex min-w-0 flex-col">
                   <span
-                    className={`truncate font-bold ${
+                    className={`truncate ${
                       account.identity
-                        ? "text-[var(--color-text-primary)]"
+                        ? "font-bold text-[var(--color-text-primary)]"
                         : "text-[var(--color-text-secondary)]"
                     }`}
                     title={lines.primary}
@@ -242,12 +268,16 @@ function ProviderSection({
                   )}
                 </span>
                 <button
+                  ref={(element) => {
+                    if (element) trashRefs.current.set(account.id, element);
+                    else trashRefs.current.delete(account.id);
+                  }}
                   aria-label={`Remove ${account.displayName}`}
-                  className="flex h-7 w-7 items-center justify-center text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+                  className={`flex h-7 w-7 items-center justify-center text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50 ${CHECKBOX_CLASS}`}
                   disabled={busy}
                   title="Remove"
                   type="button"
-                  onClick={() => setConfirmRemoveId(account.id)}
+                  onClick={() => swapRow(account.id)}
                 >
                   <TrashIcon className="h-3.5 w-3.5" />
                 </button>
@@ -263,7 +293,7 @@ function ProviderSection({
       ) : null}
       <button
         aria-busy={addMutation.isPending || undefined}
-        className={`self-start py-1 ${NOTE_CLASS} text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50`}
+        className={`self-start py-1 uppercase tracking-[0.08em] text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50`}
         data-testid={`add-account-${provider}`}
         disabled={busy}
         type="button"
@@ -281,6 +311,7 @@ export function AuthAccountsMenu() {
   const [signIn, setSignIn] = useState<SignInRequest | null>(null);
   const accountsQuery = useAuthAccounts(popover.open || signIn !== null, { poll: popover.open });
   const closeSignIn = useCallback(() => setSignIn(null), []);
+  const focusHandoff = useRef(false);
 
   return (
     <div
@@ -288,7 +319,9 @@ export function AuthAccountsMenu() {
       // Below sm the wrapper stays static, so the popover anchors to the
       // full-width footer instead of this trigger and stays on screen.
       className="sm:relative"
-      onBlur={popover.onBlur}
+      onBlur={(event) => {
+        if (!focusHandoff.current) popover.onBlur(event);
+      }}
       onMouseEnter={popover.onMouseEnter}
       onMouseLeave={popover.onMouseLeave}
     >
@@ -337,6 +370,7 @@ export function AuthAccountsMenu() {
             AUTH_PROVIDERS.map((provider) => (
               <ProviderSection
                 key={provider}
+                focusHandoff={focusHandoff}
                 accounts={accountsQuery.data.accounts.filter(
                   (account) => account.provider === provider,
                 )}
