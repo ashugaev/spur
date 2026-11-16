@@ -1,11 +1,24 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionService } from "../../src/session-service.js";
 import { startServer } from "../../src/server.js";
 import type { CronJobEditDraft, CronJobsResponse, SessionView } from "../../src/types.js";
+import * as hostMemory from "../../src/host-memory.js";
 import { cleanupTrackedTempDirs, createTempDir, findFreePort } from "../helpers/common.js";
+
+beforeEach(() => {
+  // Cron editor assertions must not depend on the runner's memory pressure.
+  vi.spyOn(hostMemory, "readHostMemory").mockReturnValue({
+    totalBytes: 64_000_000_000,
+    availableBytes: 32_000_000_000,
+    swapTotalBytes: 8_000_000_000,
+    swapFreeBytes: 8_000_000_000,
+  });
+  vi.spyOn(hostMemory, "readCgroupMemorySnapshot").mockReturnValue(null);
+  vi.spyOn(hostMemory, "readCgroupPressure").mockReturnValue(null);
+});
 
 afterEach(async () => {
   vi.restoreAllMocks();
