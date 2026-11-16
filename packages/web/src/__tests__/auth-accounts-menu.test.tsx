@@ -128,6 +128,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const settle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Focus leaves the popover for the page body, as a click outside does. */
+const leaveForBody = () =>
+  fireEvent.focusOut(screen.getByTestId("auth-accounts-popover"), {
+    relatedTarget: document.body,
+  });
+
 async function openMenu() {
   render(<AuthAccountsMenu />);
   fireEvent.click(screen.getByRole("button", { name: "Manage agent accounts" }));
@@ -324,12 +332,6 @@ describe("AuthAccountsMenu", () => {
       expect(screen.queryByTestId("auth-accounts-popover")).toBeTruthy();
     });
 
-    const leaveForBody = () =>
-      fireEvent.focusOut(screen.getByTestId("auth-accounts-popover"), {
-        relatedTarget: document.body,
-      });
-    const settle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
     it("releases the blur guard after trash then Cancel", async () => {
       const claude = await openMenu();
       claude.getByRole("button", { name: "Remove home@x.com" }).focus();
@@ -345,9 +347,22 @@ describe("AuthAccountsMenu", () => {
     it("releases the blur guard after a successful remove and its refetch", async () => {
       const claude = await openMenu();
       fireEvent.click(claude.getByRole("button", { name: "Remove home@x.com" }));
+      await settle(20);
       fireEvent.click(claude.getByRole("button", { name: "Remove" }));
       await waitFor(() => expect(screen.queryByTestId("auth-account-claude-home")).toBeNull());
       await settle(150);
+
+      leaveForBody();
+
+      await waitFor(() => expect(screen.queryByTestId("auth-accounts-popover")).toBeNull());
+    });
+
+    it("releases the guard as soon as focus has moved, not only after the backstop delay", async () => {
+      const claude = await openMenu();
+      fireEvent.click(claude.getByRole("button", { name: "Remove home@x.com" }));
+      await settle(20);
+      fireEvent.click(claude.getByRole("button", { name: "Remove" }));
+      await waitFor(() => expect(screen.queryByTestId("auth-account-claude-home")).toBeNull());
 
       leaveForBody();
 
@@ -358,6 +373,7 @@ describe("AuthAccountsMenu", () => {
       const claude = await openMenu();
       routes["GET /api/auth-accounts"] = () => ({ status: 502, payload: { error: "down" } });
       fireEvent.click(claude.getByRole("button", { name: "Remove home@x.com" }));
+      await settle(20);
       fireEvent.click(claude.getByRole("button", { name: "Remove" }));
       await waitFor(() =>
         expect(
@@ -391,6 +407,26 @@ describe("AuthAccountsMenu", () => {
       relatedTarget: document.body,
     });
 
+    await waitFor(() => expect(screen.queryByTestId("auth-accounts-popover")).toBeNull());
+  });
+
+  it("returns focus to the same row's trash button after a 409 on remove", async () => {
+    routes["DELETE /api/auth-accounts/claude-home"] = () => ({
+      status: 409,
+      payload: { error: "Cannot remove account claude-home: in use by a running session" },
+    });
+    const claude = await openMenu();
+    claude.getByRole("button", { name: "Remove home@x.com" }).focus();
+    fireEvent.click(claude.getByRole("button", { name: "Remove home@x.com" }));
+    await settle(20);
+    fireEvent.click(claude.getByRole("button", { name: "Remove" }));
+
+    expect(await claude.findByText(/in use by a running session/)).toBeTruthy();
+
+    expect(document.activeElement).toBe(claude.getByRole("button", { name: "Remove home@x.com" }));
+    // The guard is released too: a real outside blur still closes the popover.
+    await settle(20);
+    leaveForBody();
     await waitFor(() => expect(screen.queryByTestId("auth-accounts-popover")).toBeNull());
   });
 

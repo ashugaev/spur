@@ -71,6 +71,8 @@ function ProviderSection({
     pendingRemoval.current = null;
     const next = pending.focusId ? trashRefs.current.get(pending.focusId) : undefined;
     (next ?? addRef.current)?.focus();
+    // Focus has moved: release now so a real outside blur during the rest of the refetch closes the popover.
+    focusHandoff.current = false;
   }, [accounts]);
   // One error per section: each action clears it on start, sets it on failure.
   const [lastError, setLastError] = useState<string | null>(null);

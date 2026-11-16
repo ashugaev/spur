@@ -81,8 +81,16 @@ const TERMINAL_ARROW_CONTROLS = [
 
 const TERMINAL_KEY_BAR = [
   { label: "Esc", name: "Escape", sequence: "\x1b" },
-  { label: "↑", name: "Arrow Up", sequence: "\x1b[A" },
-  { label: "↓", name: "Arrow Down", sequence: "\x1b[B" },
+  {
+    label: "↑",
+    name: TERMINAL_ARROW_CONTROLS[1].label,
+    sequence: TERMINAL_ARROW_CONTROLS[1].sequence,
+  },
+  {
+    label: "↓",
+    name: TERMINAL_ARROW_CONTROLS[2].label,
+    sequence: TERMINAL_ARROW_CONTROLS[2].sequence,
+  },
   { label: "Enter", name: "Enter", sequence: "\r" },
 ] as const;
 
