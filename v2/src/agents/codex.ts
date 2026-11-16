@@ -2368,24 +2368,13 @@ function codexTranscriptFolder(limit: number): CodexLineFolder<CodexTranscriptFo
   };
 }
 
-export interface CodexConversationReaderState {
-  filePath: string;
-  cursor: CodexJsonlCursor<CodexTranscriptFold>;
-}
-
-/**
- * Newest MAX_RETAINED_CONVERSATION_ENTRIES transcript entries of the latest
- * rollout, equal to the tail of `readCodexTranscriptEntries`. An unchanged file
- * is not read; an append parses only the new bytes; a rewrite, rotation, or
- * a call whose output left the window re-reads the whole file.
- */
 // A thread's rollout inside one sessions dir; the global dir and other threads' files never match.
 async function findCodexThreadRolloutFile(
   sessionsDir: string,
   threadId: string,
 ): Promise<string | null> {
   let best: LatestRolloutFile | null = null;
-  for (const filePath of await collectJsonlFiles(sessionsDir).catch(() => [])) {
+  for (const filePath of await collectJsonlFiles(sessionsDir)) {
     try {
       const { mtimeMs } = await stat(filePath);
       if (best && mtimeMs <= best.mtimeMs) continue;
@@ -2397,8 +2386,19 @@ async function findCodexThreadRolloutFile(
   return best?.filePath ?? null;
 }
 
-// With threadId, reads only that thread's rollout in sessionsDir; without, the newest rollout
-// across sessionsDir and the global dir.
+export interface CodexConversationReaderState {
+  filePath: string;
+  cursor: CodexJsonlCursor<CodexTranscriptFold>;
+}
+
+/**
+ * Newest MAX_RETAINED_CONVERSATION_ENTRIES transcript entries of the latest
+ * rollout, equal to the tail of `readCodexTranscriptEntries`. An unchanged file
+ * is not read; an append parses only the new bytes; a rewrite, rotation, or
+ * a call whose output left the window re-reads the whole file.
+ * With threadId, reads only that thread's rollout in sessionsDir; without, the newest rollout
+ * across sessionsDir and the global dir.
+ */
 export async function readCodexConversationTail(
   sessionsDir: string,
   reader: CodexConversationReaderState | undefined,
