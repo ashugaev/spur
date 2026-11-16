@@ -12,7 +12,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 it("publishes complete GitHub fixture states to concurrent external readers", async () => {
   const context = await createRuntimeTestContext(0, { useFakeTools: false });
-  const states: FakeGhState[] = Array.from({ length: 17 }, (_, number) => ({
+  const createState = (number: number): FakeGhState => ({
     searchPrs: [
       {
         number,
@@ -21,12 +21,19 @@ it("publishes complete GitHub fixture states to concurrent external readers", as
         repository: { nameWithOwner: "acme/api" },
       },
     ],
-  }));
+  });
+  const initialState = createState(0);
+  const finalState = createState(16);
+  const states = [
+    initialState,
+    ...Array.from({ length: 15 }, (_, index) => createState(index + 1)),
+    finalState,
+  ];
   const contents = states.map((state) => `${JSON.stringify(state, null, 2)}\n`);
   const digests = contents.map((text) => createHash("sha256").update(text).digest("hex"));
   let reader: ReturnType<typeof spawn> | undefined;
   try {
-    await context.writeGhState(states[0]);
+    await context.writeGhState(initialState);
     const child = spawn(
       process.execPath,
       [
@@ -94,7 +101,7 @@ setImmediate(loop);
     });
     for (const state of states.slice(1, -1)) await context.writeGhState(state);
     await checkpoint();
-    await context.writeGhState(states[states.length - 1]);
+    await context.writeGhState(finalState);
     const result = once(child, "message");
     child.send("stop");
     const [observation]: unknown[] = await result;
