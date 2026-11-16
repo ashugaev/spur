@@ -16,6 +16,7 @@ const hooks = vi.hoisted(() => ({
   beforeOpen: null as null | { match: string; run: () => void },
   fakeSize: null as null | number,
   procFails: false,
+  beforeRealpath: null as null | { match: string; run: () => void },
 }));
 
 function unknownDirent(name: string): NodeFs.Dirent {
@@ -44,6 +45,18 @@ vi.mock("node:fs", async (importOriginal) => {
       }
       return (actual.openSync as (...a: unknown[]) => number)(...args);
     }) as typeof NodeFs.openSync,
+    realpathSync: Object.assign(
+      ((...args: unknown[]) => {
+        const path = args[0];
+        const hook = hooks.beforeRealpath;
+        if (hook && typeof path === "string" && path.endsWith(hook.match)) {
+          hooks.beforeRealpath = null;
+          hook.run();
+        }
+        return (actual.realpathSync as (...a: unknown[]) => unknown)(...args);
+      }) as typeof NodeFs.realpathSync,
+      { native: actual.realpathSync.native },
+    ),
     readlinkSync: ((...args: unknown[]) => {
       const path = args[0];
       if (hooks.procFails && typeof path === "string" && path.startsWith("/proc/self/fd/")) {
@@ -74,6 +87,7 @@ afterEach(() => {
   hooks.beforeOpen = null;
   hooks.fakeSize = null;
   hooks.procFails = false;
+  hooks.beforeRealpath = null;
   rmSync(base, { recursive: true, force: true });
 });
 
@@ -184,5 +198,38 @@ describe("closeout archive with unknown dirent types", () => {
     expect(manifest.skipped).toEqual([
       { root: "artifacts", path: "sub/f.txt", bytes: 6, reason: "unverified" },
     ]);
+  });
+
+  it("treats a root swapped for a symlink between lstat and realpath as missing", () => {
+    base = mkdtempSync(join(tmpdir(), "closeout-fault-"));
+    const artifacts = join(base, "artifacts");
+    const outside = join(base, "outside");
+    mkdirSync(join(artifacts, ".spur-work"), { recursive: true });
+    mkdirSync(join(outside, ".spur-work"), { recursive: true });
+    writeFileSync(join(outside, "secret.txt"), "secret");
+    writeFileSync(join(outside, ".spur-work", "secret.md"), "secret");
+    hooks.beforeRealpath = {
+      match: "/artifacts",
+      run: () => {
+        renameSync(artifacts, join(base, "artifacts-moved"));
+        symlinkSync(outside, artifacts);
+      },
+    };
+    const sessionDir = join(base, "sessions", "s1");
+    mkdirSync(sessionDir, { recursive: true });
+    const manifest = writeCloseoutArchive({
+      sessionDir,
+      sessionId: "s1",
+      project: "p",
+      completedAt: "2026-01-01T00:00:00.000Z",
+      links: [],
+      snapshotVersion: null,
+      headSha: null,
+      roots: { artifacts, work: join(artifacts, ".spur-work"), workspace: null },
+      include: ["work:**", "artifacts:**"],
+      maxBytes: 1000,
+    });
+    expect(manifest.files).toEqual([]);
+    expect(manifest.missingRoots).toEqual(["artifacts", "work"]);
   });
 });

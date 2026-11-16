@@ -10,6 +10,7 @@ import {
   openSync,
   readSync,
   readlinkSync,
+  type Stats,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -141,8 +142,14 @@ function entryKind(entry: Dirent, fullPath: string): "file" | "directory" | "oth
 function realRoot(root: string | null): string | null {
   if (root === null) return null;
   try {
-    if (!lstatSync(root).isDirectory()) return null;
-    return realpathSync(root);
+    const before = lstatSync(root);
+    if (!before.isDirectory()) return null;
+    const real = realpathSync(root);
+    // Bind identity: the canonical dir must be the one lstat saw, not a swapped-in target.
+    const after = lstatSync(real);
+    return after.isDirectory() && after.dev === before.dev && after.ino === before.ino
+      ? real
+      : null;
   } catch {
     return null;
   }
@@ -161,15 +168,19 @@ function nestedRoot(
   if (parentRaw === null || !child.startsWith(parentRaw + sep)) return realRoot(child);
   if (parentReal === null) return null;
   const segments = relative(parentRaw, child).split(sep);
+  const path = join(parentReal, ...segments);
   try {
+    let last: Stats | undefined;
     for (let depth = 1; depth <= segments.length; depth += 1) {
-      const stat = lstatSync(join(parentReal, ...segments.slice(0, depth)));
-      if (stat.isSymbolicLink() || !stat.isDirectory()) return null;
+      last = lstatSync(join(parentReal, ...segments.slice(0, depth)));
+      if (last.isSymbolicLink() || !last.isDirectory()) return null;
     }
+    const after = lstatSync(realpathSync(path));
+    if (!last || after.dev !== last.dev || after.ino !== last.ino) return null;
   } catch {
     return null;
   }
-  return join(parentReal, ...segments);
+  return path;
 }
 
 /** Carries what the walk collected before the entry budget ran out. */
