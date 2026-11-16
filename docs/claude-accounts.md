@@ -29,7 +29,6 @@ Session Switch auth: another profile or back to Auto, for the next request.
 
 Legacy Claude labels/IDs remain; sign in again for managed routing.
 Host credentials and existing direct processes remain untouched.
-Proxy state from a pre-release build (schema 1) stops the proxy at start: delete `auth-proxy-state.json` in the data dir once, then sign in again.
 
 ## Per-session switch
 

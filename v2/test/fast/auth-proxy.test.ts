@@ -202,18 +202,4 @@ describe("authorization proxy private control", () => {
       },
     ]);
   });
-
-  it("names the schema-1 state file when the companion refuses to start", async () => {
-    const child = childWithControl(() => {});
-    vi.mocked(spawn).mockImplementation(() => {
-      queueMicrotask(() => {
-        child.stderr.write(
-          "Spur auth proxy stopped: auth proxy state unavailable: invalid auth proxy state identity or schema\n",
-        );
-        child.emit("close", 1);
-      });
-      return child as unknown as ReturnType<typeof spawn>;
-    });
-    await expect(proxy!.getState()).rejects.toThrow("remove auth-proxy-state.json");
-  });
 });

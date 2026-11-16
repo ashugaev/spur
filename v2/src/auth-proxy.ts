@@ -207,10 +207,7 @@ export class AuthProxy {
         child.kill();
       }, 30_000);
       const lines = createInterface({ input: child.stdout });
-      let stderrTail = "";
-      child.stderr.on("data", (chunk: Buffer) => {
-        stderrTail = (stderrTail + chunk.toString()).slice(-512);
-      });
+      child.stderr.resume();
       child.once("error", () => {
         clearTimeout(timeout);
         reject(new Error("Managed authorization proxy unavailable; rebuild or reinstall Spur"));
@@ -258,13 +255,7 @@ export class AuthProxy {
         clearTimeout(timeout);
         lines.close();
         if (!ready) {
-          reject(
-            new Error(
-              stderrTail.includes("auth proxy state unavailable")
-                ? "Managed authorization proxy state is unreadable or from an older build; remove auth-proxy-state.json from the Spur data directory and retry"
-                : "Managed authorization proxy failed to start",
-            ),
-          );
+          reject(new Error("Managed authorization proxy failed to start"));
         }
         if (this.child !== child) return;
         this.child = undefined;

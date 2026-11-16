@@ -176,8 +176,9 @@ import {
 } from "./usage-report.js";
 import {
   AuthAlerts,
-  failedEventDetails,
+  logAuthFailed,
   observeHostSource,
+  type AlertEvaluationInput,
   type AuthAlert,
   type ManagedBreakage,
 } from "./auth-alerts.js";
@@ -4340,12 +4341,7 @@ export class SessionService {
     );
     this.authAlerts = new AuthAlerts({
       dataDir: this.config.dataDir,
-      onOpened: (entry) =>
-        this.logEvent("session.auth.failed", {
-          level: "warn",
-          message: `${entry.provider} sign-in is broken`,
-          details: failedEventDetails(entry),
-        }),
+      onOpened: (entry) => logAuthFailed(this.config.dataDir, entry),
     });
     this.authTerminals = new AuthTerminalLogins({
       dataDir: this.config.dataDir,
@@ -4358,14 +4354,10 @@ export class SessionService {
       importNativeLogin: (accountId, provider) =>
         this.authProxy.importNativeLogin(accountId, provider),
       loginStatus: (accountId) => this.authProxy.loginStatus(accountId),
-      hostProbe: async (provider) => {
-        this.authSnapshot = undefined;
-        return (
-          (await readHostCredentialSources(this.usageReportDeps(), true)).find(
-            (source) => source.provider === provider,
-          ) ?? null
-        );
-      },
+      hostProbe: async (provider) =>
+        (await readHostCredentialSources(this.usageReportDeps(), true)).find(
+          (source) => source.provider === provider,
+        ) ?? null,
       agentCommand: (provider) => (provider === "claude" ? claudeCommand() : codexCommand()),
       now: () => Date.now(),
     });
@@ -24780,6 +24772,11 @@ export class SessionService {
   }
 
   async listAuthAlerts(): Promise<{ alerts: AuthAlert[] }> {
+    const { alerts } = await this.authAlerts.evaluate(() => this.readAuthAlertInputs(), new Date());
+    return { alerts };
+  }
+
+  private async readAuthAlertInputs(): Promise<AlertEvaluationInput> {
     const state = this.authAccounts.read();
     let managed: ManagedBreakage[] | null = [];
     if (state.accounts.length > 0) {
@@ -24805,11 +24802,7 @@ export class SessionService {
       provider: source.provider,
       observation: observeHostSource(source),
     }));
-    const { alerts } = await this.authAlerts.evaluate(
-      { managed, host, sessions: listSessions(this.config.dataDir) },
-      new Date(),
-    );
-    return { alerts };
+    return { managed, host, sessions: listSessions(this.config.dataDir) };
   }
 
   startTerminalLogin(

@@ -18,7 +18,7 @@
 - `POST /claude-accounts/remove`
 - `POST /claude-accounts/:id/finish-login`
 - `GET /claude-accounts/:id/login-status`
-- `GET /auth-accounts` — provider profiles (status, `limited`, `cooldownUntil`) and pool preferences; `v2/src/server.ts`.
+- `GET /auth-accounts` — provider profiles (status, `limited`, `cooldownUntil`, `credential` `oauth|api_key`) and pool preferences; `v2/src/server.ts`.
 - `POST /auth-accounts` — create Claude/Codex profile; `v2/src/server.ts`.
 - `PATCH /auth-accounts/:id` — rename profile; `v2/src/server.ts`.
 - `DELETE /auth-accounts/:id` — remove unused profile; `v2/src/server.ts`.

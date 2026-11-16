@@ -5,10 +5,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AuthAlerts,
   countSessionsWaiting,
+  logAuthFailed,
   observeHostSource,
   type AlertEvaluationInput,
   type AlertEntry,
 } from "../../src/auth-alerts.js";
+import { readEventLog, resetEventLogCollapse } from "../../src/event-log.js";
 import type { QuotaSourceResult } from "../../src/usage-report.js";
 
 const T0 = new Date("2026-11-16T10:00:00.000Z");
@@ -179,5 +181,49 @@ describe("auth alerts", () => {
     const s = await setup();
     const result = await s.alerts.evaluate(input({ managed: managed(), sessions }), T0);
     expect(result.alerts[0]?.sessionsWaiting).toBe(2);
+  });
+
+  it("writes one session.auth.failed line per breakage through the real log path", async () => {
+    resetEventLogCollapse();
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-alerts-log-"));
+    const alerts = new AuthAlerts({ dataDir, onOpened: (entry) => logAuthFailed(dataDir, entry) });
+    const breakages = ["acc-1", "acc-2", "acc-3"].map((accountId) => ({
+      accountId,
+      provider: "claude" as const,
+      label: accountId,
+      brokenAt: BROKEN_AT,
+    }));
+
+    await alerts.evaluate(input({ managed: breakages }), T0);
+
+    const lines = readEventLog(dataDir).filter((entry) => entry.event === "session.auth.failed");
+    expect(lines.map((line) => line.details)).toEqual([
+      { kind: "managed", provider: "claude", accountId: "acc-1" },
+      { kind: "managed", provider: "claude", accountId: "acc-2" },
+      { kind: "managed", provider: "claude", accountId: "acc-3" },
+    ]);
+    resetEventLogCollapse();
+  });
+
+  it("gathers a function input inside the chain, after the earlier evaluation settled", async () => {
+    const s = await setup();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const second = vi.fn(() => input({ managed: [] }));
+
+    const first = s.alerts.evaluate(async () => {
+      await gate;
+      return input({ managed: managed() });
+    }, T0);
+    const closing = s.alerts.evaluate(second, T0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(second).not.toHaveBeenCalled();
+    release();
+
+    expect((await first).alerts).toHaveLength(1);
+    expect((await closing).alerts).toEqual([]);
+    expect(second).toHaveBeenCalledTimes(1);
   });
 });

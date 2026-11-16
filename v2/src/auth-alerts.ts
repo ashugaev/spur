@@ -3,6 +3,8 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "n
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { authProviderSchema, type AuthProvider } from "./auth-accounts.js";
+import { logSpurEventUncollapsed } from "./event-log.js";
+import { isTerminalSessionStatus, type SessionRecord } from "./types.js";
 import type { QuotaSourceResult } from "./usage-report.js";
 
 export interface AuthAlert {
@@ -37,7 +39,7 @@ export interface AlertEvaluationInput {
   /** Companion accounts with a breakage mark; null when the companion could not be read. */
   managed: ManagedBreakage[] | null;
   host: { provider: AuthProvider; observation: HostObservation }[];
-  sessions: { status: string; auth?: { effectiveAccountId: string } }[];
+  sessions: { status: SessionRecord["status"]; auth?: { effectiveAccountId: string } }[];
 }
 
 export interface AlertEvaluation {
@@ -59,9 +61,7 @@ export function countSessionsWaiting(
 ): number {
   return sessions.filter(
     (session) =>
-      session.status !== "completed" &&
-      session.status !== "killed" &&
-      session.auth?.effectiveAccountId === accountId,
+      !isTerminalSessionStatus(session.status) && session.auth?.effectiveAccountId === accountId,
   ).length;
 }
 
@@ -78,6 +78,16 @@ export function failedEventDetails(entry: AlertEntry): {
     provider: entry.provider,
     ...(entry.kind === "managed" ? { accountId: entry.id.slice("managed:".length) } : {}),
   };
+}
+
+/** One session.auth.failed line per call. The alert file already dedupes, so the warn collapse must not drop any. */
+export function logAuthFailed(dataDir: string, entry: AlertEntry): void {
+  logSpurEventUncollapsed(dataDir, {
+    event: "session.auth.failed",
+    level: "warn",
+    message: `${entry.provider} sign-in is broken`,
+    details: failedEventDetails(entry),
+  });
 }
 
 function entryKey(entry: AlertEntry): string {
@@ -109,8 +119,14 @@ export class AuthAlerts {
     return join(this.deps.dataDir, "auth-alerts.json");
   }
 
-  evaluate(input: AlertEvaluationInput, now: Date): Promise<AlertEvaluation> {
-    const run = this.chain.then(() => this.evaluateNow(input, now));
+  /** A function input is read inside the chain, so it never lags an earlier evaluation's write. */
+  evaluate(
+    source: AlertEvaluationInput | (() => AlertEvaluationInput | Promise<AlertEvaluationInput>),
+    now: Date,
+  ): Promise<AlertEvaluation> {
+    const run = this.chain.then(async () =>
+      this.evaluateNow(typeof source === "function" ? await source() : source, now),
+    );
     this.chain = run.catch(() => undefined);
     return run;
   }
