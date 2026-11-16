@@ -182,6 +182,11 @@ type companionFixture struct {
 
 func startCompanionFixture(t *testing.T, dir string) *companionFixture {
 	t.Helper()
+	return startCompanionFixtureWith(t, dir, nil)
+}
+
+func startCompanionFixtureWith(t *testing.T, dir string, transport http.RoundTripper) *companionFixture {
+	t.Helper()
 	gin.SetMode(gin.ReleaseMode)
 	gin.DefaultWriter, gin.DefaultErrorWriter = io.Discard, io.Discard
 	log.SetOutput(io.Discard)
@@ -197,7 +202,7 @@ func startCompanionFixture(t *testing.T, dir string) *companionFixture {
 		}
 		close(messages)
 	}()
-	go func() { done <- run(ctx, cancel, dir, in, output) }()
+	go func() { done <- run(ctx, cancel, dir, in, output, transport) }()
 	var ready struct {
 		Event    string `json:"event"`
 		Endpoint string `json:"endpoint"`

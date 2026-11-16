@@ -56,13 +56,14 @@ func main() {
 		os.Exit(1)
 	}
 	os.Stdout = discard
-	if err = run(ctx, cancel, *dataDir, os.Stdin, output); err != nil {
+	if err = run(ctx, cancel, *dataDir, os.Stdin, output, nil); err != nil {
 		fmt.Fprintln(os.Stderr, "Spur auth proxy stopped:", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, cancel context.CancelFunc, dir string, input io.Reader, output io.Writer) error {
+// transport carries OAuth token exchange traffic; nil means the default network transport.
+func run(ctx context.Context, cancel context.CancelFunc, dir string, input io.Reader, output io.Writer, transport http.RoundTripper) error {
 	r, err := openRouter(dir)
 	if err != nil {
 		return err
@@ -70,7 +71,7 @@ func run(ctx context.Context, cancel context.CancelFunc, dir string, input io.Re
 	defer r.close()
 	store := tokenStore(r.dir)
 	manager := coreauth.NewManager(store, r, r)
-	logins := &loginManager{dir: r.dir, manager: manager, store: store, attempts: map[string]*loginAttempt{}}
+	logins := &loginManager{dir: r.dir, manager: manager, store: store, attempts: map[string]*loginAttempt{}, client: oauthHTTPClient(transport)}
 	r.readyAccount = logins.ready
 	port, err := endpointPort(r.state.Endpoint)
 	if err != nil {

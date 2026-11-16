@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -32,7 +33,8 @@ type loginStatus struct {
 type loginAttempt struct {
 	status loginStatus
 	cancel context.CancelFunc
-	stdin  io.WriteCloser
+	stdin  io.WriteCloser // worker attempts only
+	paste  chan string    // Claude PKCE attempts only
 	done   chan struct{}
 }
 type loginManager struct {
@@ -42,6 +44,7 @@ type loginManager struct {
 	dir      string
 	manager  *coreauth.Manager
 	store    *durableTokenStore
+	client   *http.Client // OAuth token exchange; nil means a default client
 }
 
 func (l *loginManager) ready(id string, p provider) bool {
@@ -88,6 +91,9 @@ func (l *loginManager) start(parent context.Context, id string, p provider) (log
 	if l.active != "" {
 		return loginStatus{}, errors.New("another account sign-in is pending")
 	}
+	if p == claude {
+		return l.startClaude(parent, id)
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return loginStatus{}, errors.New("could not start account sign-in")
@@ -117,20 +123,85 @@ func (l *loginManager) start(parent context.Context, id string, p provider) (log
 	return a.status, nil
 }
 
+// startClaude begins a Spur-owned PKCE sign-in with no worker and no listener. Caller holds l.mu.
+func (l *loginManager) startClaude(parent context.Context, id string) (loginStatus, error) {
+	flow, err := newClaudeFlow()
+	if err != nil {
+		return loginStatus{}, errors.New("could not start account sign-in")
+	}
+	ctx, cancel := context.WithTimeout(parent, 16*time.Minute)
+	a := &loginAttempt{
+		status: loginStatus{AccountID: id, Status: "pending", URL: flow.authorizeURL(), Prompt: loginPrompt},
+		cancel: cancel, paste: make(chan string, 1), done: make(chan struct{}),
+	}
+	l.attempts[id], l.active = a, id
+	// Fence refresh mutations before the sign-in persists a replacement grant.
+	l.manager.Remove(parent, authFileID(id))
+	go l.runClaude(ctx, id, a, flow)
+	return a.status, nil
+}
+
+func (l *loginManager) runClaude(ctx context.Context, id string, a *loginAttempt, flow *claudeFlow) {
+	err := l.claudeLogin(ctx, id, a, flow)
+	message := "Sign-in failed; retry authentication"
+	if err != nil {
+		l.restoreSavedAccount(id)
+		var identityErr *identityError
+		if errors.As(err, &identityErr) {
+			message = identityMessage(identityErr.marker, message)
+		}
+	}
+	l.finish(id, a, err, message)
+}
+
+func identityMessage(marker, fallback string) string {
+	switch marker {
+	case missingIdentity:
+		return "Provider account identity is incomplete; sign in again"
+	case duplicateIdentity:
+		return "This account is already saved; select its existing profile"
+	case changedIdentity:
+		return "Different account selected; create a separate profile"
+	}
+	return fallback
+}
+
+func (l *loginManager) claudeLogin(ctx context.Context, id string, a *loginAttempt, flow *claudeFlow) error {
+	var input string
+	select {
+	case input = <-a.paste:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	code, state, _, err := flow.accept(input)
+	if err != nil {
+		return err
+	}
+	client := l.client
+	if client == nil {
+		client = oauthHTTPClient(nil)
+	}
+	tokens, err := flow.exchange(ctx, client, code, state)
+	if err != nil {
+		return err
+	}
+	auth, err := buildClaudeOAuthRecord(id, tokens, time.Now())
+	if err != nil {
+		return err
+	}
+	if err = persistLogin(ctx, l.store, auth, id, claude); err != nil {
+		return err
+	}
+	return l.waitRegistered(ctx, id)
+}
+
 func (l *loginManager) observe(ctx context.Context, id string, a *loginAttempt, output io.Reader, cmd *exec.Cmd) {
 	failureMessage := "Sign-in failed; retry authentication"
 	scanner := bufio.NewScanner(output)
 	scanner.Buffer(make([]byte, 4096), 64*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		switch line {
-		case missingIdentity:
-			failureMessage = "Provider account identity is incomplete; sign in again"
-		case duplicateIdentity:
-			failureMessage = "This account is already saved; select its existing profile"
-		case changedIdentity:
-			failureMessage = "Different account selected; create a separate profile"
-		}
+		failureMessage = identityMessage(line, failureMessage)
 		l.mu.Lock()
 		if strings.HasPrefix(line, "https://") {
 			if parsed, err := url.Parse(line); err == nil && parsed.Scheme == "https" && parsed.Hostname() == "claude.ai" && parsed.Path == "/oauth/authorize" {
@@ -144,7 +215,7 @@ func (l *loginManager) observe(ctx context.Context, id string, a *loginAttempt, 
 			a.status.UserCode = value
 		}
 		if line == "SPUR_LOGIN_INPUT" {
-			a.status.Prompt = "Paste the callback URL from the authorization page"
+			a.status.Prompt = loginPrompt
 		}
 		l.mu.Unlock()
 	}
@@ -155,7 +226,12 @@ func (l *loginManager) observe(ctx context.Context, id string, a *loginAttempt, 
 	if err != nil {
 		l.restoreSavedAccount(id)
 	}
+	l.finish(id, a, err, failureMessage)
+}
+
+func (l *loginManager) finish(id string, a *loginAttempt, err error, failureMessage string) {
 	l.mu.Lock()
+	defer l.mu.Unlock()
 	if a.status.Status == "pending" {
 		if err == nil {
 			a.status = loginStatus{AccountID: id, Status: "ready"}
@@ -166,10 +242,11 @@ func (l *loginManager) observe(ctx context.Context, id string, a *loginAttempt, 
 	if l.active == id {
 		l.active = ""
 	}
-	_ = a.stdin.Close()
+	if a.stdin != nil {
+		_ = a.stdin.Close()
+	}
 	a.cancel()
 	close(a.done)
-	l.mu.Unlock()
 }
 
 func (l *loginManager) restoreSavedAccount(id string) {
@@ -213,6 +290,14 @@ func (l *loginManager) input(id, input string) (loginStatus, error) {
 	a := l.attempts[id]
 	if a == nil || l.active != id || a.status.Status != "pending" {
 		return loginStatus{}, errors.New("account sign-in is not pending")
+	}
+	if a.paste != nil {
+		// Blank input keeps waiting; one submission per prompt.
+		if strings.TrimSpace(input) != "" && a.status.Prompt != "" {
+			a.paste <- input
+			a.status.Prompt = ""
+		}
+		return a.status, nil
 	}
 	if _, err := io.WriteString(a.stdin, input+"\n"); err != nil {
 		return loginStatus{}, errors.New("could not submit sign-in input")
@@ -273,7 +358,8 @@ func tokenStore(dir string) *durableTokenStore {
 }
 
 func loginWorker(ctx context.Context, dir, id string, p provider) error {
-	if !safeID.MatchString(id) || !p.valid() {
+	// Claude sign-in is Spur-owned PKCE inside the companion; the SDK worker would bind a callback port.
+	if !safeID.MatchString(id) || p != codex {
 		return errors.New("invalid sign-in worker request")
 	}
 	cfg := &config.Config{AuthDir: filepath.Join(dir, "auth-proxy-credentials")}
@@ -289,17 +375,16 @@ func loginWorker(ctx context.Context, dir, id string, p provider) error {
 		}
 		return scanner.Text(), nil
 	}}
-	var authenticator sdkauth.Authenticator
-	if p == claude {
-		authenticator = sdkauth.NewClaudeAuthenticator()
-	} else {
-		authenticator = sdkauth.NewCodexAuthenticator()
-		opts.Metadata = map[string]string{"codex_login_mode": "device"}
-	}
-	auth, err := authenticator.Login(ctx, cfg, opts)
+	opts.Metadata = map[string]string{"codex_login_mode": "device"}
+	auth, err := sdkauth.NewCodexAuthenticator().Login(ctx, cfg, opts)
 	if err != nil {
 		return errors.New("account authentication failed")
 	}
+	return persistLogin(ctx, tokenStore(dir), auth, id, p)
+}
+
+// persistLogin validates identity and saves a signed-in credential under the profile's file.
+func persistLogin(ctx context.Context, store *durableTokenStore, auth *coreauth.Auth, id string, p provider) error {
 	if auth == nil || auth.Metadata == nil || auth.Provider != string(p) {
 		return errors.New("account identity missing")
 	}
@@ -309,11 +394,11 @@ func loginWorker(ctx context.Context, dir, id string, p provider) error {
 	if err := hydrateCodexIdentity(auth); err != nil {
 		return err
 	}
-	if err := validateProfileIdentity(ctx, tokenStore(dir), auth, id); err != nil {
+	if err := validateProfileIdentity(ctx, store, auth, id); err != nil {
 		return err
 	}
 	auth.ID, auth.FileName = authFileID(id), authFileID(id)
 	auth.Metadata["spur_profile_id"] = id
-	_, err = tokenStore(dir).Save(coreauth.WithAuthCreationIntent(ctx), auth)
+	_, err := store.Save(coreauth.WithAuthCreationIntent(ctx), auth)
 	return err
 }
