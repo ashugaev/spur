@@ -101,6 +101,7 @@ import { useToasts } from "@/hooks/useToasts";
 import { usePoll } from "@/hooks/usePoll";
 import type { PollOutcome } from "@/lib/poller";
 import {
+  CLOSE_SESSION_TOOLTIP,
   killConfirmText,
   SessionLifecycleConsumer,
   type LifecycleIntent,
@@ -2148,6 +2149,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     body?: Record<string, unknown>,
     options: { skipKillConfirm?: boolean } = {},
   ) => {
+    const actionLabel = action === "complete" ? "close" : action;
     const daemonOperation = action === "complete" || action === "restore" || action === "reopen";
     const consumer = lifecycleRef.current;
     let owner: LifecycleIntent | null = null;
@@ -2233,7 +2235,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           setError(null);
           return false;
         }
-        throw new Error(responseErrorMessage(payload, `Failed to ${action} session`));
+        throw new Error(responseErrorMessage(payload, `Failed to ${actionLabel} session`));
       }
       if (
         owner &&
@@ -2269,7 +2271,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       return true;
     } catch (actionError) {
       if (!isCurrentAction()) return false;
-      showErrorToast(errorMessage(actionError, `Failed to ${action} session`));
+      showErrorToast(errorMessage(actionError, `Failed to ${actionLabel} session`));
       // The server may have already moved (e.g. reopen's rollback flips the
       // record back to completed on a failed restore) — refetch so the page
       // never shows a stale view after a failed action.
@@ -2918,18 +2920,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 ) : null}
                 {promptView.selfDestructLabel ? (
                   <div>
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                        Self-destruct
+                    <div className="flex items-center justify-between gap-2 [&>button]:text-[var(--color-text-secondary)] [&>button]:opacity-100">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+                        Auto-close conditions
                       </div>
                       <PromptSectionCopyButton
-                        label="Self-destruct"
-                        value={`Complete this session when ${promptView.selfDestructLabel}.`}
+                        label="Auto-close conditions"
+                        value={`Close this session when ${promptView.selfDestructLabel}.`}
                         onCopy={copyLabeledValue}
                       />
                     </div>
                     <p className="mt-1 text-[var(--color-text-secondary)]">
-                      Complete this session when {promptView.selfDestructLabel}.
+                      Close this session when {promptView.selfDestructLabel}.
                     </p>
                   </div>
                 ) : null}
@@ -2969,9 +2971,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     type="button"
                     aria-expanded={showAllDeskMembers}
                     aria-label={
-                      showAllDeskMembers
-                        ? "Hide completed desk agents"
-                        : "Show completed desk agents"
+                      showAllDeskMembers ? "Hide closed desk agents" : "Show closed desk agents"
                     }
                     className="border-b-2 border-transparent px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
                     onClick={() => setShowAllDeskMembers((current) => !current)}
@@ -2985,7 +2985,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             <TagsContext.Provider value={tagsContextValue}>
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 {displayState ? (
-                  <ActivityDot activity={sessionStarting ? "starting" : displayState} />
+                  <ActivityDot
+                    activity={
+                      isTerminalSession(session)
+                        ? "closed"
+                        : sessionStarting
+                          ? "starting"
+                          : displayState
+                    }
+                  />
                 ) : null}
                 {session.branch ? (
                   <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
@@ -3119,7 +3127,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("reopen")}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
-                title="Restart this completed session in place, keeping its id and history. Its Telegram topic and artifacts stay gone."
+                title="Restart this closed session in place, keeping its id and history. Its Telegram topic and artifacts stay gone."
               >
                 <BusyContent busy={busyAction === "reopen"}>Reopen</BusyContent>
               </button>
@@ -3134,16 +3142,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 Recover
               </button>
             ) : null}
-            {canComplete(session) ? (
+            {canComplete(session) || busyAction === "complete" ? (
               <button
                 aria-busy={busyAction === "complete" || undefined}
-                aria-label={busyAction === "complete" ? "Completing session" : undefined}
+                aria-label={busyAction === "complete" ? "Closing session" : undefined}
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("complete")}
-                className="border border-[var(--color-status-ready)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-ready)] transition hover:bg-[var(--color-status-ready)]/10 disabled:opacity-50"
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                title={CLOSE_SESSION_TOOLTIP}
               >
-                <BusyContent busy={busyAction === "complete"}>Complete</BusyContent>
+                <BusyContent busy={busyAction === "complete"}>Close Session</BusyContent>
               </button>
             ) : null}
             {!isTerminalSession(session) ? (

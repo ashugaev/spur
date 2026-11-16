@@ -51,6 +51,7 @@ import { aggregateTokenUsage } from "./token-usage.js";
 import { normalizePreflightTotals } from "./preflight-usage-store.js";
 import { parseArtifactRelativePath } from "./session-artifacts.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
+import { isTaskStatusRevision, normalizeTaskStatus } from "./task-status.js";
 
 export function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
@@ -737,7 +738,8 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
         title: raw.title,
         repo: raw.repo,
         createdAt: raw.createdAt,
-        autoComplete: typeof raw.autoComplete === "boolean" ? raw.autoComplete : true,
+        // Either explicit false wins; absent/malformed legacy policy historically enables closing.
+        autoClose: raw.autoClose !== false && raw.autoComplete !== false,
       };
       const state = isWorkItemLifecycleState(raw.state) ? raw.state : "running";
       if (state === "pending") {
@@ -1557,6 +1559,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { triggerBirthKey: normalizedSession.triggerBirthKey, triggerBirthRequest: birthRequest }
       : {};
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
+  const declaration = normalizeTaskStatus(normalizedSession.taskStatus);
+  const taskStatus =
+    declaration?.agentLaunchId === normalizedSession.agentLaunchId ? declaration : undefined;
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
   const sidecarLaunches: Record<string, string> = {};
   if (isRecord(normalizedSession.sidecarLaunches)) {
@@ -1635,6 +1640,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
     ...(normalizedSession.agentLaunchId ? { agentLaunchId: normalizedSession.agentLaunchId } : {}),
+    ...(isTaskStatusRevision(normalizedSession.taskStatusRevision)
+      ? { taskStatusRevision: normalizedSession.taskStatusRevision }
+      : {}),
+    ...(taskStatus ? { taskStatus } : {}),
     ...(normalizedSession.cursorRestoreBoundary &&
     typeof normalizedSession.cursorRestoreBoundary.filePath === "string" &&
     Number.isSafeInteger(normalizedSession.cursorRestoreBoundary.offset) &&
@@ -2698,6 +2707,19 @@ export function readWorkItemLifecycles(
   return existsSync(path) ? readWorkItemLifecycleFile(path) : new Map();
 }
 
+function writeWorkItemLifecycles(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  records: Map<string, WorkItemLifecycleRecord>,
+): void {
+  writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
+    records: [...records.values()]
+      .sort((left, right) => left.externalId.localeCompare(right.externalId))
+      .map(({ autoClose, ...record }) => ({ ...record, autoComplete: autoClose })),
+  });
+}
+
 export function recordWorkItemLifecycle(
   dataDir: string,
   projectId: string,
@@ -2706,11 +2728,7 @@ export function recordWorkItemLifecycle(
 ): void {
   const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
   records.set(record.externalId, record);
-  writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
-    records: [...records.values()].sort((left, right) =>
-      left.externalId.localeCompare(right.externalId),
-    ),
-  });
+  writeWorkItemLifecycles(dataDir, projectId, sourceId, records);
 }
 
 export function deleteWorkItemLifecycle(
@@ -2721,11 +2739,7 @@ export function deleteWorkItemLifecycle(
 ): void {
   const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
   if (!records.delete(externalId)) return;
-  writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
-    records: [...records.values()].sort((left, right) =>
-      left.externalId.localeCompare(right.externalId),
-    ),
-  });
+  writeWorkItemLifecycles(dataDir, projectId, sourceId, records);
 }
 
 export function readPendingSendBatches(dataDir: string): Map<string, PersistedPendingBatch> {

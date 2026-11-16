@@ -12,6 +12,7 @@ import type {
 } from "../../src/review-providers/types.js";
 import { EventBus } from "../../src/event-bus.js";
 import { normalizeSlotLinks } from "../../src/session-slots.js";
+import { projectTaskStatus } from "../../src/task-status.js";
 import type {
   AutoPingRouteDescriptor,
   PersistedPendingBatch,
@@ -20,6 +21,7 @@ import type {
   ReviewSnapshot,
   SendBatchRetryEntry,
   SessionRecord,
+  SessionState,
   WorkItemLifecycleRecord,
 } from "../../src/types.js";
 
@@ -365,7 +367,7 @@ function spawnDeskGroupConfig(options?: { thirdBlock?: boolean }) {
   };
 }
 
-function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean }) {
+function workItemSpawnConfig(options?: { prompt?: string; autoClose?: boolean }) {
   return {
     dataDir: DATA_DIR,
     projects: {
@@ -386,7 +388,7 @@ function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean
                   prompt: options?.prompt ?? "Take {{url}} from {{repo}}.",
                 },
               ],
-              autoComplete: options?.autoComplete ?? true,
+              autoClose: options?.autoClose ?? true,
             },
           },
         },
@@ -467,7 +469,7 @@ function workItemReadOnlyFanoutSpawnConfig() {
   };
 }
 
-function sentrySpawnConfig(options?: { prompt?: string; autoComplete?: boolean }) {
+function sentrySpawnConfig(options?: { prompt?: string; autoClose?: boolean }) {
   return {
     dataDir: "/tmp/spur-data",
     projects: {
@@ -494,7 +496,7 @@ function sentrySpawnConfig(options?: { prompt?: string; autoComplete?: boolean }
                   prompt: options?.prompt ?? "Triage {{url}} from {{repo}}.",
                 },
               ],
-              autoComplete: options?.autoComplete ?? true,
+              autoClose: options?.autoClose ?? true,
             },
           },
         },
@@ -738,7 +740,7 @@ function runningWorkItemLifecycle(
     title: "Fix the bug",
     repo: "acme/api",
     createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
-    autoComplete: true,
+    autoClose: true,
     state: "running",
     ...options,
   };
@@ -4731,6 +4733,64 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it.each(["github", "service"] as const)(
+    "delivers %s feedback once when native waiting projects a declared completed task",
+    async (source) => {
+      const declaration = {
+        status: "running" as const,
+        agentLaunchId: "launch-a",
+        taskStatusRevision: 0,
+        taskStatus: {
+          state: "completed" as const,
+          revision: 0,
+          agentLaunchId: "launch-a",
+          updatedAt: new Date().toISOString(),
+        },
+      };
+      let nativeState: SessionState = "working";
+      const get = vi.fn(async () => ({
+        id: "api-1",
+        status: declaration.status,
+        state: projectTaskStatus(declaration, nativeState, nativeState, true, true),
+        runtimeAlive: true,
+        workspaceExists: true,
+        lastActivityAt: staleActivity(),
+      }));
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: (source === "github" ? config() : serviceConfig()) as never,
+        bus,
+        sessionService: { get, deliver } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        bus.emit(source === "github" ? githubEvent() : serviceEvent());
+        await advanceSendWindow();
+        expect(deliver).not.toHaveBeenCalled();
+        expect(readPendingSendBatchesMock().size).toBe(1);
+
+        nativeState = "waiting";
+        expect((await get()).state).toBe("completed");
+        controller.nudgeSession("api-1");
+        await vi.advanceTimersByTimeAsync(1);
+        expect(deliver).toHaveBeenCalledTimes(1);
+        expect(deliver).toHaveBeenCalledWith("api-1", expect.any(String), { interrupt: false });
+        expect(readPendingSendBatchesMock().size).toBe(0);
+
+        controller.nudgeSession("api-1");
+        controller.nudgeSession("api-1");
+        await advanceSendWindow();
+        expect(deliver).toHaveBeenCalledTimes(1);
+        expect(readPendingSendBatchesMock().size).toBe(0);
+      } finally {
+        await controller.stop();
+      }
+    },
+  );
+
   it("delivers service alerts with the list log-view hint for the bound session", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
@@ -5636,7 +5696,7 @@ describe("startConfiguredTriggers", () => {
           number: 42,
           title: "Fix the bug",
           repo: "acme/api",
-          autoComplete: true,
+          autoClose: true,
         }),
       );
     } finally {
@@ -5726,7 +5786,7 @@ describe("startConfiguredTriggers", () => {
         expect.objectContaining({
           externalId: "acme/api#42",
           state: "running",
-          autoComplete: false,
+          autoClose: false,
         }),
       );
     } finally {
@@ -5764,7 +5824,7 @@ describe("startConfiguredTriggers", () => {
           externalId: "acme/web#WEB-7",
           state: "running",
           sessionId: "api-9",
-          autoComplete: true,
+          autoClose: true,
         }),
       );
     } finally {
@@ -5795,7 +5855,7 @@ describe("startConfiguredTriggers", () => {
                 handle: {
                   source: "check",
                   event: "script:item.new",
-                  spawn: { blocks: [{ prompt: "{{branch}} {{id}}" }], autoComplete: true },
+                  spawn: { blocks: [{ prompt: "{{branch}} {{id}}" }], autoClose: true },
                 },
               },
             },
@@ -5839,7 +5899,7 @@ describe("startConfiguredTriggers", () => {
             externalId: "script:check#a",
             state: "running",
             sessionId: "api-9",
-            autoComplete: true,
+            autoClose: true,
           }),
         );
       } finally {
@@ -6428,6 +6488,70 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it.each([
+    { configured: true, retainedPolicy: true, native: "waiting", ageMs: 6 * 60_000, closes: 1 },
+    { configured: false, retainedPolicy: true, native: "waiting", ageMs: 6 * 60_000, closes: 0 },
+    { configured: "absent", retainedPolicy: true, native: "waiting", ageMs: 6 * 60_000, closes: 0 },
+    { configured: true, retainedPolicy: false, native: "waiting", ageMs: 6 * 60_000, closes: 0 },
+    { configured: true, retainedPolicy: true, native: "working", ageMs: 6 * 60_000, closes: 0 },
+    { configured: true, retainedPolicy: true, native: "waiting", ageMs: 10_000, closes: 0 },
+  ] as const)(
+    "applies opt-in auto-completion to projected task status: config=$configured retained=$retainedPolicy native=$native age=$ageMs",
+    async ({ configured, retainedPolicy, native, ageMs, closes }) => {
+      let status: SessionRecord["status"] = "running";
+      const declaration = {
+        agentLaunchId: "launch-a",
+        taskStatusRevision: 0,
+        taskStatus: {
+          state: "completed" as const,
+          revision: 0,
+          agentLaunchId: "launch-a",
+          updatedAt: new Date().toISOString(),
+        },
+      };
+      const get = vi.fn(async () => ({
+        id: "api-9",
+        status,
+        state: projectTaskStatus({ ...declaration, status }, native, native, true, true),
+        runtimeAlive: true,
+        workspaceExists: true,
+      }));
+      const complete = vi.fn(async () => {
+        status = "completed";
+      });
+      const records = useWorkItemLifecycleStore([
+        runningWorkItemLifecycle({
+          autoClose: retainedPolicy,
+          createdAt: new Date(Date.now() - ageMs).toISOString(),
+        }),
+      ]);
+      const triggerConfig = workItemSpawnConfig({ autoClose: configured === true });
+      if (configured === "absent") {
+        Reflect.deleteProperty(triggerConfig.projects.api.triggers["pick-up"].spawn, "autoClose");
+      }
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const controller = startConfiguredTriggers({
+        config: triggerConfig as never,
+        bus: new EventBus(),
+        sessionService: { get, complete } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        await vi.advanceTimersByTimeAsync(1);
+        expect(complete).toHaveBeenCalledTimes(closes);
+        expect(records.get("acme/api#42")?.state).toBe(closes ? "completed" : "running");
+        if (closes) expect(complete).toHaveBeenCalledWith("api-9", { prAction: "leave_open" });
+        controller.nudgeSession("api-9");
+        controller.nudgeSession("api-9");
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(complete).toHaveBeenCalledTimes(closes);
+        expect(status).toBe(closes ? "completed" : "running");
+      } finally {
+        await controller.stop();
+      }
+    },
+  );
+
   it("auto-completes a waiting work-item session after the minimum age", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-9",
@@ -6715,7 +6839,7 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("logs spawn.failed when autoComplete=true is configured on a non-work-item event", async () => {
+  it("logs spawn.failed when autoClose=true is configured on a non-work-item event", async () => {
     const spawnMock = vi.fn();
     const cronAutoCompleteConfig = {
       dataDir: "/tmp/spur-data",
@@ -6734,7 +6858,7 @@ describe("startConfiguredTriggers", () => {
                     prompt: "ship the task",
                   },
                 ],
-                autoComplete: true,
+                autoClose: true,
               },
             },
           },

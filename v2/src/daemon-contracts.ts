@@ -87,6 +87,8 @@ const storeExpectedRev = field(
 const storeLimit = field("limit", "integer 1..500", "Page size.", false, 100);
 const pageSummaryResponse =
   'PageSummary {id,title,icon?,agent,path,url,source?:{path:string},sync?:{state:"pending"|"syncing"|"synced"|"error",root?:string,lastSyncedAt?:string,error?:string}}. Sync appears only for sourced Pages; lastSyncedAt is the last successful reconciliation ISO time and is retained on errors; error appears only in error state.';
+const taskStatusResponse =
+  'TaskStatusView {revision:number,state?:"completed"|"needs_input"}. Revision is a nonnegative safe integer (0 on legacy records); state is present only for a current running launch and revision. Clearing omits state; runtime and artifacts remain.';
 const storeTooLarge: ContractResponse = {
   status: 413,
   contentType: "application/json",
@@ -106,7 +108,7 @@ const subscriptionFields = [
   field("targetSessionId", "string", "Session whose state transitions trigger delivery.", true),
   field(
     "states",
-    '("working"|"waiting"|"needs_input"|"rate_limited"|"stale"|"stopped"|"error"|"killed")[]',
+    '("working"|"waiting"|"completed"|"needs_input"|"rate_limited"|"stale"|"stopped"|"error"|"killed")[]',
     "Nonempty target states.",
     true,
   ),
@@ -154,7 +156,7 @@ const spawn = body("SpawnSessionRequest", [
   field("claudeAccountId", "string", "Claude account ID used for launch."),
   field(
     "subscriptions",
-    '{targetSessionId:string,states:("working"|"waiting"|"needs_input"|"rate_limited"|"stale"|"stopped"|"error"|"killed")[],message?:string}[]',
+    '{targetSessionId:string,states:("working"|"waiting"|"completed"|"needs_input"|"rate_limited"|"stale"|"stopped"|"error"|"killed")[],message?:string}[]',
     "At most 20 state subscriptions; referenced sessions must exist.",
   ),
 ]);
@@ -311,6 +313,26 @@ const requestBodies = {
       "resume:{action,itemId}",
     ],
   ),
+  taskStatus: body("TaskStatusRequest", [
+    field(
+      "state",
+      '"completed"|"needs_input"|"clear"',
+      "Declared outcome; clear removes it. Completed requires nonempty resolved ToDo; 409 todo_ledger_empty or todo_open_work otherwise.",
+      true,
+    ),
+    field(
+      "revision",
+      "integer 0..9007199254740991",
+      "Retained task-start revision; stale values return 409 stale_task_status.",
+      true,
+    ),
+    field(
+      "agentLaunchId",
+      "string",
+      "Nonblank current launch identity; mismatched launch or non-running lifecycle returns 409 stale_task_status. Does not supply caller identity.",
+      true,
+    ),
+  ]),
   snapshot: body("WriteSnapshotRequest", [
     field(
       "content",
@@ -1289,6 +1311,29 @@ export const DAEMON_OPERATIONS: readonly DaemonOperation[] = [
       response:
         "LatestSnapshotEntry[] {sessionId,status,state,snapshot: WorkSnapshotRead}; state is last observed, null when never observed; no link 400.",
       source: "v2/src/snapshots.ts",
+    },
+  ),
+  operation(
+    "get_task_status",
+    "GET",
+    "/sessions/{sessionId}/task-status",
+    "Read the retained task revision and current declaration.",
+    { response: taskStatusResponse, source: "v2/src/task-status.ts" },
+  ),
+  operation(
+    "set_task_status",
+    "POST",
+    "/sessions/{sessionId}/task-status",
+    "Declare or clear task status. Agent-only: requires matching caller-session header; operator MCP has none and returns 403 task_status_forbidden.",
+    {
+      body: requestBodies.taskStatus,
+      response: taskStatusResponse,
+      source: "v2/src/task-status.ts",
+      examples: [
+        { body: { state: "completed", revision: 0, agentLaunchId: "current-launch-id" } },
+        { body: { state: "needs_input", revision: 0, agentLaunchId: "current-launch-id" } },
+        { body: { state: "clear", revision: 0, agentLaunchId: "current-launch-id" } },
+      ],
     },
   ),
   operation(

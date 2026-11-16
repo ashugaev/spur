@@ -403,6 +403,8 @@ describe("isSpurReminder", () => {
 describe("isSpurToolCommand", () => {
   it.each([
     '"$SPUR_TODO_COMMAND" list',
+    '"$SPUR_STATUS_COMMAND" --json',
+    "spur-status needs_input --revision 0",
     "'/d/session-tools/x/spur-snapshot' write --file a",
     "git status && spur-todo hold 1",
     '"$SPUR_SESSION_TOOL_DIR"/spur-slots show',
@@ -450,6 +452,8 @@ describe("lastAgentWorkMs", () => {
       user(reminder, at(5)),
       tool(at(6), { spurCall: true }),
       tool(at(7), { inputSummary: '{"cmd":"spur-todo list"}' }),
+      tool(at(8), { inputSummary: JSON.stringify({ cmd: '"$SPUR_STATUS_COMMAND" --json' }) }),
+      tool(at(9), { inputSummary: '{"cmd":"spur-status needs_input --revision 0"}' }),
       assistant(at(300)),
     ];
     expect(run(entries)).toEqual({ workMs: null, complete: true });
