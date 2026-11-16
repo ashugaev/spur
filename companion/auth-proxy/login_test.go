@@ -191,7 +191,10 @@ type claudeTokenFake struct {
 	rolesOK  bool
 }
 
-const claudeFakeToken = `{"access_token":"fixture-access","refresh_token":"fixture-refresh","expires_in":3600,"account":{"uuid":"acct-1","email_address":"fixture@example.invalid"},"organization":{"uuid":"org-1","name":"Org"}}`
+// expires_in must stay above the SDK's 4h Claude refresh lead (ClaudeAuthenticator.RefreshLead).
+// A shorter fixture token is refresh-due on arrival, so the SDK scheduler POSTs the fixture refresh
+// token to the real token endpoint and races model registration.
+const claudeFakeToken = `{"access_token":"fixture-access","refresh_token":"fixture-refresh","expires_in":28800,"account":{"uuid":"acct-1","email_address":"fixture@example.invalid"},"organization":{"uuid":"org-1","name":"Org"}}`
 
 func encodeFixtureBody(t string, payload []byte) ([]byte, http.Header) {
 	var buf bytes.Buffer

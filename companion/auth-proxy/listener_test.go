@@ -67,7 +67,13 @@ func childProcesses(t *testing.T) string {
 
 func TestClaudeLoginOpensNoListener(t *testing.T) {
 	fake := &claudeTokenFake{}
-	f := startCompanionFixtureWith(t, t.TempDir(), fake)
+	dir := t.TempDir()
+	// A fixture token inside the SDK's 4h refresh lead would be refreshed against the real provider.
+	var exchanged claudeTokens
+	if err := json.Unmarshal([]byte(claudeFakeToken), &exchanged); err != nil || time.Duration(exchanged.ExpiresIn)*time.Second <= 5*time.Hour {
+		t.Fatal("fixture token is refresh-due; the SDK scheduler would call the real token endpoint")
+	}
+	f := startCompanionFixtureWith(t, dir, fake)
 	endpoint, err := url.Parse(f.endpoint)
 	if err != nil || endpoint.Hostname() != "127.0.0.1" {
 		t.Fatalf("companion endpoint is not loopback: %s", f.endpoint)
