@@ -27,9 +27,9 @@ interface SwitchAuthDialogProps {
 
 const AUTO_VALUE = "";
 // The row carries the focus ring; the radio inside it stays outline-free.
-const RADIO_CLASS = "accent-[var(--color-accent)] outline-none";
+const RADIO_CLASS = "accent-[var(--color-accent)] outline-hidden disabled:opacity-50";
 const ROW_CLASS =
-  "flex cursor-pointer items-center gap-2 border-b border-[var(--color-border-subtle)] px-2.5 py-2 last:border-b-0 has-[:checked]:bg-[var(--color-hover-overlay)] has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-60 has-[:focus-visible]:outline has-[:focus-visible]:outline-1 has-[:focus-visible]:outline-[var(--color-accent)]";
+  "flex cursor-pointer items-center gap-2 border-b border-[var(--color-border-subtle)] px-2.5 py-2 last:border-b-0 has-[:checked]:bg-[var(--color-hover-overlay)] has-[:disabled]:cursor-not-allowed has-[:focus-visible]:outline has-[:focus-visible]:outline-1 has-[:focus-visible]:outline-[var(--color-accent)]";
 
 function QuotaCell({ text }: { text: ReturnType<typeof quotaText> }) {
   if (!text) return null;

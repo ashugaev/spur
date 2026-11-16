@@ -876,6 +876,9 @@ describe("SwitchAuthDialog", () => {
     const home = (await screen.findByRole("radio", { name: /home@x.com/ })) as HTMLInputElement;
     expect(home.disabled).toBe(true);
     expect(screen.getByText("signed out")).toBeTruthy();
+    // Only the radio dims; the row text stays at full contrast.
+    expect(home.className).toContain("disabled:opacity-50");
+    expect(home.closest("label")?.className).not.toMatch(/opacity/);
     expect((screen.getByRole("button", { name: "Switch" }) as HTMLButtonElement).disabled).toBe(
       true,
     );

@@ -54,7 +54,7 @@ interface DirectTerminalProps {
   onClose?: () => void;
   /** Embedded in a dialog that already carries a title and close button. */
   hideHeader?: boolean;
-  /** Phone-only Esc, up, down and Enter keys under the terminal, for native CLI prompts. */
+  /** Phone-only Esc, up and down keys under the terminal, for native CLI prompts; Enter is in the control row. */
   keyBar?: boolean;
 }
 
@@ -91,7 +91,6 @@ const TERMINAL_KEY_BAR = [
     name: TERMINAL_ARROW_CONTROLS[2].label,
     sequence: TERMINAL_ARROW_CONTROLS[2].sequence,
   },
-  { label: "Enter", name: "Enter", sequence: "\r" },
 ] as const;
 
 function isRetryableClose(code: number): boolean {

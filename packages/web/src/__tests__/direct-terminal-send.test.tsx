@@ -285,7 +285,7 @@ describe("DirectTerminal key bar", () => {
     expect(screen.queryByTestId("terminal-key-bar")).toBeNull();
   });
 
-  it("sends Esc, up, down and Enter to the terminal and is hidden from sm up", async () => {
+  it("sends Esc, up and down to the terminal, has no second Enter, and is hidden from sm up", async () => {
     const { DirectTerminal } = await import("@/components/DirectTerminal");
     await act(async () => {
       render(<DirectTerminal agent="claude" keyBar sessionId="key-bar" />);
@@ -297,15 +297,11 @@ describe("DirectTerminal key bar", () => {
     expect(screen.getByTestId("terminal-key-bar").className).toContain("sm:hidden");
     socket.send.mockClear();
 
-    for (const name of ["Escape", "Arrow Up", "Arrow Down", "Enter"]) {
+    expect(bar.queryByRole("button", { name: "Enter" })).toBeNull();
+    for (const name of ["Escape", "Arrow Up", "Arrow Down"]) {
       fireEvent.click(bar.getByRole("button", { name }));
     }
 
-    expect(socket.send.mock.calls.map((call) => call[0])).toEqual([
-      "\x1b",
-      "\x1b[A",
-      "\x1b[B",
-      "\r",
-    ]);
+    expect(socket.send.mock.calls.map((call) => call[0])).toEqual(["\x1b", "\x1b[A", "\x1b[B"]);
   });
 });
