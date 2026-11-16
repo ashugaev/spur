@@ -682,6 +682,11 @@ export interface SpurTodoHistoryEvent {
   blocker?: { kind: "external" } | { kind: "human"; requiredAction: string };
 }
 
+export interface SpurTodoHandoffRef {
+  sessionId: string;
+  itemId: string;
+}
+
 export interface SpurTodoProjection {
   revision: string;
   status: "active" | "held" | "resolved";
@@ -691,6 +696,8 @@ export interface SpurTodoProjection {
     text: string;
     status: "open" | "held" | "completed" | "cancelled";
     added: { reason: string; actor: SpurTodoActor; at: string };
+    handoffFrom?: SpurTodoHandoffRef;
+    handoffTo?: SpurTodoHandoffRef;
     latestTransition?: {
       type: "completed" | "cancelled" | "held" | "resumed";
       reason?: string;
@@ -755,6 +762,13 @@ function todoOptionalTransition(value: unknown): boolean {
   );
 }
 
+function todoOptionalHandoffRef(value: unknown): boolean {
+  if (value === undefined) return true;
+  return (
+    todoRecord(value) && typeof value.sessionId === "string" && typeof value.itemId === "string"
+  );
+}
+
 export function isSpurTodoProjection(value: unknown): value is SpurTodoProjection {
   if (!todoRecord(value) || !todoRecord(value.counts)) return false;
   const counts = value.counts;
@@ -784,6 +798,8 @@ export function isSpurTodoProjection(value: unknown): value is SpurTodoProjectio
       typeof item.added.at === "string" &&
       todoActor(item.added.actor) &&
       todoOptionalTransition(item.latestTransition) &&
+      todoOptionalHandoffRef(item.handoffFrom) &&
+      todoOptionalHandoffRef(item.handoffTo) &&
       Array.isArray(item.history) &&
       item.history.every(
         (event) =>
