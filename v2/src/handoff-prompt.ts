@@ -144,6 +144,15 @@ export interface HandoffPromptSnapshot {
 }
 
 export const HANDOFF_SNAPSHOT_INLINE_MAX_BYTES = 16384;
+/** Inherited ToDo section budget; with the snapshot cap it stays far below the 128 KiB argv limit. */
+export const HANDOFF_TODO_MAX_BYTES = 16384;
+export const HANDOFF_TODO_TEXT_MAX_CHARS = 300;
+
+function clipText(text: string): string {
+  return text.length <= HANDOFF_TODO_TEXT_MAX_CHARS
+    ? text
+    : `${text.slice(0, HANDOFF_TODO_TEXT_MAX_CHARS - 1)}…`;
+}
 
 function renderSnapshotLines(ctx: HandoffPromptContext): string[] {
   const src = ctx.sourceSessionId;
@@ -224,14 +233,24 @@ export function renderHandoffPrompt(ctx: HandoffPromptContext): string {
 
   if (ctx.inheritedTodo?.length) {
     lines.push("", `Inherited ToDo (moved from ${ctx.sourceSessionId}; use these ids):`);
+    let usedBytes = 0;
+    let listed = 0;
     for (const item of ctx.inheritedTodo) {
       const blocker = item.hold?.blocker;
       const state = !blocker
         ? "open"
         : blocker.kind === "human"
-          ? `held (human: ${blocker.requiredAction})`
+          ? `held (human: ${clipText(blocker.requiredAction)})`
           : "held (external)";
-      lines.push(`- ${item.itemId} ${state}: ${item.text}`);
+      const line = `- ${item.itemId} ${state}: ${clipText(item.text)}`;
+      usedBytes += Buffer.byteLength(line) + 1;
+      if (usedBytes > HANDOFF_TODO_MAX_BYTES) break;
+      lines.push(line);
+      listed += 1;
+    }
+    const omitted = ctx.inheritedTodo.length - listed;
+    if (omitted > 0) {
+      lines.push(`... and ${omitted} more: run \`"$SPUR_TODO_COMMAND" list\``);
     }
   }
 

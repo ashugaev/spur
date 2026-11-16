@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   extractBareUserTask,
   HANDOFF_SNAPSHOT_INLINE_MAX_BYTES,
+  HANDOFF_TODO_MAX_BYTES,
+  HANDOFF_TODO_TEXT_MAX_CHARS,
   renderHandoffPrompt,
 } from "../../src/handoff-prompt.js";
 import { withSelfDestructInstructions } from "../../src/self-destruct.js";
@@ -247,6 +249,35 @@ describe("renderHandoffPrompt snapshot and inherited ToDo", () => {
     expect(prompt).toContain("- git diff abc1234");
     expect(prompt).toContain("agent-history-api-1-*.jsonl at or after 2026-11-01T10:00:00.000Z");
     expect(prompt.indexOf("Inherited ToDo")).toBeLessThan(prompt.indexOf("Bring the work"));
+  });
+
+  it("truncates long item text and counts items past the section budget", () => {
+    const text = "y".repeat(5000);
+    const inheritedTodo = Array.from({ length: 140 }, (_, index) => ({
+      itemId: `item-${String(index).padStart(3, "0")}`,
+      text,
+      addedReason: "r",
+      from: { sessionId: "api-1", itemId: `old-${index}` },
+    }));
+    const prompt = renderHandoffPrompt({ ...base, inheritedTodo });
+    expect(prompt).not.toContain("y".repeat(HANDOFF_TODO_TEXT_MAX_CHARS + 1));
+    expect(prompt).toContain(`${"y".repeat(HANDOFF_TODO_TEXT_MAX_CHARS - 1)}…`);
+    const listed = prompt.split("\n").filter((line) => line.startsWith("- item-")).length;
+    expect(listed).toBeGreaterThan(0);
+    expect(listed).toBeLessThan(140);
+    expect(prompt).toContain(`... and ${140 - listed} more: run \`"$SPUR_TODO_COMMAND" list\``);
+    expect(Buffer.byteLength(prompt)).toBeLessThan(HANDOFF_TODO_MAX_BYTES + 4096);
+    expect(extractBareUserTask(prompt)).toBe("Ship feature");
+  });
+
+  it("lists every item without an overflow line when they fit", () => {
+    const prompt = renderHandoffPrompt({
+      ...base,
+      inheritedTodo: [
+        { itemId: "n1", text: "t", addedReason: "r", from: { sessionId: "api-1", itemId: "o1" } },
+      ],
+    });
+    expect(prompt).not.toContain("more: run");
   });
 
   it("uses the singular for one commit since the snapshot", () => {
