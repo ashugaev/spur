@@ -252,7 +252,7 @@ describe("SessionTodo", () => {
         id,
         text: `Text ${id}`,
         status,
-        added: { reason: "Handed off from api-1", actor: system, at },
+        added: { reason: "Ship the retry fix before release", actor: system, at },
         history: [],
         ...extra,
       };
@@ -283,7 +283,9 @@ describe("SessionTodo", () => {
       await renderItems([
         item("inherited", "open", { handoffFrom: { sessionId: "api-1", itemId: "old-1" } }),
       ]);
-      expect(screen.getByText("From api-1 · Handed off from api-1")).toBeInTheDocument();
+      expect(
+        screen.getByText("From api-1 · Ship the retry fix before release"),
+      ).toBeInTheDocument();
     });
 
     it("shows the latest transition reason after the source once the inherited item has one", async () => {

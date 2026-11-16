@@ -15,7 +15,7 @@ function todoItem(
     id,
     text,
     status,
-    added: { reason: "Handed off from api-1", actor: system, at },
+    added: { reason: "Ship the retry fix before release", actor: system, at },
     history: [],
     ...extra,
   };
@@ -83,7 +83,7 @@ test.describe("Spur ToDo handoff provenance", () => {
 
     await expect(row(page, "Inherited open item")).toBeVisible();
     await expect(
-      row(page, "Inherited open item").getByText("From api-1 · Handed off from api-1", {
+      row(page, "Inherited open item").getByText("From api-1 · Ship the retry fix before release", {
         exact: true,
       }),
     ).toBeVisible();
