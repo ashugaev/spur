@@ -59121,7 +59121,12 @@ describe("SessionService", () => {
 
       async function addC(
         seeded: Seeded,
-        c: { status: SessionRecord["status"]; agentLaunchId?: string; movedOn?: boolean },
+        c: {
+          status: SessionRecord["status"];
+          agentLaunchId?: string;
+          movedOn?: boolean;
+          bRolledBack?: boolean;
+        },
       ): Promise<Seeded> {
         const actualTodo = await vi.importActual<typeof todoModule>("../../src/todo.js");
         const toC = actualTodo.planHandoffTodo(
@@ -59139,6 +59144,14 @@ describe("SessionService", () => {
           }),
         );
         actualTodo.inheritTodo(TEST_DATA_DIR, { id: "api-3", project: "api" }, toC);
+        if (c.bRolledBack) {
+          actualTodo.closeTodoItems(
+            TEST_DATA_DIR,
+            { id: "api-2", project: "api" },
+            toC.map((item) => ({ itemId: item.from.itemId })),
+            "handoff to api-2 failed; item stays open in api-1",
+          );
+        }
         if (c.movedOn) {
           actualTodo.closeTodoItems(
             TEST_DATA_DIR,
@@ -59197,6 +59210,13 @@ describe("SessionService", () => {
           name: "A->B->C B killed after C launched, B copies still open",
           build: async () =>
             addC(await seedCrashWindow("killed", undefined, migrated), { status: "running" }),
+          closedAgainst: "api-2",
+          retryMoves: 0,
+        },
+        {
+          name: "A->B->C B's finalize rolled its copies back after B handed off to C",
+          build: async () =>
+            addC(await seedCrashWindow("running"), { status: "running", bRolledBack: true }),
           closedAgainst: "api-2",
           retryMoves: 0,
         },
@@ -59369,6 +59389,32 @@ describe("SessionService", () => {
         });
 
         await expectRolledBack(service);
+        service.dispose();
+      });
+
+      it("refuses to hand off the successor while its own handoff is in flight", async () => {
+        const { service } = await seedHandoff();
+        let launchReady: () => void = () => {};
+        waitForTmuxReadyMock.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              launchReady = resolve;
+            }),
+        );
+        const first = service.handoff("api-1", { agent: "cursor" });
+        await vi.waitFor(() => expect(waitForTmuxReadyMock).toHaveBeenCalled());
+
+        await expect(service.handoff("api-2", { agent: "cursor" })).rejects.toThrow(
+          /already in flight for api-2/,
+        );
+
+        launchReady();
+        await expect(first).resolves.toMatchObject({ id: "api-2", movedTodoItems: 2 });
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-3");
+        await expect(service.handoff("api-2", { agent: "cursor" })).resolves.toMatchObject({
+          id: "api-3",
+          movedTodoItems: 2,
+        });
         service.dispose();
       });
 

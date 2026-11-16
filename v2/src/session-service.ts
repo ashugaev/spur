@@ -4127,6 +4127,9 @@ export class SessionService {
       phase: "waiting" | "activating";
     }
   >();
+  // Successor id -> source id while a handoff is in flight: the successor cannot be handed off
+  // itself until its own handoff settles (it would kill the pane the finalize still checks).
+  private readonly handoffSuccessors = new Map<string, string>();
   // Session ids this process is actively reopening. Guards against two
   // overlapping reopen() calls both passing the completed-status check and
   // racing into restore() for the same tmux session and worktree.
@@ -14288,6 +14291,9 @@ export class SessionService {
         ? await this.preflightUsageStore.claim(preflightBatchId, request.project, sessionId)
         : aggregatePreflightAttempts([]);
       this.spawnsInFlight.add(sessionId);
+      if (options?.replacingSessionId) {
+        this.handoffSuccessors.set(sessionId, options.replacingSessionId);
+      }
       if (!reuseCtx && preflightOutcome) {
         this.logEvent("session.preflight.completed", {
           level: "info",
@@ -25197,7 +25203,7 @@ export class SessionService {
     this.assertNoHeldCloseoutTake(sessionId);
     const waiting = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
       // Before validation: validation reconciles ToDo, which a handoff in flight must own.
-      if (this.handoffsInFlight.has(sessionId)) {
+      if (this.handoffsInFlight.has(sessionId) || this.handoffSuccessors.has(sessionId)) {
         throw new Error(`Handoff already in flight for ${sessionId}`);
       }
       const { session } = this.validateHandoffSource(sessionId, options);
@@ -25258,6 +25264,9 @@ export class SessionService {
       if (reservation !== undefined) this.admissionReservations.delete(reservation);
       if (this.handoffsInFlight.get(sessionId)?.token === waiting.token) {
         this.handoffsInFlight.delete(sessionId);
+        for (const [successorId, sourceId] of this.handoffSuccessors) {
+          if (sourceId === sessionId) this.handoffSuccessors.delete(successorId);
+        }
       }
     }
   }

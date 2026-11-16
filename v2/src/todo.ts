@@ -522,12 +522,13 @@ export function planHandoffReconcile(
   }
   const visiting = new Set<string>();
   const owned = (ledger: (typeof ledgers)[number], item: TodoItemProjection): boolean => {
-    if (isRolledBackCopy(item) || isMigrationClosed(item)) return false;
     const key = refKey(ledger.sessionId, item.id);
     if (visiting.has(key)) return false;
     const unfinished = item.status === "open" || item.status === "held";
-    if (ledger.live && unfinished) return true;
-    if (!unfinished) return true;
+    // A rollback or migration close never owns by itself, but work that already moved on from
+    // the copy (a live downstream copy) still does.
+    const voided = isRolledBackCopy(item) || isMigrationClosed(item);
+    if (!voided && (unfinished ? ledger.live : true)) return true;
     visiting.add(key);
     const viaDownstream = (downstream.get(key) ?? []).some((next) => owned(next.ledger, next.item));
     visiting.delete(key);

@@ -540,6 +540,21 @@ describe("Spur ToDo ledger", () => {
       undefined,
     ],
     [
+      "B copy rolled back, live C downstream open",
+      { bLive: true, withC: true, cLive: true, bVoided: "rollback" },
+      "s-2",
+    ],
+    [
+      "B copy migration-closed, live C downstream open",
+      { bLive: false, withC: true, cLive: true, bVoided: "migration" },
+      "s-2",
+    ],
+    [
+      "B copy rolled back, nothing downstream live",
+      { bLive: true, withC: true, cLive: false, bVoided: "rollback" },
+      undefined,
+    ],
+    [
       "dead B copy moved on to a dead C",
       { bLive: false, withC: true, cLive: false, bMovedOn: true },
       "s-2",
@@ -553,6 +568,7 @@ describe("Spur ToDo ledger", () => {
         cLive?: boolean;
         cRolledBack?: boolean;
         bMovedOn?: boolean;
+        bVoided?: "rollback" | "migration";
       },
       string | undefined,
     ]
@@ -574,6 +590,17 @@ describe("Spur ToDo ledger", () => {
           toC.map((item) => ({ itemId: item.itemId })),
           "rollback",
         );
+      }
+      if (shape.bVoided === "rollback") {
+        closeTodoItems(
+          dataDir,
+          b,
+          toC.map((item) => ({ itemId: item.from.itemId })),
+          "rollback",
+        );
+      }
+      if (shape.bVoided === "migration") {
+        ensureTodoLedger(dataDir, { ...session, id: "s-2", workspaceId: "s-2", status: "killed" });
       }
       if (shape.bMovedOn) {
         closeTodoItems(
