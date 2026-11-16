@@ -3580,6 +3580,11 @@ function requestedAuthAccount(
   return request.authAccountId !== undefined ? request.authAccountId : request.claudeAccountId;
 }
 
+/** The predecessor's managed account (null = Auto) when the successor uses the same provider. */
+function carriedAuthAccountId(session: SessionRecord, agent: AgentName): string | null | undefined {
+  return session.auth && agent === session.agent ? session.auth.accountId : undefined;
+}
+
 export function resolveRespawnRequest(
   session: SessionRecord,
   options?: {
@@ -3600,6 +3605,7 @@ export function resolveRespawnRequest(
       : agent === session.agent
         ? session.reasoningEffort
         : undefined;
+  const authAccountId = carriedAuthAccountId(session, agent);
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
@@ -3611,7 +3617,7 @@ export function resolveRespawnRequest(
     ...(session.claudeAccountId && !session.auth && agent === "claude"
       ? { claudeAccountId: session.claudeAccountId }
       : {}),
-    ...(session.auth && agent === session.agent ? { authAccountId: session.auth.accountId } : {}),
+    ...(authAccountId !== undefined ? { authAccountId } : {}),
     ...(session.mode !== undefined ? { mode: session.mode } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
@@ -3652,6 +3658,7 @@ function resolveHandoffSpawnRequest(
     originalTaskPrompt: string;
     attachments?: SendMessageAttachment[];
     pipelineSteps?: string[];
+    authAccountId?: string;
   },
 ): SpawnSessionRequest {
   const reasoningEffort =
@@ -3666,6 +3673,7 @@ function resolveHandoffSpawnRequest(
     agent: options.agent,
     ...(options.model !== undefined ? { model: options.model } : {}),
     ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+    ...(options.authAccountId !== undefined ? { authAccountId: options.authAccountId } : {}),
     reuseWorkspaceSessionId: session.id,
     originalTaskPrompt: options.originalTaskPrompt,
     ...(session.project === SHEPHERD_PROJECT_ID ? { bareSpawnMessage: true } : {}),
@@ -26087,6 +26095,25 @@ export class SessionService {
         }
       }
       const model = resolveCarriedSpawnModel(session, agent, request.model);
+      const carriedAccountId = carriedAuthAccountId(session, agent);
+      let handoffAuthAccountId: string | undefined;
+      if (typeof carriedAccountId === "string") {
+        if (
+          this.authAccounts
+            .read()
+            .accounts.some((entry) => entry.id === carriedAccountId && entry.provider === agent)
+        ) {
+          handoffAuthAccountId = carriedAccountId;
+        } else {
+          this.logEvent("session.auth.switched", {
+            level: "warn",
+            sessionId,
+            projectId: session.project,
+            message: `Pinned ${agent} account is gone; handoff of ${sessionId} uses Auto`,
+            details: { accountId: carriedAccountId, reason: "handoff_account_missing" },
+          });
+        }
+      }
 
       const inheritedTodo = planHandoffTodo(projection, sessionId);
       let snapshot: HandoffPromptSnapshot | undefined;
@@ -26215,6 +26242,7 @@ export class SessionService {
           originalTaskPrompt: originalTask,
           ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
           ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
+          ...(handoffAuthAccountId !== undefined ? { authAccountId: handoffAuthAccountId } : {}),
         }),
         spawnOptions: {
           replacingSessionId: session.id,

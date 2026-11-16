@@ -23024,6 +23024,87 @@ describe("SessionService", () => {
       );
     });
 
+    describe("handoff auth", () => {
+      async function handoffTo(
+        agent: "claude" | "codex",
+        auth: Omit<AuthRegistration, "endpoint" | "token">,
+        accounts: "present" | "removed" = "present",
+      ) {
+        seedManagedAccounts("claude");
+        if (accounts === "removed") {
+          authAccountsReadMock.mockReturnValue({
+            schema: 1,
+            accounts: [
+              { id: "primary", provider: "claude", createdAt: "2026-03-18T09:00:00.000Z" },
+            ],
+            pools: {
+              claude: { defaultAccountId: "primary", defaultGeneration: 0, autoRotate: true },
+            },
+          });
+        }
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({ auth, worktreePath: "/tmp/spur-worktrees/api/api-1" }),
+        );
+        authProxyRegisterSessionMock.mockResolvedValue(registration("claude", "backup"));
+        workspaceExistsMock.mockReturnValue(true);
+        reserveNextSessionIdMock.mockResolvedValue("api-2");
+        const service = await createDisposedSessionService();
+        await service.handoff("api-1", { agent }, { todoActor: { kind: "human", origin: "cli" } });
+        return service;
+      }
+      const pinned = (() => {
+        const { endpoint: _endpoint, token: _token, ...auth } = registration("claude", "backup");
+        return auth;
+      })();
+
+      it("carries a pinned account to a same-provider successor", async () => {
+        const service = await handoffTo("claude", pinned);
+        expect(authProxyRegisterSessionMock).toHaveBeenCalledWith({
+          sessionId: "api-2",
+          provider: "claude",
+          accountId: "backup",
+        });
+        service.dispose();
+      });
+
+      it("picks Auto for a successor on another provider", async () => {
+        const service = await handoffTo("codex", pinned);
+        expect(authProxyRegisterSessionMock).not.toHaveBeenCalled();
+        service.dispose();
+      });
+
+      it("keeps Auto for an Auto predecessor", async () => {
+        const service = await handoffTo("claude", { ...pinned, mode: "auto", accountId: null });
+        expect(authProxyRegisterSessionMock).toHaveBeenCalledWith({
+          sessionId: "api-2",
+          provider: "claude",
+          accountId: null,
+        });
+        service.dispose();
+      });
+
+      it("falls back to Auto and warns when the pinned account was removed", async () => {
+        const service = await handoffTo("claude", pinned, "removed");
+        expect(authProxyRegisterSessionMock).toHaveBeenCalledWith({
+          sessionId: "api-2",
+          provider: "claude",
+          accountId: null,
+        });
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.auth.switched",
+            level: "warn",
+            details: expect.objectContaining({ reason: "handoff_account_missing" }),
+          }),
+        );
+        service.dispose();
+      });
+    });
+
     it("records a companion rotation once and ignores stale generations", async () => {
       const { endpoint: _endpoint, token: _token, ...pinned } = registration("claude");
       const auth = { ...pinned, mode: "auto" as const, accountId: null };

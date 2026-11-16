@@ -39,6 +39,7 @@ Omission with no ready account launches with host authorization.
 Managed Claude/Codex sessions change account for the next request through
 [switch-auth](daemon-api.md#session-routes); current requests retain their account.
 Direct sessions enter managed routing on explicit restore/respawn.
+Handoff to the same provider keeps a pinned profile; another provider, Auto, or a removed profile gives Auto.
 
 Managed routing preserves native session context and process identity during account changes.
 Managed Claude links host `~/.claude` user config (`CLAUDE.md`, `settings.json`, skills, agents, commands, plugins, hooks, output styles) and user MCP servers; never host credentials. Host `settings.json` with `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport` or auth/endpoint env (`ANTHROPIC_*` except `*_MODEL`, `CLAUDE_CODE_USE_*`, `CLAUDE_CODE_SKIP_*_AUTH`, `CLAUDE_CODE_OAUTH_TOKEN`, `AWS_BEARER_TOKEN_BEDROCK`) becomes a private copy without those keys.
