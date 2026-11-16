@@ -939,7 +939,7 @@ export interface CloseoutManifest {
     root: CloseoutRoot;
     path: string;
     bytes: number;
-    reason: "max_bytes" | "unreadable";
+    reason: "max_bytes" | "unreadable" | "changed";
   }[];
   missingRoots: CloseoutRoot[];
   error?: string;

@@ -8,6 +8,9 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readSync,
+  readlinkSync,
+  type Stats,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -117,6 +120,10 @@ function literalBase(glob: string): string[] {
   return base;
 }
 
+function byPath(a: Candidate, b: Candidate): number {
+  return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+}
+
 function entryKind(entry: Dirent, fullPath: string): "file" | "directory" | "other" | "unknown" {
   if (entry.isFile()) return "file";
   if (entry.isDirectory()) return "directory";
@@ -131,16 +138,23 @@ function entryKind(entry: Dirent, fullPath: string): "file" | "directory" | "oth
   }
 }
 
+// A root that is itself a symlink is missing: only its ancestors may be links (home dirs).
 function realRoot(root: string | null): string | null {
   if (root === null) return null;
   try {
+    if (!lstatSync(root).isDirectory()) return null;
     return realpathSync(root);
   } catch {
     return null;
   }
 }
 
-class WalkBudgetError extends Error {}
+/** Carries what the walk collected before the entry budget ran out. */
+class WalkBudgetError extends Error {
+  constructor(readonly found: Candidate[]) {
+    super("walk budget exhausted");
+  }
+}
 
 function collectCandidates(
   sessionId: string,
@@ -188,7 +202,10 @@ function collectCandidates(
     }
     for (const entry of entries) {
       budget.left -= 1;
-      if (budget.left < 0) throw new WalkBudgetError();
+      if (budget.left < 0) {
+        found.sort(byPath);
+        throw new WalkBudgetError(found);
+      }
       const segments = [...dirSegments, entry.name];
       const kind = entryKind(entry, join(rootDir, ...segments));
       if (kind === "file") {
@@ -200,7 +217,7 @@ function collectCandidates(
       }
     }
   }
-  found.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  found.sort(byPath);
   return found;
 }
 
@@ -213,12 +230,58 @@ function isForeignOrExcludedCapture(candidate: Candidate, sessionId: string): bo
   );
 }
 
-function readRegularFile(fullPath: string): { data: Buffer; size: number } | { size: number } {
-  const fd = openSync(fullPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+type BoundedRead =
+  | { kind: "ok"; data: Buffer }
+  | { kind: "skip"; reason: "max_bytes" | "unreadable" | "changed"; bytes: number };
+
+const READ_CHUNK_BYTES = 65536;
+
+/** True when the opened fd is the file at the expected canonical path (ancestors not swapped). */
+function fdIsAt(fd: number, source: string, expected: string, opened: Stats): boolean {
+  if (process.platform === "linux") {
+    try {
+      return readlinkSync(`/proc/self/fd/${fd}`) === expected;
+    } catch {
+      // /proc unavailable: use the portable check below.
+    }
+  }
+  try {
+    const at = lstatSync(source);
+    return (
+      realpathSync(dirname(source)) === dirname(expected) &&
+      at.dev === opened.dev &&
+      at.ino === opened.ino
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Opens without blocking (a FIFO would hang the daemon) or following the leaf, checks the fd
+ * is the file at `expected`, and reads at most budget + 1 bytes.
+ */
+function readBounded(source: string, expected: string, budget: number): BoundedRead {
+  const fd = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile()) return { size: stat.size };
-    return { data: readFileSync(fd), size: stat.size };
+    if (!stat.isFile()) return { kind: "skip", reason: "unreadable", bytes: stat.size };
+    if (!fdIsAt(fd, source, expected, stat)) {
+      return { kind: "skip", reason: "changed", bytes: stat.size };
+    }
+    if (stat.size > budget) return { kind: "skip", reason: "max_bytes", bytes: stat.size };
+    const chunks: Buffer[] = [];
+    let total = 0;
+    while (total <= budget) {
+      const chunk = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, budget + 1 - total));
+      const got = readSync(fd, chunk, 0, chunk.length, null);
+      if (got === 0) break;
+      chunks.push(chunk.subarray(0, got));
+      total += got;
+    }
+    if (total > budget)
+      return { kind: "skip", reason: "max_bytes", bytes: Math.max(total, stat.size) };
+    return { kind: "ok", data: Buffer.concat(chunks, total) };
   } finally {
     closeSync(fd);
   }
@@ -324,27 +387,32 @@ function buildArchive(
   const budget = { left: CLOSEOUT_WALK_MAX_ENTRIES };
   const seen = new Set<string>();
   const ordered: Candidate[] = [];
+  const add = (found: Candidate[]): void => {
+    for (const candidate of found) {
+      const key = `${candidate.root}\u0000${candidate.path}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      ordered.push(candidate);
+    }
+  };
   try {
     for (const pattern of patterns) {
       const rootDir = roots[pattern.root];
       if (rootDir === null) continue;
-      const found = collectCandidates(
-        input.sessionId,
-        pattern.root,
-        rootDir,
-        pattern.glob,
-        budget,
-        manifest.skipped,
+      add(
+        collectCandidates(
+          input.sessionId,
+          pattern.root,
+          rootDir,
+          pattern.glob,
+          budget,
+          manifest.skipped,
+        ),
       );
-      for (const candidate of found) {
-        const key = `${candidate.root}\u0000${candidate.path}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        ordered.push(candidate);
-      }
     }
   } catch (error) {
     if (!(error instanceof WalkBudgetError)) throw error;
+    add(error.found);
     problems.push(`Walk stopped after ${CLOSEOUT_WALK_MAX_ENTRIES} entries`);
   }
 
@@ -352,43 +420,18 @@ function buildArchive(
   for (const candidate of ordered) {
     const rootDir = roots[candidate.root] as string;
     const source = join(rootDir, ...candidate.path.split("/"));
-    let read: ReturnType<typeof readRegularFile>;
+    let read: BoundedRead;
     try {
-      const hint = lstatSync(source);
-      if (hint.size > remaining) {
-        manifest.skipped.push({
-          root: candidate.root,
-          path: candidate.path,
-          bytes: hint.size,
-          reason: "max_bytes",
-        });
-        continue;
-      }
-      read = readRegularFile(source);
+      read = readBounded(source, source, remaining);
     } catch {
-      manifest.skipped.push({
-        root: candidate.root,
-        path: candidate.path,
-        bytes: fileSizeHint(source),
-        reason: "unreadable",
-      });
-      continue;
+      read = { kind: "skip", reason: "unreadable", bytes: fileSizeHint(source) };
     }
-    if (!("data" in read)) {
+    if (read.kind === "skip") {
       manifest.skipped.push({
         root: candidate.root,
         path: candidate.path,
-        bytes: read.size,
-        reason: "unreadable",
-      });
-      continue;
-    }
-    if (read.data.length > remaining) {
-      manifest.skipped.push({
-        root: candidate.root,
-        path: candidate.path,
-        bytes: read.data.length,
-        reason: "max_bytes",
+        bytes: read.bytes,
+        reason: read.reason,
       });
       continue;
     }

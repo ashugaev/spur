@@ -164,6 +164,21 @@ describe("closeout archive", () => {
     expect(fileShape.files).toEqual([]);
   });
 
+  it("treats a root that is itself a symlink as missing", async () => {
+    const outside = join(base, "outside-work");
+    put(join(outside, "secret.md"), "s");
+    const linkedWork = join(base, "linked-work");
+    symlinkSync(outside, linkedWork);
+    const manifest = await write({ include: ["work:**"], roots: { work: linkedWork } });
+    expect(manifest.files).toEqual([]);
+    expect(manifest.missingRoots).toEqual(["work"]);
+    const linkedArtifacts = join(base, "linked-artifacts");
+    symlinkSync(outside, linkedArtifacts);
+    const second = await write({ roots: { artifacts: linkedArtifacts } });
+    expect(second.missingRoots).toContain("artifacts");
+    expect(second.files).toEqual([]);
+  });
+
   it("lists only named roots as missing", async () => {
     expect((await write()).missingRoots).toEqual([]);
     expect((await write({ include: ["workspace:docs/**"] })).missingRoots).toEqual(["workspace"]);
@@ -190,6 +205,7 @@ describe("closeout archive", () => {
       put(join(artifacts, `f${i}.txt`), "");
     const manifest = await write();
     expect(manifest.error).toContain(String(CLOSEOUT_WALK_MAX_ENTRIES));
+    expect(manifest.files.length).toBeGreaterThan(0);
     expect(existsSync(join(sessionDir, "closeout", "1", "manifest.json"))).toBe(true);
     expect(readCloseoutManifest(join(sessionDir, "closeout"), "s1")?.error).toBe(manifest.error);
   });
