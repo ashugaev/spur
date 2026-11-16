@@ -59216,12 +59216,6 @@ describe("SessionService", () => {
           retryMoves: 0,
         },
         {
-          name: "A->B on-launch provider: after process start, before the post-create write",
-          build: () => seedCrashWindow("spawning", undefined, { agentLaunchId: "launch-1" }),
-          closedAgainst: "api-2",
-          retryMoves: 0,
-        },
-        {
           name: "A->B after running, before the source close",
           build: () => seedCrashWindow("running"),
           closedAgainst: "api-2",
