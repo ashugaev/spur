@@ -75,7 +75,7 @@ ONE SOURCE: each topic has one owning doc, everything else links.
 
   - Commands: docs/commands.md only. Config fields: docs/configuration.md only.
     Route names: docs/daemon-api.md only — full payload/status-code contracts
-    live in the handler (`v2/src/server.ts`), per daemon-api.md's own scope line.
+    live in the handler (`v2/src/server.ts`).
     A route documented as part of a config field's behavior stays with that field.
   - Exception: docs/snapshots.md restates snapshot config defaults (#1460);
     configuration.md stays the field owner.
