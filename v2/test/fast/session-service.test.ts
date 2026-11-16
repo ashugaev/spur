@@ -211,6 +211,7 @@ import {
   createSessionStore,
   serviceKey,
   mockClaudeJsonlState,
+  findLatestClaudeSessionFileMock,
   mockClaudeSessionStatus,
   runningSession,
   sessionServiceInternals,
@@ -314,10 +315,10 @@ const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const TODO_PROMPT = `Spur ToDo:
 - Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.
-- The ledger starts empty. You own every item; nothing is added for you.
+- The ledger starts empty unless a handoff moved items to you (listed under Inherited ToDo). You own every item.
 - One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.
 - Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.
-- Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.
+- Cannot finish, self-destruct, or hand off yourself with an empty ledger; cannot finish or self-destruct with open/held work. Handoff moves open/held items to the successor.
 
 Spur snapshot:
 - Keep a backward-looking Markdown snapshot of your work: \`"$SPUR_SNAPSHOT_COMMAND" write --file <path>\` (\`--file -\` reads stdin). Each write stores a full new version.
@@ -58689,12 +58690,372 @@ describe("SessionService", () => {
         { kind: "agent", agent: "claude", sessionId: source.id },
       );
 
-      await expect(service.handoff(source.id, { agent: "cursor" })).rejects.toMatchObject({
-        code: "todo_open_work",
-      });
-      expect(killTmuxSessionMock).not.toHaveBeenCalled();
-      expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+      reserveNextSessionIdMock.mockReset().mockResolvedValue("api-2");
+
+      const response = await service.handoff(source.id, { agent: "cursor" });
+
+      expect(response.movedTodoItems).toBe(1);
+      const successor = await service.readTodo("api-2");
+      expect(successor.items.map((item) => [item.text, item.status])).toEqual([
+        ["Late requested work", "open"],
+      ]);
       service.dispose();
+    });
+
+    describe("ToDo inheritance and stalled handoff", () => {
+      const sourceAgent = { kind: "agent", agent: "claude", sessionId: "api-1" } as const;
+      const otherAgent = { kind: "agent", agent: "codex", sessionId: "api-9" } as const;
+
+      async function seedHandoff(
+        overrides: Partial<SessionRecord> = {},
+        options: { items?: boolean; requireFinal?: boolean } = {},
+      ) {
+        mockClaudeJsonlState("waiting");
+        if (options.requireFinal) {
+          const config = baseConfig();
+          loadConfigMock.mockReturnValue({
+            ...config,
+            projects: {
+              api: { ...config.projects.api, snapshots: { requireFinal: true } },
+            },
+          });
+        }
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          sessionRecord({
+            id: "api-1",
+            status: "running",
+            worktreePath: "/tmp/spur-worktrees/api/api-1",
+            ...overrides,
+          }),
+        );
+        workspaceExistsMock.mockReturnValue(true);
+        reserveNextSessionIdMock.mockReset().mockResolvedValue("api-2");
+        await useRealTodoLedger();
+        const service = await createDisposedSessionService();
+        const sourceIds: string[] = [];
+        if (options.items !== false) {
+          await service.mutateTodo(
+            "api-1",
+            { action: "add", text: "Open work", reason: "Why open" },
+            sourceAgent,
+          );
+          const held = await service.mutateTodo(
+            "api-1",
+            { action: "add", text: "Held work", reason: "Why held" },
+            sourceAgent,
+          );
+          const heldId = held.items[1]?.id;
+          if (!heldId) throw new Error("Expected held item");
+          const projection = await service.mutateTodo(
+            "api-1",
+            {
+              action: "hold",
+              itemId: heldId,
+              reason: "Waiting",
+              blocker: "human",
+              requiredHumanAction: "Approve the plan",
+            },
+            sourceAgent,
+          );
+          sourceIds.push(...projection.items.map((item) => item.id));
+        }
+        return { sessions, service, sourceIds };
+      }
+
+      it("moves open and held items to the successor before launch and cancels source items after finalize", async () => {
+        const { service, sourceIds } = await seedHandoff();
+        const actualTodo = await vi.importActual<typeof todoModule>("../../src/todo.js");
+        let ledgerAtLaunch: TodoProjection | null | undefined;
+        sendMessageToTmuxMock.mockImplementation(async (name: string) => {
+          if (name === "api-2" && ledgerAtLaunch === undefined) {
+            ledgerAtLaunch = actualTodo.readTodoIfPresent(TEST_DATA_DIR, "api-2");
+          }
+        });
+
+        const response = await service.handoff("api-1", { agent: "cursor" });
+
+        expect(response.movedTodoItems).toBe(2);
+        expect(ledgerAtLaunch?.items).toHaveLength(2);
+        const successor = await service.readTodo("api-2");
+        expect(successor.items.map((item) => [item.text, item.status])).toEqual([
+          ["Open work", "open"],
+          ["Held work", "held"],
+        ]);
+        expect(successor.items.map((item) => item.handoffFrom)).toEqual(
+          sourceIds.map((itemId) => ({ sessionId: "api-1", itemId })),
+        );
+        expect(successor.items[0]?.added.actor).toEqual({ kind: "system", source: "handoff" });
+        expect(successor.items[1]?.latestTransition?.blocker).toEqual({
+          kind: "human",
+          requiredAction: "Approve the plan",
+        });
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        expect(source.items.map((item) => item.latestTransition?.reason)).toEqual([
+          "handed off to api-2",
+          "handed off to api-2",
+        ]);
+        expect(source.items.map((item) => item.handoffTo)).toEqual(
+          successor.items.map((item) => ({ sessionId: "api-2", itemId: item.id })),
+        );
+        const sent = sendMessageToTmuxMock.mock.calls.find(([name]) => name === "api-2");
+        for (const item of successor.items) expect(sent?.[1]).toContain(item.id);
+        service.dispose();
+      });
+
+      it("spawn failure cancels inherited copies and leaves source items open; retry moves each item exactly once", async () => {
+        const { service, sourceIds } = await seedHandoff();
+        reserveNextSessionIdMock
+          .mockReset()
+          .mockResolvedValueOnce("api-2")
+          .mockResolvedValueOnce("api-3");
+        createTmuxSessionMock.mockRejectedValueOnce(new Error("tmux boom"));
+
+        await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow("tmux boom");
+
+        const failed = await service.readTodo("api-2");
+        expect(failed.items).toHaveLength(2);
+        expect(failed.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        expect(failed.items[0]?.latestTransition?.reason).toMatch(
+          /failed; item stays open in api-1/,
+        );
+        expect(failed.items[0]?.handoffTo).toBeUndefined();
+        const afterFailure = await service.readTodo("api-1");
+        expect(afterFailure.items.map((item) => item.status)).toEqual(["open", "held"]);
+        expect(afterFailure.items.map((item) => item.id)).toEqual(sourceIds);
+
+        const response = await service.handoff("api-1", { agent: "cursor" });
+
+        expect(response.id).toBe("api-3");
+        const retried = await service.readTodo("api-3");
+        expect(retried.items.map((item) => item.status)).toEqual(["open", "held"]);
+        expect(retried.items.map((item) => item.handoffFrom?.itemId)).toEqual(sourceIds);
+        const finalSource = await service.readTodo("api-1");
+        expect(finalSource.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        expect(finalSource.counts.cancelled).toBe(2);
+        service.dispose();
+      });
+
+      it("finalize failure before source commit rolls back successor copies", async () => {
+        const { sessions, service } = await seedHandoff();
+        const internals = sessionServiceInternals(service);
+        agentWaitsForSubmitAckMock.mockImplementation((agent: string) => agent === "cursor");
+        createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+        vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
+          const source = sessions.get("api-1");
+          if (!source) throw new Error("Expected source");
+          sessions.set("api-1", { ...source, updatedAt: "2026-03-18T10:30:00.000Z" });
+          return { found: true, lastScannedFile: null };
+        });
+
+        await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+          /state changed before finalization/,
+        );
+
+        const successor = await service.readTodo("api-2");
+        expect(successor.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["open", "held"]);
+        service.dispose();
+      });
+
+      it("keeps successor copies when completing the source fails after the commit", async () => {
+        const { service } = await seedHandoff();
+        const internals = service as unknown as {
+          applyManualStatusLocked(): Promise<SessionView>;
+        };
+        vi.spyOn(internals, "applyManualStatusLocked").mockRejectedValueOnce(
+          new Error("complete failed"),
+        );
+
+        await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+          "complete failed",
+        );
+
+        const source = await service.readTodo("api-1");
+        expect(source.items.map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+        const successor = await service.readTodo("api-2");
+        expect(successor.items.map((item) => item.status)).toEqual(["open", "held"]);
+        service.dispose();
+      });
+
+      it("handoff with no open or held items writes no ToDo events", async () => {
+        const { service } = await seedHandoff({}, { items: false });
+        const added = await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Done work", reason: "Why" },
+          sourceAgent,
+        );
+        const itemId = added.items[0]?.id;
+        if (!itemId) throw new Error("Expected item");
+        await service.mutateTodo(
+          "api-1",
+          { action: "complete", itemId, reason: "Done" },
+          sourceAgent,
+        );
+        const before = await service.readTodo("api-1");
+
+        const response = await service.handoff("api-1", { agent: "cursor" });
+
+        expect(response.movedTodoItems).toBe(0);
+        const after = await service.readTodo("api-1");
+        expect(after.revision).toBe(before.revision);
+        expect((await service.readTodo("api-2")).items).toEqual([]);
+        service.dispose();
+      });
+
+      it("agent hands off another stalled session; 403 when target is healthy", async () => {
+        const { sessions, service } = await seedHandoff({}, { items: false, requireFinal: true });
+
+        await expect(
+          service.handoff("api-1", { agent: "cursor" }, { todoActor: otherAgent }),
+        ).rejects.toMatchObject({
+          statusCode: 403,
+          code: "handoff_target_not_stalled",
+          payload: { code: "handoff_target_not_stalled", sessionId: "api-1", status: "running" },
+        });
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.handoff.failed",
+            level: "warn",
+            details: { kind: "handoff_target_not_stalled" },
+          }),
+        );
+        expect(sessions.get("api-1")?.status).toBe("running");
+
+        const source = sessions.get("api-1");
+        if (!source) throw new Error("Expected source");
+        sessions.set("api-1", { ...source, rateLimitedAt: "2026-03-18T10:02:00.000Z" });
+        const response = await service.handoff(
+          "api-1",
+          { agent: "cursor" },
+          { todoActor: otherAgent },
+        );
+
+        expect(response.id).toBe("api-2");
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.handoff.completed",
+            details: expect.objectContaining({ snapshotGate: "skipped_source_cannot_write" }),
+          }),
+        );
+        service.dispose();
+      });
+
+      it("agent hands off a stopped session with an empty ledger", async () => {
+        const { sessions, service } = await seedHandoff(
+          { status: "stopped", stopReason: "manual_pause" },
+          { items: false, requireFinal: true },
+        );
+
+        const response = await service.handoff(
+          "api-1",
+          { agent: "cursor" },
+          { todoActor: otherAgent },
+        );
+
+        expect(response.id).toBe("api-2");
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
+      it("agent hands off an errored session with an existing workspace", async () => {
+        const { sessions, service } = await seedHandoff(
+          { status: "errored", error: "agent crashed", errorSource: "other" },
+          { items: false },
+        );
+
+        const response = await service.handoff(
+          "api-1",
+          { agent: "cursor" },
+          { todoActor: otherAgent },
+        );
+
+        expect(response.id).toBe("api-2");
+        expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      });
+
+      it("captures agent history when stopping a running source", async () => {
+        const sourceHistoryPath = resolve(TEST_ARTIFACTS_ROOT, "handoff-source.jsonl");
+        mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+        writeFileSync(sourceHistoryPath, '{"type":"assistant","message":"tail"}\n', "utf8");
+        const { service } = await seedHandoff({ agent: "claude" }, { items: false });
+        findLatestClaudeSessionFileMock.mockResolvedValue(sourceHistoryPath);
+        const capturesAtKill: string[][] = [];
+        killTmuxSessionMock.mockImplementation(async () => {
+          const dir = artifactDirForSession("api-1");
+          capturesAtKill.push(
+            (existsSync(dir) ? readdirSync(dir) : []).filter((name) =>
+              name.startsWith("agent-history-api-1-"),
+            ),
+          );
+        });
+        await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Work", reason: "Why" },
+          sourceAgent,
+        );
+
+        await service.handoff("api-1", { agent: "cursor" });
+
+        expect(capturesAtKill[0]).toEqual([]);
+        const captures = readdirSync(artifactDirForSession("api-1")).filter((name) =>
+          /^agent-history-api-1-.*-to-stopped\.jsonl$/.test(name),
+        );
+        expect(captures).toHaveLength(1);
+        service.dispose();
+      });
+
+      it("records actor, caller and moved items on handoff events", async () => {
+        const { service, sourceIds } = await seedHandoff({
+          status: "stopped",
+          stopReason: "manual_pause",
+        });
+
+        await service.handoff("api-1", { agent: "cursor" }, { todoActor: otherAgent });
+
+        const events = logSpurEventMock.mock.calls
+          .map(([, entry]) => entry)
+          .filter((entry) => entry.sessionId === "api-1");
+        const started = events.find((entry) => entry.event === "session.handoff.started");
+        const completed = events.find((entry) => entry.event === "session.handoff.completed");
+        const successor = await service.readTodo("api-2");
+        const expected = {
+          actor: otherAgent,
+          callerSessionId: "api-9",
+          movedItems: sourceIds.map((from, index) => ({ from, to: successor.items[index]?.id })),
+        };
+        expect(started?.details).toMatchObject(expected);
+        expect(completed?.details).toMatchObject(expected);
+        service.dispose();
+      });
+
+      it("hands off with a corrupt latest snapshot", async () => {
+        const { service } = await seedHandoff({}, { items: false });
+        await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Work", reason: "Why" },
+          sourceAgent,
+        );
+        await service.writeSnapshot("api-1", { content: "# Notes", final: false });
+        const snapshotDir = join(TEST_DATA_DIR, "sessions", "api-1", "snapshots");
+        for (const name of readdirSync(snapshotDir)) {
+          writeFileSync(join(snapshotDir, name), "not a snapshot", "utf8");
+        }
+
+        const response = await service.handoff("api-1", { agent: "cursor" });
+
+        expect(response.id).toBe("api-2");
+        const sent = sendMessageToTmuxMock.mock.calls.find(([name]) => name === "api-2");
+        expect(sent?.[1]).toContain("latest snapshot unreadable:");
+        service.dispose();
+      });
     });
 
     it("keeps the source ledger responsive while handoff successor acknowledgement is pending", async () => {
