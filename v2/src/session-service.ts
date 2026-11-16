@@ -26105,12 +26105,12 @@ export class SessionService {
         ) {
           handoffAuthAccountId = carriedAccountId;
         } else {
-          this.logEvent("session.auth.switched", {
+          this.logEvent("session.handoff.auth_account_missing", {
             level: "warn",
             sessionId,
             projectId: session.project,
             message: `Pinned ${agent} account is gone; handoff of ${sessionId} uses Auto`,
-            details: { accountId: carriedAccountId, reason: "handoff_account_missing" },
+            details: { accountId: carriedAccountId },
           });
         }
       }

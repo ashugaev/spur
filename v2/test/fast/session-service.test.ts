@@ -23073,6 +23073,11 @@ describe("SessionService", () => {
       it("picks Auto for a successor on another provider", async () => {
         const service = await handoffTo("codex", pinned);
         expect(authProxyRegisterSessionMock).not.toHaveBeenCalled();
+        expect(
+          logSpurEventMock.mock.calls.filter(
+            ([, entry]) => entry.event === "session.handoff.auth_account_missing",
+          ),
+        ).toHaveLength(0);
         service.dispose();
       });
 
@@ -23096,9 +23101,9 @@ describe("SessionService", () => {
         expect(logSpurEventMock).toHaveBeenCalledWith(
           TEST_DATA_DIR,
           expect.objectContaining({
-            event: "session.auth.switched",
+            event: "session.handoff.auth_account_missing",
             level: "warn",
-            details: expect.objectContaining({ reason: "handoff_account_missing" }),
+            details: { accountId: "backup" },
           }),
         );
         service.dispose();
