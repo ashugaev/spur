@@ -3073,6 +3073,20 @@ describe("listSessions concurrency", () => {
     expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-2"]);
     expect(invalidEntries(dataDir)).toHaveLength(1);
   });
+
+  it("skips a live record with malformed auth metadata, logs it, and readSession throws", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    writeSession(dataDir, { ...sessionBase, id: "api-2", tmuxSession: "api-2" });
+    const path = join(dataDir, "sessions", "api", "api-2.json");
+    const record = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+    writeFileSync(path, JSON.stringify({ ...record, auth: { sessionId: 7 } }), "utf-8");
+
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
+    expect(invalidEntries(dataDir)).toHaveLength(1);
+    expect(invalidEntries(dataDir)[0]?.message).toContain("auth");
+    expect(() => readSession(dataDir, "api-2")).toThrow();
+  });
 });
 
 function invalidEntries(dataDir: string) {
