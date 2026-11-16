@@ -52,6 +52,8 @@ interface DirectTerminalProps {
   activity?: SpurSessionState | null;
   title?: string;
   onClose?: () => void;
+  /** Embedded in a dialog that already carries a title and close button. */
+  hideHeader?: boolean;
 }
 
 interface TerminalLocation {
@@ -230,6 +232,7 @@ export function DirectTerminal({
   activity,
   title,
   onClose,
+  hideHeader = false,
 }: DirectTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const terminalInstanceRef = useRef<TerminalType | null>(null);
@@ -934,48 +937,50 @@ export function DirectTerminal({
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden border-0 border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] sm:border">
-      <div
-        className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2"
-        data-testid="direct-terminal-header"
-      >
-        <TerminalStatusDot activity={activity} error={error} wsStatus={status} />
-        {title ? (
-          <div
-            className="min-w-0 flex-1 overflow-hidden whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
-            data-testid="direct-terminal-header-title"
-            title={title}
-          >
-            {title}
-          </div>
-        ) : null}
-        {/* Never truncates: the title yields space, this label just butts against it. */}
+      {hideHeader ? null : (
         <div
-          className="ml-auto shrink-0 whitespace-nowrap text-[10px] leading-4 text-[var(--color-text-tertiary)]"
-          data-testid="direct-terminal-header-agent"
+          className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2"
+          data-testid="direct-terminal-header"
         >
-          {getAgentDisplayName(agent)}
-          {model ? ` • ${model}` : null}
-        </div>
-        {onClose ? (
-          <button
-            aria-label="Close terminal"
-            className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
-            onClick={onClose}
-            type="button"
-          >
-            <svg
-              aria-hidden="true"
-              className="h-4 w-4"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              viewBox="0 0 24 24"
+          <TerminalStatusDot activity={activity} error={error} wsStatus={status} />
+          {title ? (
+            <div
+              className="min-w-0 flex-1 overflow-hidden whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
+              data-testid="direct-terminal-header-title"
+              title={title}
             >
-              <path d="M6 6l12 12M18 6L6 18" />
-            </svg>
-          </button>
-        ) : null}
-      </div>
+              {title}
+            </div>
+          ) : null}
+          {/* Never truncates: the title yields space, this label just butts against it. */}
+          <div
+            className="ml-auto shrink-0 whitespace-nowrap text-[10px] leading-4 text-[var(--color-text-tertiary)]"
+            data-testid="direct-terminal-header-agent"
+          >
+            {getAgentDisplayName(agent)}
+            {model ? ` • ${model}` : null}
+          </div>
+          {onClose ? (
+            <button
+              aria-label="Close terminal"
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
+              onClick={onClose}
+              type="button"
+            >
+              <svg
+                aria-hidden="true"
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                viewBox="0 0 24 24"
+              >
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </button>
+          ) : null}
+        </div>
+      )}
 
       <div
         className="min-h-0 flex-1 px-1.5 py-0 sm:p-1.5"

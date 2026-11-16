@@ -226,6 +226,17 @@ describe("DirectTerminal header agent and model", () => {
     expect(within(header).getByText(/claude/)).toBeInTheDocument();
     expect(header.textContent).not.toContain("undefined");
   });
+
+  it("omits its own header when embedded with hideHeader", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal hideHeader agent="claude" sessionId="embedded-session" />);
+    });
+
+    expect(screen.queryByTestId("direct-terminal-header")).toBeNull();
+    expect(screen.getByTestId("direct-terminal-surface")).toBeInTheDocument();
+  });
 });
 
 describe("DirectTerminal controls safe-area", () => {
